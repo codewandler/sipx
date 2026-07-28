@@ -3,11 +3,11 @@ id: S-15
 title: Add editing operations to Headers
 pillar: Signalling
 status: ready
-priority: 5
+priority: 7
 design: docs/designs/sip-core.md
 epic: sip-core
 areas: [sipx-sip, sipx-transport]
-note: track: core · a forwarding element cannot edit a header list without rebuilding it
+note: M7 · a forwarding element cannot edit a header list without rebuilding it
 ---
 
 # Add editing operations to Headers

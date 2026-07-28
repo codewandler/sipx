@@ -9,12 +9,19 @@ the stories, not the generated region. New work? Copy [`_TEMPLATE.md`](_TEMPLATE
 
 ## Status
 
-**M0 and M1 are complete.** `sipx-sip` is a working sans-IO SIP core — parser, typed headers,
-validation, builders and all four transaction machines — with 157 tests green, clippy clean at
-`-D warnings`, and the whole RFC 4475 corpus passing across its four layers.
+**M0 through M5 are complete**; **M6 is under way.** sipx registers against a real Kamailio over
+UDP, TCP and TLS, places calls with encrypted G.711 audio, bridges and mixes them, transfers
+them, and does all of it from a terminal — with 754 tests green and clippy clean at `-D warnings`
+on both feature sets.
 
-Next is **M2**, the transport layer: `T-1` writes the spec, then UDP, TCP and RFC 3263
-resolution turn the core into something that talks to a network.
+The three milestones the open stories belong to, each argued for in the
+[roadmap](../roadmap.md#next):
+
+- **M6 — Registrable.** `T-16` Service-Route, `T-15` Outbound, `M-15` DTLS-SRTP. What a real
+  deployment needs before it will route to this stack.
+- **M7 — Forwardable.** `T-19`, `T-18`, `T-17`, `S-15`, `S-16`, `X-14`. Making the API right for
+  something that is not an endpoint.
+- **M8 — Subscribable.** `S-13` the framework, then `S-17` and `S-18` as packages on it.
 
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `X` cross-cutting (build, CI, test infrastructure).
@@ -28,19 +35,22 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · track: test infrastructure · two items, both useful to sipx on their own
-- [T-16 — Implement the Service-Route header](T-16-service-route-header.md) · Signalling · track: reachability · RFC 3608 · the outbound twin of T-14's Path
+- [T-16 — Implement the Service-Route header](T-16-service-route-header.md) · Signalling · M6 · RFC 3608 · the outbound twin of T-14's Path
+- [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · M6 · RFC 5626 · T-14 unblocked it
+- [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · M6 · RFC 5764 · M-14 unblocked it
+- [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
+- [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · M8 · RFC 6665 · large; the other two packages are on it
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
-- [S-15 — Add editing operations to Headers](S-15-header-editing-operations.md) · Signalling · track: core · a forwarding element cannot edit a header list without rebuilding it
-- [S-16 — Implement the server side of digest authentication](S-16-server-side-digest.md) · Signalling · track: auth · RFC 7616 · sipx can answer a challenge but cannot issue one
+- [S-15 — Add editing operations to Headers](S-15-header-editing-operations.md) · Signalling · M7 · a forwarding element cannot edit a header list without rebuilding it
+- [S-16 — Implement the server side of digest authentication](S-16-server-side-digest.md) · Signalling · M7 · RFC 7616 · sipx can answer a challenge but cannot issue one
 
 ### Transport layer
 _The transport layer is the only place in the signalling stack that touches the network, which_
-- [T-19 — Stop dropping incoming requests silently](T-19-stop-dropping-incoming-requests-silently.md) · Signalling · track: reachability · a full channel loses requests with no counter and no log
-- [T-17 — Resolve at proxy throughput — async and shared-cache](T-17-resolution-at-proxy-throughput.md) · Signalling · track: reachability · the Resolver trait is shaped for one UA, not for a forwarding element
-- [T-18 — Surface unmatched responses to the application](T-18-surface-unmatched-responses.md) · Signalling · track: reachability · the endpoint drops what a forwarding element is required to forward
+- [T-19 — Stop dropping incoming requests silently](T-19-stop-dropping-incoming-requests-silently.md) · Signalling · M7 · a full channel loses requests with no counter and no log
+- [T-18 — Surface unmatched responses to the application](T-18-surface-unmatched-responses.md) · Signalling · M7 · the endpoint drops what a forwarding element is required to forward
+- [T-17 — Resolve at proxy throughput — async and shared-cache](T-17-resolution-at-proxy-throughput.md) · Signalling · M7 · the Resolver trait is shaped for one UA, not for a forwarding element
 
 ## Blocked
 _None._
@@ -48,9 +58,8 @@ _None._
 ## Backlog
 
 ### Conformance
-- [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · track: media · RFC 5764 · blocked by M-14
-- [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · track: signalling · RFC 6665 · large; gates presence and BLF
-- [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · track: reachability · RFC 5626 · blocked by T-14
+- [S-17 — Implement the dialog and registration event packages](S-17-dialog-and-registration-event-packages.md) · Signalling · M8 · RFC 4235 + 3680 · blocked by S-13
+- [S-18 — Implement presence and PUBLISH](S-18-presence-and-publish.md) · Signalling · M8 · RFC 3856 + 3863 + 3903 · blocked by S-13
 - [X-15 — Consider requirement-grain rows in the RFC registry](X-15-requirement-grain-registry.md) · Build · track: docs · an offer, not a dependency — decide whether per-RFC grain is enough
 
 ### Quic

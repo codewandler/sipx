@@ -3,11 +3,11 @@ id: X-14
 title: Generalize the timer queue and ship the loopback link the testkit promises
 pillar: Build
 status: ready
-priority: 7
+priority: 9
 design: docs/designs/sip-transport.md
 epic: conformance
 areas: [sipx-transport, sipx-testkit]
-note: track: test infrastructure · two items, both useful to sipx on their own
+note: M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
 ---
 
 # Generalize the timer queue and ship the loopback link the testkit promises

@@ -16,78 +16,96 @@ fit.
 
 ## Where the gaps actually are
 
-Of 61 tracked RFCs, 22 are implemented, 7 partial, 10 parse-only and 21 not started. The
-parse-only ten are the interesting number: `RAck`, `RSeq`, `Session-Expires`, `Min-SE`,
-`Accept-Contact`, `Identity` and the rest all survive the wire intact today. Nothing is lost by
-a message carrying them, and nothing acts on them. That is a deliberate position — losslessness
-first — and it means each of these becomes a behaviour module rather than a change to the
-parser.
+63 tracked RFCs; [the table](compliance.md) has the per-status counts, and it is generated, so it
+is the one place worth reading them from.
+
+The interesting status is **parse-only**: `Accept-Contact`, `Identity`, `Reason` and the rest all
+survive the wire intact today, and nothing acts on them. That is a deliberate position —
+losslessness first — and it means each of these becomes a behaviour module rather than a change to
+the parser. `RAck`/`RSeq` and `Session-Expires`/`Min-SE` were in that group until `S-12` and
+`S-11`; both turned out to be exactly that, a module beside the parser rather than a change to
+it.
+
+## Done since this list was written
+
+The first two groups are closed, and the third is half closed. Kept here rather than deleted,
+because the *reasons* were the argument for the order and they are worth being able to check
+against what happened.
+
+| RFC | Story | What it turned out to be |
+|---|---|---|
+| 3711 SRTP + 4568 SDES | `M-14` | Encrypted media, keyed over the signalling path. The remaining half is DTLS-SRTP, now in **M6**. |
+| 4028 Session timers | `S-11` | A call whose far end vanished is now torn down locally rather than kept forever. |
+| 3262 100rel / PRACK | `S-12` | Behaviour-only, as predicted: a module beside the parser. The retransmission schedule was the part with a surprise in it — no T2 cap. |
+| 3327 Path | `T-14` | Inbound routing back through the registrar's proxies. Its own surprise: RFC 3327 §5.1 has the *UA ignore* what comes back, which is why `T-16` exists. |
+| 8760 Digest | `S-14` | SHA-512-256 and several algorithms offered at once. |
 
 ## Order
 
-### 1. Media security
+### 1. Reachability — **M6**
 
-| RFC | What it unlocks |
-|---|---|
-| 3711 SRTP | Encrypted media at all |
-| 4568 SDES | Keying over an already-secure signalling path — the simpler half |
-| 5764 DTLS-SRTP | Keying that does not trust the signalling path; also the WebRTC path |
-
-sipx does `sips:` and WSS today and then sends the audio in the clear. For a stack whose TLS
-policy has no "skip verification" option anywhere, that is the most conspicuous inconsistency in
-it. SDES first because it is a smaller change and already useful; DTLS-SRTP after, because it is
-what a browser will insist on.
-
-### 2. Session integrity
-
-| RFC | What it unlocks |
-|---|---|
-| 4028 Session timers | Detecting a call whose far end vanished |
-| 3262 100rel / PRACK | Reliable provisionals, which some carriers require |
-| 3311 UPDATE | Renegotiating before the call is answered |
-
-Today a call whose far end disappears without a BYE stays up in sipx forever. That is a leak of
-exactly the kind the soak test exists to find, except it is a protocol-level one and no amount
-of local tidying fixes it. All three headers already parse, so these are behaviour-only.
-
-### 3. Reachability
-
-| RFC | What it unlocks |
-|---|---|
-| 3327 Path | Routing back toward a UA through the proxies it registered through |
-| 5626 Outbound | Flow tokens, `reg-id`, redundant registrations, NAT survival |
-| 5627 GRUU | A URI that reaches one specific instance |
-| 8599 Push | Waking a mobile client that is not holding a connection |
+| RFC | What it unlocks | Status |
+|---|---|---|
+| 3327 Path | Routing back toward a UA through the proxies it registered through | done (`T-14`) |
+| 3608 Service-Route | The same route set in the direction requests actually leave | `T-16` |
+| 5626 Outbound | Flow tokens, `reg-id`, redundant registrations, NAT survival | `T-15` |
+| 5764 DTLS-SRTP | Keying that does not trust the signalling path; also the WebRTC path | `M-15` |
+| 5627 GRUU | A URI that reaches one specific instance | after M6 |
+| 8599 Push | Waking a mobile client that is not holding a connection | after M6 |
 
 This is the group that turns a UA into something a real deployment can register. Strictly
-ordered: `Path` is not even known to the parser yet, Outbound builds on it, GRUU on both, push on
-Outbound. It is also the group that most changes what sipx *is*, since a registrar is a
-different kind of program from a phone.
+ordered: Outbound builds on `Path`, GRUU on both, push on Outbound. It is also the group that
+most changes what sipx *is*, since being reachable through infrastructure is a different problem
+from placing a call.
 
-### 4. Event framework
+DTLS-SRTP rides along here rather than in a media group of its own: it is the last piece of "can
+a real deployment, including a browser, talk to this", which is what M6 is about.
+
+### 2. Forwarding — **M7**
+
+Not RFC gaps but API ones, and they gate everything a proxy or B2BUA would need: a request that
+can be dropped without a counter (`T-19`), a response that matched nothing and is discarded
+rather than forwarded (`T-18`), a resolver shaped for one UA (`T-17`), a header collection with
+no editing operations (`S-15`), and digest that can only be answered and never issued (`S-16`).
+RFC 7616's server half is the only RFC-shaped item in the group.
+
+### 3. Event framework — **M8**
 
 | RFC | What it unlocks |
 |---|---|
-| 6665 SUBSCRIBE/NOTIFY | The framework, properly, rather than REFER's implicit subscription |
-| 4488 `Refer-Sub` | Suppressing that subscription when it is not wanted |
-| 3680, 4235, 3856 | Registration, dialog and presence event packages |
-| 3903 PUBLISH | Publishing state into it |
+| 6665 SUBSCRIBE/NOTIFY + 4488 `Refer-Sub` | The framework, rather than REFER's implicit subscription — and suppressing that one when it is not wanted (`S-13`) |
+| 4235, 3680 | Dialog and registration event packages: busy-lamp fields, and watching a registration go stale (`S-17`) |
+| 3856, 3863, 3903 | Presence with PIDF, and PUBLISH to put state into the framework (`S-18`) |
 
 sipx already implements the *implicit* subscription a REFER creates, including terminating it.
 Generalising that into a subscription store with packages is a considerable piece of work, and
 everything in the presence and busy-lamp family waits behind it.
 
+The packages are ordered by what they report. Dialog and registration state is state sipx
+*already keeps*, so those two exercise the framework without also needing a state model of their
+own; presence needs somewhere for presence to come from, which is a separate question and why
+PUBLISH travels with it.
+
+### 4. Session integrity, the remaining piece
+
+| RFC | What it unlocks |
+|---|---|
+| 3311 UPDATE | Renegotiating before the call is answered |
+
+The other two in this group are done (`S-11`, `S-12`). UPDATE is what makes an early
+renegotiation possible at all, and 100rel is its prerequisite — which is now in place, so this is
+the smallest unstarted item on the list.
+
 ### 5. Identity and interconnect
 
 | RFC | What it unlocks |
 |---|---|
-| 8760 Digest | SHA-512-256, and offering several algorithms at once |
 | 8224 / 8225 STIR/PASSporT | Signed caller identity |
 | 7044 History-Info | Saying who forwarded a call and why |
 | 7339 / 7415 Overload control | Something better than answering 503 |
 
-8760 is small and self-contained. STIR is not, and it is the one that matters for anything
-touching the public telephone network.
+8760 was the small self-contained one and is done (`S-14`). STIR is not small, and it is the one
+that matters for anything touching the public telephone network.
 
 ### 6. Recording and the rest
 

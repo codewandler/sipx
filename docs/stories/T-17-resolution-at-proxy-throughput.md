@@ -3,11 +3,11 @@ id: T-17
 title: Resolve at proxy throughput — async and shared-cache
 pillar: Signalling
 status: ready
-priority: 9
+priority: 6
 design: docs/designs/sip-transport.md
 epic: sip-transport
 areas: [sipx-transport]
-note: track: reachability · the Resolver trait is shaped for one UA, not for a forwarding element
+note: M7 · the Resolver trait is shaped for one UA, not for a forwarding element
 ---
 
 # Resolve at proxy throughput — async and shared-cache

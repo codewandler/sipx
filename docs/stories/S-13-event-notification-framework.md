@@ -2,12 +2,12 @@
 id: S-13
 title: Build the event notification framework
 pillar: Signalling
-status: backlog
-priority: 11
+status: ready
+priority: 10
 design:
 epic: conformance
 areas: [sipx-ua, sipx-sip]
-note: track: signalling · RFC 6665 · large; gates presence and BLF
+note: M8 · RFC 6665 · large; the other two packages are on it
 ---
 
 # Build the event notification framework

@@ -3,11 +3,11 @@ id: T-16
 title: Implement the Service-Route header
 pillar: Signalling
 status: ready
-priority: 8
+priority: 1
 design: docs/designs/sip-transport.md
 epic: conformance
 areas: [sipx-sip, sipx-ua]
-note: track: reachability · RFC 3608 · the outbound twin of T-14's Path
+note: M6 · RFC 3608 · the outbound twin of T-14's Path
 ---
 
 # Implement the Service-Route header

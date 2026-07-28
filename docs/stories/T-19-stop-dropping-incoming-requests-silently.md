@@ -3,11 +3,11 @@ id: T-19
 title: Stop dropping incoming requests silently
 pillar: Signalling
 status: ready
-priority: 3
+priority: 4
 design: docs/designs/sip-transport.md
 epic: sip-transport
 areas: [sipx-transport]
-note: track: reachability · a full channel loses requests with no counter and no log
+note: M7 · a full channel loses requests with no counter and no log
 ---
 
 # Stop dropping incoming requests silently

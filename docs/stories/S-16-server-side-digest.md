@@ -3,11 +3,11 @@ id: S-16
 title: Implement the server side of digest authentication
 pillar: Signalling
 status: ready
-priority: 6
+priority: 8
 design: docs/designs/sip-core.md
 epic: sip-core
 areas: [sipx-sip, sipx-ua]
-note: track: auth · RFC 7616 · sipx can answer a challenge but cannot issue one
+note: M7 · RFC 7616 · sipx can answer a challenge but cannot issue one
 ---
 
 # Implement the server side of digest authentication

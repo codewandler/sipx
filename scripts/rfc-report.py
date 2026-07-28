@@ -101,9 +101,14 @@ COUNTED_IN = [
     "README.md",
     "docs/introduction.md",
     "docs/guides/does-this-fit.md",
+    # Not generated, and it opens by counting the gaps — so it drifts the moment an RFC is
+    # added. It did, between one story and the next, which is why it is on this list.
+    "docs/rfc-roadmap.md",
 ]
 COUNT_PATTERNS = [
-    re.compile(r"(?<!\d)(\d{2,3}) RFCs"),
+    # "63 RFCs", and "63 tracked RFCs" — the second phrasing is how prose usually says it, and
+    # a checker that only knew the first one let a stale count sit in the RFC roadmap.
+    re.compile(r"(?<!\d)(\d{2,3}) (?:tracked )?RFCs"),
     re.compile(r"RFCs%20tracked-(\d{2,3})-"),
 ]
 

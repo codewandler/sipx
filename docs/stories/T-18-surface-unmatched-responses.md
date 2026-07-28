@@ -3,11 +3,11 @@ id: T-18
 title: Surface unmatched responses to the application
 pillar: Signalling
 status: ready
-priority: 10
+priority: 5
 design: docs/designs/sip-transport.md
 epic: sip-transport
 areas: [sipx-transport]
-note: track: reachability · the endpoint drops what a forwarding element is required to forward
+note: M7 · the endpoint drops what a forwarding element is required to forward
 ---
 
 # Surface unmatched responses to the application
