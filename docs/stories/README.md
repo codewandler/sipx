@@ -32,7 +32,6 @@ _None._
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
-- [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling
 - [S-5 — Build requests and responses so injection is unrepresentable](S-5-safe-message-builders.md) · Signalling
 - [S-6 — Implement the client transaction state machines](S-6-client-transaction-fsm.md) · Signalling
 - [S-7 — Implement the server transaction state machines](S-7-server-transaction-fsm.md) · Signalling
@@ -48,6 +47,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 ## Done
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
+- [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling
 - [S-4 — Implement the incremental message parser and fuzz it](S-4-incremental-parser.md) · Signalling · the correctness bar for M1
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core

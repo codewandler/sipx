@@ -78,6 +78,14 @@ pub enum Host {
 }
 
 impl Host {
+    /// Parse a `host [ ":" port ]`, as it appears in a URI or in a `Via` sent-by.
+    ///
+    /// Shared with the `Via` header so that a hostname is validated the same way wherever it
+    /// appears; a host that is rejected in a URI must not be accepted in a `Via`.
+    pub fn parse_hostport(raw: &Bytes) -> Result<(Self, Option<u16>), UriError> {
+        parse_hostport(raw)
+    }
+
     /// The host as it should be written, without IPv6 brackets.
     #[must_use]
     pub fn to_bytes(&self) -> Bytes {
@@ -598,15 +606,19 @@ fn parse_port(raw: &Bytes) -> Result<Option<u16>, UriError> {
 
 fn parse_params(raw: &Bytes, separator: u8) -> Result<Params, UriError> {
     let mut params = Params::new();
-    // An empty tail (`sip:host;`) yields no parameters rather than one empty one.
+    // A trailing separator with nothing after it (`sip:host;`) is not a parameter list of
+    // length zero; the ABNF's pname is `1*paramchar`, so there is nothing legal to parse.
     if raw.is_empty() {
-        return Ok(params);
+        return Err(UriError::EmptyParameterName);
     }
     let mut start = 0usize;
     let cut = |from: usize, to: usize, params: &mut Params| -> Result<(), UriError> {
         let field = raw.slice(from..to);
+        // Rejected rather than skipped: `;;` is not a quirky spelling of `;`. The header
+        // grammar takes the same line, and RFC 4475 3.1.2.1 turns a message invalid on
+        // exactly this in a Via.
         if field.is_empty() {
-            return Ok(());
+            return Err(UriError::EmptyParameterName);
         }
         let param = match field.iter().position(|&b| b == b'=') {
             Some(eq) => {
@@ -640,7 +652,12 @@ fn parse_params(raw: &Bytes, separator: u8) -> Result<Params, UriError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -890,11 +907,19 @@ mod tests {
         );
     }
 
+    /// `;;` is not a quirky spelling of `;`. The ABNF's pname is `1*paramchar`, and the
+    /// header grammar takes the same line — RFC 4475 3.1.2.1 makes a message invalid on
+    /// exactly this, in a `Via`.
     #[test]
-    fn empty_parameter_segments_are_ignored() {
-        let u = uri("sip:host;;a=1;");
-        let params = u.params().unwrap();
-        assert_eq!(params.len(), 1);
-        assert_eq!(params.value("a"), Some(&b"1"[..]));
+    fn empty_parameter_segments_are_rejected() {
+        for input in ["sip:host;;a=1", "sip:host;a=1;", "sip:host;", "sip:host;;"] {
+            assert_eq!(
+                Uri::parse(Bytes::from(input.to_owned())).err(),
+                Some(UriError::EmptyParameterName),
+                "{input} should be rejected"
+            );
+        }
+        // A single well-formed parameter is of course still fine.
+        assert_eq!(uri("sip:host;a=1").params().map(Params::len), Some(1));
     }
 }

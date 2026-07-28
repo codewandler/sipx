@@ -22,15 +22,21 @@
 
 pub mod error;
 mod escape;
+pub mod headers;
 pub mod message;
 pub mod name;
 pub mod params;
 pub mod parser;
 pub mod uri;
+pub mod validate;
 
 pub use error::{HeaderError, UriError};
-pub use message::{Header, Headers, Message, Method, Request, Response, StatusCode, Version};
+pub use headers::{Address, CSeq, CallId, Via};
+pub use message::{
+    Header, Headers, Message, Method, Request, Response, StatusCode, TypedHeader, Version,
+};
 pub use name::HeaderName;
 pub use params::{Param, Params};
 pub use parser::{Limits, StreamParser, parse_datagram};
 pub use uri::{Host, Scheme, Uri};
+pub use validate::{Finding, validate, validate_request, validate_response};

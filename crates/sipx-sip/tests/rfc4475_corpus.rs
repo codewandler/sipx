@@ -15,6 +15,7 @@
 
 use bytes::Bytes;
 use sipx_sip::error::ParseError;
+use sipx_sip::headers::{CSeq, ContactValue, Date, From, To, Via};
 use sipx_sip::{Limits, Message, StreamParser, parse_datagram};
 use sipx_testkit::rfc4475::{self, Expect, Fault};
 
@@ -127,6 +128,86 @@ fn value_level_and_semantic_faults_still_frame() {
             case.section,
             case.name,
             parsed.err()
+        );
+    }
+}
+
+/// A `HeaderErr` case must frame, and the *named* header must be the one that fails. Naming
+/// the header is the point: "something in this message is wrong" is not a diagnosis, and an
+/// element has to know which header to complain about.
+#[test]
+fn value_level_faults_are_found_in_the_named_header() {
+    for case in rfc4475::classified() {
+        let Expect::HeaderErr(header) = case.expect else {
+            continue;
+        };
+        let msg = parse(case).expect("must frame");
+        let headers = msg.headers();
+
+        let result = match header {
+            "Via" => headers.typed::<Via>().map(|r| r.map(drop)),
+            "CSeq" => headers.typed::<CSeq>().map(|r| r.map(drop)),
+            "To" => headers.typed::<To>().map(|r| r.map(drop)),
+            "From" => headers.typed::<From>().map(|r| r.map(drop)),
+            "Contact" => headers.typed::<ContactValue>().map(|r| r.map(drop)),
+            "Date" => headers.typed::<Date>().map(|r| r.map(drop)),
+            other => panic!("no typed reader wired up for {other}"),
+        };
+
+        match result {
+            None => panic!(
+                "RFC 4475 {} ({}): the {header} header should be present",
+                case.section, case.name
+            ),
+            Some(Ok(())) => panic!(
+                "RFC 4475 {} ({}): the {header} header should have failed to parse\n---\n{}\n---",
+                case.section,
+                case.name,
+                case.lossy()
+            ),
+            Some(Err(_)) => {}
+        }
+    }
+}
+
+/// A `ValidateErr` case must frame, every header must parse, and validation must object.
+#[test]
+fn semantic_faults_are_found_by_validation() {
+    for case in rfc4475::classified() {
+        let Expect::ValidateErr(why) = case.expect else {
+            continue;
+        };
+        let msg = parse(case).expect("must frame");
+        let findings = sipx_sip::validate(&msg);
+        assert!(
+            !findings.is_empty(),
+            "RFC 4475 {} ({}) should be rejected by validation ({why})\n---\n{}\n---",
+            case.section,
+            case.name,
+            case.lossy()
+        );
+    }
+}
+
+/// The other side of the same coin: a message the RFC calls valid must not be rejected by
+/// validation either. Over-strict validation is as wrong as under-strict parsing, and much
+/// harder to notice.
+#[test]
+fn valid_messages_pass_validation() {
+    for case in rfc4475::classified() {
+        if !matches!(case.expect, Expect::ParseOk) {
+            continue;
+        }
+        let msg = parse(case).expect("must frame");
+        let findings: Vec<_> = sipx_sip::validate(&msg)
+            .into_iter()
+            .filter(|f| !f.is_repairable())
+            .collect();
+        assert!(
+            findings.is_empty(),
+            "RFC 4475 {} ({}) is a valid message but validation objected: {findings:?}",
+            case.section,
+            case.name
         );
     }
 }
