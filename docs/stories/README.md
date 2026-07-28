@@ -29,7 +29,6 @@ _None._
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-8 — Handle re-INVITE and in-dialog requests](M-8-reinvite-and-in-dialog.md) · Media · gap left explicitly by M3
 - [M-6 — Implement RTCP sender and receiver reports](M-6-rtcp-reports.md) · Media · gap left explicitly by M3
 
 ### Transport layer
@@ -49,6 +48,7 @@ _None._
 - [M-4 — Implement the media session](M-4-media-session.md) · Media
 - [M-5 — Implement dialogs and the call framework](M-5-call-framework.md) · Media
 - [M-7 — Implement RFC 4733 DTMF events](M-7-dtmf-events.md) · Media · gap left explicitly by M3
+- [M-8 — Handle re-INVITE and in-dialog requests](M-8-reinvite-and-in-dialog.md) · Media · gap left explicitly by M3
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 - [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling

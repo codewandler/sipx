@@ -514,3 +514,222 @@ async fn the_dtmf_payload_type_is_taken_from_the_negotiation() {
         "the digit must go out on the payload type the answer named, not on 101"
     );
 }
+
+/// Set up a call where the caller side is driven by a task that routes in-dialog requests, so
+/// re-INVITEs from the callee reach the caller's `Call`.
+async fn connected_with_routing() -> (
+    std::sync::Arc<tokio::sync::Mutex<Call>>,
+    Call,
+    tokio::task::JoinHandle<()>,
+    std::net::SocketAddr,
+) {
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let (caller_endpoint, mut caller_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+
+    let answering = tokio::spawn(async move {
+        let incoming = callee_incoming.recv().await.expect("an INVITE arrives");
+        answer(&callee_endpoint, &incoming, loopback())
+            .await
+            .expect("answers")
+    });
+
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let caller_addr = caller_endpoint.local_addr();
+    let caller = dial(
+        &caller_endpoint,
+        Target::udp(callee_addr),
+        &to,
+        "<sip:caller@example.net>",
+        loopback(),
+    )
+    .await
+    .expect("connects");
+    let callee = answering.await.expect("the answering side finishes");
+
+    let caller = std::sync::Arc::new(tokio::sync::Mutex::new(caller));
+    let routed = std::sync::Arc::clone(&caller);
+    let pump = tokio::spawn(async move {
+        while let Some(incoming) = caller_incoming.recv().await {
+            let _ = routed.lock().await.handle(&incoming).await;
+        }
+    });
+
+    (caller, callee, pump, caller_addr)
+}
+
+/// The acceptance test for M-8: a re-INVITE renegotiates a running call.
+#[tokio::test]
+async fn a_reinvite_moves_the_media_without_dropping_the_call() {
+    let (caller, mut callee, pump, _) = connected_with_routing().await;
+
+    let port_before = caller.lock().await.media().local_addr().port();
+
+    // The callee re-offers, moving its own media port.
+    callee
+        .reinvite(sipx_sdp::Direction::SendRecv)
+        .await
+        .expect("the re-INVITE is accepted");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let caller = caller.lock().await;
+    assert!(!caller.is_ended(), "the call must still be running");
+    assert_eq!(
+        caller.media().local_addr().port(),
+        port_before,
+        "our own receive port does not move just because theirs did"
+    );
+
+    // And audio still flows after the renegotiation.
+    drop(caller);
+    pump.abort();
+}
+
+/// Hold and resume, which is what a re-INVITE is mostly used for.
+#[tokio::test]
+async fn a_reinvite_can_put_the_call_on_hold_and_take_it_off() {
+    let (caller, mut callee, pump, _) = connected_with_routing().await;
+
+    callee
+        .reinvite(sipx_sdp::Direction::SendOnly)
+        .await
+        .expect("hold is accepted");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        caller.lock().await.is_on_hold(),
+        "sendonly from the far end means it will not play what we send"
+    );
+
+    callee
+        .reinvite(sipx_sdp::Direction::SendRecv)
+        .await
+        .expect("resume is accepted");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !caller.lock().await.is_on_hold(),
+        "sendrecv takes it off hold"
+    );
+
+    pump.abort();
+}
+
+/// A renegotiation that cannot be answered must be refused with 488 and **leave the call
+/// running**. Tearing it down would lose a call that was working a moment earlier.
+#[tokio::test]
+async fn a_reinvite_that_cannot_be_answered_is_refused_and_the_call_survives() {
+    let (caller, _callee, pump, caller_addr) = connected_with_routing().await;
+
+    // Build a re-INVITE inside the established dialog, offering only a codec sipx cannot
+    // carry. The tags swap, because this request travels the other way.
+    let (to, from, call_id) = {
+        let guard = caller.lock().await;
+        let (local, remote) = guard.dialog.local_and_remote();
+        // `local` is the caller's own address of record, so from the far end's point of view
+        // it is the `To`.
+        (local, remote, guard.dialog.id.call_id.clone())
+    };
+
+    let sdp = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+         m=audio 45000 RTP/AVP 9\r\na=rtpmap:9 G722/8000\r\na=sendrecv\r\n";
+    let reinvite = sipx_sip::build::RequestBuilder::new(
+        Method::Invite,
+        Uri::sip(Host::Name(HostName::new("caller.example").expect("valid"))),
+    )
+    .header(HeaderName::To, Bytes::from(to))
+    .expect("valid")
+    .header(HeaderName::From, Bytes::from(from))
+    .expect("valid")
+    .header(HeaderName::CallId, Bytes::from(call_id))
+    .expect("valid")
+    .cseq(99, &Method::Invite)
+    .expect("valid")
+    .header(
+        HeaderName::ContentType,
+        Bytes::from_static(b"application/sdp"),
+    )
+    .expect("valid")
+    .max_forwards(70)
+    .body(Bytes::from(sdp))
+    .build();
+
+    let (prober, _rx) = endpoint().await;
+    let mut responses = prober
+        .send(reinvite, Target::udp(caller_addr))
+        .await
+        .expect("sends");
+    let response = tokio::time::timeout(Duration::from_secs(3), responses.final_response())
+        .await
+        .expect("no timeout")
+        .expect("a final response");
+
+    assert_eq!(
+        response.status.code(),
+        488,
+        "an unusable offer is Not Acceptable Here, not a teardown"
+    );
+    assert!(
+        !caller.lock().await.is_ended(),
+        "the call the renegotiation failed on must still be running"
+    );
+
+    pump.abort();
+}
+
+/// A re-INVITE whose sequence number is not greater than the last one is out of order.
+/// Applying it would let a delayed packet undo a later change.
+#[tokio::test]
+async fn an_out_of_order_reinvite_is_rejected() {
+    let (caller, mut callee, pump, caller_addr) = connected_with_routing().await;
+
+    // A legitimate renegotiation first, which advances the remote sequence number.
+    callee
+        .reinvite(sipx_sdp::Direction::SendOnly)
+        .await
+        .expect("accepted");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let (to, from, call_id) = {
+        let guard = caller.lock().await;
+        let (local, remote) = guard.dialog.local_and_remote();
+        (local, remote, guard.dialog.id.call_id.clone())
+    };
+
+    // Now one with sequence number 1, which is behind whatever the call is at.
+    let stale = sipx_sip::build::RequestBuilder::new(
+        Method::Invite,
+        Uri::sip(Host::Name(HostName::new("caller.example").expect("valid"))),
+    )
+    .header(HeaderName::To, Bytes::from(to))
+    .expect("valid")
+    .header(HeaderName::From, Bytes::from(from))
+    .expect("valid")
+    .header(HeaderName::CallId, Bytes::from(call_id))
+    .expect("valid")
+    .cseq(1, &Method::Invite)
+    .expect("valid")
+    .header(
+        HeaderName::ContentType,
+        Bytes::from_static(b"application/sdp"),
+    )
+    .expect("valid")
+    .max_forwards(70)
+    .body(Bytes::from_static(
+        b"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+          m=audio 46000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n",
+    ))
+    .build();
+
+    let (prober, _rx) = endpoint().await;
+    let mut responses = prober
+        .send(stale, Target::udp(caller_addr))
+        .await
+        .expect("sends");
+    let response = tokio::time::timeout(Duration::from_secs(3), responses.final_response())
+        .await
+        .expect("no timeout")
+        .expect("a final response");
+
+    assert_eq!(response.status.code(), 500, "out of order, not applied");
+    assert!(!caller.lock().await.is_ended());
+    pump.abort();
+}

@@ -48,6 +48,12 @@ pub struct Call {
     /// Set while a 2xx is still being retransmitted; cleared when the ACK arrives.
     awaiting_ack: Option<Arc<tokio::sync::Notify>>,
     ended: bool,
+    /// Where this side receives media, so a re-offer can name the same address.
+    media_address: IpAddr,
+    /// What the running session negotiated, for comparison against a re-offer.
+    current: Negotiated,
+    /// Whether the call is on hold, and which way.
+    hold: Direction,
 }
 
 impl Call {
@@ -107,6 +113,12 @@ impl Call {
                 }
                 Ok(true)
             }
+            // An INVITE inside an existing dialog is a re-INVITE: a renegotiation of the call
+            // already running, not a new one.
+            Method::Invite => {
+                self.on_reinvite(incoming).await?;
+                Ok(true)
+            }
             Method::Bye => {
                 self.media.stop();
                 self.ended = true;
@@ -120,6 +132,162 @@ impl Call {
             }
             _ => Ok(false),
         }
+    }
+
+    /// Whether the far end has put the call on hold.
+    #[must_use]
+    pub fn is_on_hold(&self) -> bool {
+        !self.hold.receives()
+    }
+
+    /// Renegotiate an established call from a re-INVITE.
+    ///
+    /// The rule that shapes this: **a renegotiation that fails must leave the call running.** A
+    /// re-INVITE tries to change something about a call that already works, so answering 488
+    /// and carrying on is right; tearing the call down because the new offer was unusable
+    /// would lose a call that was fine a moment ago.
+    async fn on_reinvite(&mut self, incoming: &Incoming) -> Result<()> {
+        // RFC 3261 §12.2.2: a sequence number that is not greater than the last one is out of
+        // order, and applying it would let a delayed packet undo a later change.
+        let sequence = incoming
+            .request
+            .headers
+            .typed::<sipx_sip::headers::CSeq>()
+            .and_then(std::result::Result::ok)
+            .map(|cseq| cseq.sequence);
+        if let (Some(sequence), Some(last)) = (sequence, self.dialog.remote_cseq) {
+            if sequence <= last {
+                return self.refuse(incoming, 500, "Server Internal Error").await;
+            }
+        }
+        if let Some(sequence) = sequence {
+            self.dialog.remote_cseq = Some(sequence);
+        }
+
+        let Ok(offer) = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body())) else {
+            return self.refuse(incoming, 488, "Not Acceptable Here").await;
+        };
+        let Ok(renegotiated) = negotiated(&offer) else {
+            return self.refuse(incoming, 488, "Not Acceptable Here").await;
+        };
+
+        let capabilities = Capabilities::g711(self.media_address, self.media.local_addr().port());
+        let answer_sdp = sipx_sdp::answer(&offer, &capabilities);
+        if answer_sdp
+            .media
+            .iter()
+            .all(sipx_sdp::MediaDescription::is_rejected)
+        {
+            return self.refuse(incoming, 488, "Not Acceptable Here").await;
+        }
+
+        // Hold is a direction, not a separate state: `sendonly` or `inactive` from the far end
+        // means it will not play what we send.
+        self.hold = offer
+            .media
+            .iter()
+            .find(|m| m.media == "audio" && !m.is_rejected())
+            .map_or(Direction::SendRecv, sipx_sdp::MediaDescription::direction);
+
+        self.move_media_if_changed(renegotiated).await?;
+
+        let response = ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?
+            .header(
+                HeaderName::Contact,
+                Bytes::from(contact_for(&self.endpoint)),
+            )?
+            .header(
+                HeaderName::ContentType,
+                Bytes::from_static(b"application/sdp"),
+            )?
+            .body(Bytes::from(answer_sdp.to_string_sdp()))
+            .build();
+        self.endpoint.respond(&incoming.key, response).await?;
+        Ok(())
+    }
+
+    /// Refuse a renegotiation without ending the call.
+    async fn refuse(&self, incoming: &Incoming, code: u16, reason: &'static str) -> Result<()> {
+        let status = StatusCode::new(code).unwrap_or_else(ok_status);
+        let response = ResponseBuilder::to_request(&incoming.request, status, reason)?.build();
+        self.endpoint.respond(&incoming.key, response).await?;
+        Ok(())
+    }
+
+    /// Rebuild the media session, but only if where or how the media flows actually changed.
+    ///
+    /// Restarting an unchanged session would drop packets for no reason on every re-INVITE, and
+    /// some peers send one every thirty seconds as a keep-alive.
+    async fn move_media_if_changed(&mut self, to: Negotiated) -> Result<()> {
+        if to.remote != self.current.remote || to.codec != self.current.codec {
+            let port = MediaPort::bind(SocketAddr::new(self.media_address, 0))
+                .await
+                .map_err(Error::Io)?;
+            let replacement = port.start(to.media_config());
+            let previous = std::mem::replace(&mut self.media, replacement);
+            previous.stop();
+        }
+        self.current = to;
+        Ok(())
+    }
+
+    /// Send a re-INVITE renegotiating this call.
+    ///
+    /// `direction` puts the call on hold (`SendOnly` or `Inactive`) or takes it off
+    /// (`SendRecv`).
+    pub async fn reinvite(&mut self, direction: Direction) -> Result<()> {
+        let (local, remote) = self.dialog.local_and_remote();
+        let cseq = self.dialog.next_cseq();
+
+        let mut capabilities =
+            Capabilities::g711(self.media_address, self.media.local_addr().port());
+        capabilities.direction = direction;
+        // The session version must increase with each modified offer, so the far end can tell
+        // a changed description from a repeated one.
+        capabilities.session_version = u64::from(cseq);
+        let offer = offer_from(&capabilities);
+
+        let builder = RequestBuilder::new(Method::Invite, self.dialog.remote_target.clone())
+            .header(HeaderName::To, Bytes::from(remote))?
+            .header(HeaderName::From, Bytes::from(local))?
+            .header(
+                HeaderName::CallId,
+                Bytes::from(self.dialog.id.call_id.clone()),
+            )?
+            .cseq(cseq, &Method::Invite)?
+            .header(
+                HeaderName::Contact,
+                Bytes::from(contact_for(&self.endpoint)),
+            )?
+            .header(
+                HeaderName::ContentType,
+                Bytes::from_static(b"application/sdp"),
+            )?
+            .max_forwards(70)
+            .body(Bytes::from(offer.to_string_sdp()));
+
+        let request = add_route_set(builder, &self.dialog)?.build();
+        let mut responses = self.endpoint.send(request, self.target).await?;
+        let response = responses.final_response().await.ok_or(Error::NoResponse)?;
+
+        if !response.status.is_success() {
+            // The far end refused the change. The call it refused to change is still running,
+            // so this is an error about the renegotiation, not about the call.
+            return Err(Error::Rejected {
+                status: response.status.code(),
+                reason: String::from_utf8_lossy(&response.reason).into_owned(),
+            });
+        }
+
+        send_ack(&self.endpoint, &self.dialog, self.target).await?;
+
+        if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body())) {
+            if let Ok(renegotiated) = negotiated(&answer) {
+                self.move_media_if_changed(renegotiated).await?;
+            }
+        }
+        self.hold = direction;
+        Ok(())
     }
 
     /// End the call.
@@ -225,7 +393,7 @@ pub async fn dial(
     // Returning an error without one leaves it retransmitting its 200 for 32 seconds and then
     // streaming media at a port we have closed.
     match establish(&invite, &response, target, port) {
-        Ok((dialog, media, in_dialog)) => {
+        Ok((dialog, media, in_dialog, negotiated)) => {
             send_ack(endpoint, &dialog, in_dialog).await?;
             Ok(Call {
                 dialog,
@@ -234,6 +402,9 @@ pub async fn dial(
                 target: in_dialog,
                 awaiting_ack: None,
                 ended: false,
+                media_address,
+                current: negotiated,
+                hold: Direction::SendRecv,
             })
         }
         Err(error) => {
@@ -257,14 +428,14 @@ fn establish(
     response: &Response,
     fallback: Target,
     port: MediaPort,
-) -> Result<(Dialog, MediaSession, Target)> {
+) -> Result<(Dialog, MediaSession, Target, Negotiated)> {
     let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
     let negotiated = negotiated(&answer)?;
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
     let media = port.start(negotiated.media_config());
-    Ok((dialog, media, target))
+    Ok((dialog, media, target, negotiated))
 }
 
 /// Answer an incoming INVITE.
@@ -333,6 +504,9 @@ pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAdd
         target,
         awaiting_ack: Some(acked),
         ended: false,
+        media_address,
+        current: negotiated,
+        hold: Direction::SendRecv,
     })
 }
 
