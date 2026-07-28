@@ -15,4 +15,4 @@ pub mod registrar;
 pub use agent::{Config, UserAgent};
 pub use auth::{Algorithm, Challenge, Credentials};
 pub use error::{Error, Result};
-pub use registrar::{Lease, Outcome, Registration};
+pub use registrar::{Lease, Outcome, PathSet, Registration};

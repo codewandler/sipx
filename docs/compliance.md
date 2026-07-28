@@ -16,10 +16,10 @@ compliance document usually becomes untrue.
 
 | | Meaning | Count |
 |---|---|---|
-| ✅ implemented | Behaviour present and tested for the roles listed | 23 |
+| ✅ implemented | Behaviour present and tested for the roles listed | 24 |
 | 🟡 partial | Some of the normative behaviour; the note says which part is missing | 9 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 9 |
-| ⬜ not started | Tracked as a target, not started | 19 |
+| ⬜ not started | Tracked as a target, not started | 18 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
 The list is bounded on purpose: it is what sipx already touches plus what it has decided
@@ -48,11 +48,11 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 |---|---|---|---|---|
 | [2782](https://www.rfc-editor.org/rfc/rfc2782) | A DNS RR for specifying the location of services (SRV) | ✅ implemented | — | Priority then the weighted shuffle, asserted against a seeded distribution rather than eyeballed. |
 | [3263](https://www.rfc-editor.org/rfc/rfc3263) | SIP: Locating SIP Servers | ✅ implemented | uac | NAPTR, SRV and A/AAAA, with the candidate list tried in order. The verification name survives resolution. |
+| [3327](https://www.rfc-editor.org/rfc/rfc3327) | SIP Extension Header Field for Registering Non-Adjacent Contacts (Path) | ✅ implemented | — | Parsed with route-header list semantics, offered as `Supported: path` on every REGISTER, and the returned path vector kept with the binding. Not turned into a route set for outbound requests: §5.1 says a UA ignores it, and `Service-Route` (RFC 3608) is the header for that. |
 | [3581](https://www.rfc-editor.org/rfc/rfc3581) | An Extension to SIP for Symmetric Response Routing | ✅ implemented | uac, uas | `rport` observed and echoed, with quote-aware parameter surgery so the value replaces the flag rather than following it. |
 | [6455](https://www.rfc-editor.org/rfc/rfc6455) | The WebSocket Protocol | ✅ implemented | — | Through `tokio-tungstenite`. sipx owns the subprotocol negotiation and the framing rules that RFC 7118 layers on top. |
 | [7118](https://www.rfc-editor.org/rfc/rfc7118) | The WebSocket Protocol as a Transport for SIP | ✅ implemented | uac, uas | Subprotocol negotiation, one message per frame, and the invented sent-by. Verified against Kamailio's WebSocket module. |
 | [5923](https://www.rfc-editor.org/rfc/rfc5923) | Connection Reuse in SIP | 🟡 partial | — | A response returns over the connection its request arrived on, and the pool distinguishes inbound from outbound. The `alias` parameter is not implemented. |
-| [3327](https://www.rfc-editor.org/rfc/rfc3327) | SIP Extension Header Field for Registering Non-Adjacent Contacts (Path) | ⬜ not started | — | The `Path` header is not even known to the parser. Needed to route back toward a registered UA through the proxies it traversed. |
 | [5626](https://www.rfc-editor.org/rfc/rfc5626) | Managing Client-Initiated Connections in SIP (Outbound) | ⬜ not started | — | Flow tokens, `reg-id` and redundant registrations. Needed before a registrar can route back to a NATed client reliably. |
 | [7339](https://www.rfc-editor.org/rfc/rfc7339) | SIP Overload Control | ⬜ not started | — | sipx answers 503 when its application queue is full, which is the behaviour 7339 exists to improve on. |
 | [7415](https://www.rfc-editor.org/rfc/rfc7415) | SIP Rate Control | ⬜ not started | — | The rate-based half of overload control. Depends on 7339. |

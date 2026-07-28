@@ -145,9 +145,13 @@ note = "Flow tokens, `reg-id` and redundant registrations. Needed before a regis
 number = 3327
 title = "SIP Extension Header Field for Registering Non-Adjacent Contacts (Path)"
 layer = "transport"
-status = "none"
-evidence = []
-note = "The `Path` header is not even known to the parser. Needed to route back toward a registered UA through the proxies it traversed."
+status = "implemented"
+headers = ["Path"]
+evidence = [
+  "crates/sipx-sip/src/headers/address.rs",
+  "crates/sipx-ua/src/registrar.rs",
+]
+note = "Parsed with route-header list semantics, offered as `Supported: path` on every REGISTER, and the returned path vector kept with the binding. Not turned into a route set for outbound requests: §5.1 says a UA ignores it, and `Service-Route` (RFC 3608) is the header for that."
 
 [[rfc]]
 number = 8599

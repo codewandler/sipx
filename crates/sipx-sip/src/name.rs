@@ -104,6 +104,7 @@ header_names! {
     MinExpires          => "Min-Expires";
     MinSe               => "Min-SE";                      // RFC 4028
     Organization        => "Organization";
+    Path                => "Path";                        // RFC 3327
     Priority            => "Priority";
     ProxyAuthenticate   => "Proxy-Authenticate";
     ProxyAuthorization  => "Proxy-Authorization";
@@ -158,6 +159,7 @@ impl HeaderName {
                 | Self::ContentLanguage
                 | Self::ErrorInfo
                 | Self::InReplyTo
+                | Self::Path
                 | Self::ProxyRequire
                 | Self::RecordRoute
                 | Self::Reason
@@ -312,6 +314,11 @@ mod tests {
     fn list_and_single_value_headers_are_classified() {
         assert!(HeaderName::Via.is_comma_separated_list());
         assert!(HeaderName::Route.is_comma_separated_list());
+        // RFC 3327 §4 gives `Path` the same `route-param *(COMMA route-param)` grammar the
+        // other route headers have. Nothing in the crate branches on this predicate today —
+        // the address-list decoder splits on commas itself — but it is public API, and a
+        // caller asking whether it may join two `Path` rows deserves the right answer.
+        assert!(HeaderName::Path.is_comma_separated_list());
         // The RFC names the authentication headers as the exception: their values contain
         // commas of their own.
         assert!(!HeaderName::WwwAuthenticate.is_comma_separated_list());

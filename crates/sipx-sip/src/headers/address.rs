@@ -260,6 +260,16 @@ address_list_header!(
     /// The `Record-Route` header (RFC 3261 §20.30).
     RecordRoute => RecordRoute, "Record-Route"
 );
+address_list_header!(
+    /// The `Path` header (RFC 3327 §4).
+    ///
+    /// A route header, not a `Contact`-shaped one, and it has to be parsed with list semantics
+    /// for the same reason `Record-Route` does: proxies each add their own value, and RFC 3261
+    /// §7.3 lets a comma-joined row stand for the same values on separate rows. Read a line at
+    /// a time, a two-proxy path becomes one opaque string and the order — which is the entire
+    /// content of a path vector — is lost.
+    Path => Path, "Path"
+);
 
 /// A `Contact` value, which may be the wildcard `*`.
 ///

@@ -28,7 +28,6 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · track: reachability · RFC 3327 · gates T-15 and GRUU
 - [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · track: auth · RFC 8760 · sipx-ua only, isolated
 - [S-12 — Implement reliable provisional responses](S-12-reliable-provisional-responses.md) · Signalling · track: signalling · RFC 3262 · same files as S-11, take it second
 - [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · track: test infrastructure · two items, both useful to sipx on their own
@@ -105,6 +104,7 @@ _None._
 - [T-8 — Implement SIP over WebSocket](T-8-implement-sip-over-websocket.md) · Signalling
 - [T-9 — Implement secure WebSocket](T-9-implement-secure-websocket.md) · Signalling
 - [T-10 — Verify TLS against a real server](T-10-tls-interop.md) · Signalling · gap left explicitly by T-7
+- [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · track: reachability · RFC 3327 · gates T-15 and GRUU
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core

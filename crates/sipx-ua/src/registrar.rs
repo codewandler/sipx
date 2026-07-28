@@ -57,8 +57,8 @@ impl Lease {
 /// What a registration attempt produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Registered, with the lease the registrar granted.
-    Registered(Lease),
+    /// Registered, with the lease the registrar granted and the path recorded for it.
+    Registered(Lease, PathSet),
     /// The registrar wants credentials. Answer with [`authorize`] and send again.
     Challenged(Box<Challenge>),
     /// The registrar refused.
@@ -87,6 +87,96 @@ pub struct Registration {
     pub cseq: u32,
 }
 
+/// The proxies a registrar recorded as being on the path back to this contact (RFC 3327).
+///
+/// Held and reported, not routed on. RFC 3327 §5.1 is explicit that "the general operation of
+/// the UA is to ignore the Path header field in the response" — the path vector exists so that
+/// requests arriving *at* the registrar can be routed toward a UA behind a NAT, and it is the
+/// registrar that walks it, not the UA. A UA that turned it into a pre-loaded route set would
+/// be sending its own requests through proxies that never asked to carry them; the header for
+/// that job is `Service-Route` (RFC 3608), which is a different list with different semantics.
+///
+/// What §5.1 does say it is for is inspection: "such inspection might allow the UA to detect
+/// intermediate proxies that have inappropriately added themselves". That is only possible if
+/// the value survives, which is why it is kept rather than parsed and dropped.
+#[derive(Debug, Clone, Default)]
+pub struct PathSet(pub Vec<Address>);
+
+impl PathSet {
+    /// The proxies, outermost first — the order they appeared in, which is the order a request
+    /// travelling toward the UA would traverse them.
+    #[must_use]
+    pub fn hops(&self) -> &[Address] {
+        &self.0
+    }
+
+    /// Whether the registrar recorded no path at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Each hop rendered back to the form it arrived in, for logging and for comparison.
+    #[must_use]
+    pub fn rendered(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .map(|hop| {
+                let mut text = format!("<{}>", String::from_utf8_lossy(&hop.uri.to_bytes()));
+                for param in &hop.params {
+                    text.push(';');
+                    text.push_str(&String::from_utf8_lossy(&param.name));
+                    if let Some(value) = &param.value {
+                        text.push('=');
+                        text.push_str(&String::from_utf8_lossy(value));
+                    }
+                }
+                text
+            })
+            .collect()
+    }
+
+    /// Whether a proxy this side did not expect is on the path.
+    ///
+    /// RFC 3327 §5.1 gives inspection as the UA's reason to care: "such inspection might allow
+    /// the UA to detect intermediate proxies that have inappropriately added themselves". That
+    /// judgement needs a policy the UA holds, so this asks the question and leaves the answer
+    /// to the caller rather than inventing a trust rule here.
+    #[must_use]
+    pub fn hops_outside(&self, expected: &[&str]) -> Vec<String> {
+        self.rendered()
+            .into_iter()
+            .filter(|hop| !expected.iter().any(|allowed| hop.contains(allowed)))
+            .collect()
+    }
+
+    /// Read the path vector out of a REGISTER response.
+    ///
+    /// Parsed rather than kept as text, and kept as [`Address`] rather than as a URI, because
+    /// the parameters are load-bearing: RFC 5626 §5.3 hangs the `ob` marker off a `Path` value,
+    /// and `T-15` needs to read it. A path vector flattened to a list of URIs would be
+    /// syntactically fine and quietly useless for Outbound.
+    #[must_use]
+    pub fn from_response(response: &Response) -> Self {
+        Self(
+            response
+                .headers
+                .typed_all::<sipx_sip::headers::address::Path>()
+                .filter_map(std::result::Result::ok)
+                .map(|path| path.0)
+                .collect(),
+        )
+    }
+}
+
+impl PartialEq for PathSet {
+    fn eq(&self, other: &Self) -> bool {
+        self.rendered() == other.rendered()
+    }
+}
+
+impl Eq for PathSet {}
+
 impl Registration {
     /// Build the REGISTER request.
     ///
@@ -103,6 +193,11 @@ impl Registration {
                 .header(HeaderName::CallId, Bytes::from(self.call_id.clone()))?
                 .cseq(self.cseq, &Method::Register)?
                 .header(HeaderName::Contact, Bytes::from(self.contact.clone()))?
+                // RFC 3327 §5.1: a UA "SHOULD include the option tag 'path' ... in all
+                // Supported header fields". Without it §5.2 tells intermediate proxies not to
+                // add themselves, so a UA that stays quiet here is unreachable from behind the
+                // very proxies the mechanism exists to traverse.
+                .header(HeaderName::Supported, Bytes::from_static(b"path"))?
                 .header(
                     HeaderName::Expires,
                     Bytes::from(self.expires.as_secs().to_string()),
@@ -133,7 +228,13 @@ pub fn interpret(response: &Response, asked_for: Duration, contact: &str) -> Out
         // The registrar's number wins. Refreshing on our own instead is how a client
         // de-registers itself on every cycle.
         let granted = granted_expiry(response, contact).unwrap_or(asked_for);
-        return Outcome::Registered(Lease::from_granted(granted));
+        // Returned even when this side never offered `path`. A registrar that adds one anyway
+        // is doing something worth seeing rather than something to drop on the floor: the
+        // whole security value §5.1 claims for the header is that the UA can look at it.
+        return Outcome::Registered(
+            Lease::from_granted(granted),
+            PathSet::from_response(response),
+        );
     }
 
     if status == 401 || status == 407 {
@@ -265,6 +366,125 @@ mod tests {
         ))
     }
 
+    /// The story's failing-first test.
+    #[test]
+    fn a_registration_preserves_the_path_it_was_returned() {
+        // Two proxies, on separate rows — which is how they actually arrive, each one having
+        // pushed itself onto the front on the way through (RFC 3327 §5.2).
+        let outcome = interpret(
+            &ok_with(
+                "Path: <sip:edge.example.com;lr>\r\nPath: <sip:core.example.net;lr>\r\nContact: <sip:alice@192.0.2.5:5060>;expires=600\r\n",
+            ),
+            Duration::from_secs(3600),
+            CONTACT,
+        );
+        let Outcome::Registered(lease, path) = outcome else {
+            panic!("expected a registration, got {outcome:?}");
+        };
+        assert_eq!(lease.granted, Duration::from_secs(600));
+        assert_eq!(
+            path.rendered(),
+            vec![
+                "<sip:edge.example.com;lr>".to_owned(),
+                "<sip:core.example.net;lr>".to_owned()
+            ],
+            "the path vector was lost, reordered, or flattened"
+        );
+    }
+
+    #[test]
+    fn a_comma_joined_path_is_the_same_as_separate_rows() {
+        // RFC 3261 §7.3 makes these two spellings equivalent for a list header, and a path
+        // vector read a line at a time turns two hops into one opaque string — losing the
+        // order, which is the entire content of the vector.
+        let joined = interpret(
+            &ok_with("Path: <sip:edge.example.com;lr>, <sip:core.example.net;lr>\r\n"),
+            Duration::from_secs(3600),
+            CONTACT,
+        );
+        let separate = interpret(
+            &ok_with("Path: <sip:edge.example.com;lr>\r\nPath: <sip:core.example.net;lr>\r\n"),
+            Duration::from_secs(3600),
+            CONTACT,
+        );
+        match (joined, separate) {
+            (Outcome::Registered(_, one), Outcome::Registered(_, other)) => {
+                assert_eq!(
+                    one.rendered().len(),
+                    2,
+                    "the comma-joined row was not split"
+                );
+                assert_eq!(one, other);
+            }
+            other => panic!("expected two registrations, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_path_parameter_survives_because_outbound_will_need_it() {
+        // RFC 5626 §5.3 hangs the `ob` marker off a Path value. A vector kept as bare URIs
+        // would parse cleanly and be quietly useless to T-15.
+        let outcome = interpret(
+            &ok_with("Path: <sip:edge.example.com;lr;ob>\r\n"),
+            Duration::from_secs(3600),
+            CONTACT,
+        );
+        let Outcome::Registered(_, path) = outcome else {
+            panic!("expected a registration");
+        };
+        assert!(
+            path.hops()
+                .first()
+                .expect("one hop")
+                .uri
+                .params()
+                .is_some_and(|params| params.contains("ob")),
+            "the ob parameter was dropped: {:?}",
+            path.rendered()
+        );
+    }
+
+    #[test]
+    fn a_register_offers_the_path_option_tag() {
+        // RFC 3327 §5.2 tells proxies not to add themselves unless the UA has indicated
+        // support, so a UA that stays quiet here is unreachable from behind exactly the
+        // proxies the mechanism exists to traverse.
+        let request = registration().request().expect("builds");
+        let supported = request
+            .headers
+            .value(&HeaderName::Supported)
+            .expect("Supported is present");
+        assert!(String::from_utf8_lossy(&supported).contains("path"));
+    }
+
+    #[test]
+    fn a_path_returned_unasked_is_still_reported() {
+        // §5.1's reason for the header to reach the UA at all: "such inspection might allow
+        // the UA to detect intermediate proxies that have inappropriately added themselves".
+        // Dropping it because we did not ask would remove the only defence it offers.
+        let outcome = interpret(
+            &ok_with("Path: <sip:stranger.example.org;lr>\r\n"),
+            Duration::from_secs(3600),
+            CONTACT,
+        );
+        let Outcome::Registered(_, path) = outcome else {
+            panic!("expected a registration");
+        };
+        assert_eq!(
+            path.hops_outside(&["edge.example.com"]),
+            vec!["<sip:stranger.example.org;lr>".to_owned()]
+        );
+    }
+
+    #[test]
+    fn no_path_is_an_empty_set_rather_than_an_absent_one() {
+        let outcome = interpret(&ok_with(""), Duration::from_secs(3600), CONTACT);
+        let Outcome::Registered(_, path) = outcome else {
+            panic!("expected a registration");
+        };
+        assert!(path.is_empty());
+    }
+
     #[test]
     fn the_request_uri_names_the_registrar_and_the_to_names_the_user() {
         let request = registration().request().expect("builds");
@@ -289,7 +509,7 @@ mod tests {
             CONTACT,
         );
         match outcome {
-            Outcome::Registered(lease) => assert_eq!(lease.granted, Duration::from_secs(60)),
+            Outcome::Registered(lease, _) => assert_eq!(lease.granted, Duration::from_secs(60)),
             other => panic!("expected a lease, got {other:?}"),
         }
     }
@@ -303,7 +523,7 @@ mod tests {
             CONTACT,
         );
         match outcome {
-            Outcome::Registered(lease) => assert_eq!(lease.granted, Duration::from_secs(120)),
+            Outcome::Registered(lease, _) => assert_eq!(lease.granted, Duration::from_secs(120)),
             other => panic!("expected a lease, got {other:?}"),
         }
     }
@@ -323,7 +543,7 @@ mod tests {
             CONTACT,
         );
         match outcome {
-            Outcome::Registered(lease) => assert_eq!(lease.granted, Duration::from_secs(60)),
+            Outcome::Registered(lease, _) => assert_eq!(lease.granted, Duration::from_secs(60)),
             other => panic!("expected a lease, got {other:?}"),
         }
     }
@@ -336,7 +556,7 @@ mod tests {
             CONTACT,
         );
         match outcome {
-            Outcome::Registered(lease) => assert_eq!(lease.granted, Duration::from_secs(300)),
+            Outcome::Registered(lease, _) => assert_eq!(lease.granted, Duration::from_secs(300)),
             other => panic!("expected a lease, got {other:?}"),
         }
     }

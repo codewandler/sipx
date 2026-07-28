@@ -67,6 +67,8 @@ pub struct UserAgent {
     /// The last nonce answered, and how many requests have used it. RFC 7616 §3.4.3 defines
     /// `nc` per nonce, not per client, so the pair travels together.
     nonce_use: Option<(String, u32)>,
+    /// The proxies the registrar recorded as being on the path back here (RFC 3327).
+    path: registrar::PathSet,
 }
 
 impl UserAgent {
@@ -90,7 +92,21 @@ impl UserAgent {
             config,
             registration,
             nonce_use: None,
+            path: registrar::PathSet::default(),
         }
+    }
+
+    /// The path the registrar recorded for this binding (RFC 3327).
+    ///
+    /// Empty until a registration succeeds, and empty afterwards if no proxy on the way put
+    /// itself on the path. This is reported rather than routed on: §5.1 says "the general
+    /// operation of the UA is to ignore the Path header field in the response", because the
+    /// vector exists so that requests arriving *at the registrar* can be steered back toward a
+    /// UA behind a NAT. What §5.1 does offer it for is inspection — seeing a proxy that has
+    /// "inappropriately added" itself — and that is only possible if the value survives.
+    #[must_use]
+    pub fn path(&self) -> &registrar::PathSet {
+        &self.path
     }
 
     /// Register, answering a challenge if one comes.
@@ -131,7 +147,10 @@ impl UserAgent {
         }
 
         match outcome {
-            Outcome::Registered(lease) => Ok(lease),
+            Outcome::Registered(lease, path) => {
+                self.path = path;
+                Ok(lease)
+            }
             Outcome::Challenged(_) => Err(Error::AuthenticationFailed),
             Outcome::Rejected { status, reason } => Err(Error::Rejected { status, reason }),
         }
