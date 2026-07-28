@@ -120,22 +120,109 @@ impl Registrar {
             .build();
         }
 
-        ResponseBuilder::to_request(
-            &incoming.request,
-            StatusCode::new(200).expect("valid"),
-            "OK",
-        )
+        granted_ok(&incoming.request, self.granted)
+    }
+}
+
+/// A 200 that lists the bindings the way RFC 3261 §10.3 step 8 requires: the binding just
+/// registered comes back as a `Contact` of its own, carrying the granted expiry.
+fn granted_ok(request: &sipx_sip::Request, granted: u64) -> sipx_sip::Response {
+    let contact = request
+        .headers
+        .value(&HeaderName::Contact)
+        .map(|value| String::from_utf8_lossy(&value).into_owned())
+        .expect("a REGISTER carries the contact it registers");
+    ResponseBuilder::to_request(request, StatusCode::new(200).expect("valid"), "OK")
         .expect("builds")
         .header(
             HeaderName::Contact,
-            Bytes::from(format!(
-                "<sip:alice@127.0.0.1:5060>;expires={}",
-                self.granted
-            )),
+            Bytes::from(format!("{contact};expires={granted}")),
         )
         .expect("valid")
         .build()
-    }
+}
+
+/// How a counting registrar hands out nonces.
+#[derive(Clone, Copy)]
+enum NoncePolicy {
+    /// A fresh nonce for every challenge.
+    Fresh,
+    /// The same nonce for every challenge.
+    Fixed,
+    /// The first answer is declared stale and re-challenged with a fresh nonce.
+    StaleThenFresh,
+}
+
+/// A registrar that records the `nonce` and `nc` of every `Authorization` it receives.
+///
+/// It does not verify the digest — the verifying stub above covers that. What it checks is
+/// the pairing RFC 7616 §3.4.3 defines: `nc` counts the requests sent *with this nonce*, so
+/// what matters is which count arrived against which nonce.
+async fn counting_registrar(
+    policy: NoncePolicy,
+) -> (Target, Arc<tokio::sync::Mutex<Vec<(String, String)>>>) {
+    let (handle, mut incoming) = bind(TransportConfig::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
+    let target = Target::udp(handle.local_addr());
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+    tokio::spawn(async move {
+        let mut issued = 0u32;
+        while let Some(request) = incoming.recv().await {
+            let authorization = request
+                .request
+                .headers
+                .value(&HeaderName::Authorization)
+                .map(|value| String::from_utf8_lossy(&value).into_owned());
+            let response = match authorization {
+                None => {
+                    issued += 1;
+                    let nonce = match policy {
+                        NoncePolicy::Fixed => "fixed".to_owned(),
+                        NoncePolicy::Fresh | NoncePolicy::StaleThenFresh => {
+                            format!("nonce-{issued}")
+                        }
+                    };
+                    challenge_with(&request.request, &nonce, false)
+                }
+                Some(authorization) => {
+                    let nonce = param(&authorization, "nonce").unwrap_or_default();
+                    let nc = param(&authorization, "nc").unwrap_or_default();
+                    let mut seen = recorder.lock().await;
+                    let first_answer = seen.is_empty();
+                    seen.push((nonce, nc));
+                    drop(seen);
+                    if first_answer && matches!(policy, NoncePolicy::StaleThenFresh) {
+                        issued += 1;
+                        challenge_with(&request.request, &format!("nonce-{issued}"), true)
+                    } else {
+                        granted_ok(&request.request, 600)
+                    }
+                }
+            };
+            let _ = handle.respond(&request.key, response).await;
+        }
+    });
+    (target, seen)
+}
+
+fn challenge_with(request: &sipx_sip::Request, nonce: &str, stale: bool) -> sipx_sip::Response {
+    let stale = if stale { ", stale=true" } else { "" };
+    ResponseBuilder::to_request(
+        request,
+        StatusCode::new(401).expect("valid"),
+        "Unauthorized",
+    )
+    .expect("builds")
+    .header(
+        HeaderName::WwwAuthenticate,
+        Bytes::from(format!(
+            r#"Digest realm="{REALM}", nonce="{nonce}", qop="auth"{stale}"#
+        )),
+    )
+    .expect("valid")
+    .build()
 }
 
 async fn registrar(granted: u64, sha256: bool) -> (Target, Arc<AtomicU32>) {
@@ -256,6 +343,74 @@ async fn a_challenge_without_credentials_says_so() {
     assert!(matches!(result, Err(sipx_ua::Error::CredentialsRequired)));
 }
 
+/// RFC 7616 §3.4.3: `nc` is "the count of the number of requests (including the current
+/// request) that the client has sent with the nonce value in this request" — so the first
+/// request under a given nonce carries `nc=00000001`. A stale challenge by definition
+/// carries a fresh nonce, and a registrar tracking counts rejects a fresh nonce answered
+/// with anything else as a replay.
+#[tokio::test]
+async fn a_stale_challenge_is_answered_with_a_count_of_one_for_the_fresh_nonce() {
+    let (target, seen) = counting_registrar(NoncePolicy::StaleThenFresh).await;
+    let mut ua = agent(target, Some(Credentials::new(USERNAME, PASSWORD))).await;
+
+    tokio::time::timeout(Duration::from_secs(5), ua.register())
+        .await
+        .expect("no timeout")
+        .expect("registers");
+
+    let seen = seen.lock().await.clone();
+    assert_eq!(
+        seen,
+        vec![
+            ("nonce-1".to_owned(), "00000001".to_owned()),
+            ("nonce-2".to_owned(), "00000001".to_owned()),
+        ],
+        "each nonce starts its own count at one"
+    );
+}
+
+/// The count must not be carried across refreshes either: a registrar that challenges every
+/// REGISTER with a fresh nonce sees `nc=00000001` every time.
+#[tokio::test]
+async fn a_fresh_nonce_on_a_refresh_restarts_the_count() {
+    let (target, seen) = counting_registrar(NoncePolicy::Fresh).await;
+    let mut ua = agent(target, Some(Credentials::new(USERNAME, PASSWORD))).await;
+
+    ua.register().await.expect("registers");
+    ua.register().await.expect("refreshes");
+
+    let seen = seen.lock().await.clone();
+    assert_eq!(
+        seen,
+        vec![
+            ("nonce-1".to_owned(), "00000001".to_owned()),
+            ("nonce-2".to_owned(), "00000001".to_owned()),
+        ],
+        "a nonce never used before starts at one"
+    );
+}
+
+/// And the other direction: a registrar that keeps issuing the *same* nonce must see the
+/// count advance, or it will reject the repeat of `nc=00000001` as a replay.
+#[tokio::test]
+async fn a_reused_nonce_advances_the_count() {
+    let (target, seen) = counting_registrar(NoncePolicy::Fixed).await;
+    let mut ua = agent(target, Some(Credentials::new(USERNAME, PASSWORD))).await;
+
+    ua.register().await.expect("registers");
+    ua.register().await.expect("refreshes");
+
+    let seen = seen.lock().await.clone();
+    assert_eq!(
+        seen,
+        vec![
+            ("fixed".to_owned(), "00000001".to_owned()),
+            ("fixed".to_owned(), "00000002".to_owned()),
+        ],
+        "the second request under the same nonce is the second of its count"
+    );
+}
+
 /// A refresh is the same registration, not a new one: same `Call-ID`, higher `CSeq`.
 #[tokio::test]
 async fn a_refresh_reuses_the_registration_rather_than_starting_another() {
@@ -316,10 +471,8 @@ async fn a_refresh_reuses_the_registration_rather_than_starting_another() {
     assert_ne!(exchanges[0].1, exchanges[1].1, "and advances the CSeq");
 }
 
-/// M2's other half: an OPTIONS ping is answered, and the answer says what we can do. A 200
-/// with an empty `Allow` is a wasted exchange — the peer asked and learned nothing.
-#[tokio::test]
-async fn an_options_ping_is_answered_with_our_capabilities() {
+/// Stand up a user agent, ping it with an out-of-dialog OPTIONS, and return the answer.
+async fn options_response() -> sipx_sip::Response {
     let (handle, incoming) = bind(TransportConfig::new("127.0.0.1:0".parse().expect("valid")))
         .await
         .expect("binds");
@@ -362,10 +515,17 @@ async fn an_options_ping_is_answered_with_our_capabilities() {
         .send(options, Target::udp(agent_addr))
         .await
         .expect("sends");
-    let response = tokio::time::timeout(Duration::from_secs(2), responses.final_response())
+    tokio::time::timeout(Duration::from_secs(2), responses.final_response())
         .await
         .expect("no timeout")
-        .expect("a final response");
+        .expect("a final response")
+}
+
+/// M2's other half: an OPTIONS ping is answered, and the answer says what we can do. A 200
+/// with an empty `Allow` is a wasted exchange — the peer asked and learned nothing.
+#[tokio::test]
+async fn an_options_ping_is_answered_with_our_capabilities() {
+    let response = options_response().await;
 
     assert_eq!(response.status.code(), 200);
     let allow = response
@@ -376,4 +536,17 @@ async fn an_options_ping_is_answered_with_our_capabilities() {
     for method in ["INVITE", "ACK", "CANCEL", "BYE", "OPTIONS"] {
         assert!(allow.contains(method), "{method} missing from {allow}");
     }
+}
+
+/// RFC 3261 §8.2.6.2: the UAS MUST add a tag to the `To` of any response other than a 100
+/// when the request arrived without one. An out-of-dialog OPTIONS always arrives without
+/// one, so a 200 that echoes the `To` verbatim violates the MUST on every ping.
+#[tokio::test]
+async fn an_options_answer_carries_a_to_tag() {
+    let response = options_response().await;
+
+    let to = response.headers.value(&HeaderName::To).expect("a To");
+    let to = sipx_sip::Address::parse(&to, "To").expect("a parseable To");
+    let tag = to.tag().expect("a To tag (RFC 3261 §8.2.6.2)");
+    assert!(!tag.is_empty(), "an empty tag identifies nothing");
 }

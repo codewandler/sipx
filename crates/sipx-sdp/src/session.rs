@@ -4,8 +4,57 @@
 //! what it does not understand breaks features it has never heard of — the typed fields here
 //! are a view over the lines, not a replacement for them.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::net::IpAddr;
+
+/// A unicast address as written on an `o=` or `c=` line.
+///
+/// RFC 8866 §5.2 and §5.7 allow a fully-qualified domain name here, not just a literal. A
+/// name is kept as written: resolving it takes a resolver, which is I/O this crate does not
+/// do, and re-emitting it verbatim is what keeps a round trip faithful.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Address {
+    /// An IP literal.
+    Ip(IpAddr),
+    /// A fully-qualified domain name, kept as written.
+    Host(String),
+}
+
+impl Address {
+    /// The IP, when the address is a literal. A name yields `None`; turning it into an
+    /// address is the caller's job.
+    #[must_use]
+    pub fn ip(&self) -> Option<IpAddr> {
+        match self {
+            Self::Ip(ip) => Some(*ip),
+            Self::Host(_) => None,
+        }
+    }
+
+    fn address_type(&self) -> &'static str {
+        match self {
+            Self::Ip(IpAddr::V6(_)) => "IP6",
+            // RFC 8866 §5.7 requires an addrtype even for a name, whose family the
+            // description alone cannot reveal; IP4 is the one every implementation accepts.
+            _ => "IP4",
+        }
+    }
+}
+
+impl From<IpAddr> for Address {
+    fn from(ip: IpAddr) -> Self {
+        Self::Ip(ip)
+    }
+}
+
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ip(ip) => ip.fmt(f),
+            Self::Host(host) => f.write_str(host),
+        }
+    }
+}
 
 /// Which way media flows, from the point of view of the description that carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -123,7 +172,7 @@ pub struct Origin {
     /// The version, which increases with each modified offer.
     pub session_version: u64,
     /// The address the session is described from.
-    pub address: IpAddr,
+    pub address: Address,
 }
 
 impl Origin {
@@ -137,31 +186,25 @@ impl Origin {
             username: "-".to_owned(),
             session_id,
             session_version,
-            address,
+            address: Address::Ip(address),
         }
-    }
-
-    fn address_type(&self) -> &'static str {
-        if self.address.is_ipv6() { "IP6" } else { "IP4" }
     }
 }
 
 /// A `c=` line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Connection {
     /// Where media should be sent.
-    pub address: IpAddr,
+    pub address: Address,
 }
 
 impl Connection {
     /// A connection line for an address.
     #[must_use]
     pub fn new(address: IpAddr) -> Self {
-        Self { address }
-    }
-
-    fn address_type(&self) -> &'static str {
-        if self.address.is_ipv6() { "IP6" } else { "IP4" }
+        Self {
+            address: Address::Ip(address),
+        }
     }
 }
 
@@ -190,6 +233,9 @@ pub struct MediaDescription {
     pub connection: Option<Connection>,
     /// Attributes under this media line.
     pub attributes: Vec<Attribute>,
+    /// Lines under this media line that this crate does not model, kept so they survive a
+    /// round trip.
+    pub other: Vec<(char, String)>,
 }
 
 impl MediaDescription {
@@ -203,6 +249,7 @@ impl MediaDescription {
             formats,
             connection: None,
             attributes: Vec::new(),
+            other: Vec::new(),
         }
     }
 
@@ -215,15 +262,21 @@ impl MediaDescription {
     /// The direction, defaulting to `sendrecv` when no attribute says otherwise.
     #[must_use]
     pub fn direction(&self) -> Direction {
-        self.attributes
-            .iter()
-            .find_map(|a| {
-                a.value
-                    .is_none()
-                    .then(|| Direction::parse(&a.name))
-                    .flatten()
-            })
-            .unwrap_or_default()
+        self.declared_direction().unwrap_or_default()
+    }
+
+    /// The direction attribute written under this `m=` line, if any.
+    ///
+    /// RFC 8866 §6.7: a stream without a direction of its own takes the session-level one,
+    /// so an absent attribute is meaningful and not the same thing as `sendrecv`.
+    #[must_use]
+    pub fn declared_direction(&self) -> Option<Direction> {
+        self.attributes.iter().find_map(|a| {
+            a.value
+                .is_none()
+                .then(|| Direction::parse(&a.name))
+                .flatten()
+        })
     }
 
     /// Set the direction, replacing any existing one.
@@ -258,16 +311,28 @@ impl MediaDescription {
             let _ = write!(out, " {format}");
         }
         let _ = writeln!(out, "\r");
+        // RFC 8866 §5.14 fixes the order inside a media description: `i=` before `c=`, then
+        // `b=` and `k=`, then the attributes.
+        write_other_lines(out, &self.other, |kind| kind == 'i');
         if let Some(connection) = &self.connection {
             let _ = writeln!(
                 out,
                 "c=IN {} {}\r",
-                connection.address_type(),
+                connection.address.address_type(),
                 connection.address
             );
         }
+        write_other_lines(out, &self.other, |kind| kind != 'i');
         for attribute in &self.attributes {
             attribute.write_to(out);
+        }
+    }
+}
+
+fn write_other_lines(out: &mut String, lines: &[(char, String)], take: impl Fn(char) -> bool) {
+    for (kind, value) in lines {
+        if take(*kind) {
+            let _ = writeln!(out, "{kind}={value}\r");
         }
     }
 }
@@ -308,12 +373,16 @@ impl SessionDescription {
     }
 
     /// The connection address for a stream: its own `c=` if it has one, else the session's.
+    ///
+    /// A domain-name address yields `None` here — the name is preserved in the description,
+    /// but only a resolver can turn it into somewhere to send media.
     #[must_use]
     pub fn address_for(&self, media: &MediaDescription) -> Option<IpAddr> {
         media
             .connection
-            .or(self.connection)
-            .map(|connection| connection.address)
+            .as_ref()
+            .or(self.connection.as_ref())
+            .and_then(|connection| connection.address.ip())
     }
 
     /// The session-level direction, defaulting to `sendrecv`.
@@ -344,27 +413,35 @@ impl SessionDescription {
             self.origin.username,
             self.origin.session_id,
             self.origin.session_version,
-            self.origin.address_type(),
+            self.origin.address.address_type(),
             self.origin.address
         );
         let _ = writeln!(out, "s={}\r", self.session_name);
+        // RFC 8866 §5 gives every line type a fixed slot: `i=`, `u=`, `e=` and `p=` before
+        // `c=`, `b=` between `c=` and the timing lines, everything else after them. Kept
+        // lines go into their slot, not wherever is convenient, because receivers enforce
+        // the grammar's order.
+        write_other_lines(&mut out, &self.other, |kind| {
+            matches!(kind, 'i' | 'u' | 'e' | 'p')
+        });
         if let Some(connection) = &self.connection {
             let _ = writeln!(
                 out,
                 "c=IN {} {}\r",
-                connection.address_type(),
+                connection.address.address_type(),
                 connection.address
             );
         }
+        write_other_lines(&mut out, &self.other, |kind| kind == 'b');
         if self.timing.is_empty() {
             let _ = writeln!(out, "t=0 0\r");
         }
         for timing in &self.timing {
             let _ = writeln!(out, "t={} {}\r", timing.start, timing.stop);
         }
-        for (kind, value) in &self.other {
-            let _ = writeln!(out, "{kind}={value}\r");
-        }
+        write_other_lines(&mut out, &self.other, |kind| {
+            !matches!(kind, 'i' | 'u' | 'e' | 'p' | 'b')
+        });
         for attribute in &self.attributes {
             attribute.write_to(&mut out);
         }

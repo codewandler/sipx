@@ -89,6 +89,54 @@ pub struct ReceiverReport {
     pub reports: Vec<ReportBlock>,
 }
 
+/// The SDES item type of a canonical name (RFC 3550 §6.5.1).
+pub const SDES_CNAME: u8 = 1;
+
+/// One source description item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdesItem {
+    /// Which attribute this is; 1 is CNAME (RFC 3550 §6.5).
+    pub kind: u8,
+    /// The text, carried verbatim. UTF-8 by the RFC, but never trusted to be.
+    pub value: Bytes,
+}
+
+/// What one source says about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdesChunk {
+    /// Who is being described.
+    pub ssrc: u32,
+    /// The attributes, in wire order.
+    pub items: Vec<SdesItem>,
+}
+
+/// A source description packet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sdes {
+    /// One chunk per source.
+    pub chunks: Vec<SdesChunk>,
+}
+
+impl Sdes {
+    /// A description carrying only a canonical name.
+    ///
+    /// The one every sender needs: RFC 3550 §6.1 requires an SDES CNAME in each compound
+    /// packet, because the CNAME is what ties streams to one participant across an SSRC
+    /// change.
+    #[must_use]
+    pub fn cname(ssrc: u32, cname: &str) -> Self {
+        Self {
+            chunks: vec![SdesChunk {
+                ssrc,
+                items: vec![SdesItem {
+                    kind: SDES_CNAME,
+                    value: Bytes::copy_from_slice(cname.as_bytes()),
+                }],
+            }],
+        }
+    }
+}
+
 /// An RTCP packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rtcp {
@@ -96,20 +144,29 @@ pub enum Rtcp {
     Sender(SenderReport),
     /// A receiver report.
     Receiver(ReceiverReport),
-    /// Something else — source descriptions, goodbyes, application data.
+    /// A source description.
+    Sdes(Sdes),
+    /// Something else — goodbyes, application data.
     ///
     /// Kept rather than dropped: RTCP arrives as compound packets, and an element that
     /// discards the types it does not model cannot forward one intact.
     Other {
         /// The packet type.
         packet_type: u8,
+        /// The header's five-bit count, verbatim. It is load-bearing for types this crate
+        /// does not model — §6.5 reads it as the SDES chunk count, §6.6 as the BYE source
+        /// count — so re-encoding it as zero empties the packet.
+        count: u8,
+        /// Whether the padding bit was set. It decides where the payload ends, so it has
+        /// to travel with the bytes it describes.
+        padding: bool,
         /// Its body, verbatim.
         payload: Bytes,
     },
 }
 
-fn put_header(out: &mut BytesMut, count: u8, packet_type: u8, body_words: u16) {
-    out.put_u8(0b1000_0000 | (count & 0x1F));
+fn put_header(out: &mut BytesMut, count: u8, packet_type: u8, body_words: u16, padding: bool) {
+    out.put_u8(0b1000_0000 | (u8::from(padding) << 5) | (count & 0x1F));
     out.put_u8(packet_type);
     // The length is in 32-bit words *minus one*, counting the header. Off-by-one here shifts
     // every later packet in a compound, which is why it is written out rather than inlined.
@@ -162,7 +219,7 @@ impl Rtcp {
             Self::Sender(report) => {
                 let count = u8::try_from(report.reports.len().min(31)).unwrap_or(0);
                 let words = 6 + u16::from(count) * 6;
-                put_header(&mut out, count, SENDER_REPORT, words);
+                put_header(&mut out, count, SENDER_REPORT, words, false);
                 out.put_u32(report.ssrc);
                 out.put_u64(report.ntp_timestamp);
                 out.put_u32(report.rtp_timestamp);
@@ -175,20 +232,65 @@ impl Rtcp {
             Self::Receiver(report) => {
                 let count = u8::try_from(report.reports.len().min(31)).unwrap_or(0);
                 let words = 1 + u16::from(count) * 6;
-                put_header(&mut out, count, RECEIVER_REPORT, words);
+                put_header(&mut out, count, RECEIVER_REPORT, words, false);
                 out.put_u32(report.ssrc);
                 for block in report.reports.iter().take(31) {
                     put_block(&mut out, block);
                 }
             }
+            Self::Sdes(sdes) => {
+                let count = u8::try_from(sdes.chunks.len().min(31)).unwrap_or(0);
+                let mut body = BytesMut::with_capacity(32);
+                for chunk in sdes.chunks.iter().take(31) {
+                    body.put_u32(chunk.ssrc);
+                    for item in &chunk.items {
+                        // The item's length field is one byte, so longer text cannot be
+                        // represented; truncating beats letting it swallow the next item.
+                        let text = item.value.get(..item.value.len().min(255)).unwrap_or(&[]);
+                        body.put_u8(item.kind);
+                        body.put_u8(u8::try_from(text.len()).unwrap_or(255));
+                        body.put_slice(text);
+                    }
+                    // The item list ends with a null octet, and the chunk is padded to the
+                    // next 32-bit boundary with more of them (RFC 3550 §6.5).
+                    body.put_u8(0);
+                    while !body.len().is_multiple_of(4) {
+                        body.put_u8(0);
+                    }
+                }
+                let words = u16::try_from(body.len() / 4).unwrap_or(0);
+                put_header(&mut out, count, SOURCE_DESCRIPTION, words, false);
+                out.put_slice(&body);
+            }
             Self::Other {
                 packet_type,
+                count,
+                padding,
                 payload,
             } => {
-                let words = u16::try_from(payload.len() / 4).unwrap_or(0);
-                put_header(&mut out, 0, *packet_type, words);
+                // The length field counts whole 32-bit words, so an unaligned payload is
+                // zero-filled up to the boundary — a length word that disagrees with the
+                // bytes written desynchronises every later packet in the compound.
+                let padded = payload.len().div_ceil(4) * 4;
+                let words = u16::try_from(padded / 4).unwrap_or(0);
+                put_header(&mut out, *count, *packet_type, words, *padding);
                 out.put_slice(payload);
+                out.put_bytes(0, padded - payload.len());
             }
+        }
+        out.freeze()
+    }
+
+    /// Serialize several packets as one datagram.
+    ///
+    /// RFC 3550 §6.1: every RTCP packet is sent in a compound of at least two, led by a
+    /// report and carrying an SDES CNAME. The parts are plain concatenation — this exists
+    /// so a caller sends one datagram rather than one per part.
+    #[must_use]
+    pub fn encode_compound(packets: &[Self]) -> Bytes {
+        let mut out = BytesMut::with_capacity(128);
+        for packet in packets {
+            out.put_slice(&packet.encode());
         }
         out.freeze()
     }
@@ -208,6 +310,7 @@ impl Rtcp {
                 return Err(RtcpError::BadVersion(version));
             }
             let count = usize::from(first & 0x1F);
+            let padding = first & 0b0010_0000 != 0;
             let packet_type = bytes.get(offset + 1).copied().unwrap_or(0);
             let words = usize::from(u16::from_be_bytes([
                 bytes.get(offset + 2).copied().ok_or(RtcpError::Truncated)?,
@@ -220,7 +323,14 @@ impl Rtcp {
                 .get(offset + 4..offset + total)
                 .ok_or(RtcpError::Truncated)?;
 
-            packets.push(Self::decode_one(packet_type, count, body, bytes, offset)?);
+            packets.push(Self::decode_one(
+                packet_type,
+                count,
+                padding,
+                body,
+                bytes,
+                offset,
+            )?);
             offset += total;
         }
 
@@ -233,6 +343,7 @@ impl Rtcp {
     fn decode_one(
         packet_type: u8,
         count: usize,
+        padding: bool,
         body: &[u8],
         whole: &Bytes,
         offset: usize,
@@ -289,8 +400,44 @@ impl Rtcp {
                 }
                 Ok(Self::Receiver(ReceiverReport { ssrc, reports }))
             }
+            SOURCE_DESCRIPTION => {
+                let mut chunks = Vec::with_capacity(count);
+                let mut at = 0usize;
+                for _ in 0..count {
+                    let ssrc = u32::from_be_bytes(
+                        body.get(at..at + 4)
+                            .and_then(|s| s.try_into().ok())
+                            .ok_or(RtcpError::Truncated)?,
+                    );
+                    at += 4;
+                    let mut items = Vec::new();
+                    loop {
+                        let kind = *body.get(at).ok_or(RtcpError::Truncated)?;
+                        at += 1;
+                        if kind == 0 {
+                            // The terminator is followed by padding to the next 32-bit
+                            // boundary, which belongs to this chunk — reading it as the
+                            // next chunk's SSRC shreds every source after the first.
+                            at = at.next_multiple_of(4);
+                            break;
+                        }
+                        let length = usize::from(*body.get(at).ok_or(RtcpError::Truncated)?);
+                        at += 1;
+                        let value = body.get(at..at + length).ok_or(RtcpError::Truncated)?;
+                        items.push(SdesItem {
+                            kind,
+                            value: Bytes::copy_from_slice(value),
+                        });
+                        at += length;
+                    }
+                    chunks.push(SdesChunk { ssrc, items });
+                }
+                Ok(Self::Sdes(Sdes { chunks }))
+            }
             other => Ok(Self::Other {
                 packet_type: other,
+                count: u8::try_from(count).unwrap_or(0),
+                padding,
                 payload: whole.slice(offset + 4..offset + 4 + body.len()),
             }),
         }
@@ -318,7 +465,8 @@ pub struct StreamStats {
     /// The smoothed interarrival jitter estimate.
     jitter: f64,
     /// The last packet's transit time, for the difference the estimate is built from.
-    last_transit: Option<i64>,
+    /// Modular 32-bit, like the clocks it is derived from.
+    last_transit: Option<u32>,
 }
 
 impl StreamStats {
@@ -338,11 +486,50 @@ impl StreamStats {
         }
     }
 
+    /// Name the source these statistics describe.
+    ///
+    /// The far end chooses its synchronisation source at random (RFC 3550 §8) and announces
+    /// it only in its first packet, so the statistics can exist before the name does. The
+    /// name goes into every report block: a block that says SSRC 0 describes nobody.
+    pub fn set_ssrc(&mut self, ssrc: u32) {
+        self.ssrc = ssrc;
+    }
+
     /// Record an arrival.
     ///
     /// `arrival` is the local clock in the same units as the RTP timestamp — for G.711, 8000
     /// per second. Mixing units here is the other way to make jitter meaningless.
     pub fn on_packet(&mut self, sequence: u16, rtp_timestamp: u32, arrival: u32) {
+        self.record(sequence);
+
+        // RFC 3550 §A.8. The transit time is the difference between the local clock and the
+        // sender's; its *change* between packets is what jitter measures, so a constant offset
+        // between the two clocks cancels and never appears in the estimate. Both differences
+        // stay in 32-bit modular arithmetic: the timestamp starts at a random value (§5.1),
+        // so either clock wrapping mid-call is ordinary, and widening the subtraction turns
+        // each wrap into 2^32/16 of phantom jitter.
+        let transit = arrival.wrapping_sub(rtp_timestamp);
+        if let Some(previous) = self.last_transit {
+            let difference = transit.wrapping_sub(previous).cast_signed().unsigned_abs();
+            // The RFC's recurrence, not a variance: J += (|D| - J) / 16.
+            let d = f64::from(difference);
+            self.jitter += (d - self.jitter) / 16.0;
+        }
+        self.last_transit = Some(transit);
+    }
+
+    /// Record an arrival whose timestamp does not track its sampling instant.
+    ///
+    /// Telephone events are the case in hand: RFC 4733 §2.5.1.2 gives every packet of one
+    /// event the timestamp of the event's *start* while the packets go out one interval
+    /// apart, so their transit grows per packet by design. RFC 3550 §6.4.1 defines jitter
+    /// over packets whose timestamps track sampling instants — these still count for loss
+    /// and sequence continuity, but must not feed the jitter estimate.
+    pub fn on_untimed_packet(&mut self, sequence: u16) {
+        self.record(sequence);
+    }
+
+    fn record(&mut self, sequence: u16) {
         self.received += 1;
 
         match self.base_sequence {
@@ -359,19 +546,6 @@ impl StreamStats {
                 }
             }
         }
-
-        // RFC 3550 §A.8. The transit time is the difference between the local clock and the
-        // sender's; its *change* between packets is what jitter measures, so a constant offset
-        // between the two clocks cancels and never appears in the estimate.
-        let transit = i64::from(arrival) - i64::from(rtp_timestamp);
-        if let Some(previous) = self.last_transit {
-            let difference = (transit - previous).abs();
-            // The RFC's recurrence, not a variance: J += (|D| - J) / 16.
-            #[allow(clippy::cast_precision_loss)]
-            let d = difference as f64;
-            self.jitter += (d - self.jitter) / 16.0;
-        }
-        self.last_transit = Some(transit);
     }
 
     /// The highest sequence number seen, with its wrap count.
@@ -517,24 +691,105 @@ mod tests {
             })
             .encode(),
         );
-        bytes.put_slice(
-            &Rtcp::Other {
-                packet_type: SOURCE_DESCRIPTION,
-                payload: Bytes::from_static(&[0, 0, 0, 0]),
-            }
-            .encode(),
-        );
+        bytes.put_slice(&Rtcp::Sdes(Sdes::cname(1, "user@host")).encode());
 
         let decoded = Rtcp::decode_compound(&bytes.freeze()).expect("decodes");
         assert_eq!(decoded.len(), 2);
         assert!(matches!(decoded[0], Rtcp::Sender(_)));
-        assert!(matches!(
-            decoded[1],
-            Rtcp::Other {
-                packet_type: SOURCE_DESCRIPTION,
-                ..
-            }
-        ));
+        assert!(matches!(decoded[1], Rtcp::Sdes(_)));
+    }
+
+    /// RFC 3550 §6.5: a chunk is the SSRC, its items, a null terminator, and padding to
+    /// the next 32-bit boundary. The padding belongs to the chunk — reading it as the next
+    /// chunk's SSRC shreds every source after the first.
+    #[test]
+    fn a_source_description_round_trips_with_padding() {
+        let sdes = Rtcp::Sdes(Sdes {
+            chunks: vec![
+                SdesChunk {
+                    ssrc: 0x1111_2222,
+                    // Three bytes of text on a two-byte item header: the chunk needs two
+                    // padding octets beyond the terminator.
+                    items: vec![SdesItem {
+                        kind: SDES_CNAME,
+                        value: Bytes::from_static(b"a@b"),
+                    }],
+                },
+                SdesChunk {
+                    ssrc: 0x3333_4444,
+                    items: vec![SdesItem {
+                        kind: SDES_CNAME,
+                        value: Bytes::from_static(b"user@host.example"),
+                    }],
+                },
+            ],
+        });
+        let encoded = sdes.encode();
+        assert_eq!(encoded.len() % 4, 0, "RTCP packets are whole words");
+        let decoded = Rtcp::decode_compound(&encoded).expect("decodes");
+        assert_eq!(decoded, vec![sdes]);
+    }
+
+    /// The compound helper is plain concatenation, so what it emits parses back to its
+    /// parts in order.
+    #[test]
+    fn an_encoded_compound_decodes_to_its_parts() {
+        let report = Rtcp::Receiver(ReceiverReport {
+            ssrc: 9,
+            reports: vec![block()],
+        });
+        let sdes = Rtcp::Sdes(Sdes::cname(9, "token@203.0.113.7"));
+        let datagram = Rtcp::encode_compound(&[report.clone(), sdes.clone()]);
+        let decoded = Rtcp::decode_compound(&datagram).expect("decodes");
+        assert_eq!(decoded, vec![report, sdes]);
+    }
+
+    /// The count field is load-bearing — §6.5 reads it as the SDES chunk count and §6.6 as
+    /// the BYE source count — and the padding bit changes where the payload ends. The
+    /// variant promises a packet it does not model can be forwarded intact, so both must
+    /// survive the round trip.
+    #[test]
+    fn a_forwarded_packet_keeps_its_count_and_padding_bit() {
+        // A goodbye naming one source, with the padding bit set and four bytes of padding.
+        let mut raw = BytesMut::new();
+        raw.put_u8(0b1010_0001);
+        raw.put_u8(GOODBYE);
+        raw.put_u16(2);
+        raw.put_u32(0xDEAD_BEEF);
+        raw.put_slice(&[0, 0, 0, 4]);
+        let raw = raw.freeze();
+
+        let decoded = Rtcp::decode_compound(&raw).expect("decodes");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].encode(), raw, "forwarded byte for byte");
+    }
+
+    /// The length field counts whole 32-bit words. A hand-built payload that is not a
+    /// multiple of four must not produce a length word that disagrees with the bytes
+    /// written, or every packet after it in the compound is misread.
+    #[test]
+    fn an_unaligned_forwarded_payload_cannot_desynchronise_a_compound() {
+        let odd = Rtcp::Other {
+            packet_type: 204,
+            count: 0,
+            padding: false,
+            payload: Bytes::from_static(&[1, 2, 3]),
+        };
+        let mut compound = BytesMut::from(&odd.encode()[..]);
+        compound.put_slice(
+            &Rtcp::Receiver(ReceiverReport {
+                ssrc: 7,
+                reports: vec![],
+            })
+            .encode(),
+        );
+
+        let decoded = Rtcp::decode_compound(&compound.freeze()).expect("decodes");
+        assert_eq!(decoded.len(), 2);
+        assert!(
+            matches!(&decoded[1], Rtcp::Receiver(report) if report.ssrc == 7),
+            "the packet after the odd one still parses"
+        );
     }
 
     /// A receiver report arriving alone is legal and must be accepted.
@@ -695,6 +950,67 @@ mod tests {
             "more unevenness, more jitter: {} vs {}",
             worse.jitter(),
             jittery.jitter()
+        );
+    }
+
+    /// Telephone events share one timestamp across a run of packets (RFC 4733 §2.5.1.2),
+    /// so their transit grows per packet by design and must not feed the estimate — while
+    /// their sequence numbers still count for loss.
+    #[test]
+    fn untimed_packets_count_for_loss_but_not_for_jitter() {
+        let mut stats = StreamStats::new(1);
+        // Clean, evenly spaced audio...
+        for sequence in 1u16..=5 {
+            let timestamp = u32::from(sequence) * 160;
+            stats.on_packet(sequence, timestamp, timestamp + 4000);
+        }
+        // ...then a keypress, with one of its packets lost in flight...
+        for sequence in 6u16..=10 {
+            if sequence == 7 {
+                continue;
+            }
+            stats.on_untimed_packet(sequence);
+        }
+        // ...and the audio resumes, still evenly spaced.
+        for sequence in 11u16..=15 {
+            let timestamp = u32::from(sequence) * 160;
+            stats.on_packet(sequence, timestamp, timestamp + 4000);
+        }
+
+        assert_eq!(stats.jitter(), 0, "the keypress fabricated no jitter");
+        assert_eq!(stats.expected(), 15);
+        assert_eq!(stats.cumulative_lost(), 1, "its lost packet still counts");
+    }
+
+    /// The transit is computed modulo 2^32, so a wrap of either clock cancels. Senders
+    /// start the timestamp at a random value (RFC 3550 §5.1), so a mid-call wrap is an
+    /// ordinary event — and non-modular arithmetic turns it into 2^32/16 of phantom jitter.
+    #[test]
+    fn a_timestamp_wrap_does_not_register_as_jitter() {
+        // The sender's clock wraps one packet in; arrival stays low.
+        let mut stats = StreamStats::new(1);
+        let mut timestamp = 0xFFFF_FF60u32;
+        let mut arrival = 1000u32;
+        for sequence in 1u16..=10 {
+            stats.on_packet(sequence, timestamp, arrival);
+            timestamp = timestamp.wrapping_add(160);
+            arrival = arrival.wrapping_add(160);
+        }
+        assert_eq!(stats.jitter(), 0, "even spacing across the sender's wrap");
+
+        // And the receiver's clock wraps while the sender's stays low.
+        let mut stats = StreamStats::new(1);
+        let mut timestamp = 1000u32;
+        let mut arrival = 0xFFFF_FF60u32;
+        for sequence in 1u16..=10 {
+            stats.on_packet(sequence, timestamp, arrival);
+            timestamp = timestamp.wrapping_add(160);
+            arrival = arrival.wrapping_add(160);
+        }
+        assert_eq!(
+            stats.jitter(),
+            0,
+            "even spacing across the arrival clock's wrap"
         );
     }
 

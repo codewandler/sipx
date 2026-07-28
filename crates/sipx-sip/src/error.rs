@@ -197,6 +197,11 @@ pub enum UriError {
     /// A parameter or header with an empty name.
     #[error("empty parameter name")]
     EmptyParameterName,
+    /// A uri-parameter name that appears more than once. RFC 3261 §19.1.1: "any given
+    /// parameter-name MUST NOT appear more than once." URI headers may repeat; only the
+    /// `;` list is policed.
+    #[error("repeated uri-parameter name")]
+    DuplicateParameterName,
 }
 
 /// A header whose value could not be parsed, or whose value is out of range.

@@ -102,7 +102,10 @@ impl Rng for SeededRng {
         if max == 0 {
             return 0;
         }
-        u32::try_from((self.0 >> 33) % u64::from(max) + 1).unwrap_or(0)
+        // Inclusive of both ends, as the trait says: a generator that never returns 0 cannot
+        // select the first record of a group, which is where RFC 2782 puts the zero-weight
+        // ones — the skew would be invisible in production and wrong only under test.
+        u32::try_from((self.0 >> 33) % (u64::from(max) + 1)).unwrap_or(0)
     }
 }
 
@@ -126,6 +129,29 @@ fn permitted(uri: &Uri) -> Vec<TransportKind> {
 /// The transport a URI names explicitly, if any.
 fn explicit_transport(uri: &Uri) -> Option<TransportKind> {
     uri.transport().and_then(TransportKind::parse)
+}
+
+/// The transport to use when no NAPTR or SRV record narrows it down.
+///
+/// For a `sips:` URI the `transport` parameter names the transport carried *under* TLS
+/// (RFC 3261 §26.2.2 and Table 1), so `transport=tcp` asks for TLS over TCP rather than for
+/// cleartext TCP. Taking the parameter at face value is a downgrade on exactly the paths that
+/// never reach the SRV stage where the scheme filter is applied — an IP literal, an explicit
+/// port, and the bare A-record last resort.
+///
+/// `None` means the URI names nothing reachable: RFC 3261 defines no TLS over UDP, so a
+/// `sips:` URI asking for UDP has no secure candidate, and inventing a cleartext one is the
+/// single answer that is wrong.
+fn default_transport(uri: &Uri) -> Option<TransportKind> {
+    let explicit = explicit_transport(uri);
+    if !uri.scheme().is_secure() {
+        return Some(explicit.unwrap_or(TransportKind::Udp));
+    }
+    match explicit {
+        None | Some(TransportKind::Tcp | TransportKind::Tls) => Some(TransportKind::Tls),
+        Some(TransportKind::Ws | TransportKind::Wss) => Some(TransportKind::Wss),
+        Some(TransportKind::Udp) => None,
+    }
 }
 
 /// Map a NAPTR service field to a transport (RFC 3263 §4.1).
@@ -160,12 +186,37 @@ pub fn resolve<R: Resolver + ?Sized, G: Rng + ?Sized>(
     resolver: &R,
     rng: &mut G,
 ) -> Vec<Target> {
+    // Every secure candidate carries the name from the URI, and resolution is exactly why.
+    //
+    // Without this, a `sips:` URI resolved through NAPTR and SRV arrives at an address with
+    // nothing attached, and the certificate ends up checked against whatever that address or
+    // SRV target happens to be called. That is the failure `docs/specs/sip-tls.md` §3.3 exists
+    // to prevent: the check still runs, the handshake still succeeds, and whoever can influence
+    // DNS has chosen which certificate is acceptable.
+    let identity = match uri.host() {
+        Some(Host::Name(name)) => String::from_utf8_lossy(name.as_bytes()).into_owned(),
+        Some(Host::Ip(ip)) => ip.to_string(),
+        None => String::new(),
+    };
+    candidates(uri, resolver, rng)
+        .into_iter()
+        .map(|target| match target.transport {
+            TransportKind::Tls | TransportKind::Wss => target.verifying(&identity),
+            _ => target,
+        })
+        .collect()
+}
+
+/// Where a URI's addresses come from, before the verification name is attached.
+fn candidates<R: Resolver + ?Sized, G: Rng + ?Sized>(
+    uri: &Uri,
+    resolver: &R,
+    rng: &mut G,
+) -> Vec<Target> {
     let allowed = permitted(uri);
-    let default_transport = explicit_transport(uri).unwrap_or(if uri.scheme().is_secure() {
-        TransportKind::Tls
-    } else {
-        TransportKind::Udp
-    });
+    let Some(default_transport) = default_transport(uri) else {
+        return Vec::new();
+    };
 
     // §4.2: an IP literal, or an explicit port, ends the procedure. The URI has answered.
     if let Some(Host::Ip(ip)) = uri.host() {
@@ -189,10 +240,16 @@ pub fn resolve<R: Resolver + ?Sized, G: Rng + ?Sized>(
             .collect();
     }
 
-    // An explicit `transport=` parameter skips NAPTR: the caller has already chosen.
-    let transports: Vec<(TransportKind, String)> = match explicit_transport(uri) {
-        Some(transport) => vec![(transport, format!("{}{domain}", srv_prefix(transport)))],
-        None => naptr_transports(&domain, resolver, &allowed),
+    // An explicit `transport=` parameter skips NAPTR: the caller has already chosen. What it
+    // chose is `default_transport`, which has already resolved the parameter against the
+    // scheme rather than trusting it verbatim.
+    let transports: Vec<(TransportKind, String)> = if explicit_transport(uri).is_some() {
+        vec![(
+            default_transport,
+            format!("{}{domain}", srv_prefix(default_transport)),
+        )]
+    } else {
+        naptr_transports(&domain, resolver, &allowed)
     };
 
     let mut targets = Vec::new();
@@ -286,6 +343,12 @@ fn order_srv<G: Rng + ?Sized>(mut records: Vec<Srv>, rng: &mut G) -> Vec<Srv> {
 /// entry whose running sum is at least that number. A weight of 0 is legal and means "only if
 /// nothing else is available", which falls out of the arithmetic rather than needing a case.
 fn weighted_shuffle<G: Rng + ?Sized>(mut group: Vec<Srv>, rng: &mut G) -> Vec<Srv> {
+    // RFC 2782: "all those with weight 0 are placed at the beginning of the list". Left where
+    // they arrived, an earlier non-zero record always satisfies the running-sum test first and
+    // a zero-weight record is chosen with probability exactly zero — not the "very small"
+    // chance the RFC intends, which is what keeps a spare server in rotation at all.
+    group.sort_by_key(|record| record.weight != 0);
+
     let mut ordered = Vec::with_capacity(group.len());
     while !group.is_empty() {
         let total: u32 = group.iter().map(|r| u32::from(r.weight)).sum();
@@ -502,6 +565,109 @@ mod tests {
         }
     }
 
+    /// The name a certificate must be valid for is the one in the URI, and it survives
+    /// resolution. Without this a `sips:` URI arrives at an address with nothing attached, the
+    /// certificate is checked against whatever the SRV target or the address happens to be
+    /// called, and whoever can influence DNS chooses which certificate is acceptable — the
+    /// handshake still succeeds and the check has become decorative (`sip-tls.md` §3.3).
+    #[test]
+    fn a_secure_candidate_carries_the_uri_host_not_the_resolved_one() {
+        let fixture = Fixture::default()
+            .with_naptr(
+                "secure.example",
+                vec![Naptr {
+                    order: 10,
+                    preference: 10,
+                    service: "SIPS+D2T".to_owned(),
+                    replacement: "_sips._tcp.secure.example".to_owned(),
+                }],
+            )
+            .with_srv(
+                "_sips._tcp.secure.example",
+                // A SRV target with a different name entirely, which is normal: SRV exists so
+                // the service can live somewhere other than the domain it serves.
+                vec![srv(1, 0, 5061, "edge-07.hosting.example")],
+            )
+            .with_address("edge-07.hosting.example", "192.0.2.41");
+
+        let targets = resolve(
+            &uri("sips:secure.example"),
+            &fixture,
+            &mut SeededRng::new(1),
+        );
+        assert!(!targets.is_empty(), "a candidate must be found");
+        for target in &targets {
+            assert_eq!(
+                target.verify_as.as_deref(),
+                Some("secure.example"),
+                "not the SRV target and not the address"
+            );
+        }
+    }
+
+    /// A cleartext candidate carries nothing: there is no certificate, so an identity here
+    /// would only be something for a later reader to mistake for one.
+    #[test]
+    fn a_cleartext_candidate_carries_no_identity() {
+        let fixture = Fixture::default()
+            .with_address("plain.example", "192.0.2.50")
+            .with_naptr("plain.example", Vec::new());
+
+        for target in resolve(&uri("sip:plain.example"), &fixture, &mut SeededRng::new(1)) {
+            assert!(target.verify_as.is_none(), "{target:?}");
+        }
+    }
+
+    /// RFC 3261 §26.2.2 and Table 1: in a `sips:` URI the transport parameter names the
+    /// transport carried *under* TLS, so `transport=tcp` means TLS over TCP. Reading it as
+    /// cleartext TCP downgrades the one thing the scheme was used to ask for, and it does so
+    /// on the paths that never reach the SRV stage where the sips filter lives: an IP literal,
+    /// an explicit port, and the bare A-record last resort.
+    #[test]
+    fn sips_with_a_transport_parameter_stays_secure() {
+        let literal = resolve(
+            &uri("sips:192.0.2.1;transport=tcp"),
+            &Fixture::default(),
+            &mut SeededRng::new(1),
+        );
+        assert_eq!(literal.len(), 1);
+        assert_eq!(literal[0].transport, TransportKind::Tls);
+        assert_eq!(literal[0].addr.to_string(), "192.0.2.1:5061");
+
+        let fixture = Fixture::default().with_address("secure.example", "192.0.2.42");
+        let last_resort = resolve(
+            &uri("sips:secure.example;transport=tcp"),
+            &fixture,
+            &mut SeededRng::new(1),
+        );
+        assert_eq!(last_resort.len(), 1);
+        assert_eq!(last_resort[0].transport, TransportKind::Tls);
+        assert_eq!(last_resort[0].addr.to_string(), "192.0.2.42:5061");
+        assert_eq!(last_resort[0].verify_as.as_deref(), Some("secure.example"));
+
+        let with_port = resolve(
+            &uri("sips:secure.example:9999;transport=tcp"),
+            &fixture,
+            &mut SeededRng::new(1),
+        );
+        assert_eq!(with_port.len(), 1);
+        assert_eq!(with_port[0].transport, TransportKind::Tls);
+        assert_eq!(with_port[0].addr.to_string(), "192.0.2.42:9999");
+    }
+
+    /// RFC 3261 defines no TLS over UDP, so a `sips:` URI asking for it names nothing that can
+    /// be reached securely. No candidate is the honest answer; a cleartext one is not.
+    #[test]
+    fn sips_over_udp_yields_nothing_rather_than_cleartext() {
+        let fixture = Fixture::default().with_address("secure.example", "192.0.2.42");
+        let targets = resolve(
+            &uri("sips:secure.example;transport=udp"),
+            &fixture,
+            &mut SeededRng::new(1),
+        );
+        assert!(targets.is_empty(), "{targets:?}");
+    }
+
     /// And when TLS is *not* available, the answer is no candidates — not a downgrade.
     #[test]
     fn sips_with_no_tls_available_yields_nothing_rather_than_downgrading() {
@@ -609,6 +775,27 @@ mod tests {
         let ordered = weighted_shuffle(records, &mut SeededRng::new(7));
         assert_eq!(ordered.len(), 2, "every record appears exactly once");
         assert!(ordered.iter().any(|r| r.target == "spare.example"));
+    }
+
+    /// RFC 2782 requires weight-0 records to be moved to the front of the group before the
+    /// running-sum walk. Left where they arrived, an earlier non-zero record always satisfies
+    /// `running >= pick` first, so a zero-weight target is chosen with probability exactly
+    /// zero rather than the "very small" one the RFC describes — it becomes reachable only
+    /// once every other record in its priority has been consumed.
+    #[test]
+    fn a_zero_weight_record_listed_last_is_still_sometimes_chosen_first() {
+        let records = vec![
+            srv(1, 100, 5060, "main.example"),
+            srv(1, 0, 5060, "spare.example"),
+        ];
+        let chosen_first = (0..200).filter(|&seed| {
+            let ordered = weighted_shuffle(records.clone(), &mut SeededRng::new(seed));
+            ordered.first().is_some_and(|r| r.target == "spare.example")
+        });
+        assert!(
+            chosen_first.count() > 0,
+            "a zero-weight record must retain a small chance of being picked first"
+        );
     }
 
     /// Every record must survive the shuffle. Losing one silently removes a server from

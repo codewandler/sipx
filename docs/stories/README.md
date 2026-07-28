@@ -28,18 +28,13 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Depth
-- [T-8 — Implement SIP over WebSocket](T-8-implement-sip-over-websocket.md) · Signalling
-- [T-9 — Implement secure WebSocket](T-9-implement-secure-websocket.md) · Signalling
-- [S-9 — Implement blind transfer (REFER)](S-9-implement-blind-transfer-refer.md) · Signalling
-- [T-10 — Verify TLS against a real server](T-10-tls-interop.md) · Signalling · gap left explicitly by T-7
-- [S-10 — Implement attended transfer](S-10-implement-attended-transfer.md) · Signalling
-- [M-9 — Make the jitter buffer adaptive](M-9-make-the-jitter-buffer-adaptive.md) · Media
-- [M-10 — Expose media quality statistics](M-10-expose-media-quality-statistics.md) · Media
-- [M-11 — Bridge two calls](M-11-bridge-two-calls.md) · Media
-- [M-12 — Mix several calls](M-12-mix-several-calls.md) · Media
-- [M-13 — Add the Opus codec](M-13-add-the-opus-codec.md) · Media
 - [X-4 — Build the load testing harness](X-4-build-the-load-testing-harness.md) · Build
 - [X-5 — Assert stability under sustained load](X-5-assert-stability-under-sustained-load.md) · Build
+
+### Quic
+- [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · gates T-12 and T-13
+- [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · blocked by T-11
+- [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · blocked by T-12; third-party SIP-over-QUIC peers may not exist yet
 
 ## Blocked
 _None._
@@ -56,6 +51,11 @@ _None._
 - [M-6 — Implement RTCP sender and receiver reports](M-6-rtcp-reports.md) · Media · gap left explicitly by M3
 - [M-7 — Implement RFC 4733 DTMF events](M-7-dtmf-events.md) · Media · gap left explicitly by M3
 - [M-8 — Handle re-INVITE and in-dialog requests](M-8-reinvite-and-in-dialog.md) · Media · gap left explicitly by M3
+- [M-9 — Make the jitter buffer adaptive](M-9-make-the-jitter-buffer-adaptive.md) · Media
+- [M-10 — Expose media quality statistics](M-10-expose-media-quality-statistics.md) · Media
+- [M-11 — Bridge two calls](M-11-bridge-two-calls.md) · Media
+- [M-12 — Mix several calls](M-12-mix-several-calls.md) · Media
+- [M-13 — Add the Opus codec](M-13-add-the-opus-codec.md) · Media
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -68,6 +68,8 @@ _None._
 - [S-6 — Implement the client transaction state machines](S-6-client-transaction-fsm.md) · Signalling
 - [S-7 — Implement the server transaction state machines](S-7-server-transaction-fsm.md) · Signalling
 - [S-8 — Implement the transaction layer and message matching](S-8-transaction-layer.md) · Signalling
+- [S-9 — Implement blind transfer (REFER)](S-9-implement-blind-transfer-refer.md) · Signalling
+- [S-10 — Implement attended transfer](S-10-implement-attended-transfer.md) · Signalling
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
@@ -75,6 +77,9 @@ _None._
 - [T-5 — Wire a real DNS client behind the resolver trait](T-5-dns-resolver-backend.md) · Signalling · T-4 implements every selection rule but has no DNS backend
 - [T-6 — Specify TLS, WebSocket and the certificate policy](T-6-specify-tls-websocket-and-the-certificate-policy.md) · Signalling
 - [T-7 — Implement the TLS transport](T-7-implement-the-tls-transport.md) · Signalling
+- [T-8 — Implement SIP over WebSocket](T-8-implement-sip-over-websocket.md) · Signalling
+- [T-9 — Implement secure WebSocket](T-9-implement-secure-websocket.md) · Signalling
+- [T-10 — Verify TLS against a real server](T-10-tls-interop.md) · Signalling · gap left explicitly by T-7
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core

@@ -6,7 +6,9 @@
 
 use std::net::IpAddr;
 
-use crate::session::{Attribute, Connection, MediaDescription, Origin, SessionDescription, Timing};
+use crate::session::{
+    Address, Attribute, Connection, MediaDescription, Origin, SessionDescription, Timing,
+};
 use crate::{Result, SdpError};
 
 /// Parse a session description.
@@ -40,7 +42,13 @@ pub fn parse(input: &str) -> Result<SessionDescription> {
                 // one would be pedantry with no upside.
             }
             'o' => origin = Some(parse_origin(value)?),
-            's' => session_name = Some(value.to_owned()),
+            's' => {
+                // RFC 8866 §5.3: the line MUST NOT be empty — `s=-` is the spelling for "no
+                // name" — so an empty one takes the same `-` a missing one does.
+                if !value.is_empty() {
+                    session_name = Some(value.to_owned());
+                }
+            }
             'c' => {
                 let parsed = parse_connection(value)?;
                 // A `c=` after an `m=` belongs to that stream, not the session.
@@ -59,8 +67,13 @@ pub fn parse(input: &str) -> Result<SessionDescription> {
                 }
             }
             // Everything else is kept verbatim. Dropping unknown lines is how an element
-            // breaks features it has never heard of.
-            _ => other.push((kind, value.to_owned())),
+            // breaks features it has never heard of. RFC 8866 §5 places `i=`, `b=` and `k=`
+            // inside each media description too, so a line after an `m=` belongs to that
+            // stream, not the session.
+            _ => match media.last_mut() {
+                Some(stream) => stream.other.push((kind, value.to_owned())),
+                None => other.push((kind, value.to_owned())),
+            },
         }
     }
 
@@ -90,7 +103,7 @@ fn parse_origin(value: &str) -> Result<Origin> {
     let _addr_type = parts.next();
     let address = parts
         .next()
-        .and_then(|v| v.parse::<IpAddr>().ok())
+        .map(parse_address)
         .ok_or_else(|| invalid("origin address", value))?;
 
     Ok(Origin {
@@ -108,10 +121,19 @@ fn parse_connection(value: &str) -> Result<Connection> {
         .and_then(|raw| {
             // A multicast address may carry `/ttl` or `/ttl/count`, which is not part of the
             // address.
-            raw.split('/').next().and_then(|v| v.parse::<IpAddr>().ok())
+            raw.split('/').next().filter(|v| !v.is_empty())
         })
+        .map(parse_address)
         .ok_or_else(|| invalid("connection address", value))?;
     Ok(Connection { address })
+}
+
+fn parse_address(raw: &str) -> Address {
+    // RFC 8866 §5.2 and §5.7 allow a fully-qualified domain name where a literal is more
+    // common. A token that is not a literal is kept as a name rather than rejected, because
+    // refusing the address refuses the call.
+    raw.parse::<IpAddr>()
+        .map_or_else(|_| Address::Host(raw.to_owned()), Address::Ip)
 }
 
 fn parse_timing(value: &str) -> Timing {
@@ -142,7 +164,12 @@ fn parse_media(value: &str) -> Result<MediaDescription> {
         .next()
         .ok_or_else(|| invalid("media protocol", value))?
         .to_owned();
-    let formats = parts.map(str::to_owned).collect();
+    let formats: Vec<String> = parts.map(str::to_owned).collect();
+    // RFC 8866 §5.14: the ABNF requires at least one format. A bare `m=` line cannot even be
+    // rejected in a well-formed answer, so it is refused here rather than propagated.
+    if formats.is_empty() {
+        return Err(invalid("media formats", value));
+    }
 
     Ok(MediaDescription {
         media,
@@ -151,6 +178,7 @@ fn parse_media(value: &str) -> Result<MediaDescription> {
         formats,
         connection: None,
         attributes: Vec::new(),
+        other: Vec::new(),
     })
 }
 
@@ -290,8 +318,10 @@ mod tests {
         assert_eq!(sdp.media[0].port, 5000);
     }
 
-    /// Unknown lines survive. An element that drops what it does not understand breaks
-    /// features it has never heard of.
+    /// Unknown lines survive, and they come back out where RFC 8866 §5 puts them: `i=`
+    /// before `c=`, `b=` before the timing lines, `z=` after them — even when the input had
+    /// them elsewhere. Receivers enforce the grammar's order, so emitting a kept line in the
+    /// wrong slot turns tolerance into a parse error at the far end.
     #[test]
     fn unknown_lines_survive_a_round_trip() {
         let input = "v=0\r\n\
@@ -300,12 +330,50 @@ mod tests {
              c=IN IP4 192.0.2.1\r\n\
              t=0 0\r\n\
              b=AS:64\r\n\
+             i=session info\r\n\
              z=0 0\r\n\
              m=audio 5000 RTP/AVP 0\r\n";
         let sdp = parse(input).expect("parses");
         let out = sdp.to_string_sdp();
-        assert!(out.contains("b=AS:64"), "{out}");
-        assert!(out.contains("z=0 0"), "{out}");
+        let position = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from {out}"))
+        };
+        assert!(position("i=session info") < position("c=IN"), "{out}");
+        assert!(position("c=IN") < position("b=AS:64"), "{out}");
+        assert!(position("b=AS:64") < position("t=0 0"), "{out}");
+        assert!(position("t=0 0") < position("z=0 0"), "{out}");
+        assert!(position("z=0 0") < position("m=audio"), "{out}");
+    }
+
+    /// RFC 8866 §5 places `i=`, `b=` and `k=` inside each media description, and §5.8 says a
+    /// media-level `b=` is that stream's bandwidth. Hoisting them to session level collapses
+    /// two streams' bandwidths into one meaningless pair.
+    #[test]
+    fn media_level_lines_stay_with_their_stream() {
+        let sdp = parse(
+            "v=0\r\n\
+             o=- 1 1 IN IP4 192.0.2.1\r\n\
+             s=-\r\n\
+             c=IN IP4 192.0.2.1\r\n\
+             t=0 0\r\n\
+             m=audio 5000 RTP/AVP 0\r\n\
+             b=TIAS:64000\r\n\
+             m=video 5002 RTP/AVP 96\r\n\
+             b=TIAS:256000\r\n",
+        )
+        .expect("parses");
+
+        assert!(sdp.other.is_empty(), "nothing here is session-level");
+
+        let out = sdp.to_string_sdp();
+        let position = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from {out}"))
+        };
+        assert!(position("m=audio") < position("b=TIAS:64000"), "{out}");
+        assert!(position("b=TIAS:64000") < position("m=video"), "{out}");
+        assert!(position("m=video") < position("b=TIAS:256000"), "{out}");
     }
 
     #[test]
@@ -327,12 +395,43 @@ mod tests {
         assert!(sdp.media[0].is_rejected());
     }
 
+    /// RFC 8866 §5.14: the ABNF requires at least one format on an `m=` line. Accepting a
+    /// bare one means later emitting a format-less `m=` in the answer's rejection, which the
+    /// far end cannot parse.
+    #[test]
+    fn a_media_line_without_formats_is_rejected() {
+        assert!(matches!(
+            parse(
+                "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+                 m=application 49174 udp\r\n",
+            ),
+            Err(SdpError::Invalid {
+                field: "media formats",
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn a_line_without_an_equals_sign_is_rejected() {
         assert!(matches!(
             parse("v=0\r\nthis is not sdp\r\n"),
             Err(SdpError::MalformedLine(_))
         ));
+    }
+
+    /// RFC 8866 §5.3: the `s=` line MUST NOT be empty; `s=-` is the spelling for "no name".
+    /// An empty one is taken the same way a missing one is, so it is never re-emitted
+    /// invalid.
+    #[test]
+    fn an_empty_session_name_becomes_a_dash() {
+        let sdp = parse(
+            "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+             m=audio 5000 RTP/AVP 0\r\n",
+        )
+        .expect("parses");
+        assert_eq!(sdp.session_name, "-");
+        assert!(sdp.to_string_sdp().contains("s=-\r\n"));
     }
 
     #[test]
@@ -353,6 +452,37 @@ mod tests {
         let out = sdp.to_string_sdp();
         assert!(out.contains("c=IN IP6 2001:db8::1"), "{out}");
         assert!(out.contains("o=- 1 1 IN IP6 2001:db8::1"), "{out}");
+    }
+
+    /// RFC 8866 §5.2 and §5.7 allow a fully-qualified domain name as the unicast address,
+    /// and offers carrying one exist (RFC 3264 §10.1 opens with one). Rejecting the name
+    /// rejects the whole description, and with it the call.
+    #[test]
+    fn a_domain_name_address_is_kept_not_rejected() {
+        let sdp = parse(
+            "v=0\r\n\
+             o=alice 2890844526 2890844526 IN IP4 host.anywhere.com\r\n\
+             s=-\r\n\
+             c=IN IP4 host.anywhere.com\r\n\
+             t=0 0\r\n\
+             m=audio 49170 RTP/AVP 0\r\n\
+             a=rtpmap:0 PCMU/8000\r\n",
+        )
+        .expect("parses");
+
+        assert_eq!(sdp.origin.address.to_string(), "host.anywhere.com");
+        assert_eq!(
+            sdp.address_for(&sdp.media[0]),
+            None,
+            "a name is not an address until someone resolves it, and this crate does no I/O"
+        );
+
+        let out = sdp.to_string_sdp();
+        assert!(
+            out.contains("o=alice 2890844526 2890844526 IN IP4 host.anywhere.com"),
+            "{out}"
+        );
+        assert!(out.contains("c=IN IP4 host.anywhere.com"), "{out}");
     }
 
     /// A multicast `c=` carries `/ttl`, which is not part of the address.

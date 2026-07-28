@@ -106,6 +106,18 @@ impl Address {
         })
     }
 
+    /// Parse a header value carrying one or more comma-separated addresses.
+    ///
+    /// RFC 3261 §7.3: for `Contact`, `Route` and `Record-Route` a comma-joined row is
+    /// exactly equivalent to the same values on separate rows, so the row must be split
+    /// before the address grammar applies.
+    pub fn parse_list(value: &[u8], header: &'static str) -> Result<Vec<Self>, HeaderError> {
+        grammar::split_list(value, header)?
+            .into_iter()
+            .map(|part| Self::parse(part, header))
+            .collect()
+    }
+
     /// The value of a header parameter.
     #[must_use]
     pub fn param(&self, name: &str) -> Option<&[u8]> {
@@ -120,13 +132,21 @@ impl Address {
 }
 
 /// The index of the `<` that opens a URI, if the value uses the `name-addr` form.
+///
+/// Quoted strings are skipped, escapes and all: `qdtext` includes `%x3C` (RFC 3261 §25.1),
+/// so the `<` in `sip:a@b;x="<y>"` is parameter text, not the start of a name-addr.
 #[must_use]
 fn find_angle(value: &[u8], from: usize) -> Option<usize> {
-    value
-        .get(from..)?
-        .iter()
-        .position(|&b| b == b'<')
-        .map(|p| p + from)
+    let mut i = from;
+    while i < value.len() {
+        match value.get(i) {
+            Some(b'"') => i = quoted_string_end(value, i)?,
+            Some(b'<') => return Some(i),
+            Some(_) => i += 1,
+            None => break,
+        }
+    }
+    None
 }
 
 #[must_use]
@@ -156,8 +176,8 @@ fn unescape(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-macro_rules! address_header {
-    ($(#[$meta:meta])* $type:ident => $variant:ident, $label:literal) => {
+macro_rules! address_type {
+    ($(#[$meta:meta])* $type:ident) => {
         $(#[$meta])*
         #[derive(Debug, Clone)]
         pub struct $type(pub Address);
@@ -168,6 +188,14 @@ macro_rules! address_header {
                 &self.0
             }
         }
+    };
+}
+
+/// A header holding exactly one address per row. A comma in the value is a fault, not a
+/// separator: `From` and `To` are single-value (RFC 3261 §20.20, §20.39).
+macro_rules! single_address_header {
+    ($(#[$meta:meta])* $type:ident => $variant:ident, $label:literal) => {
+        address_type!($(#[$meta])* $type);
 
         impl TypedHeader for $type {
             const NAME: HeaderName = HeaderName::$variant;
@@ -179,27 +207,57 @@ macro_rules! address_header {
     };
 }
 
-address_header!(
+/// A header whose row may carry several comma-separated addresses (RFC 3261 §7.3).
+macro_rules! address_list_header {
+    ($(#[$meta:meta])* $type:ident => $variant:ident, $label:literal) => {
+        address_type!($(#[$meta])* $type);
+
+        impl $type {
+            /// Parse a header value that may carry several comma-separated addresses.
+            pub fn parse_list(value: &[u8]) -> Result<Vec<Self>, HeaderError> {
+                Address::parse_list(value, $label).map(|list| list.into_iter().map(Self).collect())
+            }
+        }
+
+        impl TypedHeader for $type {
+            const NAME: HeaderName = HeaderName::$variant;
+
+            /// Decodes the **first** address in the value; use [`Self::parse_list`] or
+            /// [`crate::message::Headers::typed_all`] when every one is needed.
+            fn decode(value: &[u8]) -> Result<Self, HeaderError> {
+                let parts = grammar::split_list(value, $label)?;
+                let first = parts.first().copied().unwrap_or(&[]);
+                Address::parse(first, $label).map(Self)
+            }
+
+            fn decode_list(value: &[u8]) -> Result<Vec<Self>, HeaderError> {
+                Self::parse_list(value)
+            }
+        }
+    };
+}
+
+single_address_header!(
     /// The `From` header (RFC 3261 §20.20).
     From => From, "From"
 );
-address_header!(
+single_address_header!(
     /// The `To` header (RFC 3261 §20.39).
     To => To, "To"
 );
-address_header!(
-    /// One `Contact` value (RFC 3261 §20.10).
+address_list_header!(
+    /// The `Contact` header (RFC 3261 §20.10).
     ///
     /// A `Contact` of `*` is legal in a REGISTER and is *not* an address; parse it with
     /// [`ContactValue`] rather than this type.
     Contact => Contact, "Contact"
 );
-address_header!(
-    /// One `Route` value (RFC 3261 §20.34).
+address_list_header!(
+    /// The `Route` header (RFC 3261 §20.34).
     Route => Route, "Route"
 );
-address_header!(
-    /// One `Record-Route` value (RFC 3261 §20.30).
+address_list_header!(
+    /// The `Record-Route` header (RFC 3261 §20.30).
     RecordRoute => RecordRoute, "Record-Route"
 );
 
@@ -219,11 +277,23 @@ pub enum ContactValue {
 impl TypedHeader for ContactValue {
     const NAME: HeaderName = HeaderName::Contact;
 
+    /// Decodes the wildcard, or the **first** address in the value; use
+    /// [`TypedHeader::decode_list`] when every one is needed.
     fn decode(value: &[u8]) -> Result<Self, HeaderError> {
         if trim(value) == b"*" {
             return Ok(Self::Wildcard);
         }
-        Address::parse(value, "Contact").map(Self::Address)
+        Contact::decode(value).map(|c| Self::Address(c.0))
+    }
+
+    fn decode_list(value: &[u8]) -> Result<Vec<Self>, HeaderError> {
+        // The wildcard is the entire value: `Contact: *, <sip:a@b>` is not in the grammar,
+        // which has `STAR` as an alternative to the whole contact-param list (RFC 3261 §25.1).
+        if trim(value) == b"*" {
+            return Ok(vec![Self::Wildcard]);
+        }
+        Address::parse_list(value, "Contact")
+            .map(|list| list.into_iter().map(Self::Address).collect())
     }
 }
 
@@ -289,6 +359,23 @@ mod tests {
         assert!(bracketed.tag().is_none());
     }
 
+    /// RFC 3261 §25.1: `gen-value` may be a quoted string, and `qdtext` includes `<`
+    /// (%x3C), so an angle bracket inside a quoted parameter value never opens a name-addr.
+    #[test]
+    fn a_quoted_parameter_value_may_contain_an_angle_bracket() {
+        let a = addr(br#"sip:a@b.com;x="<y>""#);
+        assert_eq!(a.uri.to_bytes(), Bytes::from_static(b"sip:a@b.com"));
+        assert_eq!(a.param("x"), Some(&b"<y>"[..]));
+
+        let a = addr(br#"sip:a@b.com;note="hi <there>""#);
+        assert_eq!(a.uri.to_bytes(), Bytes::from_static(b"sip:a@b.com"));
+        assert_eq!(a.param("note"), Some(&b"hi <there>"[..]));
+
+        // An escaped quote does not end the string early.
+        let a = addr(br#"sip:a@b.com;x="a\"<b""#);
+        assert_eq!(a.param("x"), Some(&br#"a"<b"#[..]));
+    }
+
     /// RFC 4475 3.1.2.15. The archive file for this case is unterminated so the corpus test
     /// cannot reach it; this is the hand-built version.
     #[test]
@@ -335,6 +422,49 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    /// RFC 3261 §7.3: a comma-joined row is exactly equivalent to the same values on
+    /// separate rows, so the typed readers must accept a list.
+    #[test]
+    fn decodes_the_first_address_of_a_comma_separated_row() {
+        let c = Contact::decode(b"<sip:a@b.com>, <sip:c@d.com>").unwrap();
+        assert_eq!(c.uri.to_bytes(), Bytes::from_static(b"sip:a@b.com"));
+
+        let r = Route::decode(b"<sip:p1.example.com;lr>,<sip:p2.example.com;lr>").unwrap();
+        assert_eq!(
+            r.uri.to_bytes(),
+            Bytes::from_static(b"sip:p1.example.com;lr")
+        );
+    }
+
+    #[test]
+    fn parses_every_address_of_a_comma_separated_row() {
+        let list = Address::parse_list(
+            br#""Bell, Alexander" <sip:a@b.com>;q=0.7, <sip:c@d.com>"#,
+            "Contact",
+        )
+        .unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(
+            list[0].display_name.as_deref(),
+            Some(&b"Bell, Alexander"[..])
+        );
+        assert_eq!(list[0].param("q"), Some(&b"0.7"[..]));
+        assert_eq!(list[1].uri.to_bytes(), Bytes::from_static(b"sip:c@d.com"));
+
+        // One bad element spoils the row: the list is only as good as its members.
+        assert!(Address::parse_list(b"<sip:a@b.com>, not a uri", "Contact").is_err());
+    }
+
+    #[test]
+    fn wildcard_and_addresses_both_come_out_of_a_contact_list() {
+        let all = ContactValue::decode_list(b"*").unwrap();
+        assert!(matches!(all.as_slice(), [ContactValue::Wildcard]));
+
+        let all = ContactValue::decode_list(b"<sip:a@b.com>, <sip:c@d.com>").unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|v| matches!(v, ContactValue::Address(_))));
     }
 
     #[test]

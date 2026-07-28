@@ -40,7 +40,12 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ./scripts/check-provenance.sh
+scripts/check-features.sh
 ```
+
+`check-features.sh` is not optional garnish. `--all-features` hides a whole class of breakage:
+an optional transport that does not compile with its feature turned off is invisible until a
+downstream user turns it off, and that is exactly how `tls` came to be broken for a release.
 
 <!-- BEGIN track:agents -->
 ## Start here (every session) — track backlog

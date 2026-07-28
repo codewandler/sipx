@@ -47,10 +47,24 @@ impl Param {
     }
 
     /// Whether this parameter's name matches, case-insensitively.
+    ///
+    /// Escapes of unreserved characters fold before the comparison: `pname` is built from
+    /// `paramchar`, which includes `escaped`, so `%74ransport` is a legal spelling of
+    /// `transport` (RFC 3261 §19.1.4).
     #[must_use]
     pub fn has_name(&self, name: &str) -> bool {
-        escape::eq_ignore_ascii_case(&self.name, name.as_bytes())
+        names_equivalent(&self.name, name.as_bytes())
     }
+}
+
+/// Whether two parameter names are the same name under RFC 3261 §19.1.4: case-insensitive,
+/// with escapes of unreserved characters folded into the characters themselves.
+#[must_use]
+pub(crate) fn names_equivalent(a: &[u8], b: &[u8]) -> bool {
+    escape::eq_ignore_ascii_case(
+        &escape::normalize_for_comparison(a),
+        &escape::normalize_for_comparison(b),
+    )
 }
 
 /// An ordered list of parameters.
@@ -143,18 +157,11 @@ impl Params {
     #[must_use]
     pub(crate) fn common_params_agree(&self, other: &Self) -> bool {
         self.entries.iter().all(|p| {
-            let Ok(name) = std::str::from_utf8(p.name()) else {
-                // A non-UTF-8 parameter name can still be compared byte-wise.
-                return other
-                    .entries
-                    .iter()
-                    .filter(|q| escape::eq_ignore_ascii_case(q.name(), p.name()))
-                    .all(|q| Self::values_equivalent(p.value(), q.value()));
-            };
-            match other.get(name) {
-                None => true,
-                Some(q) => Self::values_equivalent(p.value(), q.value()),
-            }
+            other
+                .entries
+                .iter()
+                .filter(|q| names_equivalent(q.name(), p.name()))
+                .all(|q| Self::values_equivalent(p.value(), q.value()))
         })
     }
 
@@ -237,6 +244,22 @@ mod tests {
         let a = params(&[("Transport", Some("TCP"))]);
         let b = params(&[("transport", Some("tcp"))]);
         assert!(a.param_equivalent(&b, "transport"));
+    }
+
+    /// RFC 3261 §19.1.4: `pname` includes `escaped`, so an escaped spelling of a name is
+    /// the same name.
+    #[test]
+    fn escaped_names_fold_when_looked_up() {
+        let p = params(&[("%74ransport", Some("udp"))]);
+        assert!(p.get("transport").is_some());
+        assert_eq!(p.value("transport"), Some(&b"udp"[..]));
+
+        let plain = params(&[("transport", Some("udp"))]);
+        assert!(p.param_equivalent(&plain, "transport"));
+        assert!(p.common_params_agree(&plain) && plain.common_params_agree(&p));
+
+        let other = params(&[("transport", Some("tcp"))]);
+        assert!(!p.common_params_agree(&other));
     }
 
     #[test]

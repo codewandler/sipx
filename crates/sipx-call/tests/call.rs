@@ -401,7 +401,7 @@ async fn the_contact_advertises_the_configured_address() {
     config.sent_by_port = Some(5080);
     let (handle, _rx) = sipx_transport::bind(config).await.expect("binds");
 
-    let contact = sipx_call::call::contact_for(&handle);
+    let contact = sipx_call::call::contact_for(&handle, sipx_transport::TransportKind::Udp);
     assert_eq!(contact, "<sip:sipx@sipx.example.net:5080>");
     assert!(
         !contact.contains(&handle.local_addr().port().to_string()),
@@ -866,4 +866,614 @@ async fn without_a_timeout_the_call_is_not_cancelled() {
         .expect("a slow answer is still an answer");
     assert!(!call.is_ended());
     let _ = answering.await;
+}
+
+/// RFC 3261 §12.2.1.1: with a route set, an in-dialog request is *sent to* the first `Route`
+/// entry, not to the remote target. That entry is the proxy which record-routed itself into
+/// the dialog precisely so it would see the rest of it — and behind a NAT or on a separate
+/// segment it is the only element that can reach the far end at all. Addressing the request to
+/// the peer's `Contact` and putting the routes in as headers produces the BYE that never
+/// arrives: the call cannot be hung up, and the media keeps flowing.
+#[tokio::test]
+async fn an_in_dialog_request_goes_to_the_first_route_not_the_remote_target() {
+    use tokio::net::UdpSocket;
+
+    // Stands in for a record-routing proxy: it only has to exist and be listened on.
+    let proxy = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let proxy_addr = proxy.local_addr().expect("has an address");
+
+    // And an address the callee claims in its Contact, which nothing listens on. A request
+    // sent there is lost, which is exactly the production failure this reproduces.
+    let unreachable = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let contact_addr = unreachable.local_addr().expect("has an address");
+    drop(unreachable);
+
+    let callee = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let callee_addr = callee.local_addr().expect("has an address");
+
+    let (caller_endpoint, _caller_incoming) = endpoint().await;
+
+    // A raw callee: answer the INVITE with a 200 that record-routes through the proxy.
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        let (len, from) = callee.recv_from(&mut buf).await.expect("an INVITE");
+        let invite = String::from_utf8_lossy(&buf[..len]).into_owned();
+        let header = |name: &str| {
+            invite
+                .lines()
+                .find(|line| {
+                    line.to_ascii_lowercase()
+                        .starts_with(&name.to_ascii_lowercase())
+                })
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let sdp = format!(
+            "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+             m=audio {} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n",
+            callee_addr.port()
+        );
+        let response = format!(
+            "SIP/2.0 200 OK\r\n{}\r\nRecord-Route: <sip:127.0.0.1:{};lr>\r\n{}\r\n{};tag=callee\r\n{}\r\n{}\r\n\
+             Contact: <sip:callee@127.0.0.1:{}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+            header("Via:"),
+            proxy_addr.port(),
+            header("From:"),
+            header("To:"),
+            header("Call-ID:"),
+            header("CSeq:"),
+            contact_addr.port(),
+            sdp.len(),
+            sdp
+        );
+        let _ = callee.send_to(response.as_bytes(), from).await;
+    });
+
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let dialing = tokio::spawn(async move {
+        dial(
+            &caller_endpoint,
+            Target::udp(callee_addr),
+            &to,
+            &sipx_call::DialOptions::new("<sip:caller@example.net>", loopback()),
+        )
+        .await
+    });
+
+    // The ACK is the first in-dialog request, and it must arrive at the proxy.
+    let mut buf = vec![0u8; 8192];
+    let received = tokio::time::timeout(Duration::from_secs(3), proxy.recv_from(&mut buf))
+        .await
+        .expect("the ACK must be sent to the route set's first hop, not the remote target");
+    let (len, _) = received.expect("reads");
+    let ack = String::from_utf8_lossy(&buf[..len]).into_owned();
+    assert!(ack.starts_with("ACK "), "the proxy sees the ACK: {ack}");
+    assert!(
+        ack.contains(&format!("Route: <sip:127.0.0.1:{};lr>", proxy_addr.port())),
+        "and it still carries the route set: {ack}"
+    );
+
+    let _ = dialing.await;
+}
+
+/// RFC 3261 §9.1: "If no provisional response has been received, the CANCEL request MUST NOT
+/// be sent; rather, the client MUST wait for the arrival of a provisional response before
+/// sending the request." A CANCEL sent before the far end has said anything can overtake the
+/// INVITE it refers to, matching no transaction there while the INVITE goes on to ring.
+#[tokio::test]
+async fn a_cancel_is_not_sent_before_a_provisional_arrives() {
+    use tokio::net::UdpSocket;
+
+    // A raw socket, not a sipx endpoint: a server transaction answers 100 Trying of its own
+    // accord when the application is slow (RFC 3261 §17.2.1), and that provisional would make
+    // the invitation legitimately cancellable. This peer says nothing whatsoever.
+    let silent = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let silent_addr = silent.local_addr().expect("has an address");
+
+    let seen = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let recorder = std::sync::Arc::clone(&seen);
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        while let Ok((len, _)) = silent.recv_from(&mut buf).await {
+            let text = String::from_utf8_lossy(&buf[..len]);
+            if let Some(line) = text.lines().next() {
+                recorder.lock().await.push(line.to_owned());
+            }
+        }
+    });
+
+    let (caller, _rx) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("silent.example").expect("valid")));
+    let options = sipx_call::DialOptions::new("<sip:caller@example.net>", loopback())
+        .with_timeout(Duration::from_millis(300));
+
+    let result = dial(&caller, Target::udp(silent_addr), &to, &options).await;
+    assert!(
+        matches!(result, Err(sipx_call::Error::Cancelled(_))),
+        "the dial still gives up: {result:?}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let lines = seen.lock().await.clone();
+    assert!(
+        lines.iter().any(|line| line.starts_with("INVITE ")),
+        "the invitation was sent: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("CANCEL ")),
+        "nothing may be cancelled before the far end has answered provisionally: {lines:?}"
+    );
+}
+
+/// RFC 3261 §12.2.2: "When a UAS receives a target refresh request, it MUST replace the
+/// dialog's remote target URI with the URI from the Contact header field in that request".
+/// Keeping the original sends every later request — the BYE above all — to where the peer used
+/// to be, so a peer that re-homes mid-call can never be told the call is over.
+#[test]
+fn a_target_refresh_moves_the_remote_target() {
+    use sipx_sip::build::RequestBuilder;
+
+    let invite = RequestBuilder::new(
+        Method::Invite,
+        Uri::sip(Host::Name(HostName::new("example.com").expect("valid"))),
+    )
+    .header(HeaderName::To, "<sip:callee@example.com>")
+    .expect("valid")
+    .header(HeaderName::From, "<sip:caller@example.net>;tag=abc")
+    .expect("valid")
+    .header(HeaderName::CallId, "refresh@example.net")
+    .expect("valid")
+    .cseq(1, &Method::Invite)
+    .expect("valid")
+    .header(HeaderName::Contact, "<sip:caller@192.0.2.10:5060>")
+    .expect("valid")
+    .max_forwards(70)
+    .build();
+
+    let mut dialog = sipx_call::Dialog::from_request(&invite, "tag").expect("a dialog");
+    assert_eq!(
+        String::from_utf8_lossy(&dialog.remote_target.to_bytes()),
+        "sip:caller@192.0.2.10:5060"
+    );
+
+    let moved = RequestBuilder::new(
+        Method::Invite,
+        Uri::sip(Host::Name(HostName::new("example.com").expect("valid"))),
+    )
+    .header(HeaderName::Contact, "<sip:caller@198.51.100.7:5080>")
+    .expect("valid")
+    .build();
+    dialog.refresh_target(&moved.headers);
+    assert_eq!(
+        String::from_utf8_lossy(&dialog.remote_target.to_bytes()),
+        "sip:caller@198.51.100.7:5080",
+        "the dialog follows the peer to its new contact"
+    );
+}
+
+/// RFC 3261 §12.2.1.1's two forms. A loose router leaves the Request-URI alone and travels in
+/// `Route`; a strict router takes the Request-URI, and the remote target moves to the end of
+/// the route set — otherwise the far end is handed a request addressed to a proxy.
+#[test]
+fn a_strict_route_set_rewrites_the_request_uri() {
+    use sipx_sip::build::RequestBuilder;
+
+    let with_route = |route: &'static str| {
+        let invite = RequestBuilder::new(
+            Method::Invite,
+            Uri::sip(Host::Name(HostName::new("example.com").expect("valid"))),
+        )
+        .header(HeaderName::To, "<sip:callee@example.com>")
+        .expect("valid")
+        .header(HeaderName::From, "<sip:caller@example.net>;tag=abc")
+        .expect("valid")
+        .header(HeaderName::CallId, "routing@example.net")
+        .expect("valid")
+        .cseq(1, &Method::Invite)
+        .expect("valid")
+        .header(HeaderName::Contact, "<sip:caller@192.0.2.10:5060>")
+        .expect("valid")
+        .header(HeaderName::RecordRoute, route)
+        .expect("valid")
+        .max_forwards(70)
+        .build();
+        sipx_call::Dialog::from_request(&invite, "tag").expect("a dialog")
+    };
+
+    let loose = with_route("<sip:proxy.example;lr>");
+    let (uri, routes) = loose.request_target();
+    assert_eq!(
+        String::from_utf8_lossy(&uri.to_bytes()),
+        "sip:caller@192.0.2.10:5060",
+        "a loose router leaves the Request-URI addressed to the peer"
+    );
+    assert_eq!(routes, vec!["<sip:proxy.example;lr>".to_owned()]);
+
+    let strict = with_route("<sip:proxy.example>");
+    let (uri, routes) = strict.request_target();
+    assert_eq!(
+        String::from_utf8_lossy(&uri.to_bytes()),
+        "sip:proxy.example",
+        "a strict router takes the Request-URI"
+    );
+    assert_eq!(
+        routes,
+        vec!["<sip:caller@192.0.2.10:5060>".to_owned()],
+        "and the remote target becomes the last route"
+    );
+}
+
+/// RFC 3261 §13.3.1.4 governs the 2xx to *any* INVITE, the re-INVITE included: it is
+/// retransmitted on the T1 backoff until the ACK arrives. The server transaction deliberately
+/// absorbs retransmitted INVITEs without answering them again (RFC 6026), so if the transaction
+/// user does not resend, a single lost 200 deadlocks the renegotiation until the peer's Timer B
+/// — one dropped packet breaking hold and resume for half a minute.
+#[tokio::test]
+async fn a_reinvite_200_is_retransmitted_until_it_is_acked() {
+    use tokio::net::UdpSocket;
+
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+
+    let peer = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let peer_addr = peer.local_addr().expect("has an address");
+
+    let sdp = |port: u16| {
+        format!(
+            "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+             m=audio {port} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+        )
+    };
+    let invite = |cseq: u32, branch: &str, body: &str| {
+        format!(
+            "INVITE sip:callee@127.0.0.1 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:{};branch={branch}\r\n\
+             To: <sip:callee@127.0.0.1>\r\nFrom: <sip:peer@127.0.0.1>;tag=peertag\r\n\
+             Call-ID: reinvite-retransmit@example.net\r\nCSeq: {cseq} INVITE\r\n\
+             Contact: <sip:peer@127.0.0.1:{}>\r\nMax-Forwards: 70\r\n\
+             Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}",
+            peer_addr.port(),
+            peer_addr.port(),
+            body.len()
+        )
+    };
+
+    // Establish the call, so the callee holds a real dialog.
+    let first = invite(1, "z9hG4bKfirst", &sdp(40000));
+    peer.send_to(first.as_bytes(), callee_addr)
+        .await
+        .expect("sends");
+
+    let incoming = tokio::time::timeout(Duration::from_secs(2), callee_incoming.recv())
+        .await
+        .expect("no timeout")
+        .expect("an INVITE");
+    let mut callee = answer(&callee_endpoint, &incoming, loopback())
+        .await
+        .expect("answers");
+
+    let mut buf = vec![0u8; 8192];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut buf))
+        .await
+        .expect("no timeout")
+        .expect("reads");
+    let ok = String::from_utf8_lossy(&buf[..len]).into_owned();
+    assert!(ok.starts_with("SIP/2.0 200"), "{ok}");
+    let to_line = ok
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("to:"))
+        .unwrap_or_default()
+        .to_owned();
+
+    let ack = format!(
+        "ACK sip:callee@127.0.0.1 SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 127.0.0.1:{};branch=z9hG4bKack\r\n\
+         {to_line}\r\nFrom: <sip:peer@127.0.0.1>;tag=peertag\r\n\
+         Call-ID: reinvite-retransmit@example.net\r\nCSeq: 1 ACK\r\n\
+         Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
+        peer_addr.port()
+    );
+    peer.send_to(ack.as_bytes(), callee_addr)
+        .await
+        .expect("sends");
+
+    // Pump in-dialog requests into the call, which is what a real application does.
+    tokio::spawn(async move {
+        while let Some(incoming) = callee_incoming.recv().await {
+            let _ = callee.handle(&incoming).await;
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A re-INVITE, whose 200 this peer deliberately never acknowledges.
+    let renegotiate = format!(
+        "INVITE sip:callee@127.0.0.1 SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 127.0.0.1:{};branch=z9hG4bKsecond\r\n\
+         {to_line}\r\nFrom: <sip:peer@127.0.0.1>;tag=peertag\r\n\
+         Call-ID: reinvite-retransmit@example.net\r\nCSeq: 2 INVITE\r\n\
+         Contact: <sip:peer@127.0.0.1:{}>\r\nMax-Forwards: 70\r\n\
+         Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+        peer_addr.port(),
+        peer_addr.port(),
+        sdp(40002).len(),
+        sdp(40002)
+    );
+    peer.send_to(renegotiate.as_bytes(), callee_addr)
+        .await
+        .expect("sends");
+
+    let mut answers = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, peer.recv_from(&mut buf)).await {
+            Ok(Ok((len, _))) => {
+                let text = String::from_utf8_lossy(&buf[..len]);
+                if text.starts_with("SIP/2.0 200") && text.contains("CSeq: 2 INVITE") {
+                    answers += 1;
+                    if answers >= 2 {
+                        break;
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        answers >= 2,
+        "the 200 to a re-INVITE must be retransmitted until acknowledged; saw {answers}"
+    );
+}
+
+/// RFC 3261 §12.2.2 applies to every in-dialog request, not only the ones that renegotiate. A
+/// BYE from behind the dialog's current sequence number is a stale duplicate — one that
+/// outlived the transaction layer's absorption window, or an injected one — and honouring it
+/// ends a call that is still running.
+#[tokio::test]
+async fn a_stale_bye_is_rejected_rather_than_ending_the_call() {
+    let (caller, mut callee, pump, caller_addr) = connected_with_routing().await;
+
+    // A legitimate renegotiation first, which advances the remote sequence number.
+    callee
+        .reinvite(sipx_sdp::Direction::SendOnly)
+        .await
+        .expect("accepted");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let (to, from, call_id) = {
+        let guard = caller.lock().await;
+        let (local, remote) = guard.dialog.local_and_remote();
+        (local, remote, guard.dialog.id.call_id.clone())
+    };
+
+    let stale = sipx_sip::build::RequestBuilder::new(
+        Method::Bye,
+        Uri::sip(Host::Name(HostName::new("caller.example").expect("valid"))),
+    )
+    .header(HeaderName::To, Bytes::from(to))
+    .expect("valid")
+    .header(HeaderName::From, Bytes::from(from))
+    .expect("valid")
+    .header(HeaderName::CallId, Bytes::from(call_id))
+    .expect("valid")
+    .cseq(1, &Method::Bye)
+    .expect("valid")
+    .max_forwards(70)
+    .build();
+
+    let (sender, _rx) = endpoint().await;
+    let mut responses = sender
+        .send(stale, Target::udp(caller_addr))
+        .await
+        .expect("sends");
+    let response = tokio::time::timeout(Duration::from_secs(2), responses.final_response())
+        .await
+        .expect("no timeout")
+        .expect("a response");
+    assert_eq!(
+        response.status.code(),
+        500,
+        "a stale BYE is rejected, not obeyed"
+    );
+    assert!(
+        !caller.lock().await.is_ended(),
+        "and the call it tried to end is still running"
+    );
+
+    pump.abort();
+}
+
+/// RFC 3261 §13.2.2.4: the UAC core "MUST generate an ACK for each 2xx received". A
+/// retransmitted 2xx means the previous ACK was lost, and only the UAC core can answer it —
+/// the INVITE transaction has already passed the response up. Acknowledging only the first
+/// leaves the far end retransmitting for 64*T1 and then tearing down, from its side, a call
+/// this side believes is established and is already sending audio into.
+#[tokio::test]
+async fn a_retransmitted_2xx_is_acknowledged_again() {
+    use tokio::net::UdpSocket;
+
+    let peer = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let peer_addr = peer.local_addr().expect("has an address");
+
+    let (caller_endpoint, _rx) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("peer.example").expect("valid")));
+    let dialing = tokio::spawn(async move {
+        dial(
+            &caller_endpoint,
+            Target::udp(peer_addr),
+            &to,
+            &sipx_call::DialOptions::new("<sip:caller@example.net>", loopback()),
+        )
+        .await
+    });
+
+    let mut buf = vec![0u8; 8192];
+    let (len, from) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut buf))
+        .await
+        .expect("no timeout")
+        .expect("an INVITE");
+    let invite = String::from_utf8_lossy(&buf[..len]).into_owned();
+    let header = |name: &str| {
+        invite
+            .lines()
+            .find(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with(&name.to_ascii_lowercase())
+            })
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+               m=audio 41000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+    let ok = format!(
+        "SIP/2.0 200 OK\r\n{}\r\n{}\r\n{};tag=peertag\r\n{}\r\n{}\r\n\
+         Contact: <sip:peer@127.0.0.1:{}>\r\nContent-Type: application/sdp\r\n\
+         Content-Length: {}\r\n\r\n{sdp}",
+        header("Via:"),
+        header("From:"),
+        header("To:"),
+        header("Call-ID:"),
+        header("CSeq:"),
+        peer_addr.port(),
+        sdp.len()
+    );
+
+    // Answer, and then answer again as a peer whose ACK never arrived would.
+    peer.send_to(ok.as_bytes(), from).await.expect("sends");
+    let mut acks = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut resent = false;
+    while tokio::time::Instant::now() < deadline && acks < 2 {
+        match tokio::time::timeout_at(deadline, peer.recv_from(&mut buf)).await {
+            Ok(Ok((len, _))) => {
+                if String::from_utf8_lossy(&buf[..len]).starts_with("ACK ") {
+                    acks += 1;
+                    if !resent {
+                        resent = true;
+                        peer.send_to(ok.as_bytes(), from).await.expect("sends");
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+
+    assert!(
+        acks >= 2,
+        "each 2xx must be acknowledged; saw {acks} ACK(s)"
+    );
+    let _ = dialing.await;
+}
+
+/// RFC 3261 §12.2.1.1 places the first route into the Request-URI "stripping any parameters
+/// that are not allowed in a Request-URI", and §19.1.1 names them: the `method` parameter and
+/// the header component. The route came off the wire from another element, so neither can be
+/// assumed absent, and a strict router handed either is entitled to reject the request.
+#[test]
+fn a_strict_route_request_uri_drops_what_may_not_appear_there() {
+    use sipx_sip::build::RequestBuilder;
+
+    let invite = RequestBuilder::new(
+        Method::Invite,
+        Uri::sip(Host::Name(HostName::new("example.com").expect("valid"))),
+    )
+    .header(HeaderName::To, "<sip:callee@example.com>")
+    .expect("valid")
+    .header(HeaderName::From, "<sip:caller@example.net>;tag=abc")
+    .expect("valid")
+    .header(HeaderName::CallId, "stripping@example.net")
+    .expect("valid")
+    .cseq(1, &Method::Invite)
+    .expect("valid")
+    .header(HeaderName::Contact, "<sip:caller@192.0.2.10:5060>")
+    .expect("valid")
+    .header(
+        HeaderName::RecordRoute,
+        "<sip:proxy.example;transport=tcp;method=INVITE?Subject=x>",
+    )
+    .expect("valid")
+    .max_forwards(70)
+    .build();
+
+    let dialog = sipx_call::Dialog::from_request(&invite, "tag").expect("a dialog");
+    let (uri, _routes) = dialog.request_target();
+    let text = String::from_utf8_lossy(&uri.to_bytes()).into_owned();
+
+    assert!(
+        !text.contains('?'),
+        "the header component may not appear in a Request-URI: {text}"
+    );
+    assert!(
+        !text.to_ascii_lowercase().contains("method="),
+        "nor the method parameter: {text}"
+    );
+    assert!(
+        text.contains("transport=tcp"),
+        "but the parameters that are allowed survive: {text}"
+    );
+}
+
+/// RFC 3261 §9.1: with no provisional received, the client "MUST wait for the arrival of a
+/// provisional response before sending" the CANCEL. Waiting is the instruction — abandoning the
+/// cancellation leaves a callee ringing for a call nobody is waiting for any more.
+#[tokio::test]
+async fn a_cancel_waits_for_a_late_provisional_rather_than_being_abandoned() {
+    use tokio::net::UdpSocket;
+
+    let peer = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let peer_addr = peer.local_addr().expect("has an address");
+
+    let (caller, _rx) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("slow.example").expect("valid")));
+    let options = sipx_call::DialOptions::new("<sip:caller@example.net>", loopback())
+        .with_timeout(Duration::from_millis(250));
+    let dialing =
+        tokio::spawn(async move { dial(&caller, Target::udp(peer_addr), &to, &options).await });
+
+    let mut buf = vec![0u8; 8192];
+    let (len, from) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut buf))
+        .await
+        .expect("no timeout")
+        .expect("an INVITE");
+    let invite = String::from_utf8_lossy(&buf[..len]).into_owned();
+    let header = |name: &str| {
+        invite
+            .lines()
+            .find(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with(&name.to_ascii_lowercase())
+            })
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    // Ring only *after* the caller has already given up waiting.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let ringing = format!(
+        "SIP/2.0 180 Ringing\r\n{}\r\n{}\r\n{};tag=peertag\r\n{}\r\n{}\r\nContent-Length: 0\r\n\r\n",
+        header("Via:"),
+        header("From:"),
+        header("To:"),
+        header("Call-ID:"),
+        header("CSeq:")
+    );
+    peer.send_to(ringing.as_bytes(), from).await.expect("sends");
+
+    let mut cancelled = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, peer.recv_from(&mut buf)).await {
+            Ok(Ok((len, _))) => {
+                if String::from_utf8_lossy(&buf[..len]).starts_with("CANCEL ") {
+                    cancelled = true;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        cancelled,
+        "the CANCEL must follow the provisional it was waiting for"
+    );
+    let _ = dialing.await;
 }

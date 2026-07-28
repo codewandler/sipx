@@ -30,6 +30,7 @@ OPTIONS:
     --from <URI>      Our own address (default sip:sipx@<local>)
     --local <ADDR>    Local address to bind (default 0.0.0.0:0)
     --tcp             Use TCP rather than UDP
+    --stats           Report call quality on exit: loss, jitter, round trip, MOS estimate
     --json            Report as JSON
 ";
 
@@ -72,16 +73,8 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Ok(local) => local,
         Err(_) => return fail(format, Exit::Usage, "--local must be host:port"),
     };
-    let media_address: IpAddr = if local.ip().is_unspecified() {
-        // Media has to advertise something reachable, and an unspecified address is not.
-        if target_addr.ip().is_loopback() {
-            "127.0.0.1".parse().unwrap_or(target_addr.ip())
-        } else {
-            local_address_towards(target_addr.ip())
-        }
-    } else {
-        local.ip()
-    };
+    // Media has to advertise something reachable, and an unspecified address is not.
+    let media_address: IpAddr = crate::advertise::reachable_ip(local, target_addr.ip());
 
     let mut config = TransportConfig::new(local);
     config.sent_by = media_address.to_string();
@@ -134,6 +127,10 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             i64::try_from(recorded.len()).unwrap_or(0),
         )
         .boolean("heard_audio", !recorded.is_empty());
+
+    if args.flag("stats") {
+        report = with_quality(report, &call.media().quality().await);
+    }
 
     if let Some(path) = args.value("record") {
         match write_clip(path, &recorded) {
@@ -242,22 +239,87 @@ pub(crate) fn target_of(uri: &str) -> Option<std::net::SocketAddr> {
         .map(|ip| std::net::SocketAddr::new(ip, 5060))
 }
 
-/// Which of our addresses faces a peer.
+/// Add the call's quality to a report.
 ///
-/// Asking the routing table by opening a UDP socket towards the peer — no packet is sent, but
-/// the kernel picks the source address it would use, which is the one to advertise.
-fn local_address_towards(peer: IpAddr) -> IpAddr {
-    std::net::UdpSocket::bind("0.0.0.0:0")
-        .and_then(|socket| {
-            socket.connect(std::net::SocketAddr::new(peer, 9))?;
-            socket.local_addr()
-        })
-        .map_or_else(|_| "127.0.0.1".parse().unwrap_or(peer), |addr| addr.ip())
+/// The round-trip time is added only when there is one. A peer that does not speak RTCP never
+/// gives us the numbers to compute it, and reporting `0` there would say "instantaneous" —
+/// which a script would believe.
+fn with_quality(report: Report, quality: &sipx_rtp::Quality) -> Report {
+    let report = report
+        .decimal("loss", quality.loss, 4)
+        .number("packets_lost", quality.cumulative_lost)
+        .number(
+            "jitter_ms",
+            i64::try_from(quality.jitter.as_millis()).unwrap_or(i64::MAX),
+        )
+        // Two places. The E-model behind this is an estimate with simplified impairment terms,
+        // and more digits would be inventing precision it does not have.
+        .decimal("mos", quality.mos, 2);
+    match quality.round_trip {
+        Some(trip) => report.millis("round_trip_ms", trip),
+        None => report,
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    /// Both formats must carry the same facts — that is the rule the whole output module is
+    /// built on, and a statistics block added to one and not the other is the easiest way to
+    /// break it.
+    #[test]
+    fn stats_render_the_same_facts_in_both_formats() {
+        let quality = sipx_rtp::Quality {
+            loss: 0.0123,
+            cumulative_lost: 7,
+            jitter: std::time::Duration::from_millis(12),
+            round_trip: Some(std::time::Duration::from_millis(84)),
+            mos: 4.128_745_9,
+        };
+        let report = with_quality(Report::new(), &quality);
+
+        let text = report.render(Format::Text);
+        let json = report.render(Format::Json);
+        for field in ["loss", "packets_lost", "jitter_ms", "mos", "round_trip_ms"] {
+            assert!(text.contains(field), "text is missing {field}: {text}");
+            assert!(json.contains(field), "json is missing {field}: {json}");
+        }
+    }
+
+    /// A score printed to eight digits invites someone to compare two calls on the last one.
+    /// The model behind it does not support that, so the output does not offer it.
+    #[test]
+    fn the_score_is_not_reported_to_more_precision_than_it_has() {
+        let quality = sipx_rtp::Quality {
+            loss: 0.0,
+            cumulative_lost: 0,
+            jitter: std::time::Duration::ZERO,
+            round_trip: None,
+            mos: 4.128_745_9,
+        };
+        let rendered = with_quality(Report::new(), &quality).render(Format::Json);
+        assert!(rendered.contains("4.13"), "{rendered}");
+        assert!(!rendered.contains("4.1287"), "{rendered}");
+    }
+
+    /// A peer that does not speak RTCP never gives us the numbers for a round trip. Reporting
+    /// `0` would say "instantaneous", and a script would believe it; the field is absent.
+    #[test]
+    fn an_unmeasurable_round_trip_is_absent_rather_than_zero() {
+        let quality = sipx_rtp::Quality {
+            loss: 0.0,
+            cumulative_lost: 0,
+            jitter: std::time::Duration::ZERO,
+            round_trip: None,
+            mos: 4.4,
+        };
+        let rendered = with_quality(Report::new(), &quality).render(Format::Json);
+        assert!(
+            !rendered.contains("round_trip"),
+            "an absent measurement must not be reported as zero: {rendered}"
+        );
+    }
+
     use super::*;
 
     #[test]

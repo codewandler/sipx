@@ -6,7 +6,7 @@
 //! loop over channels.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
 use crate::nat::apply_received_and_rport;
-use crate::target::{Target, TransportKind, response_destination};
+use crate::target::{ConnectionKey, Target, TransportKind, response_destination};
 use crate::tcp::{self, Pool, PoolConfig};
 use crate::timers::TimerQueue;
 
@@ -61,6 +61,22 @@ pub struct Config {
     /// default (5061) and a peer connecting to 5060 does not expect a handshake.
     #[cfg(feature = "tls")]
     pub tls_server: Option<(crate::tls::ServerTls, u16)>,
+    /// The port to listen for WebSocket connections on, if any.
+    ///
+    /// Its own port for the same reason TLS has one: a peer connecting to 5060 expects SIP on
+    /// the wire, not an HTTP upgrade request.
+    #[cfg(feature = "ws")]
+    pub ws_server: Option<u16>,
+    /// The identity sipx presents on the secure WebSocket port, and the port.
+    #[cfg(feature = "wss")]
+    pub wss_server: Option<(crate::tls::ServerTls, u16)>,
+    /// How often to ping an otherwise idle WebSocket.
+    ///
+    /// Well under the idle timeout of the intermediaries that sit in front of browsers — most
+    /// close a silent connection somewhere between 30 and 120 seconds, and a registration whose
+    /// connection died silently is a phone that rings nowhere.
+    #[cfg(feature = "ws")]
+    pub ws_keepalive: std::time::Duration,
     /// How the connection pool behaves.
     pub pool: PoolConfig,
 }
@@ -86,10 +102,22 @@ impl Config {
             tls_client: None,
             #[cfg(feature = "tls")]
             tls_server: None,
+            #[cfg(feature = "ws")]
+            ws_server: None,
+            #[cfg(feature = "wss")]
+            wss_server: None,
+            #[cfg(feature = "ws")]
+            ws_keepalive: std::time::Duration::from_secs(25),
             pool: PoolConfig::default(),
         }
     }
 }
+
+/// A connection that finished its handshake and is ready to join the pool.
+///
+/// A closure rather than a stream: the pool lives on the driver's loop, and the three kinds of
+/// handshake produce three unrelated stream types the loop has no reason to distinguish.
+type Adopt = Box<dyn FnOnce(&mut Pool) + Send>;
 
 /// A request that arrived and created a server transaction.
 #[derive(Debug)]
@@ -162,6 +190,15 @@ enum Command {
         /// Fired once the driver has actually performed the send.
         sent: oneshot::Sender<()>,
     },
+    /// A request handed straight to the transport, with no transaction behind it.
+    Direct {
+        request: Box<Request>,
+        target: Target,
+        /// Fired once the driver has actually performed the send.
+        sent: oneshot::Sender<Result<()>>,
+    },
+    /// How much state the driver is holding, for a soak test to assert on.
+    Outstanding(oneshot::Sender<usize>),
     Shutdown,
 }
 
@@ -172,6 +209,16 @@ pub struct Handle {
     local_addr: SocketAddr,
     #[cfg(feature = "tls")]
     tls_addr: Option<SocketAddr>,
+    #[cfg(feature = "ws")]
+    ws_addr: Option<SocketAddr>,
+    #[cfg(feature = "wss")]
+    wss_addr: Option<SocketAddr>,
+    /// The sent-by this endpoint uses on a WebSocket it dialled out (RFC 7118 §5.2).
+    ///
+    /// Invented once at bind time rather than per request: a `Via` that changed between a
+    /// request and its retransmission would be a different `Via`.
+    #[cfg(feature = "ws")]
+    ws_sent_by: Arc<str>,
     sent_by: Arc<String>,
     sent_by_port: u16,
 }
@@ -193,6 +240,20 @@ impl Handle {
         self.tls_addr
     }
 
+    /// The address the WebSocket listener is bound to, if one was configured.
+    #[cfg(feature = "ws")]
+    #[must_use]
+    pub fn ws_addr(&self) -> Option<SocketAddr> {
+        self.ws_addr
+    }
+
+    /// The address the secure WebSocket listener is bound to, if one was configured.
+    #[cfg(feature = "wss")]
+    #[must_use]
+    pub fn wss_addr(&self) -> Option<SocketAddr> {
+        self.wss_addr
+    }
+
     /// The host and port this endpoint tells peers to reach it on.
     ///
     /// Not the same as [`Self::local_addr`], and the difference matters wherever an address
@@ -211,10 +272,9 @@ impl Handle {
     pub async fn send(&self, mut request: Request, target: Target) -> Result<Responses> {
         if request.headers.get(&HeaderName::Via).is_none() {
             let via = format!(
-                "SIP/2.0/{} {}:{};rport;branch={}",
+                "SIP/2.0/{} {};rport;branch={}",
                 target.transport.as_str(),
-                self.sent_by,
-                self.sent_by_port,
+                self.sent_by_for(target.transport),
                 new_branch()
             );
             let header = Header::build(HeaderName::Via, Bytes::from(via))?;
@@ -237,6 +297,32 @@ impl Handle {
             rx: events_rx,
             peeked: None,
         })
+    }
+
+    /// Send a request straight to the transport, with no transaction behind it.
+    ///
+    /// For the one request that has no transaction of its own: the ACK to a 2xx. RFC 3261
+    /// §13.2.2.4 has it "passed to the transport layer directly for transmission", and it is
+    /// the UAC core — not a transaction — that resends it when a retransmitted 2xx arrives.
+    /// Putting it in a transaction instead earns it Timer E retransmissions toward a response
+    /// that will never come, and a timeout 32 seconds later for a call that is up and talking.
+    ///
+    /// The `Via` is the caller's business here: an ACK for a 2xx carries a *new* branch
+    /// (§13.2.2.4 makes it a new transaction as far as any proxy is concerned), and only the
+    /// caller knows the dialog it belongs to.
+    ///
+    /// Returns once the bytes have been handed to the socket.
+    pub async fn send_directly(&self, request: Request, target: Target) -> Result<()> {
+        let (sent_tx, sent_rx) = oneshot::channel();
+        self.commands
+            .send(Command::Direct {
+                request: Box::new(request),
+                target,
+                sent: sent_tx,
+            })
+            .await
+            .map_err(|_| Error::EndpointClosed)?;
+        sent_rx.await.map_err(|_| Error::EndpointClosed)?
     }
 
     /// Resolve a URI (RFC 3263) and send to the resulting candidates in order.
@@ -281,6 +367,45 @@ impl Handle {
         last
     }
 
+    /// The host and port this endpoint tells peers to reach it on over this transport.
+    ///
+    /// Almost always its real host and port, as [`Self::advertised`] gives them. The exception
+    /// is a WebSocket sipx dialled out on: RFC 7118 §5.2 says such a client has no listening
+    /// port and must invent an unresolvable name, and advertising a real address instead would
+    /// send a proxy off to a port that is not listening while the connection it should have
+    /// used sits open. An endpoint that *does* listen for WebSocket connections is not that
+    /// client, and keeps its own name.
+    ///
+    /// Belongs in a `Contact` as much as in a `Via`, for the same reason: both are answers to
+    /// "where do I reach you".
+    #[must_use]
+    pub fn sent_by_for(&self, transport: TransportKind) -> String {
+        #[cfg(feature = "ws")]
+        if matches!(transport, TransportKind::Ws | TransportKind::Wss) && !self.listens_for_ws() {
+            return self.ws_sent_by.to_string();
+        }
+        // TLS is listened for on a port of its own (RFC 3261 §19.1.2), so a sent-by naming the
+        // cleartext port would direct any response that cannot reuse the connection at a port
+        // speaking a different protocol.
+        #[cfg(feature = "tls")]
+        if matches!(transport, TransportKind::Tls)
+            && let Some(addr) = self.tls_addr
+        {
+            return format!("{}:{}", self.sent_by, addr.port());
+        }
+        let _ = transport;
+        format!("{}:{}", self.sent_by, self.sent_by_port)
+    }
+
+    #[cfg(feature = "ws")]
+    fn listens_for_ws(&self) -> bool {
+        #[cfg(feature = "wss")]
+        if self.wss_addr.is_some() {
+            return true;
+        }
+        self.ws_addr.is_some()
+    }
+
     /// Send a response on a server transaction.
     ///
     /// Returns once the response has been handed to the socket, not merely queued. The
@@ -298,6 +423,24 @@ impl Handle {
             .await
             .map_err(|_| Error::EndpointClosed)?;
         delivered.await.map_err(|_| Error::EndpointClosed)
+    }
+
+    /// How many transactions and destinations the endpoint is still holding.
+    ///
+    /// Exposed for the soak test in `sipx-testkit`, and worth exposing: a transaction store
+    /// that leaks is a slow, quiet outage — the stack goes on working for hours and then stops,
+    /// and by then the cause is a long way behind. This is the cheapest way to notice.
+    ///
+    /// Note what a *non-zero* answer does not mean. RFC 3261 §17 keeps a completed transaction
+    /// for Timer J, thirty-two seconds, so it can absorb a retransmission. Sampling before that
+    /// has elapsed counts the specification.
+    pub async fn outstanding(&self) -> Result<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.commands
+            .send(Command::Outstanding(tx))
+            .await
+            .map_err(|_| Error::EndpointClosed)?;
+        rx.await.map_err(|_| Error::EndpointClosed)
     }
 
     /// Stop the endpoint.
@@ -329,35 +472,40 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         _ => local_addr.port(),
     };
 
+    // One channel for every handshaked connection, whatever kind it is. The driver owns the
+    // pool, so adoption has to happen on its loop; what joins is a closure rather than a stream
+    // because TCP-over-TLS, WebSocket and WebSocket-over-TLS are three unrelated types and the
+    // loop has no reason to know which it is holding. One channel is also one `select!` branch,
+    // which matters more than it looks: `tokio::select!` cannot compile a branch out behind a
+    // feature flag, so a branch per optional transport does not build with that feature off.
+    let (adopt_tx, adopt_rx) = mpsc::channel::<Adopt>(64);
+
     #[cfg(feature = "tls")]
-    let (tls_accept_tx, tls_accept_rx) = mpsc::channel(64);
-    #[cfg(feature = "tls")]
-    let mut tls_addr = None;
-    #[cfg(feature = "tls")]
-    if let Some((server, port)) = config.tls_server.clone() {
-        let tls_listener = TcpListener::bind(SocketAddr::new(config.bind.ip(), port)).await?;
-        tls_addr = Some(tls_listener.local_addr()?);
-        let (raw_tx, mut raw_rx) = mpsc::channel(64);
-        tokio::spawn(tcp::accept_loop(tls_listener, raw_tx));
-        tokio::spawn(async move {
-            // The handshake happens off the accept path, so one slow or hostile peer cannot
-            // hold up every other connection waiting behind it.
-            while let Some((stream, peer)) = raw_rx.recv().await {
-                let acceptor = server.acceptor();
-                let accepted = tls_accept_tx.clone();
-                tokio::spawn(async move {
-                    match acceptor.accept(stream).await {
-                        Ok(tls) => {
-                            let _ = accepted.send((tls, peer)).await;
-                        }
-                        Err(error) => {
-                            tracing::debug!(%error, %peer, "inbound TLS handshake failed");
-                        }
-                    }
-                });
-            }
-        });
-    }
+    let secure_addr = match config.tls_server.clone() {
+        Some((server, port)) => Some(listen_tls(config.bind.ip(), port, server, &adopt_tx).await?),
+        None => None,
+    };
+    #[cfg(feature = "ws")]
+    let upgrade_addr = match config.ws_server {
+        Some(port) => {
+            Some(listen_ws(config.bind.ip(), port, config.ws_keepalive, &adopt_tx).await?)
+        }
+        None => None,
+    };
+    #[cfg(feature = "wss")]
+    let secure_upgrade_addr = match config.wss_server.clone() {
+        Some((server, port)) => Some(
+            listen_wss(
+                config.bind.ip(),
+                port,
+                server,
+                config.ws_keepalive,
+                &adopt_tx,
+            )
+            .await?,
+        ),
+        None => None,
+    };
 
     let (commands_tx, commands_rx) = mpsc::channel(config.capacity);
     let (incoming_tx, incoming_rx) = mpsc::channel(config.capacity);
@@ -366,7 +514,13 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         commands: commands_tx,
         local_addr,
         #[cfg(feature = "tls")]
-        tls_addr,
+        tls_addr: secure_addr,
+        #[cfg(feature = "ws")]
+        ws_addr: upgrade_addr,
+        #[cfg(feature = "wss")]
+        wss_addr: secure_upgrade_addr,
+        #[cfg(feature = "ws")]
+        ws_sent_by: Arc::from(crate::ws::invented_sent_by()),
         sent_by: Arc::new(config.sent_by.clone()),
         sent_by_port,
     };
@@ -382,15 +536,18 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         layer: TransactionLayer::new(config.timers),
         timers: TimerQueue::new(),
         destinations: HashMap::new(),
+        reconnect: HashMap::new(),
         clients: HashMap::new(),
         incoming: incoming_tx,
         commands: commands_rx,
         net: net_rx,
         accepts: accept_rx,
-        #[cfg(feature = "tls")]
-        tls_accepts: tls_accept_rx,
+        adopts: adopt_rx,
+        _adopt: adopt_tx,
         #[cfg(feature = "tls")]
         tls_client: config.tls_client.clone(),
+        #[cfg(feature = "ws")]
+        ws_keepalive: config.ws_keepalive,
         pool: Pool::new(config.pool, config.limits, net_tx),
         limits: config.limits,
         mtu: config.mtu,
@@ -398,6 +555,144 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     tokio::spawn(driver.run());
 
     Ok((handle, incoming_rx))
+}
+
+/// Listen for TLS connections, handshaking each off the accept path.
+///
+/// Off the accept path so one slow or hostile peer cannot hold up every other connection
+/// waiting behind it. The listener's own address is returned because the caller may have asked
+/// for port 0 and cannot put a port it does not know into a `Contact`.
+#[cfg(feature = "tls")]
+async fn listen_tls(
+    ip: IpAddr,
+    port: u16,
+    server: crate::tls::ServerTls,
+    adopt: &mpsc::Sender<Adopt>,
+) -> Result<SocketAddr> {
+    let listener = TcpListener::bind(SocketAddr::new(ip, port)).await?;
+    let addr = listener.local_addr()?;
+    let (raw_tx, mut raw_rx) = mpsc::channel(64);
+    tokio::spawn(tcp::accept_loop(listener, raw_tx));
+
+    let adopt = adopt.clone();
+    tokio::spawn(async move {
+        while let Some((stream, peer)) = raw_rx.recv().await {
+            let acceptor = server.acceptor();
+            let adopt = adopt.clone();
+            tokio::spawn(async move {
+                match acceptor.accept(stream).await {
+                    Ok(tls) => {
+                        let _ = adopt
+                            .send(Box::new(move |pool: &mut Pool| pool.accept_tls(tls, peer)))
+                            .await;
+                    }
+                    Err(error) => tracing::debug!(%error, %peer, "inbound TLS handshake failed"),
+                }
+            });
+        }
+    });
+    Ok(addr)
+}
+
+/// Listen for WebSocket connections, upgrading each off the accept path.
+#[cfg(feature = "ws")]
+async fn listen_ws(
+    ip: IpAddr,
+    port: u16,
+    keepalive: std::time::Duration,
+    adopt: &mpsc::Sender<Adopt>,
+) -> Result<SocketAddr> {
+    let listener = TcpListener::bind(SocketAddr::new(ip, port)).await?;
+    let addr = listener.local_addr()?;
+    let (raw_tx, mut raw_rx) = mpsc::channel(64);
+    tokio::spawn(tcp::accept_loop(listener, raw_tx));
+
+    let adopt = adopt.clone();
+    tokio::spawn(async move {
+        while let Some((stream, peer)) = raw_rx.recv().await {
+            let adopt = adopt.clone();
+            tokio::spawn(async move {
+                adopt_upgraded(
+                    crate::ws::accept(stream, peer).await,
+                    peer,
+                    TransportKind::Ws,
+                    keepalive,
+                    &adopt,
+                )
+                .await;
+            });
+        }
+    });
+    Ok(addr)
+}
+
+/// Listen for secure WebSocket connections: TLS, then the upgrade.
+///
+/// The certificate policy is `T-7`'s because this is `T-7`'s code — the same acceptor, built
+/// from the same [`crate::tls::ServerTls`]. A second implementation of a security check is how
+/// one of the two ends up weaker.
+#[cfg(feature = "wss")]
+async fn listen_wss(
+    ip: IpAddr,
+    port: u16,
+    server: crate::tls::ServerTls,
+    keepalive: std::time::Duration,
+    adopt: &mpsc::Sender<Adopt>,
+) -> Result<SocketAddr> {
+    let listener = TcpListener::bind(SocketAddr::new(ip, port)).await?;
+    let addr = listener.local_addr()?;
+    let (raw_tx, mut raw_rx) = mpsc::channel(64);
+    tokio::spawn(tcp::accept_loop(listener, raw_tx));
+
+    let adopt = adopt.clone();
+    tokio::spawn(async move {
+        while let Some((stream, peer)) = raw_rx.recv().await {
+            let acceptor = server.acceptor();
+            let adopt = adopt.clone();
+            tokio::spawn(async move {
+                let tls = match acceptor.accept(stream).await {
+                    Ok(tls) => tls,
+                    Err(error) => {
+                        tracing::debug!(%error, %peer, "inbound WSS handshake failed");
+                        return;
+                    }
+                };
+                adopt_upgraded(
+                    crate::ws::accept(tls, peer).await,
+                    peer,
+                    TransportKind::Wss,
+                    keepalive,
+                    &adopt,
+                )
+                .await;
+            });
+        }
+    });
+    Ok(addr)
+}
+
+/// Hand a completed WebSocket upgrade to the driver, or report why there was none.
+#[cfg(feature = "ws")]
+async fn adopt_upgraded<S>(
+    upgraded: std::result::Result<crate::ws::Socket<S>, crate::ws::WsError>,
+    peer: SocketAddr,
+    transport: TransportKind,
+    keepalive: std::time::Duration,
+    adopt: &mpsc::Sender<Adopt>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    match upgraded {
+        Ok(socket) => {
+            let key = ConnectionKey::new(peer, transport);
+            let _ = adopt
+                .send(Box::new(move |pool: &mut Pool| {
+                    pool.accept_ws(socket, key, keepalive);
+                }))
+                .await;
+        }
+        Err(error) => tracing::debug!(%error, %peer, "inbound websocket handshake failed"),
+    }
 }
 
 /// Bind UDP and TCP to the *same* port.
@@ -453,18 +748,26 @@ struct Driver {
     layer: TransactionLayer,
     timers: TimerQueue,
     destinations: HashMap<TransactionKey, Target>,
+    /// Where a response goes if the connection its request arrived on has closed.
+    ///
+    /// RFC 3261 §18.2.2: the address from `received` at the `sent-by` port, which is a port the
+    /// peer listens on — unlike the source port, which is the ephemeral one it dialled out
+    /// from. Held only for server transactions on a connection-oriented transport, because it
+    /// is the only case where the question arises.
+    reconnect: HashMap<TransactionKey, Target>,
     clients: HashMap<TransactionKey, mpsc::Sender<TuEvent>>,
     incoming: mpsc::Sender<Incoming>,
     commands: mpsc::Receiver<Command>,
     net: mpsc::Receiver<tcp::Event>,
     accepts: mpsc::Receiver<(tokio::net::TcpStream, SocketAddr)>,
-    #[cfg(feature = "tls")]
-    tls_accepts: mpsc::Receiver<(
-        tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-        SocketAddr,
-    )>,
+    adopts: mpsc::Receiver<Adopt>,
+    /// Held only to keep the adoption channel open when no optional listener is configured. A
+    /// closed channel would leave that `select!` branch resolving instantly on every pass.
+    _adopt: mpsc::Sender<Adopt>,
     #[cfg(feature = "tls")]
     tls_client: Option<crate::tls::ClientTls>,
+    #[cfg(feature = "ws")]
+    ws_keepalive: std::time::Duration,
     pool: Pool,
     limits: Limits,
     mtu: usize,
@@ -498,12 +801,10 @@ impl Driver {
                 },
                 Some(event) = self.net.recv() => self.on_net_event(event).await,
                 Some((stream, peer)) = self.accepts.recv() => self.pool.accept(stream, peer),
-                Some((stream, peer)) = recv_tls(&mut self.tls_accepts) => {
-                    self.pool.accept_tls(stream, peer);
-                }
+                Some(adopt) = self.adopts.recv() => adopt(&mut self.pool),
                 _ = idle_sweep.tick() => {
-                    for peer in self.pool.evict_idle() {
-                        tracing::debug!(%peer, "closed an idle connection");
+                    for closed in self.pool.evict_idle() {
+                        tracing::debug!(peer = %closed.peer, "closed an idle connection");
                     }
                 }
             }
@@ -530,9 +831,9 @@ impl Driver {
             } => {
                 self.on_message(*message, source, transport).await;
             }
-            tcp::Event::Closed { peer, transport } => {
-                self.pool.remove(peer);
-                self.fail_transactions_on(peer, transport).await;
+            tcp::Event::Closed { key } => {
+                self.pool.remove(&key);
+                self.fail_transactions_on(&key).await;
             }
         }
     }
@@ -541,11 +842,15 @@ impl Driver {
     ///
     /// The alternative is letting them time out, which means waiting up to 32 seconds to
     /// discover something already known — a bad experience and a resource leak.
-    async fn fail_transactions_on(&mut self, peer: SocketAddr, transport: TransportKind) {
+    async fn fail_transactions_on(&mut self, closed: &ConnectionKey) {
         let affected: Vec<TransactionKey> = self
             .destinations
             .iter()
-            .filter(|(_, target)| target.addr == peer && target.transport == transport)
+            .filter(|(_, target)| &target.connection() == closed)
+            // A server transaction that knows where the peer listens is not failed by the loss
+            // of the connection its request arrived on: RFC 3261 §18.2.2 has it open a new one
+            // to the advertised port, and the response is still deliverable.
+            .filter(|(key, _)| !self.reconnect.contains_key(*key))
             .map(|(key, _)| key.clone())
             .collect();
         for key in affected {
@@ -568,21 +873,30 @@ impl Driver {
         // RFC 5923: on a connection-oriented transport the response goes back over the
         // connection the request arrived on, before §18.2.2 is consulted at all. Opening a new
         // connection to a NATed client's `Via` cannot work.
-        let reply_to = match &message {
-            Message::Request(request) if transport == TransportKind::Udp => request
+        let advertised = match &message {
+            Message::Request(request) => request
                 .headers
                 .typed::<sipx_sip::headers::Via>()
                 .and_then(std::result::Result::ok)
-                .map_or_else(
-                    || Target::new(source, transport),
-                    |via| response_destination(&via, source, transport),
-                ),
+                .map(|via| response_destination(&via, source, transport)),
+            Message::Response(_) => None,
+        };
+        let reply_to = match &message {
+            Message::Request(_) if transport == TransportKind::Udp => advertised
+                .clone()
+                .unwrap_or_else(|| Target::new(source, transport)),
             _ => Target::new(source, transport),
         };
 
         match self.layer.receive(message, transport.reliability()) {
             Dispatch::Created { key, outputs } => {
                 self.destinations.insert(key.clone(), reply_to);
+                // §18.2.2's fallback only arises on a transport that has a connection to lose.
+                if transport.reliability().is_reliable()
+                    && let Some(advertised) = advertised
+                {
+                    self.reconnect.insert(key.clone(), advertised);
+                }
                 self.perform(&key, outputs, Some((source, transport))).await;
             }
             Dispatch::Matched { key, outputs } => {
@@ -646,6 +960,22 @@ impl Driver {
                 // response on the wire.
                 let _ = sent.send(());
             }
+            Command::Direct {
+                request,
+                target,
+                sent,
+            } => {
+                let bytes = Message::Request(*request).to_bytes();
+                let result = self.transmit(bytes, target, false, None).await;
+                let _ = sent.send(result);
+            }
+            Command::Outstanding(reply) => {
+                let (clients, servers) = self.layer.len();
+                // Destinations too, not only transactions: an entry there outlives its
+                // transaction only if `Terminated` failed to clean up, which is exactly the
+                // kind of leak a count of transactions alone would miss.
+                let _ = reply.send(clients + servers + self.destinations.len());
+            }
             Command::Shutdown => {}
         }
     }
@@ -671,7 +1001,8 @@ impl Driver {
                     let is_response = matches!(*message, Message::Response(_));
                     let bytes = message.to_bytes();
                     let addr = target.addr;
-                    if let Err(error) = self.transmit(bytes, target, is_response).await {
+                    let fallback = self.reconnect.get(key).cloned();
+                    if let Err(error) = self.transmit(bytes, target, is_response, fallback).await {
                         tracing::warn!(%error, %addr, "send failed");
                         let outputs = self.layer.on_transport_error(key);
                         Box::pin(self.perform(key, outputs, origin)).await;
@@ -684,6 +1015,7 @@ impl Driver {
                 Output::Terminated(_) => {
                     self.timers.forget(key);
                     self.destinations.remove(key);
+                    self.reconnect.remove(key);
                     // Dropping the sender closes the application's response stream, which is
                     // how it learns the transaction is over.
                     self.clients.remove(key);
@@ -699,13 +1031,25 @@ impl Driver {
     /// when the peer is behind a NAT. An outbound *request* is different: reusing an inbound
     /// connection for one is how a peer that connected to you gets your traffic routed
     /// through it, so that is off unless configured.
-    async fn transmit(&mut self, bytes: Bytes, target: Target, is_response: bool) -> Result<()> {
+    async fn transmit(
+        &mut self,
+        bytes: Bytes,
+        target: Target,
+        is_response: bool,
+        fallback: Option<Target>,
+    ) -> Result<()> {
         match target.transport {
             TransportKind::Udp => {
-                if bytes.len() > self.mtu {
-                    // RFC 3261 §18.1.1. Refusing by name beats sending something that will be
-                    // fragmented or silently truncated — a truncated SIP message is a security
-                    // problem, not a degraded one.
+                // RFC 3261 §18.1.1. Refusing by name beats sending something that will be
+                // fragmented or silently truncated — a truncated SIP message is a security
+                // problem, not a degraded one.
+                //
+                // Requests only. §18.1.1 offers a sender the alternative of switching to a
+                // congestion-controlled transport; §18.2.2 offers a *responder* nothing — the
+                // response goes back per the topmost `Via`, over the transport the request
+                // came in on. Refusing it here would answer a 200 with silence, leaving the
+                // caller to time out while the callee believes the call is up.
+                if !is_response && bytes.len() > self.mtu {
                     return Err(Error::TooLarge {
                         size: bytes.len(),
                         mtu: self.mtu,
@@ -715,17 +1059,26 @@ impl Driver {
                 Ok(())
             }
             TransportKind::Tcp => {
-                if is_response && self.pool.send_on_existing(target.addr, bytes.clone()).await {
+                let key = target.connection();
+                if is_response && self.pool.send_on_existing(&key, bytes.clone()).await {
                     return Ok(());
                 }
-                self.pool.send(target.addr, bytes).await
+                // The connection is gone. RFC 3261 §18.2.2 sends the response to the address
+                // the request came from at the port the sender said it listens on — not back
+                // at the ephemeral port it dialled out from, where nothing is accepting.
+                let key = match (is_response, &fallback) {
+                    (true, Some(advertised)) => advertised.connection(),
+                    _ => key,
+                };
+                self.pool.send(&key, bytes).await
             }
             #[cfg(feature = "tls")]
             TransportKind::Tls => {
                 // Answering on the connection the request arrived over comes first, and needs
                 // no client configuration at all — a pure TLS server has no reason to hold
                 // one, and requiring it would leave such a server unable to reply.
-                if is_response && self.pool.send_on_existing(target.addr, bytes.clone()).await {
+                let key = target.connection();
+                if is_response && self.pool.send_on_existing(&key, bytes.clone()).await {
                     return Ok(());
                 }
                 // Only opening a *new* connection needs somewhere to verify against.
@@ -740,8 +1093,36 @@ impl Driver {
                     .verify_as
                     .as_deref()
                     .map_or_else(|| target.addr.ip().to_string(), str::to_owned);
-                self.pool.send_tls(target.addr, &name, &client, bytes).await
+                self.pool.send_tls(&key, &name, &client, bytes).await
             }
+            #[cfg(feature = "ws")]
+            TransportKind::Ws | TransportKind::Wss => {
+                let key = target.connection();
+                // Unconditionally, and not only for responses. A WebSocket peer has no
+                // listening port (RFC 7118 §5.2), so an existing connection is not merely the
+                // preferred way to reach it — it is the only one. The pool's "do not carry
+                // outbound requests over an inbound connection" rule protects against traffic
+                // being routed through a peer that connected to us; here the peer *is* the
+                // destination, so there is nothing to route through and nothing to protect.
+                if self.pool.send_on_existing(&key, bytes.clone()).await {
+                    return Ok(());
+                }
+                let authority = target.verify_as.as_deref().map_or_else(
+                    || target.addr.to_string(),
+                    |name| format!("{name}:{}", target.addr.port()),
+                );
+                self.pool
+                    .send_ws(
+                        &key,
+                        &authority,
+                        self.ws_keepalive,
+                        #[cfg(feature = "wss")]
+                        self.tls_client.as_ref(),
+                        bytes,
+                    )
+                    .await
+            }
+            #[allow(unreachable_patterns)]
             other => Err(Error::UnsupportedTransport(other.as_str())),
         }
     }
@@ -807,20 +1188,6 @@ impl Driver {
             .local_addr()
             .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)))
     }
-}
-
-/// Receive from the TLS accept channel, or never when TLS is not configured.
-#[cfg(feature = "tls")]
-async fn recv_tls(
-    accepts: &mut mpsc::Receiver<(
-        tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-        SocketAddr,
-    )>,
-) -> Option<(
-    tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-    SocketAddr,
-)> {
-    accepts.recv().await
 }
 
 async fn sleep_until(deadline: Option<tokio::time::Instant>) {

@@ -166,27 +166,59 @@ impl Event {
 /// leave the far end holding a digit down forever. Three is the RFC's number.
 pub const END_RETRANSMISSIONS: usize = 3;
 
+/// One packet of a keypress: the event payload, plus where its segment sits in the
+/// event's timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TonePacket {
+    /// The four-byte payload.
+    pub event: Event,
+    /// The segment's start, in timestamp units after the event began.
+    ///
+    /// Zero for any event short enough to fit one segment. RFC 4733 §2.5.1.3: an event
+    /// that outlives the 16-bit duration field is continued as a new segment with a fresh
+    /// RTP timestamp, and this offset is what that timestamp moves by.
+    pub segment_offset: u32,
+}
+
 /// Build the packets for one keypress.
 ///
-/// Every packet shares `start_timestamp` — that is what marks them as one tone. The duration
-/// grows across the run, and the last packet is repeated with the end bit set.
+/// Every packet of a segment shares one RTP timestamp — the segment's start — which is
+/// what marks them as one tone. The duration grows across the run, and the last packet is
+/// repeated with the end bit set. An event too long for the duration field continues as a
+/// new segment (RFC 4733 §2.5.1.3): the duration restarts, the offset advances, and only
+/// the final segment carries the end bit.
 #[must_use]
-pub fn tone(digit: Digit, packets: usize, samples_per_packet: u16) -> Vec<Event> {
-    let mut events = Vec::with_capacity(packets + END_RETRANSMISSIONS);
+pub fn tone(digit: Digit, packets: usize, samples_per_packet: u16) -> Vec<TonePacket> {
     let steps = packets.max(1);
+    let mut events = Vec::with_capacity(steps + END_RETRANSMISSIONS);
+    let mut segment_offset: u32 = 0;
+    let mut duration: u32 = 0;
 
-    for step in 1..=steps {
-        let duration = samples_per_packet.saturating_mul(u16::try_from(step).unwrap_or(1));
-        events.push(Event::new(digit, duration));
+    for _ in 0..steps {
+        if duration + u32::from(samples_per_packet) > u32::from(u16::MAX) {
+            // The field is full: the event continues as a new segment rather than
+            // saturating, which would report a key stuck at 65535 for as long as it is
+            // held (RFC 4733 §2.5.1.3). The segment before it ends without the end bit —
+            // that bit ends the *event*, and only the last segment carries it.
+            segment_offset += duration;
+            duration = 0;
+        }
+        duration += u32::from(samples_per_packet);
+        events.push(TonePacket {
+            event: Event::new(digit, u16::try_from(duration).unwrap_or(u16::MAX)),
+            segment_offset,
+        });
     }
 
-    let total = samples_per_packet.saturating_mul(u16::try_from(steps).unwrap_or(1));
     for _ in 0..END_RETRANSMISSIONS {
-        events.push(Event {
-            digit,
-            end: true,
-            volume: 10,
-            duration: total,
+        events.push(TonePacket {
+            event: Event {
+                digit,
+                end: true,
+                volume: 10,
+                duration: u16::try_from(duration).unwrap_or(u16::MAX),
+            },
+            segment_offset,
         });
     }
     events
@@ -344,18 +376,67 @@ mod tests {
 
         let sounding: Vec<u16> = events
             .iter()
-            .filter(|e| !e.end)
-            .map(|e| e.duration)
+            .filter(|p| !p.event.end)
+            .map(|p| p.event.duration)
             .collect();
         assert_eq!(sounding, vec![160, 320, 480, 640], "duration accumulates");
 
-        let ends: Vec<&Event> = events.iter().filter(|e| e.end).collect();
+        let ends: Vec<&Event> = events
+            .iter()
+            .filter(|p| p.event.end)
+            .map(|p| &p.event)
+            .collect();
         assert_eq!(ends.len(), 3);
         assert!(
             ends.iter().all(|e| e.duration == 640),
             "every end packet reports the full duration"
         );
-        assert!(events.iter().all(|e| e.digit == Digit::Number(7)));
+        assert!(events.iter().all(|p| p.event.digit == Digit::Number(7)));
+        assert!(
+            events.iter().all(|p| p.segment_offset == 0),
+            "a short keypress is one segment"
+        );
+    }
+
+    /// RFC 4733 §2.5.1.3: an event that outlives the 16-bit duration field MUST be
+    /// continued as a new segment — fresh start timestamp, duration restarting — never
+    /// saturated at 65535, which reports a stuck key from ~8.19 s onward at 8 kHz.
+    #[test]
+    fn a_long_event_is_segmented_rather_than_saturated() {
+        // Ten seconds at 8 kHz, 160 samples per packet: 500 packets, 80000 units in all —
+        // more than one segment can carry.
+        let events = tone(Digit::Number(1), 500, 160);
+        assert!(
+            events
+                .iter()
+                .all(|packet| packet.event.duration != u16::MAX),
+            "no packet may report a saturated duration"
+        );
+
+        // 409 packets fill the first segment (65440 units); packet 410 starts the second.
+        let second = events
+            .iter()
+            .find(|packet| packet.segment_offset > 0)
+            .expect("the event is too long for one segment");
+        assert_eq!(second.segment_offset, 65_440);
+        assert_eq!(second.event.duration, 160, "the duration restarts");
+
+        // Only the last segment ends the event; a non-final segment just stops.
+        assert!(
+            events
+                .iter()
+                .filter(|packet| packet.event.end)
+                .all(|packet| packet.segment_offset == 65_440),
+            "the end bit belongs to the event, not to a segment"
+        );
+
+        // The segments cover the whole keypress, no more and no less.
+        let last = events.last().expect("an end packet");
+        assert_eq!(
+            last.segment_offset + u32::from(last.event.duration),
+            80_000,
+            "500 packets of 160 units"
+        );
     }
 
     /// The receiver's whole job: one keypress reported once, however many packets carried it.
@@ -364,8 +445,8 @@ mod tests {
     fn a_tone_is_reported_exactly_once() {
         let mut receiver = Receiver::new();
         let mut digits = Vec::new();
-        for event in tone(Digit::Number(3), 5, 160) {
-            if let Some(digit) = receiver.push(1000, &event) {
+        for packet in tone(Digit::Number(3), 5, 160) {
+            if let Some(digit) = receiver.push(1000, &packet.event) {
                 digits.push(digit);
             }
         }
@@ -379,8 +460,8 @@ mod tests {
         let mut receiver = Receiver::new();
         let mut digits = Vec::new();
         for timestamp in [1000u32, 5000] {
-            for event in tone(Digit::Number(4), 3, 160) {
-                if let Some(digit) = receiver.push(timestamp, &event) {
+            for packet in tone(Digit::Number(4), 3, 160) {
+                if let Some(digit) = receiver.push(timestamp, &packet.event) {
                     digits.push(digit);
                 }
             }
@@ -396,8 +477,8 @@ mod tests {
         for (index, c) in "1234*#".chars().enumerate() {
             let digit = Digit::from_char(c).expect("a digit");
             let timestamp = 1000 + u32::try_from(index).unwrap_or(0) * 2000;
-            for event in tone(digit, 3, 160) {
-                if let Some(reported) = receiver.push(timestamp, &event) {
+            for packet in tone(digit, 3, 160) {
+                if let Some(reported) = receiver.push(timestamp, &packet.event) {
                     collected.push(reported.as_char());
                 }
             }
@@ -413,7 +494,7 @@ mod tests {
         let events = tone(Digit::Star, 5, 160);
         // Only the last packet arrives.
         let last = events.last().expect("an end packet");
-        assert_eq!(receiver.push(2000, last), Some(Digit::Star));
+        assert_eq!(receiver.push(2000, &last.event), Some(Digit::Star));
     }
 
     #[test]
@@ -421,10 +502,10 @@ mod tests {
         let mut receiver = Receiver::new();
         let events = tone(Digit::Hash, 3, 160);
         assert!(receiver.in_progress().is_none());
-        receiver.push(1000, &events[0]);
+        receiver.push(1000, &events[0].event);
         assert_eq!(receiver.in_progress(), Some(Digit::Hash));
-        for event in &events[1..] {
-            receiver.push(1000, event);
+        for packet in &events[1..] {
+            receiver.push(1000, &packet.event);
         }
         assert!(receiver.in_progress().is_none(), "the tone is over");
     }

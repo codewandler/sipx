@@ -90,6 +90,11 @@ produces logs that look like authentication and are not.
 excluded. This will lock out some old SBCs, which is the point of a floor — the alternative is
 that every sipx deployment inherits their weaknesses.
 
+**[sipx]** sipx offers 1.3 and 1.2 and lets the server choose. A server that rejects the offer
+outright rather than selecting 1.2 is misconfigured, not old — Kamailio's default `tls_method`
+does exactly this, and `openssl s_client` fails against it too. sipx does not stop offering 1.3
+to accommodate it.
+
 **[sipx]** Cipher selection is left to the TLS library's defaults rather than pinned here. A
 hand-written cipher list is a snapshot of one afternoon's opinion, and it ages badly: the lists
 people pin are the reason deployments are still negotiating things nobody meant to allow.
@@ -99,25 +104,64 @@ people pin are the reason deployments are still negotiating things nobody meant 
 **[RFC 7118 §4]** The handshake negotiates the `sip` subprotocol. **[sipx]** A peer that does not
 offer it is refused: without the subprotocol there is no agreement about what the frames mean.
 
-**[RFC 7118 §5] One SIP message per WebSocket frame.** Not `Content-Length` framing — the frame
-boundary *is* the message boundary. A message split across frames is malformed, and two
-messages in one frame likewise.
+**[RFC 7118 §5] One SIP message per WebSocket message.** Not `Content-Length` framing — the
+frame boundary *is* the message boundary. A message split across frames is malformed, and two
+messages in one frame likewise. **[sipx]** Both close the connection rather than being patched
+up: a peer that frames wrongly has revealed it disagrees about where messages end, so nothing
+further from it can be trusted to be what it claims.
+
+**[sipx] `Content-Length` is optional here**, unlike on TCP and TLS. RFC 3261 §20.14 makes it
+mandatory on a stream because nothing else says where a message ends; a WebSocket message says,
+so a body simply runs to the end of it. Requiring it anyway would reject messages this transport
+can frame perfectly well.
+
+**[sipx] Text frames where the bytes allow it, binary otherwise.** RFC 7118 §5 permits either.
+Text is what a browser's network panel and every capture tool show as readable SIP; a body that
+is not valid UTF-8 cannot go in a text frame at all (RFC 6455 §5.6).
 
 **[RFC 7118 §5.2]** A WebSocket client has no listening port and can never be connected back to.
 Its `Via` sent-by is therefore an arbitrary unique hostname it invents, which is not resolvable
-and must not be resolved. **[sipx]** Every response and in-dialog request goes back over the
-same connection, unconditionally. This is the RFC 5923 rule from `T-3` made absolute: for
-WebSocket there is no fallback, because there is nowhere to fall back to.
+and must not be resolved. **[sipx]** sipx invents one per endpoint under `.invalid`, which
+RFC 2606 reserves precisely so that nothing will ever resolve it. An endpoint that *does* listen
+for WebSocket connections is not that client and keeps its own name.
 
-**[sipx]** Ping/pong keeps the connection alive. Intermediaries close idle sockets, and a
-registration whose connection has silently died is a phone that rings nowhere.
+**[sipx] The same applies to `Contact`, and it has to.** A dialog's remote target is taken from
+`Contact` (RFC 3261 §12.2.1.1), so a WebSocket client that advertised a real address there would
+have every in-dialog ACK and BYE aimed at a port that is not listening. sipx therefore writes
+the invented name, marked with the transport, and — on the receiving side — **ignores `Contact`
+entirely for in-dialog requests over WebSocket**: everything goes back over the connection the
+dialog was established on, unconditionally. This is the RFC 5923 rule from `T-3` made absolute:
+for WebSocket there is no fallback, because there is nowhere to fall back to.
+
+**[sipx]** Ping (RFC 6455 §5.5.2) keeps the connection alive, every 25 seconds by default.
+Intermediaries close idle sockets well inside a registration's lifetime, and a registration
+whose connection has silently died is a phone that rings nowhere. A Ping is also the only
+keep-alive that tells us something: the peer must answer it.
+
+**[sipx] WSS is §3 with §4 on top, and is not permitted to be anything else.** The certificate
+policy is not restated here because it is not reimplemented — the same `ClientTls`/`ServerTls`
+perform the same handshake before the upgrade begins. A second implementation of a security
+check is how one of the two ends up weaker.
 
 ## 5. Connection reuse under TLS
 
-**[sipx]** The pool from `T-3` keys connections by `(transport, remote address)`. Under TLS the
-*verified identity* joins that key: two names that resolve to one address are two connections.
-Reusing one for the other would mean traffic for `a.example.com` travelling over a connection
-authenticated as `b.example.com`, which defeats the check that was just performed.
+**[sipx]** The pool keys connections by `(remote address, transport, verified identity)`.
+
+The *transport* is in the key because TCP, TLS and WebSocket to one address are not
+interchangeable — they can share a port, and a `sips:` request riding a cleartext socket has
+silently become the thing it asked not to be.
+
+The *verified identity* is in the key because two names that resolve to one address are two
+connections. Reusing one for the other would mean traffic for `a.example.com` travelling over a
+connection authenticated as `b.example.com`, which defeats the check that was just performed. A
+connection a peer opened has no identity — sipx verified nothing about it — so it can never
+stand in for a name it never checked.
+
+**[sipx] The identity is the URI host, and it survives resolution.** RFC 3263 turns one name
+into a list of addresses by way of NAPTR and SRV records that may name something else entirely;
+the certificate is still checked against what the URI said. Attaching the resolved name instead
+would leave the handshake succeeding, the check apparently running, and whoever can influence
+DNS deciding which certificate is acceptable.
 
 ## 6. Test vectors
 
@@ -137,3 +181,15 @@ authenticated as `b.example.com`, which defeats the check that was just performe
 | W2 | One message per frame | Delivered |
 | W3 | Message split across two frames | Rejected as malformed |
 | W4 | Response to a WebSocket request | Returns on the same connection |
+| W5 | Two messages in one frame | Rejected as malformed |
+| W6 | Message with no `Content-Length` | Accepted; body runs to the end of the frame |
+| W7 | Server upgrading without echoing the subprotocol | Refused |
+| W8 | Outbound WebSocket request | `Via` sent-by and `Contact` are `.invalid` |
+| W9 | In-dialog BYE over a WebSocket | Goes over the connection, not to the `Contact` |
+| W10 | Idle connection | Pinged before an intermediary would time it out |
+| W11 | WS and TCP to one address | Two connections, not one reused |
+| W12 | WSS with a certificate for another host | Refused before the upgrade; nothing crosses |
+| I1 | Register over TLS against a third-party server | Accepted |
+| I2 | …presenting a certificate for another name | Refused, immediately |
+| I3 | …signed by an issuer we do not know | Refused, immediately |
+| I4 | Register over WebSocket against a third-party server | Accepted |

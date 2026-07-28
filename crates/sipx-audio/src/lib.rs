@@ -5,7 +5,11 @@
 //! to C.
 
 pub mod g711;
+pub mod mix;
+#[cfg(feature = "opus")]
+pub mod opus;
 pub mod wav;
 
 pub use g711::{alaw_decode, alaw_encode, ulaw_decode, ulaw_encode};
+pub use mix::{mix_excluding, mix_into};
 pub use wav::{Wav, read_wav, write_wav};

@@ -18,58 +18,10 @@
 
 use std::time::Duration;
 
-use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair, SanType,
-};
+use sipx_testkit::certs::{Ca, dns};
 use sipx_transport::tls::{ClientTls, Identity, ServerTls, TrustAnchors, verification_name};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-
-/// A certificate authority the test controls.
-struct Ca {
-    pem: String,
-    issuer: Issuer<'static, KeyPair>,
-}
-
-impl Ca {
-    fn new() -> Self {
-        let key = KeyPair::generate().expect("a key");
-        let mut params = CertificateParams::new(Vec::new()).expect("params");
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        let mut name = DistinguishedName::new();
-        name.push(DnType::CommonName, "sipx test CA");
-        params.distinguished_name = name;
-
-        let certificate = params.clone().self_signed(&key).expect("a CA certificate");
-        Self {
-            pem: certificate.pem(),
-            issuer: Issuer::new(params, key),
-        }
-    }
-
-    fn pem(&self) -> String {
-        self.pem.clone()
-    }
-
-    /// Issue a certificate carrying these subject alternative names, and this common name.
-    fn issue(&self, sans: &[SanType], common_name: &str) -> (String, String) {
-        let key = KeyPair::generate().expect("a key");
-        let mut params = CertificateParams::new(Vec::new()).expect("params");
-        params.subject_alt_names = sans.to_vec();
-        let mut name = DistinguishedName::new();
-        name.push(DnType::CommonName, common_name);
-        params.distinguished_name = name;
-
-        let signed = params
-            .signed_by(&key, &self.issuer)
-            .expect("a leaf certificate");
-        (signed.pem(), key.serialize_pem())
-    }
-}
-
-fn dns(name: &str) -> SanType {
-    SanType::DnsName(name.try_into().expect("a DNS name"))
-}
 
 /// Run one handshake and report what happened.
 ///
@@ -432,5 +384,79 @@ async fn a_wrong_certificate_stops_the_exchange_rather_than_downgrading() {
     assert!(
         server_rx.try_recv().is_err(),
         "a request must not cross a connection that failed verification"
+    );
+}
+
+/// L10. Two hosts served from one address are two connections, not one reused.
+///
+/// `docs/specs/sip-tls.md` §5. Handing traffic for `a.example.com` to a connection
+/// authenticated as `b.example.com` throws away the verification that was just performed —
+/// and a proxy serving many domains from one address is the ordinary case, not a contrived one.
+#[tokio::test]
+async fn two_names_on_one_address_are_two_connections() {
+    use sipx_transport::{ConnectionKey, Pool, PoolConfig, TransportKind};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("has an address");
+    let accepting = tokio::spawn(async move { listener.accept().await.expect("accepts") });
+    let _client = TcpStream::connect(addr).await.expect("connects");
+    let (_stream, peer) = accepting.await.expect("accepted");
+
+    let (events, _rx) = tokio::sync::mpsc::channel(64);
+    let pool = Pool::new(PoolConfig::default(), sipx_sip::Limits::stream(), events);
+
+    let one = ConnectionKey {
+        peer,
+        transport: TransportKind::Tls,
+        identity: Some(std::sync::Arc::from("a.example.com")),
+    };
+    let other = ConnectionKey {
+        peer,
+        transport: TransportKind::Tls,
+        identity: Some(std::sync::Arc::from("b.example.com")),
+    };
+
+    assert_ne!(
+        one, other,
+        "the verified name is part of what a connection is"
+    );
+    assert!(!pool.holds(&one) && !pool.holds(&other));
+
+    // And neither is the unverified connection a peer opened to the same address: sipx checked
+    // nothing about that one, so it cannot stand in for a name it never verified.
+    assert_ne!(one, ConnectionKey::new(peer, TransportKind::Tls));
+}
+
+/// RFC 3261 §18.1.1: the `Via` sent-by names where the sender expects responses to arrive,
+/// *for the transport in use*. TLS is listened for on its own port (§19.1.2), so a request
+/// dialled out over TLS that advertises the cleartext port sends any response that cannot
+/// reuse the connection to a port speaking a different protocol.
+#[tokio::test]
+async fn a_tls_sent_by_names_the_tls_port() {
+    use sipx_transport::{Config, TransportKind, bind};
+
+    let ca = Ca::new();
+    let (cert, key) = ca.issue(&[dns("localhost")], "localhost");
+    let identity = Identity::from_pem(cert.as_bytes(), key.as_bytes()).expect("an identity");
+    let server_tls = ServerTls::new(identity).expect("a server");
+
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.tls_server = Some((server_tls, 0));
+    let (endpoint, _rx) = bind(config).await.expect("binds");
+
+    let cleartext_port = endpoint.local_addr().port();
+    let tls_port = endpoint.tls_addr().expect("a TLS port was bound").port();
+    assert_ne!(cleartext_port, tls_port, "the listeners are separate");
+
+    let sent_by = endpoint.sent_by_for(TransportKind::Tls);
+    assert!(
+        sent_by.ends_with(&format!(":{tls_port}")),
+        "a TLS Via must name the TLS port, not {sent_by}"
+    );
+    assert!(
+        endpoint
+            .sent_by_for(TransportKind::Udp)
+            .ends_with(&format!(":{cleartext_port}")),
+        "and the cleartext transports keep theirs"
     );
 }

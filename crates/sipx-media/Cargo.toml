@@ -10,6 +10,12 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+## Opus (RFC 6716). Pulls in a C dependency through `sipx-audio`; off by default so the stack
+## stays pure Rust unless somebody asks for the codec.
+opus = ["sipx-audio/opus"]
+
 [dependencies]
 rand.workspace = true
 sipx-sdp.workspace = true

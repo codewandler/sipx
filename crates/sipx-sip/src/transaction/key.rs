@@ -34,6 +34,10 @@ pub enum TransactionKey {
         top_via: Vec<u8>,
         /// The `From` tag.
         from_tag: Vec<u8>,
+        /// The `To` tag, which RFC 3261 §17.2.3 makes part of the match: a forked INVITE
+        /// retried under a different tag, and an ACK belonging to another branch's response,
+        /// are separate transactions however alike the rest of their fields look.
+        to_tag: Vec<u8>,
         /// The `Call-ID`.
         call_id: Vec<u8>,
         /// The `CSeq` number.
@@ -98,6 +102,12 @@ impl TransactionKey {
                 .and_then(Result::ok)
                 .and_then(|f| f.tag().map(<[u8]>::to_vec))
                 .unwrap_or_default(),
+            to_tag: request
+                .headers
+                .typed::<crate::headers::To>()
+                .and_then(Result::ok)
+                .and_then(|t| t.tag().map(<[u8]>::to_vec))
+                .unwrap_or_default(),
             call_id: request
                 .headers
                 .value(&HeaderName::CallId)
@@ -149,6 +159,12 @@ impl TransactionKey {
                 .and_then(Result::ok)
                 .and_then(|f| f.tag().map(<[u8]>::to_vec))
                 .unwrap_or_default(),
+            to_tag: response
+                .headers
+                .typed::<crate::headers::To>()
+                .and_then(Result::ok)
+                .and_then(|t| t.tag().map(<[u8]>::to_vec))
+                .unwrap_or_default(),
             call_id: response
                 .headers
                 .value(&HeaderName::CallId)
@@ -182,6 +198,7 @@ impl TransactionKey {
                 request_uri,
                 top_via,
                 from_tag,
+                to_tag,
                 call_id,
                 cseq,
                 ..
@@ -189,6 +206,7 @@ impl TransactionKey {
                 request_uri,
                 top_via,
                 from_tag,
+                to_tag,
                 call_id,
                 cseq,
                 method: Method::Invite.as_bytes().to_vec(),

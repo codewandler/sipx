@@ -267,11 +267,35 @@ fn invite_client_stops_retransmitting_when_a_provisional_arrives() {
 
     let out = tx.on_response(response(&req, 180, None));
     assert_eq!(tx.state(), ClientState::Proceeding);
-    assert_eq!(cleared_timers(&out), vec![Timer::A]);
+    assert!(cleared_timers(&out).contains(&Timer::A));
+}
+
+/// RFC 3261 §17.1.1.2: Timer B terminates the INVITE machine from `Calling` only. Once a
+/// provisional has arrived the transaction waits in `Proceeding` with no timeout of its own —
+/// §16.6 item 11 says so outright, and it is why proxies need Timer C. Timing out here hangs
+/// up on a callee whose phone simply rang for longer than 64*T1.
+#[test]
+fn invite_client_does_not_time_out_once_a_provisional_has_arrived() {
+    let req = request(&Method::Invite, "z9hG4bK1");
+    let (mut tx, _) = ClientTransaction::new(req.clone(), Reliability::Unreliable, timers());
+
+    let out = tx.on_response(response(&req, 180, None));
+    assert_eq!(tx.state(), ClientState::Proceeding);
     assert!(
-        !cleared_timers(&out).contains(&Timer::B),
-        "Timer B stays: alive is not the same as answered"
+        cleared_timers(&out).contains(&Timer::B),
+        "the timeout is cancelled when the far end proves it is alive"
     );
+
+    let out = tx.on_timer(Timer::B);
+    assert!(
+        tu_events(&out).is_empty(),
+        "a stray Timer B in Proceeding is not a timeout"
+    );
+    assert_eq!(tx.state(), ClientState::Proceeding);
+
+    // And the answer that arrives forty seconds later still has a transaction to reach.
+    let out = tx.on_response(response(&req, 200, Some("t")));
+    assert!(matches!(tu_events(&out).as_slice(), [TuEvent::Response(_)]));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -324,22 +348,17 @@ fn non_invite_client_times_out_from_trying() {
 }
 
 /// And from `Proceeding`, where the far end has answered provisionally and then gone quiet.
+///
+/// This is the non-INVITE machine only: RFC 3261 §17.1.2.2 keeps Timer F running across
+/// `Trying` and `Proceeding` alike, which is the difference from Timer B.
 #[test]
-fn a_client_transaction_times_out_from_proceeding_too() {
+fn a_non_invite_client_transaction_times_out_from_proceeding_too() {
     let req = request(&Method::Options, "z9hG4bK2");
     let (mut tx, _) = ClientTransaction::new(req.clone(), Reliability::Unreliable, timers());
     let _ = tx.on_response(response(&req, 100, None));
     assert_eq!(tx.state(), ClientState::Proceeding);
 
     let out = tx.on_timer(Timer::F);
-    assert!(matches!(tu_events(&out).as_slice(), [TuEvent::Timeout]));
-    assert_eq!(tx.state(), ClientState::Terminated);
-
-    let req = request(&Method::Invite, "z9hG4bK3");
-    let (mut tx, _) = ClientTransaction::new(req.clone(), Reliability::Unreliable, timers());
-    let _ = tx.on_response(response(&req, 180, None));
-    assert_eq!(tx.state(), ClientState::Proceeding);
-    let out = tx.on_timer(Timer::B);
     assert!(matches!(tu_events(&out).as_slice(), [TuEvent::Timeout]));
     assert_eq!(tx.state(), ClientState::Terminated);
 }
@@ -581,6 +600,56 @@ fn legacy_branch_matching_rfc2543_fallback() {
     let dispatch = layer.receive(Message::Request(req), Reliability::Unreliable);
     assert!(matches!(dispatch, Dispatch::Matched { .. }));
     assert_eq!(layer.len(), (0, 1), "still exactly one server transaction");
+}
+
+/// RFC 3261 §17.2.3: under the pre-3261 rules the To tag is part of what distinguishes one
+/// transaction from another. Leaving it out lets a forked INVITE retried with a different tag
+/// — or an ACK belonging to another branch's response — be absorbed by the wrong transaction.
+#[test]
+fn legacy_matching_distinguishes_the_to_tag() {
+    let plain = request(&Method::Invite, "oldschoolbranch");
+    let tagged = RequestBuilder::new(Method::Invite, uri())
+        .header(
+            HeaderName::Via,
+            Bytes::from("SIP/2.0/UDP h.example.com;branch=oldschoolbranch"),
+        )
+        .expect("valid Via")
+        .header(HeaderName::From, "<sip:caller@example.net>;tag=abc")
+        .expect("valid From")
+        .header(HeaderName::To, "<sip:callee@example.com>;tag=totag")
+        .expect("valid To")
+        .header(HeaderName::CallId, "call-1@example.net")
+        .expect("valid Call-ID")
+        .cseq(1, &Method::Invite)
+        .expect("valid CSeq")
+        .max_forwards(70)
+        .build();
+
+    let untagged_key = TransactionKey::from_request(&plain).expect("a key");
+    let tagged_key = TransactionKey::from_request(&tagged).expect("a key");
+    assert!(untagged_key.is_legacy() && tagged_key.is_legacy());
+    assert_ne!(
+        untagged_key, tagged_key,
+        "the To tag distinguishes legacy transactions"
+    );
+}
+
+/// RFC 3261 §8.1.1 lists Max-Forwards among the headers that must be present in every
+/// request, and §17.1.1.3 has the transaction — not the TU — build the ACK for a non-2xx. A
+/// proxy entitled to reject the ACK restarts the far end's retransmissions until Timer H.
+#[test]
+fn the_ack_for_a_non_2xx_carries_max_forwards() {
+    let req = request(&Method::Invite, "z9hG4bK1");
+    let (mut tx, _) = ClientTransaction::new(req.clone(), Reliability::Unreliable, timers());
+
+    let out = tx.on_response(response(&req, 486, Some("t")));
+    let acks = sent_requests(&out);
+    let ack = acks.first().expect("an ACK");
+    assert_eq!(ack.method, Method::Ack);
+    assert_eq!(
+        ack.headers.value(&HeaderName::MaxForwards).as_deref(),
+        Some(b"70".as_slice())
+    );
 }
 
 /// T14: a CANCEL names the INVITE it cancels but runs in a transaction of its own.

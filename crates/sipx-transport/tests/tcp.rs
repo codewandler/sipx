@@ -295,3 +295,64 @@ async fn a_refused_connection_fails_its_transaction_promptly() {
     .expect("a refused connection must not hang the transaction");
     assert!(saw_error, "a refused connection is a transport error");
 }
+
+/// RFC 3261 §18.2.2: when the connection a request arrived on is gone, the response is sent by
+/// opening a connection to the `received` address "using the port in the `sent-by` value, or
+/// the default port for that transport". The source port is an ephemeral one the peer dialled
+/// out from and is listening on for nothing; dialling it back loses the response even though
+/// the peer is perfectly reachable at the port it advertised.
+#[tokio::test]
+async fn a_response_reconnects_to_the_sent_by_port_not_the_source_port() {
+    let (server, mut server_rx) = endpoint().await;
+    let server_addr = server.local_addr();
+
+    // Where the peer says it can be reached — a port it really is listening on, which is not
+    // the ephemeral port it dials out from.
+    let advertised = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let advertised_port = advertised.local_addr().expect("has an address").port();
+
+    let mut stream = tokio::net::TcpStream::connect(server_addr)
+        .await
+        .expect("connects");
+    let text = format!(
+        "OPTIONS sip:a@b.com SIP/2.0\r\n\
+         Via: SIP/2.0/TCP 127.0.0.1:{advertised_port};branch=z9hG4bKreconnect\r\n\
+         To: <sip:a@b.com>\r\n\
+         From: <sip:c@d.net>;tag=1\r\n\
+         Call-ID: reconnect@example.net\r\n\
+         CSeq: 1 OPTIONS\r\n\
+         Max-Forwards: 70\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    stream.write_all(text.as_bytes()).await.expect("writes");
+    stream.flush().await.expect("flushes");
+
+    let incoming = tokio::time::timeout(Duration::from_secs(2), server_rx.recv())
+        .await
+        .expect("no timeout")
+        .expect("a request");
+
+    // The peer goes away before the answer is ready, as a peer that has finished dialling out
+    // routinely does.
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let response = ok_for(&incoming.request);
+    let _ = server.respond(&incoming.key, response).await;
+
+    let (mut accepted, _) = tokio::time::timeout(Duration::from_secs(2), advertised.accept())
+        .await
+        .expect("the response must be sent to the advertised port")
+        .expect("accepts");
+    let mut buf = vec![0u8; 4096];
+    let read = tokio::time::timeout(Duration::from_secs(2), accepted.read(&mut buf))
+        .await
+        .expect("no timeout")
+        .expect("reads");
+    assert!(
+        String::from_utf8_lossy(&buf[..read]).starts_with("SIP/2.0 200"),
+        "the reopened connection carries the response"
+    );
+}

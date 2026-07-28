@@ -183,21 +183,60 @@ impl TypedHeader for Date {
 
     fn decode(value: &[u8]) -> Result<Self, HeaderError> {
         const LABEL: &str = "Date";
+        // The alphabets are fixed by the grammar, and matched case-sensitively: rfc1123-date
+        // is case-sensitive (RFC 2616 §3.3.1), and its dates are what SIP-date narrows down
+        // to (RFC 3261 §20.17).
+        const WKDAYS: [&[u8]; 7] = [b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat", b"Sun"];
+        const MONTHS: [&[u8]; 12] = [
+            b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov",
+            b"Dec",
+        ];
         let value = trim(value);
 
-        // SIP-date = wkday "," SP date1 SP time SP "GMT"
-        if !value.ends_with(b"GMT") {
-            return Err(HeaderError::Syntax { header: LABEL });
-        }
-        // "Mon, 01 Jan 2010 16:00:00 GMT" is 29 octets; anything shorter cannot be one.
+        // SIP-date = wkday "," SP date1 SP time SP "GMT". Every field is of fixed width, so
+        // "Mon, 01 Jan 2010 16:00:00 GMT" is 29 octets and each field sits at a fixed offset.
         if value.len() != 29 {
             return Err(HeaderError::Syntax { header: LABEL });
         }
-        if value.get(3) != Some(&b',') || value.get(4) != Some(&b' ') {
+        let field = |from: usize, to: usize| value.get(from..to).unwrap_or(&[]);
+        if field(3, 5) != b", "
+            || field(7, 8) != b" "
+            || field(11, 12) != b" "
+            || field(16, 17) != b" "
+            || field(19, 20) != b":"
+            || field(22, 23) != b":"
+            || field(25, 26) != b" "
+            || field(26, 29) != b"GMT"
+        {
             return Err(HeaderError::Syntax { header: LABEL });
         }
+        if !WKDAYS.contains(&field(0, 3))
+            || !MONTHS.contains(&field(8, 11))
+            || !field(12, 16).iter().all(u8::is_ascii_digit)
+        {
+            return Err(HeaderError::Syntax { header: LABEL });
+        }
+
+        let day = two_digits(value, 5).ok_or(HeaderError::Syntax { header: LABEL })?;
+        let hour = two_digits(value, 17).ok_or(HeaderError::Syntax { header: LABEL })?;
+        let minute = two_digits(value, 20).ok_or(HeaderError::Syntax { header: LABEL })?;
+        let second = two_digits(value, 23).ok_or(HeaderError::Syntax { header: LABEL })?;
+        // The grammar's own bounds: date1 has at most 31 days, and the comment on `time`
+        // stops it at 23:59:59 (RFC 3261 §25.1) — no leap-second allowance.
+        if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 59 {
+            return Err(HeaderError::OutOfRange { header: LABEL });
+        }
+
         Ok(Self(value.to_vec()))
     }
+}
+
+/// The `2DIGIT` field starting at `at`, or `None` if either octet is not a digit.
+#[must_use]
+fn two_digits(value: &[u8], at: usize) -> Option<u8> {
+    let hi = value.get(at)?.checked_sub(b'0')?;
+    let lo = value.get(at + 1)?.checked_sub(b'0')?;
+    (hi <= 9 && lo <= 9).then_some(hi * 10 + lo)
 }
 
 /// A header whose value is a comma-separated list of tokens: `Allow`, `Supported`,
@@ -206,14 +245,20 @@ impl TypedHeader for Date {
 pub struct TokenList(pub Vec<Vec<u8>>);
 
 impl TokenList {
-    fn decode_named(value: &[u8], header: &'static str) -> Result<Self, HeaderError> {
+    fn decode_named(
+        value: &[u8],
+        header: &'static str,
+        may_be_empty: bool,
+    ) -> Result<Self, HeaderError> {
         let mut tokens = Vec::new();
         for part in grammar::split_list(value, header)? {
             let token = trim(part);
-            // An entirely empty value is a legitimate "none of them" — `Supported:` with
-            // nothing after it says the peer supports no extensions.
+            // An entirely empty value is a legitimate "none of them" for `Allow` and
+            // `Supported`, whose ABNF brackets the whole value — but `Require`,
+            // `Proxy-Require` and `Unsupported` are `option-tag *(COMMA option-tag)` and
+            // demand at least one tag (RFC 3261 §25.1).
             if token.is_empty() {
-                if grammar::split_list(value, header)?.len() == 1 {
+                if may_be_empty && grammar::split_list(value, header)?.len() == 1 {
                     return Ok(Self(Vec::new()));
                 }
                 return Err(HeaderError::Syntax { header });
@@ -236,7 +281,7 @@ impl TokenList {
 }
 
 macro_rules! token_list_header {
-    ($(#[$meta:meta])* $type:ident => $variant:ident, $label:literal) => {
+    ($(#[$meta:meta])* $type:ident => $variant:ident, $label:literal, $may_be_empty:literal) => {
         $(#[$meta])*
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct $type(pub TokenList);
@@ -252,7 +297,7 @@ macro_rules! token_list_header {
             const NAME: HeaderName = HeaderName::$variant;
 
             fn decode(value: &[u8]) -> Result<Self, HeaderError> {
-                TokenList::decode_named(value, $label).map(Self)
+                TokenList::decode_named(value, $label, $may_be_empty).map(Self)
             }
         }
     };
@@ -260,23 +305,23 @@ macro_rules! token_list_header {
 
 token_list_header!(
     /// The `Allow` header (RFC 3261 §20.5).
-    Allow => Allow, "Allow"
+    Allow => Allow, "Allow", true
 );
 token_list_header!(
     /// The `Supported` header (RFC 3261 §20.37).
-    Supported => Supported, "Supported"
+    Supported => Supported, "Supported", true
 );
 token_list_header!(
     /// The `Require` header (RFC 3261 §20.32).
-    Require => Require, "Require"
+    Require => Require, "Require", false
 );
 token_list_header!(
     /// The `Proxy-Require` header (RFC 3261 §20.29).
-    ProxyRequire => ProxyRequire, "Proxy-Require"
+    ProxyRequire => ProxyRequire, "Proxy-Require", false
 );
 token_list_header!(
     /// The `Unsupported` header (RFC 3261 §20.40).
-    Unsupported => Unsupported, "Unsupported"
+    Unsupported => Unsupported, "Unsupported", false
 );
 
 #[cfg(test)]
@@ -364,6 +409,42 @@ mod tests {
         assert!(Date::decode(b"nonsense GMT").is_err());
     }
 
+    /// RFC 3261 §25.1: `wkday` and `month` are fixed alphabets, the numeric fields are
+    /// `2DIGIT`/`4DIGIT`, and the time comment bounds them at 23:59:59. The right shape with
+    /// the wrong contents is not a date.
+    #[test]
+    fn date_validates_every_field_not_just_the_shape() {
+        for bad in [
+            &b"aaa, aaaaaaaaaaaaaaaaaaaa GMT"[..],
+            b"Fri, 32 Jan 2010 25:99:99 GMT",
+            b"Xyz, 01 Jan 2010 16:00:00 GMT",
+            b"Fri, 00 Jan 2010 16:00:00 GMT",
+            b"Fri, 01 Foo 2010 16:00:00 GMT",
+            b"Fri, 01 Jan 2010 24:00:00 GMT",
+            b"Fri, 01 Jan 2010 16:60:00 GMT",
+            b"Fri, 01 Jan 2010 16:00:60 GMT",
+            b"Fri, 01 Jan x010 16:00:00 GMT",
+            b"Fri, 01 Jan 2010 16.00.00 GMT",
+        ] {
+            assert!(
+                Date::decode(bad).is_err(),
+                "{:?} should be rejected",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        for good in [
+            &b"Mon, 01 Jan 2010 00:00:00 GMT"[..],
+            b"Sat, 13 Nov 2010 23:29:00 GMT",
+            b"Sun, 31 Dec 2699 23:59:59 GMT",
+        ] {
+            assert!(
+                Date::decode(good).is_ok(),
+                "{:?} should parse",
+                String::from_utf8_lossy(good)
+            );
+        }
+    }
+
     #[test]
     fn token_lists_split_and_compare_case_insensitively() {
         let allow = Allow::decode(b"INVITE, ACK, OPTIONS, CANCEL, BYE").unwrap();
@@ -375,6 +456,24 @@ mod tests {
         assert_eq!(Supported::decode(b"").unwrap().0.0.len(), 0);
         // But a stray comma is a malformed list, not an empty one.
         assert!(Supported::decode(b"100rel,,timer").is_err());
+    }
+
+    /// RFC 3261 §25.1 brackets the value of `Allow` and `Supported`, so those may be empty;
+    /// `Require`, `Proxy-Require` and `Unsupported` are `option-tag *(COMMA option-tag)` and
+    /// demand at least one tag.
+    #[test]
+    fn only_allow_and_supported_may_be_empty() {
+        assert!(Allow::decode(b"").is_ok());
+        assert!(Supported::decode(b"").is_ok());
+
+        assert!(Require::decode(b"").is_err());
+        assert!(ProxyRequire::decode(b"").is_err());
+        assert!(Unsupported::decode(b"").is_err());
+
+        // With a tag present all five parse alike.
+        assert!(Require::decode(b"100rel").is_ok());
+        assert!(ProxyRequire::decode(b"sec-agree").is_ok());
+        assert!(Unsupported::decode(b"foo, bar").is_ok());
     }
 
     #[test]

@@ -119,9 +119,12 @@ impl ClientTransaction {
 
                 if status.is_provisional() {
                     if from_calling {
-                        // Provisional means the far end is alive: stop retransmitting, but
-                        // keep Timer B, because "alive" is not "answered".
+                        // Provisional means the far end is alive: stop retransmitting, and
+                        // drop the timeout with it. RFC 3261 §17.1.1.2 fires Timer B from
+                        // Calling only, because a phone may legitimately ring for far longer
+                        // than 64*T1 and the answer must still find its transaction.
                         out.push(Output::ClearTimer(Timer::A));
+                        out.push(Output::ClearTimer(Timer::B));
                     }
                     self.state = ClientState::Proceeding;
                     out.push(Output::to_tu(TuEvent::Response(Box::new(response))));
@@ -239,14 +242,13 @@ impl ClientTransaction {
                     },
                 ]
             }
-            // Timer B belongs to the INVITE machine, which waits in Calling; Timer F to the
-            // non-INVITE one, which waits in Trying. Both also apply from Proceeding, where a
-            // provisional response has arrived but no final one — the far end is alive and
-            // still has to answer within 64*T1.
-            (
-                ClientState::Calling | ClientState::Trying | ClientState::Proceeding,
-                Timer::B | Timer::F,
-            ) => {
+            // Timer B belongs to the INVITE machine and fires only from Calling (§17.1.1.2):
+            // once a provisional has arrived the INVITE transaction has no timeout of its own,
+            // which §16.6 item 11 states outright and is the reason Timer C exists at proxies.
+            // Timer F belongs to the non-INVITE machine and does carry over into Proceeding
+            // (§17.1.2.2) — the asymmetry is deliberate, not an oversight.
+            (ClientState::Calling, Timer::B)
+            | (ClientState::Trying | ClientState::Proceeding, Timer::F) => {
                 self.state = ClientState::Terminated;
                 vec![
                     Output::to_tu(TuEvent::Timeout),
@@ -300,6 +302,12 @@ fn make_ack(request: &Request, response: &Response) -> Request {
     for route in request.headers.get_all(&HeaderName::Route) {
         ack.headers.push(route.clone());
     }
+    // RFC 3261 §8.1.1: Max-Forwards is mandatory in every request, the ACK included. A proxy
+    // is entitled to reject one that lacks it, which restarts the far end's retransmissions.
+    ack.headers.push(Header::new_unchecked(
+        HeaderName::MaxForwards,
+        bytes::Bytes::from_static(b"70"),
+    ));
 
     // Same sequence number, method ACK.
     let sequence = request

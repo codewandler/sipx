@@ -121,7 +121,9 @@ pub enum Version {
 impl Version {
     #[must_use]
     pub(crate) fn parse(raw: &Bytes) -> Self {
-        if raw.as_ref() == b"SIP/2.0" {
+        // RFC 3261 §7.1: "The SIP-Version string is case-insensitive, but implementations
+        // MUST send upper-case." Serialization stays upper-case; only recognition folds.
+        if raw.eq_ignore_ascii_case(b"SIP/2.0") {
             Self::Sip20
         } else {
             Self::Other(raw.clone())
@@ -622,6 +624,15 @@ pub trait TypedHeader: Sized {
 
     /// Parse one header value. The value arrives unfolded and trimmed.
     fn decode(value: &[u8]) -> Result<Self, HeaderError>;
+
+    /// Parse every value in one header row.
+    ///
+    /// RFC 3261 §7.3 makes a comma-joined row exactly equivalent to the same values on
+    /// separate rows for headers whose grammar is a comma-separated list; those headers
+    /// override this. Everything else carries exactly one value per row.
+    fn decode_list(value: &[u8]) -> Result<Vec<Self>, HeaderError> {
+        Self::decode(value).map(|one| vec![one])
+    }
 }
 
 impl Headers {
@@ -635,13 +646,19 @@ impl Headers {
         self.get(&H::NAME).map(|h| H::decode(&h.value()))
     }
 
-    /// Parse every header of this type, in wire order.
-    pub fn typed_all<H: TypedHeader>(&self) -> impl Iterator<Item = Result<H, HeaderError>> + '_ {
-        // Bound the name to a local so the iterator can borrow it.
+    /// Parse every header of this type, in wire order, yielding each element of a
+    /// comma-separated row separately — one row of `n` values and `n` rows of one value are
+    /// the same message (RFC 3261 §7.3).
+    pub fn typed_all<'a, H: TypedHeader + 'a>(
+        &'a self,
+    ) -> impl Iterator<Item = Result<H, HeaderError>> + 'a {
         self.entries
             .iter()
             .filter(|h| h.name() == &H::NAME)
-            .map(|h| H::decode(&h.value()))
+            .flat_map(|h| match H::decode_list(&h.value()) {
+                Ok(values) => values.into_iter().map(Ok).collect::<Vec<_>>(),
+                Err(e) => vec![Err(e)],
+            })
     }
 }
 
@@ -724,6 +741,37 @@ mod tests {
             Bytes::from_static(b"newest"),
         ));
         assert_eq!(headers.value(&HeaderName::Via).unwrap().as_ref(), b"newest");
+    }
+
+    /// RFC 3261 §7.3: `Contact: <a>, <b>` and two `Contact` rows are the same message, so
+    /// iterating the typed values must yield the same elements either way.
+    #[test]
+    fn typed_all_yields_each_element_of_a_comma_separated_row() {
+        use crate::headers::Contact;
+
+        let mut headers = Headers::new();
+        headers.push(Header::new_unchecked(
+            HeaderName::Contact,
+            Bytes::from_static(b"<sip:a@b.com>, <sip:c@d.com>"),
+        ));
+        headers.push(Header::new_unchecked(
+            HeaderName::Contact,
+            Bytes::from_static(b"<sip:e@f.org>"),
+        ));
+
+        let contacts: Vec<Contact> = headers
+            .typed_all::<Contact>()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let uris: Vec<_> = contacts.iter().map(|c| c.uri.to_bytes()).collect();
+        assert_eq!(
+            uris,
+            vec![
+                Bytes::from_static(b"sip:a@b.com"),
+                Bytes::from_static(b"sip:c@d.com"),
+                Bytes::from_static(b"sip:e@f.org"),
+            ]
+        );
     }
 
     #[test]

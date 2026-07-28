@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_sip::build::RequestBuilder;
-use sipx_sip::{HeaderName, Method, Request, Response, Uri};
+use sipx_sip::headers::ContactValue;
+use sipx_sip::{Address, HeaderName, Method, Request, Response, Uri};
 
 use crate::auth::{Challenge, Credentials, new_cnonce, respond, strongest};
 
@@ -121,14 +122,17 @@ impl Registration {
 }
 
 /// Read what a registrar said.
+///
+/// `contact` is the `Contact` this client registered, needed to find its own binding among
+/// the ones the 200 lists.
 #[must_use]
-pub fn interpret(response: &Response, asked_for: Duration) -> Outcome {
+pub fn interpret(response: &Response, asked_for: Duration, contact: &str) -> Outcome {
     let status = response.status.code();
 
     if (200..300).contains(&status) {
         // The registrar's number wins. Refreshing on our own instead is how a client
         // de-registers itself on every cycle.
-        let granted = granted_expiry(response).unwrap_or(asked_for);
+        let granted = granted_expiry(response, contact).unwrap_or(asked_for);
         return Outcome::Registered(Lease::from_granted(granted));
     }
 
@@ -155,14 +159,27 @@ pub fn interpret(response: &Response, asked_for: Duration) -> Outcome {
     }
 }
 
-/// The lease the registrar granted.
+/// The lease the registrar granted to *this client's* binding.
 ///
-/// It may be in the `Contact` parameters or in `Expires`; the `Contact` wins, because it is
-/// per-contact and the header is not.
-fn granted_expiry(response: &Response) -> Option<Duration> {
-    for header in response.headers.get_all(&HeaderName::Contact) {
-        if let Some(seconds) = contact_expires(&header.value()) {
-            return Some(Duration::from_secs(seconds));
+/// RFC 3261 §10.3 step 8: the 200 lists every current binding for the address of record,
+/// not just the one refreshed, so per §10.2.4 the client finds its own by URI comparison
+/// (§19.1.4) and takes the expiry from that row. The first row may be another device on
+/// another lease. Only when no row is ours does the `Expires` header speak — it is the
+/// per-contact parameter that is per-binding, not the header.
+fn granted_expiry(response: &Response, contact: &str) -> Option<Duration> {
+    if let Ok(own) = Address::parse(contact.as_bytes(), "Contact") {
+        for value in response.headers.typed_all::<ContactValue>() {
+            let Ok(ContactValue::Address(address)) = value else {
+                continue;
+            };
+            if !address.uri.equivalent(&own.uri) {
+                continue;
+            }
+            if let Some(seconds) = contact_expires(&address) {
+                return Some(Duration::from_secs(seconds));
+            }
+            // Our binding, listed without a per-contact expiry: the header applies to it.
+            break;
         }
     }
     response
@@ -176,16 +193,9 @@ fn granted_expiry(response: &Response) -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
-fn contact_expires(value: &[u8]) -> Option<u64> {
-    let text = std::str::from_utf8(value).ok()?;
-    for part in text.split(';').skip(1) {
-        let mut halves = part.splitn(2, '=');
-        let name = halves.next()?.trim();
-        if name.eq_ignore_ascii_case("expires") {
-            return halves.next()?.trim().trim_matches('"').parse().ok();
-        }
-    }
-    None
+fn contact_expires(address: &Address) -> Option<u64> {
+    let value = address.param("expires")?;
+    std::str::from_utf8(value).ok()?.trim().parse().ok()
 }
 
 /// Add credentials answering a challenge to a request.
@@ -221,11 +231,14 @@ mod tests {
     use super::*;
     use sipx_sip::{Host, HostName, Limits, Message, parse_datagram};
 
+    /// The `Contact` this client registers in every test here.
+    const CONTACT: &str = "<sip:alice@192.0.2.5:5060>";
+
     fn registration() -> Registration {
         Registration {
             registrar: Uri::sip(Host::Name(HostName::new("example.com").expect("valid"))),
             aor: "<sip:alice@example.com>".to_owned(),
-            contact: "<sip:alice@192.0.2.5:5060>".to_owned(),
+            contact: CONTACT.to_owned(),
             expires: Duration::from_secs(3600),
             call_id: "reg-1@192.0.2.5".to_owned(),
             cseq: 1,
@@ -273,6 +286,7 @@ mod tests {
         let outcome = interpret(
             &ok_with("Contact: <sip:alice@192.0.2.5:5060>;expires=60\r\n"),
             Duration::from_secs(3600),
+            CONTACT,
         );
         match outcome {
             Outcome::Registered(lease) => assert_eq!(lease.granted, Duration::from_secs(60)),
@@ -286,6 +300,7 @@ mod tests {
         let outcome = interpret(
             &ok_with("Expires: 3600\r\nContact: <sip:alice@192.0.2.5:5060>;expires=120\r\n"),
             Duration::from_secs(3600),
+            CONTACT,
         );
         match outcome {
             Outcome::Registered(lease) => assert_eq!(lease.granted, Duration::from_secs(120)),
@@ -293,9 +308,33 @@ mod tests {
         }
     }
 
+    /// RFC 3261 §10.3 step 8: the 200 lists every current binding for the address of
+    /// record, and §10.2.4 has the client find its own by URI comparison (§19.1.4). Another
+    /// device's binding listed first must not become this client's refresh schedule — a
+    /// lease scheduled off the wrong row lapses while the client still believes it holds it.
+    #[test]
+    fn the_expiry_comes_from_our_own_binding_not_the_first_listed() {
+        let outcome = interpret(
+            &ok_with(
+                "Contact: <sip:alice@198.51.100.9:5060>;expires=3600\r\n\
+                 Contact: <sip:alice@192.0.2.5:5060>;expires=60\r\n",
+            ),
+            Duration::from_secs(3600),
+            CONTACT,
+        );
+        match outcome {
+            Outcome::Registered(lease) => assert_eq!(lease.granted, Duration::from_secs(60)),
+            other => panic!("expected a lease, got {other:?}"),
+        }
+    }
+
     #[test]
     fn the_expires_header_is_used_when_the_contact_has_none() {
-        let outcome = interpret(&ok_with("Expires: 300\r\n"), Duration::from_secs(3600));
+        let outcome = interpret(
+            &ok_with("Expires: 300\r\n"),
+            Duration::from_secs(3600),
+            CONTACT,
+        );
         match outcome {
             Outcome::Registered(lease) => assert_eq!(lease.granted, Duration::from_secs(300)),
             other => panic!("expected a lease, got {other:?}"),
@@ -333,7 +372,7 @@ mod tests {
              WWW-Authenticate: Digest realm=\"example.com\", nonce=\"abc\", qop=\"auth\"\r\n\
              Content-Length: 0\r\n\r\n",
         );
-        match interpret(&challenged, Duration::from_secs(3600)) {
+        match interpret(&challenged, Duration::from_secs(3600), CONTACT) {
             Outcome::Challenged(challenge) => {
                 assert_eq!(challenge.realm, "example.com");
                 assert!(challenge.qop_auth);
@@ -355,7 +394,7 @@ mod tests {
              Proxy-Authenticate: Digest realm=\"p\", nonce=\"n\"\r\n\
              Content-Length: 0\r\n\r\n",
         );
-        match interpret(&challenged, Duration::from_secs(3600)) {
+        match interpret(&challenged, Duration::from_secs(3600), CONTACT) {
             Outcome::Challenged(challenge) => {
                 assert!(challenge.from_proxy);
                 assert_eq!(challenge.response_header(), HeaderName::ProxyAuthorization);
@@ -375,7 +414,7 @@ mod tests {
              CSeq: 1 REGISTER\r\n\
              Content-Length: 0\r\n\r\n",
         );
-        match interpret(&refused, Duration::from_secs(3600)) {
+        match interpret(&refused, Duration::from_secs(3600), CONTACT) {
             Outcome::Rejected { status, reason } => {
                 assert_eq!(status, 403);
                 assert_eq!(reason, "Forbidden");
@@ -399,7 +438,7 @@ mod tests {
              Content-Length: 0\r\n\r\n",
         );
         assert!(matches!(
-            interpret(&bad, Duration::from_secs(3600)),
+            interpret(&bad, Duration::from_secs(3600), CONTACT),
             Outcome::Rejected { status: 401, .. }
         ));
     }

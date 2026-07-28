@@ -21,9 +21,11 @@ pub mod tcp;
 pub mod timers;
 #[cfg(feature = "tls")]
 pub mod tls;
+#[cfg(feature = "ws")]
+pub mod ws;
 
 pub use endpoint::{Config, Handle, Incoming, Responses, bind, new_branch};
 pub use error::{Error, Result};
 pub use resolve::{Naptr, Resolver, Srv, resolve};
-pub use target::{Target, TransportKind};
+pub use target::{ConnectionKey, Target, TransportKind};
 pub use tcp::{Pool, PoolConfig};

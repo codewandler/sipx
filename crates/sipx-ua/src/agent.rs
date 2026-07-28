@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_sip::build::ResponseBuilder;
-use sipx_sip::{HeaderName, Method, Request, StatusCode, Uri};
+use sipx_sip::{Address, HeaderName, Method, Request, StatusCode, Uri};
 use sipx_transport::{Handle, Incoming, Target};
 
 use crate::auth::Credentials;
@@ -64,7 +64,9 @@ pub struct UserAgent {
     endpoint: Handle,
     config: Config,
     registration: Registration,
-    nonce_count: u32,
+    /// The last nonce answered, and how many requests have used it. RFC 7616 §3.4.3 defines
+    /// `nc` per nonce, not per client, so the pair travels together.
+    nonce_use: Option<(String, u32)>,
 }
 
 impl UserAgent {
@@ -87,7 +89,7 @@ impl UserAgent {
             endpoint,
             config,
             registration,
-            nonce_count: 0,
+            nonce_use: None,
         }
     }
 
@@ -110,9 +112,9 @@ impl UserAgent {
                 .ok_or(Error::CredentialsRequired)?;
 
             self.registration.advance();
-            self.nonce_count = self.nonce_count.saturating_add(1);
+            let count = nonce_count_for(&mut self.nonce_use, &challenge.nonce);
             request = self.registration.request()?;
-            registrar::authorize(&mut request, &challenge, credentials, self.nonce_count)?;
+            registrar::authorize(&mut request, &challenge, credentials, count)?;
             outcome = self.attempt(request).await?;
 
             // A stale nonce is the server asking for the same credentials against a fresh
@@ -121,9 +123,9 @@ impl UserAgent {
                 && again.stale
             {
                 self.registration.advance();
-                self.nonce_count = self.nonce_count.saturating_add(1);
+                let count = nonce_count_for(&mut self.nonce_use, &again.nonce);
                 let mut retry = self.registration.request()?;
-                registrar::authorize(&mut retry, again, credentials, self.nonce_count)?;
+                registrar::authorize(&mut retry, again, credentials, count)?;
                 outcome = self.attempt(retry).await?;
             }
         }
@@ -141,7 +143,11 @@ impl UserAgent {
             .send(request, self.config.target.clone())
             .await?;
         let response = responses.final_response().await.ok_or(Error::NoResponse)?;
-        Ok(registrar::interpret(&response, self.config.expires))
+        Ok(registrar::interpret(
+            &response,
+            self.config.expires,
+            &self.registration.contact,
+        ))
     }
 
     /// Register and keep registering, refreshing before each lease expires.
@@ -179,7 +185,7 @@ impl UserAgent {
     /// The point of OPTIONS is the capability list, so a 200 with an empty `Allow` is a wasted
     /// exchange: the peer asked what we can do and learned nothing.
     async fn answer_options(&self, incoming: &Incoming) -> Result<()> {
-        let response = ResponseBuilder::to_request(
+        let mut builder = ResponseBuilder::to_request(
             &incoming.request,
             StatusCode::new(200).ok_or(Error::NoResponse)?,
             "OK",
@@ -192,8 +198,20 @@ impl UserAgent {
         .header(
             HeaderName::UserAgent,
             Bytes::from(self.config.user_agent.clone()),
-        )?
-        .build();
+        )?;
+        // RFC 3261 §8.2.6.2: every response but a 100 must carry a `To` tag, and an
+        // out-of-dialog request arrives without one, so the tag is added rather than
+        // copied. `new_cnonce` gives 64 random bits, which covers §19.3's demand for global
+        // uniqueness with at least 32 bits of randomness. Appending works in both forms of
+        // the header: after `>` in a name-addr, and after a bare addr-spec, where the
+        // semicolon starts a header parameter (RFC 3261 §20).
+        if let Some(to) = tagless_to(&incoming.request) {
+            builder = builder.set_header(
+                &HeaderName::To,
+                Bytes::from(format!("{to};tag={}", crate::auth::new_cnonce())),
+            )?;
+        }
+        let response = builder.build();
         self.endpoint.respond(&incoming.key, response).await?;
         Ok(())
     }
@@ -203,4 +221,33 @@ impl UserAgent {
     pub fn endpoint(&self) -> &Handle {
         &self.endpoint
     }
+}
+
+/// The request's `To` value, when it arrived without a tag and needs one added.
+///
+/// `None` also covers a `To` that does not parse: `ResponseBuilder::to_request` copies it
+/// verbatim so a malformed request still gets a well-formed answer, and appending a tag to
+/// a value whose shape is unknown could change what the rest of it means.
+fn tagless_to(request: &Request) -> Option<String> {
+    let value = request.headers.value(&HeaderName::To)?;
+    let address = Address::parse(&value, "To").ok()?;
+    address
+        .tag()
+        .is_none()
+        .then(|| String::from_utf8_lossy(&value).into_owned())
+}
+
+/// The `nc` for a request about to answer `nonce`, recorded in `nonce_use`.
+///
+/// RFC 7616 §3.4.3: `nc` counts the requests sent *with this nonce*, so a nonce not seen
+/// before starts at one — including the fresh nonce a stale challenge carries. A count
+/// carried across nonces looks like a replay to the registrar that tracks it, which is the
+/// registrar the count exists to satisfy.
+fn nonce_count_for(nonce_use: &mut Option<(String, u32)>, nonce: &str) -> u32 {
+    let count = match nonce_use {
+        Some((last, count)) if last == nonce => count.saturating_add(1),
+        _ => 1,
+    };
+    *nonce_use = Some((nonce.to_owned(), count));
+    count
 }

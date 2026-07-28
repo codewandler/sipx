@@ -424,10 +424,15 @@ impl Uri {
 
         let (a, b) = match (&self.parts, &other.parts) {
             (Parts::Sip(a), Parts::Sip(b)) => (a, b),
-            // For schemes sipx does not model, the RFC defines no comparison rules, so fall
-            // back to the one thing that cannot be wrong: the bytes, after normalizing
-            // escapes of unreserved characters.
             (Parts::Opaque(a), Parts::Opaque(b)) => {
+                // A tel URI has its own equivalence rules (RFC 3966 §4.1); byte comparison
+                // would call `tel:+1-201-555-0123` and `tel:+12015550123` different numbers.
+                if matches!(self.scheme, Scheme::Tel) {
+                    return tel_equivalent(a, b);
+                }
+                // For schemes sipx does not model, no RFC defines comparison rules, so fall
+                // back to the one thing that cannot be wrong: the bytes, after normalizing
+                // escapes of unreserved characters.
                 return escape::normalize_for_comparison(a) == escape::normalize_for_comparison(b);
             }
             _ => return false,
@@ -493,6 +498,81 @@ fn header_multiset(headers: &Params) -> std::collections::BTreeMap<Vec<u8>, Vec<
             .value()
             .map(|value| escape::normalize_for_comparison(value).to_ascii_lowercase())
             .unwrap_or_default();
+        grouped.entry(name).or_default().push(value);
+    }
+    for values in grouped.values_mut() {
+        values.sort_unstable();
+    }
+    grouped
+}
+
+/// Whether two tel URI bodies — everything after `tel:` — are equivalent under RFC 3966 §4.1.
+///
+/// The number is compared after removing visual separators; both URIs must be global or both
+/// local, which falls out of the comparison because only a global number keeps its leading
+/// `+`. Parameters are compared by name regardless of order, a name present in only one URI
+/// is a difference, and the whole comparison is case-insensitive.
+#[must_use]
+fn tel_equivalent(a: &[u8], b: &[u8]) -> bool {
+    let (number_a, params_a) = split_tel_body(a);
+    let (number_b, params_b) = split_tel_body(b);
+
+    if !escape::eq_ignore_ascii_case(
+        &strip_visual_separators(number_a),
+        &strip_visual_separators(number_b),
+    ) {
+        return false;
+    }
+
+    tel_param_multiset(params_a) == tel_param_multiset(params_b)
+}
+
+/// Split a tel URI body into the telephone-subscriber part and the parameter tail.
+#[must_use]
+fn split_tel_body(body: &[u8]) -> (&[u8], &[u8]) {
+    match body.iter().position(|&b| b == b';') {
+        Some(semi) => (
+            body.get(..semi).unwrap_or(&[]),
+            body.get(semi + 1..).unwrap_or(&[]),
+        ),
+        None => (body, &[]),
+    }
+}
+
+/// Remove the RFC 3966 `visual-separator` characters: `-`, `.`, `(` and `)`.
+#[must_use]
+fn strip_visual_separators(number: &[u8]) -> Vec<u8> {
+    number
+        .iter()
+        .copied()
+        .filter(|b| !matches!(b, b'-' | b'.' | b'(' | b')'))
+        .collect()
+}
+
+/// The parameters of a tel URI, grouped by name, normalized for the §4.1 comparison.
+///
+/// Escapes of unreserved characters fold, and everything lowercases — "URI comparisons are
+/// case-insensitive". A `phone-context` naming a global number, and an `ext`, are digit
+/// strings, so their visual separators are removed the same way the number's are.
+fn tel_param_multiset(params: &[u8]) -> std::collections::BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
+    let mut grouped: std::collections::BTreeMap<Vec<u8>, Vec<Vec<u8>>> =
+        std::collections::BTreeMap::new();
+    if params.is_empty() {
+        return grouped;
+    }
+    for segment in params.split(|&b| b == b';') {
+        let (name, value) = match segment.iter().position(|&b| b == b'=') {
+            Some(eq) => (
+                segment.get(..eq).unwrap_or(&[]),
+                segment.get(eq + 1..).unwrap_or(&[]),
+            ),
+            None => (segment, &[][..]),
+        };
+        let name = escape::normalize_for_comparison(name).to_ascii_lowercase();
+        let mut value = escape::normalize_for_comparison(value).to_ascii_lowercase();
+        if name == b"ext" || (name == b"phone-context" && value.first() == Some(&b'+')) {
+            value = strip_visual_separators(&value);
+        }
         grouped.entry(name).or_default().push(value);
     }
     for values in grouped.values_mut() {
@@ -697,6 +777,17 @@ fn parse_params(raw: &Bytes, separator: u8) -> Result<Params, UriError> {
         {
             return Err(UriError::PercentEscape);
         }
+        // RFC 3261 §19.1.1: "any given parameter-name MUST NOT appear more than once" among
+        // uri-parameters. URI headers may legally repeat — `?f=a&f=b` — so only the `;` list
+        // is policed. Spelling variants count: §19.1.4 makes `%74ransport` the name
+        // `transport`, so a repeat under an escape or a case change is still a repeat.
+        if separator == b';'
+            && params
+                .iter()
+                .any(|existing| crate::params::names_equivalent(existing.name(), param.name()))
+        {
+            return Err(UriError::DuplicateParameterName);
+        }
         params.push(param);
         Ok(())
     };
@@ -800,6 +891,84 @@ mod tests {
     #[test]
     fn sip_and_sips_are_never_equivalent() {
         assert!(!uri("sip:a@b.com").equivalent(&uri("sips:a@b.com")));
+    }
+
+    /// The RFC 3966 §4.1 rules: visual separators are not part of the number, parameter
+    /// order and case carry no meaning, and a parameter present in only one URI is a
+    /// difference.
+    #[test]
+    fn tel_uri_equivalence_rfc3966_4_1() {
+        let equivalent: &[(&str, &str)] = &[
+            // The §4.1 worked example: separators removed, the numbers are identical.
+            ("tel:+1-201-555-0123", "tel:+12015550123"),
+            (
+                "tel:7042;phone-context=example.com",
+                "tel:7042;PHONE-CONTEXT=EXAMPLE.COM",
+            ),
+            // A global-number phone-context is compared digit by digit, separators removed.
+            (
+                "tel:863-1234;phone-context=+1-914-555",
+                "tel:8631234;phone-context=+1914555",
+            ),
+            // Parameter order is insignificant.
+            (
+                "tel:7042;ext=1;phone-context=example.com",
+                "tel:7042;phone-context=example.com;ext=1",
+            ),
+        ];
+        for (a, b) in equivalent {
+            assert!(
+                uri(a).equivalent(&uri(b)),
+                "RFC 3966 4.1 says these are equivalent:\n  {a}\n  {b}"
+            );
+            assert!(uri(b).equivalent(&uri(a)), "equivalence must be symmetric");
+        }
+
+        let different: &[(&str, &str, &str)] = &[
+            (
+                "tel:+12015550123",
+                "tel:12015550123",
+                "a global number never matches a local one",
+            ),
+            (
+                "tel:7042;phone-context=example.com",
+                "tel:7042",
+                "a parameter present in only one is a difference",
+            ),
+            (
+                "tel:+1-201-555-0123",
+                "tel:+1-201-555-0124",
+                "different numbers",
+            ),
+            (
+                "tel:7042;phone-context=example.com",
+                "tel:7042;phone-context=example.org",
+                "different phone-context domains",
+            ),
+        ];
+        for (a, b, why) in different {
+            assert!(
+                !uri(a).equivalent(&uri(b)),
+                "RFC 3966 4.1 says these differ ({why}):\n  {a}\n  {b}"
+            );
+        }
+    }
+
+    /// RFC 3261 §19.1.4: characters outside the reserved set are equivalent to their
+    /// `% HEX HEX` encoding, and `pname` is built from `paramchar`, which includes
+    /// `escaped` — so `%74ransport` is a legal spelling of `transport`, and the §19.1.4
+    /// special-parameter rules must see through it.
+    #[test]
+    fn escaped_parameter_names_are_the_same_parameter() {
+        assert!(uri("sip:h;transport=udp").equivalent(&uri("sip:h;%74ransport=udp")));
+        assert_eq!(uri("sip:h;%74ransport=tcp").transport(), Some(&b"tcp"[..]));
+
+        // A one-sided maddr never matches, however its name is spelled.
+        assert!(!uri("sip:h").equivalent(&uri("sip:h;m%61ddr=239.1.1.1")));
+        assert!(!uri("sip:h;m%61ddr=239.1.1.1").equivalent(&uri("sip:h")));
+
+        // And a non-special parameter present in both must still agree.
+        assert!(!uri("sip:h;foo=1").equivalent(&uri("sip:h;%66oo=2")));
     }
 
     /// The RFC notes this itself: equivalence is not transitive. It is the reason `Uri` does
@@ -967,6 +1136,28 @@ mod tests {
             u.to_bytes(),
             Bytes::from_static(b"sip:alice@Example.COM;lr")
         );
+    }
+
+    /// RFC 3261 §19.1.1: "any given parameter-name MUST NOT appear more than once" among
+    /// uri-parameters. Accepting a repeat also made equivalence irreflexive, because each
+    /// occurrence was compared against the other URI's *first* one.
+    #[test]
+    fn duplicate_uri_parameter_names_are_rejected() {
+        for input in [
+            "sip:h;a=1;a=2",
+            "sip:h;a=1;a=1",
+            "sip:h;lr;lr",
+            // Case and escape spellings of a name are still that name (§19.1.4).
+            "sip:h;transport=udp;TRANSPORT=tcp",
+            "sip:h;transport=udp;%74ransport=tcp",
+        ] {
+            assert!(
+                Uri::parse(Bytes::from(input.to_owned())).is_err(),
+                "{input} should be rejected"
+            );
+        }
+        // URI *headers* may repeat; only uri-parameters are policed.
+        assert!(Uri::parse(Bytes::from_static(b"sip:a?f=a&f=b")).is_ok());
     }
 
     /// `;;` is not a quirky spelling of `;`. The ABNF's pname is `1*paramchar`, and the

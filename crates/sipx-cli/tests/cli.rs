@@ -96,6 +96,72 @@ async fn start_answerer(
     (child, address, lines)
 }
 
+/// The first header line with this name, without its terminator.
+fn header_line<'a>(message: &'a str, name: &str) -> &'a str {
+    let prefix = format!("{name}:");
+    message
+        .split("\r\n")
+        .find(|line| {
+            line.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(&prefix))
+        })
+        .unwrap_or_else(|| panic!("no {name} header in:\n{message}"))
+}
+
+/// A REGISTER must name *this* client in its Via and Contact. The Via sent-by is where the
+/// sender expects responses (RFC 3261 §18.1.1), and the Contact is the binding the registrar
+/// stores and routes calls to (RFC 3261 §10.2.6) — an unspecified address in either sends
+/// traffic nowhere.
+#[tokio::test]
+async fn register_advertises_this_client_in_via_and_contact() {
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let address = registrar.local_addr().expect("has an address");
+
+    let mut child = sipx()
+        .args([
+            "register",
+            "sip:alice@example.com",
+            "--target",
+            &address.to_string(),
+            "--json",
+            "--expires",
+            "60",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawns");
+
+    let mut buf = vec![0u8; 65_535];
+    let (length, source) =
+        tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut buf))
+            .await
+            .expect("a REGISTER arrives")
+            .expect("reads");
+    let request = String::from_utf8_lossy(&buf[..length]).into_owned();
+    let _ = child.kill().await;
+
+    assert!(request.starts_with("REGISTER"), "{request}");
+
+    let contact = header_line(&request, "Contact");
+    assert!(
+        !contact.contains("0.0.0.0"),
+        "a binding at the unspecified address routes inbound calls nowhere: {contact}"
+    );
+    assert!(
+        contact.contains(&source.to_string()),
+        "the Contact must be where this client listens ({source}): {contact}"
+    );
+
+    let via = header_line(&request, "Via");
+    assert!(
+        via.contains(&source.to_string()),
+        "the Via sent-by must name the sender ({source}), not anyone else: {via}"
+    );
+}
+
 #[tokio::test]
 async fn version_and_help_succeed() {
     let output = sipx().arg("version").output().await.expect("runs");
@@ -277,6 +343,58 @@ async fn a_busy_answer_gives_the_caller_the_busy_exit_code() {
     );
 
     let _ = answerer.wait().await;
+}
+
+/// A final response to an INVITE must carry a To tag (RFC 3261 §8.2.6.2): the tag is what
+/// lets a caller behind a forking proxy tell one branch's refusal from another's.
+#[tokio::test]
+async fn a_refusal_carries_a_to_tag() {
+    let (mut answerer, address, _lines) = start_answerer(&["--busy"]).await;
+
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let port = socket.local_addr().expect("has an address").port();
+    let unique = std::process::id();
+    let invite = format!(
+        "INVITE sip:answer@{address} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 127.0.0.1:{port};branch=z9hG4bKrefusal{unique};rport\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:caller@127.0.0.1:{port}>;tag=refusal{unique}\r\n\
+         To: <sip:answer@{address}>\r\n\
+         Call-ID: refusal-{unique}@127.0.0.1\r\n\
+         CSeq: 1 INVITE\r\n\
+         Contact: <sip:caller@127.0.0.1:{port}>\r\n\
+         Content-Length: 0\r\n\
+         \r\n"
+    );
+    socket
+        .send_to(invite.as_bytes(), &address)
+        .await
+        .expect("sends");
+
+    // Provisional responses are the one place a To tag is optional, so read past them to the
+    // final one.
+    let mut buf = vec![0u8; 65_535];
+    let response = loop {
+        let (length, _) = tokio::time::timeout(Duration::from_secs(10), socket.recv_from(&mut buf))
+            .await
+            .expect("a response arrives")
+            .expect("reads");
+        let response = String::from_utf8_lossy(&buf[..length]).into_owned();
+        if !response.starts_with("SIP/2.0 1") {
+            break response;
+        }
+    };
+
+    assert!(response.starts_with("SIP/2.0 486"), "{response}");
+    let to = header_line(&response, "To");
+    assert!(
+        to.contains("tag="),
+        "a final response needs a To tag to identify its branch: {to}"
+    );
+
+    let _ = answerer.kill().await;
 }
 
 /// Logging must never reach stdout, or one `-vv` turns every JSON result into a parse error at

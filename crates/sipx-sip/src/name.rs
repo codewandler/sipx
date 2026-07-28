@@ -114,6 +114,7 @@ header_names! {
     ReferTo             => "Refer-To" | b'r';             // RFC 3515
     ReferredBy          => "Referred-By" | b'b';          // RFC 3892
     RejectContact       => "Reject-Contact" | b'j';       // RFC 3841
+    Replaces            => "Replaces";                    // RFC 3891
     ReplyTo             => "Reply-To";
     RequestDisposition  => "Request-Disposition" | b'd';  // RFC 3841
     Require             => "Require";

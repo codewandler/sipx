@@ -479,3 +479,49 @@ async fn respond_returns_only_once_the_response_has_been_sent() {
         "expected the 200 we just sent"
     );
 }
+
+/// RFC 3261 §18.1.1's size limit is a rule for *sending requests*: a UAC that would exceed the
+/// path MTU is told to use a congestion-controlled transport instead. §18.2.2 gives a UAS no
+/// such choice — the response goes back per the topmost `Via`, over the transport the request
+/// arrived on. Refusing to send it leaves the caller to time out while the callee believes it
+/// answered, which a 200 carrying a full SDP answer reaches routinely.
+#[tokio::test]
+async fn an_oversized_response_is_sent_rather_than_refused() {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.mtu = 500;
+    let (server, mut server_rx) = bind(config).await.expect("binds");
+
+    let (client, _client_rx) = endpoint().await;
+    let request = options_to(&server);
+    let server_addr = server.local_addr();
+
+    tokio::spawn(async move {
+        let incoming = server_rx.recv().await.expect("a request arrives");
+        let mut response = ResponseBuilder::to_request(
+            &incoming.request,
+            StatusCode::new(200).expect("valid"),
+            "OK",
+        )
+        .expect("builds")
+        .build();
+        response.set_body(Bytes::from(vec![b'x'; 800]));
+        let _ = server.respond(&incoming.key, response).await;
+    });
+
+    let mut responses = client
+        .send(request, Target::udp(server_addr))
+        .await
+        .expect("sends");
+
+    let status = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = responses.next().await {
+            if let sipx_sip::transaction::TuEvent::Response(response) = event {
+                return Some(response.status.code());
+            }
+        }
+        None
+    })
+    .await
+    .expect("no timeout");
+    assert_eq!(status, Some(200), "the response must reach the caller");
+}

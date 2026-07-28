@@ -21,3 +21,6 @@ Cargo.lock.orig
 # Recordings produced by tests and manual runs
 *.wav.out
 /recordings/
+
+# Generated per interop run: a committed certificate is a committed private key.
+tests/interop/kamailio/tls/

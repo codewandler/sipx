@@ -36,6 +36,15 @@ pub enum Error {
     /// Distinct from a rejection: nobody refused the call, we stopped waiting for it.
     #[error("no answer within {0:?}; the invitation was cancelled")]
     Cancelled(std::time::Duration),
+    /// An INVITE asked to replace a dialog it did not name, or named one this is not.
+    ///
+    /// Deliberately one error for both. Telling a caller "the Call-ID matched but the tags did
+    /// not" would be telling them how far their guess got.
+    #[error("the Replaces header names no dialog we have")]
+    NoReplaces,
+    /// A transfer was accepted or refused when none had been asked for.
+    #[error("no transfer has been requested on this call")]
+    NoReferral,
     /// Negotiation produced no usable audio stream.
     #[error("no codec in common")]
     NoCommonCodec,

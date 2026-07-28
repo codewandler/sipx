@@ -147,6 +147,63 @@ impl Dialog {
         self.local_cseq
     }
 
+    /// The first entry of the route set, as a URI.
+    #[must_use]
+    pub fn first_route(&self) -> Option<Uri> {
+        uri_in(self.route_set.first()?)
+    }
+
+    /// Where an in-dialog request is *sent*, which is not always what its Request-URI says.
+    ///
+    /// RFC 3261 §12.2.1.1: with a route set the request goes to the first `Route` entry — the
+    /// proxy that record-routed itself into the dialog precisely so that it would see the rest
+    /// of it. Handing the request to the remote target instead bypasses that proxy, and where
+    /// it is the only element that can reach the far end — behind a NAT, or on a segment this
+    /// side cannot address — the request is simply lost. A BYE lost this way is the call that
+    /// cannot be hung up, with the media still running.
+    #[must_use]
+    pub fn hop(&self) -> Uri {
+        self.first_route()
+            .unwrap_or_else(|| self.remote_target.clone())
+    }
+
+    /// The Request-URI and `Route` headers for a request sent inside this dialog.
+    ///
+    /// RFC 3261 §12.2.1.1 describes two forms, chosen by the `lr` parameter on the first
+    /// route. A loose router leaves the Request-URI alone: the remote target addresses the
+    /// request and the route set travels in `Route` headers, in order. A strict router
+    /// predates that convention and rewrites the Request-URI at every hop, so the first route
+    /// becomes the Request-URI and the remote target moves to the *end* of the route set —
+    /// otherwise the far end receives a request addressed to a proxy it has never heard of.
+    #[must_use]
+    pub fn request_target(&self) -> (Uri, Vec<String>) {
+        let Some(first) = self.first_route() else {
+            return (self.remote_target.clone(), Vec::new());
+        };
+        if first.params().is_some_and(|params| params.contains("lr")) {
+            return (self.remote_target.clone(), self.route_set.clone());
+        }
+
+        let mut routes: Vec<String> = self.route_set.iter().skip(1).cloned().collect();
+        routes.push(format!(
+            "<{}>",
+            String::from_utf8_lossy(&self.remote_target.to_bytes())
+        ));
+        (as_request_uri(&first), routes)
+    }
+
+    /// Replace the remote target from a target refresh request or its response.
+    ///
+    /// RFC 3261 §12.2.2 and §12.2.1.2: a re-INVITE carrying a `Contact` moves the dialog's
+    /// remote target, in both directions. Keeping the original means every later request goes
+    /// to where the peer *used* to be — the BYE included, so a peer that re-homes mid-call can
+    /// never be told the call is over.
+    pub fn refresh_target(&mut self, headers: &sipx_sip::Headers) {
+        if let Some(contact) = contact_uri(headers) {
+            self.remote_target = contact;
+        }
+    }
+
     /// Whether an in-dialog request belongs to this dialog.
     #[must_use]
     pub fn matches(&self, request: &Request) -> bool {
@@ -218,14 +275,54 @@ impl HasTag for FromHeader {
 
 fn contact_uri(headers: &sipx_sip::Headers) -> Option<Uri> {
     let value = headers.value(&HeaderName::Contact)?;
-    let text = String::from_utf8_lossy(&value);
-    // A Contact is usually `<uri>` with optional parameters; the angle brackets are what make
-    // a URI with its own parameters unambiguous.
+    uri_in(&String::from_utf8_lossy(&value))
+}
+
+/// A URI reduced to what may appear in a Request-URI.
+///
+/// RFC 3261 §12.2.1.1 says to place the first route into the Request-URI "stripping any
+/// parameters that are not allowed in a Request-URI", and §19.1.1 names them: the `method`
+/// parameter and the header component may not appear there. A strict router that is handed
+/// either sees a request it is entitled to reject, and the URI came off the wire from another
+/// element, so neither can be assumed absent.
+///
+/// The delimiters can be found by scanning because §19.1.2 requires a literal `?` or `;` in any
+/// earlier component to be escaped; an unescaped one is always the separator it looks like.
+fn as_request_uri(uri: &Uri) -> Uri {
+    let raw = uri.to_bytes();
+    let text = String::from_utf8_lossy(&raw);
+    let without_headers = text.split('?').next().unwrap_or(&text);
+
+    let mut parts = without_headers.split(';');
+    let Some(head) = parts.next() else {
+        return uri.clone();
+    };
+    let mut rebuilt = head.to_owned();
+    for param in parts {
+        let name = param.split('=').next().unwrap_or(param);
+        if name.eq_ignore_ascii_case("method") {
+            continue;
+        }
+        rebuilt.push(';');
+        rebuilt.push_str(param);
+    }
+
+    // A URI that came apart under this is left as it was: a Request-URI that is wrong in a way
+    // the far end may tolerate beats one this side has corrupted.
+    Uri::parse(Bytes::from(rebuilt)).unwrap_or_else(|_| uri.clone())
+}
+
+/// The URI inside a `name-addr` or bare `addr-spec`.
+///
+/// The angle brackets are what make a URI carrying its own parameters unambiguous, so when
+/// they are present the URI is exactly what they enclose; without them RFC 3261 §20.10 says
+/// there can be no URI parameters, and the first `;` begins the header's.
+fn uri_in(text: &str) -> Option<Uri> {
     let inner = text
         .split_once('<')
         .and_then(|(_, rest)| rest.split_once('>'))
         .map_or_else(
-            || text.split(';').next().unwrap_or(&text).trim().to_owned(),
+            || text.split(';').next().unwrap_or(text).trim().to_owned(),
             |(uri, _)| uri.to_owned(),
         );
     Uri::parse(Bytes::from(inner)).ok()

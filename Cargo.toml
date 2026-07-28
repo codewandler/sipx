@@ -37,6 +37,15 @@ rustls-pki-types = { version = "1", features = ["std"] }
 rustls-native-certs = "0.8"
 rcgen = "0.14"
 hickory-resolver = { version = "0.26", default-features = false, features = ["system-config", "tokio"] }
+# WebSocket framing and the RFC 6455 handshake. No TLS features: sipx drives its own handshake
+# with the `tls` module, so WSS is the TLS policy from T-7 with WebSocket framing on top rather
+# than a second, subtly different certificate check.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Opus, behind a feature. The only C dependency in the workspace, and it earns its place:
+# there is no pure-Rust encoder of comparable quality, and a codec that cannot encode is not a
+# codec a softphone can offer.
+opus = "0.3"
 md-5 = "0.10"
 sha2 = "0.10"
 tracing = "0.1"

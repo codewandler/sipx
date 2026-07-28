@@ -11,6 +11,10 @@
 //! application produces samples, which is how a call sends 200 packets per second to a jitter
 //! buffer expecting 50.
 
+pub mod bridge;
+pub mod conference;
 pub mod session;
 
-pub use session::{Codec, Config, MediaPort, MediaSession};
+pub use bridge::Bridge;
+pub use conference::Conference;
+pub use session::{Codec, Config, Encoded, MediaPort, MediaSession};

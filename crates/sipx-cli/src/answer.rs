@@ -155,12 +155,24 @@ async fn refuse(
     let Some(status) = StatusCode::new(code) else {
         return fail(format, Exit::Failed, "bad status");
     };
-    let response =
+    let builder =
         match sipx_sip::build::ResponseBuilder::to_request(&request.request, status, reason) {
-            Ok(builder) => builder.build(),
+            Ok(builder) => builder,
             Err(error) => return fail(format, Exit::Failed, &error.to_string()),
         };
-    let _ = handle.respond(&request.key, response).await;
+    // RFC 3261 §8.2.6.2: every response but 100 carries a To tag — it is what lets a caller
+    // behind a forking proxy tell this branch's refusal from another's.
+    let builder = match request.request.headers.value(&HeaderName::To) {
+        Some(to) => {
+            let to = tagged(&String::from_utf8_lossy(&to), &fresh_tag());
+            match builder.set_header(&HeaderName::To, bytes::Bytes::from(to)) {
+                Ok(builder) => builder,
+                Err(error) => return fail(format, Exit::Failed, &error.to_string()),
+            }
+        }
+        None => builder,
+    };
+    let _ = handle.respond(&request.key, builder.build()).await;
 
     Report::new()
         .text("status", "refused")
@@ -168,6 +180,43 @@ async fn refuse(
         .number("code", i64::from(code))
         .emit(format);
     Exit::Success
+}
+
+/// A `To` for a final response, tagged if the request left it untagged.
+///
+/// RFC 3261 §8.2.6.2 has the UAS add a tag to every response except 100; a tag already
+/// present names an existing dialog, whose tag is not ours to replace.
+fn tagged(to: &str, tag: &str) -> String {
+    if has_tag(to) {
+        return to.to_owned();
+    }
+    format!("{to};tag={tag}")
+}
+
+/// Whether a `To` already carries a tag.
+///
+/// Only parameters after the closing bracket belong to the header; inside it they are the
+/// URI's (RFC 3261 §20.10), and a URI parameter spelled `tag` does not identify a dialog.
+fn has_tag(to: &str) -> bool {
+    let params = to
+        .rfind('>')
+        .map_or(to, |end| to.get(end..).unwrap_or_default());
+    params.split(';').skip(1).any(|param| {
+        param
+            .split('=')
+            .next()
+            .is_some_and(|name| name.trim().eq_ignore_ascii_case("tag"))
+    })
+}
+
+/// A fresh tag value.
+///
+/// RFC 3261 §19.3 asks for global uniqueness and at least 32 bits of randomness; 64 random
+/// bits give both without coordinating with anyone.
+fn fresh_tag() -> String {
+    use rand::Rng as _;
+    let value: u64 = rand::rng().random();
+    format!("{value:016x}")
 }
 
 fn read_clip(path: &str) -> Result<Wav, String> {
@@ -185,4 +234,47 @@ fn read_clip(path: &str) -> Result<Wav, String> {
 fn write_clip(path: &str, samples: &[i16]) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|error| format!("{path}: {error}"))?;
     write_wav(file, &Wav::narrowband(samples.to_vec())).map_err(|error| format!("{path}: {error}"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_untagged_to_gains_a_tag() {
+        assert_eq!(
+            tagged("<sip:answer@example.com>", "abcd"),
+            "<sip:answer@example.com>;tag=abcd"
+        );
+    }
+
+    /// A tag already on the header names a dialog this response belongs to, and replacing it
+    /// would move the response into a dialog that does not exist.
+    #[test]
+    fn a_to_that_already_has_a_tag_keeps_it() {
+        assert_eq!(tagged("<sip:a@b>;tag=1", "x"), "<sip:a@b>;tag=1");
+        assert_eq!(tagged("sip:a@b;tag=1", "x"), "sip:a@b;tag=1");
+        assert_eq!(
+            tagged("Bob <sip:a@b>;q=1;tag=1", "x"),
+            "Bob <sip:a@b>;q=1;tag=1"
+        );
+    }
+
+    /// RFC 3261 §20.10: inside the brackets, parameters belong to the URI. A `tag` there is
+    /// not the header's, and the response still needs one.
+    #[test]
+    fn a_uri_parameter_spelled_tag_does_not_count() {
+        assert_eq!(tagged("<sip:a@b;tag=1>", "x"), "<sip:a@b;tag=1>;tag=x");
+    }
+
+    /// RFC 3261 §19.3 asks for at least 32 bits of randomness; sixteen hex digits carry 64,
+    /// and two draws that collide would mean they carried none.
+    #[test]
+    fn a_fresh_tag_is_long_enough_and_not_repeated() {
+        let tag = fresh_tag();
+        assert_eq!(tag.len(), 16);
+        assert!(tag.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(tag, fresh_tag());
+    }
 }

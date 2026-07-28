@@ -4,6 +4,7 @@
 //! distinct exit code per outcome, and keeps logging off stdout — so a shell can place a call,
 //! assert on what happened, and branch on why it did not.
 
+mod advertise;
 mod answer;
 mod dial;
 mod output;

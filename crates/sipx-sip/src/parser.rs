@@ -181,6 +181,14 @@ impl StreamParser {
         loop {
             match &self.state {
                 State::Head => {
+                    // RFC 3261 §7.5: CRLF before the start-line MUST be ignored on stream
+                    // transports. RFC 5626 §4.4.1 makes CRLFCRLF the keepalive ping and a
+                    // lone CRLF the pong, so peers send exactly this between messages.
+                    // Dropped only between messages: within one, framing is untouched.
+                    while self.buf.starts_with(b"\r\n") {
+                        let _crlf = self.buf.split_to(2);
+                        self.scanned = self.scanned.saturating_sub(2);
+                    }
                     let Some(head_end) = find_header_terminator(&self.buf, self.scanned) else {
                         // Remember how far we looked. Back up three bytes so a terminator
                         // straddling the chunk boundary is still found.
@@ -393,7 +401,13 @@ fn parse_start_line(line: Bytes) -> Result<StartLine, ParseError> {
         return Err(StartLineError::Empty.into());
     }
 
-    if line.starts_with(b"SIP/") {
+    // A line opening with the version is a status line. The match is case-insensitive
+    // because the SIP-Version string is (RFC 3261 §7.1), and it cannot swallow a request:
+    // no method token may contain the `/`.
+    if line
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"SIP/"))
+    {
         return parse_status_line(line);
     }
 
@@ -739,6 +753,27 @@ mod tests {
         }
     }
 
+    /// RFC 3261 §7.1: "The SIP-Version string is case-insensitive, but implementations MUST
+    /// send upper-case." Receiving is the lenient half.
+    #[test]
+    fn sip_version_is_recognized_case_insensitively() {
+        let text = "sip/2.0 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let msg = parse(text).expect("should parse");
+        let res = msg
+            .as_response()
+            .expect("a lower-case version still marks a response");
+        assert_eq!(res.status.code(), 200);
+        assert!(res.version.is_supported());
+        // The start line goes back out exactly as it arrived.
+        assert_eq!(msg.to_bytes(), Bytes::from(text));
+
+        let text = "OPTIONS sip:a@b.com sip/2.0\r\nContent-Length: 0\r\n\r\n";
+        let msg = parse(text).expect("should parse");
+        let req = msg.as_request().expect("a request");
+        assert!(req.version.is_supported(), "sip/2.0 is SIP/2.0");
+        assert_eq!(msg.to_bytes(), Bytes::from(text));
+    }
+
     #[test]
     fn an_unknown_version_parses_so_the_caller_can_answer_505() {
         let text = "OPTIONS sip:a@b.com SIP/7.0\r\nContent-Length: 0\r\n\r\n";
@@ -814,6 +849,53 @@ mod tests {
             out.first().map(Message::to_bytes),
             Some(Bytes::from(MINIMAL))
         );
+    }
+
+    /// RFC 3261 §7.5: CRLF before the start-line MUST be ignored on stream transports.
+    /// RFC 5626 §4.4.1 makes CRLFCRLF the keepalive ping and a lone CRLF the pong, so these
+    /// arrive routinely and must not poison the framing.
+    #[test]
+    fn stream_parser_ignores_crlf_before_the_start_line() {
+        let mut p = StreamParser::new(Limits::stream());
+
+        // A keepalive ping ahead of a message.
+        let text = format!("\r\n\r\n{MINIMAL}");
+        let messages = p
+            .push(text.as_bytes())
+            .expect("leading CRLFs are not an error");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(p.pending(), 0);
+
+        // A lone CRLF pong between messages, alone in its own chunk.
+        assert!(p.push(b"\r\n").expect("a pong is not an error").is_empty());
+        assert_eq!(p.pending(), 0);
+        let messages = p.push(MINIMAL.as_bytes()).expect("framing must survive");
+        assert_eq!(messages.len(), 1);
+    }
+
+    /// The same, however the bytes are chunked — the CRLFs and the terminator search must
+    /// not disagree about offsets.
+    #[test]
+    fn leading_crlf_is_ignored_at_every_split_point() {
+        let text = format!("\r\n\r\n\r\n{MINIMAL}");
+        let bytes = text.as_bytes();
+        for split in 0..=bytes.len() {
+            let mut p = StreamParser::new(Limits::stream());
+            let (a, b) = bytes.split_at(split);
+            let mut got = p.push(a).expect("first half");
+            got.extend(p.push(b).expect("second half"));
+            assert_eq!(
+                got.len(),
+                1,
+                "split at {split} produced {} messages",
+                got.len()
+            );
+            assert_eq!(
+                got.first().map(Message::to_bytes),
+                Some(Bytes::from(MINIMAL)),
+                "split at {split} changed the message"
+            );
+        }
     }
 
     #[test]

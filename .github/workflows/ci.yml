@@ -25,6 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # `--all-features` turns on Opus, which links libopus. Installing it means the FFI crate
+      # finds the library through pkg-config instead of building it from source with CMake —
+      # which is the failure mode of the one advisory `deny.toml` excepts.
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -36,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
@@ -45,12 +50,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       # --all-targets, so tests and dev-dependencies are covered too. Without it the declared
       # floor is verified for the library and nothing else, and a downstream user running
       # `cargo test` on the minimum version is the one who finds out.
       - run: cargo check --workspace --all-targets --all-features
+
+  features:
+    name: feature matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Every other job builds `--all-features`, which cannot see a crate that fails to compile
+      # with an optional feature turned *off*. That is not a hypothetical gap: `tokio::select!`
+      # cannot compile a branch out behind a `#[cfg]`, and an optional transport's branch
+      # referred to a field that only existed with its feature on. Nothing here noticed.
+      - run: ./scripts/check-features.sh
 
   deny:
     name: cargo-deny

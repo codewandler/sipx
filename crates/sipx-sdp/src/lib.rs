@@ -19,7 +19,7 @@ pub mod session;
 pub use answer::{Capabilities, answer, negotiate_direction};
 pub use parse::parse;
 pub use session::{
-    Attribute, Connection, Direction, MediaDescription, Origin, SessionDescription, Timing,
+    Address, Attribute, Connection, Direction, MediaDescription, Origin, SessionDescription, Timing,
 };
 
 /// What can go wrong reading SDP.

@@ -31,16 +31,87 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The bound lives in `sipx-call` rather than around it — dropping the call future would
   abandon the exchange after a 200 OK but before the ACK.
 
-### Added
-
 **Milestone M5 — depth** (in progress)
 
-- `docs/specs/sip-tls.md` and **SIP over TLS**, with certificate verification that cannot be
-  turned off. Trusting a private CA is an addition to the anchor set, not a bypass.
-- CANCEL (RFC 3261 §9), so giving up on a call stops the far end ringing.
+- `docs/specs/sip-tls.md` and **SIP over TLS** (`T-6`, `T-7`), with certificate verification
+  that cannot be turned off. Trusting a private CA is an addition to the anchor set, not a
+  bypass — there is no `insecure` flag, because every stack that ships one eventually finds it
+  in production.
+- **SIP over WebSocket** (`T-8`, RFC 7118), which is how a browser reaches a SIP network at
+  all. The handshake negotiates the `sip` subprotocol and refuses a peer that does not offer
+  it; one SIP message per WebSocket message, with anything else closing the connection rather
+  than being patched up; and Ping keeps the path open through intermediaries that would
+  otherwise close a registered client's socket.
+- **Secure WebSocket** (`T-9`), which is the TLS above with the framing above on top — the same
+  acceptor, the same connector, the same policy. Not a third set of security rules.
+- **Interop for both against Kamailio** (`T-10`). The harness now issues its own certificate
+  and asserts three things a fixture test cannot: that a registration over TLS is accepted by an
+  implementation that did not learn TLS from sipx, that a certificate for another name is
+  refused, and that an unknown issuer is refused. Both refusals must be *immediate* — a test
+  that accepted a timeout would also pass against a stack that had simply hung. WebSocket
+  registration is proved the same way, against Kamailio's own WebSocket module.
+
+**Media**
+
+- **Opus** (`M-13`, RFC 6716), behind the `opus` feature. Note the one exception in
+  `deny.toml`: the FFI shim under it is unmaintained, there is no maintained alternative that
+  encodes, and the advisory is excepted with its reasoning and its exit condition written down.
+  — off by default, so the stack stays
+  pure Rust unless the codec is asked for. Negotiated as a dynamic payload type matched by
+  *encoding name*, so an endpoint that numbers Opus differently is still understood, and G.711
+  remains the fallback. Being stateful, unlike G.711, it moved the codec into the send and
+  receive loops, one each: a stateful codec that cost a lock in the packet path would not be
+  worth having.
+- **Conferencing** (`M-12`): every party hears every other party and never themselves. The
+  mixer saturates rather than wrapping, because wrapping turns the loudest instant of a call —
+  the moment two people talk over each other — into a full-scale discontinuity heard as a bang.
+  Participants join and leave without interrupting the others.
+- **Bridging two calls** (`M-11`). Audio is passed through without decoding when both legs
+  agreed on the same codec, and transcoded — visibly, via `Bridge::is_transcoding` — when they
+  did not. Dropping a bridge stops it, rather than leaving two tasks forwarding audio between
+  calls nobody holds a handle to.
+- **Call quality, readable while the call is running** (`M-10`): loss, jitter, round-trip time
+  and an estimated MOS, from `MediaSession::quality()` and from `sipx dial --stats`. The round
+  trip is computed from the RTCP exchange (RFC 3550 §6.4.1) and is *absent* rather than zero
+  when the far end does not speak RTCP — zero would read as "instantaneous", and a script would
+  believe it.
+- **The media session now binds a control port** and receives RTCP, where before it could only
+  send. It also sends **sender** reports once it has sent anything, rather than only receiver
+  reports. Without both, no peer could ever have told sipx its round-trip time.
+- **An adaptive jitter buffer** (`M-9`). Depth follows observed jitter between a floor and a
+  ceiling, growing at the first packet that arrives too late and shrinking only after five
+  seconds of clean network — because being too shallow is audible and being too deep is not.
+  The fixed buffer remains, as the control: on a trace with recurring 95 ms spikes the constant
+  loses 86 packets to lateness and the adaptive one loses 3, and on a clean trace the two behave
+  identically. Used by default in `sipx-media`, bounded at 12 packets.
+
+**Transfer**
+
+- **Blind transfer** (`S-9`, RFC 3515). REFER is sent and received in-dialog, the transferee
+  places the call, and the outcome comes back as NOTIFY — because a `202 Accepted` means "I will
+  try" and nothing more. A transferor that read it as success would report a completed transfer
+  to a user whose call had been refused. The implicit subscription is terminated when the
+  transfer finishes, either way, rather than left open on both sides.
+- **Attended transfer** (`S-10`, RFC 3891). `Replaces` is matched on `Call-ID` *and both tags*,
+  and the check is inside `answer_replacing` rather than left to the caller. A `Call-ID` travels
+  in every message of a dialog and is visible to every element on the path; the tags are random
+  and known only to the two parties. Matching on the `Call-ID` alone would let anyone who had
+  seen one message of a call ask to be put in the middle of it — so every mismatch is refused
+  with the same 481, which also tells a guesser nothing about how close they got.
+- `Call::handle` does not answer a REFER. Whether to place a call on another party's say-so is
+  the application's decision, and `accept_referral`/`refuse_referral` are the two answers. A
+  `Refer-To` naming nothing usable is the exception: 400, without asking.
 
 ### Changed
 
+- **The connection pool keys connections by `(address, transport, verified identity)`**, where
+  it used to key by address alone. Two names that resolve to one address are two connections:
+  reusing one for the other would send traffic for `a.example.com` over a connection
+  authenticated as `b.example.com`, discarding the check that had just been performed. The
+  transport is in the key for a related reason — WebSocket and TCP can share a port, and a
+  `sips:` request riding a cleartext socket has silently become what it asked not to be.
+- `call::contact_for` takes the transport. Over a WebSocket there is no address to advertise,
+  and in-dialog requests ignore `Contact` entirely — see the fix below.
 - `TrustAnchors::system()` uses the **platform's** trust store rather than a copy of one
   vendor's root list compiled in — so an operator's corporate CA is honoured, and a root
   distrusted after a compromise stops being trusted when the OS says so.
@@ -61,6 +132,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   word — or, for DTMF, its last digit. `MediaSession::flush` now drains the queue first.
 - The RTCP report block decoder read cumulative loss from byte 4 instead of byte 5, folding the
   loss fraction into the high byte of the count.
+- **A `sips:` URI resolved through DNS had its certificate checked against the resolved
+  address.** RFC 3263 turns one name into a list of addresses by way of NAPTR and SRV records
+  that may name something else entirely, and resolution never attached the name from the URI to
+  what it produced. The handshake still succeeded and the check still appeared to run, which is
+  the whole failure mode `docs/specs/sip-tls.md` §3.3 exists to prevent: whoever can influence
+  DNS chooses which certificate is acceptable. Found while building WSS on top of it.
+- **An in-dialog request over a WebSocket was sent to the peer's `Contact`.** A WebSocket client
+  has no listening port, so its `Contact` names something that will never resolve (RFC 7118
+  §5.2) — every ACK and BYE went nowhere. In-dialog requests now go over the connection the
+  dialog was established on, unconditionally, and sipx writes an unresolvable `Contact` of its
+  own when it is the WebSocket client.
+- **The crate did not compile with the `tls` feature disabled.** `tokio::select!` cannot compile
+  a branch out behind a `#[cfg]`, so each optional listener's branch referred to a field that
+  was not there. CI only ever built `--all-features`, so nothing noticed. Every optional
+  listener now shares one channel and one branch, and each feature combination is checked.
 - **A URI carrying the same header name twice was not equivalent to itself.** Each occurrence
   was compared against the *first* header of that name rather than its counterpart, so
   `sip:a?f=a&f=b` failed reflexivity. Headers are now compared as multisets. Found by a

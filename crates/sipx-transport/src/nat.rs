@@ -45,11 +45,17 @@ pub fn apply_received_and_rport(request: &mut Request, source: SocketAddr) -> bo
     // RFC 3261 §18.2.1: record the source when it differs from what the sender claimed. A
     // hostname sent-by always counts as differing, because comparing it would mean resolving
     // it — and the whole point is that the sender may be wrong about where it is.
+    //
+    // RFC 3581 §4 goes further for a sender that asked for `rport`: `received` is added
+    // "even if it is identical to the value of the sent-by component". Without it the
+    // response is routed by sent-by, at the sent-by port — which is the very thing `rport`
+    // was sent to correct.
     let sent_by_matches = match &via.host {
         Host::Ip(ip) => *ip == source.ip(),
         Host::Name(_) => false,
     };
-    if !sent_by_matches && via.received().is_none() {
+    let asked_for_rport = matches!(via.rport(), Some(None));
+    if (asked_for_rport || !sent_by_matches) && via.received().is_none() {
         let addition = format!(";received={}", source.ip());
         // Before the parameters, not after: `received` conventionally sits next to the
         // sent-by, and inserting at a parameter boundary keeps the value well-formed however
@@ -235,16 +241,23 @@ mod tests {
         );
     }
 
-    /// The same, with the sent-by already correct, so `rport` is the only change.
+    /// RFC 3581 §4 is explicit that asking for `rport` also asks for `received`: the server
+    /// "MUST insert a `received` parameter containing the source IP address that the request
+    /// came from, even if it is identical to the value of the `sent-by` component". Omitting
+    /// it when the addresses agree leaves the response to be routed by sent-by, which is the
+    /// port `rport` exists to correct.
     #[test]
-    fn rport_is_filled_in_even_when_received_is_not_needed() {
+    fn rport_brings_received_with_it_even_when_the_sent_by_matches() {
         let mut request = request_with("SIP/2.0/UDP 203.0.113.9:41234;rport;branch=z9hG4bKx");
         assert!(apply_received_and_rport(&mut request, source()));
         assert_eq!(
             parsed_via(&request).rport().flatten().map(<[u8]>::to_vec),
             Some(b"41234".to_vec())
         );
-        assert!(parsed_via(&request).received().is_none());
+        assert_eq!(
+            parsed_via(&request).received().map(<[u8]>::to_vec),
+            Some(b"203.0.113.9".to_vec())
+        );
     }
 
     #[test]

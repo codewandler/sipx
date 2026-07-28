@@ -35,16 +35,54 @@ fn server() -> std::net::SocketAddr {
         .expect("a valid address")
 }
 
+/// Where the server listens for TLS. Its own port, per RFC 3261 §19.1.2.
+fn secure_server() -> std::net::SocketAddr {
+    let mut addr = server();
+    addr.set_port(
+        std::env::var("SIPX_INTEROP_TLS_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(5061),
+    );
+    addr
+}
+
+/// The fixture authority the server's certificate was issued by.
+///
+/// Trusting it is an *addition* to the anchor set, never a bypass — there is no way to say
+/// "accept anything", so a mistake in this harness produces a failed handshake rather than a
+/// test that quietly proves nothing.
+fn interop_anchors() -> sipx_transport::tls::TrustAnchors {
+    let path = std::env::var("SIPX_INTEROP_CA").unwrap_or_else(|_| {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/interop/kamailio/tls/ca.pem"
+        )
+        .to_owned()
+    });
+    let pem = std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("{path}: {e}; run ./tests/interop/run.sh, which issues it"));
+    let mut anchors = sipx_transport::tls::TrustAnchors::only();
+    anchors.add_pem(&pem).expect("a usable fixture CA");
+    anchors
+}
+
 async fn agent_over(transport: TransportKind) -> UserAgent {
-    let (handle, _incoming) = bind(TransportConfig::new("127.0.0.1:0".parse().expect("valid")))
-        .await
-        .expect("binds");
+    agent_to(Target::new(server(), transport), None).await
+}
+
+async fn agent_to(target: Target, anchors: Option<sipx_transport::tls::TrustAnchors>) -> UserAgent {
+    let mut config = TransportConfig::new("127.0.0.1:0".parse().expect("valid"));
+    if let Some(anchors) = anchors {
+        config.tls_client = Some(sipx_transport::tls::ClientTls::new(&anchors).expect("a client"));
+    }
+    let (handle, _incoming) = bind(config).await.expect("binds");
     let registrar = Uri::sip(Host::Name(HostName::new("sipx.test").expect("valid")));
     let config = Config::new(
         "<sip:alice@sipx.test>",
         format!("<sip:alice@{}>", handle.local_addr()),
         registrar,
-        Target::new(server(), transport),
+        target,
     )
     .with_credentials(Credentials::new("alice", "Circle Of Life"));
     UserAgent::new(handle, config)
@@ -149,4 +187,87 @@ async fn a_real_server_answers_our_options_ping() {
         .expect("no timeout")
         .expect("a final response");
     assert_eq!(response.status.code(), 200);
+}
+
+/// T-10, and the half of TLS that fixture tests cannot reach: another implementation agrees.
+///
+/// `T-7` proved sipx checks certificates the way the spec says against certificates sipx also
+/// generated. This proves the handshake succeeds against a server that learned TLS from
+/// somewhere else — and, because the digest exchange rides on top, that a challenge and its
+/// answer survive the transport too.
+#[tokio::test]
+#[ignore = "needs a SIP server; see tests/interop/README.md"]
+async fn registers_against_a_real_server_over_tls() {
+    let target = Target::new(secure_server(), TransportKind::Tls).verifying("sipx.test");
+    let mut ua = agent_to(target, Some(interop_anchors())).await;
+
+    let lease = tokio::time::timeout(Duration::from_secs(15), ua.register())
+        .await
+        .expect("no timeout")
+        .expect("the registrar accepts our credentials over TLS");
+    assert!(lease.granted > Duration::ZERO);
+}
+
+/// And the negative, which is the one that matters. The server is genuine, its certificate is
+/// signed by a CA we trust, and it is still not the name we set out to reach — so the
+/// connection must not happen.
+///
+/// A stack that got this wrong would pass the test above and every fixture test in `T-7`.
+#[tokio::test]
+#[ignore = "needs a SIP server; see tests/interop/README.md"]
+async fn refuses_a_real_server_presenting_the_wrong_name() {
+    let target = Target::new(secure_server(), TransportKind::Tls).verifying("elsewhere.example");
+    let mut ua = agent_to(target, Some(interop_anchors())).await;
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_secs(15), ua.register()).await;
+
+    // Not merely "did not succeed": it must fail *now*. A failed handshake closes the
+    // connection and every transaction on it, so the answer comes back in milliseconds. A test
+    // that accepted a timeout would also pass if sipx had simply hung, or if the server were
+    // not running at all.
+    outcome
+        .expect("verification failure is immediate, not a timeout")
+        .expect_err("a certificate for another name must not be accepted");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a refusal took {:?}; that is a timeout wearing a refusal's clothes",
+        started.elapsed()
+    );
+}
+
+/// And there is no way to make it accept one. Not a flag, not a builder method: trusting the
+/// fixture CA is an addition to the anchors, so the only thing that could rescue the handshake
+/// above is a certificate that actually names `elsewhere.example`.
+#[tokio::test]
+#[ignore = "needs a SIP server; see tests/interop/README.md"]
+async fn a_real_server_is_refused_when_its_issuer_is_unknown() {
+    let target = Target::new(secure_server(), TransportKind::Tls).verifying("sipx.test");
+    // The platform's anchors, which do not vouch for a fixture CA.
+    let mut ua = agent_to(target, Some(sipx_transport::tls::TrustAnchors::system())).await;
+
+    let started = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(15), ua.register())
+        .await
+        .expect("verification failure is immediate, not a timeout")
+        .expect_err("an unknown issuer must not be accepted");
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// SIP over WebSocket against Kamailio's own WebSocket module.
+///
+/// Note the port: this is 5060, the same port the TCP test uses. Kamailio serves both there,
+/// which is the ordinary arrangement and the reason the connection pool cannot be keyed by
+/// address alone.
+#[tokio::test]
+#[ignore = "needs a SIP server; see tests/interop/README.md"]
+async fn registers_against_a_real_server_over_websocket() {
+    let target = Target::new(server(), TransportKind::Ws).verifying("sipx.test");
+    let mut ua = agent_to(target, None).await;
+
+    let lease = tokio::time::timeout(Duration::from_secs(15), ua.register())
+        .await
+        .expect("no timeout")
+        .expect("the registrar accepts our credentials over a websocket");
+    assert!(lease.granted > Duration::ZERO);
 }

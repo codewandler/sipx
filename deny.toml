@@ -4,6 +4,26 @@ all-features = true
 [advisories]
 yanked = "deny"
 
+# The only exception in this file, and it is a judgement call rather than a rule.
+#
+# `audiopus_sys` is the FFI layer under the `opus` crate. It is unmaintained, and the advisory's
+# concrete complaint is that its pinned CMake version breaks under CMake 4.0 — which bites only
+# when it has to *build* libopus from source. Given a system libopus it uses pkg-config and
+# never invokes CMake at all, so sipx's CI installs `libopus-dev` and the failure mode the
+# advisory describes does not arise.
+#
+# Twice this session an unmaintained dependency was *replaced* rather than excepted
+# (`rustls-pemfile`, `webpki-roots`). The difference here is that there is no maintained
+# alternative: the pure-Rust crates decode and do not encode, and a codec sipx can decode but
+# not encode is one it cannot offer. The other bindings either wrap the same `audiopus_sys` or
+# fail to build.
+#
+# What bounds it: Opus is behind a **non-default feature**, so nothing reaches this unless a
+# build asks for the codec. The exception ends when a maintained binding exists — or when
+# somebody decides an opt-in codec is not worth an unmaintained C shim, which is a reasonable
+# thing to decide.
+ignore = ["RUSTSEC-2026-0150"]
+
 [licenses]
 # Permissive only. A copyleft dependency would restrict how this stack can be embedded,
 # which defeats the point of licensing it MIT OR Apache-2.0.

@@ -16,7 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::error::Result;
-use crate::target::TransportKind;
+use crate::target::{ConnectionKey, TransportKind};
 
 /// Something that happened on a connection.
 #[derive(Debug)]
@@ -38,10 +38,9 @@ pub enum Event {
     /// time out: waiting 32 seconds to learn something we already know is both a bad
     /// experience and a resource leak.
     Closed {
-        /// The peer whose connection closed.
-        peer: SocketAddr,
-        /// Which transport it was.
-        transport: TransportKind,
+        /// Which connection closed. The whole key, not just the peer: two connections to one
+        /// address are ordinary now, and removing the wrong one is worse than removing none.
+        key: ConnectionKey,
     },
 }
 
@@ -87,10 +86,10 @@ struct Pooled {
     last_used: Instant,
 }
 
-/// A pool of TCP connections, keyed by peer address.
+/// A pool of stream connections.
 #[derive(Debug)]
 pub struct Pool {
-    connections: HashMap<SocketAddr, Pooled>,
+    connections: HashMap<ConnectionKey, Pooled>,
     config: PoolConfig,
     events: mpsc::Sender<Event>,
     limits: Limits,
@@ -122,7 +121,8 @@ impl Pool {
 
     /// Adopt a connection a peer opened.
     pub fn accept(&mut self, stream: TcpStream, peer: SocketAddr) {
-        self.insert(stream, peer, Origin::Inbound);
+        let key = ConnectionKey::new(peer, TransportKind::Tcp);
+        self.insert_stream(stream, key, Origin::Inbound);
     }
 
     /// Send to a peer, connecting if there is no usable connection.
@@ -132,66 +132,14 @@ impl Pool {
     /// every transaction timer. Waiting here would stop retransmissions for calls that have
     /// nothing to do with this peer, so the connection is established inside its own task and
     /// the bytes wait in the channel until it is up.
-    pub async fn send(&mut self, peer: SocketAddr, bytes: Bytes) -> Result<()> {
-        let reusable = self.connections.get(&peer).is_some_and(|pooled| {
-            !pooled.writer.is_closed()
-                && (pooled.origin == Origin::Outbound || self.config.reuse_inbound_for_outbound)
-        });
-        if !reusable {
+    pub async fn send(&mut self, key: &ConnectionKey, bytes: Bytes) -> Result<()> {
+        if !self.reusable(key) {
             // Either there is nothing here, the writer is gone, or policy forbids reusing an
             // inbound connection for our own requests. All three mean: open our own.
-            self.connections.remove(&peer);
-            self.insert_connecting(peer);
+            self.connections.remove(key);
+            self.dial(key.clone());
         }
-
-        let Some(pooled) = self.connections.get_mut(&peer) else {
-            return Err(crate::error::Error::EndpointClosed);
-        };
-        pooled.last_used = Instant::now();
-        let writer = pooled.writer.clone();
-        writer
-            .send(bytes)
-            .await
-            .map_err(|_| crate::error::Error::EndpointClosed)
-    }
-
-    /// Register a connection that is still being dialled.
-    ///
-    /// The writer exists before the socket does, so bytes queue in the channel rather than in
-    /// the caller.
-    fn insert_connecting(&mut self, peer: SocketAddr) {
-        if self.connections.len() >= self.config.max_connections {
-            self.evict_least_recently_used();
-        }
-
-        let (writer_tx, writer_rx) = mpsc::channel::<Bytes>(64);
-        let events = self.events.clone();
-        let limits = self.limits;
-        tokio::spawn(async move {
-            match TcpStream::connect(peer).await {
-                Ok(stream) => {
-                    pump(stream, peer, writer_rx, events, limits, TransportKind::Tcp).await;
-                }
-                Err(error) => {
-                    tracing::debug!(%error, %peer, "connect failed");
-                    let _ = events
-                        .send(Event::Closed {
-                            peer,
-                            transport: TransportKind::Tcp,
-                        })
-                        .await;
-                }
-            }
-        });
-
-        self.connections.insert(
-            peer,
-            Pooled {
-                writer: writer_tx,
-                origin: Origin::Outbound,
-                last_used: Instant::now(),
-            },
-        );
+        self.queue(key, bytes).await
     }
 
     /// Adopt a TLS connection a peer opened, once the handshake has completed.
@@ -201,31 +149,125 @@ impl Pool {
         stream: tokio_rustls::server::TlsStream<TcpStream>,
         peer: SocketAddr,
     ) {
-        self.insert_stream(stream, peer, Origin::Inbound, TransportKind::Tls);
+        let key = ConnectionKey::new(peer, TransportKind::Tls);
+        self.insert_stream(stream, key, Origin::Inbound);
     }
 
     /// Send to a peer over TLS, connecting and verifying if there is no usable connection.
     ///
     /// The verification name is the host from the URI, not the address — see
-    /// `docs/specs/sip-tls.md` §3.3.
+    /// `docs/specs/sip-tls.md` §3.3 — and it is part of the pool key, so a connection verified
+    /// as one name is never handed to traffic for another.
     #[cfg(feature = "tls")]
     pub async fn send_tls(
         &mut self,
-        peer: SocketAddr,
+        key: &ConnectionKey,
         verification_name: &str,
         client: &crate::tls::ClientTls,
         bytes: Bytes,
     ) -> Result<()> {
-        let reusable = self.connections.get(&peer).is_some_and(|pooled| {
+        if !self.reusable(key) {
+            self.connections.remove(key);
+            self.dial_tls(key.clone(), verification_name, client)?;
+        }
+        self.queue(key, bytes).await
+    }
+
+    /// Adopt a WebSocket connection a peer opened, once the handshake has completed.
+    #[cfg(feature = "ws")]
+    pub fn accept_ws<S>(
+        &mut self,
+        ws: crate::ws::Socket<S>,
+        key: ConnectionKey,
+        keepalive: Duration,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        self.spawn_ws(ws, key, Origin::Inbound, keepalive);
+    }
+
+    /// Send to a peer over WebSocket, doing the handshake if there is no usable connection.
+    ///
+    /// `authority` is what goes in the `Host` header of the upgrade request and, under WSS, the
+    /// name the certificate must be valid for. Both are the host from the URI.
+    #[cfg(feature = "ws")]
+    pub async fn send_ws(
+        &mut self,
+        key: &ConnectionKey,
+        authority: &str,
+        keepalive: Duration,
+        #[cfg(feature = "wss")] client: Option<&crate::tls::ClientTls>,
+        bytes: Bytes,
+    ) -> Result<()> {
+        if !self.reusable(key) {
+            self.connections.remove(key);
+            self.dial_ws(
+                key.clone(),
+                authority,
+                keepalive,
+                #[cfg(feature = "wss")]
+                client,
+            )?;
+        }
+        self.queue(key, bytes).await
+    }
+
+    /// Forget a connection that has closed.
+    pub fn remove(&mut self, key: &ConnectionKey) {
+        self.connections.remove(key);
+    }
+
+    /// Whether this connection is held.
+    #[must_use]
+    pub fn holds(&self, key: &ConnectionKey) -> bool {
+        self.connections.contains_key(key)
+    }
+
+    /// Answer on the connection a request arrived over, if it is still open.
+    ///
+    /// Always tried before anything the `Via` says: opening a new connection to a NAT-ed
+    /// client's advertised address cannot work, which is what RFC 5923 exists to say.
+    ///
+    /// [`Via`]: sipx_sip::headers::Via
+    pub async fn send_on_existing(&mut self, key: &ConnectionKey, bytes: Bytes) -> bool {
+        let Some(pooled) = self.connections.get_mut(key) else {
+            return false;
+        };
+        if pooled.writer.send(bytes).await.is_err() {
+            self.connections.remove(key);
+            return false;
+        }
+        pooled.last_used = Instant::now();
+        true
+    }
+
+    /// Close connections idle for longer than the configured timeout.
+    pub fn evict_idle(&mut self) -> Vec<ConnectionKey> {
+        let deadline = Instant::now();
+        let idle_timeout = self.config.idle_timeout;
+        let evicted: Vec<ConnectionKey> = self
+            .connections
+            .iter()
+            .filter(|(_, c)| deadline.duration_since(c.last_used) > idle_timeout)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &evicted {
+            self.connections.remove(key);
+        }
+        evicted
+    }
+
+    /// Whether the connection already held for this key may carry what is about to be sent.
+    fn reusable(&self, key: &ConnectionKey) -> bool {
+        self.connections.get(key).is_some_and(|pooled| {
             !pooled.writer.is_closed()
                 && (pooled.origin == Origin::Outbound || self.config.reuse_inbound_for_outbound)
-        });
-        if !reusable {
-            self.connections.remove(&peer);
-            self.insert_connecting_tls(peer, verification_name, client)?;
-        }
+        })
+    }
 
-        let Some(pooled) = self.connections.get_mut(&peer) else {
+    /// Hand bytes to a connection's writer.
+    async fn queue(&mut self, key: &ConnectionKey, bytes: Bytes) -> Result<()> {
+        let Some(pooled) = self.connections.get_mut(key) else {
             return Err(crate::error::Error::EndpointClosed);
         };
         pooled.last_used = Instant::now();
@@ -236,164 +278,168 @@ impl Pool {
             .map_err(|_| crate::error::Error::EndpointClosed)
     }
 
-    #[cfg(feature = "tls")]
-    fn insert_connecting_tls(
-        &mut self,
-        peer: SocketAddr,
-        verification_name: &str,
-        client: &crate::tls::ClientTls,
-    ) -> Result<()> {
+    /// Make room, then take the writer half of a connection whose task is about to be spawned.
+    ///
+    /// The writer exists before the socket does, so bytes queue in the channel rather than in
+    /// the caller while a connection is still being established.
+    fn register(&mut self, key: ConnectionKey, origin: Origin) -> mpsc::Receiver<Bytes> {
         if self.connections.len() >= self.config.max_connections {
             self.evict_least_recently_used();
         }
-
-        let name = crate::tls::verification_name(verification_name)?;
-        let connector = client.connector();
         let (writer_tx, writer_rx) = mpsc::channel::<Bytes>(64);
-        let events = self.events.clone();
-        let limits = self.limits;
-
-        tokio::spawn(async move {
-            let stream = match TcpStream::connect(peer).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    tracing::debug!(%error, %peer, "connect failed");
-                    let _ = events
-                        .send(Event::Closed {
-                            peer,
-                            transport: TransportKind::Tcp,
-                        })
-                        .await;
-                    return;
-                }
-            };
-            match connector.connect(name, stream).await {
-                Ok(tls) => {
-                    pump(tls, peer, writer_rx, events, limits, TransportKind::Tls).await;
-                }
-                Err(error) => {
-                    // Every verification failure arrives here, with the reason attached. It is
-                    // logged rather than swallowed, and the connection simply does not exist —
-                    // there is no fallback to cleartext.
-                    tracing::warn!(%error, %peer, "TLS handshake failed");
-                    let _ = events
-                        .send(Event::Closed {
-                            peer,
-                            transport: TransportKind::Tls,
-                        })
-                        .await;
-                }
-            }
-        });
-
         self.connections.insert(
-            peer,
-            Pooled {
-                writer: writer_tx,
-                origin: Origin::Outbound,
-                last_used: Instant::now(),
-            },
-        );
-        Ok(())
-    }
-
-    /// Forget a connection that has closed.
-    pub fn remove(&mut self, peer: SocketAddr) {
-        self.connections.remove(&peer);
-    }
-
-    /// Whether a connection to this peer is held.
-    #[must_use]
-    pub fn holds(&self, peer: SocketAddr) -> bool {
-        self.connections.contains_key(&peer)
-    }
-
-    /// Answer on the connection a request arrived over, if it is still open.
-    ///
-    /// Always tried before anything the `Via` says: opening a new connection to a NAT-ed
-    /// client's advertised address cannot work, which is what RFC 5923 exists to say.
-    ///
-    /// [`Via`]: sipx_sip::headers::Via
-    pub async fn send_on_existing(&mut self, peer: SocketAddr, bytes: Bytes) -> bool {
-        let Some(pooled) = self.connections.get_mut(&peer) else {
-            return false;
-        };
-        if pooled.writer.send(bytes).await.is_err() {
-            self.connections.remove(&peer);
-            return false;
-        }
-        pooled.last_used = Instant::now();
-        true
-    }
-
-    /// Close connections idle for longer than the configured timeout.
-    pub fn evict_idle(&mut self) -> Vec<SocketAddr> {
-        let deadline = Instant::now();
-        let idle_timeout = self.config.idle_timeout;
-        let evicted: Vec<SocketAddr> = self
-            .connections
-            .iter()
-            .filter(|(_, c)| deadline.duration_since(c.last_used) > idle_timeout)
-            .map(|(addr, _)| *addr)
-            .collect();
-        for addr in &evicted {
-            self.connections.remove(addr);
-        }
-        evicted
-    }
-
-    fn insert(&mut self, stream: TcpStream, peer: SocketAddr, origin: Origin) {
-        self.insert_stream(stream, peer, origin, TransportKind::Tcp);
-    }
-
-    fn insert_stream<S>(
-        &mut self,
-        stream: S,
-        peer: SocketAddr,
-        origin: Origin,
-        transport: TransportKind,
-    ) where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
-    {
-        if self.connections.len() >= self.config.max_connections {
-            self.evict_least_recently_used();
-        }
-
-        let (writer_tx, writer_rx) = mpsc::channel::<Bytes>(64);
-        let events = self.events.clone();
-        let limits = self.limits;
-        tokio::spawn(pump(stream, peer, writer_rx, events, limits, transport));
-
-        self.connections.insert(
-            peer,
+            key,
             Pooled {
                 writer: writer_tx,
                 origin,
                 last_used: Instant::now(),
             },
         );
+        writer_rx
     }
 
-    /// Accept a TLS connection, doing the handshake before it joins the pool.
-    #[cfg(feature = "tls")]
-    pub fn accept_tls_handshake(
-        &self,
-        stream: TcpStream,
-        peer: SocketAddr,
-        server: &crate::tls::ServerTls,
-        accepted: mpsc::Sender<(tokio_rustls::server::TlsStream<TcpStream>, SocketAddr)>,
-    ) {
-        let acceptor = server.acceptor();
+    fn dial(&mut self, key: ConnectionKey) {
+        let writer_rx = self.register(key.clone(), Origin::Outbound);
+        let events = self.events.clone();
+        let limits = self.limits;
         tokio::spawn(async move {
-            match acceptor.accept(stream).await {
-                Ok(tls) => {
-                    let _ = accepted.send((tls, peer)).await;
-                }
+            match TcpStream::connect(key.peer).await {
+                Ok(stream) => pump(stream, key, writer_rx, events, limits).await,
                 Err(error) => {
-                    tracing::debug!(%error, %peer, "inbound TLS handshake failed");
+                    tracing::debug!(%error, peer = %key.peer, "connect failed");
+                    let _ = events.send(Event::Closed { key }).await;
                 }
             }
         });
+    }
+
+    #[cfg(feature = "tls")]
+    fn dial_tls(
+        &mut self,
+        key: ConnectionKey,
+        verification_name: &str,
+        client: &crate::tls::ClientTls,
+    ) -> Result<()> {
+        let name = crate::tls::verification_name(verification_name)?;
+        let connector = client.connector();
+        let writer_rx = self.register(key.clone(), Origin::Outbound);
+        let events = self.events.clone();
+        let limits = self.limits;
+
+        tokio::spawn(async move {
+            let stream = match TcpStream::connect(key.peer).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    tracing::debug!(%error, peer = %key.peer, "connect failed");
+                    let _ = events.send(Event::Closed { key }).await;
+                    return;
+                }
+            };
+            match connector.connect(name, stream).await {
+                Ok(tls) => pump(tls, key, writer_rx, events, limits).await,
+                Err(error) => {
+                    // Every verification failure arrives here, with the reason attached. It is
+                    // logged rather than swallowed, and the connection simply does not exist —
+                    // there is no fallback to cleartext.
+                    tracing::warn!(%error, peer = %key.peer, "TLS handshake failed");
+                    let _ = events.send(Event::Closed { key }).await;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    #[cfg(feature = "ws")]
+    fn dial_ws(
+        &mut self,
+        key: ConnectionKey,
+        authority: &str,
+        keepalive: Duration,
+        #[cfg(feature = "wss")] client: Option<&crate::tls::ClientTls>,
+    ) -> Result<()> {
+        #[cfg(feature = "wss")]
+        let secure = if key.transport == TransportKind::Wss {
+            let client = client.ok_or(crate::error::Error::UnsupportedTransport(
+                "WSS (no client configuration, so no outbound connection can be verified)",
+            ))?;
+            // The name a certificate is checked against, which is *not* `authority`: that
+            // carries a port because an HTTP `Host` header does, and a certificate is issued to
+            // a host. The identity on the key is the bare host from the URI — see
+            // `docs/specs/sip-tls.md` §3.3 — with the address as the fallback, exactly as the
+            // TLS transport does it.
+            let verify = key
+                .identity
+                .as_deref()
+                .map_or_else(|| key.peer.ip().to_string(), str::to_owned);
+            Some((client.connector(), crate::tls::verification_name(&verify)?))
+        } else {
+            None
+        };
+
+        let authority = authority.to_owned();
+        let writer_rx = self.register(key.clone(), Origin::Outbound);
+        let events = self.events.clone();
+        let limits = self.limits;
+
+        tokio::spawn(async move {
+            let stream = match TcpStream::connect(key.peer).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    tracing::debug!(%error, peer = %key.peer, "connect failed");
+                    let _ = events.send(Event::Closed { key }).await;
+                    return;
+                }
+            };
+
+            #[cfg(feature = "wss")]
+            if let Some((connector, name)) = secure {
+                match connector.connect(name, stream).await {
+                    Ok(tls) => {
+                        crate::ws::dial(tls, &authority, key, writer_rx, events, limits, keepalive)
+                            .await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, peer = %key.peer, "TLS handshake failed");
+                        let _ = events.send(Event::Closed { key }).await;
+                    }
+                }
+                return;
+            }
+
+            crate::ws::dial(
+                stream, &authority, key, writer_rx, events, limits, keepalive,
+            )
+            .await;
+        });
+        Ok(())
+    }
+
+    fn insert_stream<S>(&mut self, stream: S, key: ConnectionKey, origin: Origin)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+    {
+        let writer_rx = self.register(key.clone(), origin);
+        let events = self.events.clone();
+        let limits = self.limits;
+        tokio::spawn(pump(stream, key, writer_rx, events, limits));
+    }
+
+    #[cfg(feature = "ws")]
+    fn spawn_ws<S>(
+        &mut self,
+        ws: crate::ws::Socket<S>,
+        key: ConnectionKey,
+        origin: Origin,
+        keepalive: Duration,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let writer_rx = self.register(key.clone(), origin);
+        let events = self.events.clone();
+        let limits = self.limits;
+        tokio::spawn(crate::ws::pump(
+            ws, key, writer_rx, events, limits, keepalive,
+        ));
     }
 
     fn evict_least_recently_used(&mut self) {
@@ -401,7 +447,7 @@ impl Pool {
             .connections
             .iter()
             .min_by_key(|(_, c)| c.last_used)
-            .map(|(addr, _)| *addr)
+            .map(|(key, _)| key.clone())
         else {
             return;
         };
@@ -416,14 +462,14 @@ impl Pool {
 /// copy of this loop is a second place for the framing rules to drift.
 async fn pump<S>(
     stream: S,
-    peer: SocketAddr,
+    key: ConnectionKey,
     mut outgoing: mpsc::Receiver<Bytes>,
     events: mpsc::Sender<Event>,
     limits: Limits,
-    transport: TransportKind,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
 {
+    let (peer, transport) = (key.peer, key.transport);
     let (mut read_half, mut write_half) = tokio::io::split(stream);
     let mut parser = StreamParser::new(limits);
     let mut buf = vec![0u8; 8192];
@@ -468,7 +514,7 @@ async fn pump<S>(
         }
     }
 
-    let _ = events.send(Event::Closed { peer, transport }).await;
+    let _ = events.send(Event::Closed { key }).await;
 }
 
 /// Accept connections on a listener, adding each to the pool.
@@ -488,12 +534,6 @@ pub async fn accept_loop(listener: TcpListener, incoming: mpsc::Sender<(TcpStrea
             }
         }
     }
-}
-
-/// The transport kind a pool serves.
-#[must_use]
-pub fn kind() -> TransportKind {
-    TransportKind::Tcp
 }
 
 #[cfg(test)]
@@ -520,6 +560,10 @@ mod tests {
         let (tx, rx) = mpsc::channel(64);
         let pool = Pool::new(PoolConfig::default(), Limits::stream(), tx);
         (pool, addr, rx, listener)
+    }
+
+    fn tcp(peer: SocketAddr) -> ConnectionKey {
+        ConnectionKey::new(peer, TransportKind::Tcp)
     }
 
     /// X5: the property a stream transport lives or dies by.
@@ -630,7 +674,8 @@ mod tests {
 
         // Answering on it is fine.
         assert!(
-            pool.send_on_existing(peer, Bytes::from_static(b"x")).await,
+            pool.send_on_existing(&tcp(peer), Bytes::from_static(b"x"))
+                .await,
             "a response must go back over the connection it came in on"
         );
 
@@ -639,7 +684,7 @@ mod tests {
         // is a client socket with nothing listening, which is exactly the point — it did not
         // silently reuse.
         let before = pool.len();
-        let _ = pool.send(peer, Bytes::from_static(b"y")).await;
+        let _ = pool.send(&tcp(peer), Bytes::from_static(b"y")).await;
         assert!(
             pool.len() <= before,
             "the inbound connection must not have been adopted for outbound use"

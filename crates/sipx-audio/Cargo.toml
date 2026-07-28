@@ -13,11 +13,12 @@ categories.workspace = true
 [features]
 default = []
 ## Opus support. Pulls in a C dependency; off by default so the stack stays pure Rust.
-opus = []
+opus = ["dep:opus"]
 
 [dependencies]
 bytes.workspace = true
 thiserror.workspace = true
+opus = { workspace = true, optional = true }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

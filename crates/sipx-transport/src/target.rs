@@ -109,6 +109,52 @@ impl Target {
         self.verify_as = Some(Arc::from(name.as_ref()));
         self
     }
+
+    /// Which pooled connection carries traffic for this destination.
+    #[must_use]
+    pub fn connection(&self) -> ConnectionKey {
+        ConnectionKey {
+            peer: self.addr,
+            transport: self.transport,
+            identity: self.verify_as.clone(),
+        }
+    }
+}
+
+/// What makes two connections the same connection.
+///
+/// Not the address alone, and each of the other two fields earns its place.
+///
+/// **The transport**, because TCP and TLS to one address are not interchangeable: a `sips:`
+/// request riding a cleartext socket has silently become what it asked not to be. With
+/// WebSocket in the mix the case stops being theoretical — WS and TCP can and do share a port.
+///
+/// **The verified identity**, because `docs/specs/sip-tls.md` §5 says two names that resolve to
+/// one address are two connections. Reusing one for the other would send traffic for
+/// `a.example.com` over a connection authenticated as `b.example.com`, which throws away the
+/// verification that was just performed. `None` on a connection a peer opened: sipx verified
+/// nothing about it, so there is no identity to key on.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConnectionKey {
+    /// The far end.
+    pub peer: SocketAddr,
+    /// Which transport it speaks.
+    pub transport: TransportKind,
+    /// The name whose certificate was verified, for connections sipx opened over TLS.
+    pub identity: Option<Arc<str>>,
+}
+
+impl ConnectionKey {
+    /// A connection with nothing verified about it — anything a peer opened, and every
+    /// cleartext transport.
+    #[must_use]
+    pub fn new(peer: SocketAddr, transport: TransportKind) -> Self {
+        Self {
+            peer,
+            transport,
+            identity: None,
+        }
+    }
 }
 
 /// Where a response to this request must be sent (RFC 3261 §18.2.2).
@@ -127,15 +173,21 @@ pub fn response_destination(via: &Via, source: SocketAddr, transport: TransportK
         return Target::new(SocketAddr::new(addr, port), transport);
     }
 
+    // RFC 3581 §4: an observed `rport` names the port the response has to go to, whichever
+    // address the steps below settle on. It is not tied to `received` — a client whose
+    // sent-by host is right but whose port was rewritten, or which simply sent from an
+    // ephemeral socket, has its pinhole open here and nothing listening on the claimed port.
+    let observed_port = via
+        .rport()
+        .flatten()
+        .and_then(|v| std::str::from_utf8(v).ok())
+        .and_then(|v| v.parse::<u16>().ok());
+
     // 2. received, at the rport if the sender asked us to observe one.
     if let Some(received) = via.received()
         && let Some(addr) = parse_host(received)
     {
-        let port = via
-            .rport()
-            .flatten()
-            .and_then(|v| std::str::from_utf8(v).ok())
-            .and_then(|v| v.parse::<u16>().ok())
+        let port = observed_port
             .or(via.port)
             .unwrap_or_else(|| transport.default_port());
         return Target::new(SocketAddr::new(addr, port), transport);
@@ -143,7 +195,9 @@ pub fn response_destination(via: &Via, source: SocketAddr, transport: TransportK
 
     // 3. The sent-by, if it is an address we can use directly.
     if let sipx_sip::Host::Ip(ip) = &via.host {
-        let port = via.port.unwrap_or_else(|| transport.default_port());
+        let port = observed_port
+            .or(via.port)
+            .unwrap_or_else(|| transport.default_port());
         return Target::new(SocketAddr::new(*ip, port), transport);
     }
 
@@ -206,6 +260,21 @@ mod tests {
             .port(),
             5061
         );
+    }
+
+    /// RFC 3581 §4: when the topmost `Via` carries an `rport`, the response goes to the source
+    /// IP address *and port* the request came from. The port matters on its own — a client
+    /// whose sent-by names the right host but the wrong port (an ephemeral socket, or a NAT
+    /// that rewrote only the port) has a pinhole open on the observed port and nothing
+    /// listening on the claimed one.
+    #[test]
+    fn an_observed_rport_is_used_even_without_a_received() {
+        let target = response_destination(
+            &via("SIP/2.0/UDP 203.0.113.9:5060;rport=41234;branch=z9hG4bKx"),
+            source(),
+            TransportKind::Udp,
+        );
+        assert_eq!(target.addr.to_string(), "203.0.113.9:41234");
     }
 
     /// The NAT case, and the reason this function is not one line. The sender believes it is

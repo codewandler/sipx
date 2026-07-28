@@ -72,14 +72,17 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     };
 
     let mut config = TransportConfig::new(local);
-    // The advertised address must be one a peer can reach; the bound one may be 0.0.0.0.
-    config.sent_by = target.addr.ip().to_string();
+    // The `Via` sent-by names where *this* client expects responses (RFC 3261 §18.1.1); the
+    // bound address may be 0.0.0.0, which names every interface and reaches none.
+    config.sent_by = crate::advertise::reachable_ip(local, target.addr.ip()).to_string();
     let (handle, _incoming) = match bind(config).await {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
     };
-    // Now that the socket has a port, advertise the one it actually got.
-    let contact = format!("<sip:{user}@{}>", handle.local_addr());
+    // The registrar stores this binding and routes every call to the address-of-record at it
+    // (RFC 3261 §10.2.6), so it carries the advertised address — reachable host, real port —
+    // not the bound one.
+    let contact = format!("<sip:{user}@{}>", handle.advertised());
 
     let Ok(host) = HostName::new(domain.clone()) else {
         return fail(format, Exit::Usage, &format!("not a hostname: {domain}"));

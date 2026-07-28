@@ -206,6 +206,10 @@ impl TypedHeader for Via {
         let first = parts.first().copied().unwrap_or(&[]);
         Self::parse_one(first)
     }
+
+    fn decode_list(value: &[u8]) -> Result<Vec<Self>, HeaderError> {
+        Self::parse_list(value)
+    }
 }
 
 #[cfg(test)]

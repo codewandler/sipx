@@ -40,6 +40,12 @@ pub(crate) enum Value {
     Bool(bool),
     /// A duration, reported in seconds.
     Seconds(u64),
+    /// A measured quantity, rendered to a fixed number of decimal places.
+    ///
+    /// Fixed because these are estimates. A mean opinion score printed as `4.393268032` claims
+    /// a precision the model behind it does not have, and someone will compare two calls on the
+    /// eighth digit.
+    Decimal(f64, usize),
 }
 
 impl Value {
@@ -49,6 +55,7 @@ impl Value {
             Self::Number(number) => number.to_string(),
             Self::Bool(value) => value.to_string(),
             Self::Seconds(seconds) => seconds.to_string(),
+            Self::Decimal(value, places) => format!("{value:.places$}"),
         }
     }
 
@@ -58,6 +65,7 @@ impl Value {
             Self::Number(number) => number.to_string(),
             Self::Bool(value) => value.to_string(),
             Self::Seconds(seconds) => format!("{seconds}s"),
+            Self::Decimal(value, places) => format!("{value:.places$}"),
         }
     }
 }
@@ -120,6 +128,23 @@ impl Report {
         self.fields
             .push((name.to_owned(), Value::Seconds(value.as_secs())));
         self
+    }
+
+    /// Add a measured quantity, to a fixed number of decimal places.
+    #[must_use]
+    pub(crate) fn decimal(mut self, name: &str, value: f64, places: usize) -> Self {
+        // A NaN would render as `NaN`, which is not JSON and would break a script parsing the
+        // output. Reporting zero is no better; the field is simply omitted upstream.
+        let value = if value.is_finite() { value } else { 0.0 };
+        self.fields
+            .push((name.to_owned(), Value::Decimal(value, places)));
+        self
+    }
+
+    /// Add a duration in milliseconds, which is the useful scale for a round trip.
+    #[must_use]
+    pub(crate) fn millis(self, name: &str, value: std::time::Duration) -> Self {
+        self.number(name, i64::try_from(value.as_millis()).unwrap_or(i64::MAX))
     }
 
     /// The field names, in order.
