@@ -53,3 +53,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Registration as a lease: the registrar's granted expiry wins, refreshes reuse the `Call-ID`
   and advance the `CSeq`, and a rejected password fails once instead of looping.
 - `OPTIONS` answered with a real capability list.
+- Verified against a real Kamailio, not only against sipx: `./tests/interop/run.sh`.
+
+**Milestone M3 — media and calls**
+
+- `sipx-sdp`: RFC 8866 parsing that keeps unknown lines, and RFC 3264 offer/answer as a pure
+  function. Rejected streams keep their place with port 0, codec order is the offerer's, and
+  dynamic payload types are matched by encoding name rather than number.
+- `sipx-audio`: G.711 µ-law and A-law checked against the ITU algorithm rather than by round
+  trip, and WAV for 8 kHz 16-bit mono.
+- `sipx-rtp`: packet encode/decode that rejects rather than guesses, and a jitter buffer that
+  extends sequence numbers to 64 bits so the 16-bit wrap is ordinary rather than a cliff.
+- `sipx-media`: RTP sessions with symmetric RTP, paced by a single clock.
+- `sipx-call`: dialogs, `dial`, `answer` and `hang_up`. Two sipx endpoints establish a call,
+  play a WAV and record it bit-exact after G.711.
+
+### Fixed
+
+- An endpoint binding to port 0 could fail with `AddrInUse`: UDP and TCP have independent port
+  spaces, so a port the OS handed out for UDP could already be held for TCP. Binding now
+  retries for a port free on both, while a *named* port that is taken still fails honestly.

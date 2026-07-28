@@ -504,6 +504,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "pretty_assertions",
+ "rand",
  "sipx-audio",
  "sipx-media",
  "sipx-rtp",
@@ -538,6 +539,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "pretty_assertions",
+ "rand",
  "sipx-audio",
  "sipx-rtp",
  "sipx-sdp",

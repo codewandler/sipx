@@ -387,3 +387,37 @@ async fn resolution_falls_through_to_the_next_candidate() {
     assert_eq!(response.status.code(), 200);
     responder.await.expect("the responder finishes");
 }
+
+/// UDP and TCP have independent port spaces, so a port the OS hands out for UDP may already be
+/// held by someone else for TCP. An endpoint asking for "any port" must find one that is free
+/// for both rather than failing — this surfaced as an intermittent `AddrInUse` under load,
+/// which is exactly the kind of failure that gets blamed on the test.
+#[tokio::test]
+async fn binding_finds_a_port_free_for_both_transports() {
+    // Hold a TCP port, then try to make the OS hand out the same number for UDP. The retry is
+    // what makes this reliable rather than a coin toss.
+    let squatter = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let taken = squatter.local_addr().expect("has an address").port();
+
+    // Binding to that exact port must fail honestly: the caller named it, so the conflict is
+    // real and not something to paper over by choosing another.
+    let mut exact = Config::new(format!("127.0.0.1:{taken}").parse().expect("valid"));
+    exact.tcp = true;
+    assert!(
+        bind(exact).await.is_err(),
+        "a named port that is taken is a real conflict"
+    );
+
+    // Asking for any port must succeed, repeatedly, with both transports on the same number.
+    for _ in 0..20 {
+        let (handle, _rx) = bind(Config::new("127.0.0.1:0".parse().expect("valid")))
+            .await
+            .expect("an endpoint asking for any port must find one");
+        let port = handle.local_addr().port();
+        assert_ne!(port, 0);
+        // Both transports really are on it: TCP would not have bound otherwise.
+        assert_ne!(port, taken, "it must not have taken the held port");
+    }
+}

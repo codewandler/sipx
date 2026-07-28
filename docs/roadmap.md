@@ -6,14 +6,14 @@ this document is the hand-written narrative around it.
 
 ## Status
 
-_As of 2026-07-28:_ **M0, M1 and M2 are complete.** `sipx-sip` is a working sans-IO SIP core:
+_As of 2026-07-28:_ **M0 through M3 are complete.** `sipx-sip` is a working sans-IO SIP core:
 URIs, headers, an incremental parser for both datagram and stream transports, message
 validation, injection-proof builders, and all four transaction state machines with matching
 and stores. 157 tests pass; clippy is clean at `-D warnings`; the whole RFC 4475 torture
 corpus is green across all four of its layers.
 
-sipx registers against a real Kamailio over both UDP and TCP, and answers `OPTIONS`. Next is
-**M3**: media, and a call that carries audio.
+sipx registers against a real Kamailio over both UDP and TCP, answers `OPTIONS`, and places
+calls that carry G.711 audio in both directions. Next is **M4**: the `sipx` command-line phone.
 
 ## Delivered
 
@@ -43,6 +43,12 @@ sipx registers against a real Kamailio over both UDP and TCP, and answers `OPTIO
     and registration treated as a lease rather than a request.
   - **Verified against a real Kamailio**, not only against sipx: `./tests/interop/run.sh`
     registers over UDP and TCP, refreshes, is refused with a wrong password, and pings.
+- **M3 — It calls.** SDP offer/answer as a pure function, G.711 checked against the ITU
+  algorithm, RTP with a jitter buffer that treats the 16-bit sequence wrap as ordinary, media
+  sessions with symmetric RTP, and dialogs. Two endpoints establish a call, play a WAV and
+  record it back bit-exact after the codec.
+  - Known gaps, filed rather than implied: RTCP reports (`M-6`), RFC 4733 DTMF (`M-7`), and
+    re-INVITE plus in-dialog request routing (`M-8`).
 
 ## Next
 
@@ -50,8 +56,6 @@ Milestones, in order. Each is independently demonstrable:
 
 - **M2 — It talks.** Registers against Kamailio and Asterisk over UDP and TCP; answers
   `OPTIONS`.
-- **M3 — It calls.** INVITE with SDP offer/answer and G.711 audio both ways: play a WAV into
-  a call, record the far end, assert on the samples.
 - **M4 — Phone.** `sipx dial | answer | register` with file/log media, recording, DTMF and
   machine-readable output.
 - **M5 — Depth.** TLS/WS/WSS, bridging and mixing, transfer, jitter-buffer tuning, RTCP

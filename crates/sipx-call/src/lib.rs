@@ -1,8 +1,17 @@
-//! Call framework — the layer applications build on.
+//! Calls: dialogs, INVITE with SDP offer/answer, and the media that results.
 //!
-//! A `Call` owns its signalling dialog and its media pipeline outright. Everything above
-//! is expressed in those terms: answer and dial, play audio, record, read and send DTMF,
-//! bridge two calls, mix several, and transfer (RFC 3515).
+//! This is the layer where the signalling and the media stacks meet. The join is narrower than
+//! it looks: SDP negotiation decides an address, a port and a codec, and everything else about
+//! media follows from those three.
 //!
-//! Bridging moves audio frames between calls over channels rather than sharing a media
-//! session behind a lock, so a stalled leg can never block its peer.
+//! The ordering constraint worth knowing is that an SDP offer has to name the port audio will
+//! arrive on, and only a bound socket knows that port. So the media socket is bound *before*
+//! the INVITE is sent, not after the answer comes back.
+
+pub mod call;
+pub mod dialog;
+pub mod error;
+
+pub use call::{Call, answer, dial};
+pub use dialog::{Dialog, DialogId, Role};
+pub use error::{Error, Result};

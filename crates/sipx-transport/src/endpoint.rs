@@ -275,16 +275,7 @@ pub fn new_branch() -> String {
 ///
 /// Returns a handle for sending, and a receiver of the requests that arrive.
 pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> {
-    let socket = UdpSocket::bind(config.bind).await?;
-    let local_addr = socket.local_addr()?;
-
-    // The TCP listener shares the UDP port, which is what peers expect: a `Via` naming
-    // `SIP/2.0/TCP host:port` and one naming UDP refer to the same port number.
-    let listener = if config.tcp {
-        Some(TcpListener::bind(local_addr).await?)
-    } else {
-        None
-    };
+    let (socket, listener, local_addr) = bind_matching_ports(&config).await?;
     // Port 0 in the configuration means the same as absent: it is a request for any port,
     // not an advertisement of port zero.
     let sent_by_port = match config.sent_by_port {
@@ -325,6 +316,54 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     tokio::spawn(driver.run());
 
     Ok((handle, incoming_rx))
+}
+
+/// Bind UDP and TCP to the *same* port.
+///
+/// Peers assume they are the same: a `Via` naming `SIP/2.0/TCP host:port` and one naming UDP
+/// refer to one port number, and an endpoint whose two transports live on different ports is
+/// unreachable over one of them.
+///
+/// The awkward part is that UDP and TCP have independent port spaces, so a port the OS hands
+/// out for UDP may already be held by someone else for TCP. When the caller asked for port 0 —
+/// "any port" — that is not an error, it is a port to not use: try again. When the caller named
+/// a port, it is a real conflict and is reported as one.
+async fn bind_matching_ports(
+    config: &Config,
+) -> Result<(UdpSocket, Option<TcpListener>, SocketAddr)> {
+    const ATTEMPTS: usize = 16;
+
+    let wants_any_port = config.bind.port() == 0;
+    let mut last_error = None;
+
+    for _ in 0..ATTEMPTS {
+        let socket = UdpSocket::bind(config.bind).await?;
+        let local_addr = socket.local_addr()?;
+
+        if !config.tcp {
+            return Ok((socket, None, local_addr));
+        }
+
+        match TcpListener::bind(local_addr).await {
+            Ok(listener) => return Ok((socket, Some(listener), local_addr)),
+            Err(error) if wants_any_port && error.kind() == std::io::ErrorKind::AddrInUse => {
+                // Someone else holds this port for TCP. Drop the UDP socket so the OS may
+                // hand the port out again, and ask for another.
+                drop(socket);
+                last_error = Some(error);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                "no port was free for both UDP and TCP",
+            )
+        })
+        .into())
 }
 
 struct Driver {

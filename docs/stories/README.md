@@ -35,17 +35,20 @@ _None._
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media
-- [M-2 — Implement RTP and RTCP](M-2-rtp-and-rtcp.md) · Media
-- [M-3 — Implement G.711 and WAV handling](M-3-g711-and-wav.md) · Media
-- [M-4 — Implement the media session](M-4-media-session.md) · Media
-- [M-5 — Implement dialogs and the call framework](M-5-call-framework.md) · Media
+- [M-6 — Implement RTCP sender and receiver reports](M-6-rtcp-reports.md) · Media · gap left explicitly by M3
+- [M-7 — Implement RFC 4733 DTMF events](M-7-dtmf-events.md) · Media · gap left explicitly by M3
+- [M-8 — Handle re-INVITE and in-dialog requests](M-8-reinvite-and-in-dialog.md) · Media · gap left explicitly by M3
 
 ### Transport layer
 _The transport layer is the only place in the signalling stack that touches the network, which_
 - [T-5 — Wire a real DNS client behind the resolver trait](T-5-dns-resolver-backend.md) · Signalling · T-4 implements every selection rule but has no DNS backend
 
 ## Done
+- [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media
+- [M-2 — Implement RTP and RTCP](M-2-rtp-and-rtcp.md) · Media
+- [M-3 — Implement G.711 and WAV handling](M-3-g711-and-wav.md) · Media
+- [M-4 — Implement the media session](M-4-media-session.md) · Media
+- [M-5 — Implement dialogs and the call framework](M-5-call-framework.md) · Media
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 - [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling

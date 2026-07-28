@@ -1,0 +1,264 @@
+//! A call, end to end: INVITE with SDP, G.711 audio, and BYE.
+//!
+//! This is milestone M3's exit criterion. Two sipx endpoints, real UDP sockets for signalling
+//! and for media, a WAV played into the call and recorded at the far end, and an assertion on
+//! the samples that came out.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation
+)]
+// `caller` and `callee` differ by two letters and are the names the RFCs, the industry and
+// everyone reading this test already use. Renaming them to satisfy a similarity heuristic
+// would make the test harder to read, not easier.
+#![allow(clippy::similar_names)]
+
+use std::net::IpAddr;
+use std::time::Duration;
+
+use sipx_audio::{Wav, g711, read_wav, write_wav};
+use sipx_call::{Call, answer, dial};
+use sipx_sip::{Host, HostName, Method, Uri};
+use sipx_transport::{Config, Handle, Incoming, Target, bind};
+use tokio::sync::mpsc::Receiver;
+
+fn loopback() -> IpAddr {
+    "127.0.0.1".parse().expect("valid")
+}
+
+async fn endpoint() -> (Handle, Receiver<Incoming>) {
+    bind(Config::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds")
+}
+
+/// A recognisable clip: a 440 Hz tone with an envelope, so a test that silently recorded
+/// silence could not pass.
+fn clip(milliseconds: usize) -> Wav {
+    let samples = milliseconds * 8;
+    Wav::narrowband(
+        (0..samples)
+            .map(|i| {
+                let t = f64::from(u32::try_from(i).unwrap_or(0)) / 8000.0;
+                let envelope = (t * 3.0).min(1.0);
+                let value = (t * 440.0 * 2.0 * std::f64::consts::PI).sin() * 12000.0 * envelope;
+                i16::try_from(value.round() as i32).unwrap_or(0)
+            })
+            .collect(),
+    )
+}
+
+/// Set up a caller and a callee, connect them, and hand back both sides of the call.
+async fn connected() -> (Call, Call) {
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let (caller_endpoint, _caller_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+
+    let answering = tokio::spawn(async move {
+        let incoming = callee_incoming.recv().await.expect("an INVITE arrives");
+        assert_eq!(incoming.request.method, Method::Invite);
+        answer(&callee_endpoint, &incoming, loopback())
+            .await
+            .expect("answers")
+    });
+
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let caller = dial(
+        &caller_endpoint,
+        Target::udp(callee_addr),
+        &to,
+        "<sip:caller@example.net>",
+        loopback(),
+    )
+    .await
+    .expect("the call connects");
+
+    let callee = answering.await.expect("the answering side finishes");
+    (caller, callee)
+}
+
+/// M3's exit criterion.
+#[tokio::test]
+async fn a_call_carries_audio_from_one_endpoint_to_the_other() {
+    let (caller, callee) = connected().await;
+
+    // Write the source out and read it back, so the test exercises the WAV path too rather
+    // than only the samples in memory.
+    let source = clip(300);
+    let mut encoded = Vec::new();
+    write_wav(&mut encoded, &source).expect("writes");
+    let source = read_wav(encoded.as_slice()).expect("reads");
+
+    let played = source.samples.clone();
+    let recorded = tokio::join!(
+        async {
+            caller.media().play(&played, 160).await;
+        },
+        async {
+            callee
+                .media()
+                .record_until_idle(Duration::from_millis(500))
+                .await
+        }
+    )
+    .1;
+
+    assert!(!recorded.is_empty(), "the callee heard nothing at all");
+    assert_eq!(recorded.len(), source.samples.len(), "every sample arrived");
+
+    // G.711 is lossy, so the samples cannot be compared directly. The codec is idempotent on
+    // its own output, so encoding both sides must agree exactly — a stronger claim than
+    // "close enough", and one that a dropped or reordered packet would break.
+    assert_eq!(
+        g711::ulaw_encode_all(&source.samples),
+        g711::ulaw_encode_all(&recorded),
+        "the audio that arrived is the audio that was played"
+    );
+
+    // And the recording is a real clip, not silence that happens to be the right length.
+    let peak = recorded
+        .iter()
+        .map(|s| i32::from(s.abs()))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        peak > 8000,
+        "the recorded audio is too quiet to be the tone: peak {peak}"
+    );
+}
+
+/// Both directions at once, which is what a call actually is.
+#[tokio::test]
+async fn audio_flows_in_both_directions() {
+    let (caller, callee) = connected().await;
+
+    let from_caller = clip(200).samples;
+    let from_callee: Vec<i16> = clip(200).samples.iter().map(|s| -s).collect();
+
+    let (heard_by_callee, heard_by_caller) = tokio::join!(
+        async {
+            let played = from_caller.clone();
+            let ((), recorded) = tokio::join!(
+                caller.media().play(&played, 160),
+                callee.media().record_until_idle(Duration::from_millis(500))
+            );
+            recorded
+        },
+        async {
+            let played = from_callee.clone();
+            let ((), recorded) = tokio::join!(
+                callee.media().play(&played, 160),
+                caller.media().record_until_idle(Duration::from_millis(500))
+            );
+            recorded
+        }
+    );
+
+    assert!(!heard_by_callee.is_empty(), "the callee heard nothing");
+    assert!(!heard_by_caller.is_empty(), "the caller heard nothing");
+    assert_ne!(
+        g711::ulaw_encode_all(&heard_by_callee),
+        g711::ulaw_encode_all(&heard_by_caller),
+        "each side must hear the other, not its own audio looped back"
+    );
+}
+
+/// The negotiation the call rests on: both sides agree on a codec and on where to send.
+#[tokio::test]
+async fn the_two_sides_agree_on_a_codec_and_a_media_port() {
+    let (caller, callee) = connected().await;
+
+    assert_ne!(
+        caller.media().local_addr().port(),
+        callee.media().local_addr().port(),
+        "each side binds its own media port"
+    );
+
+    // A short exchange proves the ports and codec actually match, which the SDP alone does not.
+    caller.media().play(&clip(60).samples, 160).await;
+    let heard = callee
+        .media()
+        .record_until_idle(Duration::from_millis(400))
+        .await;
+    assert_eq!(heard.len(), 480, "60 ms is three packets");
+}
+
+/// A dialog established by the exchange, seen from both ends.
+#[tokio::test]
+async fn the_call_establishes_a_dialog_both_sides_agree_on() {
+    let (caller, callee) = connected().await;
+
+    assert_eq!(caller.dialog.id.call_id, callee.dialog.id.call_id);
+    assert_eq!(
+        caller.dialog.id.local_tag, callee.dialog.id.remote_tag,
+        "the caller's tag is the callee's remote tag"
+    );
+    assert_eq!(caller.dialog.id.remote_tag, callee.dialog.id.local_tag);
+    assert_eq!(caller.dialog.role, sipx_call::Role::Caller);
+    assert_eq!(callee.dialog.role, sipx_call::Role::Callee);
+}
+
+/// Hanging up ends the call and releases the media.
+#[tokio::test]
+async fn hanging_up_ends_the_call() {
+    let (mut caller, callee) = connected().await;
+
+    caller.hang_up().await.expect("hangs up");
+
+    // The media session is stopped: nothing more is delivered.
+    let after = callee
+        .media()
+        .record_until_idle(Duration::from_millis(200))
+        .await;
+    let before = caller.media().packets_sent();
+    caller.media().play(&clip(100).samples, 160).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        caller.media().packets_sent(),
+        before,
+        "a stopped session sends nothing"
+    );
+    assert!(after.is_empty(), "and the far end hears nothing more");
+}
+
+/// A call to somewhere that refuses is an error with the status in it, not a hang.
+#[tokio::test]
+async fn a_refused_call_reports_the_status() {
+    let (busy_endpoint, mut busy_incoming) = endpoint().await;
+    let busy_addr = busy_endpoint.local_addr();
+
+    tokio::spawn(async move {
+        while let Some(incoming) = busy_incoming.recv().await {
+            let response = sipx_sip::build::ResponseBuilder::to_request(
+                &incoming.request,
+                sipx_sip::StatusCode::new(486).expect("valid"),
+                "Busy Here",
+            )
+            .expect("builds")
+            .build();
+            let _ = busy_endpoint.respond(&incoming.key, response).await;
+        }
+    });
+
+    let (caller_endpoint, _rx) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("busy.example").expect("valid")));
+    let result = dial(
+        &caller_endpoint,
+        Target::udp(busy_addr),
+        &to,
+        "<sip:caller@example.net>",
+        loopback(),
+    )
+    .await;
+
+    match result {
+        Err(sipx_call::Error::Rejected { status, reason }) => {
+            assert_eq!(status, 486);
+            assert_eq!(reason, "Busy Here");
+        }
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+}

@@ -11,6 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+rand.workspace = true
 sipx-sdp.workspace = true
 sipx-rtp.workspace = true
 sipx-audio.workspace = true
