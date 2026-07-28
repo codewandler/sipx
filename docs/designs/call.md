@@ -1,6 +1,6 @@
 # Design: Call framework
 
-**Status:** outline · **Pillar:** Application · **Epic:** `call` · **Stories:** _to be cut_
+**Status:** outline · **Pillar:** Application · **Epic:** `call` · **Stories:** `C-2`
 
 ## Why
 
@@ -27,7 +27,9 @@ mixing is a task that owns N receivers and one mixed output. Transfer follows RF
 
 - Channel capacity and what to do when a bridge's receiver falls behind — dropping audio is
   correct, but only if it is measured and reported.
-- Whether early media and 183 belong here or in the UA layer.
+- Whether early media and 183 belong here or in the UA layer. `C-2` (M9) settles it: here, because
+  an early media stream becomes the confirmed one on the 2xx without being rebuilt, and only the
+  layer that owns the pipeline can do that without a gap in the audio.
 
 ## Acceptance / done
 

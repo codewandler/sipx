@@ -72,9 +72,10 @@ stack and route back to it.
 
 ## Next
 
-Three milestones, each independently demonstrable, each ordered by the same rule the
+Seven milestones, each independently demonstrable, each ordered by the same rule the
 [RFC roadmap](rfc-roadmap.md) uses: **a gap that changes what sipx can be deployed as beats a gap
-that adds a feature.**
+that adds a feature.** M6 to M8 are scoped and their stories are `ready`; M9 to M12 are defined
+and their stories are cut, not started.
 
 ### M6 — Registrable
 
@@ -141,14 +142,113 @@ subscriber.
 S-13 first and alone — the other two are packages *on* it, and writing a package before the
 framework would shape the framework around that one package.
 
-### After M8
+### M9 — Bridgeable
+
+*What has to be true of a session before sipx can sit between two of them.*
+
+M7 makes a *message* forwardable. Nothing makes a *session* forwardable: `sipx-call` owns one
+dialog and one media pipeline, and the media bridge `M-11` built has no signalling counterpart.
+This is also where the [edge design](designs/edge.md)'s open question gets answered — whether a
+B2BUA belongs in this repository. The product does not; the primitive does.
+
+| Story | RFC | Why it is in M9 |
+|---|---|---|
+| **S-19** UPDATE | 3311 | The only way to change a session that has not been answered — §5.1 permits it "for both early and confirmed dialogs". Also what RFC 4028 §7.4 *recommends* a session refresh use when the peer allows it, which `S-11` could not do. |
+| **C-2** Early media | 3960 | `S-12` built the early-dialog offer/answer and stopped there: sipx never puts a session description in a provisional, so a caller hears a locally generated tone where the callee sent audio. |
+| **C-1** Two dialogs, one call | 7092 | An offer relayed leg to leg, a re-INVITE and a BYE propagated, and a bridge in between. §3.1.3 names the role sipx should be able to hold — signalling and SDP, off the media path — and §3.2.3 the one whose media half `M-11` already built. |
+
+**Done when** a session is renegotiated before it is answered, a caller hears the callee's early
+media rather than a local tone, and two dialogs are driven as one call by a single policy with
+audio passing between them.
+
+In that order, and the order *is* the argument. `C-1` has to relay an offer wherever it arrives —
+in a provisional, a PRACK, an UPDATE or a re-INVITE. Taken first, it would mean writing the
+early-dialog cases twice: once inside the coupling and once beside it.
+
+### M10 — Reachable
+
+*The three ways of being reached that M6 leaves open.*
+
+M6 makes sipx registrable. It does not make one *instance* of a registration addressable, a
+*sleeping* client callable, or a media path work where symmetric RTP cannot.
+
+| Story | RFC | What it unlocks |
+|---|---|---|
+| **T-20** GRUU | 5627 | A URI that reaches one instance of a registered user. It needs the `+sip.instance` value `T-15` introduces, which is why `T-14` recorded it as gated on both. |
+| **T-21** Push | 8599 | A client holding no connection at all: `pn-provider`, `pn-prid` and `pn-param` on the registered contact, and the binding-refresh REGISTER §4.1.3 requires when the push arrives. |
+| **M-16** ICE | 8445, 8839 | The NAT cases symmetric RTP does not solve — and, with `M-15`'s DTLS-SRTP and M5's WSS, the last piece of a media path a browser can use. |
+
+**Done when** one of two registrations of the same address of record can be called individually, a
+push wakes a client that held no connection into an answered call, and a call passes audio between
+two endpoints that symmetric RTP alone cannot connect.
+
+`T-20` then `T-21`: both are registration work, and push builds on the same instance identity GRUU
+needs. `M-16` is in different crates and can run beside them.
+
+ICE is promoted here out of the [RFC roadmap](rfc-roadmap.md)'s last group, where it sat beside
+recording. That was a mis-grouping — reaching the far end is not a feature, it is the same class of
+gap as the two rows above it.
+
+### M11 — Attestable
+
+*What a peer network requires before it will carry the traffic.*
+
+Everything up to here makes a call work. None of it makes a call *accountable*: sipx cannot prove
+who placed it, say what happened to it on the way, or ask a neighbour to send less.
+
+| Story | RFC | What it unlocks |
+|---|---|---|
+| **S-20** STIR and PASSporT | 8224, 8225 | A signed `Identity` header field, and a verification service that refuses a bad one with the code §6.2.2 names rather than a generic 400. Without it, a call handed to the public telephone network is unattested traffic. |
+| **S-21** History-Info and Reason | 7044, 3326 | Who diverted a call and why. One story, not two: RFC 7044 §10.2 requires the `Reason` inside the `hi-targeted-to-uri`, and RFC 3326 is `syntax only` today precisely because nothing populates it. |
+| **T-22** Overload control | 7339, 7415 | `oc`, `oc-algo`, `oc-validity` and `oc-seq` on the `Via`, so a loaded endpoint says how much to send instead of answering 503 — which is what `T-19` will otherwise leave it doing. |
+
+**Done when** an outbound call carries an `Identity` header field an independent verifier accepts,
+an inbound one whose signature does not verify is refused with 438, a diverted call arrives
+carrying its diversion history with a reason per hop, and an overloaded endpoint publishes a rate
+its neighbour honours.
+
+`S-20` first and alone — it is the largest item here and the only one with a credential fetch and a
+signature in it. `S-21` next, because the element that has to get a diversion history right is a
+re-signing one, and M9 is what creates one. `T-22` is transport work and independent of both.
+
+M11 sits after M10 because a call that cannot be reached has nothing to attest.
+
+### M12 — Provable
+
+*The measurement apparatus, caught up with the stack it measures.*
+
+The north star is "correct under adversarial input and adversarial timing, provably". The apparatus
+backing that claim — one torture corpus, four fuzz targets that are all parsers, one interop peer —
+has not grown since M1, and the stack under it has.
+
+| Story | What is missing |
+|---|---|
+| **X-16** The RFC 5118 corpus | The one published corpus sipx has never run: §4's IPv6 messages, nearly all of which must be *accepted* rather than rejected. A stack that classifies RFC 4475 to the layer has no excuse for skipping its IPv6 twin. |
+| **X-17** A second interop peer | `tests/interop` proves sipx against exactly one implementation. One peer is a sample of one, and every quirk it happens not to have is a quirk sipx does not know about. |
+| **X-18** Count what is discarded, capture what is sent | The stack emits `tracing` and nothing else: no counter leaves the process, and no capture can be attached to a bug report. `T-19` adds the first counter and has nowhere to put it. |
+| **X-19** Fuzz the driver, not only the parser | `S-4` fuzzes bytes into the parser. Nothing fuzzes *event sequences* into the transaction layer, which is the half of the north star about adversarial **timing**. |
+
+**Done when** the whole 5118 corpus is classified and green, the interop script runs against two
+independent implementations, every discard in the signalling path is counted and exportable next to
+a capture of the traffic that caused it, and a fuzzer drives the transaction layer with sequences of
+timers and messages rather than with bytes.
+
+Last, and for a reason that is not deprioritisation: each of these measures the stack as it stands
+when it is written. Built before M9 to M11 they would certify a stack nobody will ship, and would
+be extended three times. `X-16` first — a fixed corpus is the cheapest thing here.
+
+### After M12
 
 **QUIC** (`T-12` transport, `T-13` verified against a real peer) is specified in
 [`docs/specs/sip-quic.md`](https://github.com/codewandler/sipx/blob/main/docs/specs/sip-quic.md)
-and deliberately ranked below the published-RFC work; it is a draft, and a reasonable bet rather
-than a prerequisite. **GRUU** (RFC 5627) and
-**push** (RFC 8599) come free-ish once M6's Outbound lands. The **edge epic** is what M7 exists
-to make possible, and it stays unscheduled until someone wants it.
+and stays unscheduled on the same argument as before: there is no RFC for SIP over QUIC, so every
+choice in that spec is ours, and that makes it a bet rather than a prerequisite. A bet does not get
+a milestone — it lands in whichever one someone asks for it in.
+
+What the compliance table still shows red after M12 is a list of features on roles sipx already
+holds, and therefore last by this roadmap's own rule: SIPREC (7865, 7866), MESSAGE (3428), INFO
+(6086), `tel` URI normalisation (3966), caller preferences (3841), the rest of the SRTP transform
+set and rekeying (3711), RFC 5923's `alias` parameter, and the signed `Referred-By` token (3892).
 
 ## Epics
 
@@ -198,8 +298,10 @@ devices or generators, and results emitted in a form a test can assert on. Done 
 script can place a call, send DTMF, record the answer and verify it.
 See [design](designs/phone.md).
 
-### Edge / B2BUA — `edge` _(backlog, not scheduled)_
+### Edge / B2BUA — `edge` _(one story, in M9)_
 
-A programmable SIP and media edge: transports, endpoints and routes, with dialog bridging
-and selected session-border behaviour. Deliberately deferred until the layers beneath it are
-proven. See [design](designs/edge.md).
+The design's open question — whether a programmable edge belongs in this repository, or in a
+separate product consuming `sipx-call` as a library — is answered: separate. What stays here is the
+primitive underneath it, two dialogs driven as one call (`C-1`, M9). Transports, endpoints, routes,
+a registrar and session-border policy are a thing built *with* sipx, which is what the
+[vision](vision.md) already says about routing engines. See [design](designs/edge.md).

@@ -22,6 +22,13 @@ The three milestones the open stories belong to, each argued for in the
 - **M7 — Forwardable.** `T-19`, `T-18`, `T-17`, `S-15`, `S-16`, `X-14`. Making the API right for
   something that is not an endpoint.
 - **M8 — Subscribable.** `S-13` the framework, then `S-17` and `S-18` as packages on it.
+- **M9 — Bridgeable.** `S-19` UPDATE, `C-2` early media, `C-1` two dialogs as one call. What has to
+  be true of a session before sipx can sit between two of them.
+- **M10 — Reachable.** `T-20` GRUU, `T-21` push, `M-16` ICE. The three ways of being reached that M6
+  leaves open.
+- **M11 — Attestable.** `S-20` STIR, `S-21` History-Info and Reason, `T-22` overload control.
+- **M12 — Provable.** `X-16` the RFC 5118 corpus, `X-17` a second interop peer, `X-18` counters and
+  capture, `X-19` fuzzing the transaction driver.
 
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `X` cross-cutting (build, CI, test infrastructure).
@@ -35,7 +42,6 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · M6 · RFC 5626 · T-14 unblocked it
 - [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · M6 · RFC 5764 · M-14 unblocked it
 - [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
 - [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · M8 · RFC 6665 · large; the other two packages are on it
@@ -56,14 +62,39 @@ _None._
 
 ## Backlog
 
+### Call framework
+_This is the layer applications actually program against, so it is the one that decides whether_
+- [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
+
 ### Conformance
+- [M-16 — Implement ICE](M-16-ice.md) · Media · M10 · RFC 8445 + 8839 · the NAT cases symmetric RTP does not solve
 - [S-17 — Implement the dialog and registration event packages](S-17-dialog-and-registration-event-packages.md) · Signalling · M8 · RFC 4235 + 3680 · blocked by S-13
 - [S-18 — Implement presence and PUBLISH](S-18-presence-and-publish.md) · Signalling · M8 · RFC 3856 + 3863 + 3903 · blocked by S-13
+- [S-19 — Implement the UPDATE method](S-19-update-method.md) · Signalling · M9 · RFC 3311 · the last session-integrity gap; 100rel unblocked it
+- [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
+- [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
+- [T-20 — Implement GRUU](T-20-gruu.md) · Signalling · M10 · RFC 5627 · needs T-14's Path and T-15's instance ID
+- [T-21 — Be reachable through a push notification](T-21-push-notification.md) · Signalling · M10 · RFC 8599 · a client holding no connection at all
+- [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 - [X-15 — Consider requirement-grain rows in the RFC registry](X-15-requirement-grain-registry.md) · Build · track: docs · an offer, not a dependency — decide whether per-RFC grain is enough
+- [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
+- [X-17 — Interoperate against a second independent implementation](X-17-second-interop-peer.md) · Build · M12 · one interop peer is a sample of one, and no peer has ever answered a sipx call
+
+### Edge / B2BUA
+_A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
+- [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
 
 ### Quic
 - [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11
 - [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · track: quic · blocked by T-12
+
+### SIP core (sans-IO)
+_Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
+- [X-19 — Fuzz the transaction driver, not only the parser](X-19-fuzz-the-transaction-driver.md) · Build · M12 · four fuzz targets, all of them parsers; the timing half of the north star is untested
+
+### Transport layer
+_The transport layer is the only place in the signalling stack that touches the network, which_
+- [X-18 — Count what the stack discards, and capture what it sends](X-18-counters-and-capture.md) · Build · M12 · nothing leaves the process but tracing; T-19 adds the first counter and has nowhere to put it
 
 ## Done
 - [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media
@@ -109,6 +140,7 @@ _None._
 - [T-10 — Verify TLS against a real server](T-10-tls-interop.md) · Signalling · gap left explicitly by T-7
 - [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · track: quic · a draft rather than an RFC, so it sits below the RFC work
 - [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · track: reachability · RFC 3327 · gates T-15 and GRUU
+- [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · M6 · RFC 5626 · T-14 unblocked it
 - [T-16 — Implement the Service-Route header](T-16-service-route-header.md) · Signalling · M6 · RFC 3608 · the outbound twin of T-14's Path
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
