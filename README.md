@@ -6,7 +6,7 @@
 audio — as a library you embed, or as a command you run.
 
 [![docs](https://img.shields.io/badge/docs-codewandler.github.io%2Fsipx-blue)](https://codewandler.github.io/sipx/)
-[![RFCs tracked](https://img.shields.io/badge/RFCs%20tracked-61-blue)](docs/compliance.md)
+[![RFCs tracked](https://img.shields.io/badge/RFCs%20tracked-63-blue)](docs/compliance.md)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 **📖 [codewandler.github.io/sipx](https://codewandler.github.io/sipx/)** — what it supports,
@@ -35,7 +35,7 @@ registrations.
 Verified against **Kamailio**, not only against itself: registration over UDP, TCP, TLS and
 WebSocket — and the refusals that make the successes mean something.
 
-**[→ What sipx supports, RFC by RFC](docs/compliance.md).** 61 RFCs, each marked implemented,
+**[→ What sipx supports, RFC by RFC](docs/compliance.md).** 63 RFCs, each marked implemented,
 partial, parse-only or not started. The table is generated from a registry and CI fails the
 build if it drifts from the code, so it is a measurement rather than a claim.
 

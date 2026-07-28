@@ -90,6 +90,44 @@ def check(entries) -> list[str]:
         if count > 1:
             problems.append(f"RFC {number} appears {count} times")
 
+    problems.extend(stale_counts(len(entries)))
+    return problems
+
+
+# Prose that states the number of tracked RFCs. Every one of these is a copy of a fact whose
+# source is the registry, so every one of them drifts the moment an RFC is added — which is
+# exactly what happened when the QUIC entries landed and four documents kept saying 61.
+COUNTED_IN = [
+    "README.md",
+    "docs/introduction.md",
+    "docs/guides/does-this-fit.md",
+]
+COUNT_PATTERNS = [
+    re.compile(r"(?<!\d)(\d{2,3}) RFCs"),
+    re.compile(r"RFCs%20tracked-(\d{2,3})-"),
+]
+
+
+def stale_counts(tracked: int) -> list[str]:
+    """Prose stating an RFC count that the registry no longer agrees with.
+
+    A generated table cannot drift, but a sentence in the README that says "61 RFCs" is a
+    hand-copied fact and drifts silently. Checking it here is cheaper than noticing later that
+    the front page understates the work by two.
+    """
+    problems = []
+    for name in COUNTED_IN:
+        path = ROOT / name
+        if not path.exists():
+            problems.append(f"{name} is listed as stating the RFC count but does not exist")
+            continue
+        text = path.read_text(encoding="utf-8")
+        found = {m.group(1) for pattern in COUNT_PATTERNS for m in pattern.finditer(text)}
+        for stated in sorted(found):
+            if int(stated) != tracked:
+                problems.append(
+                    f"{name} says {stated} RFCs; the registry has {tracked}"
+                )
     return problems
 
 

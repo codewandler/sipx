@@ -126,6 +126,22 @@ evidence = ["crates/sipx-transport/src/ws.rs", "crates/sipx-transport/tests/ws.r
 note = "Subprotocol negotiation, one message per frame, and the invented sent-by. Verified against Kamailio's WebSocket module."
 
 [[rfc]]
+number = 9000
+title = "QUIC: A UDP-Based Multiplexed and Secure Transport"
+layer = "transport"
+status = "none"
+evidence = []
+note = "Specified, not implemented: `docs/specs/sip-quic.md` fixes the mapping. There is no RFC for SIP over QUIC, so every choice in that spec is ours and interoperates with nothing else."
+
+[[rfc]]
+number = 9001
+title = "Using TLS to Secure QUIC"
+layer = "security"
+status = "none"
+evidence = []
+note = "Would carry the certificate policy of `docs/specs/sip-tls.md` unchanged. Its §9.2 is why the spec refuses 0-RTT for requests."
+
+[[rfc]]
 number = 6455
 title = "The WebSocket Protocol"
 layer = "transport"

@@ -36,9 +36,6 @@ _None._
 - [X-12 — Write the user-facing guides](X-12-write-the-user-facing-guides.md) · Build · track: docs · nothing else touches docs/
 - [X-13 — Publish the API documentation](X-13-publish-the-api-documentation.md) · Build · track: docs · after X-12 in the same crate-free track
 
-### Quic
-- [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · track: quic · a draft rather than an RFC, so it sits below the RFC work
-
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
 - [S-15 — Add editing operations to Headers](S-15-header-editing-operations.md) · Signalling · track: core · a forwarding element cannot edit a header list without rebuilding it
@@ -106,6 +103,7 @@ _None._
 - [T-8 — Implement SIP over WebSocket](T-8-implement-sip-over-websocket.md) · Signalling
 - [T-9 — Implement secure WebSocket](T-9-implement-secure-websocket.md) · Signalling
 - [T-10 — Verify TLS against a real server](T-10-tls-interop.md) · Signalling · gap left explicitly by T-7
+- [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · track: quic · a draft rather than an RFC, so it sits below the RFC work
 - [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · track: reachability · RFC 3327 · gates T-15 and GRUU
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core

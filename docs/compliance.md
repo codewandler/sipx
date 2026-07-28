@@ -12,14 +12,14 @@ compliance document usually becomes untrue.
 
 ## Where it stands
 
-**61 RFCs tracked.**
+**63 RFCs tracked.**
 
 | | Meaning | Count |
 |---|---|---|
 | ✅ implemented | Behaviour present and tested for the roles listed | 25 |
 | 🟡 partial | Some of the normative behaviour; the note says which part is missing | 9 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 9 |
-| ⬜ not started | Tracked as a target, not started | 17 |
+| ⬜ not started | Tracked as a target, not started | 19 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
 The list is bounded on purpose: it is what sipx already touches plus what it has decided
@@ -57,6 +57,7 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | [7339](https://www.rfc-editor.org/rfc/rfc7339) | SIP Overload Control | ⬜ not started | — | sipx answers 503 when its application queue is full, which is the behaviour 7339 exists to improve on. |
 | [7415](https://www.rfc-editor.org/rfc/rfc7415) | SIP Rate Control | ⬜ not started | — | The rate-based half of overload control. Depends on 7339. |
 | [8599](https://www.rfc-editor.org/rfc/rfc8599) | Push Notification with SIP | ⬜ not started | — | How a mobile client that is not holding a connection gets woken. Depends on 5626. |
+| [9000](https://www.rfc-editor.org/rfc/rfc9000) | QUIC: A UDP-Based Multiplexed and Secure Transport | ⬜ not started | — | Specified, not implemented: `docs/specs/sip-quic.md` fixes the mapping. There is no RFC for SIP over QUIC, so every choice in that spec is ours and interoperates with nothing else. |
 
 ## Core — transactions, dialogs, negotiation
 
@@ -86,6 +87,7 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | [4474](https://www.rfc-editor.org/rfc/rfc4474) | Enhancements for Authenticated Identity Management in SIP | 🔤 syntax only | — | Headers only, and obsoleted by 8224. Tracked because the header names still arrive on the wire. |
 | [8224](https://www.rfc-editor.org/rfc/rfc8224) | Authenticated Identity Management in SIP (STIR) | ⬜ not started | — | The replacement for 4474. Signing and verifying caller identity. |
 | [8225](https://www.rfc-editor.org/rfc/rfc8225) | PASSporT: Personal Assertion Token | ⬜ not started | — | The token 8224 carries. |
+| [9001](https://www.rfc-editor.org/rfc/rfc9001) | Using TLS to Secure QUIC | ⬜ not started | — | Would carry the certificate policy of `docs/specs/sip-tls.md` unchanged. Its §9.2 is why the spec refuses 0-RTT for requests. |
 
 ## Media — describing it, carrying it, encoding it
 
