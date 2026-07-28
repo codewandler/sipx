@@ -286,6 +286,20 @@ impl MediaDescription {
         self.attributes.push(Attribute::flag(direction.as_str()));
     }
 
+    /// The first `a=crypto` line this stream carries that sipx can act on (RFC 4568).
+    ///
+    /// Several may be offered, in preference order. sipx takes the first it can perform rather
+    /// than the first listed: an offer whose favourite suite is one sipx does not implement is
+    /// still an offer worth answering.
+    #[must_use]
+    pub fn crypto(&self) -> Option<crate::crypto::Crypto> {
+        self.attributes
+            .iter()
+            .filter(|attribute| attribute.name == "crypto")
+            .filter_map(|attribute| attribute.value.as_deref())
+            .find_map(crate::crypto::Crypto::parse)
+    }
+
     /// The `rtpmap` for a payload type, if the description gives one.
     #[must_use]
     pub fn rtpmap(&self, format: &str) -> Option<&str> {

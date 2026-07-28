@@ -13,6 +13,7 @@ pub mod jitter;
 pub mod packet;
 pub mod quality;
 pub mod rtcp;
+pub mod srtp;
 
 pub use dtmf::{Digit, Event as DtmfEvent, Receiver as DtmfReceiver};
 pub use jitter::JitterBuffer;
@@ -22,3 +23,4 @@ pub use rtcp::{
     ReceiverReport, ReportBlock, Rtcp, RtcpError, Sdes, SdesChunk, SdesItem, SenderReport,
     StreamStats,
 };
+pub use srtp::{Context as SrtpContext, SrtpError};

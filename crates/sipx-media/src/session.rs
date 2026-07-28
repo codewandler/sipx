@@ -217,6 +217,12 @@ pub struct Config {
     pub payload_type: Option<u8>,
     /// How many channels the codec carries. One, for telephony.
     pub channels: usize,
+    /// SRTP keys, if the media is to be encrypted (RFC 3711).
+    ///
+    /// `None` sends and expects plain RTP. There is deliberately no middle setting — no "accept
+    /// either" — because a session that falls back to cleartext when a packet fails to
+    /// authenticate is a session an attacker can downgrade by sending one bad packet.
+    pub srtp: Option<SrtpKeys>,
     /// How much audio each packet carries. 20 ms is universal.
     pub packet_duration: Duration,
     /// Samples per second. G.711 is always 8000.
@@ -260,6 +266,7 @@ impl Config {
             codec,
             payload_type: None,
             channels: 1,
+            srtp: None,
             packet_duration: Duration::from_millis(20),
             clock_rate: codec.clock_rate(),
             jitter_depth: 3,
@@ -308,6 +315,27 @@ enum Frame {
     /// quality; for any codec whose decode is not invertible it saves both. See
     /// [`crate::bridge`].
     Encoded { payload_type: u8, payload: Bytes },
+}
+
+/// The master keys for one SRTP session, one direction each.
+///
+/// Separate directions because RFC 3711 keys them separately: each side offers its own key in
+/// SDP and uses the other's to decrypt. Sharing one key between directions would give both ends
+/// the same keystream for the same packet index, which is the classic way to lose a stream
+/// cipher.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SrtpKeys {
+    /// Master key and salt this side encrypts with — the one offered in our SDP.
+    pub local: (Vec<u8>, Vec<u8>),
+    /// Master key and salt the far end encrypts with — the one from its SDP.
+    pub remote: (Vec<u8>, Vec<u8>),
+}
+
+impl std::fmt::Debug for SrtpKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Keys. A derived `Debug` puts them in whatever log the caller writes.
+        f.write_str("SrtpKeys { .. }")
+    }
 }
 
 /// A packet's payload as it arrived, still encoded.
@@ -524,6 +552,10 @@ impl MediaSession {
         // source: behind a NAT the advertised address is private and unreachable.
         let remote = Arc::new(Mutex::new(config.remote));
 
+        // Taken before `config` is moved into the receive loop. Both control loops need them,
+        // and cloning a pair of keys is cheaper than cloning the whole configuration twice.
+        let srtp_keys = config.srtp.clone();
+
         tokio::spawn(send_loop(
             Arc::clone(socket),
             outgoing_rx,
@@ -564,6 +596,7 @@ impl MediaSession {
                 Arc::clone(&stats),
                 Arc::clone(&outbound),
                 Arc::clone(&feedback),
+                srtp_keys.clone(),
                 Arc::clone(&stop),
             ));
         }
@@ -572,6 +605,7 @@ impl MediaSession {
                 control,
                 ssrc,
                 Arc::clone(&feedback),
+                srtp_keys,
                 Arc::clone(&stop),
             ));
         }
@@ -822,6 +856,74 @@ impl Drop for MediaSession {
     }
 }
 
+/// Where a received packet goes, gathered so the receive loop reads as a loop.
+fn delivery<'a>(
+    audio: &'a mpsc::Sender<Vec<i16>>,
+    encoded: &'a mpsc::Sender<Encoded>,
+    relay: &'a AtomicBool,
+) -> Delivery<'a> {
+    Delivery {
+        audio,
+        encoded,
+        relay,
+    }
+}
+
+/// Release everything the jitter buffer is holding, because nothing more is coming.
+#[allow(clippy::too_many_arguments)]
+async fn flush(
+    buffer: &mut JitterBuffer,
+    to: &Delivery<'_>,
+    decoding: &mut Decoding,
+    digits: &mpsc::Sender<Digit>,
+    dtmf: &mut sipx_rtp::dtmf::Receiver,
+    config: &Config,
+    stop: &Stop,
+) -> bool {
+    for packet in buffer.drain() {
+        if !deliver(to, decoding, digits, dtmf, config, stop, &packet).await {
+            return false;
+        }
+    }
+    true
+}
+
+/// Authenticate and decrypt a datagram, or drop it.
+///
+/// `None` means the packet does not belong to this stream and nothing about it should reach the
+/// parser, the jitter buffer or the statistics — which is the point of authenticating at all:
+/// a forged packet must not be able to move any state.
+fn authenticated(
+    context: Option<&mut sipx_rtp::SrtpContext>,
+    bytes: Bytes,
+    source: SocketAddr,
+) -> Option<Bytes> {
+    let Some(context) = context else {
+        return Some(bytes);
+    };
+    match context.unprotect(&bytes) {
+        Ok(plain) => Some(Bytes::from(plain)),
+        Err(error) => {
+            tracing::debug!(%error, %source, "dropping a packet that failed SRTP");
+            None
+        }
+    }
+}
+
+/// An SRTP context from a master key and salt, or `None` when the media is not encrypted.
+fn srtp_context(keys: Option<&(Vec<u8>, Vec<u8>)>) -> Option<sipx_rtp::SrtpContext> {
+    let (key, salt) = keys?;
+    match sipx_rtp::SrtpContext::new(key, salt) {
+        Ok(context) => Some(context),
+        Err(error) => {
+            // Carrying on unencrypted would be the worst of the three options: the far end
+            // expects SRTP, so the media is useless to it *and* readable to everyone else.
+            tracing::error!(%error, "SRTP keys were refused; this session will carry nothing");
+            None
+        }
+    }
+}
+
 /// Bind the control port for a media port, if it is free.
 async fn bind_control_port(media: SocketAddr) -> Option<Arc<UdpSocket>> {
     let port = media.port().checked_add(1)?;
@@ -973,6 +1075,10 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
     } = sending;
     let mut encoding = Encoding::for_codec(config.codec, config.channels);
     let mut clock = SendClock::new();
+    // One context, owned by this loop. SRTP keeps a rollover counter and a replay window per
+    // stream, and a context behind a lock would put a mutex in the packet path for state exactly
+    // one task ever touches.
+    let mut protect = srtp_context(config.srtp.as_ref().map(|keys| &keys.local));
 
     // One clock for the whole stream. Sending on channel readiness instead makes the packet
     // rate depend on how fast the application produces samples.
@@ -1046,7 +1152,21 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
 
         let destination = *remote.lock().await;
         let payload_len = packet.payload.len();
-        if socket.send_to(&packet.encode(), destination).await.is_err() {
+        let encoded = packet.encode();
+        let datagram = match protect.as_mut() {
+            Some(context) => match context.protect(&encoded) {
+                Ok(protected) => Bytes::from(protected),
+                Err(error) => {
+                    // Sending it in the clear instead is not an option: the far end negotiated
+                    // encryption and a cleartext packet is both unreadable to it and readable to
+                    // everyone else.
+                    tracing::warn!(%error, "dropping a packet SRTP could not protect");
+                    continue;
+                }
+            },
+            None => encoded,
+        };
+        if socket.send_to(&datagram, destination).await.is_err() {
             return;
         }
         sent.fetch_add(1, Ordering::Relaxed);
@@ -1146,6 +1266,7 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
         None => JitterBuffer::new(config.jitter_depth),
     };
     let mut decoding = Decoding::for_codec(config.codec, config.channels);
+    let mut unprotect = srtp_context(config.srtp.as_ref().map(|keys| &keys.remote));
     let mut datagram = vec![0u8; 2048];
     let mut dtmf = sipx_rtp::dtmf::Receiver::new();
     let started = tokio::time::Instant::now();
@@ -1177,32 +1298,32 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
             Ok(Ok(received)) => received,
             Ok(Err(_)) => return,
             Err(_elapsed) => {
-                // Silence. Release what is held rather than holding it against a packet that
-                // is not coming.
-                for packet in buffer.drain() {
-                    if !deliver(
-                        &Delivery {
-                            audio: &incoming,
-                            encoded: &encoded,
-                            relay: &relay,
-                        },
-                        &mut decoding,
-                        &digits,
-                        &mut dtmf,
-                        &config,
-                        &stop,
-                        &packet,
-                    )
-                    .await
-                    {
-                        return;
-                    }
+                // Silence. Release what is held rather than holding it against a packet that is
+                // not coming — otherwise the last `depth - 1` packets of every clip are lost.
+                if !flush(
+                    &mut buffer,
+                    &delivery(&incoming, &encoded, &relay),
+                    &mut decoding,
+                    &digits,
+                    &mut dtmf,
+                    &config,
+                    &stop,
+                )
+                .await
+                {
+                    return;
                 }
                 continue;
             }
         };
 
         let bytes = Bytes::copy_from_slice(datagram.get(..len).unwrap_or(&[]));
+        // Authenticated before it is parsed. A packet that fails is dropped and nothing about it
+        // reaches the parser, the jitter buffer or the statistics — which is the point of
+        // authenticating at all: forged packets must not be able to move any state.
+        let Some(bytes) = authenticated(unprotect.as_mut(), bytes, source) else {
+            continue;
+        };
         let Ok(packet) = Packet::decode(&bytes) else {
             // A malformed packet is dropped, not fatal. Media ports attract stray traffic —
             // STUN probes, port scans, the occasional scanner — and none of it should end a
@@ -1305,8 +1426,12 @@ async fn rtcp_loop(
     stats: Arc<Mutex<StreamStats>>,
     outbound: Arc<Outbound>,
     feedback: Arc<Mutex<Feedback>>,
+    srtp: Option<SrtpKeys>,
     stop: Arc<Stop>,
 ) {
+    // Owned by this loop, like the RTP contexts: SRTCP keeps its own index, and one task sends.
+    let mut protect = srtp_context(srtp.as_ref().map(|keys| &keys.local));
+
     loop {
         // Drawn afresh every cycle: reusing one draw for the whole session would leave the
         // reports evenly spaced again, just at a different spacing.
@@ -1367,6 +1492,18 @@ async fn rtcp_loop(
         // Never a bare report: RFC 3550 §6.1 requires a compound of at least two packets
         // with an SDES CNAME in each.
         let datagram = Rtcp::encode_compound(&[report, Rtcp::Sdes(Sdes::cname(ssrc, &cname))]);
+        // RFC 3711 §3.4. A report says who is talking to whom and how well — exactly the
+        // metadata that encrypting the media was meant to withhold.
+        let datagram = match protect.as_mut() {
+            Some(context) => match context.protect_rtcp(&datagram) {
+                Ok(protected) => Bytes::from(protected),
+                Err(error) => {
+                    tracing::warn!(%error, "dropping a report SRTCP could not protect");
+                    continue;
+                }
+            },
+            None => datagram,
+        };
 
         // RTCP conventionally travels on the RTP port plus one (RFC 3550 §11).
         let destination = *remote.lock().await;
@@ -1388,8 +1525,10 @@ async fn rtcp_receive_loop(
     socket: Arc<UdpSocket>,
     ssrc: u32,
     feedback: Arc<Mutex<Feedback>>,
+    srtp: Option<SrtpKeys>,
     stop: Arc<Stop>,
 ) {
+    let mut unprotect = srtp_context(srtp.as_ref().map(|keys| &keys.remote));
     let mut datagram = vec![0u8; 2048];
     loop {
         let read = tokio::select! {
@@ -1404,6 +1543,16 @@ async fn rtcp_receive_loop(
         };
 
         let bytes = Bytes::copy_from_slice(datagram.get(..len).unwrap_or(&[]));
+        let bytes = match unprotect.as_mut() {
+            Some(context) => match context.unprotect_rtcp(&bytes) {
+                Ok(plain) => Bytes::from(plain),
+                Err(error) => {
+                    tracing::debug!(%error, "dropping a report that failed SRTCP");
+                    continue;
+                }
+            },
+            None => bytes,
+        };
         // A malformed control packet is dropped, not fatal. The control port attracts the same
         // stray traffic the media port does, and none of it should end a call.
         let Ok(packets) = Rtcp::decode_compound(&bytes) else {

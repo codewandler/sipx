@@ -17,9 +17,9 @@ compliance document usually becomes untrue.
 | | Meaning | Count |
 |---|---|---|
 | ✅ implemented | Behaviour present and tested for the roles listed | 22 |
-| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 7 |
+| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 9 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 10 |
-| ⬜ not started | Tracked as a target, not started | 21 |
+| ⬜ not started | Tracked as a target, not started | 19 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
 The list is bounded on purpose: it is what sipx already touches plus what it has decided
@@ -97,8 +97,8 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | [7587](https://www.rfc-editor.org/rfc/rfc7587) | RTP Payload Format for the Opus Speech and Audio Codec | ✅ implemented | — | The 48000 RTP clock whatever the sample rate, and negotiation by encoding name rather than by payload type number. |
 | [8866](https://www.rfc-editor.org/rfc/rfc8866) | SDP: Session Description Protocol | ✅ implemented | — | A real AST with round-tripping, rather than string manipulation over the body. |
 | [3551](https://www.rfc-editor.org/rfc/rfc3551) | RTP Profile for Audio and Video Conferences | 🟡 partial | — | The static payload types sipx carries: 0 and 8. The rest of the profile is not implemented. |
-| [3711](https://www.rfc-editor.org/rfc/rfc3711) | The Secure Real-time Transport Protocol (SRTP) | ⬜ not started | — | Signalling can be encrypted today and media cannot. The largest single gap in the stack. |
-| [4568](https://www.rfc-editor.org/rfc/rfc4568) | SDP Security Descriptions for Media Streams (SDES) | ⬜ not started | — | Keying for SRTP over a secured signalling path. Depends on 3711. |
+| [3711](https://www.rfc-editor.org/rfc/rfc3711) | The Secure Real-time Transport Protocol (SRTP) | 🟡 partial | uac, uas | The default transform, AES_CM_128_HMAC_SHA1_80, for RTP and RTCP, with the replay window and rollover inference. Key derivation and the keystream are checked against the RFC's own Appendix B vectors. Only one transform: no AES-192/256, no f8, no null cipher, and no rekeying (the key derivation rate is fixed at zero). |
+| [4568](https://www.rfc-editor.org/rfc/rfc4568) | SDP Security Descriptions for Media Streams (SDES) | 🟡 partial | uac, uas | `a=crypto` offered and answered, and **only over a secure signalling path** — §7.1 makes that a condition of use, and `Crypto::offer` returns nothing without it rather than leaving the check to every caller. No MKI, no key lifetimes, no session parameters. |
 | [5764](https://www.rfc-editor.org/rfc/rfc5764) | DTLS Extension to Establish Keys for SRTP | ⬜ not started | — | The keying WebRTC uses. Depends on 3711. |
 | [8445](https://www.rfc-editor.org/rfc/rfc8445) | Interactive Connectivity Establishment (ICE) | ⬜ not started | — | sipx uses symmetric RTP, which handles the common NAT case and not the hard one. |
 | [4566](https://www.rfc-editor.org/rfc/rfc4566) | SDP: Session Description Protocol (obsoleted by 8866) | — superseded | — | Superseded. Listed so a reader looking for it knows where it went. |

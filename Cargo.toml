@@ -46,6 +46,15 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # there is no pure-Rust encoder of comparable quality, and a codec that cannot encode is not a
 # codec a softphone can offer.
 opus = "0.3"
+# SRTP's default transform: AES-128 in counter mode with HMAC-SHA1. RustCrypto rather than a
+# bespoke implementation — the arithmetic is not the hard part of SRTP, and a hand-rolled AES is
+# a liability nobody asked for. `subtle` is for comparing authentication tags without leaking
+# their contents through timing.
+aes = "0.8"
+ctr = "0.9"
+hmac = "0.12"
+sha1 = "0.10"
+subtle = "2"
 md-5 = "0.10"
 sha2 = "0.10"
 tracing = "0.1"

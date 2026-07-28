@@ -13,6 +13,7 @@
 //! different things at each end) and they are all one function call away here.
 
 pub mod answer;
+pub mod crypto;
 pub mod parse;
 pub mod session;
 

@@ -57,6 +57,8 @@ pub struct Call {
     current: Negotiated,
     /// Whether the call is on hold, and which way.
     hold: Direction,
+    /// Whether the media is encrypted.
+    encrypted: bool,
     /// A transfer the far end has asked for and we have not yet answered.
     referral: Option<Referral>,
     /// A transfer we asked for, and what has become of it.
@@ -94,6 +96,17 @@ impl Call {
     /// Take the next digit the far end pressed.
     pub async fn recv_digit(&self) -> Option<sipx_rtp::Digit> {
         self.media.recv_digit().await
+    }
+
+    /// Whether the media is encrypted (RFC 3711).
+    ///
+    /// Worth asking, and worth being able to answer without a packet capture. A call whose
+    /// signalling is encrypted and whose audio is not looks identical from the outside to one
+    /// where both are — which is exactly the confusion that makes people believe `sips:` covers
+    /// the media. It does not.
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        self.encrypted
     }
 
     /// Whether the call has ended, from either side.
@@ -804,6 +817,21 @@ impl DialOptions {
 }
 
 /// Place a call.
+/// What this side offers, and the description that carries it.
+///
+/// A key is offered only when the transport protects it: SDES puts the master key in the SDP
+/// body, so offering one over cleartext SIP publishes it (RFC 4568 §7.1).
+fn offered_media(
+    media_address: IpAddr,
+    port: &MediaPort,
+    transport: TransportKind,
+) -> (Capabilities, SessionDescription) {
+    let capabilities = Capabilities::g711(media_address, port.local_addr().port())
+        .with_srtp(transport.is_secure());
+    let offer = offer_from(&capabilities);
+    (capabilities, offer)
+}
+
 /// The INVITE that opens a call.
 ///
 /// Its own function only because `dial` had grown past the point where the interesting part —
@@ -855,8 +883,7 @@ pub async fn dial(
         .await
         .map_err(Error::Io)?;
 
-    let capabilities = Capabilities::g711(media_address, port.local_addr().port());
-    let offer = offer_from(&capabilities);
+    let (capabilities, offer) = offered_media(media_address, &port, target.transport);
 
     // The `Via` is built here rather than left to the transport, because a CANCEL has to carry
     // the *same* branch as the INVITE it cancels — that identity is what matches the two at the
@@ -934,8 +961,14 @@ pub async fn dial(
     // From here the far end believes a dialog exists, so *every* path must acknowledge.
     // Returning an error without one leaves it retransmitting its 200 for 32 seconds and then
     // streaming media at a port we have closed.
-    match establish(&invite, &response, target.clone(), port) {
-        Ok((dialog, media, in_dialog, negotiated)) => {
+    match establish(
+        &invite,
+        &response,
+        target.clone(),
+        port,
+        capabilities.crypto.as_ref(),
+    ) {
+        Ok((dialog, media, in_dialog, settled)) => {
             let ack = build_ack(endpoint, &dialog, &in_dialog)?;
             endpoint
                 .send_directly(ack.clone(), in_dialog.clone())
@@ -957,7 +990,8 @@ pub async fn dial(
                 awaiting_ack: None,
                 ended: false,
                 media_address,
-                current: negotiated,
+                current: settled.negotiated,
+                encrypted: settled.srtp.is_some(),
                 hold: Direction::SendRecv,
                 referral: None,
                 transfer: None,
@@ -984,14 +1018,21 @@ fn establish(
     response: &Response,
     fallback: Target,
     port: MediaPort,
-) -> Result<(Dialog, MediaSession, Target, Negotiated)> {
+    offered: Option<&sipx_sdp::crypto::Crypto>,
+) -> Result<(Dialog, MediaSession, Target, Settled)> {
     let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
     let negotiated = negotiated(&answer)?;
+    // Both halves or neither. A stream keyed at one end only is a call that connects and
+    // carries silence, which is worse than one that fails to connect.
+    let settled = Settled {
+        negotiated,
+        srtp: srtp_keys(offered, answered_crypto(&answer)),
+    };
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
-    let media = port.start(negotiated.media_config());
-    Ok((dialog, media, target, negotiated))
+    let media = port.start(settled.media_config());
+    Ok((dialog, media, target, settled))
 }
 
 /// Answer an incoming INVITE.
@@ -1005,11 +1046,16 @@ pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAdd
         .map_err(|error| Error::Sdp(error.to_string()))?;
 
     let negotiated = negotiated(&offer)?;
-    let media = MediaSession::start(SocketAddr::new(media_address, 0), negotiated.media_config())
+
+    // The port is bound before the session starts, because the answer has to name it *and* the
+    // session has to be created with the keys that answer settles on. Starting the session first
+    // — as this did — leaves nowhere to put them.
+    let port = MediaPort::bind(SocketAddr::new(media_address, 0))
         .await
         .map_err(Error::Io)?;
 
-    let capabilities = Capabilities::g711(media_address, media.local_addr().port());
+    let capabilities = Capabilities::g711(media_address, port.local_addr().port())
+        .with_srtp(incoming.transport.is_secure());
     let answer_sdp = sipx_sdp::answer(&offer, &capabilities);
     if answer_sdp
         .media
@@ -1018,6 +1064,13 @@ pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAdd
     {
         return Err(Error::NoCommonCodec);
     }
+
+    // Our key from the answer we just built, theirs from the offer we were sent.
+    let settled = Settled {
+        negotiated,
+        srtp: srtp_keys(capabilities.crypto.as_ref(), offer_crypto(&offer)),
+    };
+    let media = port.start(settled.media_config());
 
     let tag = token();
     let to_with_tag = {
@@ -1068,8 +1121,9 @@ pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAdd
         awaiting_ack: Some(acked),
         ended: false,
         media_address,
-        current: negotiated,
+        current: settled.negotiated,
         hold: Direction::SendRecv,
+        encrypted: settled.srtp.is_some(),
         referral: None,
         transfer: None,
     })
@@ -1299,6 +1353,15 @@ fn offer_from(capabilities: &Capabilities) -> SessionDescription {
             format!("{payload} {mapping}"),
         ));
     }
+    // The key, and the protocol that matches it. Offering `a=crypto` under `RTP/AVP` asks for a
+    // stream that is encrypted and declared not to be; offering `RTP/SAVP` with no key asks for
+    // encryption with nothing to key it. Both come from the same place, so neither can drift.
+    if let Some(crypto) = &capabilities.crypto {
+        capabilities.protocol().clone_into(&mut audio.protocol);
+        audio
+            .attributes
+            .push(sipx_sdp::Attribute::valued("crypto", crypto.to_value()));
+    }
     audio.set_direction(capabilities.direction);
     sdp.media.push(audio);
     sdp
@@ -1317,12 +1380,58 @@ struct Negotiated {
     dtmf: Option<u8>,
 }
 
+/// What negotiation settled on, plus the keys — which are not `Copy` and do not belong in a
+/// type that is.
+#[derive(Debug, Clone)]
+struct Settled {
+    negotiated: Negotiated,
+    srtp: Option<sipx_media::SrtpKeys>,
+}
+
 impl Negotiated {
     fn media_config(self) -> sipx_media::Config {
         let mut config = sipx_media::Config::new(self.remote, self.codec);
         config.dtmf_payload_type = self.dtmf;
         config
     }
+}
+
+impl Settled {
+    fn media_config(&self) -> sipx_media::Config {
+        let mut config = self.negotiated.media_config();
+        config.srtp.clone_from(&self.srtp);
+        config
+    }
+}
+
+/// Pair our offered key with the far end's answered one.
+///
+/// `None` unless *both* are present. One key is not a session: a stream keyed at one end only
+/// is a stream the other end cannot read, and treating a half-answer as success would produce a
+/// call that connects and carries silence.
+fn srtp_keys(
+    ours: Option<&sipx_sdp::crypto::Crypto>,
+    theirs: Option<sipx_sdp::crypto::Crypto>,
+) -> Option<sipx_media::SrtpKeys> {
+    let (ours, theirs) = (ours?, theirs?);
+    Some(sipx_media::SrtpKeys {
+        local: (ours.master_key().to_vec(), ours.master_salt().to_vec()),
+        remote: (theirs.master_key().to_vec(), theirs.master_salt().to_vec()),
+    })
+}
+
+/// The keying the far end offered, from its description. Same shape as the answered one; named
+/// separately because reading it from an *offer* and from an *answer* are different moments.
+fn offer_crypto(sdp: &SessionDescription) -> Option<sipx_sdp::crypto::Crypto> {
+    answered_crypto(sdp)
+}
+
+/// The keying the far end answered with, from its description.
+fn answered_crypto(sdp: &SessionDescription) -> Option<sipx_sdp::crypto::Crypto> {
+    sdp.media
+        .iter()
+        .find(|m| m.media == "audio" && !m.is_rejected())?
+        .crypto()
 }
 
 /// The payload type carrying `telephone-event`, per the description's own rtpmaps.

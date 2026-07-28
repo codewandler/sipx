@@ -32,6 +32,11 @@ pub struct Capabilities {
     pub session_id: u64,
     /// The session version to use.
     pub session_version: u64,
+    /// The SRTP keying this side offers, if the media is to be encrypted (RFC 4568).
+    ///
+    /// `None` means plain RTP. It is `None` unless the signalling is secure, because
+    /// [`crate::crypto::Crypto::offer`] will not produce a key over a path that anyone can read.
+    pub crypto: Option<crate::crypto::Crypto>,
 }
 
 impl Capabilities {
@@ -50,6 +55,7 @@ impl Capabilities {
             direction: Direction::SendRecv,
             session_id: 1,
             session_version: 1,
+            crypto: None,
         }
     }
 
@@ -88,6 +94,33 @@ impl Capabilities {
             direction: Direction::SendRecv,
             session_id: 1,
             session_version: 1,
+            crypto: None,
+        }
+    }
+
+    /// The same capabilities, offering SRTP.
+    ///
+    /// `secure_signalling` decides whether a key is generated at all: SDES carries the master
+    /// key in the SDP body, so offering one over cleartext SIP publishes it (RFC 4568 §7.1).
+    /// Passing `false` therefore leaves the offer as plain RTP rather than offering encryption
+    /// that would not be encryption.
+    #[must_use]
+    pub fn with_srtp(mut self, secure_signalling: bool) -> Self {
+        self.crypto = crate::crypto::Crypto::offer(
+            1,
+            crate::crypto::Suite::AesCm128HmacSha1_80,
+            secure_signalling,
+        );
+        self
+    }
+
+    /// The media transport this side offers: `RTP/SAVP` when it has a key, `RTP/AVP` otherwise.
+    #[must_use]
+    pub fn protocol(&self) -> &'static str {
+        if self.crypto.is_some() {
+            "RTP/SAVP"
+        } else {
+            "RTP/AVP"
         }
     }
 
@@ -142,6 +175,18 @@ fn answer_stream(
         return rejected(offered);
     }
 
+    // A secure offer answered without a key would be answered with encryption neither side can
+    // perform; a secure offer answered in the clear would be a downgrade this side chose. Both
+    // are worse than declining the stream, which is what RFC 4568 §7.1 leaves as the option.
+    let secure_offer = offered.protocol.contains("SAVP");
+    let answering_crypto = match (secure_offer, capabilities.crypto.as_ref()) {
+        (true, Some(crypto)) if offered.crypto().is_some() => Some(crypto),
+        (true, _) => return rejected(offered),
+        // A plain offer is answered plainly, even when this side would have preferred a key.
+        // Answering `RTP/AVP` with `a=crypto` is how a stream ends up encrypted at one end only.
+        (false, _) => None,
+    };
+
     // RFC 3264 §6.1: the answer lists the formats both sides support. The order is the
     // *offerer's*, because the offerer's first choice is the one it most wants used, and the
     // answerer expressing its own preference here is how two endpoints end up transcoding for
@@ -186,6 +231,10 @@ fn answer_stream(
         .unwrap_or_else(|| offer.direction());
     let direction = negotiate_direction(offered_direction, capabilities.direction);
     attributes.push(Attribute::flag(direction.as_str()));
+
+    if let Some(crypto) = answering_crypto {
+        attributes.push(Attribute::valued("crypto", crypto.to_value()));
+    }
 
     MediaDescription {
         media: offered.media.clone(),

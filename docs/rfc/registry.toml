@@ -410,17 +410,19 @@ note = "The 48000 RTP clock whatever the sample rate, and negotiation by encodin
 number = 3711
 title = "The Secure Real-time Transport Protocol (SRTP)"
 layer = "media"
-status = "none"
-evidence = []
-note = "Signalling can be encrypted today and media cannot. The largest single gap in the stack."
+status = "partial"
+roles = ["uac", "uas"]
+evidence = ["crates/sipx-rtp/src/srtp.rs", "crates/sipx-media/tests/srtp.rs"]
+note = "The default transform, AES_CM_128_HMAC_SHA1_80, for RTP and RTCP, with the replay window and rollover inference. Key derivation and the keystream are checked against the RFC's own Appendix B vectors. Only one transform: no AES-192/256, no f8, no null cipher, and no rekeying (the key derivation rate is fixed at zero)."
 
 [[rfc]]
 number = 4568
 title = "SDP Security Descriptions for Media Streams (SDES)"
 layer = "media"
-status = "none"
-evidence = []
-note = "Keying for SRTP over a secured signalling path. Depends on 3711."
+status = "partial"
+roles = ["uac", "uas"]
+evidence = ["crates/sipx-sdp/src/crypto.rs", "crates/sipx-sdp/tests/srtp_negotiation.rs"]
+note = "`a=crypto` offered and answered, and **only over a secure signalling path** — §7.1 makes that a condition of use, and `Crypto::offer` returns nothing without it rather than leaving the check to every caller. No MKI, no key lifetimes, no session parameters."
 
 [[rfc]]
 number = 5764

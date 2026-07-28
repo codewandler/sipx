@@ -11,6 +11,11 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+aes.workspace = true
+ctr.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+subtle.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

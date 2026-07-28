@@ -28,7 +28,6 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [M-14 — Encrypt the media](M-14-secure-media.md) · Media · track: media · RFC 3711 + 4568 · the largest gap in the stack
 - [S-11 — Implement session timers](S-11-session-timers.md) · Signalling · track: signalling · RFC 4028 · headers already parse
 - [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · track: reachability · RFC 3327 · gates T-15 and GRUU
 - [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · track: auth · RFC 8760 · sipx-ua only, isolated
@@ -69,6 +68,7 @@ _None._
 - [M-11 — Bridge two calls](M-11-bridge-two-calls.md) · Media
 - [M-12 — Mix several calls](M-12-mix-several-calls.md) · Media
 - [M-13 — Add the Opus codec](M-13-add-the-opus-codec.md) · Media
+- [M-14 — Encrypt the media](M-14-secure-media.md) · Media · track: media · RFC 3711 + 4568 · the largest gap in the stack
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone

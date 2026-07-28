@@ -17,4 +17,4 @@ pub mod session;
 
 pub use bridge::Bridge;
 pub use conference::Conference;
-pub use session::{Codec, Config, Encoded, MediaPort, MediaSession};
+pub use session::{Codec, Config, Encoded, MediaPort, MediaSession, SrtpKeys};

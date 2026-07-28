@@ -43,6 +43,16 @@ impl TransportKind {
         }
     }
 
+    /// Whether this transport protects the signalling itself.
+    ///
+    /// The question SDES turns on. RFC 4568 §7.1 makes a secure signalling path a *condition* of
+    /// carrying a key in SDP, because the key travels in the body — so this decides whether sipx
+    /// may offer encrypted media at all.
+    #[must_use]
+    pub fn is_secure(self) -> bool {
+        matches!(self, Self::Tls | Self::Wss)
+    }
+
     /// The default port, per RFC 3261 §19.1.2 and RFC 7118.
     #[must_use]
     pub fn default_port(self) -> u16 {
