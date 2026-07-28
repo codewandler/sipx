@@ -11,6 +11,11 @@
 # duplicated work.
 set -euo pipefail
 
+# The same flags CI builds with. Without this the script is a weaker check than the job that
+# runs it: an unused import behind a disabled feature is a warning here and an error there, so
+# a release can pass locally and fail on push — which is exactly how it went the first time.
+export RUSTFLAGS="${RUSTFLAGS:--D warnings}"
+
 combinations=(
     ""
     "udp"

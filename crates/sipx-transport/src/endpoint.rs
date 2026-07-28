@@ -6,7 +6,7 @@
 //! loop over channels.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -579,7 +579,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
 /// for port 0 and cannot put a port it does not know into a `Contact`.
 #[cfg(feature = "tls")]
 async fn listen_tls(
-    ip: IpAddr,
+    ip: std::net::IpAddr,
     port: u16,
     server: crate::tls::ServerTls,
     adopt: &mpsc::Sender<Adopt>,
@@ -612,7 +612,7 @@ async fn listen_tls(
 /// Listen for WebSocket connections, upgrading each off the accept path.
 #[cfg(feature = "ws")]
 async fn listen_ws(
-    ip: IpAddr,
+    ip: std::net::IpAddr,
     port: u16,
     keepalive: std::time::Duration,
     adopt: &mpsc::Sender<Adopt>,
@@ -648,7 +648,7 @@ async fn listen_ws(
 /// one of the two ends up weaker.
 #[cfg(feature = "wss")]
 async fn listen_wss(
-    ip: IpAddr,
+    ip: std::net::IpAddr,
     port: u16,
     server: crate::tls::ServerTls,
     keepalive: std::time::Duration,
