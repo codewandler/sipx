@@ -16,10 +16,14 @@ sipx-transport.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+rand.workspace = true
+md-5.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
 sipx-testkit.workspace = true
+sipx-transport.workspace = true
 tokio = { workspace = true, features = ["full"] }
 pretty_assertions.workspace = true
 
