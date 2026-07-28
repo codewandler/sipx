@@ -54,11 +54,27 @@ impl Lease {
     }
 }
 
+/// A successful registration: the lease, and the two route vectors that came back with it.
+///
+/// A struct rather than three positional fields on the enum variant, because `PathSet` and
+/// `ServiceRoute` are the same shape and opposite directions — `Path` routes requests *toward*
+/// this UA and is not ours to follow, `Service-Route` routes the requests we *send*. Positionally
+/// interchangeable arguments of identical type are how they would eventually get swapped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Registered {
+    /// What the registrar granted, and when to refresh it.
+    pub lease: Lease,
+    /// The proxies the registrar recorded on the path back to this contact (RFC 3327).
+    pub path: PathSet,
+    /// The proxies this UA's own outbound requests must traverse (RFC 3608).
+    pub service_route: ServiceRoute,
+}
+
 /// What a registration attempt produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Registered, with the lease the registrar granted and the path recorded for it.
-    Registered(Lease, PathSet),
+    /// Registered, with the lease the registrar granted and the route vectors it returned.
+    Registered(Box<Registered>),
     /// The registrar wants credentials. Answer with [`authorize`] and send again.
     Challenged(Box<Challenge>),
     /// The registrar refused.
@@ -119,21 +135,7 @@ impl PathSet {
     /// Each hop rendered back to the form it arrived in, for logging and for comparison.
     #[must_use]
     pub fn rendered(&self) -> Vec<String> {
-        self.0
-            .iter()
-            .map(|hop| {
-                let mut text = format!("<{}>", String::from_utf8_lossy(&hop.uri.to_bytes()));
-                for param in &hop.params {
-                    text.push(';');
-                    text.push_str(&String::from_utf8_lossy(&param.name));
-                    if let Some(value) = &param.value {
-                        text.push('=');
-                        text.push_str(&String::from_utf8_lossy(value));
-                    }
-                }
-                text
-            })
-            .collect()
+        render_hops(&self.0)
     }
 
     /// Whether a proxy this side did not expect is on the path.
@@ -176,6 +178,116 @@ impl PartialEq for PathSet {
 }
 
 impl Eq for PathSet {}
+
+/// The proxies a registrar says this UA's own requests must traverse (RFC 3608).
+///
+/// The opposite direction from [`PathSet`], and — unlike `Path` — this one *is* the UA's to act
+/// on. RFC 3608 §6: the route "applies only to requests originating in the user agent", and §6.1
+/// has the UA "use the content of the Service-Route header field as a preloaded Route header
+/// field in outgoing initial requests". Without it, a request sipx sends goes straight at the
+/// destination and arrives at a proxy holding no state for the registration it belongs to.
+///
+/// Order is normative: §6.1 requires a UA that exercises the route to "preserve the order" the
+/// values arrived in.
+#[derive(Debug, Clone, Default)]
+pub struct ServiceRoute(pub Vec<Address>);
+
+impl ServiceRoute {
+    /// The proxies, in the order the registrar listed them — which is the order to traverse.
+    #[must_use]
+    pub fn hops(&self) -> &[Address] {
+        &self.0
+    }
+
+    /// Whether the registrar dictated no route at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Each hop rendered as a `Route` header value, in order.
+    ///
+    /// This is the form to preload: `Route: <sip:proxy.example;lr>`, one per hop.
+    #[must_use]
+    pub fn rendered(&self) -> Vec<String> {
+        render_hops(&self.0)
+    }
+
+    /// Read the service route out of a REGISTER response.
+    ///
+    /// **Absent means empty, and empty means clear.** RFC 3608 §6.1 says the stored value "is
+    /// updated according to the Service-Route header field of the latest 200 class response",
+    /// and that "if there is no Service-Route header field in the response, the UA clears any
+    /// service route for that address-of-record previously stored". Both rules are the same rule
+    /// — replace unconditionally — which is why this returns an empty set rather than an
+    /// `Option` a caller could mistake for "leave what you had".
+    #[must_use]
+    pub fn from_response(response: &Response) -> Self {
+        Self(
+            response
+                .headers
+                .typed_all::<sipx_sip::headers::address::ServiceRoute>()
+                .filter_map(std::result::Result::ok)
+                .map(|route| route.0)
+                .collect(),
+        )
+    }
+
+    /// The hops the registrar sent without the `;lr` parameter RFC 3608 §5 requires.
+    ///
+    /// §5: values "MUST include the loose-routing indicator parameter `;lr`". A hop without it
+    /// asks for RFC 2543 strict routing, where each proxy rewrites the Request-URI — a mechanism
+    /// sipx does not implement and would be wrong to pretend to. Reported rather than rejected:
+    /// the offending party is the registrar, the request will still reach the proxy named, and a
+    /// UA that discarded the whole route set over a missing parameter would be unroutable for a
+    /// reason its operator could not see.
+    ///
+    /// `lr` is a *URI* parameter — inside the angle brackets — not a header parameter after them.
+    /// Looking for it in the wrong list finds nothing and reports every hop, which is how this
+    /// method was wrong the first time it was written.
+    #[must_use]
+    pub fn hops_without_loose_routing(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .filter(|hop| {
+                // `contains`, not `value`: `;lr` is a valueless flag, and `value` returns `None`
+                // for a present-but-valueless parameter as well as an absent one.
+                hop.uri.params().is_none_or(|params| !params.contains("lr"))
+            })
+            .map(|hop| format!("<{}>", String::from_utf8_lossy(&hop.uri.to_bytes())))
+            .collect()
+    }
+}
+
+impl PartialEq for ServiceRoute {
+    fn eq(&self, other: &Self) -> bool {
+        self.rendered() == other.rendered()
+    }
+}
+
+impl Eq for ServiceRoute {}
+
+/// Render address-list hops back to the header values they arrived as, in order.
+///
+/// Shared by the two route vectors deliberately: they render identically, and only their
+/// *meaning* differs. Keeping one renderer means a fix to the parameter handling cannot apply to
+/// one direction and not the other.
+fn render_hops(hops: &[Address]) -> Vec<String> {
+    hops.iter()
+        .map(|hop| {
+            let mut text = format!("<{}>", String::from_utf8_lossy(&hop.uri.to_bytes()));
+            for param in &hop.params {
+                text.push(';');
+                text.push_str(&String::from_utf8_lossy(&param.name));
+                if let Some(value) = &param.value {
+                    text.push('=');
+                    text.push_str(&String::from_utf8_lossy(value));
+                }
+            }
+            text
+        })
+        .collect()
+}
 
 impl Registration {
     /// Build the REGISTER request.
@@ -231,10 +343,11 @@ pub fn interpret(response: &Response, asked_for: Duration, contact: &str) -> Out
         // Returned even when this side never offered `path`. A registrar that adds one anyway
         // is doing something worth seeing rather than something to drop on the floor: the
         // whole security value §5.1 claims for the header is that the UA can look at it.
-        return Outcome::Registered(
-            Lease::from_granted(granted),
-            PathSet::from_response(response),
-        );
+        return Outcome::Registered(Box::new(Registered {
+            lease: Lease::from_granted(granted),
+            path: PathSet::from_response(response),
+            service_route: ServiceRoute::from_response(response),
+        }));
     }
 
     if status == 401 || status == 407 {
@@ -378,12 +491,12 @@ mod tests {
             Duration::from_secs(3600),
             CONTACT,
         );
-        let Outcome::Registered(lease, path) = outcome else {
+        let Outcome::Registered(registered) = outcome else {
             panic!("expected a registration, got {outcome:?}");
         };
-        assert_eq!(lease.granted, Duration::from_secs(600));
+        assert_eq!(registered.lease.granted, Duration::from_secs(600));
         assert_eq!(
-            path.rendered(),
+            registered.path.rendered(),
             vec![
                 "<sip:edge.example.com;lr>".to_owned(),
                 "<sip:core.example.net;lr>".to_owned()
@@ -408,13 +521,13 @@ mod tests {
             CONTACT,
         );
         match (joined, separate) {
-            (Outcome::Registered(_, one), Outcome::Registered(_, other)) => {
+            (Outcome::Registered(one), Outcome::Registered(other)) => {
                 assert_eq!(
-                    one.rendered().len(),
+                    one.path.rendered().len(),
                     2,
                     "the comma-joined row was not split"
                 );
-                assert_eq!(one, other);
+                assert_eq!(one.path, other.path);
             }
             other => panic!("expected two registrations, got {other:?}"),
         }
@@ -429,18 +542,20 @@ mod tests {
             Duration::from_secs(3600),
             CONTACT,
         );
-        let Outcome::Registered(_, path) = outcome else {
+        let Outcome::Registered(registered) = outcome else {
             panic!("expected a registration");
         };
         assert!(
-            path.hops()
+            registered
+                .path
+                .hops()
                 .first()
                 .expect("one hop")
                 .uri
                 .params()
                 .is_some_and(|params| params.contains("ob")),
             "the ob parameter was dropped: {:?}",
-            path.rendered()
+            registered.path.rendered()
         );
     }
 
@@ -467,11 +582,11 @@ mod tests {
             Duration::from_secs(3600),
             CONTACT,
         );
-        let Outcome::Registered(_, path) = outcome else {
+        let Outcome::Registered(registered) = outcome else {
             panic!("expected a registration");
         };
         assert_eq!(
-            path.hops_outside(&["edge.example.com"]),
+            registered.path.hops_outside(&["edge.example.com"]),
             vec!["<sip:stranger.example.org;lr>".to_owned()]
         );
     }
@@ -479,10 +594,100 @@ mod tests {
     #[test]
     fn no_path_is_an_empty_set_rather_than_an_absent_one() {
         let outcome = interpret(&ok_with(""), Duration::from_secs(3600), CONTACT);
-        let Outcome::Registered(_, path) = outcome else {
+        let Outcome::Registered(registered) = outcome else {
             panic!("expected a registration");
         };
-        assert!(path.is_empty());
+        assert!(registered.path.is_empty());
+    }
+
+    fn service_route_of(extra: &str) -> ServiceRoute {
+        let outcome = interpret(&ok_with(extra), Duration::from_secs(3600), CONTACT);
+        match outcome {
+            Outcome::Registered(registered) => registered.service_route,
+            other => panic!("expected a registration, got {other:?}"),
+        }
+    }
+
+    /// RFC 3608 §6.1: a UA that exercises the route "MUST preserve the order".
+    #[test]
+    fn a_service_route_keeps_the_order_the_registrar_listed() {
+        let route = service_route_of(
+            "Service-Route: <sip:edge.example.com;lr>\r\n\
+             Service-Route: <sip:core.example.net;lr>\r\n",
+        );
+        assert_eq!(
+            route.rendered(),
+            vec![
+                "<sip:edge.example.com;lr>".to_owned(),
+                "<sip:core.example.net;lr>".to_owned(),
+            ],
+            "the outbound route set is not in the order it arrived in"
+        );
+    }
+
+    /// §5's grammar is `sr-value *( COMMA sr-value )`, so the two spellings are one value.
+    #[test]
+    fn a_comma_joined_service_route_is_the_same_as_separate_rows() {
+        let joined = service_route_of(
+            "Service-Route: <sip:edge.example.com;lr>, <sip:core.example.net;lr>\r\n",
+        );
+        let separate = service_route_of(
+            "Service-Route: <sip:edge.example.com;lr>\r\n\
+             Service-Route: <sip:core.example.net;lr>\r\n",
+        );
+        assert_eq!(joined.hops().len(), 2, "the comma-joined row was not split");
+        assert_eq!(joined, separate);
+    }
+
+    /// RFC 3608 §6.1: "if there is no Service-Route header field in the response, the UA clears
+    /// any service route for that address-of-record previously stored".
+    ///
+    /// The rule is easy to get backwards — treating an absent header as "nothing to say, keep
+    /// what you had" leaves a UA routing through a proxy the registrar has stopped naming.
+    #[test]
+    fn a_response_without_a_service_route_says_clear_it_rather_than_keep_it() {
+        assert!(
+            service_route_of("").is_empty(),
+            "an absent Service-Route must read as empty, so that storing it clears the old one"
+        );
+    }
+
+    /// §5: values "MUST include the loose-routing indicator parameter `;lr`".
+    ///
+    /// Reported, not enforced: the request still reaches the proxy named, and discarding a whole
+    /// route set over a missing parameter would make a UA unroutable for an invisible reason.
+    #[test]
+    fn a_hop_without_lr_is_reported_rather_than_dropped() {
+        let route = service_route_of(
+            "Service-Route: <sip:edge.example.com;lr>\r\n\
+             Service-Route: <sip:strict.example.net>\r\n",
+        );
+        assert_eq!(route.hops().len(), 2, "the offending hop was dropped");
+        assert_eq!(
+            route.hops_without_loose_routing(),
+            vec!["<sip:strict.example.net>".to_owned()],
+            "the hop missing ;lr was not reported"
+        );
+    }
+
+    /// The two vectors travel in opposite directions and must not be read from each other's
+    /// header. A registrar that returns only a `Path` has dictated no outbound route.
+    #[test]
+    fn a_path_is_not_a_service_route() {
+        let outcome = interpret(
+            &ok_with("Path: <sip:edge.example.com;lr>\r\n"),
+            Duration::from_secs(3600),
+            CONTACT,
+        );
+        let Outcome::Registered(registered) = outcome else {
+            panic!("expected a registration");
+        };
+        assert!(!registered.path.is_empty(), "the Path was lost");
+        assert!(
+            registered.service_route.is_empty(),
+            "a Path was read as a Service-Route; the UA would route its own requests through \
+             proxies that only asked to be on the inbound path"
+        );
     }
 
     #[test]
@@ -509,7 +714,7 @@ mod tests {
             CONTACT,
         );
         match outcome {
-            Outcome::Registered(lease, _) => assert_eq!(lease.granted, Duration::from_secs(60)),
+            Outcome::Registered(r) => assert_eq!(r.lease.granted, Duration::from_secs(60)),
             other => panic!("expected a lease, got {other:?}"),
         }
     }
@@ -523,7 +728,7 @@ mod tests {
             CONTACT,
         );
         match outcome {
-            Outcome::Registered(lease, _) => assert_eq!(lease.granted, Duration::from_secs(120)),
+            Outcome::Registered(r) => assert_eq!(r.lease.granted, Duration::from_secs(120)),
             other => panic!("expected a lease, got {other:?}"),
         }
     }
@@ -543,7 +748,7 @@ mod tests {
             CONTACT,
         );
         match outcome {
-            Outcome::Registered(lease, _) => assert_eq!(lease.granted, Duration::from_secs(60)),
+            Outcome::Registered(r) => assert_eq!(r.lease.granted, Duration::from_secs(60)),
             other => panic!("expected a lease, got {other:?}"),
         }
     }
@@ -556,7 +761,7 @@ mod tests {
             CONTACT,
         );
         match outcome {
-            Outcome::Registered(lease, _) => assert_eq!(lease.granted, Duration::from_secs(300)),
+            Outcome::Registered(r) => assert_eq!(r.lease.granted, Duration::from_secs(300)),
             other => panic!("expected a lease, got {other:?}"),
         }
     }

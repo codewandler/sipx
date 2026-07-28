@@ -550,3 +550,70 @@ async fn an_options_answer_carries_a_to_tag() {
     let tag = to.tag().expect("a To tag (RFC 3261 §8.2.6.2)");
     assert!(!tag.is_empty(), "an empty tag identifies nothing");
 }
+
+/// A registrar that returns a `Service-Route` on the first registration and none on the next.
+///
+/// The second answer is the interesting one: RFC 3608 §6.1 says a 2xx with no `Service-Route`
+/// *clears* whatever was stored, and "keep the last one we saw" is the natural mis-implementation.
+async fn registrar_that_stops_dictating_a_route(route: &'static str) -> Target {
+    let (handle, mut incoming) = bind(TransportConfig::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
+    let target = Target::udp(handle.local_addr());
+    tokio::spawn(async move {
+        let mut answered = 0u32;
+        while let Some(request) = incoming.recv().await {
+            let mut builder = ResponseBuilder::to_request(
+                &request.request,
+                StatusCode::new(200).expect("valid"),
+                "OK",
+            )
+            .expect("builds")
+            .header(
+                HeaderName::Contact,
+                Bytes::from_static(b"<sip:alice@127.0.0.1:5060>;expires=3600"),
+            )
+            .expect("valid");
+            if answered == 0 {
+                builder = builder
+                    .header(
+                        HeaderName::ServiceRoute,
+                        Bytes::from_static(route.as_bytes()),
+                    )
+                    .expect("valid");
+            }
+            answered += 1;
+            let _ = handle.respond(&request.key, builder.build()).await;
+        }
+    });
+    target
+}
+
+#[tokio::test]
+async fn a_registrars_service_route_is_stored_and_then_cleared_when_it_stops_sending_one() {
+    let target =
+        registrar_that_stops_dictating_a_route("<sip:edge.sipx.test;lr>, <sip:core.sipx.test;lr>")
+            .await;
+    let mut ua = agent(target, None).await;
+
+    ua.register().await.expect("registers");
+    assert_eq!(
+        ua.service_route().rendered(),
+        vec![
+            "<sip:edge.sipx.test;lr>".to_owned(),
+            "<sip:core.sipx.test;lr>".to_owned()
+        ],
+        "the service route the registrar dictated was not stored, or lost its order"
+    );
+
+    // The refresh carries no Service-Route. §6.1: "the UA clears any service route for that
+    // address-of-record previously stored". Keeping it would route every outbound request
+    // through a proxy the registrar has stopped naming — which fails as a 403 or a timeout at
+    // the proxy, nowhere near the registration that caused it.
+    ua.register().await.expect("refreshes");
+    assert!(
+        ua.service_route().is_empty(),
+        "a 2xx with no Service-Route must clear the stored one, not leave it in place: {:?}",
+        ua.service_route().rendered()
+    );
+}

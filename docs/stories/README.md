@@ -35,7 +35,6 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [T-16 — Implement the Service-Route header](T-16-service-route-header.md) · Signalling · M6 · RFC 3608 · the outbound twin of T-14's Path
 - [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · M6 · RFC 5626 · T-14 unblocked it
 - [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · M6 · RFC 5764 · M-14 unblocked it
 - [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
@@ -110,6 +109,7 @@ _None._
 - [T-10 — Verify TLS against a real server](T-10-tls-interop.md) · Signalling · gap left explicitly by T-7
 - [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · track: quic · a draft rather than an RFC, so it sits below the RFC work
 - [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · track: reachability · RFC 3327 · gates T-15 and GRUU
+- [T-16 — Implement the Service-Route header](T-16-service-route-header.md) · Signalling · M6 · RFC 3608 · the outbound twin of T-14's Path
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core

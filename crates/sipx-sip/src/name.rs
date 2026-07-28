@@ -123,6 +123,7 @@ header_names! {
     Route               => "Route";
     RSeq                => "RSeq";                        // RFC 3262
     Server              => "Server";
+    ServiceRoute        => "Service-Route";               // RFC 3608
     SessionExpires      => "Session-Expires" | b'x';      // RFC 4028
     Subject             => "Subject" | b's';
     SubscriptionState   => "Subscription-State";          // RFC 6665
@@ -166,6 +167,7 @@ impl HeaderName {
                 | Self::RejectContact
                 | Self::Require
                 | Self::Route
+                | Self::ServiceRoute
                 | Self::Supported
                 | Self::Unsupported
                 | Self::Via
@@ -319,6 +321,8 @@ mod tests {
         // the address-list decoder splits on commas itself — but it is public API, and a
         // caller asking whether it may join two `Path` rows deserves the right answer.
         assert!(HeaderName::Path.is_comma_separated_list());
+        // RFC 3608 §5: `Service-Route = "Service-Route" HCOLON sr-value *( COMMA sr-value )`.
+        assert!(HeaderName::ServiceRoute.is_comma_separated_list());
         // The RFC names the authentication headers as the exception: their values contain
         // commas of their own.
         assert!(!HeaderName::WwwAuthenticate.is_comma_separated_list());

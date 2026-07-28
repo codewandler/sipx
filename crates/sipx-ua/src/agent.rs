@@ -69,6 +69,8 @@ pub struct UserAgent {
     nonce_use: Option<(String, u32)>,
     /// The proxies the registrar recorded as being on the path back here (RFC 3327).
     path: registrar::PathSet,
+    /// The proxies this UA's own outbound requests must traverse (RFC 3608).
+    service_route: registrar::ServiceRoute,
 }
 
 impl UserAgent {
@@ -93,6 +95,7 @@ impl UserAgent {
             registration,
             nonce_use: None,
             path: registrar::PathSet::default(),
+            service_route: registrar::ServiceRoute::default(),
         }
     }
 
@@ -107,6 +110,21 @@ impl UserAgent {
     #[must_use]
     pub fn path(&self) -> &registrar::PathSet {
         &self.path
+    }
+
+    /// The route the registrar dictated for requests this UA sends (RFC 3608).
+    ///
+    /// The opposite direction from [`UserAgent::path`], and the one a UA is meant to act on:
+    /// §6.1 has it used "as a preloaded Route header field in outgoing initial requests". sipx
+    /// does not preload it behind the caller's back — a `Route` set silently attached to every
+    /// request is the kind of thing that is impossible to debug from the outside — so this is
+    /// handed to whoever builds the request, via `DialOptions::with_service_route` for a call.
+    ///
+    /// Empty until a registration succeeds, and empty again after any 2xx that carries no
+    /// `Service-Route`.
+    #[must_use]
+    pub fn service_route(&self) -> &registrar::ServiceRoute {
+        &self.service_route
     }
 
     /// Register, answering a challenge if one comes.
@@ -147,8 +165,24 @@ impl UserAgent {
         }
 
         match outcome {
-            Outcome::Registered(lease, path) => {
+            Outcome::Registered(registered) => {
+                let registrar::Registered {
+                    lease,
+                    path,
+                    service_route,
+                } = *registered;
                 self.path = path;
+                // Replaced on every success, never merged. RFC 3608 §6.1: the stored value is
+                // "updated according to the Service-Route header field of the latest 200 class
+                // response", and a response with no such header "clears any service route ...
+                // previously stored". Both are one rule, and assignment is it.
+                for hop in service_route.hops_without_loose_routing() {
+                    tracing::warn!(
+                        hop = %hop,
+                        "the registrar's Service-Route omits ;lr, which RFC 3608 §5 requires"
+                    );
+                }
+                self.service_route = service_route;
                 Ok(lease)
             }
             Outcome::Challenged(_) => Err(Error::AuthenticationFailed),

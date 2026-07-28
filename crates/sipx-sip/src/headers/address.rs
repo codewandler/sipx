@@ -270,6 +270,15 @@ address_list_header!(
     /// content of a path vector — is lost.
     Path => Path, "Path"
 );
+address_list_header!(
+    /// The `Service-Route` header (RFC 3608 §5).
+    ///
+    /// `sr-value = name-addr *( SEMI rr-param )`, comma-separated — the same list grammar the
+    /// other route headers have, and list semantics for the same reason: RFC 3608 §6.1 requires
+    /// a UA that exercises a service route to "preserve the order", and order is exactly what is
+    /// lost when a comma-joined row is read as one opaque value.
+    ServiceRoute => ServiceRoute, "Service-Route"
+);
 
 /// A `Contact` value, which may be the wildcard `*`.
 ///

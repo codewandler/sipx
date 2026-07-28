@@ -12,11 +12,11 @@ compliance document usually becomes untrue.
 
 ## Where it stands
 
-**63 RFCs tracked.**
+**64 RFCs tracked.**
 
 | | Meaning | Count |
 |---|---|---|
-| ✅ implemented | Behaviour present and tested for the roles listed | 26 |
+| ✅ implemented | Behaviour present and tested for the roles listed | 27 |
 | 🟡 partial | Some of the normative behaviour; the note says which part is missing | 9 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 8 |
 | ⬜ not started | Tracked as a target, not started | 19 |
@@ -50,6 +50,7 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | [3263](https://www.rfc-editor.org/rfc/rfc3263) | SIP: Locating SIP Servers | ✅ implemented | uac | NAPTR, SRV and A/AAAA, with the candidate list tried in order. The verification name survives resolution. |
 | [3327](https://www.rfc-editor.org/rfc/rfc3327) | SIP Extension Header Field for Registering Non-Adjacent Contacts (Path) | ✅ implemented | — | Parsed with route-header list semantics, offered as `Supported: path` on every REGISTER, and the returned path vector kept with the binding. Not turned into a route set for outbound requests: §5.1 says a UA ignores it, and `Service-Route` (RFC 3608) is the header for that. |
 | [3581](https://www.rfc-editor.org/rfc/rfc3581) | An Extension to SIP for Symmetric Response Routing | ✅ implemented | uac, uas | `rport` observed and echoed, with quote-aware parameter surgery so the value replaces the flag rather than following it. |
+| [3608](https://www.rfc-editor.org/rfc/rfc3608) | SIP Extension Header Field for Service Route Discovery During Registration | ✅ implemented | — | Parsed with route-header list semantics and order preserved (§6.1), stored against the registration and replaced on every 2xx — so a response with no Service-Route clears it, which is what §6.1 requires. Exercised as a pre-loaded Route set on outgoing initial requests via `DialOptions::with_service_route`, not attached behind the caller's back. A hop missing the `;lr` §5 requires is reported rather than dropped. |
 | [6455](https://www.rfc-editor.org/rfc/rfc6455) | The WebSocket Protocol | ✅ implemented | — | Through `tokio-tungstenite`. sipx owns the subprotocol negotiation and the framing rules that RFC 7118 layers on top. |
 | [7118](https://www.rfc-editor.org/rfc/rfc7118) | The WebSocket Protocol as a Transport for SIP | ✅ implemented | uac, uas | Subprotocol negotiation, one message per frame, and the invented sent-by. Verified against Kamailio's WebSocket module. |
 | [5923](https://www.rfc-editor.org/rfc/rfc5923) | Connection Reuse in SIP | 🟡 partial | — | A response returns over the connection its request arrived on, and the pool distinguishes inbound from outbound. The `alias` parameter is not implemented. |

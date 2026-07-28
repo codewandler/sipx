@@ -1001,6 +1001,13 @@ pub struct DialOptions {
     /// being *run*: a far end that asks for one gets it, because refusing to refresh a session
     /// the peer is timing would have it hang up on a call that is working.
     pub session_expires: Option<Duration>,
+    /// The pre-loaded route set to put on the INVITE, outermost proxy first (RFC 3608 §6.1).
+    ///
+    /// Empty by default: the INVITE goes to `target` and no further. Set it from a registrar's
+    /// `Service-Route` — `UserAgent::service_route().rendered()` produces exactly this — when the
+    /// registration says outbound requests must traverse proxies. Without it, a call placed
+    /// through a registration reaches a proxy holding no state for it.
+    pub service_route: Vec<String>,
 }
 
 impl DialOptions {
@@ -1012,7 +1019,19 @@ impl DialOptions {
             media_address,
             timeout: None,
             session_expires: None,
+            service_route: Vec::new(),
         }
+    }
+
+    /// Traverse these proxies on the way out, outermost first (RFC 3608).
+    ///
+    /// The values are `Route` header values — `<sip:proxy.example;lr>` — which is what
+    /// `ServiceRoute::rendered` returns. Order is normative: §6.1 requires a UA that exercises a
+    /// service route to preserve the order the registrar listed.
+    #[must_use]
+    pub fn with_service_route(mut self, hops: Vec<String>) -> Self {
+        self.service_route = hops;
+        self
     }
 
     /// Detect a far end that vanishes, by refreshing the session on this interval (RFC 4028).
@@ -1094,6 +1113,8 @@ struct Invitation<'a> {
     offer: &'a SessionDescription,
     session_expires: Option<Duration>,
     identity: &'a Identity,
+    /// The pre-loaded route set, outermost first (RFC 3608 §6.1).
+    service_route: &'a [String],
 }
 
 fn build_invite(
@@ -1108,6 +1129,7 @@ fn build_invite(
         offer,
         session_expires,
         identity,
+        service_route,
     } = invitation;
     let Identity {
         call_id,
@@ -1158,6 +1180,12 @@ fn build_invite(
                 Bytes::from(session::ABSOLUTE_MIN_INTERVAL.as_secs().to_string()),
             )?;
     }
+    // Pre-loaded Route, before the request goes anywhere. RFC 3608 §6.1 has the service route
+    // used "as a preloaded Route header field in outgoing initial requests", and §6.1 requires
+    // the order preserved — which `add_routes` does by appending in sequence. This is the only
+    // place the INVITE can acquire it: a Route added after the transaction is created would not
+    // be on the message the far end matched.
+    let builder = add_routes(builder, service_route)?;
     Ok(builder.build())
 }
 
@@ -1246,6 +1274,7 @@ async fn open_invitation(
             offer: &offer,
             session_expires: options.session_expires,
             identity,
+            service_route: &options.service_route,
         },
     )?;
     Ok((port, capabilities, via, invite))

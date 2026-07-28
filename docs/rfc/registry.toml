@@ -170,6 +170,19 @@ evidence = [
 note = "Parsed with route-header list semantics, offered as `Supported: path` on every REGISTER, and the returned path vector kept with the binding. Not turned into a route set for outbound requests: §5.1 says a UA ignores it, and `Service-Route` (RFC 3608) is the header for that."
 
 [[rfc]]
+number = 3608
+title = "SIP Extension Header Field for Service Route Discovery During Registration"
+layer = "transport"
+status = "implemented"
+headers = ["ServiceRoute"]
+evidence = [
+  "crates/sipx-sip/src/headers/address.rs",
+  "crates/sipx-ua/src/registrar.rs",
+  "crates/sipx-call/tests/service_route.rs",
+]
+note = "Parsed with route-header list semantics and order preserved (§6.1), stored against the registration and replaced on every 2xx — so a response with no Service-Route clears it, which is what §6.1 requires. Exercised as a pre-loaded Route set on outgoing initial requests via `DialOptions::with_service_route`, not attached behind the caller's back. A hop missing the `;lr` §5 requires is reported rather than dropped."
+
+[[rfc]]
 number = 8599
 title = "Push Notification with SIP"
 layer = "transport"

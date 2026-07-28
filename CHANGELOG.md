@@ -9,6 +9,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The registrar's outbound route set, obeyed — `Service-Route` (`T-16`, RFC 3608).** `Path`
+  (`T-14`) fixed routing *toward* a UA. This is the other direction: a registration can dictate
+  which proxies the UA's own requests must traverse, and a UA that ignores it sends every call
+  straight at the destination — arriving at a proxy holding no state for the registration the call
+  belongs to.
+  - **An absent `Service-Route` clears the stored one.** §6.1's two sentences are one rule, and
+    "nothing to say, keep what you had" is the natural mis-implementation: it leaves a UA routing
+    through a proxy the registrar has stopped naming.
+  - It is **not** attached behind the caller's back. `UserAgent::service_route()` hands it over and
+    `DialOptions::with_service_route` takes it, because a `Route` header silently added to every
+    request is close to undebuggable from outside.
+  - A hop missing the `;lr` that §5 requires is *reported*, not dropped — the registrar is the
+    offending party, and a UA that discarded a route set over a missing parameter would be
+    unroutable for an invisible reason.
+
+### Changed
+
+- `Outcome::Registered` carries a `Registered` struct rather than positional fields. `PathSet` and
+  `ServiceRoute` are the same shape and opposite directions, and two interchangeable positions of
+  identical type is how they would eventually get swapped.
+
 - **Reliable provisional responses — 100rel and PRACK (`S-12`, RFC 3262).** A `180 Ringing` is
   fire-and-forget over UDP, and some carriers will not accept a call without the option tag at
   all. `100rel` is offered on every INVITE, honoured when a peer requires it, and refused with
