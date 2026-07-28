@@ -16,7 +16,7 @@
 //!   backwards, and it never arrives.
 
 use bytes::Bytes;
-use sipx_sip::headers::{From as FromHeader, RecordRoute, To};
+use sipx_sip::headers::{From as FromHeader, To};
 use sipx_sip::{HeaderName, Request, Response, Uri};
 
 /// Which side of the dialog this is.
@@ -130,12 +130,12 @@ impl Dialog {
     pub fn local_and_remote(&self) -> (String, String) {
         let local = format!(
             "{};tag={}",
-            strip_tag(&self.local_uri),
+            strip_header_params(&self.local_uri),
             String::from_utf8_lossy(&self.id.local_tag)
         );
         let remote = format!(
             "{};tag={}",
-            strip_tag(&self.remote_uri),
+            strip_header_params(&self.remote_uri),
             String::from_utf8_lossy(&self.id.remote_tag)
         );
         (local, remote)
@@ -164,8 +164,20 @@ impl Dialog {
     }
 }
 
-fn strip_tag(uri: &str) -> String {
-    uri.split(';').next().unwrap_or(uri).trim().to_owned()
+/// The name-addr part of a `To` or `From`, without its header parameters.
+///
+/// Splitting on the first `;` is wrong: a URI inside angle brackets may carry its own
+/// parameters, so `<sip:alice@example.com;transport=tcp>;tag=abc` would be truncated to
+/// `<sip:alice@example.com` — an unterminated bracket the far end answers with 400, leaving a
+/// call that cannot be hung up. Parameters after the closing bracket belong to the header;
+/// those inside belong to the URI and stay.
+pub(crate) fn strip_header_params(value: &str) -> String {
+    if let Some(end) = value.rfind('>') {
+        return value.get(..=end).unwrap_or(value).trim().to_owned();
+    }
+    // Without brackets there can be no URI parameters — RFC 3261 §20.10 requires brackets
+    // exactly when the URI carries any — so the first `;` is the header's.
+    value.split(';').next().unwrap_or(value).trim().to_owned()
 }
 
 fn header_string(headers: &sipx_sip::Headers, name: &HeaderName) -> String {
@@ -219,16 +231,54 @@ fn contact_uri(headers: &sipx_sip::Headers) -> Option<Uri> {
     Uri::parse(Bytes::from(inner)).ok()
 }
 
+/// The route set, one entry per route.
+///
+/// Two things this must get right. `Record-Route` is a comma-separated list header, so one
+/// line may carry several routes, and the reversal a UAC performs has to reverse *routes*, not
+/// lines. And a malformed route must not take the well-formed ones with it: the route set is
+/// what a BYE travels along, and losing it silently is how a call becomes unhangupable.
 fn record_routes(headers: &sipx_sip::Headers) -> Vec<String> {
-    headers
-        .get_all(&HeaderName::RecordRoute)
-        .filter_map(|header| {
-            headers
-                .typed::<RecordRoute>()
-                .and_then(Result::ok)
-                .map(|_| String::from_utf8_lossy(&header.value()).into_owned())
-        })
-        .collect()
+    let mut routes = Vec::new();
+    for header in headers.get_all(&HeaderName::RecordRoute) {
+        routes.extend(split_routes(&header.value()));
+    }
+    routes
+}
+
+/// Split one `Record-Route` value into its routes, honouring angle brackets and quotes.
+///
+/// A comma inside `<...>` or inside a quoted display name is part of the route, not a
+/// separator between two of them.
+fn split_routes(value: &[u8]) -> Vec<String> {
+    let mut routes = Vec::new();
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut start = 0usize;
+
+    for (index, &byte) in value.iter().enumerate() {
+        match byte {
+            b'"' => quoted = !quoted,
+            b'<' if !quoted => depth += 1,
+            b'>' if !quoted => depth = depth.saturating_sub(1),
+            b',' if !quoted && depth == 0 => {
+                push_route(&mut routes, value.get(start..index));
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    push_route(&mut routes, value.get(start..));
+    routes
+}
+
+fn push_route(routes: &mut Vec<String>, slice: Option<&[u8]>) {
+    let Some(slice) = slice else {
+        return;
+    };
+    let text = String::from_utf8_lossy(slice).trim().to_owned();
+    if !text.is_empty() {
+        routes.push(text);
+    }
 }
 
 fn cseq_number(headers: &sipx_sip::Headers) -> Option<u32> {
@@ -454,6 +504,104 @@ mod tests {
             "as received for the callee: {:?}",
             uas.route_set
         );
+    }
+
+    /// Several routes on one line: `Record-Route` is a comma-separated list header. Treating a
+    /// line as a route means the caller's reversal reverses lines rather than routes, and a
+    /// BYE goes through the proxies backwards.
+    #[test]
+    fn several_routes_on_one_line_are_separate_routes() {
+        let routed = response(
+            "SIP/2.0 200 OK\r\n\
+             Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bKcall\r\n\
+             Record-Route: <sip:proxy1.example.com;lr>, <sip:proxy2.example.com;lr>\r\n\
+             Record-Route: <sip:proxy3.example.com;lr>\r\n\
+             To: <sip:bob@example.com>;tag=bobtag\r\n\
+             From: <sip:alice@example.net>;tag=alicetag\r\n\
+             Call-ID: thecall@example.net\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:bob@192.0.2.9:5060>\r\n\
+             Content-Length: 0\r\n\r\n",
+        );
+        let caller = Dialog::from_response(&invite(), &routed).expect("a dialog");
+        assert_eq!(
+            caller.route_set.len(),
+            3,
+            "three routes: {:?}",
+            caller.route_set
+        );
+        assert!(
+            caller.route_set[0].contains("proxy3"),
+            "{:?}",
+            caller.route_set
+        );
+        assert!(
+            caller.route_set[1].contains("proxy2"),
+            "{:?}",
+            caller.route_set
+        );
+        assert!(
+            caller.route_set[2].contains("proxy1"),
+            "{:?}",
+            caller.route_set
+        );
+    }
+
+    /// A comma inside angle brackets or a quoted display name is part of the route.
+    #[test]
+    fn a_comma_inside_a_route_does_not_split_it() {
+        assert_eq!(
+            split_routes(br#""Proxy, Inc" <sip:p1.example.com;lr>, <sip:p2.example.com;lr>"#),
+            vec![
+                r#""Proxy, Inc" <sip:p1.example.com;lr>"#.to_owned(),
+                "<sip:p2.example.com;lr>".to_owned()
+            ]
+        );
+    }
+
+    /// A URI inside angle brackets may carry its own parameters. Splitting on the first `;`
+    /// truncates it to an unterminated bracket, which the far end answers 400 — leaving a call
+    /// that cannot be hung up.
+    #[test]
+    fn a_uri_with_parameters_survives_having_its_tag_stripped() {
+        assert_eq!(
+            strip_header_params("<sip:alice@example.com;transport=tcp>;tag=abc"),
+            "<sip:alice@example.com;transport=tcp>"
+        );
+        assert_eq!(
+            strip_header_params("<sip:bob@example.com>;tag=x"),
+            "<sip:bob@example.com>"
+        );
+        assert_eq!(
+            strip_header_params("sip:carol@example.com;tag=y"),
+            "sip:carol@example.com"
+        );
+        assert_eq!(
+            strip_header_params(r#""Alice" <sip:alice@example.com;user=phone>;tag=z"#),
+            r#""Alice" <sip:alice@example.com;user=phone>"#
+        );
+    }
+
+    /// And the whole way round: a dialog built from such a `From` produces a well-formed one.
+    #[test]
+    fn a_request_from_a_dialog_with_uri_parameters_is_well_formed() {
+        let with_params = request(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bKcall\r\n\
+             To: <sip:bob@example.com;user=phone>\r\n\
+             From: <sip:alice@example.net;transport=tcp>;tag=alicetag\r\n\
+             Call-ID: thecall@example.net\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:alice@192.0.2.1:5060>\r\n\
+             Max-Forwards: 70\r\n\
+             Content-Length: 0\r\n\r\n",
+        );
+        let callee = Dialog::from_request(&with_params, "bobtag").expect("a dialog");
+        let (local, remote) = callee.local_and_remote();
+        assert_eq!(local, "<sip:bob@example.com;user=phone>;tag=bobtag");
+        assert_eq!(remote, "<sip:alice@example.net;transport=tcp>;tag=alicetag");
+        assert_eq!(local.matches('<').count(), local.matches('>').count());
+        assert_eq!(remote.matches('<').count(), remote.matches('>').count());
     }
 
     /// A `Contact` may carry parameters; the angle brackets are what make the URI unambiguous.

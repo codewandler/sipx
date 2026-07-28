@@ -18,13 +18,13 @@ sipx-rtp.workspace = true
 sipx-audio.workspace = true
 sipx-media.workspace = true
 sipx-transport.workspace = true
-sipx-ua.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "fs", "macros"] }
 
 [dev-dependencies]
+bytes.workspace = true
 sipx-testkit.workspace = true
 tokio = { workspace = true, features = ["full"] }
 pretty_assertions.workspace = true

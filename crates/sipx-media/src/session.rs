@@ -315,7 +315,6 @@ async fn send_loop(
     let mut sequence: u16 = rand::random();
     let mut timestamp: u32 = rand::random();
     let ssrc: u32 = rand::random();
-    let samples_per_packet = config.samples_per_packet();
 
     // One clock for the whole stream. Sending on channel readiness instead makes the packet
     // rate depend on how fast the application produces samples.
@@ -359,8 +358,14 @@ async fn send_loop(
         sent.fetch_add(1, Ordering::Relaxed);
 
         // Both counters wrap, and both are supposed to.
+        //
+        // The timestamp advances by the samples this packet actually carried, not by the
+        // configured packet size. They are usually the same, and when they are not — a caller
+        // sending 10 ms frames on a 20 ms config — advancing by the configured size builds a
+        // timeline at the wrong rate, and the far end plays the call with a gap between every
+        // packet.
         sequence = sequence.wrapping_add(1);
-        timestamp = timestamp.wrapping_add(u32::try_from(samples_per_packet).unwrap_or(160));
+        timestamp = timestamp.wrapping_add(u32::try_from(samples.len()).unwrap_or(0));
     }
 }
 
@@ -374,7 +379,12 @@ async fn receive_loop(
 ) {
     let mut buffer = JitterBuffer::new(config.jitter_depth);
     let mut datagram = vec![0u8; 2048];
-    let mut latched = false;
+    // The synchronisation source this session is carrying. RTP has no authentication, so this
+    // is not a security control — anyone who can guess the port can still forge a first
+    // packet. What it does buy is that once a stream is established, a *later* forged packet
+    // with a different SSRC cannot redirect our media or poison the jitter buffer, which is
+    // the difference between a race an attacker has to win and one they can win at leisure.
+    let mut stream: Option<u32> = None;
 
     // When the far end stops, whatever the buffer is still holding has to come out. Without
     // this the last `depth - 1` packets are never played: in a continuous call that is
@@ -400,9 +410,7 @@ async fn receive_loop(
                 // Silence. Release what is held rather than holding it against a packet that
                 // is not coming.
                 for packet in buffer.drain() {
-                    let codec =
-                        Codec::from_payload_type(packet.payload_type).unwrap_or(config.codec);
-                    if incoming.send(codec.decode(&packet.payload)).await.is_err() {
+                    if !deliver(&incoming, &stop, &packet).await {
                         return;
                     }
                 }
@@ -418,26 +426,57 @@ async fn receive_loop(
             continue;
         };
 
-        if !latched {
-            // Symmetric RTP: the observed source replaces the advertised address, because
-            // behind a NAT the advertised one is private and this is the only path back.
-            //
-            // Deliberately *after* the packet parses. Latching on any datagram lets anyone who
-            // can guess the port redirect our media by sending a single byte, which is a
-            // hijack rather than a NAT traversal.
-            *remote.lock().await = source;
-            latched = true;
+        match stream {
+            None => {
+                // Symmetric RTP: the observed source replaces the advertised address, because
+                // behind a NAT the advertised one is private and this is the only path back.
+                // Deliberately after the packet parses, so a stray STUN probe cannot move it.
+                *remote.lock().await = source;
+                stream = Some(packet.ssrc);
+            }
+            Some(established) if established != packet.ssrc => {
+                // Another source on our port. Dropped rather than mixed in: one packet with a
+                // high sequence number would otherwise advance the jitter buffer past every
+                // genuine packet still to come, and the call goes silent.
+                tracing::debug!(
+                    %source,
+                    ssrc = packet.ssrc,
+                    "ignoring a packet from a different synchronisation source"
+                );
+                continue;
+            }
+            Some(_) => {}
         }
 
         received.fetch_add(1, Ordering::Relaxed);
         buffer.push(packet);
 
         while let Some(packet) = buffer.pop() {
-            let codec = Codec::from_payload_type(packet.payload_type).unwrap_or(config.codec);
-            if incoming.send(codec.decode(&packet.payload)).await.is_err() {
+            if !deliver(&incoming, &stop, &packet).await {
                 return;
             }
         }
+    }
+}
+
+/// Hand one packet's audio to the application.
+///
+/// Returns whether the loop should keep running.
+async fn deliver(incoming: &mpsc::Sender<Vec<i16>>, stop: &Stop, packet: &Packet) -> bool {
+    // An unknown payload type is dropped, not decoded as if it were the negotiated codec.
+    // sipx's own offers advertise `telephone-event` on payload type 101, so a peer that sends
+    // DTMF sends packets this loop must not treat as speech: mu-law-decoding a four-byte event
+    // payload injects four garbage samples and is heard as a click.
+    let Some(codec) = Codec::from_payload_type(packet.payload_type) else {
+        return true;
+    };
+
+    // The stop signal is checked here too. This is the one await that can park indefinitely —
+    // a full channel means the application has stopped reading — and a task parked here when
+    // the call is hung up would hold its socket and its port for the life of the process.
+    tokio::select! {
+        () = stop.wait() => false,
+        result = incoming.send(codec.decode(&packet.payload)) => result.is_ok(),
     }
 }
 
@@ -608,6 +647,110 @@ mod tests {
         let mut ten_ms = config.clone();
         ten_ms.packet_duration = Duration::from_millis(10);
         assert_eq!(ten_ms.samples_per_packet(), 80);
+    }
+
+    /// The RTP timestamp must advance by the samples actually sent. Advancing by the
+    /// configured packet size instead builds a timeline at the wrong rate, and the far end
+    /// plays the call with a gap between every packet.
+    #[tokio::test]
+    async fn the_timestamp_follows_the_frame_actually_sent() {
+        let listener = UdpSocket::bind(any()).await.expect("binds");
+        let listen_addr = listener.local_addr().expect("has an address");
+        let session = MediaSession::start(any(), Config::new(listen_addr, Codec::Pcmu))
+            .await
+            .expect("binds");
+
+        // Half-sized frames on a config that says 160.
+        for _ in 0..3 {
+            session.send(vec![0i16; 80]).await;
+        }
+
+        let mut stamps = Vec::new();
+        let mut datagram = vec![0u8; 2048];
+        for _ in 0..3 {
+            let (len, _) =
+                tokio::time::timeout(Duration::from_secs(2), listener.recv_from(&mut datagram))
+                    .await
+                    .expect("no timeout")
+                    .expect("receives");
+            let packet =
+                Packet::decode(&Bytes::copy_from_slice(&datagram[..len])).expect("a valid packet");
+            stamps.push(packet.timestamp);
+        }
+
+        assert_eq!(
+            stamps[1].wrapping_sub(stamps[0]),
+            80,
+            "80 samples sent must advance the clock by 80, not by the configured 160"
+        );
+        assert_eq!(stamps[2].wrapping_sub(stamps[1]), 80);
+    }
+
+    /// sipx's own offers advertise `telephone-event` on payload type 101, so a peer that sends
+    /// DTMF sends packets this loop must not treat as speech. Decoding a four-byte event
+    /// payload as µ-law injects four garbage samples and is heard as a click.
+    #[tokio::test]
+    async fn an_unknown_payload_type_is_dropped_rather_than_decoded_as_audio() {
+        let (left, right) = pair(Codec::Pcmu).await;
+
+        // Establish the stream so `left` latches on to `right`.
+        right.play(&tone(320), 160).await;
+        let established = left.record_until_idle(Duration::from_millis(300)).await;
+        assert_eq!(established.len(), 320);
+
+        // Now a DTMF packet on the same stream. It must not reach the audio path.
+        let dtmf = Packet::new(
+            101,
+            9000,
+            999_999,
+            1,
+            Bytes::from_static(&[0x05, 0x0A, 0x01, 0x40]),
+        );
+        let raw = UdpSocket::bind(any()).await.expect("binds");
+        raw.send_to(&dtmf.encode(), left.local_addr())
+            .await
+            .expect("sends");
+
+        let after = left.record_until_idle(Duration::from_millis(200)).await;
+        assert!(
+            after.is_empty(),
+            "a telephone-event packet must not become audio samples: {after:?}"
+        );
+    }
+
+    /// Once a stream is established, a packet from a different synchronisation source is
+    /// dropped. Without this, one forged packet with a high sequence number advances the
+    /// jitter buffer past every genuine packet still to come, and the call goes silent.
+    #[tokio::test]
+    async fn a_packet_from_another_source_cannot_silence_the_stream() {
+        let (left, right) = pair(Codec::Pcmu).await;
+
+        right.play(&tone(320), 160).await;
+        assert_eq!(
+            left.record_until_idle(Duration::from_millis(300))
+                .await
+                .len(),
+            320
+        );
+
+        // A forged packet: valid RTP, different SSRC, sequence number far in the future.
+        let forged = Packet::new(0, 60_000, 0, 0xBAD0_BAD0, Bytes::from(vec![0xFFu8; 160]));
+        let attacker = UdpSocket::bind(any()).await.expect("binds");
+        attacker
+            .send_to(&forged.encode(), left.local_addr())
+            .await
+            .expect("sends");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The genuine stream still gets through.
+        let more = tone(320);
+        right.play(&more, 160).await;
+        let heard = left.record_until_idle(Duration::from_millis(300)).await;
+        assert_eq!(
+            g711::ulaw_encode_all(&more),
+            g711::ulaw_encode_all(&heard),
+            "the forged packet must not have poisoned the buffer"
+        );
     }
 
     #[test]

@@ -512,7 +512,6 @@ dependencies = [
  "sipx-sip",
  "sipx-testkit",
  "sipx-transport",
- "sipx-ua",
  "thiserror",
  "tokio",
  "tracing",

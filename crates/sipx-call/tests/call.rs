@@ -19,9 +19,10 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
+use bytes::Bytes;
 use sipx_audio::{Wav, g711, read_wav, write_wav};
 use sipx_call::{Call, answer, dial};
-use sipx_sip::{Host, HostName, Method, Uri};
+use sipx_sip::{HeaderName, Host, HostName, Method, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use tokio::sync::mpsc::Receiver;
 
@@ -261,4 +262,153 @@ async fn a_refused_call_reports_the_status() {
         }
         other => panic!("expected a rejection, got {other:?}"),
     }
+}
+
+/// The far end hanging up must stop our media. Without in-dialog routing, an incoming BYE
+/// reaches nothing and the local session goes on sending RTP into a call that no longer
+/// exists — which is worse than a call that never connects, because it does not stop.
+#[tokio::test]
+async fn a_bye_from_the_far_end_ends_the_call_locally() {
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let (caller_endpoint, mut caller_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+
+    let answering = tokio::spawn(async move {
+        let incoming = callee_incoming.recv().await.expect("an INVITE arrives");
+        answer(&callee_endpoint, &incoming, loopback())
+            .await
+            .expect("answers")
+    });
+
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let mut caller = dial(
+        &caller_endpoint,
+        Target::udp(callee_addr),
+        &to,
+        "<sip:caller@example.net>",
+        loopback(),
+    )
+    .await
+    .expect("connects");
+    let mut callee = answering.await.expect("the answering side finishes");
+
+    assert!(!caller.is_ended());
+    callee.hang_up().await.expect("the callee hangs up");
+
+    // The caller must see the BYE and act on it.
+    let bye = tokio::time::timeout(Duration::from_secs(2), caller_incoming.recv())
+        .await
+        .expect("no timeout")
+        .expect("a BYE arrives");
+    assert_eq!(bye.request.method, sipx_sip::Method::Bye);
+    assert!(
+        caller.handle(&bye).await.expect("handles"),
+        "the BYE belongs to this call"
+    );
+    assert!(caller.is_ended(), "the call must be over");
+
+    // And the media has stopped: nothing more goes out.
+    let before = caller.media().packets_sent();
+    caller.media().play(&clip(100).samples, 160).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        caller.media().packets_sent(),
+        before,
+        "a call ended by the far end must stop sending"
+    );
+}
+
+/// A 2xx must be acknowledged even when the caller cannot use it. Walking away leaves the far
+/// end retransmitting for 32 seconds and then streaming at a port we have closed.
+#[tokio::test]
+async fn a_2xx_the_caller_cannot_use_is_still_acknowledged() {
+    let (answerer, mut answerer_incoming) = endpoint().await;
+    let answerer_addr = answerer.local_addr();
+
+    // Answer 200 OK with an SDP offering only a codec sipx does not implement, so the caller
+    // gets a usable dialog and an unusable media stream.
+    let seen = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<sipx_sip::Method>::new()));
+    let recorder = std::sync::Arc::clone(&seen);
+    tokio::spawn(async move {
+        while let Some(incoming) = answerer_incoming.recv().await {
+            recorder.lock().await.push(incoming.request.method.clone());
+            if incoming.request.method != sipx_sip::Method::Invite {
+                continue;
+            }
+            let sdp = format!(
+                "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+                 m=audio {} RTP/AVP 9\r\na=rtpmap:9 G722/8000\r\n",
+                40404
+            );
+            let response = sipx_sip::build::ResponseBuilder::to_request(
+                &incoming.request,
+                sipx_sip::StatusCode::new(200).expect("valid"),
+                "OK",
+            )
+            .expect("builds")
+            .set_header(
+                &HeaderName::To,
+                Bytes::from_static(b"<sip:callee@example.com>;tag=theirs"),
+            )
+            .expect("valid")
+            .header(
+                HeaderName::Contact,
+                Bytes::from(format!("<sip:sipx@{answerer_addr}>")),
+            )
+            .expect("valid")
+            .header(
+                HeaderName::ContentType,
+                Bytes::from_static(b"application/sdp"),
+            )
+            .expect("valid")
+            .body(Bytes::from(sdp))
+            .build();
+            let _ = answerer.respond(&incoming.key, response).await;
+        }
+    });
+
+    let (caller_endpoint, _rx) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let result = dial(
+        &caller_endpoint,
+        Target::udp(answerer_addr),
+        &to,
+        "<sip:caller@example.net>",
+        loopback(),
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(sipx_call::Error::NoCommonCodec)),
+        "G.722 alone is not usable: {result:?}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let methods = seen.lock().await.clone();
+    assert!(
+        methods.contains(&sipx_sip::Method::Ack),
+        "the 2xx must be acknowledged even though the call could not proceed: {methods:?}"
+    );
+    assert!(
+        methods.contains(&sipx_sip::Method::Bye),
+        "and then torn down, per RFC 3261 section 15: {methods:?}"
+    );
+}
+
+/// The `Contact` must carry the endpoint's advertised address, not its socket's local one. An
+/// endpoint bound to 0.0.0.0 would otherwise tell the peer to reach it at 0.0.0.0, and every
+/// in-dialog request the peer sends becomes unroutable.
+#[tokio::test]
+async fn the_contact_advertises_the_configured_address() {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.sent_by = "sipx.example.net".to_owned();
+    config.sent_by_port = Some(5080);
+    let (handle, _rx) = sipx_transport::bind(config).await.expect("binds");
+
+    let contact = sipx_call::call::contact_for(&handle);
+    assert_eq!(contact, "<sip:sipx@sipx.example.net:5080>");
+    assert!(
+        !contact.contains(&handle.local_addr().port().to_string()),
+        "the socket's own port must not leak into the Contact: {contact}"
+    );
 }

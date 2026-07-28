@@ -166,6 +166,17 @@ impl Handle {
         self.local_addr
     }
 
+    /// The host and port this endpoint tells peers to reach it on.
+    ///
+    /// Not the same as [`Self::local_addr`], and the difference matters wherever an address
+    /// goes into a message. An endpoint bound to `0.0.0.0` has a local address that means
+    /// "everywhere" to us and nothing to a peer; behind a NAT the local address is private.
+    /// `Contact` and `Via` must carry this.
+    #[must_use]
+    pub fn advertised(&self) -> String {
+        format!("{}:{}", self.sent_by, self.sent_by_port)
+    }
+
     /// Send a request, creating a client transaction.
     ///
     /// A `Via` is added if the request has none — the transport owns that header, since only

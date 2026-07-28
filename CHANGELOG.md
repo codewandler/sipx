@@ -70,6 +70,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A 2xx was not retransmitted until acknowledged.** The transaction layer absorbs
+  retransmitted requests but does not resend the response; over UDP one lost 200 OK left the
+  caller giving up while the answering side held an established call.
+- **A 2xx the caller could not use was never acknowledged.** A 200 OK carrying an unusable SDP
+  answer made `dial` return an error without an ACK, leaving the far end retransmitting for 32
+  seconds and then streaming media at a closed port. It now ACKs and BYEs, per RFC 3261 §15.
+- **ACK and BYE went to the address the INVITE was sent to** rather than to the peer's
+  `Contact`, so with a redirect or a B2BUA in the path they reached the wrong element.
+- **The route set was computed and never sent.** No `Route` header was added to in-dialog
+  requests, so a call through a Record-Routing proxy could not be ended.
+- **`Record-Route` was read one line at a time**, though it is a comma-separated list header —
+  so a UAC's reversal reversed lines rather than routes. A malformed first route also silently
+  discarded every later one.
+- **An inbound BYE reached nothing**, so the far end hanging up did not stop the local media.
+- **A URI with its own parameters was truncated** when its header tag was stripped, producing
+  an unterminated angle bracket the far end answers with 400.
+- **The RTP timestamp advanced by the configured packet size** rather than the samples actually
+  sent, so any other frame size built a timeline at the wrong rate.
+- **Unknown RTP payload types were decoded as the negotiated codec.** sipx advertises
+  `telephone-event` on 101, so a peer's DTMF was decoded as µ-law and heard as a click.
+- **A media session could not be stopped while its consumer was not reading**, leaking the task
+  and its socket for the life of the process.
+- **A forged RTP packet could silence a call.** Any later packet with a different SSRC was
+  admitted to the jitter buffer, where a high sequence number made every genuine packet late.
+- **`Contact` carried the socket's local address** rather than the endpoint's advertised one,
+  so an endpoint bound to `0.0.0.0` published an unroutable contact.
 - An endpoint binding to port 0 could fail with `AddrInUse`: UDP and TCP have independent port
   spaces, so a port the OS handed out for UDP could already be held for TCP. Binding now
   retries for a port free on both, while a *named* port that is taken still fails honestly.
