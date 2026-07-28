@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-29
+
 ### Added
 
 - **The loopback link the testkit has always promised (`X-14`).** Two full stacks talk in one
