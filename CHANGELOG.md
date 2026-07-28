@@ -7,6 +7,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] — 2026-07-28
+
+The first cut. Not published anywhere: no crate is on crates.io and no tag has been pushed.
+What this marks is the point at which the bottom four layers of the stack are complete and
+verified — a SIP core, transports, a user agent and calls that carry audio.
+
+sipx registers against a real Kamailio over UDP and TCP, answers `OPTIONS`, and places a call
+between two of its own endpoints that carries G.711 in both directions. 349 tests, clippy clean
+at `-D warnings`, and the whole RFC 4475 torture corpus green.
+
 ### Added
 
 **Milestone M0 — workspace**
@@ -70,6 +82,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+Defects found and fixed before this release — nothing here ever reached a user. They are
+recorded because each one is a mistake worth not repeating, and most of them sat directly
+beneath a comment asserting the opposite.
+
 - **A 2xx was not retransmitted until acknowledged.** The transaction layer absorbs
   retransmitted requests but does not resend the response; over UDP one lost 200 OK left the
   caller giving up while the answering side held an established call.
@@ -99,3 +115,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An endpoint binding to port 0 could fail with `AddrInUse`: UDP and TCP have independent port
   spaces, so a port the OS handed out for UDP could already be held for TCP. Binding now
   retries for a port free on both, while a *named* port that is taken still fails honestly.
+
+### Not in this release
+
+Stated so nobody has to discover it from a stack trace:
+
+- **No TLS, WebSocket or WSS.** The transport enum names them; only UDP and TCP are
+  implemented, and a `sips:` URI resolves to no candidate rather than downgrading.
+- **No DNS client.** Every RFC 3263 selection rule is implemented and tested, but the only
+  `Resolver` implementations are test fixtures, so a URI naming a domain resolves to nothing at
+  runtime. IP literals and explicit `host:port` work today (`T-5`).
+- **No re-INVITE.** A call can be established and ended, not modified (`M-8`).
+- **No RTCP** (`M-6`) and **no RFC 4733 DTMF** (`M-7`) — the latter matters because the SDP
+  already advertises `telephone-event`, so that advertisement is currently a promise sipx does
+  not keep.
+- **No command-line tool.** `sipx-cli` is a scaffold; `dial`, `answer` and `register` are
+  library calls only (milestone M4).
+- **Interop is verified against Kamailio only.** A second implementation with different
+  opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
+
+[Unreleased]: https://github.com/codewandler/sipx/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/codewandler/sipx/releases/tag/v0.1.0
