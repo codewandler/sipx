@@ -41,7 +41,14 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ./scripts/check-provenance.sh
 scripts/check-features.sh
+./scripts/rfc-report.py --check
 ```
+
+`rfc-report.py` regenerates `docs/compliance.md` from `docs/rfc/registry.toml` and checks that
+its claims hold: a named header must be known to the parser, a cited file must exist, and an
+entry claiming implementation must cite something. **When a story changes what sipx supports,
+update the registry in the same commit.** The table is linked from the README as a measurement,
+and a measurement that lags the code is worse than no table at all.
 
 `check-features.sh` is not optional garnish. `--all-features` hides a whole class of breakage:
 an optional transport that does not compile with its feature turned off is invisible until a

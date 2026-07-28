@@ -97,6 +97,15 @@ jobs:
       # soaking, and a default-features build never touches them.
       - run: cargo test -p sipx-call --test load --all-features -- --ignored
 
+  docs:
+    name: rfc compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The compliance table is generated from a registry and claims things about the code. This
+      # fails the build if it has drifted from either — a table nobody checks becomes marketing.
+      - run: ./scripts/rfc-report.py --check
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

@@ -27,6 +27,17 @@ _None._
 
 ## Next (ready — take the top one unless the user named a story)
 
+### Conformance
+- [M-14 — Encrypt the media](M-14-secure-media.md) · Media · RFC 3711 + 4568; the largest gap in the stack
+- [S-11 — Implement session timers](S-11-session-timers.md) · Signalling · RFC 4028; headers already parse
+- [S-12 — Implement reliable provisional responses](S-12-reliable-provisional-responses.md) · Signalling · RFC 3262; RAck and RSeq already parse
+- [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · RFC 3327; gates Outbound and GRUU
+- [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · RFC 5626; blocked by T-14
+- [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · RFC 8760; small and self-contained
+
+### Docs Site
+- [X-11 — Publish a documentation site](X-11-publish-a-documentation-site.md) · Build · seeds the docs-site epic
+
 ### Quic
 - [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · gates T-12 and T-13
 - [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · blocked by T-11
@@ -36,7 +47,14 @@ _None._
 _None._
 
 ## Backlog
-_None._
+
+### Conformance
+- [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · RFC 5764; blocked by M-14
+- [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · RFC 6665; generalises what REFER already does implicitly
+
+### Docs Site
+- [X-12 — Write the user-facing guides](X-12-write-the-user-facing-guides.md) · Build · blocked by X-8
+- [X-13 — Publish the API documentation](X-13-publish-the-api-documentation.md) · Build · blocked by X-8
 
 ## Done
 - [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media
@@ -82,6 +100,8 @@ _None._
 - [X-4 — Build the load testing harness](X-4-build-the-load-testing-harness.md) · Build
 - [X-5 — Assert stability under sustained load](X-5-assert-stability-under-sustained-load.md) · Build
 - [X-6 — Fix the RFC conformance defects found by review](X-6-fix-the-rfc-conformance-defects.md) · Core · review of implemented behaviour, not of gaps
+- [X-7 — Track RFC compliance, measured rather than asserted](X-7-track-rfc-compliance.md) · Build · seeds the conformance epic
+- [X-8 — Fail the build on unbacked compliance claims](X-8-fail-the-build-on-unbacked-compliance-claims.md) · Build
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

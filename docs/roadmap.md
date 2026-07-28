@@ -4,9 +4,13 @@ The big picture: what's delivered, what's next, and the epics that group related
 operational detail lives on the [board](stories/README.md) (generated from story frontmatter);
 this document is the hand-written narrative around it.
 
+Two companions to this one: [**RFC compliance**](compliance.md) is the measured list of what
+sipx supports, generated from a registry and checked in CI; [**the RFC roadmap**](rfc-roadmap.md)
+is the order the remaining gaps close in and why.
+
 ## Status
 
-_As of 2026-07-28:_ **M0 through M4 are complete.** `sipx-sip` is a working sans-IO SIP core:
+_As of 2026-07-28:_ **M0 through M5 are complete.** `sipx-sip` is a working sans-IO SIP core:
 URIs, headers, an incremental parser for both datagram and stream transports, message
 validation, injection-proof builders, and all four transaction state machines with matching
 and stores. 157 tests pass; clippy is clean at `-D warnings`; the whole RFC 4475 torture
