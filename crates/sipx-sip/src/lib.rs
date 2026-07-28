@@ -20,6 +20,7 @@
 //! its headers is malformed, because a proxy must be able to forward what it cannot itself
 //! interpret. See `docs/specs/sip-message.md`.
 
+pub mod build;
 pub mod error;
 mod escape;
 pub mod headers;
@@ -30,7 +31,8 @@ pub mod parser;
 pub mod uri;
 pub mod validate;
 
-pub use error::{HeaderError, UriError};
+pub use build::{RequestBuilder, ResponseBuilder};
+pub use error::{BuildError, HeaderError, UriError};
 pub use headers::{Address, CSeq, CallId, Via};
 pub use message::{
     Header, Headers, Message, Method, Request, Response, StatusCode, TypedHeader, Version,

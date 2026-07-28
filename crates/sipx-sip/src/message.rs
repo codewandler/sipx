@@ -210,9 +210,13 @@ enum HeaderRepr {
 }
 
 impl Header {
-    /// Build a header.
+    /// Build a header without checking the value.
+    ///
+    /// Crate-private on purpose: the only callers are the parser, which works on bytes that
+    /// were already framed, and the builders in [`crate::build`], which check first. The
+    /// public way to make a header is `Header::build`, and it is fallible.
     #[must_use]
-    pub fn new(name: HeaderName, value: impl Into<Bytes>) -> Self {
+    pub(crate) fn new_unchecked(name: HeaderName, value: impl Into<Bytes>) -> Self {
         Self {
             name,
             repr: HeaderRepr::Built {
@@ -694,9 +698,18 @@ mod tests {
     #[test]
     fn header_order_is_preserved_including_duplicates() {
         let mut headers = Headers::new();
-        headers.push(Header::new(HeaderName::Via, Bytes::from_static(b"first")));
-        headers.push(Header::new(HeaderName::Route, Bytes::from_static(b"r")));
-        headers.push(Header::new(HeaderName::Via, Bytes::from_static(b"second")));
+        headers.push(Header::new_unchecked(
+            HeaderName::Via,
+            Bytes::from_static(b"first"),
+        ));
+        headers.push(Header::new_unchecked(
+            HeaderName::Route,
+            Bytes::from_static(b"r"),
+        ));
+        headers.push(Header::new_unchecked(
+            HeaderName::Via,
+            Bytes::from_static(b"second"),
+        ));
 
         let vias: Vec<_> = headers
             .get_all(&HeaderName::Via)
@@ -706,14 +719,17 @@ mod tests {
         assert_eq!(headers.count(&HeaderName::Via), 2);
 
         // A new Via goes on the front, ahead of everything.
-        headers.push_front(Header::new(HeaderName::Via, Bytes::from_static(b"newest")));
+        headers.push_front(Header::new_unchecked(
+            HeaderName::Via,
+            Bytes::from_static(b"newest"),
+        ));
         assert_eq!(headers.value(&HeaderName::Via).unwrap().as_ref(), b"newest");
     }
 
     #[test]
     fn built_headers_serialize_canonically() {
         let mut headers = Headers::new();
-        headers.push(Header::new(
+        headers.push(Header::new_unchecked(
             HeaderName::MaxForwards,
             Bytes::from_static(b"70"),
         ));

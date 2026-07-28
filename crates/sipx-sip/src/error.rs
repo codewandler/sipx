@@ -6,6 +6,33 @@
 
 use thiserror::Error;
 
+/// A message that could not be built.
+///
+/// Every one of these means a caller tried to put something into a message that would have
+/// changed its structure — the header-injection family. They are errors rather than silent
+/// escaping because a caller that supplies a CRLF in a display name has a bug, and hiding it
+/// helps nobody.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BuildError {
+    /// A character that would end a line or terminate a string, in a field that must not
+    /// contain one.
+    #[error("illegal byte {byte:#04x} at offset {offset} in {field}")]
+    IllegalCharacter {
+        /// Which field.
+        field: &'static str,
+        /// Where in the value.
+        offset: usize,
+        /// The offending byte.
+        byte: u8,
+    },
+    /// A field that must be a single token is not one.
+    #[error("{field} is not a token")]
+    NotAToken {
+        /// Which field.
+        field: &'static str,
+    },
+}
+
 /// A message that could not be framed or whose structure is malformed.
 ///
 /// Structural only: a message whose *headers* are bad still parses (see [`HeaderError`]).

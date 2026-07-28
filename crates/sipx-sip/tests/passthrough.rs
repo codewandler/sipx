@@ -75,10 +75,13 @@ fn adding_a_header_does_not_disturb_the_others() {
         Content-Length: 0\r\n\r\n";
 
     let mut msg = parse(text);
-    msg.headers_mut().push_front(Header::new(
-        HeaderName::Via,
-        Bytes::from_static(b"SIP/2.0/UDP proxy.example.com;branch=z9hG4bK2"),
-    ));
+    msg.headers_mut().push_front(
+        Header::build(
+            HeaderName::Via,
+            Bytes::from_static(b"SIP/2.0/UDP proxy.example.com;branch=z9hG4bK2"),
+        )
+        .expect("a well-formed Via"),
+    );
 
     let out = msg.to_bytes();
     let expected: &[u8] = b"OPTIONS sip:user@example.com SIP/2.0\r\n\
