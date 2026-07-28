@@ -101,6 +101,53 @@ async fn fixture_server() -> (SocketAddr, Arc<std::sync::atomic::AtomicU32>) {
     (addr, queries)
 }
 
+/// The same fixture, answering after a delay.
+///
+/// The delay is what makes a stampede observable: without it the first lookup completes before
+/// the second is issued, and every implementation looks single-flight.
+async fn slow_fixture_server(delay: Duration) -> (SocketAddr, Arc<std::sync::atomic::AtomicU32>) {
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("binds"));
+    let addr = socket.local_addr().expect("has an address");
+    let queries = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counter = Arc::clone(&queries);
+
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 2048];
+        while let Ok((len, from)) = socket.recv_from(&mut buf).await {
+            let Ok(request) = Message::from_bytes(&buf[..len]) else {
+                continue;
+            };
+            let Some(query) = request.queries.first().cloned() else {
+                continue;
+            };
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let socket = Arc::clone(&socket);
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let name = query.name().to_string();
+                let mut response = Message::response(request.metadata.id, OpCode::Query);
+                response.metadata.message_type = MessageType::Response;
+                response.metadata.authoritative = true;
+                response.queries.push(query.clone());
+                if query.query_type() == RecordType::A && name == "slow.sipx.test." {
+                    response.answers.push(Record::from_rdata(
+                        Name::from_ascii(&name).expect("valid"),
+                        60,
+                        RData::A(A::new(192, 0, 2, 33)),
+                    ));
+                } else {
+                    response.metadata.response_code = ResponseCode::NXDomain;
+                }
+                if let Ok(bytes) = response.to_bytes() {
+                    let _ = socket.send_to(&bytes, from).await;
+                }
+            });
+        }
+    });
+
+    (addr, queries)
+}
+
 fn resolver_for(server: SocketAddr) -> Arc<DnsResolver> {
     Arc::new(DnsResolver::for_nameserver(server, Duration::from_secs(2)).expect("a resolver"))
 }
@@ -219,5 +266,261 @@ async fn prefetching_gathers_everything_the_selection_needs() {
     assert!(
         prefetched.naptr("sipx.test").is_empty(),
         "the zone has none"
+    );
+}
+
+/// The `T-17` story's failing-first test.
+///
+/// A user agent resolves for its own one call, so a cache miss costs one query. A forwarding
+/// element resolves for every call it forwards, and a burst to one domain arrives together — so
+/// without single-flight, one cache miss becomes one query *per concurrent call*, every one of them
+/// missing the cache because none of them has finished yet. That is a stampede aimed at whoever
+/// runs the nameserver.
+///
+/// The coalescing is `hickory-resolver`'s, not sipx's — a single-flight layer written on top of it
+/// was measured to change nothing and removed. This test is what makes that a checked fact rather
+/// than an assumption: if the client is swapped or configured differently, it fails here.
+#[tokio::test]
+async fn two_concurrent_resolutions_of_one_name_make_one_query() {
+    let (server, queries) = slow_fixture_server(Duration::from_millis(200)).await;
+    let resolver = resolver_for(server);
+
+    // Eight at once, all for the same name, all issued before any can complete.
+    let mut tasks = Vec::new();
+    for _ in 0..8u32 {
+        let resolver = Arc::clone(&resolver);
+        tasks.push(tokio::spawn(async move {
+            resolver.addresses("slow.sipx.test").await
+        }));
+    }
+
+    let mut answered = 0u32;
+    for task in tasks {
+        let answer = task.await.expect("the task finishes");
+        if let Answer::Records(records) = answer
+            && records.iter().any(|ip| ip.to_string() == "192.0.2.33")
+        {
+            answered += 1;
+        }
+    }
+
+    assert_eq!(
+        answered, 8,
+        "every caller must get the answer, not only the leader"
+    );
+    assert_eq!(
+        queries.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "eight concurrent lookups of one name must reach the nameserver once"
+    );
+}
+
+/// Single-flight must not turn into a cache: after the in-flight lookup completes and its TTL
+/// expires, the next caller queries again.
+#[tokio::test]
+async fn single_flight_does_not_outlive_the_lookup_it_shares() {
+    let (server, queries) = slow_fixture_server(Duration::from_millis(50)).await;
+    let resolver = Arc::new(
+        DnsResolver::for_nameserver(server, Duration::from_secs(2))
+            .expect("a resolver")
+            .with_max_ttl(Duration::from_millis(1)),
+    );
+
+    let _ = resolver.addresses("slow.sipx.test").await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = resolver.addresses("slow.sipx.test").await;
+
+    assert_eq!(
+        queries.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a lookup after the entry expired must ask again"
+    );
+}
+
+/// A nameserver whose negative answers carry an SOA, as a real one's do (RFC 2308).
+///
+/// The plain fixture's NXDOMAIN has no SOA, which sipx reads as "could not ask" — so it cannot say
+/// anything about caching a *genuine* negative. This one can.
+async fn negative_fixture_server() -> (SocketAddr, Arc<std::sync::atomic::AtomicU32>) {
+    use hickory_resolver::proto::rr::rdata::SOA;
+
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let addr = socket.local_addr().expect("has an address");
+    let queries = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counter = Arc::clone(&queries);
+
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 2048];
+        while let Ok((len, from)) = socket.recv_from(&mut buf).await {
+            let Ok(request) = Message::from_bytes(&buf[..len]) else {
+                continue;
+            };
+            let Some(query) = request.queries.first() else {
+                continue;
+            };
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            let mut response = Message::response(request.metadata.id, OpCode::Query);
+            response.metadata.message_type = MessageType::Response;
+            response.metadata.authoritative = true;
+            response.queries.push(query.clone());
+            response.metadata.response_code = ResponseCode::NXDomain;
+            // The SOA is what makes this a real negative answer rather than a synthesised one,
+            // and its TTL is how long it may be remembered.
+            response.authorities.push(Record::from_rdata(
+                Name::from_ascii("sipx.test.").expect("valid"),
+                300,
+                RData::SOA(SOA::new(
+                    Name::from_ascii("ns.sipx.test.").expect("valid"),
+                    Name::from_ascii("admin.sipx.test.").expect("valid"),
+                    1,
+                    3600,
+                    600,
+                    86400,
+                    300,
+                )),
+            ));
+            if let Ok(bytes) = response.to_bytes() {
+                let _ = socket.send_to(&bytes, from).await;
+            }
+        }
+    });
+
+    (addr, queries)
+}
+
+/// A nameserver that records the names it was asked about.
+///
+/// A count cannot answer "was this name prefetched" — a negative answer with no SOA is treated as
+/// "could not ask" and deliberately not cached, so a second lookup of an absent name queries again
+/// whether or not it was prefetched. The names themselves can answer it.
+async fn logging_fixture_server() -> (SocketAddr, Arc<tokio::sync::Mutex<Vec<String>>>) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let addr = socket.local_addr().expect("has an address");
+    let asked = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let log = Arc::clone(&asked);
+
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 2048];
+        while let Ok((len, from)) = socket.recv_from(&mut buf).await {
+            let Ok(request) = Message::from_bytes(&buf[..len]) else {
+                continue;
+            };
+            let Some(query) = request.queries.first() else {
+                continue;
+            };
+            log.lock()
+                .await
+                .push(format!("{} {}", query.query_type(), query.name()));
+
+            let mut response = Message::response(request.metadata.id, OpCode::Query);
+            response.metadata.message_type = MessageType::Response;
+            response.metadata.authoritative = true;
+            response.queries.push(query.clone());
+            response.metadata.response_code = ResponseCode::NXDomain;
+            if let Ok(bytes) = response.to_bytes() {
+                let _ = socket.send_to(&bytes, from).await;
+            }
+        }
+    });
+
+    (addr, asked)
+}
+
+/// RFC 7118 §6's prefixes are prefetched too. A WebSocket destination that misses the prefetch is
+/// not unreachable — it pays a serial round trip later, which is what prefetching exists to avoid.
+#[tokio::test]
+async fn the_websocket_srv_prefixes_are_prefetched() {
+    let (server, asked) = logging_fixture_server().await;
+    let resolver = resolver_for(server);
+    let _ = Prefetched::for_domain(&resolver, "sipx.test").await;
+
+    let asked = asked.lock().await.clone();
+    for prefix in ["_sip._ws.", "_sips._wss."] {
+        assert!(
+            asked
+                .iter()
+                .any(|entry| entry == &format!("SRV {prefix}sipx.test.")),
+            "{prefix}sipx.test was not prefetched; it would cost a serial round trip later. \
+             Asked: {asked:?}"
+        );
+    }
+    // And the three a phone needs are still there.
+    for prefix in ["_sip._udp.", "_sip._tcp.", "_sips._tcp."] {
+        assert!(
+            asked
+                .iter()
+                .any(|entry| entry == &format!("SRV {prefix}sipx.test.")),
+            "{prefix}sipx.test stopped being prefetched"
+        );
+    }
+}
+
+/// RFC 2308: a genuine negative answer is cacheable, and caching it is the difference between one
+/// query per absent name and one per *call* to it. A forwarding element asks about the same absent
+/// `_sips._tcp` record thousands of times a minute.
+#[tokio::test]
+async fn a_genuine_negative_answer_is_cached() {
+    let (server, queries) = negative_fixture_server().await;
+    let resolver = resolver_for(server);
+
+    for _ in 0..4u32 {
+        let answer = resolver.srv("_sips._tcp.sipx.test").await;
+        assert!(
+            matches!(answer, Answer::Records(ref records) if records.is_empty()),
+            "an SOA-backed NXDOMAIN is a real negative, not an outage: {answer:?}"
+        );
+    }
+
+    assert_eq!(
+        queries.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "four lookups of a name the zone denies must ask once"
+    );
+}
+
+/// And "could not ask" is *not* cached. Remembering a network blip as a routing decision keeps a
+/// domain unreachable long after it has come back.
+#[tokio::test]
+async fn an_unavailable_answer_is_not_cached() {
+    // Nothing listening: every lookup times out, and none of them is an answer to remember.
+    let dead = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let addr = dead.local_addr().expect("has an address");
+    drop(dead);
+    let resolver = Arc::new(
+        DnsResolver::for_nameserver(addr, Duration::from_millis(150)).expect("a resolver"),
+    );
+
+    for _ in 0..2u32 {
+        assert!(
+            matches!(
+                resolver.srv("_sip._udp.sipx.test").await,
+                Answer::Unavailable
+            ),
+            "an unanswered lookup is an outage, not a negative answer"
+        );
+    }
+    // The assertion is that the second call still *asks* — proven by it still reporting
+    // Unavailable rather than an empty cached set, which is what a cached negative would produce.
+}
+
+/// One await from a URI to a candidate list, for a caller that is not the endpoint loop.
+#[tokio::test]
+async fn a_uri_resolves_to_candidates_in_one_await() {
+    let (server, _queries) = fixture_server().await;
+    let resolver = resolver_for(server);
+    let uri = sipx_sip::Uri::sip(sipx_sip::Host::Name(
+        sipx_sip::HostName::new("sipx.test").expect("valid"),
+    ));
+
+    let targets = sipx_transport::dns::resolve_uri(&uri, &resolver, &mut SeededRng::new(1)).await;
+
+    assert_eq!(
+        targets
+            .iter()
+            .map(|target| target.addr.to_string())
+            .collect::<Vec<_>>(),
+        vec!["192.0.2.11:5060".to_owned(), "192.0.2.12:5062".to_owned()],
+        "the same list the two-step form produces"
     );
 }

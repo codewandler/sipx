@@ -9,6 +9,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A genuine negative DNS answer is cached (`T-17`, RFC 2308 §5).** It was not: an SOA-backed
+  NXDOMAIN returned early and was re-queried every time. For a user agent that is one extra lookup
+  per call; for a forwarding element resolving for every call it forwards, a domain with no
+  `_sips._tcp` record was asked about thousands of times a minute. "Could not ask" is still
+  deliberately *not* cached — remembering a network blip as a routing decision keeps a domain
+  unreachable long after it has come back.
+- `_sip._ws` and `_sips._wss` join the RFC 3263 prefetch, so a WebSocket destination no longer pays
+  a serial lookup the other transports avoid.
+- `dns::resolve_uri` resolves a URI to a candidate list in one await, for a caller that is not the
+  endpoint loop.
+
+### Changed
+
+- A single-flight layer for concurrent identical DNS lookups was written and then **removed**:
+  `hickory-resolver` already coalesces them, and the layer was measured to change nothing. The test
+  that proves the property stays, so it is a checked fact about the dependency rather than an
+  assumption.
+
 - **sipx can issue a digest challenge, not only answer one (`S-16`, RFC 7616 / 8760).**
   `Authenticator` mints a nonce, emits `WWW-Authenticate` or `Proxy-Authenticate`, and verifies the
   credentials that come back. The credential store stays out: `verify` takes the password as an

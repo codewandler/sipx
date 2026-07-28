@@ -212,6 +212,18 @@ impl DnsResolver {
     }
 
     /// One cached lookup, shared by all three record types.
+    ///
+    /// **Concurrent callers asking for the same name make one query**, which is what a forwarding
+    /// element needs: it resolves for every call it forwards, and a burst to one domain arrives
+    /// together, so without coalescing one cache miss becomes one query per concurrent call — every
+    /// one of them missing the cache because none has finished yet.
+    ///
+    /// That coalescing is **not implemented here**. `hickory-resolver` already does it, and a
+    /// single-flight layer written on top of it was measured to change nothing: eight concurrent
+    /// lookups reach the fixture nameserver exactly once with or without it, so the layer was
+    /// removed rather than kept as decoration. The property is load-bearing all the same, so
+    /// `two_concurrent_resolutions_of_one_name_make_one_query` pins it — if the client is ever
+    /// swapped or configured differently, that test is what notices.
     async fn lookup<T: Clone>(
         &self,
         cache: &Mutex<std::collections::HashMap<String, Cached<T>>>,
@@ -225,7 +237,22 @@ impl DnsResolver {
 
         let lookup = match self.inner.lookup(name, record_type).await {
             Ok(lookup) => lookup,
-            Err(error) => return classify(&error),
+            Err(error) => {
+                let answer = classify(&error);
+                // RFC 2308: a *genuine* negative answer is cacheable, for the TTL the zone's SOA
+                // states. Caching it is the difference between one query per absent name and one
+                // per call to it — a domain with no `_sips._tcp` record is asked about on every
+                // single call otherwise, which is what a forwarding element does thousands of
+                // times a minute.
+                //
+                // `Unavailable` is deliberately *not* cached. It means nothing answered, and
+                // remembering a network blip as a routing decision would keep a domain
+                // unreachable long after it came back.
+                if matches!(answer, Answer::Records(_)) {
+                    store(cache, name, &[], negative_ttl(&error, self.max_ttl)).await;
+                }
+                return answer;
+            }
         };
 
         let answers = lookup.answers();
@@ -263,6 +290,23 @@ fn classify<T>(error: &hickory_resolver::net::NetError) -> Answer<T> {
         };
     }
     Answer::Unavailable
+}
+
+/// How long a negative answer may be remembered (RFC 2308 §5).
+///
+/// The SOA's TTL is what the zone says about its own absences. Capped the same way a positive
+/// answer is, and floored at nothing — a zone that says zero means "ask every time", and obeying
+/// that is cheaper than arguing with it.
+fn negative_ttl(error: &hickory_resolver::net::NetError, max: Duration) -> Duration {
+    use hickory_resolver::net::{DnsError, NetError};
+    if let NetError::Dns(DnsError::NoRecordsFound(no_records)) = error
+        && let Some(ttl) = no_records.negative_ttl
+    {
+        return Duration::from_secs(u64::from(ttl)).min(max);
+    }
+    // A negative answer whose SOA carried no explicit TTL. Short, because guessing long about an
+    // absence is how a record that has just been created stays invisible.
+    Duration::from_secs(30).min(max)
 }
 
 /// The shortest TTL in a set, which is how long the whole set may be held.
@@ -344,7 +388,17 @@ impl Prefetched {
         // Every SRV name the NAPTR records point at, plus the conventional ones, since a
         // domain with no NAPTR may still have SRV.
         let mut srv_names: Vec<String> = naptr.iter().map(|n| n.replacement.clone()).collect();
-        for prefix in ["_sip._udp.", "_sip._tcp.", "_sips._tcp."] {
+        // Every prefix RFC 3263 §4.1 and RFC 7118 §6 define, not only the three a phone uses. A
+        // WebSocket destination whose prefix is missing here is not unreachable — it just pays a
+        // serial lookup later, one round trip at a time, which is exactly what prefetching exists
+        // to avoid.
+        for prefix in [
+            "_sip._udp.",
+            "_sip._tcp.",
+            "_sips._tcp.",
+            "_sip._ws.",
+            "_sips._wss.",
+        ] {
             srv_names.push(format!("{prefix}{domain}"));
         }
         srv_names.sort_unstable();
@@ -372,6 +426,26 @@ impl Prefetched {
             addresses,
         }
     }
+}
+
+/// Resolve a URI to an ordered candidate list, in one await (RFC 3263).
+///
+/// The two-step form — prefetch, then select — is what the endpoint uses, because it keeps every
+/// await off the loop where a slow nameserver would stop the transaction timers. This is the same
+/// thing for a caller that is not the loop: a forwarding element deciding where to send one
+/// request, which wants a list and does not want to know that resolution has two halves.
+///
+/// The selection is unchanged and still pure. Only the waiting is here.
+pub async fn resolve_uri<G: crate::resolve::Rng + ?Sized>(
+    uri: &sipx_sip::Uri,
+    resolver: &Arc<DnsResolver>,
+    rng: &mut G,
+) -> Vec<crate::Target> {
+    let Some(domain) = uri.host().map(ToString::to_string) else {
+        return Vec::new();
+    };
+    let prefetched = Prefetched::for_domain(resolver, &domain).await;
+    crate::resolve::resolve(uri, &prefetched, rng)
 }
 
 impl Resolver for Prefetched {
