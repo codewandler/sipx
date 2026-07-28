@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use sipx_sip::transaction::{Dispatch, Output, TransactionKey, TransactionLayer, TuEvent};
@@ -223,11 +224,70 @@ enum Command {
     Shutdown,
 }
 
+/// What the endpoint has dropped because the application was not keeping up.
+///
+/// Kept as atomics behind an `Arc` rather than answered by the event loop, and that is the point:
+/// the loop is busy in exactly the situation this counts, so a counter you could only read by
+/// asking it would be unreadable when it mattered. [`Handle::shed`] reads it without touching the
+/// loop at all.
+///
+/// The three kinds are counted apart because their consequences differ by an order of magnitude,
+/// and one number would hide that.
+#[derive(Debug, Default)]
+struct Shed {
+    requests: AtomicU64,
+    acks: AtomicU64,
+    unmatched: AtomicU64,
+}
+
+/// A snapshot of what an endpoint has shed (see [`Handle::shed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShedCounts {
+    /// Requests that reached a server transaction and could not be handed to the application.
+    ///
+    /// Answered `503 Service Unavailable` with a `Retry-After`, so the peer is told something
+    /// true rather than left to retransmit into a queue that is still full.
+    pub requests: u64,
+    /// **ACKs** that could not be handed over.
+    ///
+    /// The serious one, and the reason these are not one number. An ACK for a 2xx has no
+    /// transaction to answer — RFC 3261 §17.1.1.3 makes it a new transaction of its own, and
+    /// there is no response to an ACK in SIP at all — so there is no 503 to send and nothing
+    /// retransmits it after Timer H. Both ends are then in a dialog that no timer will reap
+    /// unless session timers (RFC 4028) happen to be in play. A non-zero count here means calls
+    /// are leaking.
+    pub acks: u64,
+    /// Requests that matched no transaction and could not be handed over.
+    ///
+    /// The peer will retransmit an unmatched INVITE, so this is the most survivable of the three
+    /// — but it is still loss, and it was previously invisible.
+    pub unmatched: u64,
+}
+
+impl ShedCounts {
+    /// Whether anything has been shed at all.
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.total() > 0
+    }
+
+    /// Everything shed, of every kind.
+    #[must_use]
+    pub fn total(self) -> u64 {
+        self.requests
+            .saturating_add(self.acks)
+            .saturating_add(self.unmatched)
+    }
+}
+
 /// A handle to a running endpoint.
 #[derive(Debug, Clone)]
 pub struct Handle {
     commands: mpsc::Sender<Command>,
     local_addr: SocketAddr,
+    /// What has been dropped for backpressure, shared with the driver so it can be read while
+    /// the driver is busy — which is the only time it is interesting.
+    shed: Arc<Shed>,
     #[cfg(feature = "tls")]
     tls_addr: Option<SocketAddr>,
     #[cfg(feature = "ws")]
@@ -483,6 +543,23 @@ impl Handle {
         }
     }
 
+    /// What this endpoint has dropped because the application was not keeping up.
+    ///
+    /// Read straight from a shared counter rather than by asking the event loop, because the loop
+    /// is busy in precisely the situation this counts. A metric that is unavailable exactly when
+    /// it is interesting is not a metric.
+    ///
+    /// Non-zero is not automatically a fault — shedding under load is a policy, and a `503` tells
+    /// a peer something true. `ShedCounts::acks` is different: see its documentation.
+    #[must_use]
+    pub fn shed(&self) -> ShedCounts {
+        ShedCounts {
+            requests: self.shed.requests.load(Ordering::Relaxed),
+            acks: self.shed.acks.load(Ordering::Relaxed),
+            unmatched: self.shed.unmatched.load(Ordering::Relaxed),
+        }
+    }
+
     /// How many transactions and destinations the endpoint is still holding.
     ///
     /// Exposed for the soak test in `sipx-testkit`, and worth exposing: a transaction store
@@ -568,9 +645,11 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     let (commands_tx, commands_rx) = mpsc::channel(config.capacity);
     let (incoming_tx, incoming_rx) = mpsc::channel(config.capacity);
 
+    let shed = Arc::new(Shed::default());
     let handle = Handle {
         commands: commands_tx,
         local_addr,
+        shed: Arc::clone(&shed),
         #[cfg(feature = "tls")]
         tls_addr: secure_addr,
         #[cfg(feature = "ws")]
@@ -611,6 +690,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         pool: Pool::new(config.pool, config.limits, net_tx),
         limits: config.limits,
         mtu: config.mtu,
+        shed,
         stun_waiters: HashMap::new(),
         pong_waiters: HashMap::new(),
     };
@@ -839,6 +919,8 @@ struct Driver {
     limits: Limits,
     mtu: usize,
     /// Keep-alives sent over UDP, waiting for the STUN response that answers them.
+    /// Shared with every [`Handle`]; see [`ShedCounts`].
+    shed: Arc<Shed>,
     stun_waiters: HashMap<crate::stun::TransactionId, oneshot::Sender<Result<Option<SocketAddr>>>>,
     /// Keep-alives sent over a connection, waiting for a CRLF pong.
     ///
@@ -1085,12 +1167,28 @@ impl Driver {
                     let Some(key) = TransactionKey::from_request(&request) else {
                         return;
                     };
-                    let _ = self.incoming.try_send(Incoming {
-                        key,
-                        request,
-                        source,
-                        transport,
-                    });
+                    let method = request.method.clone();
+                    if self
+                        .incoming
+                        .try_send(Incoming {
+                            key,
+                            request,
+                            source,
+                            transport,
+                        })
+                        .is_err()
+                    {
+                        // Previously `let _ = …`: the request was gone, nothing was logged, and no
+                        // counter moved. There is no transaction here to answer with a 503 — this
+                        // request matched none — so counting and saying so is the whole of what
+                        // can be done, and it is a great deal more than nothing.
+                        self.shed.unmatched.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            %source,
+                            method = %method,
+                            "application queue full; an unmatched request was dropped"
+                        );
+                    }
                 }
             }
         }
@@ -1419,6 +1517,7 @@ impl Driver {
         let (source, transport) = origin.unwrap_or((self.local_addr(), TransportKind::Udp));
         match event {
             TuEvent::Request(request) | TuEvent::Ack(request) => {
+                let is_ack = request.method == sipx_sip::Method::Ack;
                 if self
                     .incoming
                     .try_send(Incoming {
@@ -1431,10 +1530,26 @@ impl Driver {
                 {
                     // The application is not keeping up. Blocking the loop would stop timers,
                     // which turns a slow application into a stack that drops established
-                    // calls; dropping the event silently loses a request. 503 tells the peer
-                    // something true.
-                    tracing::warn!("application queue full; refusing the transaction");
-                    self.refuse(key).await;
+                    // calls; dropping the event silently loses a request.
+                    if is_ack {
+                        // An ACK cannot be refused. SIP has no response to an ACK, and an ACK
+                        // for a 2xx is a transaction of its own (RFC 3261 §17.1.1.3) with
+                        // nothing to answer — so there is no 503 to send, nothing will
+                        // retransmit it once Timer H expires, and both ends are left in a
+                        // dialog no timer reaps unless RFC 4028 session timers happen to be
+                        // running. This is the one that leaks calls, which is why it is
+                        // counted apart and logged at error rather than warn.
+                        self.shed.acks.fetch_add(1, Ordering::Relaxed);
+                        tracing::error!(
+                            %source,
+                            "application queue full; an ACK was dropped and cannot be refused — \
+                             the dialog it would have completed will not be reaped"
+                        );
+                    } else {
+                        self.shed.requests.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(%source, "application queue full; refusing the transaction");
+                        self.refuse(key).await;
+                    }
                 }
             }
             _ => {}

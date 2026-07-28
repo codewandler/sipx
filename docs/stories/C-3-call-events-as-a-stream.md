@@ -2,8 +2,8 @@
 id: C-3
 title: Report call state as a typed event stream
 pillar: Signalling
-status: backlog
-priority:
+status: in-progress
+priority: 4
 design: docs/designs/app-sdk.md
 epic: app-sdk
 areas: [sipx-call]

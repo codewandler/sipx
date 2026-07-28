@@ -9,6 +9,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Backpressure is visible now (`T-19`).** The endpoint's delivery path ended in
+  `let _ = try_send(…)`: a request the application could not take was gone, with nothing logged and
+  no counter moved. `Handle::shed()` now reports what was dropped, and both paths log it.
+  - **The counter is shared state, not a question asked of the event loop.** The loop is busy in
+    exactly the situation this counts, so a metric readable only by asking it would be unavailable
+    precisely when it is interesting.
+  - **ACKs are counted apart**, because their consequence is different in kind. An ACK cannot be
+    refused — SIP has no response to one, and an ACK for a 2xx is a transaction of its own with
+    nothing to answer — so nothing retransmits it after Timer H and both ends are left in a dialog
+    no timer reaps. A non-zero `ShedCounts::acks` means calls are leaking.
+
 - **DTLS-SRTP (`M-15`, RFC 5764 / 5763 / 8122).** SDES (`M-14`) keys over the signalling path,
   which means every proxy on it has held the key. This keys on the *media* path: the two endpoints
   handshake there, derive SRTP keys from the DTLS master secret, and the SDP carries only a hash of
