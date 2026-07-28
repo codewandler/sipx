@@ -7,8 +7,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-28
+
 ### Added
 
+- **The application contract, specified — `sipx.app.v1`** (`docs/specs/app-contract.md`), the
+  epic behind it (`app-sdk`), and the six kernel stories it pulls: a call-level event stream
+  (`C-3`), multi-call dispatch (`C-4`), the contract crate with its sans-IO interpreter (`C-5`),
+  the bridge reachable from a `Call` (`C-6`), playback control (`M-17`) and mute (`M-18`).
+  Events carry full call snapshots; instructions are ordered programs with correlated
+  completion ids; a response replaces the pending program, which is what makes barge-in
+  compose. Experimental until an inbound IVR and an outbound notifier both run against it.
+- **Migration guides** — from Kamailio and from Asterisk — written as honest concept maps,
+  each opening with a maps-today/not-yet table.
 - **Outbound, the client half (`T-15`, RFC 5626).** A `Contact` naming an address behind a NAT is
   unroutable the moment the mapping lapses. Outbound routes down a *flow* the client opened
   instead: `+sip.instance` and `reg-id` on every REGISTER, `outbound` offered, `ob` on a
@@ -51,6 +62,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The documentation site is customer-facing now** (`website/`, Docusaurus), and the internal
+  tree under `docs/` is no longer published at all. The book's guarantee survives the move:
+  every code sample is a compiled example file, inlined as a generated region the gate refuses
+  to let drift (`scripts/sync-website.py --check`). The API reference stays at `/api`.
 - `Outcome::Registered` carries a `Registered` struct rather than positional fields. `PathSet` and
   `ServiceRoute` are the same shape and opposite directions, and two interchangeable positions of
   identical type is how they would eventually get swapped.
