@@ -35,5 +35,4 @@ without touching reception — distinct from hold, which is a signalled state th
 - `mute` does not exist anywhere in the workspace today; the closest primitives are
   `Direction::Inactive`/`SendOnly` re-INVITEs (signalled, visible to the peer) or simply not
   calling `send`/`play` (which no host holding a bridged call can arrange).
-- Requested by the downstream application platform (working name `sipx-app`): `mute`/`unmute`
-  are contract verbs.
+- Needed by the host (`crates/sipx-app`): `mute` and `unmute` are contract verbs.

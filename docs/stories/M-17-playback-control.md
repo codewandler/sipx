@@ -36,5 +36,5 @@ Playback that can be queued, stopped, and interrupted by a DTMF digit — the pr
 - Today `MediaSession::play(&samples, spp)` runs a clip to its end with no handle, no stop, and no
   interruption (`crates/sipx-media/src/session.rs`); `collect_digits` exists but cannot be
   combined with a prompt except by racing two futures by hand — and the prompt keeps playing.
-- Requested by the downstream application platform (working name `sipx-app`): the contract's
+- Needed by the host (`crates/sipx-app`, story `A-2`): the contract's
   `gather{prompt, interruptible}` instruction is unimplementable without this.

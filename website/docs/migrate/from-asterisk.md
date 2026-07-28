@@ -25,9 +25,9 @@ otherwise.**
 | Bridging two calls, conferencing several | `sipx-call` + `sipx-media` (Rust; bridge from the public API is being finished) | today / in progress |
 | Transfers (blind and attended) | `sipx-call` REFER support | **today** |
 | Call quality visibility | per-call loss, jitter, RTT, MOS estimate | **today** |
-| The dialplan, and event/instruction control of a call from your own code | the [`sipx.app.v1` contract](../sdk/overview.md): events out, instructions in, webhook or session | **specified, experimental** — the host is a downstream product in development |
+| The dialplan, and event/instruction control of a call from your own code | the [`sipx.app.v1` contract](../sdk/overview.md): events out, instructions in, webhook or session | **specified, experimental** — the host (`sipx-app`) is in development |
 | Call event stream for monitoring | the same contract's event side | designed, in progress |
-| Running handler scripts inside the server | embedded TypeScript runtime in the downstream host | designed |
+| Running handler scripts inside the server | the host's embedded TypeScript runtime | designed |
 | Registrar for your phones | [sipx-clstr](https://github.com/codewandler/sipx-clstr) | early — in development |
 | Queues, voicemail, parking, hunt groups | — | **no equivalent planned**; these become applications you build on the SDK, not features of sipx |
 | Music on hold, TTS | — | not planned (playback of your own audio: today) |

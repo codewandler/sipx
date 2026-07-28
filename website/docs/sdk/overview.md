@@ -30,7 +30,7 @@ deploy it. Three ways of running the same contract:
 |---|---|---|
 | **Webhook** | an HTTP endpoint returning instruction documents | specified |
 | **Session** | a process holding a WebSocket (or pipe), free to act mid-call at any time | specified |
-| **Embedded TypeScript** | a `.ts` handler the server runs in-process | designed, downstream |
+| **Embedded TypeScript** | a `.ts` handler the server runs in-process | designed |
 
 The TypeScript SDK's handler API is the same in session and embedded mode — a handler is
 portable between "my own Node service" and "a file the server loads" without code changes.
@@ -43,8 +43,8 @@ portable between "my own Node service" and "a file the server loads" without cod
 - The kernel work it needs (a call event stream, multi-call serving, playback control, mute,
   bridging from the public API) is designed and tracked in
   [the app-sdk design](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md).
-- The host — the server that terminates calls and runs your handlers — is a separate downstream
-  product built on sipx, the same way the clustered proxy/registrar is.
+- The host — the server that terminates calls and runs your handlers — is the `sipx-app`
+  crate in this repository, in development; the crate exists, the code is on the board.
 
 Until then, the scriptable surface that ships today is the **CLI**: every command speaks
 `--json` and exits with a distinct code per outcome, which is enough for real automation —

@@ -18,15 +18,16 @@ protocol core: **express the logic as a function from inputs to outputs, and kee
 driver.** Applied one layer up: define the application contract as *data* — call events out,
 call-control instructions in — and implement its interpreter as a sans-IO state machine in this
 repository. Then every host — a remote webhook service, a subprocess speaking the contract over
-a socket, an embedded script runtime in a downstream product — is a thin driver over the same
-tested machine, and none of them needs this repository to know it exists.
+a socket, an embedded script runtime in the host crate — is a thin driver over the same
+tested machine, and the remote ones need nothing from this workspace but the wire.
 
 The SDK does not add a dial plan to sipx. Routing engines and dial plans remain things built
 *with* sipx; this epic moves "build with sipx" across the language boundary.
 
 ## Approach
 
-Three pieces land here; the host does not.
+Three pieces belong to this epic; the host itself is the [app-host](app-host.md)
+epic's, one shelf up in the same workspace.
 
 1. **The contract.** [`docs/specs/app-contract.md`](../specs/app-contract.md) defines
    `sipx.app.v1`: a closed, typed vocabulary of events (with a full call snapshot per event)
@@ -64,12 +65,13 @@ Three pieces land here; the host does not.
    after `S-19` and `C-2`), and when it lands it upgrades the contract's `bridge` verb from
    naive per-leg signalling to a real coupling without changing the verb.
 
-**The host lives downstream.** A separate product (working name `sipx-app`) implements the
+**The host lives here, as `crates/sipx-app`.** The [app-host](app-host.md) epic implements the
 contract's bindings — the webhook document mode, the socket session mode, and an embedded
-TypeScript runtime, all three over the one vocabulary — and pulls what it needs from this
-kernel through an upstream ledger, story by story, exactly as the cluster platform does. That
-process, not sympathy, is what keeps this list honest: each story here names the downstream
-need that pulled it.
+TypeScript runtime, all three over the one vocabulary — as a leaf crate no kernel crate ever
+depends on. What keeps this epic's list honest is the same discipline an external consumer
+would impose: each story here names the host story that needs it (`A-2` names four of the six),
+and the host may not reach around this public API — a gap is a story here, not a workaround
+there.
 
 **Sequencing against the roadmap.** M7 lives in `sipx-transport`/`sipx-sip` and M8 in
 `sipx-sip`/`sipx-ua`; this epic lives in `sipx-call`/`sipx-media` plus one new crate. No file
@@ -78,24 +80,25 @@ spec costs no code at all and can land immediately.
 
 ## Alternatives considered
 
-- **Host the webhook server in this repository** (a `sipx serve` subcommand or a `sipx-serve`
-  crate). Rejected on the [edge design](edge.md)'s own argument: an in-workspace consumer is
-  pressure to reach around the public API instead of hurting where the API is wrong, and the
-  upstream-ledger process is demonstrably how this ecosystem fixes the kernel. It would also
-  drag serialization, an HTTP stack and retry/authentication policy into a workspace that has
-  none of them, and a server product growing inside a CLI has no natural stopping point.
+- **Host the webhook server in a separate repository**, pulling kernel gaps through an
+  upstream ledger the way the cluster platform does. This design first chose that, and the
+  choice was reversed the same day by the user's decision: the host is `crates/sipx-app`, in
+  this workspace. The reversal's reasoning is recorded in [app-host](app-host.md) — the
+  separation's benefits (dependency hygiene, no reaching around the public API) are kept as
+  ground rules a leaf crate can honour, and its cost was real: a contract, an interpreter and
+  a host iterating across a tag boundary during exactly the phase they must move together.
 - **Host it in the cluster platform.** Rejected by that platform's charter: it forwards, forks
   and record-routes; it does not terminate calls, and a feature server in its core is one of
   its named non-goals.
-- **Embed a script engine in the kernel so handlers run in-process here.** Rejected: the
-  engine's weight and sandboxing policy belong to a product, and the vision's non-goals
-  (a configuration-driven PBX, maximum feature count) both point away. The contract makes the
-  engine unnecessary here: an embedded runtime elsewhere binds the same vocabulary.
-- **Ship the contract types downstream with the host.** Considered seriously — a contract
-  iterates at product speed, and the kernel releases by tag. Kept here because the interpreter
-  is the primitive (the `C-1` precedent: the product stays out, the state machine the product
-  cannot correctly rebuild comes in), and a vocabulary that forks from the kernel's actual
-  capabilities is worse than one that waits for a tag.
+- **Embed a script engine in the protocol or call crates so handlers run everywhere.**
+  Rejected: the engine's weight and sandboxing policy belong to the host crate alone
+  ([app-host](app-host.md) ground rule 4), and the contract makes the engine unnecessary
+  anywhere else — an embedded runtime in `sipx-app` binds the same vocabulary every remote
+  host speaks.
+- **Ship the contract types with the host crate instead of their own.** Rejected:
+  `sipx-app-protocol` is the piece a *remote* SDK generator and the host both consume, and the
+  interpreter is the primitive (the `C-1` precedent) — it belongs beside the call framework it
+  drives, importable without the host's HTTP stack and engine coming with it.
 - **A per-verb RPC API instead of an instruction program.** Rejected: a call is a real-time
   process; "what to do next" must survive the app being slow or gone. An ordered program with
   declared failure semantics degrades predictably; a stream of imperative RPCs does not.
@@ -112,7 +115,7 @@ spec costs no code at all and can land immediately.
 - **`play` scope creep.** URL fetch, TTS and streaming each smuggle dependencies and security
   policy into whatever executes them. v1 sources are host-local files and inline audio only;
   anything remote is a host capability behind an allowlist, and TTS is a named non-goal.
-- **Naming.** `sipx-app-protocol`, `sipx.app.v1` and the downstream repo's name should be
+- **Naming.** `sipx-app-protocol` and `sipx.app.v1` should be
   settled before the docs site publishes them; renames after publication are expensive.
 - Open: whether `C-3`'s event set should carry media-quality events (`quality()` snapshots on
   an interval) in v1 or wait for a consumer that wants them.

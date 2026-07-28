@@ -38,4 +38,4 @@ signalling path entirely.
 
 The `sipx.app.v1` contract — call events out, instructions in, so call behaviour can be built
 without writing Rust — is now [specified](sdk/overview.md) and experimental. The kernel work it
-needs is designed and tracked; the host is a downstream product.
+needs is designed and tracked, and the host has its home in the workspace: `crates/sipx-app`.

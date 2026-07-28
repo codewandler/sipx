@@ -49,9 +49,12 @@ it belongs in a user-agent stack while forking and Record-Route insertion do not
   roles on this kernel, and its
   [upstream ledger](https://github.com/codewandler/sipx-clstr/blob/main/docs/upstream.md) records
   each kernel gap it depends on as a story here.
-- A second downstream product does the same for the application side: a programmable call server
-  (working name `sipx-app`) hosting webhook- and TypeScript-driven call handlers over the
-  `sipx.app.v1` contract. The kernel's half of that boundary is the [app-sdk design](app-sdk.md).
+- The application side drew the line differently: the programmable call server hosting webhook-
+  and TypeScript-driven handlers over the `sipx.app.v1` contract lives *in this workspace* as
+  `crates/sipx-app` — a leaf crate under the [app-host](app-host.md) design's ground rules. A
+  B2BUA product forwards other people's calls and stays out; the app host terminates its own,
+  which is exactly the user-agent business this repository is in. The contract's kernel half is
+  the [app-sdk design](app-sdk.md).
 - Open: how much of the coupling policy is data and how much is a trait. A B2BUA that can only be
   configured is a PBX; one that is only a trait is a tutorial. `C-1` has to pick.
 - Open: whether a signalling-only B2BUA (RFC 7092 §3.1.2/§3.1.3, no media path) is worth a separate

@@ -39,8 +39,8 @@ effects out. The primitive every host is a driver over.
 - Not started. Blocked on the spec landing (same epic) and on `C-3` for the event input type.
 
 ## Notes
-- The in-repo placement is the `C-1` precedent: the product stays out; the state machine the
-  product cannot correctly rebuild comes in. See the design's "Alternatives considered" for the
-  rejected placements.
-- The downstream application platform (working name `sipx-app`) implements the webhook, socket
-  and embedded-runtime bindings of this same vocabulary; its upstream ledger pulls this story.
+- The interpreter is the primitive every binding drives — remote or in-process — which is why
+  it lives in its own crate and not inside `sipx-app`. See the design's "Alternatives
+  considered" for the placements weighed.
+- The host (`crates/sipx-app`, the [app-host](../designs/app-host.md) epic) implements the
+  webhook, socket and embedded-runtime bindings of this same vocabulary; `A-2` needs this story.

@@ -39,5 +39,5 @@ API, without `Arc<Mutex<Call>>` and without constructing media sessions from raw
 - Scope: the **media** coupling of two host-owned calls. The signalling coupling — offer relay
   on every axis, glare, CANCEL/BYE mapping — is `C-1`, deliberately later (M9, after `S-19` and
   `C-2`), and upgrades the contract's `bridge` verb without changing it.
-- Requested by the downstream application platform (working name `sipx-app`): `bridge` and
-  `dial`-then-connect are contract verbs.
+- Needed by the host (`crates/sipx-app`): `bridge` and `dial`-then-connect are contract
+  verbs.

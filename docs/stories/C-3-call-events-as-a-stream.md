@@ -42,8 +42,8 @@ state that is only visible by calling methods on the `Call` at the right moment.
 - The keystone of the `app-sdk` epic: `C-4` dispatches by consuming these events, `M-17`'s
   playback completion and `M-18`'s gate report through them, and `C-5`'s interpreter consumes
   them as its input alphabet.
-- Requested by the downstream application platform (working name `sipx-app`), whose upstream
-  ledger records this gap; the sans-IO interpreter (`C-5`) is unusable without an event source.
+- Needed by the host (`crates/sipx-app`, story `A-2`); the sans-IO interpreter (`C-5`) is
+  unusable without an event source.
 - Today the only inbound "event" is `sipx_transport::Incoming` plus transaction-level `TuEvent` —
   nothing at the call layer. `crates/sipx-call/tests/call.rs` works around it with
   `Arc<Mutex<Call>>`, which is exactly the shape the vision forbids.

@@ -304,11 +304,22 @@ What can be built on sipx **without writing Rust**. The contract layer: `sipx.ap
 ([spec](specs/app-contract.md)) defines call events and call-control instructions as data, and a
 sans-IO interpreter for them lands here (`C-5`) alongside the call-framework surface its effects
 need — a typed event stream (`C-3`), multi-call dispatch (`C-4`), playback control (`M-17`),
-mute (`M-18`), and the bridge reachable from a `Call` (`C-6`). The host executing webhook and
-TypeScript handlers is a downstream product pulling these stories through its upstream ledger;
-none of it is scheduled into M6–M8, whose crates this epic does not touch. Done when the spec's
-vectors pass sans-IO and an example binary runs a canned program against a real call from a
-shell. See [design](designs/app-sdk.md).
+mute (`M-18`), and the bridge reachable from a `Call` (`C-6`). None of it is scheduled into
+M6–M8, whose crates this epic does not touch. Done when the spec's vectors pass sans-IO and an
+example binary runs a canned program against a real call from a shell.
+See [design](designs/app-sdk.md).
+
+### Application host — `app-host`
+
+The server the SDK's contract exists for, and the consumer that pulls the `app-sdk` stories:
+**`crates/sipx-app`**, a leaf crate no other crate depends on. It executes handler programs on
+real calls through three bindings of the one vocabulary — webhook documents, full-duplex
+sessions, and an embedded TypeScript runtime — with per-app declared failure semantics and
+deny-by-default capabilities. Four phases, each shell-demonstrable: one call one webhook
+(`A-1` `A-2` `A-7`), session mode and the TypeScript SDK (`A-3` `A-4`), the embedded runtime
+(`A-5` `A-6`), then operability. Done for phase 1 when a scripted webhook app answers a real
+call placed by the CLI and the absent-app case does what its declaration says.
+See [design](designs/app-host.md).
 
 ### Edge / B2BUA — `edge` _(one story, in M9)_
 

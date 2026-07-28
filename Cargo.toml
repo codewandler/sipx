@@ -26,6 +26,7 @@ sipx-media = { path = "crates/sipx-media", version = "0.3.0" }
 sipx-transport = { path = "crates/sipx-transport", version = "0.3.0" }
 sipx-ua = { path = "crates/sipx-ua", version = "0.3.0" }
 sipx-call = { path = "crates/sipx-call", version = "0.3.0" }
+sipx-app = { path = "crates/sipx-app", version = "0.3.0" }
 sipx-testkit = { path = "crates/sipx-testkit", version = "0.3.0" }
 
 # Core

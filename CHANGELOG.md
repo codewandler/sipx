@@ -7,6 +7,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The application host is a workspace crate — `crates/sipx-app` — not a separate product.**
+  Reverses the placement 0.3.0 recorded: the contract, its interpreter and its host iterate
+  together in one repository with one gate, and the separation's benefits are kept as ground
+  rules instead (the host is a leaf no kernel crate depends on; its HTTP stack, serialization
+  and future engine stop at its own `Cargo.toml`). The host's planning — designs
+  (`app-host`, `embedded-runtime`, `ts-sdk`), four binding specs, and stories `A-1` … `A-7`
+  under the new `app-host` epic — moves into `docs/`, and the crate exists as a documented
+  stub so the name has its home from day one.
+
 ## [0.3.0] — 2026-07-28
 
 ### Added

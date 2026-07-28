@@ -40,6 +40,6 @@ writing its own demultiplexer.
 - Today `serve()` drives exactly one call and drops whatever `Call::handle` does not claim
   (`crates/sipx-call/src/call.rs`, documented at the function). Every multi-call consumer must
   currently hand-roll this loop, and each hand-rolled copy is a fresh chance to drop an ACK.
-- Requested by the downstream application platform (working name `sipx-app`): a host serving
-  webhook-driven calls is a multi-call consumer by definition.
+- Needed by the host (`crates/sipx-app`, story `A-2`): a host serving webhook-driven calls
+  is a multi-call consumer by definition.
 - Depends on `C-3` for the incoming-call and per-call event delivery shape.
