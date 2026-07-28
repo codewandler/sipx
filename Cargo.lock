@@ -1503,7 +1503,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "sipx-audio"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "opus",
@@ -1514,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-call"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "pretty_assertions",
@@ -1533,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1551,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-media"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "pretty_assertions",
@@ -1566,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-rtp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "pretty_assertions",
@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-sdp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "pretty_assertions",
@@ -1587,7 +1587,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-sip"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "pretty_assertions",
@@ -1599,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-testkit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "rcgen",
@@ -1611,7 +1611,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-transport"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1633,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-ua"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "md-5",

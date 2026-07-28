@@ -5,6 +5,36 @@ All notable changes to sipx are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-07-28
+
+Documentation and tooling only. **No crate changed**, so the libraries are byte-identical to
+0.2.0; this release exists to mark the point where what sipx supports became something you can
+check rather than something you have to take on trust.
+
+### Added
+
+- **[A documentation site](https://codewandler.github.io/sipx/)**, built from `docs/` rather
+  than from a copy of it — a site with its own content tree is a second copy of the truth, and
+  the second copy is the one that rots. `./scripts/build-docs.sh` builds it locally and fails if
+  a published page links to something the site does not publish; it found eight such links on
+  its first run.
+- **An RFC compliance table**, generated from `docs/rfc/registry.toml` and verified in CI: a
+  header an entry names must be known to the parser, a cited file must exist, and an entry
+  claiming implementation must cite something. 61 RFCs — 22 implemented, 7 partial, 10
+  parse-only, 21 not started, 1 superseded.
+  *Parse-only is its own status.* sipx parses `RAck` and `RSeq` and does nothing with them, so
+  "supports RFC 3262" and "rejects it" are both false, and a three-state table could not say so.
+- **An [RFC roadmap](https://codewandler.github.io/sipx/rfc-roadmap.html)** ordering the
+  remaining gaps by dependency and by what each changes about where sipx can be deployed.
+- A logo: a crab holding a telephone handset.
+
+### Changed
+
+- **The README is for people deciding whether sipx fits**, not for contributors. It had been
+  claiming the workspace was still being scaffolded. It now leads with what sipx can and cannot
+  do — media is not encrypted, stated in the first table rather than buried — and `AGENTS.md`
+  stays the file for contributors and agents.
+
 ## [0.2.0] — 2026-07-28
 
 ### Added
