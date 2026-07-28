@@ -1,0 +1,139 @@
+# Spec: TLS, WebSocket, and the certificate policy
+
+**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-6 … T-9 · **Design:**
+[sip-transport](../designs/sip-transport.md)
+
+## 1. Normative references
+
+- RFC 3261 §26 (security), §26.3.2.2 (`sips`), §19.1.1 (the `sips` scheme).
+- RFC 5922 — domain certificates in SIP. This is the one that says *how* to check a name.
+- RFC 5923 — connection reuse, which TLS complicates.
+- RFC 7118 — SIP over WebSocket.
+- RFC 6125 — service identity in TLS generally.
+- RFC 8446 (TLS 1.3), RFC 5246 (TLS 1.2).
+
+## 2. What `sips:` actually promises
+
+**[sipx] `sips:` is hop-by-hop, and sipx says so.**
+
+RFC 3261 §26.2.2 requires TLS on each hop up to the last proxy; the final hop to the callee is
+whatever that proxy chooses. So a `sips:` URI guarantees that *sipx's own* connection is
+encrypted and authenticated. It does not guarantee the call is encrypted end to end, and it
+cannot: a proxy in the middle terminates TLS by design.
+
+This matters because it is routinely misread. A user who believes `sips:` means end-to-end
+encryption will make decisions on that basis. Any sipx documentation, log line or CLI output
+that mentions `sips:` therefore describes it as *transport* security, never as end-to-end.
+
+**[sipx]** sipx never downgrades a `sips:` request. If no TLS candidate can be reached the
+request fails, with an error naming that reason. `T-4` already implements the resolution half
+of this — a `sips:` URI yields no cleartext candidate — and this spec extends it to the
+handshake: a certificate that fails verification is a failed candidate, not a reason to try TCP.
+
+## 3. Certificate verification
+
+### 3.1 Mandatory
+
+These are not configurable, because a stack in which they can be turned off is a stack whose
+security depends on every deployment getting a flag right.
+
+- **[sipx] The chain must validate** to a trust anchor, with expiry and signature checked.
+- **[sipx] The peer identity must match** what we set out to reach, per §3.3.
+- **[sipx] A failure closes the connection.** No retry in cleartext, no "continue anyway".
+- **[sipx] The error names which check failed** — expired, wrong host, unknown issuer are three
+  different operational problems with three different fixes, and collapsing them into
+  "handshake failed" costs an engineer an afternoon.
+
+### 3.2 Configurable
+
+- The trust anchors. Default: the system roots.
+- A client certificate to present (§3.4).
+- The minimum protocol version, at or above the floor in §3.5.
+
+**[sipx] There is no "skip verification" option.** Test code that needs to trust a fixture CA
+adds that CA as a trust anchor, which is a different operation with a different shape: it says
+*what* to trust rather than *that anything goes*. This is deliberate. Every stack that ships an
+`insecure` flag eventually finds it in production, because it is exactly the thing a frustrated
+engineer reaches for at midnight, and nothing about it is loud the next morning.
+
+### 3.3 Which name must match (RFC 5922)
+
+The identity being checked is **the host in the URI sipx set out to reach** — the SIP domain
+before resolution, not the address a SRV record led to. Checking the resolved name instead
+means anyone who can influence DNS chooses which certificate is acceptable, and the whole
+verification becomes decorative.
+
+In order:
+
+1. **`subjectAltName` of type `URI`** matching the SIP URI, if present.
+2. **`subjectAltName` of type `dNSName`** matching the host.
+3. **The `CN`**, *only* when the certificate carries no `subjectAltName` at all. A certificate
+   with a SAN that does not match is a failure, not a reason to consult the CN — RFC 6125 §6.4.4.
+
+**[sipx]** A certificate may carry several names and any one matching is enough; that is normal
+for a proxy serving many domains. Wildcards match a single leftmost label only, so
+`*.example.com` matches `sip.example.com` and not `a.b.example.com` or bare `example.com`.
+
+### 3.4 Mutual TLS
+
+**[sipx]** sipx presents a client certificate only when configured with one. When a server
+requests one and none is configured, the handshake proceeds without it and the *server* decides
+— sipx does not pre-emptively fail, because plenty of servers ask optionally.
+
+**[sipx]** As a server, sipx requests a client certificate only when configured to, and when it
+does, an unverifiable one is refused. "Request but do not check" is worse than not asking: it
+produces logs that look like authentication and are not.
+
+### 3.5 Versions and ciphers
+
+**[sipx] TLS 1.2 is the floor; 1.3 is preferred.** 1.0 and 1.1 are deprecated (RFC 8996) and
+excluded. This will lock out some old SBCs, which is the point of a floor — the alternative is
+that every sipx deployment inherits their weaknesses.
+
+**[sipx]** Cipher selection is left to the TLS library's defaults rather than pinned here. A
+hand-written cipher list is a snapshot of one afternoon's opinion, and it ages badly: the lists
+people pin are the reason deployments are still negotiating things nobody meant to allow.
+
+## 4. WebSocket (RFC 7118)
+
+**[RFC 7118 §4]** The handshake negotiates the `sip` subprotocol. **[sipx]** A peer that does not
+offer it is refused: without the subprotocol there is no agreement about what the frames mean.
+
+**[RFC 7118 §5] One SIP message per WebSocket frame.** Not `Content-Length` framing — the frame
+boundary *is* the message boundary. A message split across frames is malformed, and two
+messages in one frame likewise.
+
+**[RFC 7118 §5.2]** A WebSocket client has no listening port and can never be connected back to.
+Its `Via` sent-by is therefore an arbitrary unique hostname it invents, which is not resolvable
+and must not be resolved. **[sipx]** Every response and in-dialog request goes back over the
+same connection, unconditionally. This is the RFC 5923 rule from `T-3` made absolute: for
+WebSocket there is no fallback, because there is nowhere to fall back to.
+
+**[sipx]** Ping/pong keeps the connection alive. Intermediaries close idle sockets, and a
+registration whose connection has silently died is a phone that rings nowhere.
+
+## 5. Connection reuse under TLS
+
+**[sipx]** The pool from `T-3` keys connections by `(transport, remote address)`. Under TLS the
+*verified identity* joins that key: two names that resolve to one address are two connections.
+Reusing one for the other would mean traffic for `a.example.com` travelling over a connection
+authenticated as `b.example.com`, which defeats the check that was just performed.
+
+## 6. Test vectors
+
+| # | Scenario | Expected |
+|---|---|---|
+| L1 | Certificate signed by an untrusted CA | Refused, error names the issuer |
+| L2 | Certificate for the wrong host | Refused, error names the host mismatch |
+| L3 | Expired certificate | Refused, error names expiry |
+| L4 | SAN present but not matching, CN matching | **Refused** — the CN is not consulted |
+| L5 | No SAN, CN matching | Accepted |
+| L6 | Wildcard `*.example.com` vs `sip.example.com` | Accepted |
+| L7 | Wildcard `*.example.com` vs `a.b.example.com` | Refused |
+| L8 | `sips:` where only TCP is reachable | No candidate; the request fails, never downgrades |
+| L9 | TLS 1.1 offered | Refused |
+| L10 | Two hosts on one address | Two connections, not one reused |
+| W1 | WebSocket peer offering no `sip` subprotocol | Refused |
+| W2 | One message per frame | Delivered |
+| W3 | Message split across two frames | Rejected as malformed |
+| W4 | Response to a WebSocket request | Returns on the same connection |
