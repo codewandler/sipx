@@ -1,0 +1,376 @@
+//! The session description AST.
+//!
+//! Every line is kept. SDP grows new attributes constantly, and an element that silently drops
+//! what it does not understand breaks features it has never heard of — the typed fields here
+//! are a view over the lines, not a replacement for them.
+
+use std::fmt::Write as _;
+use std::net::IpAddr;
+
+/// Which way media flows, from the point of view of the description that carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Direction {
+    /// Both ways. The default when no direction attribute is present (RFC 4566 §6).
+    #[default]
+    SendRecv,
+    /// This side sends only.
+    SendOnly,
+    /// This side receives only.
+    RecvOnly,
+    /// Neither, but the stream stays negotiated.
+    Inactive,
+}
+
+impl Direction {
+    /// The direction an answer must carry to match an offer.
+    ///
+    /// This is a mirror, not a copy. An offer of `sendonly` means "I will send, you will
+    /// receive", so the answer says `recvonly`. Copying the offer's direction instead is a
+    /// common bug and produces a call where both ends wait for audio.
+    #[must_use]
+    pub fn mirrored(self) -> Self {
+        match self {
+            Self::SendRecv => Self::SendRecv,
+            Self::SendOnly => Self::RecvOnly,
+            Self::RecvOnly => Self::SendOnly,
+            Self::Inactive => Self::Inactive,
+        }
+    }
+
+    /// Parse a direction attribute name.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "sendrecv" => Some(Self::SendRecv),
+            "sendonly" => Some(Self::SendOnly),
+            "recvonly" => Some(Self::RecvOnly),
+            "inactive" => Some(Self::Inactive),
+            _ => None,
+        }
+    }
+
+    /// The attribute name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SendRecv => "sendrecv",
+            Self::SendOnly => "sendonly",
+            Self::RecvOnly => "recvonly",
+            Self::Inactive => "inactive",
+        }
+    }
+
+    /// Whether this side will send media.
+    #[must_use]
+    pub fn sends(self) -> bool {
+        matches!(self, Self::SendRecv | Self::SendOnly)
+    }
+
+    /// Whether this side will receive media.
+    #[must_use]
+    pub fn receives(self) -> bool {
+        matches!(self, Self::SendRecv | Self::RecvOnly)
+    }
+}
+
+/// An `a=` line: either `a=name` or `a=name:value`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attribute {
+    /// The attribute name.
+    pub name: String,
+    /// Its value, if it has one.
+    pub value: Option<String>,
+}
+
+impl Attribute {
+    /// A flag attribute, like `a=sendrecv`.
+    #[must_use]
+    pub fn flag(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: None,
+        }
+    }
+
+    /// A valued attribute, like `a=rtpmap:0 PCMU/8000`.
+    #[must_use]
+    pub fn valued(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: Some(value.into()),
+        }
+    }
+
+    fn write_to(&self, out: &mut String) {
+        match &self.value {
+            Some(value) => {
+                let _ = writeln!(out, "a={}:{value}\r", self.name);
+            }
+            None => {
+                let _ = writeln!(out, "a={}\r", self.name);
+            }
+        }
+    }
+}
+
+/// An `o=` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    /// The originator's name, or `-`.
+    pub username: String,
+    /// A session identifier.
+    pub session_id: u64,
+    /// The version, which increases with each modified offer.
+    pub session_version: u64,
+    /// The address the session is described from.
+    pub address: IpAddr,
+}
+
+impl Origin {
+    /// An origin for an address, with the identifier and version supplied by the caller.
+    ///
+    /// The caller supplies them deliberately: a session version has to *increase* across
+    /// re-offers, and only the caller knows what it used last.
+    #[must_use]
+    pub fn new(address: IpAddr, session_id: u64, session_version: u64) -> Self {
+        Self {
+            username: "-".to_owned(),
+            session_id,
+            session_version,
+            address,
+        }
+    }
+
+    fn address_type(&self) -> &'static str {
+        if self.address.is_ipv6() { "IP6" } else { "IP4" }
+    }
+}
+
+/// A `c=` line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Connection {
+    /// Where media should be sent.
+    pub address: IpAddr,
+}
+
+impl Connection {
+    /// A connection line for an address.
+    #[must_use]
+    pub fn new(address: IpAddr) -> Self {
+        Self { address }
+    }
+
+    fn address_type(&self) -> &'static str {
+        if self.address.is_ipv6() { "IP6" } else { "IP4" }
+    }
+}
+
+/// A `t=` line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Timing {
+    /// Start time, 0 for unbounded.
+    pub start: u64,
+    /// Stop time, 0 for unbounded.
+    pub stop: u64,
+}
+
+/// An `m=` line and everything under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaDescription {
+    /// `audio`, `video`, `application`…
+    pub media: String,
+    /// The port. Zero means the stream is rejected — and a rejected stream is still *present*,
+    /// which is what keeps the answer's media lines aligned with the offer's.
+    pub port: u16,
+    /// The transport protocol, such as `RTP/AVP`.
+    pub protocol: String,
+    /// Payload type numbers, in preference order.
+    pub formats: Vec<String>,
+    /// A `c=` line for this stream, overriding the session's.
+    pub connection: Option<Connection>,
+    /// Attributes under this media line.
+    pub attributes: Vec<Attribute>,
+}
+
+impl MediaDescription {
+    /// An audio stream offering these payload types.
+    #[must_use]
+    pub fn audio(port: u16, formats: Vec<String>) -> Self {
+        Self {
+            media: "audio".to_owned(),
+            port,
+            protocol: "RTP/AVP".to_owned(),
+            formats,
+            connection: None,
+            attributes: Vec::new(),
+        }
+    }
+
+    /// Whether this stream is rejected.
+    #[must_use]
+    pub fn is_rejected(&self) -> bool {
+        self.port == 0
+    }
+
+    /// The direction, defaulting to `sendrecv` when no attribute says otherwise.
+    #[must_use]
+    pub fn direction(&self) -> Direction {
+        self.attributes
+            .iter()
+            .find_map(|a| {
+                a.value
+                    .is_none()
+                    .then(|| Direction::parse(&a.name))
+                    .flatten()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Set the direction, replacing any existing one.
+    pub fn set_direction(&mut self, direction: Direction) {
+        self.attributes
+            .retain(|a| !(a.value.is_none() && Direction::parse(&a.name).is_some()));
+        self.attributes.push(Attribute::flag(direction.as_str()));
+    }
+
+    /// The `rtpmap` for a payload type, if the description gives one.
+    #[must_use]
+    pub fn rtpmap(&self, format: &str) -> Option<&str> {
+        self.attributes.iter().find_map(|a| {
+            if a.name != "rtpmap" {
+                return None;
+            }
+            let value = a.value.as_deref()?;
+            let (payload, rest) = value.split_once(' ')?;
+            (payload == format).then_some(rest)
+        })
+    }
+
+    /// The first attribute with this name.
+    #[must_use]
+    pub fn attribute(&self, name: &str) -> Option<&Attribute> {
+        self.attributes.iter().find(|a| a.name == name)
+    }
+
+    fn write_to(&self, out: &mut String) {
+        let _ = write!(out, "m={} {} {}", self.media, self.port, self.protocol);
+        for format in &self.formats {
+            let _ = write!(out, " {format}");
+        }
+        let _ = writeln!(out, "\r");
+        if let Some(connection) = &self.connection {
+            let _ = writeln!(
+                out,
+                "c=IN {} {}\r",
+                connection.address_type(),
+                connection.address
+            );
+        }
+        for attribute in &self.attributes {
+            attribute.write_to(out);
+        }
+    }
+}
+
+/// A whole session description.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionDescription {
+    /// The `o=` line.
+    pub origin: Origin,
+    /// The `s=` line.
+    pub session_name: String,
+    /// The session-level `c=` line.
+    pub connection: Option<Connection>,
+    /// The `t=` lines.
+    pub timing: Vec<Timing>,
+    /// Session-level attributes.
+    pub attributes: Vec<Attribute>,
+    /// The media streams, in order. The order is load-bearing: an answer's streams correspond
+    /// to the offer's by position.
+    pub media: Vec<MediaDescription>,
+    /// Lines this crate does not model, kept so they survive a round trip.
+    pub other: Vec<(char, String)>,
+}
+
+impl SessionDescription {
+    /// A session description for an address.
+    #[must_use]
+    pub fn new(address: IpAddr, session_id: u64, session_version: u64) -> Self {
+        Self {
+            origin: Origin::new(address, session_id, session_version),
+            session_name: "-".to_owned(),
+            connection: Some(Connection::new(address)),
+            timing: vec![Timing::default()],
+            attributes: Vec::new(),
+            media: Vec::new(),
+            other: Vec::new(),
+        }
+    }
+
+    /// The connection address for a stream: its own `c=` if it has one, else the session's.
+    #[must_use]
+    pub fn address_for(&self, media: &MediaDescription) -> Option<IpAddr> {
+        media
+            .connection
+            .or(self.connection)
+            .map(|connection| connection.address)
+    }
+
+    /// The session-level direction, defaulting to `sendrecv`.
+    #[must_use]
+    pub fn direction(&self) -> Direction {
+        self.attributes
+            .iter()
+            .find_map(|a| {
+                a.value
+                    .is_none()
+                    .then(|| Direction::parse(&a.name))
+                    .flatten()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Serialize to the wire format.
+    ///
+    /// Line order follows RFC 8866 §5, which is not a style preference: the grammar fixes the
+    /// order, and receivers do reject descriptions that get it wrong.
+    #[must_use]
+    pub fn to_string_sdp(&self) -> String {
+        let mut out = String::with_capacity(256);
+        let _ = writeln!(out, "v=0\r");
+        let _ = writeln!(
+            out,
+            "o={} {} {} IN {} {}\r",
+            self.origin.username,
+            self.origin.session_id,
+            self.origin.session_version,
+            self.origin.address_type(),
+            self.origin.address
+        );
+        let _ = writeln!(out, "s={}\r", self.session_name);
+        if let Some(connection) = &self.connection {
+            let _ = writeln!(
+                out,
+                "c=IN {} {}\r",
+                connection.address_type(),
+                connection.address
+            );
+        }
+        if self.timing.is_empty() {
+            let _ = writeln!(out, "t=0 0\r");
+        }
+        for timing in &self.timing {
+            let _ = writeln!(out, "t={} {}\r", timing.start, timing.stop);
+        }
+        for (kind, value) in &self.other {
+            let _ = writeln!(out, "{kind}={value}\r");
+        }
+        for attribute in &self.attributes {
+            attribute.write_to(&mut out);
+        }
+        for media in &self.media {
+            media.write_to(&mut out);
+        }
+        out
+    }
+}

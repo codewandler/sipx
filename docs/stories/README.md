@@ -33,6 +33,14 @@ _None._
 
 ## Backlog
 
+### Media
+_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media
+- [M-2 — Implement RTP and RTCP](M-2-rtp-and-rtcp.md) · Media
+- [M-3 — Implement G.711 and WAV handling](M-3-g711-and-wav.md) · Media
+- [M-4 — Implement the media session](M-4-media-session.md) · Media
+- [M-5 — Implement dialogs and the call framework](M-5-call-framework.md) · Media
+
 ### Transport layer
 _The transport layer is the only place in the signalling stack that touches the network, which_
 - [T-5 — Wire a real DNS client behind the resolver trait](T-5-dns-resolver-backend.md) · Signalling · T-4 implements every selection rule but has no DNS backend

@@ -3,3 +3,9 @@
 //!
 //! Codecs are pure Rust by default. Opus lives behind the `opus` feature because it binds
 //! to C.
+
+pub mod g711;
+pub mod wav;
+
+pub use g711::{alaw_decode, alaw_encode, ulaw_decode, ulaw_encode};
+pub use wav::{Wav, read_wav, write_wav};
