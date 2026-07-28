@@ -189,6 +189,8 @@ async fn dial_plays_a_file_and_records_the_far_end() {
                 "--json",
                 "--duration",
                 "6",
+                "--timeout",
+                "15",
                 "--play",
                 from_caller.to_str().expect("a path"),
             ])
@@ -252,6 +254,8 @@ async fn a_busy_answer_gives_the_caller_the_busy_exit_code() {
                 "--json",
                 "--duration",
                 "5",
+                "--timeout",
+                "10",
             ])
             .output(),
     )
@@ -303,6 +307,8 @@ async fn digits_sent_by_the_caller_are_reported_by_the_answerer() {
                 "--json",
                 "--duration",
                 "8",
+                "--timeout",
+                "15",
                 "--dtmf",
                 "1234",
             ])
@@ -327,4 +333,48 @@ async fn digits_sent_by_the_caller_are_reported_by_the_answerer() {
         "the keypresses must be reported: {answered}"
     );
     let _ = answerer.wait().await;
+}
+
+/// Calling something that never answers gives up on the caller's schedule rather than on the
+/// transaction layer's. 64*T1 is 32 seconds — correct for SIP, and far too long for a script
+/// that wanted either an answer or an error.
+#[tokio::test]
+async fn a_call_that_is_never_answered_times_out_on_schedule() {
+    // A UDP socket that accepts packets and never replies.
+    let black_hole = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let address = black_hole.local_addr().expect("has an address");
+
+    let started = std::time::Instant::now();
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:nobody@{address}"),
+                "--local",
+                "127.0.0.1:0",
+                "--json",
+                "--timeout",
+                "3",
+            ])
+            .output(),
+    )
+    .await
+    .expect("must not wait for the transaction timeout")
+    .expect("runs");
+
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "timeout has its own exit code"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(12),
+        "gave up after {:?}, which is the transaction's schedule rather than ours",
+        started.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("\"status\":\"timeout\""), "{stderr}");
 }

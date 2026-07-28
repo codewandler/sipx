@@ -57,12 +57,12 @@ impl JitterBuffer {
         self.received += 1;
         let extended = self.extend(packet.sequence);
 
-        if let Some(last) = self.last_released {
-            if extended <= last {
-                // It arrived after its slot had already been played.
-                self.late += 1;
-                return false;
-            }
+        if let Some(last) = self.last_released
+            && extended <= last
+        {
+            // It arrived after its slot had already been played.
+            self.late += 1;
+            return false;
         }
         if self.packets.contains_key(&extended) {
             self.duplicates += 1;

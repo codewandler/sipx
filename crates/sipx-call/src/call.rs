@@ -155,10 +155,10 @@ impl Call {
             .typed::<sipx_sip::headers::CSeq>()
             .and_then(std::result::Result::ok)
             .map(|cseq| cseq.sequence);
-        if let (Some(sequence), Some(last)) = (sequence, self.dialog.remote_cseq) {
-            if sequence <= last {
-                return self.refuse(incoming, 500, "Server Internal Error").await;
-            }
+        if let (Some(sequence), Some(last)) = (sequence, self.dialog.remote_cseq)
+            && sequence <= last
+        {
+            return self.refuse(incoming, 500, "Server Internal Error").await;
         }
         if let Some(sequence) = sequence {
             self.dialog.remote_cseq = Some(sequence);
@@ -281,10 +281,10 @@ impl Call {
 
         send_ack(&self.endpoint, &self.dialog, self.target).await?;
 
-        if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body())) {
-            if let Ok(renegotiated) = negotiated(&answer) {
-                self.move_media_if_changed(renegotiated).await?;
-            }
+        if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
+            && let Ok(renegotiated) = negotiated(&answer)
+        {
+            self.move_media_if_changed(renegotiated).await?;
         }
         self.hold = direction;
         Ok(())

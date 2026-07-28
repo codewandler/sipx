@@ -117,14 +117,14 @@ impl UserAgent {
 
             // A stale nonce is the server asking for the same credentials against a fresh
             // nonce, not a refusal. One further attempt, then stop.
-            if let Outcome::Challenged(again) = &outcome {
-                if again.stale {
-                    self.registration.advance();
-                    self.nonce_count = self.nonce_count.saturating_add(1);
-                    let mut retry = self.registration.request()?;
-                    registrar::authorize(&mut retry, again, credentials, self.nonce_count)?;
-                    outcome = self.attempt(retry).await?;
-                }
+            if let Outcome::Challenged(again) = &outcome
+                && again.stale
+            {
+                self.registration.advance();
+                self.nonce_count = self.nonce_count.saturating_add(1);
+                let mut retry = self.registration.request()?;
+                registrar::authorize(&mut retry, again, credentials, self.nonce_count)?;
+                outcome = self.attempt(retry).await?;
             }
         }
 

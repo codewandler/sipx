@@ -85,24 +85,23 @@ pub(crate) fn normalize_for_comparison(input: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(input.len());
     let mut i = 0;
     while let Some(&b) = input.get(i) {
-        if b == b'%' {
-            if let Some(decoded) = input
+        if b == b'%'
+            && let Some(decoded) = input
                 .get(i + 1)
                 .and_then(|&h| hex_value(h))
                 .zip(input.get(i + 2).and_then(|&h| hex_value(h)))
                 .map(|(hi, lo)| (hi << 4) | lo)
-            {
-                if is_reserved(decoded) {
-                    // Keep the escape, but canonicalize its spelling so %2F and %2f compare
-                    // equal.
-                    out.push(b'%');
-                    out.extend_from_slice(&upper_hex(decoded));
-                } else {
-                    out.push(decoded);
-                }
-                i += 3;
-                continue;
+        {
+            if is_reserved(decoded) {
+                // Keep the escape, but canonicalize its spelling so %2F and %2f compare
+                // equal.
+                out.push(b'%');
+                out.extend_from_slice(&upper_hex(decoded));
+            } else {
+                out.push(decoded);
             }
+            i += 3;
+            continue;
         }
         out.push(b);
         i += 1;

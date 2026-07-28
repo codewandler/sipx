@@ -100,10 +100,10 @@ pub fn validate_request(request: &Request) -> Vec<Finding> {
     // The CSeq method must name the same method as the request line. A mismatch means one of
     // the two is a forgery or a bug, and either way the transaction it would create is not
     // the one the sender thinks.
-    if let Some(Ok(cseq)) = headers.typed::<CSeq>() {
-        if cseq.method != request.method {
-            out.push(Finding::CSeqMethodMismatch);
-        }
+    if let Some(Ok(cseq)) = headers.typed::<CSeq>()
+        && cseq.method != request.method
+    {
+        out.push(Finding::CSeqMethodMismatch);
     }
 
     out

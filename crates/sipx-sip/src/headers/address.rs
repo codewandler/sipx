@@ -143,12 +143,12 @@ fn unescape(raw: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(raw.len());
     let mut i = 0usize;
     while let Some(&b) = raw.get(i) {
-        if b == b'\\' {
-            if let Some(&next) = raw.get(i + 1) {
-                out.push(next);
-                i += 2;
-                continue;
-            }
+        if b == b'\\'
+            && let Some(&next) = raw.get(i + 1)
+        {
+            out.push(next);
+            i += 2;
+            continue;
         }
         out.push(b);
         i += 1;

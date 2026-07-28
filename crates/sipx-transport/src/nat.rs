@@ -34,12 +34,12 @@ pub fn apply_received_and_rport(request: &mut Request, source: SocketAddr) -> bo
     // RFC 3581: an empty `rport` is the client asking which port we saw. The answer replaces
     // the empty parameter — appending a second `rport` would leave the first one, and a
     // reader taking the first occurrence would learn nothing.
-    if matches!(via.rport(), Some(None)) {
-        if let Some((start, end)) = param_span(&updated_hop, b"rport") {
-            let replacement = format!(";rport={}", source.port());
-            updated_hop.splice(start..end, replacement.into_bytes());
-            changed = true;
-        }
+    if matches!(via.rport(), Some(None))
+        && let Some((start, end)) = param_span(&updated_hop, b"rport")
+    {
+        let replacement = format!(";rport={}", source.port());
+        updated_hop.splice(start..end, replacement.into_bytes());
+        changed = true;
     }
 
     // RFC 3261 §18.2.1: record the source when it differs from what the sender claimed. A

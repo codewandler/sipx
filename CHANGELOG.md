@@ -25,6 +25,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `sipx dial`, `sipx answer` and `sipx register`, with WAV playback and recording, DTMF, a
   `--json` output mode and a distinct exit code per outcome.
+- `sipx dial --timeout` bounds the attempt. Without it a call to something that never answers
+  sits for 64·T1 — 32 seconds, correct for SIP and far too long for a script that wanted
+  either an answer or an error.
+
+### Changed
+
+- **The minimum supported Rust version is now 1.88**, raised from 1.85. The DNS client needed
+  to clear RUSTSEC-2026-0119 requires it, and the alternative was shipping a known denial of
+  service in a parser that reads untrusted network data.
 
 ### Security
 

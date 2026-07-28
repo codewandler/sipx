@@ -99,25 +99,25 @@ impl Target {
 #[must_use]
 pub fn response_destination(via: &Via, source: SocketAddr, transport: TransportKind) -> Target {
     // 1. An explicit maddr wins.
-    if let Some(maddr) = via.maddr() {
-        if let Some(addr) = parse_host(maddr) {
-            let port = via.port.unwrap_or_else(|| transport.default_port());
-            return Target::new(SocketAddr::new(addr, port), transport);
-        }
+    if let Some(maddr) = via.maddr()
+        && let Some(addr) = parse_host(maddr)
+    {
+        let port = via.port.unwrap_or_else(|| transport.default_port());
+        return Target::new(SocketAddr::new(addr, port), transport);
     }
 
     // 2. received, at the rport if the sender asked us to observe one.
-    if let Some(received) = via.received() {
-        if let Some(addr) = parse_host(received) {
-            let port = via
-                .rport()
-                .flatten()
-                .and_then(|v| std::str::from_utf8(v).ok())
-                .and_then(|v| v.parse::<u16>().ok())
-                .or(via.port)
-                .unwrap_or_else(|| transport.default_port());
-            return Target::new(SocketAddr::new(addr, port), transport);
-        }
+    if let Some(received) = via.received()
+        && let Some(addr) = parse_host(received)
+    {
+        let port = via
+            .rport()
+            .flatten()
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .and_then(|v| v.parse::<u16>().ok())
+            .or(via.port)
+            .unwrap_or_else(|| transport.default_port());
+        return Target::new(SocketAddr::new(addr, port), transport);
     }
 
     // 3. The sent-by, if it is an address we can use directly.

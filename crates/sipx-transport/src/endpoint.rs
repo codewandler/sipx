@@ -125,10 +125,10 @@ impl Responses {
     /// apart.
     pub async fn final_response(&mut self) -> Option<Response> {
         while let Some(event) = self.next().await {
-            if let TuEvent::Response(response) = event {
-                if response.status.is_final() {
-                    return Some(*response);
-                }
+            if let TuEvent::Response(response) = event
+                && response.status.is_final()
+            {
+                return Some(*response);
             }
         }
         None

@@ -7,7 +7,9 @@ exclude = ["fuzz"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# Raised from 1.85 by the DNS client needed to clear RUSTSEC-2026-0119. The alternative was
+# shipping a known denial of service in a parser that eats untrusted network data.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/codewandler/sipx"
 authors = ["Timo Friedl <timofriedlberlin@gmail.com>"]

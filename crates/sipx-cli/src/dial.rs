@@ -24,7 +24,8 @@ OPTIONS:
     --play <FILE>     Play this WAV into the call (8 kHz 16-bit mono)
     --record <FILE>   Record the far end to this WAV
     --dtmf <DIGITS>   Send these digits once the call is up
-    --duration <S>    Hang up after this many seconds (default 30)
+    --duration <S>    Hang up after this many seconds once connected (default 30)
+    --timeout <S>     Give up if the call is not answered in this many seconds (default 32)
     --from <URI>      Our own address (default sip:sipx@<local>)
     --local <ADDR>    Local address to bind (default 0.0.0.0:0)
     --tcp             Use TCP rather than UDP
@@ -95,10 +96,23 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         .value("from")
         .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
 
+    // Bounding the attempt is the caller's business, not the transaction layer's. Without
+    // this a call to something that never answers sits for 64*T1 — 32 seconds — which is
+    // correct for SIP and far too long for a script that wanted an answer or an error.
+    let attempt = Duration::from_secs(args.number("timeout").unwrap_or(32));
+
     let started = std::time::Instant::now();
-    let mut call = match sipx_call::dial(&handle, target, &to, &from, media_address).await {
-        Ok(call) => call,
-        Err(error) => return report_failure(format, &error),
+    let dialling = sipx_call::dial(&handle, target, &to, &from, media_address);
+    let mut call = match tokio::time::timeout(attempt, dialling).await {
+        Ok(Ok(call)) => call,
+        Ok(Err(error)) => return report_failure(format, &error),
+        Err(_elapsed) => {
+            return fail(
+                format,
+                Exit::Timeout,
+                &format!("no answer within {}s", attempt.as_secs()),
+            );
+        }
     };
 
     let duration = Duration::from_secs(args.number("duration").unwrap_or(30));

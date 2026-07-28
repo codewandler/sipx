@@ -744,13 +744,13 @@ async fn deliver(
     // audio one — decoding a four-byte event payload as µ-law injects four garbage samples and
     // is heard as a click.
     if config.dtmf_payload_type == Some(packet.payload_type) {
-        if let Some(event) = DtmfEvent::decode(&packet.payload) {
-            if let Some(digit) = dtmf.push(packet.timestamp, &event) {
-                // A full channel means the application is not reading digits. Dropping is
-                // right: a keypress delivered late is worse than one not delivered, since the
-                // application has already moved on.
-                let _ = digits.try_send(digit);
-            }
+        if let Some(event) = DtmfEvent::decode(&packet.payload)
+            && let Some(digit) = dtmf.push(packet.timestamp, &event)
+        {
+            // A full channel means the application is not reading digits. Dropping is
+            // right: a keypress delivered late is worse than one not delivered, since the
+            // application has already moved on.
+            let _ = digits.try_send(digit);
         }
         return true;
     }
