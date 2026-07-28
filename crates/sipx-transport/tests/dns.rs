@@ -16,12 +16,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
-use hickory_resolver::proto::op::{Header, Message, MessageType, OpCode, ResponseCode};
+use hickory_resolver::proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_resolver::proto::rr::rdata::{A, SRV};
 use hickory_resolver::proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::proto::serialize::binary::{BinDecodable, BinEncodable};
-use hickory_resolver::proto::xfer::Protocol;
 use sipx_transport::dns::{Answer, DnsResolver, Prefetched};
 use sipx_transport::resolve::{Resolver as _, SeededRng, resolve};
 use tokio::net::UdpSocket;
@@ -42,23 +40,17 @@ async fn fixture_server() -> (SocketAddr, Arc<std::sync::atomic::AtomicU32>) {
             let Ok(request) = Message::from_bytes(&buf[..len]) else {
                 continue;
             };
-            let Some(query) = request.queries().first() else {
+            let Some(query) = request.queries.first() else {
                 continue;
             };
             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
             let name = query.name().to_string();
-            let mut header = Header::new();
-            header.set_id(request.id());
-            header.set_message_type(MessageType::Response);
-            header.set_op_code(OpCode::Query);
-            header.set_authoritative(true);
-            header.set_recursion_desired(request.recursion_desired());
-            header.set_recursion_available(true);
-
-            let mut response = Message::new();
-            response.set_header(header);
-            response.add_query(query.clone());
+            let mut response = Message::response(request.metadata.id, OpCode::Query);
+            response.metadata.message_type = MessageType::Response;
+            response.metadata.authoritative = true;
+            response.metadata.recursion_available = true;
+            response.queries.push(query.clone());
 
             match (query.query_type(), name.as_str()) {
                 (RecordType::SRV, "_sip._udp.sipx.test.") => {
@@ -66,7 +58,7 @@ async fn fixture_server() -> (SocketAddr, Arc<std::sync::atomic::AtomicU32>) {
                         (10u16, 5060u16, "one.sipx.test."),
                         (20, 5062, "two.sipx.test."),
                     ] {
-                        response.add_answer(Record::from_rdata(
+                        response.answers.push(Record::from_rdata(
                             Name::from_ascii(&name).expect("valid"),
                             60,
                             RData::SRV(SRV::new(
@@ -79,24 +71,24 @@ async fn fixture_server() -> (SocketAddr, Arc<std::sync::atomic::AtomicU32>) {
                     }
                 }
                 (RecordType::A, "one.sipx.test.") => {
-                    response.add_answer(Record::from_rdata(
+                    response.answers.push(Record::from_rdata(
                         Name::from_ascii(&name).expect("valid"),
                         60,
                         RData::A(A::new(192, 0, 2, 11)),
                     ));
                 }
                 (RecordType::A, "two.sipx.test.") => {
-                    response.add_answer(Record::from_rdata(
+                    response.answers.push(Record::from_rdata(
                         Name::from_ascii(&name).expect("valid"),
                         60,
                         RData::A(A::new(192, 0, 2, 12)),
                     ));
                 }
                 _ => {
-                    // A genuine negative answer. Real ones carry an SOA so the resolver knows
-                    // how long to cache them; this one does not, which is what a synthesised
-                    // NXDOMAIN also looks like — see `classify`.
-                    response.set_response_code(ResponseCode::NXDomain);
+                    // A negative answer. A real one carries an SOA so the resolver knows how
+                    // long to cache it; this one does not, which is what a synthesised NXDOMAIN
+                    // also looks like — see `classify`.
+                    response.metadata.response_code = ResponseCode::NXDomain;
                 }
             }
 
@@ -110,12 +102,7 @@ async fn fixture_server() -> (SocketAddr, Arc<std::sync::atomic::AtomicU32>) {
 }
 
 fn resolver_for(server: SocketAddr) -> Arc<DnsResolver> {
-    let mut config = ResolverConfig::new();
-    config.add_name_server(NameServerConfig::new(server, Protocol::Udp));
-    let mut options = ResolverOpts::default();
-    options.timeout = Duration::from_secs(2);
-    options.use_hosts_file = hickory_resolver::config::ResolveHosts::Never;
-    Arc::new(DnsResolver::with_config(config, options))
+    Arc::new(DnsResolver::for_nameserver(server, Duration::from_secs(2)).expect("a resolver"))
 }
 
 /// The acceptance test for T-5: a URI naming a domain resolves at runtime, through a real
@@ -200,15 +187,11 @@ async fn a_second_lookup_is_served_from_cache() {
 #[tokio::test]
 async fn an_expired_entry_is_asked_for_again() {
     let (server, queries) = fixture_server().await;
-    // A one-second ceiling on the cache, so the 60-second TTL in the zone does not decide.
-    let mut config = ResolverConfig::new();
-    config.add_name_server(NameServerConfig::new(server, Protocol::Udp));
-    let mut options = ResolverOpts::default();
-    options.timeout = Duration::from_secs(2);
-    options.cache_size = 0;
-    options.use_hosts_file = hickory_resolver::config::ResolveHosts::Never;
-    let resolver =
-        DnsResolver::with_config(config, options).with_max_ttl(Duration::from_millis(200));
+    // A short ceiling on the cache, so the 60-second TTL in the zone does not decide how long
+    // this test takes.
+    let resolver = DnsResolver::for_nameserver(server, Duration::from_secs(2))
+        .expect("a resolver")
+        .with_max_ttl(Duration::from_millis(200));
 
     resolver.srv("_sip._udp.sipx.test").await.or_empty();
     let after_first = queries.load(std::sync::atomic::Ordering::SeqCst);

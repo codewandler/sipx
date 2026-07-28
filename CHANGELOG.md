@@ -26,12 +26,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `sipx dial`, `sipx answer` and `sipx register`, with WAV playback and recording, DTMF, a
   `--json` output mode and a distinct exit code per outcome.
 
+### Security
+
+- Upgraded the DNS client past **RUSTSEC-2026-0119**, a CPU-exhaustion denial of service in
+  `hickory-proto`'s name compression. sipx feeds that parser untrusted network data, so this is
+  on the path that matters. Caught by `cargo-deny` in CI on the first push after the dependency
+  was added — which is the whole reason the gate exists.
+
 ### Fixed
 
 - A call hung up while packets were still in the paced send queue, so every call lost its last
   word — or, for DTMF, its last digit. `MediaSession::flush` now drains the queue first.
 - The RTCP report block decoder read cumulative loss from byte 4 instead of byte 5, folding the
   loss fraction into the high byte of the count.
+- The DNS client's own response cache is now disabled. Two caches with different TTL policies
+  is a source of confusion rather than speed: sipx's exists to cap TTLs and to distinguish
+  "no such record" from "could not ask", and neither survives a second layer underneath doing
+  its own thing.
 
 ## [0.1.0] — 2026-07-28
 

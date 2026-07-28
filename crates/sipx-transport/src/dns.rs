@@ -14,13 +14,15 @@
 //! **Nothing here may block the endpoint loop.** A lookup can take seconds; the loop it would
 //! block owns every transaction timer.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hickory_resolver::TokioResolver;
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::config::{
+    ConnectionConfig, NameServerConfig, ProtocolConfig, ResolverConfig, ResolverOpts,
+};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::rr::rdata::{NAPTR, SRV};
 use hickory_resolver::proto::rr::{RData, RecordType};
 use tokio::sync::Mutex;
@@ -65,6 +67,7 @@ pub struct DnsResolver {
     naptr: Mutex<std::collections::HashMap<String, Cached<Naptr>>>,
     srv: Mutex<std::collections::HashMap<String, Cached<Srv>>>,
     addresses: Mutex<std::collections::HashMap<String, Cached<IpAddr>>>,
+    addresses_v6: Mutex<std::collections::HashMap<String, Cached<IpAddr>>>,
     /// Never cache for longer than this, however generous the TTL.
     max_ttl: Duration,
 }
@@ -74,19 +77,24 @@ impl DnsResolver {
     pub fn from_system() -> std::io::Result<Self> {
         let builder = TokioResolver::builder_tokio()
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Ok(Self::with(builder.build()))
+        let resolver = builder
+            .build()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(Self::with(resolver))
     }
 
     /// A resolver pointed at specific nameservers.
     ///
     /// This is what makes the tests possible: they run a fixture DNS server on localhost and
     /// point sipx at it, rather than asking the public internet and hoping.
-    #[must_use]
-    pub fn with_config(config: ResolverConfig, options: ResolverOpts) -> Self {
+    pub fn with_config(config: ResolverConfig, options: ResolverOpts) -> std::io::Result<Self> {
         let mut builder =
-            TokioResolver::builder_with_config(config, TokioConnectionProvider::default());
+            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
         *builder.options_mut() = options;
-        Self::with(builder.build())
+        let resolver = builder
+            .build()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(Self::with(resolver))
     }
 
     fn with(inner: TokioResolver) -> Self {
@@ -95,8 +103,35 @@ impl DnsResolver {
             naptr: Mutex::new(std::collections::HashMap::new()),
             srv: Mutex::new(std::collections::HashMap::new()),
             addresses: Mutex::new(std::collections::HashMap::new()),
+            addresses_v6: Mutex::new(std::collections::HashMap::new()),
             max_ttl: Duration::from_secs(3600),
         }
+    }
+
+    /// A resolver pointed at one nameserver.
+    ///
+    /// Wraps the DNS client's own configuration types so they appear in exactly one place. They
+    /// change shape between releases — this file has been through one such change already —
+    /// and a caller of sipx should not have to track that to point a resolver somewhere.
+    pub fn for_nameserver(server: SocketAddr, timeout: Duration) -> std::io::Result<Self> {
+        let mut connection = ConnectionConfig::new(ProtocolConfig::Udp);
+        connection.port = server.port();
+
+        let name_server = NameServerConfig::new(server.ip(), true, vec![connection]);
+        let config = ResolverConfig::from_parts(None, Vec::new(), vec![name_server]);
+
+        let mut options = ResolverOpts::default();
+        options.timeout = timeout;
+        // The fixture zone in the tests is authoritative for names that do not exist anywhere
+        // else, and a hosts file entry would silently win over it.
+        options.use_hosts_file = hickory_resolver::config::ResolveHosts::Never;
+        // The client has a response cache of its own. Two caches with different TTL policies
+        // is a source of confusion rather than of speed — sipx's exists to cap TTLs and to
+        // distinguish "no such record" from "could not ask", and neither of those survives a
+        // layer underneath doing its own thing. One cache, in one place.
+        options.cache_size = 0;
+
+        Self::with_config(config, options)
     }
 
     /// Cap how long any record is held, however long its TTL claims.
@@ -108,75 +143,95 @@ impl DnsResolver {
 
     /// NAPTR records for a domain.
     pub async fn naptr(&self, domain: &str) -> Answer<Naptr> {
-        if let Some(records) = cached(&self.naptr, domain).await {
-            return Answer::Records(records);
-        }
-
-        let lookup = match self.inner.lookup(domain, RecordType::NAPTR).await {
-            Ok(lookup) => lookup,
-            Err(error) => return classify(&error),
-        };
-
-        let ttl = shortest_ttl(
-            lookup
-                .record_iter()
-                .map(hickory_resolver::proto::rr::Record::ttl),
-            self.max_ttl,
-        );
-        let records: Vec<Naptr> = lookup
-            .record_iter()
-            .filter_map(|record| match record.data() {
+        self.lookup(
+            &self.naptr,
+            domain,
+            RecordType::NAPTR,
+            |record| match &record.data {
                 RData::NAPTR(naptr) => Some(convert_naptr(naptr)),
                 _ => None,
-            })
-            .collect();
-        store(&self.naptr, domain, &records, ttl).await;
-        Answer::Records(records)
+            },
+        )
+        .await
     }
 
     /// SRV records for a name.
     pub async fn srv(&self, name: &str) -> Answer<Srv> {
-        if let Some(records) = cached(&self.srv, name).await {
-            return Answer::Records(records);
-        }
-
-        let lookup = match self.inner.srv_lookup(name).await {
-            Ok(lookup) => lookup,
-            Err(error) => return classify(&error),
-        };
-
-        let ttl = shortest_ttl(
-            lookup
-                .as_lookup()
-                .record_iter()
-                .map(hickory_resolver::proto::rr::Record::ttl),
-            self.max_ttl,
-        );
-        let records: Vec<Srv> = lookup.iter().map(convert_srv).collect();
-        store(&self.srv, name, &records, ttl).await;
-        Answer::Records(records)
+        self.lookup(&self.srv, name, RecordType::SRV, |record| {
+            match &record.data {
+                RData::SRV(srv) => Some(convert_srv(srv)),
+                _ => None,
+            }
+        })
+        .await
     }
 
     /// Addresses for a host.
+    ///
+    /// Both families, because RFC 3263 does not distinguish them and a host with only an AAAA
+    /// record is reachable.
     pub async fn addresses(&self, host: &str) -> Answer<IpAddr> {
-        if let Some(records) = cached(&self.addresses, host).await {
+        let v4 = self
+            .lookup(
+                &self.addresses,
+                host,
+                RecordType::A,
+                |record| match &record.data {
+                    RData::A(a) => Some(IpAddr::V4(a.0)),
+                    _ => None,
+                },
+            )
+            .await;
+
+        // A host with no A record may still have AAAA; asking only for A would make it
+        // unreachable for a reason nothing reports.
+        match v4 {
+            Answer::Records(records) if !records.is_empty() => Answer::Records(records),
+            other => {
+                let v6 = self
+                    .lookup(
+                        &self.addresses_v6,
+                        host,
+                        RecordType::AAAA,
+                        |record| match &record.data {
+                            RData::AAAA(aaaa) => Some(IpAddr::V6(aaaa.0)),
+                            _ => None,
+                        },
+                    )
+                    .await;
+                match (other, v6) {
+                    // Only report "the server answered, with nothing" if both did.
+                    (Answer::Records(_), Answer::Records(records)) => Answer::Records(records),
+                    (_, Answer::Records(records)) if !records.is_empty() => {
+                        Answer::Records(records)
+                    }
+                    _ => Answer::Unavailable,
+                }
+            }
+        }
+    }
+
+    /// One cached lookup, shared by all three record types.
+    async fn lookup<T: Clone>(
+        &self,
+        cache: &Mutex<std::collections::HashMap<String, Cached<T>>>,
+        name: &str,
+        record_type: RecordType,
+        extract: impl Fn(&hickory_resolver::proto::rr::Record) -> Option<T>,
+    ) -> Answer<T> {
+        if let Some(records) = cached(cache, name).await {
             return Answer::Records(records);
         }
 
-        let lookup = match self.inner.lookup_ip(host).await {
+        let lookup = match self.inner.lookup(name, record_type).await {
             Ok(lookup) => lookup,
             Err(error) => return classify(&error),
         };
 
-        let ttl = shortest_ttl(
-            lookup
-                .as_lookup()
-                .record_iter()
-                .map(hickory_resolver::proto::rr::Record::ttl),
-            self.max_ttl,
-        );
-        let records: Vec<IpAddr> = lookup.iter().collect();
-        store(&self.addresses, host, &records, ttl).await;
+        let answers = lookup.answers();
+        let ttl = shortest_ttl(answers.iter().map(|record| record.ttl), self.max_ttl);
+        let records: Vec<T> = answers.iter().filter_map(&extract).collect();
+        store(cache, name, &records, ttl).await;
         Answer::Records(records)
     }
 }
@@ -196,22 +251,16 @@ impl DnsResolver {
 /// error — retrying a name that genuinely does not exist costs a lookup, while caching a
 /// network blip as a routing decision costs every call to that domain until something evicts
 /// it.
-fn classify<T>(error: &hickory_resolver::ResolveError) -> Answer<T> {
-    use hickory_resolver::ResolveErrorKind;
-    use hickory_resolver::proto::ProtoErrorKind;
+fn classify<T>(error: &hickory_resolver::net::NetError) -> Answer<T> {
+    use hickory_resolver::net::{DnsError, NetError};
 
-    if let ResolveErrorKind::Proto(proto) = error.kind() {
-        if let ProtoErrorKind::NoRecordsFound {
-            soa, negative_ttl, ..
-        } = proto.kind()
-        {
-            let answered = soa.is_some() || negative_ttl.is_some();
-            return if answered {
-                Answer::Records(Vec::new())
-            } else {
-                Answer::Unavailable
-            };
-        }
+    if let NetError::Dns(DnsError::NoRecordsFound(no_records)) = error {
+        let answered = no_records.soa.is_some() || no_records.negative_ttl.is_some();
+        return if answered {
+            Answer::Records(Vec::new())
+        } else {
+            Answer::Unavailable
+        };
     }
     Answer::Unavailable
 }
@@ -252,19 +301,19 @@ async fn store<T: Clone>(
 
 fn convert_naptr(naptr: &NAPTR) -> Naptr {
     Naptr {
-        order: naptr.order(),
-        preference: naptr.preference(),
-        service: String::from_utf8_lossy(naptr.services()).into_owned(),
-        replacement: strip_root(&naptr.replacement().to_string()),
+        order: naptr.order,
+        preference: naptr.preference,
+        service: String::from_utf8_lossy(&naptr.services).into_owned(),
+        replacement: strip_root(&naptr.replacement.to_string()),
     }
 }
 
 fn convert_srv(srv: &SRV) -> Srv {
     Srv {
-        priority: srv.priority(),
-        weight: srv.weight(),
-        port: srv.port(),
-        target: strip_root(&srv.target().to_string()),
+        priority: srv.priority,
+        weight: srv.weight,
+        port: srv.port,
+        target: strip_root(&srv.target.to_string()),
     }
 }
 
@@ -396,16 +445,11 @@ mod tests {
     #[tokio::test]
     async fn a_resolver_that_cannot_reach_a_server_reports_unavailable_not_empty() {
         // A nameserver on a port nothing listens on, with a short timeout.
-        let mut config = ResolverConfig::new();
-        config.add_name_server(hickory_resolver::config::NameServerConfig::new(
+        let resolver = DnsResolver::for_nameserver(
             "127.0.0.1:9".parse().expect("valid"),
-            hickory_resolver::proto::xfer::Protocol::Udp,
-        ));
-        let mut options = ResolverOpts::default();
-        options.timeout = Duration::from_millis(200);
-        options.attempts = 0;
-
-        let resolver = DnsResolver::with_config(config, options);
+            Duration::from_millis(200),
+        )
+        .expect("builds");
         assert_eq!(
             resolver.srv("_sip._udp.example.invalid").await,
             Answer::Unavailable,
