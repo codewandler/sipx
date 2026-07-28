@@ -111,3 +111,32 @@ proptest! {
         }
     }
 }
+
+/// The case a property test found: a URI carrying the same header name twice was not
+/// equivalent to itself, because each occurrence was compared against the *first* header of
+/// that name rather than against its counterpart.
+#[test]
+fn a_uri_with_a_repeated_header_name_is_equivalent_to_itself() {
+    for text in [
+        "sip:a?f=a&f=*",
+        "sip:a?f=a&f=b",
+        "sip:bob@example.com?Subject=one&Subject=two&Subject=three",
+    ] {
+        let uri = Uri::parse(Bytes::from(text)).expect("parses");
+        let twin = Uri::parse(Bytes::from(text)).expect("parses");
+        assert!(uri.equivalent(&twin), "{text} must equal itself");
+    }
+}
+
+/// And the values still have to match: repeated names are compared as a multiset, not merely
+/// counted. Otherwise the fix would make every URI with two headers equal to every other.
+#[test]
+fn repeated_headers_compare_their_values_not_just_their_count() {
+    let one = Uri::parse(Bytes::from("sip:a?f=a&f=b")).expect("parses");
+    let other = Uri::parse(Bytes::from("sip:a?f=a&f=c")).expect("parses");
+    assert!(!one.equivalent(&other), "b is not c");
+
+    // Order carries no meaning, so the same values in the other order do match.
+    let reordered = Uri::parse(Bytes::from("sip:a?f=b&f=a")).expect("parses");
+    assert!(one.equivalent(&reordered), "order is not significant");
+}

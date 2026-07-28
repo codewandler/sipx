@@ -31,8 +31,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The bound lives in `sipx-call` rather than around it — dropping the call future would
   abandon the exchange after a 200 OK but before the ACK.
 
+### Added
+
+**Milestone M5 — depth** (in progress)
+
+- `docs/specs/sip-tls.md` and **SIP over TLS**, with certificate verification that cannot be
+  turned off. Trusting a private CA is an addition to the anchor set, not a bypass.
+- CANCEL (RFC 3261 §9), so giving up on a call stops the far end ringing.
+
 ### Changed
 
+- `TrustAnchors::system()` uses the **platform's** trust store rather than a copy of one
+  vendor's root list compiled in — so an operator's corporate CA is honoured, and a root
+  distrusted after a compromise stops being trusted when the OS says so.
 - **The minimum supported Rust version is now 1.88**, raised from 1.85. The DNS client needed
   to clear RUSTSEC-2026-0119 requires it, and the alternative was shipping a known denial of
   service in a parser that reads untrusted network data.
@@ -50,6 +61,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   word — or, for DTMF, its last digit. `MediaSession::flush` now drains the queue first.
 - The RTCP report block decoder read cumulative loss from byte 4 instead of byte 5, folding the
   loss fraction into the high byte of the count.
+- **A URI carrying the same header name twice was not equivalent to itself.** Each occurrence
+  was compared against the *first* header of that name rather than its counterpart, so
+  `sip:a?f=a&f=b` failed reflexivity. Headers are now compared as multisets. Found by a
+  property test, which is exactly the kind of bug no example test would have reached.
 - **`Handle::respond` returned before the response was sent.** It queued a command for the
   endpoint loop and returned, so a process that answered a call and exited could lose the
   response to its own exit — the caller then saw a timeout for a call that had in fact been

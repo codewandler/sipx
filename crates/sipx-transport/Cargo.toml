@@ -17,7 +17,7 @@ udp = []
 dns = ["dep:hickory-resolver"]
 tcp = []
 ## TLS over TCP (SIPS).
-tls = ["tcp", "dep:tokio-rustls", "dep:rustls-pki-types", "dep:rustls-pemfile", "dep:webpki-roots"]
+tls = ["tcp", "dep:tokio-rustls", "dep:rustls-pki-types", "dep:rustls-native-certs"]
 ## SIP over WebSocket (RFC 7118).
 ws = ["tcp"]
 wss = ["ws", "tls"]
@@ -29,8 +29,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "io-util", "macros"] }
 rand.workspace = true
-webpki-roots = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 hickory-resolver = { workspace = true, optional = true }

@@ -464,16 +464,13 @@ impl Uri {
 
         // "URI header components are never ignored. Any present header component MUST be
         // present in both URIs and match."
-        if a.headers.len() != b.headers.len() {
-            return false;
-        }
-        a.headers.iter().all(|p| {
-            std::str::from_utf8(p.name()).is_ok_and(|name| {
-                b.headers
-                    .get(name)
-                    .is_some_and(|q| opt_bytes_equivalent(p.value(), q.value(), false))
-            })
-        })
+        //
+        // Compared as multisets rather than by looking each one up by name. A URI may carry
+        // the same header name twice with different values — `?f=a&f=b` is legal — and a
+        // lookup returns only the first, so every occurrence after the first would be compared
+        // against the wrong value. That made such a URI unequal to *itself*, which a property
+        // test caught and no example test would have.
+        header_multiset(&a.headers) == header_multiset(&b.headers)
     }
 }
 
@@ -481,6 +478,27 @@ impl fmt::Display for Uri {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", String::from_utf8_lossy(&self.to_bytes()))
     }
+}
+
+/// The headers of a URI, grouped by name, with each name's values sorted.
+///
+/// Sorted because order carries no meaning for equivalence: `?a=1&b=2` and `?b=2&a=1` are the
+/// same URI. Grouped because a name may repeat.
+fn header_multiset(headers: &Params) -> std::collections::BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
+    let mut grouped: std::collections::BTreeMap<Vec<u8>, Vec<Vec<u8>>> =
+        std::collections::BTreeMap::new();
+    for param in headers.iter() {
+        let name = escape::normalize_for_comparison(param.name()).to_ascii_lowercase();
+        let value = param
+            .value()
+            .map(|value| escape::normalize_for_comparison(value).to_ascii_lowercase())
+            .unwrap_or_default();
+        grouped.entry(name).or_default().push(value);
+    }
+    for values in grouped.values_mut() {
+        values.sort_unstable();
+    }
+    grouped
 }
 
 /// Compare two optional components, folding escapes of unreserved characters. `case_sensitive`

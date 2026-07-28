@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use rustls_pki_types::pem::PemObject as _;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -77,7 +78,12 @@ pub struct TrustAnchors {
 }
 
 impl TrustAnchors {
-    /// The usual set: whatever the platform trusts.
+    /// Whatever the platform trusts.
+    ///
+    /// The *platform's* store, not a copy of one vendor's list compiled in. The difference
+    /// matters twice: an operator who adds a corporate CA expects sipx to honour it, and a
+    /// root that is distrusted after a compromise stops being trusted when the OS says so
+    /// rather than when someone remembers to bump a dependency.
     #[must_use]
     pub fn system() -> Self {
         Self {
@@ -101,8 +107,7 @@ impl TrustAnchors {
 
     /// Add a PEM-encoded certificate as a trust anchor.
     pub fn add_pem(&mut self, pem: &[u8]) -> Result<(), TlsError> {
-        let mut reader = std::io::BufReader::new(pem);
-        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem)
             .collect::<Result<_, _>>()
             .map_err(|error| TlsError::Material {
                 what: "trust anchor".to_owned(),
@@ -121,7 +126,19 @@ impl TrustAnchors {
     fn store(&self) -> Result<RootCertStore, TlsError> {
         let mut store = RootCertStore::empty();
         if self.system {
-            store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let loaded = rustls_native_certs::load_native_certs();
+            for error in &loaded.errors {
+                // Reported rather than swallowed: a partially loaded store fails handshakes
+                // that ought to succeed, and the reason is otherwise invisible.
+                tracing::warn!(%error, "could not read part of the platform trust store");
+            }
+            for cert in loaded.certs {
+                // A platform store may hold a certificate rustls will not parse. Skipping it
+                // is right — one unusable root must not cost the other two hundred.
+                if let Err(error) = store.add(cert) {
+                    tracing::debug!(%error, "skipping an unusable root from the platform store");
+                }
+            }
         }
         for cert in &self.extra {
             store
@@ -184,8 +201,7 @@ pub struct Identity {
 impl Identity {
     /// Read a certificate chain and key from PEM.
     pub fn from_pem(cert_pem: &[u8], key_pem: &[u8]) -> Result<Self, TlsError> {
-        let mut reader = std::io::BufReader::new(cert_pem);
-        let chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+        let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
             .collect::<Result<_, _>>()
             .map_err(|error| TlsError::Material {
                 what: "certificate".to_owned(),
@@ -198,16 +214,10 @@ impl Identity {
             });
         }
 
-        let mut reader = std::io::BufReader::new(key_pem);
-        let key = rustls_pemfile::private_key(&mut reader)
-            .map_err(|error| TlsError::Material {
-                what: "private key".to_owned(),
-                detail: error.to_string(),
-            })?
-            .ok_or_else(|| TlsError::Material {
-                what: "private key".to_owned(),
-                detail: "no key found in the PEM data".to_owned(),
-            })?;
+        let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|error| TlsError::Material {
+            what: "private key".to_owned(),
+            detail: error.to_string(),
+        })?;
 
         Ok(Self { chain, key })
     }
