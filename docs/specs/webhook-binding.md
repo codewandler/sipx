@@ -1,7 +1,7 @@
 # Spec: The webhook binding (document mode)
 
 **Status:** draft — `A-2` finishes it; vectors required before any code · **Epic:** `app-host` ·
-**Design:** [host](../designs/host.md)
+**Design:** [app-host](../designs/app-host.md)
 
 > The wire is the contract:
 > [`app-contract.md`](app-contract.md)

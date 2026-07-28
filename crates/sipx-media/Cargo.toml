@@ -15,6 +15,11 @@ default = []
 ## Opus (RFC 6716). Pulls in a C dependency through `sipx-audio`; off by default so the stack
 ## stays pure Rust unless somebody asks for the codec.
 opus = ["sipx-audio/opus"]
+## DTLS-SRTP (RFC 5764). Pulls in OpenSSL; off by default so the stack stays pure Rust unless
+## somebody needs keying that does not trust the signalling path. Everything DTLS-SRTP *decides*
+## — the fingerprint check, the profile, the key split, the demultiplexing — is in `dtls` either
+## way; this feature supplies only the handshake.
+dtls = ["dep:openssl"]
 
 [dependencies]
 rand.workspace = true
@@ -25,6 +30,7 @@ bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
+openssl = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

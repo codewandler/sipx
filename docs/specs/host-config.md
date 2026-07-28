@@ -1,7 +1,7 @@
 # Spec: Host configuration
 
 **Status:** draft — `A-1` finishes it; vectors required before any code · **Epic:** `app-host` ·
-**Design:** [host](../designs/host.md)
+**Design:** [app-host](../designs/app-host.md)
 
 > One document describes a running host. Everything an operator can decide is in it; nothing
 > in it is a program. This spec fixes the schema's *shape and semantics*; the concrete syntax

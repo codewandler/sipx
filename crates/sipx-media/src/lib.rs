@@ -13,8 +13,10 @@
 
 pub mod bridge;
 pub mod conference;
+pub mod dtls;
 pub mod session;
 
 pub use bridge::Bridge;
 pub use conference::Conference;
+pub use dtls::{Arriving, Handshake, Profile, Role};
 pub use session::{Codec, Config, Encoded, MediaPort, MediaSession, SrtpKeys};

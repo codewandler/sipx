@@ -1958,6 +1958,20 @@ fn offer_from(capabilities: &Capabilities) -> SessionDescription {
             .attributes
             .push(sipx_sdp::Attribute::valued("crypto", crypto.to_value()));
     }
+    // The same rule for DTLS-SRTP, with the fingerprint in place of the key: `UDP/TLS/RTP/SAVP`
+    // and an `a=fingerprint` come from one place so a stream cannot claim one and carry the
+    // other. RFC 5763 §5 requires the *offerer* to say `actpass` and let the answerer choose.
+    if let Some(fingerprint) = capabilities.dtls() {
+        capabilities.protocol().clone_into(&mut audio.protocol);
+        audio.attributes.push(sipx_sdp::Attribute::valued(
+            "fingerprint",
+            fingerprint.to_value(),
+        ));
+        audio.attributes.push(sipx_sdp::Attribute::valued(
+            "setup",
+            sipx_sdp::fingerprint::Setup::ActPass.as_str().to_owned(),
+        ));
+    }
     audio.set_direction(capabilities.direction);
     sdp.media.push(audio);
     sdp

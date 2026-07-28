@@ -487,9 +487,46 @@ note = "`a=crypto` offered and answered, and **only over a secure signalling pat
 number = 5764
 title = "DTLS Extension to Establish Keys for SRTP"
 layer = "media"
-status = "none"
-evidence = []
-note = "The keying WebRTC uses. Depends on 3711."
+status = "implemented"
+roles = ["uac", "uas"]
+evidence = [
+  "crates/sipx-media/src/dtls/mod.rs",
+  "crates/sipx-media/src/dtls/openssl.rs",
+  "crates/sipx-media/tests/dtls_srtp.rs",
+]
+note = "The `use_srtp` extension with the AES_CM_128_HMAC_SHA1_80 profile, §5.1.2's demultiplexing of DTLS from RTP and STUN on one port, and §4.2's key derivation — the exported block split client key, server key, client salt, server salt, asserted against the RFC's literal offsets rather than against the two ends agreeing with each other. The handshake is OpenSSL, behind the off-by-default `dtls` feature; everything the RFC decides is compiled either way."
+
+[[rfc]]
+number = 5763
+title = "Framework for Establishing an SRTP Security Context Using DTLS"
+layer = "media"
+status = "implemented"
+roles = ["uac", "uas"]
+evidence = [
+  "crates/sipx-sdp/src/answer.rs",
+  "crates/sipx-media/src/dtls/mod.rs",
+]
+note = "The SDP half: `UDP/TLS/RTP/SAVP` offered and answered, `a=fingerprint` and `a=setup` negotiated with the offerer sending `actpass` (§5) and the answerer taking `active` so its ClientHello opens the NAT it is behind. A DTLS offer with no fingerprint is declined rather than answered, since there would be nothing to authenticate the handshake against."
+
+[[rfc]]
+number = 8122
+title = "Connection-Oriented Media Transport over TLS in SDP"
+layer = "media"
+status = "implemented"
+roles = ["uac", "uas"]
+evidence = [
+  "crates/sipx-sdp/src/fingerprint.rs",
+  "crates/sipx-media/src/dtls/mod.rs",
+]
+note = "`a=fingerprint` at media and session level, uppercase hex per §5's UHEX rule, and §6.2's mandatory check — a certificate that does not match yields an error rather than keys. MD5 and MD2 are refused at the parser, which is where §5's prohibition on acting on them belongs. The digest length must match the hash named, so a truncated one cannot verify a prefix."
+
+[[rfc]]
+number = 4145
+title = "TCP-Based Media Transport in SDP"
+layer = "media"
+status = "partial"
+evidence = ["crates/sipx-sdp/src/fingerprint.rs"]
+note = "`a=setup` only, which is the part RFC 5763 §5 borrows to decide who opens the DTLS connection. The `a=connection` attribute and TCP media transport itself are not implemented: sipx carries media over UDP."
 
 [[rfc]]
 number = 8445

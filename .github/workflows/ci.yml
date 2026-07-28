@@ -30,10 +30,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # `--all-features` turns on Opus, which links libopus. Installing it means the FFI crate
-      # finds the library through pkg-config instead of building it from source with CMake —
-      # which is the failure mode of the one advisory `deny.toml` excepts.
-      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      # `--all-features` turns on Opus, which links libopus, and DTLS-SRTP, which links OpenSSL.
+      # Installing them means the FFI crates find the libraries through pkg-config instead of
+      # building from source — which for Opus is the failure mode of the one advisory
+      # `deny.toml` excepts.
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -45,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
@@ -58,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       # --all-targets, so tests and dev-dependencies are covered too. Without it the declared
@@ -89,7 +90,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Named explicitly rather than `--workspace -- --ignored`. The interop tests are ignored

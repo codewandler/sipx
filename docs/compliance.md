@@ -12,14 +12,14 @@ compliance document usually becomes untrue.
 
 ## Where it stands
 
-**65 RFCs tracked.**
+**68 RFCs tracked.**
 
 | | Meaning | Count |
 |---|---|---|
-| ✅ implemented | Behaviour present and tested for the roles listed | 27 |
-| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 11 |
+| ✅ implemented | Behaviour present and tested for the roles listed | 30 |
+| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 12 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 8 |
-| ⬜ not started | Tracked as a target, not started | 18 |
+| ⬜ not started | Tracked as a target, not started | 17 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
 The list is bounded on purpose: it is what sipx already touches plus what it has decided
@@ -97,13 +97,16 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 |---|---|---|---|---|
 | [3550](https://www.rfc-editor.org/rfc/rfc3550) | RTP: A Transport Protocol for Real-Time Applications | ✅ implemented | — | RTP and RTCP, including sender and receiver reports and the §A.8 interarrival jitter recurrence — which is not a variance, and is usually implemented as one. |
 | [4733](https://www.rfc-editor.org/rfc/rfc4733) | RTP Payload for DTMF Digits, Telephony Tones, and Telephony Signals | ✅ implemented | — | Events 0-15, with the payload type read from the negotiation rather than assumed. End retransmissions share the event's timestamp, which is the part that is usually wrong. |
+| [5763](https://www.rfc-editor.org/rfc/rfc5763) | Framework for Establishing an SRTP Security Context Using DTLS | ✅ implemented | uac, uas | The SDP half: `UDP/TLS/RTP/SAVP` offered and answered, `a=fingerprint` and `a=setup` negotiated with the offerer sending `actpass` (§5) and the answerer taking `active` so its ClientHello opens the NAT it is behind. A DTLS offer with no fingerprint is declined rather than answered, since there would be nothing to authenticate the handshake against. |
+| [5764](https://www.rfc-editor.org/rfc/rfc5764) | DTLS Extension to Establish Keys for SRTP | ✅ implemented | uac, uas | The `use_srtp` extension with the AES_CM_128_HMAC_SHA1_80 profile, §5.1.2's demultiplexing of DTLS from RTP and STUN on one port, and §4.2's key derivation — the exported block split client key, server key, client salt, server salt, asserted against the RFC's literal offsets rather than against the two ends agreeing with each other. The handshake is OpenSSL, behind the off-by-default `dtls` feature; everything the RFC decides is compiled either way. |
 | [6716](https://www.rfc-editor.org/rfc/rfc6716) | Definition of the Opus Audio Codec | ✅ implemented | — | Behind the `opus` feature, off by default because it links a C library. |
 | [7587](https://www.rfc-editor.org/rfc/rfc7587) | RTP Payload Format for the Opus Speech and Audio Codec | ✅ implemented | — | The 48000 RTP clock whatever the sample rate, and negotiation by encoding name rather than by payload type number. |
+| [8122](https://www.rfc-editor.org/rfc/rfc8122) | Connection-Oriented Media Transport over TLS in SDP | ✅ implemented | uac, uas | `a=fingerprint` at media and session level, uppercase hex per §5's UHEX rule, and §6.2's mandatory check — a certificate that does not match yields an error rather than keys. MD5 and MD2 are refused at the parser, which is where §5's prohibition on acting on them belongs. The digest length must match the hash named, so a truncated one cannot verify a prefix. |
 | [8866](https://www.rfc-editor.org/rfc/rfc8866) | SDP: Session Description Protocol | ✅ implemented | — | A real AST with round-tripping, rather than string manipulation over the body. |
 | [3551](https://www.rfc-editor.org/rfc/rfc3551) | RTP Profile for Audio and Video Conferences | 🟡 partial | — | The static payload types sipx carries: 0 and 8. The rest of the profile is not implemented. |
 | [3711](https://www.rfc-editor.org/rfc/rfc3711) | The Secure Real-time Transport Protocol (SRTP) | 🟡 partial | uac, uas | The default transform, AES_CM_128_HMAC_SHA1_80, for RTP and RTCP, with the replay window and rollover inference. Key derivation and the keystream are checked against the RFC's own Appendix B vectors. Only one transform: no AES-192/256, no f8, no null cipher, and no rekeying (the key derivation rate is fixed at zero). |
+| [4145](https://www.rfc-editor.org/rfc/rfc4145) | TCP-Based Media Transport in SDP | 🟡 partial | — | `a=setup` only, which is the part RFC 5763 §5 borrows to decide who opens the DTLS connection. The `a=connection` attribute and TCP media transport itself are not implemented: sipx carries media over UDP. |
 | [4568](https://www.rfc-editor.org/rfc/rfc4568) | SDP Security Descriptions for Media Streams (SDES) | 🟡 partial | uac, uas | `a=crypto` offered and answered, and **only over a secure signalling path** — §7.1 makes that a condition of use, and `Crypto::offer` returns nothing without it rather than leaving the check to every caller. No MKI, no key lifetimes, no session parameters. |
-| [5764](https://www.rfc-editor.org/rfc/rfc5764) | DTLS Extension to Establish Keys for SRTP | ⬜ not started | — | The keying WebRTC uses. Depends on 3711. |
 | [8445](https://www.rfc-editor.org/rfc/rfc8445) | Interactive Connectivity Establishment (ICE) | ⬜ not started | — | sipx uses symmetric RTP, which handles the common NAT case and not the hard one. |
 | [4566](https://www.rfc-editor.org/rfc/rfc4566) | SDP: Session Description Protocol (obsoleted by 8866) | — superseded | — | Superseded. Listed so a reader looking for it knows where it went. |
 

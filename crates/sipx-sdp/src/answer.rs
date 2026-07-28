@@ -37,6 +37,12 @@ pub struct Capabilities {
     /// `None` means plain RTP. It is `None` unless the signalling is secure, because
     /// [`crate::crypto::Crypto::offer`] will not produce a key over a path that anyone can read.
     pub crypto: Option<crate::crypto::Crypto>,
+    /// The certificate fingerprint this side offers, if the media is to be keyed with DTLS-SRTP
+    /// (RFC 5763 / 8122).
+    ///
+    /// Exclusive with `crypto`: they are different `m=` protocols, and a stream cannot be keyed
+    /// both ways at once.
+    pub dtls: Option<crate::fingerprint::Fingerprint>,
 }
 
 impl Capabilities {
@@ -56,6 +62,7 @@ impl Capabilities {
             session_id: 1,
             session_version: 1,
             crypto: None,
+            dtls: None,
         }
     }
 
@@ -95,6 +102,7 @@ impl Capabilities {
             session_id: 1,
             session_version: 1,
             crypto: None,
+            dtls: None,
         }
     }
 
@@ -114,14 +122,49 @@ impl Capabilities {
         self
     }
 
-    /// The media transport this side offers: `RTP/SAVP` when it has a key, `RTP/AVP` otherwise.
+    /// The same capabilities, offering DTLS-SRTP (RFC 5763).
+    ///
+    /// `fingerprint` is of the certificate this endpoint will present on the media path. Unlike
+    /// [`Capabilities::with_srtp`] there is no `secure_signalling` flag, and its absence is the
+    /// point: SDES needs one because the SDP *carries the key*, and here it carries only a hash of
+    /// a certificate. That is what makes DTLS-SRTP usable over signalling sipx does not control —
+    /// a proxy that terminates the TLS learns nothing it can decrypt with.
+    ///
+    /// What it can do is substitute a fingerprint of its own. RFC 8122 §7 says so plainly, and it
+    /// is the reason this is a keying improvement rather than an authentication one.
+    ///
+    /// The role offered is `actpass`, which RFC 5763 §5 requires of an offerer: the answerer picks,
+    /// and picking `active` means *its* `ClientHello` opens the NAT it sits behind.
+    #[must_use]
+    pub fn with_dtls_srtp(mut self, fingerprint: crate::fingerprint::Fingerprint) -> Self {
+        self.dtls = Some(fingerprint);
+        // Mutually exclusive with SDES rather than additive. They are different `m=` protocols,
+        // so an offer cannot propose both on one stream, and leaving a stale `a=crypto` in place
+        // would put a master key in an SDP whose whole purpose is not to carry one.
+        self.crypto = None;
+        self
+    }
+
+    /// The media transport this side offers.
+    ///
+    /// `UDP/TLS/RTP/SAVP` for DTLS-SRTP (RFC 5764 §8), `RTP/SAVP` for SDES, `RTP/AVP` otherwise.
+    /// The token is not decoration: it is what tells the far end which keying to expect, and an
+    /// `RTP/SAVP` line with an `a=fingerprint` describes a stream nobody can key.
     #[must_use]
     pub fn protocol(&self) -> &'static str {
-        if self.crypto.is_some() {
+        if self.dtls.is_some() {
+            "UDP/TLS/RTP/SAVP"
+        } else if self.crypto.is_some() {
             "RTP/SAVP"
         } else {
             "RTP/AVP"
         }
+    }
+
+    /// The fingerprint this side offers, if it is offering DTLS-SRTP.
+    #[must_use]
+    pub fn dtls(&self) -> Option<&crate::fingerprint::Fingerprint> {
+        self.dtls.as_ref()
     }
 
     fn rtpmap_for(&self, format: &str) -> Option<&str> {
@@ -178,8 +221,23 @@ fn answer_stream(
     // A secure offer answered without a key would be answered with encryption neither side can
     // perform; a secure offer answered in the clear would be a downgrade this side chose. Both
     // are worse than declining the stream, which is what RFC 4568 §7.1 leaves as the option.
+    //
+    // Three keyings, decided by the `m=` protocol token because that is what the token is for.
+    // `UDP/TLS/RTP/SAVP` is DTLS-SRTP (RFC 5764 §8), a bare `SAVP` is SDES (RFC 4568), and
+    // anything else is plain RTP.
+    let dtls_offer = offered.protocol.contains("TLS");
     let secure_offer = offered.protocol.contains("SAVP");
-    let answering_crypto = match (secure_offer, capabilities.crypto.as_ref()) {
+
+    let answering_dtls = match (dtls_offer, capabilities.dtls.as_ref()) {
+        // A DTLS offer carries a fingerprint, at media or session level. Without one there is
+        // nothing to check the certificate against, and RFC 8122's guarantee is exactly that
+        // check — so this is refused rather than answered with an unverifiable handshake.
+        (true, Some(ours)) if fingerprint_of(offer, offered).is_some() => Some(ours),
+        (true, _) => return rejected(offered),
+        (false, _) => None,
+    };
+
+    let answering_crypto = match (secure_offer && !dtls_offer, capabilities.crypto.as_ref()) {
         (true, Some(crypto)) if offered.crypto().is_some() => Some(crypto),
         (true, _) => return rejected(offered),
         // A plain offer is answered plainly, even when this side would have preferred a key.
@@ -236,6 +294,23 @@ fn answer_stream(
         attributes.push(Attribute::valued("crypto", crypto.to_value()));
     }
 
+    if let Some(fingerprint) = answering_dtls {
+        attributes.push(Attribute::valued("fingerprint", fingerprint.to_value()));
+        // RFC 4145 §4.1, via RFC 5763 §5. The role is *answered*, never copied: two endpoints
+        // that both say `active` both send a `ClientHello` and neither answers one, and two that
+        // both say `passive` wait for each other until the call times out.
+        let role = crate::fingerprint::Setup::answer(
+            offered
+                .setup()
+                .or_else(|| session_setup(offer))
+                // §5 requires an offerer to send `actpass`. One that sends nothing is not
+                // conformant, and reading its silence as `actpass` — rather than refusing the
+                // stream — is what lets the answer name a role it can actually hold.
+                .unwrap_or(crate::fingerprint::Setup::ActPass),
+        );
+        attributes.push(Attribute::valued("setup", role.as_str().to_owned()));
+    }
+
     MediaDescription {
         media: offered.media.clone(),
         port: capabilities.audio_port,
@@ -245,6 +320,30 @@ fn answer_stream(
         attributes,
         other: Vec::new(),
     }
+}
+
+/// The fingerprint that applies to a stream: the media-level one, or the session-level fallback.
+///
+/// RFC 8122 §5 allows the attribute at either level, and a session-level value applies to every
+/// stream that does not override it. Reading only the media level is the reason a stack fails
+/// against a peer that puts one `a=fingerprint` at the top and none on the `m=` lines — which is
+/// what a browser does.
+#[must_use]
+pub fn fingerprint_of(
+    offer: &SessionDescription,
+    stream: &MediaDescription,
+) -> Option<crate::fingerprint::Fingerprint> {
+    stream.fingerprint().or_else(|| offer.fingerprint())
+}
+
+/// The `a=setup` at session level, if the offer gives one there.
+fn session_setup(offer: &SessionDescription) -> Option<crate::fingerprint::Setup> {
+    offer
+        .attributes
+        .iter()
+        .find(|attribute| attribute.name == "setup")
+        .and_then(|attribute| attribute.value.as_deref())
+        .and_then(crate::fingerprint::Setup::parse)
 }
 
 /// The direction an answer may carry, given what was offered and what this side wants.
@@ -726,5 +825,207 @@ mod tests {
         let answered = answer(&offer(AUDIO_OFFER), &Capabilities::g711(local(), 40000));
         let round_tripped = parse(&answered.to_string_sdp()).expect("the answer parses");
         assert_eq!(answered, round_tripped);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // DTLS-SRTP (RFC 5763 / 5764 / 8122)
+    // ---------------------------------------------------------------------------------------
+
+    fn our_fingerprint() -> crate::fingerprint::Fingerprint {
+        crate::fingerprint::Fingerprint::of(
+            b"our certificate",
+            crate::fingerprint::HashFunc::Sha256,
+        )
+    }
+
+    fn their_fingerprint() -> crate::fingerprint::Fingerprint {
+        crate::fingerprint::Fingerprint::of(
+            b"their certificate",
+            crate::fingerprint::HashFunc::Sha256,
+        )
+    }
+
+    fn dtls_offer(extra_media: &str, session_level: &str) -> SessionDescription {
+        offer(&format!(
+            "v=0\r\n\
+             o=- 1 1 IN IP4 192.0.2.10\r\n\
+             s=-\r\n\
+             c=IN IP4 192.0.2.10\r\n\
+             t=0 0\r\n\
+             {session_level}\
+             m=audio 49170 UDP/TLS/RTP/SAVP 0 8\r\n\
+             a=rtpmap:0 PCMU/8000\r\n\
+             a=rtpmap:8 PCMA/8000\r\n\
+             {extra_media}"
+        ))
+    }
+
+    /// A DTLS offer is answered with this side's fingerprint and a role, on the same protocol.
+    #[test]
+    fn a_dtls_offer_is_answered_with_a_fingerprint_and_a_role() {
+        let offered = dtls_offer(
+            &format!(
+                "a=fingerprint:{}\r\na=setup:actpass\r\n",
+                their_fingerprint().to_value()
+            ),
+            "",
+        );
+        let answered = answer(
+            &offered,
+            &Capabilities::g711(local(), 40000).with_dtls_srtp(our_fingerprint()),
+        );
+        let audio = answered.media.first().expect("an audio stream");
+        assert_ne!(audio.port, 0, "the stream should not be rejected");
+        assert_eq!(
+            audio.protocol, "UDP/TLS/RTP/SAVP",
+            "the answer's protocol must match the offer's, or neither side knows how to key it"
+        );
+        assert_eq!(
+            audio.fingerprint(),
+            Some(our_fingerprint()),
+            "the answer carries *our* fingerprint, not an echo of theirs"
+        );
+        assert_eq!(
+            audio.setup(),
+            Some(crate::fingerprint::Setup::Active),
+            "RFC 5763 §5: the answerer takes `active`, so its `ClientHello` opens its own NAT"
+        );
+        assert!(
+            audio.crypto().is_none(),
+            "a DTLS stream must not also carry an SDES key"
+        );
+    }
+
+    /// A browser puts one `a=fingerprint` at session level and none on the `m=` line.
+    #[test]
+    fn a_session_level_fingerprint_is_found() {
+        let offered = dtls_offer(
+            "a=setup:actpass\r\n",
+            &format!("a=fingerprint:{}\r\n", their_fingerprint().to_value()),
+        );
+        let stream = offered.media.first().expect("an audio stream");
+        assert!(stream.fingerprint().is_none(), "none on the m= line");
+        assert_eq!(
+            fingerprint_of(&offered, stream),
+            Some(their_fingerprint()),
+            "the session-level value applies to a stream that does not override it"
+        );
+        let answered = answer(
+            &offered,
+            &Capabilities::g711(local(), 40000).with_dtls_srtp(our_fingerprint()),
+        );
+        assert_ne!(
+            answered.media.first().expect("a stream").port,
+            0,
+            "an offer whose fingerprint is at session level is still answerable"
+        );
+    }
+
+    /// A media-level fingerprint overrides the session-level one.
+    #[test]
+    fn a_media_level_fingerprint_wins_over_the_session_level_one() {
+        let other = crate::fingerprint::Fingerprint::of(
+            b"a third certificate",
+            crate::fingerprint::HashFunc::Sha256,
+        );
+        let offered = dtls_offer(
+            &format!(
+                "a=fingerprint:{}\r\na=setup:actpass\r\n",
+                their_fingerprint().to_value()
+            ),
+            &format!("a=fingerprint:{}\r\n", other.to_value()),
+        );
+        let stream = offered.media.first().expect("an audio stream");
+        assert_eq!(fingerprint_of(&offered, stream), Some(their_fingerprint()));
+    }
+
+    /// RFC 8122's whole guarantee is the fingerprint. An offer without one describes a handshake
+    /// whose certificate nothing can be checked against, so the stream is refused rather than
+    /// answered with encryption that authenticates nobody.
+    #[test]
+    fn a_dtls_offer_with_no_fingerprint_is_rejected() {
+        let offered = dtls_offer("a=setup:actpass\r\n", "");
+        let answered = answer(
+            &offered,
+            &Capabilities::g711(local(), 40000).with_dtls_srtp(our_fingerprint()),
+        );
+        assert_eq!(
+            answered.media.first().expect("a stream").port,
+            0,
+            "an unverifiable DTLS offer must be declined, not answered"
+        );
+    }
+
+    /// And an endpoint that cannot do DTLS declines rather than answering in the clear — the same
+    /// rule SDES already had, for the same reason.
+    #[test]
+    fn a_dtls_offer_to_an_endpoint_without_dtls_is_rejected() {
+        let offered = dtls_offer(
+            &format!(
+                "a=fingerprint:{}\r\na=setup:actpass\r\n",
+                their_fingerprint().to_value()
+            ),
+            "",
+        );
+        let answered = answer(&offered, &Capabilities::g711(local(), 40000));
+        assert_eq!(
+            answered.media.first().expect("a stream").port,
+            0,
+            "answering a DTLS offer in the clear would be a downgrade this side chose"
+        );
+    }
+
+    /// An offerer that names `passive` is answered `active`, and one that names `active` gets
+    /// `passive`. Copying the role is how both ends wait for each other.
+    #[test]
+    fn the_role_is_answered_rather_than_copied() {
+        for (offered_role, expected) in [
+            ("actpass", crate::fingerprint::Setup::Active),
+            ("passive", crate::fingerprint::Setup::Active),
+            ("active", crate::fingerprint::Setup::Passive),
+        ] {
+            let offered = dtls_offer(
+                &format!(
+                    "a=fingerprint:{}\r\na=setup:{offered_role}\r\n",
+                    their_fingerprint().to_value()
+                ),
+                "",
+            );
+            let answered = answer(
+                &offered,
+                &Capabilities::g711(local(), 40000).with_dtls_srtp(our_fingerprint()),
+            );
+            assert_eq!(
+                answered.media.first().expect("a stream").setup(),
+                Some(expected),
+                "offered {offered_role}"
+            );
+        }
+    }
+
+    /// Offering DTLS replaces any SDES key rather than adding to it. They are different `m=`
+    /// protocols, and a leftover `a=crypto` would put a master key in an SDP whose entire purpose
+    /// is not to carry one.
+    #[test]
+    fn offering_dtls_srtp_clears_any_sdes_key() {
+        let capabilities = Capabilities::g711(local(), 40000)
+            .with_srtp(true)
+            .with_dtls_srtp(our_fingerprint());
+        assert!(capabilities.crypto.is_none());
+        assert_eq!(capabilities.protocol(), "UDP/TLS/RTP/SAVP");
+    }
+
+    /// A plain offer is answered plainly even by an endpoint that would rather use DTLS — the
+    /// answerer does not get to upgrade the keying unilaterally.
+    #[test]
+    fn a_plain_offer_is_not_upgraded_to_dtls() {
+        let answered = answer(
+            &offer(AUDIO_OFFER),
+            &Capabilities::g711(local(), 40000).with_dtls_srtp(our_fingerprint()),
+        );
+        let audio = answered.media.first().expect("a stream");
+        assert_ne!(audio.port, 0, "a plain offer is still answerable");
+        assert_eq!(audio.protocol, "RTP/AVP");
+        assert!(audio.fingerprint().is_none());
     }
 }

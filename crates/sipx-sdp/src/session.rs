@@ -300,6 +300,36 @@ impl MediaDescription {
             .find_map(crate::crypto::Crypto::parse)
     }
 
+    /// The first `a=fingerprint` this stream carries that sipx may act on (RFC 8122 §5).
+    ///
+    /// §5.1 has an endpoint offer a fingerprint under *several* hash functions — "the 'SHA-256'
+    /// hash function algorithm and the hash function used to generate the signature on the
+    /// certificate" — so more than one line is normal and any of them identifies the same
+    /// certificate. Taking the first sipx can compute is therefore correct rather than a shortcut;
+    /// the ones it skips are `md5` and `md2`, which §5 forbids acting on.
+    ///
+    /// Looked for on the media description and not the session: a fingerprint may be given at
+    /// either level, and the media-level one wins where both appear. A caller that wants the
+    /// session-level fallback reads [`SessionDescription::fingerprint`].
+    #[must_use]
+    pub fn fingerprint(&self) -> Option<crate::fingerprint::Fingerprint> {
+        self.attributes
+            .iter()
+            .filter(|attribute| attribute.name == "fingerprint")
+            .filter_map(|attribute| attribute.value.as_deref())
+            .find_map(crate::fingerprint::Fingerprint::parse)
+    }
+
+    /// The `a=setup` role this stream declares (RFC 4145 §4).
+    #[must_use]
+    pub fn setup(&self) -> Option<crate::fingerprint::Setup> {
+        self.attributes
+            .iter()
+            .find(|attribute| attribute.name == "setup")
+            .and_then(|attribute| attribute.value.as_deref())
+            .and_then(crate::fingerprint::Setup::parse)
+    }
+
     /// The `rtpmap` for a payload type, if the description gives one.
     #[must_use]
     pub fn rtpmap(&self, format: &str) -> Option<&str> {
@@ -411,6 +441,20 @@ impl SessionDescription {
                     .flatten()
             })
             .unwrap_or_default()
+    }
+
+    /// The session-level `a=fingerprint`, if the description carries one (RFC 8122 §5).
+    ///
+    /// §5 allows the attribute at either level, and one given here applies to every stream that
+    /// does not override it. A browser puts it here and on no `m=` line at all, so a stack that
+    /// reads only the media level finds nothing and refuses a perfectly good offer.
+    #[must_use]
+    pub fn fingerprint(&self) -> Option<crate::fingerprint::Fingerprint> {
+        self.attributes
+            .iter()
+            .filter(|attribute| attribute.name == "fingerprint")
+            .filter_map(|attribute| attribute.value.as_deref())
+            .find_map(crate::fingerprint::Fingerprint::parse)
     }
 
     /// Serialize to the wire format.

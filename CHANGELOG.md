@@ -7,6 +7,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **DTLS-SRTP (`M-15`, RFC 5764 / 5763 / 8122).** SDES (`M-14`) keys over the signalling path,
+  which means every proxy on it has held the key. This keys on the *media* path: the two endpoints
+  handshake there, derive SRTP keys from the DTLS master secret, and the SDP carries only a hash of
+  the certificate that will appear. It is also the only keying a browser accepts.
+  - **The fingerprint check is mandatory and happens where the TLS stack cannot see it.** RFC 8122
+    §6.2 requires an endpoint whose peer's certificate does not match to stop; the certificate is
+    self-signed, so there is no chain to validate, and what authenticates it arrived in the
+    *signalling*. A mismatch yields an error rather than keys, and a peer that sent no fingerprint
+    is refused before the handshake runs at all.
+  - **Everything the RFC decides is compiled always** — `a=fingerprint`/`a=setup` negotiation,
+    §5.1.2's demultiplexing of DTLS from RTP and STUN on one port, §4.2's key derivation. Only the
+    handshake sits behind the new **off-by-default `dtls` feature**, which is where OpenSSL lives.
+    The default build stays pure Rust.
+  - MD5 and MD2 fingerprints are refused at the parser, which is where §5's prohibition on acting
+    on them belongs; a digest whose length disagrees with the hash it names is refused too.
+  - A session-level `a=fingerprint` is honoured as well as a media-level one — a browser sends only
+    the former, and reading just the media level declines a perfectly good offer.
+
+### Fixed
+
+- Three specs linked to `designs/host.md`, which is named `app-host.md`, and the board's epic blurb
+  carried a link relative to `docs/designs/` into `docs/stories/`. Both broke the docs build.
+
 ### Changed
 
 - **The application host is a workspace crate — `crates/sipx-app` — not a separate product.**

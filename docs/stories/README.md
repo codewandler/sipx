@@ -41,8 +41,12 @@ _None._
 
 ## Next (ready — take the top one unless the user named a story)
 
+### The application host
+_The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
+- [A-1 — Finish the host configuration and failure-semantics schema](A-1-host-configuration-schema.md) · Application · app-host phase 1 · spec work, no dependency on the app-sdk stories
+- [A-7 — The deterministic harness — fake time, scripted bindings, scripted calls](A-7-deterministic-harness.md) · Application · app-host phase 1 · built with the host, not after it · startable against contract vectors alone
+
 ### Conformance
-- [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · M6 · RFC 5764 · M-14 unblocked it
 - [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
 - [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · M8 · RFC 6665 · large; the other two packages are on it
 
@@ -61,6 +65,14 @@ _The transport layer is the only place in the signalling stack that touches the 
 _None._
 
 ## Backlog
+
+### The application host
+_The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
+- [A-2 — Implement the document-mode host over the contract interpreter](A-2-document-mode-host.md) · Application · app-host phase 1 · needs C-3, C-4, C-5 and M-17 first
+- [A-3 — The TypeScript SDK and the two reference applications](A-3-typescript-sdk.md) · Application · app-host phase 2 · the reference apps are the contract's exit-from-experimental gate
+- [A-4 — Implement the session binding and originate](A-4-session-binding-and-originate.md) · Application · app-host phase 2 · WebSocket first; the subprocess variant is this story's decision
+- [A-5 — Implement the embedded TypeScript runtime](A-5-embedded-runtime.md) · Application · app-host phase 3 · needs A-6 (the binding spec) and A-3 (the SDK it hosts)
+- [A-6 — Finish the engine-binding spec — isolation, lifecycle, budgets](A-6-engine-binding-spec.md) · Application · app-host phase 3 · spec before code, decided with measurements where the design says so
 
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
@@ -120,6 +132,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [M-12 — Mix several calls](M-12-mix-several-calls.md) · Media
 - [M-13 — Add the Opus codec](M-13-add-the-opus-codec.md) · Media
 - [M-14 — Encrypt the media](M-14-secure-media.md) · Media · track: media · RFC 3711 + 4568 · the largest gap in the stack
+- [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · M6 · RFC 5764 · M-14 unblocked it
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone

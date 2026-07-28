@@ -1,7 +1,7 @@
 # Spec: The session binding
 
 **Status:** draft — `A-4` finishes it; vectors required before any code · **Epic:** `app-host` ·
-**Design:** [host](../designs/host.md)
+**Design:** [app-host](../designs/app-host.md)
 
 > The wire is the contract's §8 (app-contract.md): envelopes and documents as JSON text frames, no
 > alternation rule, `originate`, declared backpressure, binary frames reserved. This spec

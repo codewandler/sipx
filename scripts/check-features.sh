@@ -43,6 +43,31 @@ for features in "${combinations[@]}"; do
     rm -f /tmp/sipx-features.$$
 done
 
+# `sipx-media` has its own optional layers, and the same trap: everything RFC 5764 decides is
+# compiled whatever the features say, so the crate has to build with the handshake absent as
+# well as present. A `dtls`-only path that referred to something behind `opus` would pass
+# `--all-features` and fail for everyone who wanted encrypted media without the codec.
+media_combinations=(
+    ""
+    "dtls"
+    "opus"
+    "dtls,opus"
+)
+
+for features in "${media_combinations[@]}"; do
+    label="sipx-media ${features:-<none>}"
+    printf '  %-24s ' "$label"
+    if cargo check --quiet -p sipx-media --no-default-features \
+        ${features:+--features "$features"} 2>/tmp/sipx-features.$$; then
+        echo "ok"
+    else
+        echo "FAILED"
+        cat /tmp/sipx-features.$$
+        status=1
+    fi
+    rm -f /tmp/sipx-features.$$
+done
+
 if [ "$status" -eq 0 ]; then
     echo "features: every combination builds"
 fi

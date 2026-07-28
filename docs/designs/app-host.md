@@ -5,7 +5,7 @@
 
 ## Why
 
-The [app-sdk](app-sdk.md) epic ends where a process has to exist: something must hold real
+The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real
 calls, own the sockets a contract binding needs, enforce per-app policy, and keep running when
 the customer's code does not. That process is **`crates/sipx-app`** — in this workspace, by
 decision (see Alternatives). The kernel ships the contract's *interpreter*; this crate is its
