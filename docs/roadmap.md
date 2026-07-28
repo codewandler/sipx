@@ -6,22 +6,37 @@ this document is the hand-written narrative around it.
 
 ## Status
 
-_As of 2026-07-28:_ pre-release, nothing shipped. The Cargo workspace is scaffolded with all
-ten crates compiling, the lint and licensing policy is set (`unsafe_code = "forbid"`,
-`MIT OR Apache-2.0`), and CI runs fmt, clippy, tests, MSRV, `cargo-deny` and the provenance
-gate. Work now begins at the bottom of the stack: the sans-IO SIP core.
+_As of 2026-07-28:_ **M0 and M1 are complete.** `sipx-sip` is a working sans-IO SIP core:
+URIs, headers, an incremental parser for both datagram and stream transports, message
+validation, injection-proof builders, and all four transaction state machines with matching
+and stores. 157 tests pass; clippy is clean at `-D warnings`; the whole RFC 4475 torture
+corpus is green across all four of its layers.
+
+Next is **M2**: the transport layer, which turns the sans-IO core into something that talks
+to a network.
 
 ## Delivered
 
-- Nothing yet. Milestone **M0 (workspace)** is in progress.
+- **M0 — Workspace.** Ten crates, shared lints (`unsafe_code = "forbid"`), `MIT OR
+  Apache-2.0`, CI with fmt/clippy/tests/MSRV/`cargo-deny`, and a provenance gate that fails
+  the build rather than passing unconfigured.
+- **M1 — Wire correctness.** The sans-IO SIP core:
+  - RFC 4475 corpus recovered bit-exactly from the RFC's own Appendix A archive and
+    classified by which layer must object to each message. 27 messages parse and re-serialize
+    byte for byte, 9 are rejected structurally, 7 fail in the header the RFC names, and 6 pass
+    parsing and are caught by validation — plus the converse assertion that no valid message
+    is rejected.
+  - One parser serving datagram and stream framing, asserted identical by splitting every
+    corpus message at every byte offset.
+  - Header injection made unrepresentable: no public constructor accepts unvalidated bytes,
+    and hostnames are a newtype whose interior cannot be forged.
+  - All four transaction FSMs, RFC 3261 §17 amended by RFC 6026, driven with no clock and no
+    socket.
 
 ## Next
 
 Milestones, in order. Each is independently demonstrable:
 
-- **M0 — Workspace.** Scaffold, lints, licensing, CI, backlog, first specs.
-- **M1 — Wire correctness.** `sipx-sip` round-trips every RFC 4475 valid message and rejects
-  every invalid one; transaction FSMs pass exhaustive table tests; the parser survives fuzzing.
 - **M2 — It talks.** Registers against Kamailio and Asterisk over UDP and TCP; answers
   `OPTIONS`.
 - **M3 — It calls.** INVITE with SDP offer/answer and G.711 audio both ways: play a WAV into

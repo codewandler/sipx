@@ -6,6 +6,7 @@ Cargo.lock.orig
 /fuzz/target
 /fuzz/artifacts
 /fuzz/corpus
+/fuzz/Cargo.lock
 
 # Local research and scratch material — must never be committed.
 /notes/

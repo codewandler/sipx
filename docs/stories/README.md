@@ -9,9 +9,12 @@ the stories, not the generated region. New work? Copy [`_TEMPLATE.md`](_TEMPLATE
 
 ## Status
 
-Pre-release, milestone **M0 (workspace)**. The workspace scaffold, lint/licensing policy, CI and
-provenance gate are in place and green. Next up is the sans-IO SIP core: specs first (`S-1`), then
-URIs and headers, then the parser, then the transaction state machines.
+**M0 and M1 are complete.** `sipx-sip` is a working sans-IO SIP core — parser, typed headers,
+validation, builders and all four transaction machines — with 157 tests green, clippy clean at
+`-D warnings`, and the whole RFC 4475 corpus passing across its four layers.
+
+Next is **M2**, the transport layer: `T-1` writes the spec, then UDP, TCP and RFC 3263
+resolution turn the core into something that talks to a network.
 
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `X` cross-cutting (build, CI, test infrastructure).
