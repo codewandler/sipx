@@ -8,8 +8,10 @@
 //! Packet parsing rejects rather than guesses. A decoder that reads a malformed packet
 //! optimistically plays header bytes as audio, which is heard as a loud click.
 
+pub mod dtmf;
 pub mod jitter;
 pub mod packet;
 
+pub use dtmf::{Digit, Event as DtmfEvent, Receiver as DtmfReceiver};
 pub use jitter::JitterBuffer;
 pub use packet::{HEADER_LEN, Packet, RtpError, sequence_distance, sequence_is_newer};

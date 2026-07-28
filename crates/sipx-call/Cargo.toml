@@ -24,6 +24,7 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "fs", "macros"] }
 
 [dev-dependencies]
+sipx-rtp.workspace = true
 bytes.workspace = true
 sipx-testkit.workspace = true
 tokio = { workspace = true, features = ["full"] }

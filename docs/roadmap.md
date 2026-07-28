@@ -52,10 +52,12 @@ calls that carry G.711 audio in both directions. Next is **M4**: the `sipx` comm
 
 ## Next
 
-Milestones, in order. Each is independently demonstrable:
+Milestones, in order. Each is independently demonstrable.
 
-- **M2 — It talks.** Registers against Kamailio and Asterisk over UDP and TCP; answers
-  `OPTIONS`.
+Before M4, the gaps M3 left are being closed — DTMF, re-INVITE, a DNS backend and RTCP — so
+that nothing the stack advertises is left unimplemented. They are on the board as `M-6`,
+`M-7`, `M-8` and `T-5`.
+
 - **M4 — Phone.** `sipx dial | answer | register` with file/log media, recording, DTMF and
   machine-readable output.
 - **M5 — Depth.** TLS/WS/WSS, bridging and mixing, transfer, jitter-buffer tuning, RTCP

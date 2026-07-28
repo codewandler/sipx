@@ -412,3 +412,105 @@ async fn the_contact_advertises_the_configured_address() {
         "the socket's own port must not leak into the Contact: {contact}"
     );
 }
+
+/// DTMF across a real call, negotiated rather than assumed. sipx advertises
+/// `telephone-event` in every offer it sends, so until this worked that advertisement was a
+/// promise the stack did not keep.
+#[tokio::test]
+async fn a_call_carries_dtmf_digits() {
+    let (caller, callee) = connected().await;
+
+    // Establish the media path first: symmetric RTP has to learn where the caller is.
+    caller.media().play(&clip(60).samples, 160).await;
+    let _ = callee
+        .media()
+        .record_until_idle(Duration::from_millis(300))
+        .await;
+
+    caller.send_digits("1234#", Duration::from_millis(80)).await;
+
+    let collected = callee
+        .media()
+        .collect_digits(Duration::from_millis(600))
+        .await;
+    assert_eq!(collected, "1234#");
+}
+
+/// The payload type comes from the answer, not from an assumption. 101 is what sipx offers,
+/// not what everyone uses, and sending keypresses on a number the far end put to another
+/// purpose is worse than not sending them.
+#[tokio::test]
+async fn the_dtmf_payload_type_is_taken_from_the_negotiation() {
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let (caller_endpoint, _rx) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+
+    // The callee answers with telephone-event on 96 rather than 101.
+    tokio::spawn(async move {
+        let incoming = callee_incoming.recv().await.expect("an INVITE");
+        let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+             m=audio 41234 RTP/AVP 0 96\r\n\
+             a=rtpmap:0 PCMU/8000\r\n\
+             a=rtpmap:96 telephone-event/8000\r\n\
+             a=sendrecv\r\n";
+        let response = sipx_sip::build::ResponseBuilder::to_request(
+            &incoming.request,
+            sipx_sip::StatusCode::new(200).expect("valid"),
+            "OK",
+        )
+        .expect("builds")
+        .set_header(
+            &HeaderName::To,
+            Bytes::from_static(b"<sip:callee@example.com>;tag=theirs"),
+        )
+        .expect("valid")
+        .header(
+            HeaderName::Contact,
+            Bytes::from(format!("<sip:sipx@{callee_addr}>")),
+        )
+        .expect("valid")
+        .header(
+            HeaderName::ContentType,
+            Bytes::from_static(b"application/sdp"),
+        )
+        .expect("valid")
+        .body(Bytes::from(sdp))
+        .build();
+        let _ = callee_endpoint.respond(&incoming.key, response).await;
+    });
+
+    // A raw socket standing in for the far end's media port, so the payload type is visible.
+    let far_media = tokio::net::UdpSocket::bind("127.0.0.1:41234")
+        .await
+        .expect("binds the port the answer names");
+
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let caller = dial(
+        &caller_endpoint,
+        Target::udp(callee_addr),
+        &to,
+        "<sip:caller@example.net>",
+        loopback(),
+    )
+    .await
+    .expect("connects");
+
+    caller
+        .send_digit(
+            sipx_rtp::Digit::from_char('9').expect("a digit"),
+            Duration::from_millis(80),
+        )
+        .await;
+
+    let mut datagram = vec![0u8; 2048];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), far_media.recv_from(&mut datagram))
+        .await
+        .expect("no timeout")
+        .expect("a packet");
+    let packet = sipx_rtp::Packet::decode(&Bytes::copy_from_slice(&datagram[..len]))
+        .expect("a valid RTP packet");
+    assert_eq!(
+        packet.payload_type, 96,
+        "the digit must go out on the payload type the answer named, not on 101"
+    );
+}

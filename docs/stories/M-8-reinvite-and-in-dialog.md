@@ -2,30 +2,32 @@
 id: M-8
 title: Handle re-INVITE and in-dialog requests
 pillar: Media
-status: backlog
-priority:
+status: ready
+priority: 2
 design: docs/designs/media.md
 epic: media
-areas: [sipx-rtp, sipx-media, sipx-call]
+areas: [sipx-call]
 note: gap left explicitly by M3
 ---
 
 # Handle re-INVITE and in-dialog requests
 
 ## Goal
-A call can be established and ended but not modified, and an incoming BYE is not routed to its
-dialog — so the far end hanging up is not yet noticed.
+Let an established call be modified: a re-INVITE that renegotiates media, from either side.
 
 ## Acceptance
-- [ ] To be detailed when picked up.
+- [ ] A re-INVITE inside a dialog is recognised as such rather than treated as a new call.
+- [ ] The offer/answer runs again and the media session moves to the newly negotiated
+      address, port and codec without dropping the call.
+- [ ] `a=sendonly`/`a=inactive` in a re-INVITE puts the call on hold and `a=sendrecv` takes it
+      off again.
+- [ ] A re-INVITE that cannot be answered is rejected with 488 and **the existing session
+      continues** — a failed renegotiation must not tear down a working call.
+- [ ] The `CSeq` of a re-INVITE is greater than the last one, and one arriving out of order is
+      rejected with 500 rather than applied.
+- [ ] Failing-first test: `a_reinvite_moves_the_media_without_dropping_the_call`.
 
 ## Progress
-- **In-dialog request handling is done**, brought forward by a code review: `Call::handle`
-  routes an in-dialog request to its dialog, answers a BYE and stops the media. Without it an
-  incoming BYE reached nothing and the local session kept sending RTP into a call the far end
-  had torn down.
-- Also done, from the same review: the 2xx is now retransmitted on the T1 backoff until the ACK
-  arrives. The transaction layer absorbs retransmitted *requests* but does not resend the
-  response — that is the transaction user's job, and over UDP one lost 200 meant the caller
-  gave up while this side held an established call.
-- **Still to do: re-INVITE.** A call cannot yet be modified once established.
+- **Half of this story is already done**, brought forward by a code review: `Call::handle`
+  routes in-dialog requests to their dialog, answers a BYE and stops the media, and the 2xx is
+  retransmitted until acknowledged. What remains is re-INVITE.

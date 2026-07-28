@@ -57,6 +57,32 @@ impl Call {
         &self.media
     }
 
+    /// Send a DTMF digit.
+    pub async fn send_digit(&self, digit: sipx_rtp::Digit, duration: Duration) -> bool {
+        self.media.send_digit(digit, duration).await
+    }
+
+    /// Send a string of digits, each held for `duration`.
+    ///
+    /// Characters that are not DTMF digits are skipped rather than rejected: a caller passing
+    /// a formatted number should not have to strip the spaces and dashes itself.
+    pub async fn send_digits(&self, digits: &str, duration: Duration) -> bool {
+        for c in digits.chars() {
+            let Some(digit) = sipx_rtp::Digit::from_char(c) else {
+                continue;
+            };
+            if !self.media.send_digit(digit, duration).await {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Take the next digit the far end pressed.
+    pub async fn recv_digit(&self) -> Option<sipx_rtp::Digit> {
+        self.media.recv_digit().await
+    }
+
     /// Whether the call has ended, from either side.
     #[must_use]
     pub fn is_ended(&self) -> bool {
@@ -234,10 +260,10 @@ fn establish(
 ) -> Result<(Dialog, MediaSession, Target)> {
     let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    let (remote_addr, codec) = negotiated(&answer)?;
+    let negotiated = negotiated(&answer)?;
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
-    let media = port.start(sipx_media::Config::new(remote_addr, codec));
+    let media = port.start(negotiated.media_config());
     Ok((dialog, media, target))
 }
 
@@ -251,13 +277,10 @@ pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAdd
     let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
 
-    let (remote_addr, codec) = negotiated(&offer)?;
-    let media = MediaSession::start(
-        SocketAddr::new(media_address, 0),
-        sipx_media::Config::new(remote_addr, codec),
-    )
-    .await
-    .map_err(Error::Io)?;
+    let negotiated = negotiated(&offer)?;
+    let media = MediaSession::start(SocketAddr::new(media_address, 0), negotiated.media_config())
+        .await
+        .map_err(Error::Io)?;
 
     let capabilities = Capabilities::g711(media_address, media.local_addr().port());
     let answer_sdp = sipx_sdp::answer(&offer, &capabilities);
@@ -405,8 +428,41 @@ fn offer_from(capabilities: &Capabilities) -> SessionDescription {
     sdp
 }
 
+/// What negotiation settled on.
+#[derive(Debug, Clone, Copy)]
+struct Negotiated {
+    remote: SocketAddr,
+    codec: Codec,
+    /// The payload type the far end uses for `telephone-event`, if it offered one.
+    ///
+    /// Taken from the description rather than assumed, because it is a *dynamic* type: 101 is
+    /// what sipx offers, not what everyone uses, and assuming it would send keypresses on
+    /// whatever the far end put that number to.
+    dtmf: Option<u8>,
+}
+
+impl Negotiated {
+    fn media_config(self) -> sipx_media::Config {
+        let mut config = sipx_media::Config::new(self.remote, self.codec);
+        config.dtmf_payload_type = self.dtmf;
+        config
+    }
+}
+
+/// The payload type carrying `telephone-event`, per the description's own rtpmaps.
+fn telephone_event_payload_type(audio: &sipx_sdp::MediaDescription) -> Option<u8> {
+    audio.formats.iter().find_map(|format| {
+        let mapping = audio.rtpmap(format)?;
+        let encoding = mapping.split('/').next().unwrap_or(mapping);
+        encoding
+            .eq_ignore_ascii_case("telephone-event")
+            .then(|| format.parse::<u8>().ok())
+            .flatten()
+    })
+}
+
 /// Where to send media, and in what codec, from a description.
-fn negotiated(sdp: &SessionDescription) -> Result<(SocketAddr, Codec)> {
+fn negotiated(sdp: &SessionDescription) -> Result<Negotiated> {
     let audio = sdp
         .media
         .iter()
@@ -429,7 +485,11 @@ fn negotiated(sdp: &SessionDescription) -> Result<(SocketAddr, Codec)> {
         .find_map(|format| format.parse::<u8>().ok().and_then(Codec::from_payload_type))
         .ok_or(Error::NoCommonCodec)?;
 
-    Ok((SocketAddr::new(address, audio.port), codec))
+    Ok(Negotiated {
+        remote: SocketAddr::new(address, audio.port),
+        codec,
+        dtmf: telephone_event_payload_type(audio),
+    })
 }
 
 /// The `Contact` this endpoint should advertise.

@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_audio::g711;
+use sipx_rtp::dtmf::{self, Digit, Event as DtmfEvent};
 use sipx_rtp::{JitterBuffer, Packet};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc};
@@ -80,6 +81,11 @@ pub struct Config {
     pub clock_rate: u32,
     /// How many packets the jitter buffer holds.
     pub jitter_depth: usize,
+    /// The payload type carrying `telephone-event`, if the SDP negotiated one.
+    ///
+    /// It is dynamic, so the number is whatever the answer said — assuming 101 because that
+    /// is what sipx offers would decode another endpoint's codec as keypresses.
+    pub dtmf_payload_type: Option<u8>,
 }
 
 impl Config {
@@ -92,6 +98,7 @@ impl Config {
             packet_duration: Duration::from_millis(20),
             clock_rate: 8000,
             jitter_depth: 3,
+            dtmf_payload_type: Some(dtmf::DEFAULT_PAYLOAD_TYPE),
         }
     }
 
@@ -103,12 +110,35 @@ impl Config {
     }
 }
 
+/// What the paced send queue carries.
+///
+/// Audio and DTMF share one queue because they share one clock and one sequence number space.
+/// A separate path for events would have to interleave them anyway, and would get the
+/// sequence numbering wrong the first time both were busy.
+#[derive(Debug)]
+enum Frame {
+    /// One packet's worth of samples.
+    Audio(Vec<i16>),
+    /// One telephone event, tagged with the keypress it belongs to.
+    ///
+    /// The tag is what holds a tone together. Every packet of one keypress must carry the same
+    /// RTP timestamp, including the three end retransmissions — and the send loop cannot tell
+    /// from an end packet alone whether more of them are coming. Without the tag it started a
+    /// new tone on each retransmission, and one keypress arrived as three digits.
+    Dtmf { event: DtmfEvent, tone: u64 },
+}
+
 /// A running media session.
 #[derive(Debug)]
 pub struct MediaSession {
-    outgoing: mpsc::Sender<Vec<i16>>,
+    outgoing: mpsc::Sender<Frame>,
+    digits: Mutex<mpsc::Receiver<Digit>>,
+    /// Distinguishes one keypress from the next.
+    tones: AtomicU64,
     incoming: Mutex<mpsc::Receiver<Vec<i16>>>,
     local_addr: SocketAddr,
+    samples_per_packet: usize,
+    packet_duration: Duration,
     sent: Arc<AtomicU64>,
     received: Arc<AtomicU64>,
     stop: Arc<Stop>,
@@ -191,8 +221,11 @@ impl MediaSession {
     }
 
     fn on_socket(socket: Arc<UdpSocket>, local_addr: SocketAddr, config: Config) -> Self {
-        let (outgoing_tx, outgoing_rx) = mpsc::channel::<Vec<i16>>(64);
+        let samples_per_packet = config.samples_per_packet();
+        let packet_duration = config.packet_duration;
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(64);
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
+        let (digits_tx, digits_rx) = mpsc::channel::<Digit>(32);
 
         let sent = Arc::new(AtomicU64::new(0));
         let received = Arc::new(AtomicU64::new(0));
@@ -213,6 +246,7 @@ impl MediaSession {
         tokio::spawn(receive_loop(
             socket,
             incoming_tx,
+            digits_tx,
             remote,
             config,
             Arc::clone(&received),
@@ -221,8 +255,12 @@ impl MediaSession {
 
         Self {
             outgoing: outgoing_tx,
+            digits: Mutex::new(digits_rx),
+            tones: AtomicU64::new(0),
             incoming: Mutex::new(incoming_rx),
             local_addr,
+            samples_per_packet,
+            packet_duration,
             sent,
             received,
             stop,
@@ -239,7 +277,49 @@ impl MediaSession {
     ///
     /// Queued rather than sent: the pacing timer decides when it goes out.
     pub async fn send(&self, samples: Vec<i16>) -> bool {
-        self.outgoing.send(samples).await.is_ok()
+        self.outgoing.send(Frame::Audio(samples)).await.is_ok()
+    }
+
+    /// Send a DTMF digit, held for `duration`.
+    ///
+    /// The packets go through the same paced queue as audio, so the tone occupies the slots
+    /// audio would have. That is deliberate: RFC 4733 events replace the audio for their
+    /// duration rather than being sent alongside it, and sending both means the far end hears
+    /// the keypress twice.
+    pub async fn send_digit(&self, digit: Digit, duration: Duration) -> bool {
+        let per_packet = self.samples_per_packet;
+        let packets = (duration.as_millis() / self.packet_duration.as_millis().max(1)).max(1);
+        let events = dtmf::tone(
+            digit,
+            usize::try_from(packets).unwrap_or(1),
+            u16::try_from(per_packet).unwrap_or(160),
+        );
+        let tone = self.tones.fetch_add(1, Ordering::Relaxed);
+        for event in events {
+            if self
+                .outgoing
+                .send(Frame::Dtmf { event, tone })
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Take the next DTMF digit the far end pressed.
+    pub async fn recv_digit(&self) -> Option<Digit> {
+        self.digits.lock().await.recv().await
+    }
+
+    /// Collect digits until none arrives for `idle`.
+    pub async fn collect_digits(&self, idle: Duration) -> String {
+        let mut out = String::new();
+        while let Ok(Some(digit)) = tokio::time::timeout(idle, self.recv_digit()).await {
+            out.push(digit.as_char());
+        }
+        out
     }
 
     /// Take the next packet's worth of received samples.
@@ -306,7 +386,7 @@ impl Drop for MediaSession {
 
 async fn send_loop(
     socket: Arc<UdpSocket>,
-    mut outgoing: mpsc::Receiver<Vec<i16>>,
+    mut outgoing: mpsc::Receiver<Frame>,
     remote: Arc<Mutex<SocketAddr>>,
     config: Config,
     sent: Arc<AtomicU64>,
@@ -315,6 +395,13 @@ async fn send_loop(
     let mut sequence: u16 = rand::random();
     let mut timestamp: u32 = rand::random();
     let ssrc: u32 = rand::random();
+    // The timestamp a tone in progress started at, and whether the next audio packet begins a
+    // new talkspurt (RFC 3550: the marker bit says so, and a tone interrupts the audio).
+    let mut tone_timestamp: Option<u32> = None;
+    let mut current_tone: Option<u64> = None;
+    // How much the clock owes the tone in progress, charged when it is over.
+    let mut tone_duration: u32 = 0;
+    let mut ending_a_tone = false;
 
     // One clock for the whole stream. Sending on channel readiness instead makes the packet
     // rate depend on how fast the application produces samples.
@@ -332,24 +419,76 @@ async fn send_loop(
 
         // Both awaits check the stop signal. A loop parked on its channel when the call is
         // hung up would otherwise go on sending audio into a torn-down call.
-        let samples: Vec<i16> = tokio::select! {
+        let frame = tokio::select! {
             () = stop.wait() => return,
             received = outgoing.recv() => match received {
-                Some(samples) => samples,
+                Some(frame) => frame,
                 None => return,
             },
         };
         if stop.is_stopped() {
             return;
         }
-        let payload = config.codec.encode(&samples);
-        let packet = Packet::new(
-            config.codec.payload_type(),
-            sequence,
-            timestamp,
-            ssrc,
-            Bytes::from(payload),
-        );
+
+        let (packet, advance) = match &frame {
+            Frame::Audio(samples) => {
+                // A tone that has just finished owes the clock its duration; pay it before
+                // stamping the audio that follows, or the audio overlaps the keypress.
+                timestamp = timestamp.wrapping_add(std::mem::take(&mut tone_duration));
+                current_tone = None;
+                tone_timestamp = None;
+                let mut packet = Packet::new(
+                    config.codec.payload_type(),
+                    sequence,
+                    timestamp,
+                    ssrc,
+                    Bytes::from(config.codec.encode(samples)),
+                );
+                packet.marker = ending_a_tone;
+                ending_a_tone = false;
+                // The timestamp advances by the samples this packet actually carried, not by
+                // the configured packet size. They are usually the same, and when they are not
+                // — a caller sending 10 ms frames on a 20 ms config — advancing by the
+                // configured size builds a timeline at the wrong rate, and the far end plays
+                // the call with a gap between every packet.
+                (packet, u32::try_from(samples.len()).unwrap_or(0))
+            }
+            Frame::Dtmf { event, tone } => {
+                let Some(payload_type) = config.dtmf_payload_type else {
+                    // Nothing negotiated `telephone-event`, so there is no payload type to
+                    // send it on. Dropping is right: guessing one means sending keypresses on
+                    // whatever the far end uses that number for.
+                    continue;
+                };
+
+                // A new keypress starts here; anything with the same tag continues the one in
+                // progress and reuses its timestamp. That shared timestamp is what marks the
+                // packets as one press — including the end retransmissions, which is the case
+                // that gets this wrong.
+                let starting = current_tone != Some(*tone);
+                if starting {
+                    // The previous tone's duration is charged to the clock now, so audio
+                    // resumes past it rather than on top of it.
+                    timestamp = timestamp.wrapping_add(std::mem::take(&mut tone_duration));
+                    current_tone = Some(*tone);
+                    tone_timestamp = Some(timestamp);
+                }
+
+                let mut packet = Packet::new(
+                    payload_type,
+                    sequence,
+                    tone_timestamp.unwrap_or(timestamp),
+                    ssrc,
+                    event.encode(),
+                );
+                packet.marker = starting;
+                if event.end {
+                    tone_duration = u32::from(event.duration);
+                    ending_a_tone = true;
+                }
+                (packet, 0)
+            }
+        };
 
         let destination = *remote.lock().await;
         if socket.send_to(&packet.encode(), destination).await.is_err() {
@@ -365,13 +504,14 @@ async fn send_loop(
         // timeline at the wrong rate, and the far end plays the call with a gap between every
         // packet.
         sequence = sequence.wrapping_add(1);
-        timestamp = timestamp.wrapping_add(u32::try_from(samples.len()).unwrap_or(0));
+        timestamp = timestamp.wrapping_add(advance);
     }
 }
 
 async fn receive_loop(
     socket: Arc<UdpSocket>,
     incoming: mpsc::Sender<Vec<i16>>,
+    digits: mpsc::Sender<Digit>,
     remote: Arc<Mutex<SocketAddr>>,
     config: Config,
     received: Arc<AtomicU64>,
@@ -379,6 +519,7 @@ async fn receive_loop(
 ) {
     let mut buffer = JitterBuffer::new(config.jitter_depth);
     let mut datagram = vec![0u8; 2048];
+    let mut dtmf = sipx_rtp::dtmf::Receiver::new();
     // The synchronisation source this session is carrying. RTP has no authentication, so this
     // is not a security control — anyone who can guess the port can still forge a first
     // packet. What it does buy is that once a stream is established, a *later* forged packet
@@ -410,7 +551,7 @@ async fn receive_loop(
                 // Silence. Release what is held rather than holding it against a packet that
                 // is not coming.
                 for packet in buffer.drain() {
-                    if !deliver(&incoming, &stop, &packet).await {
+                    if !deliver(&incoming, &digits, &mut dtmf, &config, &stop, &packet).await {
                         return;
                     }
                 }
@@ -452,7 +593,7 @@ async fn receive_loop(
         buffer.push(packet);
 
         while let Some(packet) = buffer.pop() {
-            if !deliver(&incoming, &stop, &packet).await {
+            if !deliver(&incoming, &digits, &mut dtmf, &config, &stop, &packet).await {
                 return;
             }
         }
@@ -462,11 +603,30 @@ async fn receive_loop(
 /// Hand one packet's audio to the application.
 ///
 /// Returns whether the loop should keep running.
-async fn deliver(incoming: &mpsc::Sender<Vec<i16>>, stop: &Stop, packet: &Packet) -> bool {
-    // An unknown payload type is dropped, not decoded as if it were the negotiated codec.
-    // sipx's own offers advertise `telephone-event` on payload type 101, so a peer that sends
-    // DTMF sends packets this loop must not treat as speech: mu-law-decoding a four-byte event
-    // payload injects four garbage samples and is heard as a click.
+async fn deliver(
+    incoming: &mpsc::Sender<Vec<i16>>,
+    digits: &mpsc::Sender<Digit>,
+    dtmf: &mut sipx_rtp::dtmf::Receiver,
+    config: &Config,
+    stop: &Stop,
+    packet: &Packet,
+) -> bool {
+    // A telephone event is a keypress, not audio. It goes to the DTMF path and never to the
+    // audio one — decoding a four-byte event payload as µ-law injects four garbage samples and
+    // is heard as a click.
+    if config.dtmf_payload_type == Some(packet.payload_type) {
+        if let Some(event) = DtmfEvent::decode(&packet.payload) {
+            if let Some(digit) = dtmf.push(packet.timestamp, &event) {
+                // A full channel means the application is not reading digits. Dropping is
+                // right: a keypress delivered late is worse than one not delivered, since the
+                // application has already moved on.
+                let _ = digits.try_send(digit);
+            }
+        }
+        return true;
+    }
+
+    // Any other unknown payload type is dropped rather than decoded as the negotiated codec.
     let Some(codec) = Codec::from_payload_type(packet.payload_type) else {
         return true;
     };
@@ -637,6 +797,124 @@ mod tests {
         let recorded = left.record_until_idle(Duration::from_millis(300)).await;
         assert_eq!(recorded.len(), 480, "three whole packets");
         assert_eq!(&recorded[400..], &[0i16; 80], "padded with silence");
+    }
+
+    /// The acceptance test for M-7: a keypress crosses a real media session and arrives once.
+    #[tokio::test]
+    async fn a_dtmf_digit_survives_a_media_session() {
+        let (left, right) = pair(Codec::Pcmu).await;
+
+        // Establish the stream so `left` knows where `right` is.
+        right.play(&tone(320), 160).await;
+        assert_eq!(
+            left.record_until_idle(Duration::from_millis(300))
+                .await
+                .len(),
+            320
+        );
+
+        right
+            .send_digit(
+                Digit::from_char('5').expect("a digit"),
+                Duration::from_millis(100),
+            )
+            .await;
+
+        let digit = tokio::time::timeout(Duration::from_secs(2), left.recv_digit())
+            .await
+            .expect("no timeout")
+            .expect("a digit arrives");
+        assert_eq!(digit.as_char(), '5');
+
+        // Exactly once, however many packets carried it.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), left.recv_digit())
+                .await
+                .is_err(),
+            "one keypress must not be reported twice"
+        );
+    }
+
+    /// A whole sequence, as an application collecting a PIN would see it.
+    #[tokio::test]
+    async fn a_sequence_of_keypresses_arrives_in_order() {
+        let (left, right) = pair(Codec::Pcmu).await;
+        right.play(&tone(160), 160).await;
+        let _ = left.record_until_idle(Duration::from_millis(200)).await;
+
+        for c in "1234".chars() {
+            right
+                .send_digit(
+                    Digit::from_char(c).expect("a digit"),
+                    Duration::from_millis(80),
+                )
+                .await;
+        }
+
+        let collected = left.collect_digits(Duration::from_millis(600)).await;
+        assert_eq!(collected, "1234");
+    }
+
+    /// DTMF must not become audio and audio must not become digits.
+    #[tokio::test]
+    async fn keypresses_and_audio_stay_on_their_own_paths() {
+        let (left, right) = pair(Codec::Pcmu).await;
+
+        right.play(&tone(320), 160).await;
+        let audio = left.record_until_idle(Duration::from_millis(300)).await;
+        assert_eq!(audio.len(), 320, "audio arrived");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), left.recv_digit())
+                .await
+                .is_err(),
+            "audio must not be reported as a keypress"
+        );
+
+        right
+            .send_digit(
+                Digit::from_char('#').expect("a digit"),
+                Duration::from_millis(80),
+            )
+            .await;
+        let digit = tokio::time::timeout(Duration::from_secs(2), left.recv_digit())
+            .await
+            .expect("no timeout")
+            .expect("a digit");
+        assert_eq!(digit.as_char(), '#');
+
+        let after = left.record_until_idle(Duration::from_millis(200)).await;
+        assert!(
+            after.is_empty(),
+            "a keypress must not become audio samples: {after:?}"
+        );
+    }
+
+    /// With nothing negotiated for `telephone-event`, a digit cannot be sent — and guessing a
+    /// payload type would put keypresses on whatever the far end uses that number for.
+    #[tokio::test]
+    async fn a_digit_is_not_sent_when_no_payload_type_was_negotiated() {
+        let listener = UdpSocket::bind(any()).await.expect("binds");
+        let mut config = Config::new(listener.local_addr().expect("addr"), Codec::Pcmu);
+        config.dtmf_payload_type = None;
+        let session = MediaSession::start(any(), config).await.expect("binds");
+
+        session
+            .send_digit(
+                Digit::from_char('7').expect("a digit"),
+                Duration::from_millis(80),
+            )
+            .await;
+
+        let mut datagram = vec![0u8; 2048];
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                listener.recv_from(&mut datagram)
+            )
+            .await
+            .is_err(),
+            "nothing should go on the wire"
+        );
     }
 
     #[test]
