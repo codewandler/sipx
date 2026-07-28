@@ -62,6 +62,15 @@ _None._
 
 ## Backlog
 
+### Application SDK
+_The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
+- [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
+- [C-4 — Serve many calls from one endpoint](C-4-serve-many-calls-from-one-endpoint.md) · Signalling · app-sdk · after C-3 · size M
+- [C-5 — The application contract crate and its sans-IO interpreter](C-5-app-contract-crate-and-interpreter.md) · Application · app-sdk · parallel to C-3/C-4/M-17/M-18 · spec is docs/specs/app-contract.md · size M
+- [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
+- [M-17 — Control playback — queue, stop, interrupt on digit](M-17-playback-control.md) · Media · app-sdk · after C-3 · gates the contract's gather · size S/M
+- [M-18 — Mute and unmute a call's outbound audio](M-18-mute-and-unmute.md) · Media · app-sdk · independent · size S
+
 ### Call framework
 _This is the layer applications actually program against, so it is the one that decides whether_
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it

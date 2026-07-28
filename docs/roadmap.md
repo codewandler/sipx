@@ -298,6 +298,18 @@ devices or generators, and results emitted in a form a test can assert on. Done 
 script can place a call, send DTMF, record the answer and verify it.
 See [design](designs/phone.md).
 
+### Application SDK — `app-sdk`
+
+What can be built on sipx **without writing Rust**. The contract layer: `sipx.app.v1`
+([spec](specs/app-contract.md)) defines call events and call-control instructions as data, and a
+sans-IO interpreter for them lands here (`C-5`) alongside the call-framework surface its effects
+need — a typed event stream (`C-3`), multi-call dispatch (`C-4`), playback control (`M-17`),
+mute (`M-18`), and the bridge reachable from a `Call` (`C-6`). The host executing webhook and
+TypeScript handlers is a downstream product pulling these stories through its upstream ledger;
+none of it is scheduled into M6–M8, whose crates this epic does not touch. Done when the spec's
+vectors pass sans-IO and an example binary runs a canned program against a real call from a
+shell. See [design](designs/app-sdk.md).
+
 ### Edge / B2BUA — `edge` _(one story, in M9)_
 
 The design's open question — whether a programmable edge belongs in this repository, or in a
