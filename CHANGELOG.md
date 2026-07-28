@@ -7,6 +7,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The event notification framework (`S-13`, RFC 6665).** sipx had exactly one subscription: the
+  implicit one a REFER creates. Now there is a notifier with a subscription store — establish,
+  refresh, unsubscribe, expire, terminate — and packages that register by name.
+  - **A terminated subscription stays terminated.** It produces no further notification and cannot
+    be refreshed back to life; a subscriber that wants another one starts a new dialog. Terminating
+    is not forgetting, either: it stays findable until swept, so a NOTIFY crossing it finds a
+    subscription that is *over* rather than one that never existed.
+  - The identity is the dialog **and** the package, because §4.4.1 allows several subscriptions in
+    one dialog when their `Event` differs — keying on the dialog alone lets the second silently
+    replace the first.
+  - An unserved package is refused `489 Bad Event` by name, rather than accepted and never
+    notified, which a subscriber cannot tell from a slow notifier.
+- **`Refer-Sub: false` (RFC 4488)** suppresses the implicit subscription — and needs *both* sides
+  to say so. §3 makes it a request and an agreement; a transferor that assumed agreement would stop
+  watching for notifications the transferee is still sending.
+
+### Changed
+
+- The implicit REFER subscription reads `Subscription-State` through the event framework instead of
+  parsing it a second time. Two parsers for one header eventually disagree about whether a transfer
+  has finished.
+
 ## [0.4.0] — 2026-07-29
 
 ### Added
