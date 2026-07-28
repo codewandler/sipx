@@ -12,6 +12,6 @@ pub mod call;
 pub mod dialog;
 pub mod error;
 
-pub use call::{Call, answer, dial};
+pub use call::{Call, DialOptions, answer, dial};
 pub use dialog::{Dialog, DialogId, Role};
 pub use error::{Error, Result};

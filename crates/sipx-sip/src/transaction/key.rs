@@ -45,11 +45,14 @@ pub enum TransactionKey {
 
 /// An ACK is matched to the INVITE it acknowledges, so the two share a key.
 ///
-/// CANCEL likewise: RFC 3261 §9.1 says a CANCEL matches the transaction of the request it
-/// cancels, which is why it carries that request's branch.
+/// **CANCEL is not.** It carries the branch of the request it cancels (RFC 3261 §9.1), which
+/// is how it names its target — but RFC 3261 §17.2.3 folds the method only for ACK, so a
+/// CANCEL runs in a transaction of its own. Folding it too makes a received CANCEL look like a
+/// retransmitted INVITE: it is absorbed, nobody is told, and the callee goes on ringing.
+/// [`TransactionKey::for_cancelled_invite`] is how the INVITE is found instead.
 fn match_method(method: &Method) -> Vec<u8> {
     match method {
-        Method::Ack | Method::Cancel => Method::Invite.as_bytes().to_vec(),
+        Method::Ack => Method::Invite.as_bytes().to_vec(),
         other => other.as_bytes().to_vec(),
     }
 }
@@ -153,6 +156,43 @@ impl TransactionKey {
                 .unwrap_or_default(),
             cseq: cseq.sequence,
             method,
+        })
+    }
+
+    /// The key of the INVITE a CANCEL refers to (RFC 3261 §9.2).
+    ///
+    /// A CANCEL shares the INVITE's branch and differs only in method, so this is that key
+    /// with the method put back. Returns `None` for anything that is not a CANCEL, since no
+    /// other request cancels one.
+    #[must_use]
+    pub fn for_cancelled_invite(request: &Request) -> Option<Self> {
+        if request.method != Method::Cancel {
+            return None;
+        }
+        let key = Self::from_request(request)?;
+        Some(match key {
+            Self::Rfc3261 {
+                branch, sent_by, ..
+            } => Self::Rfc3261 {
+                branch,
+                sent_by,
+                method: Method::Invite.as_bytes().to_vec(),
+            },
+            Self::Legacy {
+                request_uri,
+                top_via,
+                from_tag,
+                call_id,
+                cseq,
+                ..
+            } => Self::Legacy {
+                request_uri,
+                top_via,
+                from_tag,
+                call_id,
+                cseq,
+                method: Method::Invite.as_bytes().to_vec(),
+            },
         })
     }
 

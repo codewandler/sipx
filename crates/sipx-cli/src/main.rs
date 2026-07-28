@@ -153,11 +153,18 @@ impl<'a> Args<'a> {
 }
 
 /// Flags that take a separate value, so positional detection can skip past them.
+///
+/// A flag missing from this list has its *value* read as the positional argument, which turns
+/// `sipx dial --timeout 30 sip:bob@host` into an attempt to call "30". There is a test below
+/// asserting every flag the help text documents appears here, because the failure is silent
+/// and the list is easy to forget.
 const VALUED_FLAGS: &[&str] = &[
     "--password",
     "--play",
     "--record",
     "--duration",
+    "--timeout",
+    "--wait",
     "--dtmf",
     "--from",
     "--expires",
@@ -202,6 +209,62 @@ mod tests {
 
         let raw = args(&["dial", "--json", "sip:bob@example.com"]);
         assert_eq!(Args::new(&raw).positional(), Some("sip:bob@example.com"));
+    }
+
+    /// Every flag that takes a value must be listed, or its value is read as the positional
+    /// argument. The failure is silent — the command tries to call "30" — so this checks the
+    /// list against the help text of every command rather than trusting anyone to remember.
+    #[test]
+    fn every_valued_flag_in_the_help_text_is_registered() {
+        let help = format!(
+            "{}{}{}{}",
+            USAGE,
+            crate::register::HELP,
+            crate::dial::HELP,
+            crate::answer::HELP
+        );
+
+        // A documented flag takes a value if its help line shows a placeholder after it.
+        let mut documented = Vec::new();
+        for line in help.lines() {
+            let trimmed = line.trim_start();
+            let Some(rest) = trimmed.strip_prefix("--") else {
+                continue;
+            };
+            let Some((flag, tail)) = rest.split_once(char::is_whitespace) else {
+                continue;
+            };
+            if tail.trim_start().starts_with('<') {
+                documented.push(format!("--{flag}"));
+            }
+        }
+        assert!(
+            !documented.is_empty(),
+            "the help text lists no valued flags"
+        );
+
+        for flag in documented {
+            assert!(
+                VALUED_FLAGS.contains(&flag.as_str()),
+                "{flag} takes a value but is missing from VALUED_FLAGS, so its value would be \
+                 read as the positional argument"
+            );
+        }
+    }
+
+    /// The case the missing entry actually breaks.
+    #[test]
+    fn a_timeout_before_the_uri_does_not_become_the_uri() {
+        let raw = args(&["dial", "--timeout", "30", "sip:bob@192.0.2.1:5060"]);
+        assert_eq!(Args::new(&raw).positional(), Some("sip:bob@192.0.2.1:5060"));
+        assert_eq!(Args::new(&raw).value("timeout"), Some("30"));
+
+        let raw = args(&["answer", "--wait", "20", "--json"]);
+        assert_eq!(
+            Args::new(&raw).positional(),
+            None,
+            "answer takes no positional"
+        );
     }
 
     #[test]

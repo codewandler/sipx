@@ -9,7 +9,7 @@ use sipx_ua::{Config, Credentials, UserAgent};
 use crate::Args;
 use crate::output::{Exit, Format, Report, fail};
 
-const HELP: &str = "\
+pub(crate) const HELP: &str = "\
 sipx register — register with a registrar
 
 USAGE:

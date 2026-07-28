@@ -23,7 +23,12 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 fn sipx() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_sipx"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sipx"));
+    // If an assertion fires while a child is running, the future is dropped but the process is
+    // not — and a sipx that goes on retransmitting outlives the test binary. On CI that reads
+    // as a hung job on top of whatever actually failed.
+    command.kill_on_drop(true);
+    command
 }
 
 fn scratch(name: &str) -> std::path::PathBuf {
@@ -377,4 +382,53 @@ async fn a_call_that_is_never_answered_times_out_on_schedule() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("\"status\":\"timeout\""), "{stderr}");
+}
+
+/// A flag's value must never be read as the URI. `sipx dial --timeout 30 sip:bob@host` tried
+/// to call "30" until `--timeout` was registered as taking a value.
+#[tokio::test]
+async fn a_valued_flag_before_the_uri_is_not_mistaken_for_it() {
+    let output = sipx()
+        .args([
+            "dial",
+            "--timeout",
+            "1",
+            "--local",
+            "127.0.0.1:0",
+            "--json",
+            "sip:bob@192.0.2.1:5060",
+        ])
+        .output()
+        .await
+        .expect("runs");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("must name an address"),
+        "the timeout value was read as the URI: {stderr}"
+    );
+    // 192.0.2.1 is TEST-NET-1 and answers nothing, so this is a timeout rather than usage.
+    assert_eq!(output.status.code(), Some(5), "{stderr}");
+}
+
+/// A non-numeric option is a usage error, not a silent fall back to the default — which would
+/// restore exactly the behaviour the flag exists to prevent.
+#[tokio::test]
+async fn a_non_numeric_timeout_is_a_usage_error() {
+    let output = sipx()
+        .args([
+            "dial",
+            "sip:bob@192.0.2.1:5060",
+            "--timeout",
+            "3s",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("runs");
+
+    assert_eq!(output.status.code(), Some(2), "usage");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--timeout"), "{stderr}");
+    assert!(stderr.contains("whole number"), "{stderr}");
 }

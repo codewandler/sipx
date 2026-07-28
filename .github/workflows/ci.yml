@@ -47,7 +47,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-features
+      # --all-targets, so tests and dev-dependencies are covered too. Without it the declared
+      # floor is verified for the library and nothing else, and a downstream user running
+      # `cargo test` on the minimum version is the one who finds out.
+      - run: cargo check --workspace --all-targets --all-features
 
   deny:
     name: cargo-deny

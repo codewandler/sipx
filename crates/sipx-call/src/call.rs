@@ -343,14 +343,50 @@ fn bye_request(dialog: &Dialog, cseq: u32) -> Result<Request> {
     Ok(add_route_set(builder, dialog)?.build())
 }
 
+/// How a call is placed.
+#[derive(Debug, Clone)]
+pub struct DialOptions {
+    /// Our own address of record.
+    pub from: String,
+    /// Where this side receives media.
+    pub media_address: IpAddr,
+    /// How long to wait for an answer before giving up and cancelling.
+    ///
+    /// `None` waits as long as the transaction layer does — 64·T1, or 32 seconds with the
+    /// default constants. A bound *here* rather than around the call is what makes giving up
+    /// correct: dropping the future partway through leaves the far end believing it is in a
+    /// call, and only code inside the exchange can send the CANCEL that stops it.
+    pub timeout: Option<Duration>,
+}
+
+impl DialOptions {
+    /// Options for a call from an address of record.
+    #[must_use]
+    pub fn new(from: impl Into<String>, media_address: IpAddr) -> Self {
+        Self {
+            from: from.into(),
+            media_address,
+            timeout: None,
+        }
+    }
+
+    /// Give up after this long.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+}
+
 /// Place a call.
 pub async fn dial(
     endpoint: &Handle,
     target: Target,
     to: &Uri,
-    from: &str,
-    media_address: IpAddr,
+    options: &DialOptions,
 ) -> Result<Call> {
+    let media_address = options.media_address;
+    let from = options.from.as_str();
     // The offer has to name the port audio will arrive on, and only a bound socket knows it.
     // So the port is bound now and the session started once the answer says where and in what.
     let port = MediaPort::bind(SocketAddr::new(media_address, 0))
@@ -360,7 +396,19 @@ pub async fn dial(
     let capabilities = Capabilities::g711(media_address, port.local_addr().port());
     let offer = offer_from(&capabilities);
 
+    // The `Via` is built here rather than left to the transport, because a CANCEL has to carry
+    // the *same* branch as the INVITE it cancels — that identity is what matches the two at the
+    // far end (RFC 3261 §9.1). Letting the transport generate it would leave this layer unable
+    // to name the transaction it started.
+    let via = format!(
+        "SIP/2.0/{} {};rport;branch={}",
+        target.transport.as_str(),
+        endpoint.advertised(),
+        sipx_transport::new_branch()
+    );
+
     let invite = RequestBuilder::new(Method::Invite, to.clone())
+        .header(HeaderName::Via, Bytes::from(via.clone()))?
         .header(
             HeaderName::To,
             Bytes::from(format!("<{}>", String::from_utf8_lossy(&to.to_bytes()))),
@@ -381,7 +429,35 @@ pub async fn dial(
         .build();
 
     let mut responses = endpoint.send(invite.clone(), target).await?;
-    let response = responses.final_response().await.ok_or(Error::NoResponse)?;
+
+    let response = match options.timeout {
+        None => responses.final_response().await.ok_or(Error::NoResponse)?,
+        Some(limit) => match tokio::time::timeout(limit, responses.final_response()).await {
+            Ok(response) => response.ok_or(Error::NoResponse)?,
+            Err(_elapsed) => {
+                // Giving up is not just ceasing to wait. The far end is ringing and has been
+                // told nothing; without a CANCEL it goes on ringing, and someone answering
+                // afterwards ends up in a call with a party that has left.
+                let _ = send_cancel(endpoint, &invite, &via, target).await;
+
+                // CANCEL cannot close the race it exists to manage: a 200 already in flight
+                // arrives anyway, and RFC 3261 §15 says a UAC that will not proceed must
+                // acknowledge it and then hang up rather than leave it unanswered.
+                if let Ok(Some(late)) =
+                    tokio::time::timeout(Duration::from_secs(2), responses.final_response()).await
+                    && late.status.is_success()
+                    && let Some(dialog) = Dialog::from_response(&invite, &late)
+                {
+                    let in_dialog = in_dialog_target(&dialog, target);
+                    let _ = send_ack(endpoint, &dialog, in_dialog).await;
+                    if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
+                        let _ = endpoint.send(bye, in_dialog).await;
+                    }
+                }
+                return Err(Error::Cancelled(limit));
+            }
+        },
+    };
 
     if !response.status.is_success() {
         // A non-2xx is acknowledged by the transaction layer itself, so there is nothing to
@@ -541,6 +617,42 @@ async fn retransmit_until_acked(
         // Doubling capped at T2, exactly as the INVITE client transaction retransmits.
         interval = (interval * 2).min(Duration::from_secs(4));
     }
+}
+
+/// Cancel an INVITE that has not been answered (RFC 3261 §9.1).
+///
+/// A CANCEL is not a new request in its own right: it carries the INVITE's `Via` verbatim —
+/// branch and all — its `Call-ID`, `To`, `From` and sequence *number*, differing only in the
+/// method. That is what identifies which invitation it is cancelling.
+async fn send_cancel(endpoint: &Handle, invite: &Request, via: &str, target: Target) -> Result<()> {
+    let copy = |name: &HeaderName| {
+        invite
+            .headers
+            .value(name)
+            .map(|value| Bytes::from(value.into_owned()))
+    };
+
+    let mut builder = RequestBuilder::new(Method::Cancel, invite.uri.clone())
+        .header(HeaderName::Via, Bytes::from(via.to_owned()))?;
+    for name in [HeaderName::To, HeaderName::From, HeaderName::CallId] {
+        if let Some(value) = copy(&name) {
+            builder = builder.header(name, value)?;
+        }
+    }
+    // The same sequence number as the INVITE, with the method changed. A fresh number would
+    // make it a new request rather than a cancellation of that one.
+    let sequence = invite
+        .headers
+        .typed::<sipx_sip::headers::CSeq>()
+        .and_then(std::result::Result::ok)
+        .map_or(1, |cseq| cseq.sequence);
+
+    let request = builder
+        .cseq(sequence, &Method::Cancel)?
+        .max_forwards(70)
+        .build();
+    endpoint.send(request, target).await?;
+    Ok(())
 }
 
 async fn send_ack(endpoint: &Handle, dialog: &Dialog, target: Target) -> Result<()> {

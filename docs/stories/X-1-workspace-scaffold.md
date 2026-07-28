@@ -30,7 +30,9 @@ crates that compile, lints that encode the project's principles, and CI that enf
 
 ## Progress
 - Done. Workspace, `deny.toml`, `.github/workflows/ci.yml`, README, licenses all in place.
-- MSRV set to 1.85 (edition 2024). No `rust-toolchain.toml`: pinning a channel would force a
+- MSRV set to 1.85 (edition 2024), **raised to 1.88 in July 2026** by the DNS client needed to
+  clear RUSTSEC-2026-0119; the alternative was shipping a known denial of service in a parser
+  that reads untrusted network data. No `rust-toolchain.toml`: pinning a channel would force a
   toolchain download on machines using a distribution Rust.
 
 ## Notes

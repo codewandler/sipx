@@ -71,8 +71,7 @@ async fn connected() -> (Call, Call) {
         &caller_endpoint,
         Target::udp(callee_addr),
         &to,
-        "<sip:caller@example.net>",
-        loopback(),
+        &sipx_call::DialOptions::new("<sip:caller@example.net>", loopback()),
     )
     .await
     .expect("the call connects");
@@ -250,8 +249,7 @@ async fn a_refused_call_reports_the_status() {
         &caller_endpoint,
         Target::udp(busy_addr),
         &to,
-        "<sip:caller@example.net>",
-        loopback(),
+        &sipx_call::DialOptions::new("<sip:caller@example.net>", loopback()),
     )
     .await;
 
@@ -285,8 +283,7 @@ async fn a_bye_from_the_far_end_ends_the_call_locally() {
         &caller_endpoint,
         Target::udp(callee_addr),
         &to,
-        "<sip:caller@example.net>",
-        loopback(),
+        &sipx_call::DialOptions::new("<sip:caller@example.net>", loopback()),
     )
     .await
     .expect("connects");
@@ -373,8 +370,7 @@ async fn a_2xx_the_caller_cannot_use_is_still_acknowledged() {
         &caller_endpoint,
         Target::udp(answerer_addr),
         &to,
-        "<sip:caller@example.net>",
-        loopback(),
+        &sipx_call::DialOptions::new("<sip:caller@example.net>", loopback()),
     )
     .await;
 
@@ -489,8 +485,7 @@ async fn the_dtmf_payload_type_is_taken_from_the_negotiation() {
         &caller_endpoint,
         Target::udp(callee_addr),
         &to,
-        "<sip:caller@example.net>",
-        loopback(),
+        &sipx_call::DialOptions::new("<sip:caller@example.net>", loopback()),
     )
     .await
     .expect("connects");
@@ -540,8 +535,7 @@ async fn connected_with_routing() -> (
         &caller_endpoint,
         Target::udp(callee_addr),
         &to,
-        "<sip:caller@example.net>",
-        loopback(),
+        &sipx_call::DialOptions::new("<sip:caller@example.net>", loopback()),
     )
     .await
     .expect("connects");
@@ -732,4 +726,144 @@ async fn an_out_of_order_reinvite_is_rejected() {
     assert_eq!(response.status.code(), 500, "out of order, not applied");
     assert!(!caller.lock().await.is_ended());
     pump.abort();
+}
+
+/// Giving up on an unanswered call must tell the far end. Without a CANCEL the callee goes on
+/// ringing, and someone answering afterwards ends up in a call with a party that has left.
+#[tokio::test]
+async fn giving_up_cancels_the_invitation() {
+    let (ringing, mut incoming) = endpoint().await;
+    let ringing_addr = ringing.local_addr();
+
+    // A callee that rings and never answers, recording what it is sent.
+    let seen = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<sipx_sip::Method>::new()));
+    let recorder = std::sync::Arc::clone(&seen);
+    tokio::spawn(async move {
+        while let Some(request) = incoming.recv().await {
+            recorder.lock().await.push(request.request.method.clone());
+            // 180 Ringing, and nothing more.
+            if request.request.method == Method::Invite {
+                let response = sipx_sip::build::ResponseBuilder::to_request(
+                    &request.request,
+                    sipx_sip::StatusCode::new(180).expect("valid"),
+                    "Ringing",
+                )
+                .expect("builds")
+                .build();
+                let _ = ringing.respond(&request.key, response).await;
+            }
+        }
+    });
+
+    let (caller, _rx) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("ringing.example").expect("valid")));
+    let options = sipx_call::DialOptions::new("<sip:caller@example.net>", loopback())
+        .with_timeout(Duration::from_millis(400));
+
+    let result = dial(&caller, Target::udp(ringing_addr), &to, &options).await;
+    assert!(
+        matches!(result, Err(sipx_call::Error::Cancelled(_))),
+        "expected a cancellation, got {result:?}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let methods = seen.lock().await.clone();
+    assert!(
+        methods.contains(&Method::Cancel),
+        "the callee must be told to stop ringing: {methods:?}"
+    );
+}
+
+/// The CANCEL carries the INVITE's own branch. That identity is what matches the two at the far
+/// end; a fresh branch cancels nothing and the callee keeps ringing.
+#[tokio::test]
+async fn the_cancel_carries_the_invites_branch() {
+    let (ringing, mut incoming) = endpoint().await;
+    let ringing_addr = ringing.local_addr();
+
+    let branches = std::sync::Arc::new(tokio::sync::Mutex::new(
+        Vec::<(sipx_sip::Method, String)>::new(),
+    ));
+    let recorder = std::sync::Arc::clone(&branches);
+    tokio::spawn(async move {
+        while let Some(request) = incoming.recv().await {
+            let via = request
+                .request
+                .headers
+                .typed::<sipx_sip::headers::Via>()
+                .and_then(std::result::Result::ok)
+                .and_then(|via| {
+                    via.branch()
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                })
+                .unwrap_or_default();
+            recorder
+                .lock()
+                .await
+                .push((request.request.method.clone(), via));
+            if request.request.method == Method::Invite {
+                let response = sipx_sip::build::ResponseBuilder::to_request(
+                    &request.request,
+                    sipx_sip::StatusCode::new(180).expect("valid"),
+                    "Ringing",
+                )
+                .expect("builds")
+                .build();
+                let _ = ringing.respond(&request.key, response).await;
+            }
+        }
+    });
+
+    let (caller, _rx) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("ringing.example").expect("valid")));
+    let options = sipx_call::DialOptions::new("<sip:caller@example.net>", loopback())
+        .with_timeout(Duration::from_millis(400));
+    let _ = dial(&caller, Target::udp(ringing_addr), &to, &options).await;
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let seen = branches.lock().await.clone();
+
+    let invite = seen
+        .iter()
+        .find(|(method, _)| *method == Method::Invite)
+        .map(|(_, branch)| branch.clone())
+        .expect("an INVITE was sent");
+    let cancel = seen
+        .iter()
+        .find(|(method, _)| *method == Method::Cancel)
+        .map(|(_, branch)| branch.clone())
+        .expect("a CANCEL was sent");
+
+    assert!(!invite.is_empty(), "the INVITE must carry a branch");
+    assert_eq!(
+        cancel, invite,
+        "a CANCEL with a different branch cancels nothing"
+    );
+}
+
+/// Waiting is still the default: without a timeout, a call is bounded only by the transaction
+/// layer, and nothing is cancelled early.
+#[tokio::test]
+async fn without_a_timeout_the_call_is_not_cancelled() {
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+
+    let answering = tokio::spawn(async move {
+        let incoming = callee_incoming.recv().await.expect("an INVITE");
+        // Answer slowly, but well within the transaction's patience.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        answer(&callee_endpoint, &incoming, loopback())
+            .await
+            .expect("answers")
+    });
+
+    let (caller_endpoint, _rx) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("slow.example").expect("valid")));
+    let options = sipx_call::DialOptions::new("<sip:caller@example.net>", loopback());
+
+    let call = dial(&caller_endpoint, Target::udp(callee_addr), &to, &options)
+        .await
+        .expect("a slow answer is still an answer");
+    assert!(!call.is_ended());
+    let _ = answering.await;
 }

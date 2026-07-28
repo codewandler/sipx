@@ -10,7 +10,7 @@ use sipx_transport::{Config as TransportConfig, bind};
 use crate::Args;
 use crate::output::{Exit, Format, Report, fail};
 
-const HELP: &str = "\
+pub(crate) const HELP: &str = "\
 sipx answer — wait for a call and answer it
 
 USAGE:

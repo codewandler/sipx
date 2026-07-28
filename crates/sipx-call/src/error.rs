@@ -31,6 +31,11 @@ pub enum Error {
     /// A 2xx that established no dialog — no `To` tag, or no `Contact` to send to.
     #[error("the response established no dialog")]
     NoDialog,
+    /// The caller gave up before the far end answered, and cancelled the invitation.
+    ///
+    /// Distinct from a rejection: nobody refused the call, we stopped waiting for it.
+    #[error("no answer within {0:?}; the invitation was cancelled")]
+    Cancelled(std::time::Duration),
     /// Negotiation produced no usable audio stream.
     #[error("no codec in common")]
     NoCommonCodec,

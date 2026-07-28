@@ -583,18 +583,59 @@ fn legacy_branch_matching_rfc2543_fallback() {
     assert_eq!(layer.len(), (0, 1), "still exactly one server transaction");
 }
 
-/// T14: a CANCEL matches the transaction of the request it cancels, not one of its own.
+/// T14: a CANCEL names the INVITE it cancels but runs in a transaction of its own.
+///
+/// Both halves matter. It carries the INVITE's branch (RFC 3261 §9.1), which is how it says
+/// *which* invitation to stop. But RFC 3261 §17.2.3 folds the method only for ACK, so its own
+/// key differs — and folding it too would make a received CANCEL indistinguishable from a
+/// retransmitted INVITE, absorbed by the existing transaction with nobody told.
 #[test]
-fn cancel_matches_the_invite_it_cancels() {
+fn cancel_names_the_invite_but_runs_in_its_own_transaction() {
     let invite = request(&Method::Invite, "z9hG4bKc");
     let cancel = request(&Method::Cancel, "z9hG4bKc");
 
     let invite_key = TransactionKey::from_request(&invite).expect("a key");
     let cancel_key = TransactionKey::from_request(&cancel).expect("a key");
-    assert_eq!(
+    assert_ne!(
         invite_key, cancel_key,
-        "a CANCEL carries the branch of the request it cancels"
+        "a CANCEL absorbed as an INVITE retransmission stops nothing"
     );
+
+    assert_eq!(
+        TransactionKey::for_cancelled_invite(&cancel).expect("a CANCEL names an INVITE"),
+        invite_key,
+        "and it must still be able to name the invitation it cancels"
+    );
+    assert!(
+        TransactionKey::for_cancelled_invite(&invite).is_none(),
+        "only a CANCEL cancels"
+    );
+}
+
+/// A CANCEL arriving at a server creates its own transaction rather than being swallowed by
+/// the INVITE's.
+#[test]
+fn a_received_cancel_is_delivered_rather_than_absorbed() {
+    let mut layer = TransactionLayer::new(timers());
+    let invite = request(&Method::Invite, "z9hG4bKcx");
+    let cancel = request(&Method::Cancel, "z9hG4bKcx");
+
+    let created = layer.receive(Message::Request(invite), Reliability::Unreliable);
+    assert!(matches!(created, Dispatch::Created { .. }));
+
+    let dispatch = layer.receive(Message::Request(cancel), Reliability::Unreliable);
+    match dispatch {
+        Dispatch::Created { outputs, .. } => {
+            assert!(
+                tu_events(&outputs)
+                    .iter()
+                    .any(|event| matches!(event, TuEvent::Request(_))),
+                "the CANCEL must reach the transaction user"
+            );
+        }
+        other => panic!("a CANCEL must create its own transaction, got {other:?}"),
+    }
+    assert_eq!(layer.len(), (0, 2), "the INVITE's and the CANCEL's");
 }
 
 /// An ACK matches the INVITE it acknowledges — the same folding as CANCEL, for the same

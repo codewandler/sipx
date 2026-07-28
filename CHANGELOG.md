@@ -25,9 +25,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `sipx dial`, `sipx answer` and `sipx register`, with WAV playback and recording, DTMF, a
   `--json` output mode and a distinct exit code per outcome.
-- `sipx dial --timeout` bounds the attempt. Without it a call to something that never answers
-  sits for 64·T1 — 32 seconds, correct for SIP and far too long for a script that wanted
-  either an answer or an error.
+- `sipx dial --timeout` bounds the attempt, and **CANCEL** (RFC 3261 §9), which the stack had
+  never implemented. Giving up is not just ceasing to wait: without a CANCEL the callee goes
+  on ringing, and someone answering afterwards ends up in a call with a party that has left.
+  The bound lives in `sipx-call` rather than around it — dropping the call future would
+  abandon the exchange after a 200 OK but before the ACK.
 
 ### Changed
 
@@ -48,6 +50,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   word — or, for DTMF, its last digit. `MediaSession::flush` now drains the queue first.
 - The RTCP report block decoder read cumulative loss from byte 4 instead of byte 5, folding the
   loss fraction into the high byte of the count.
+- **A received CANCEL was absorbed as an INVITE retransmission.** The transaction key folded
+  CANCEL to INVITE, but RFC 3261 §17.2.3 folds the method only for ACK — so a CANCEL matched
+  the INVITE's own transaction, was swallowed as a duplicate, and nobody was told. Nothing
+  could have stopped a ringing phone.
 - The DNS client's own response cache is now disabled. Two caches with different TTL policies
   is a source of confusion rather than speed: sipx's exists to cap TTLs and to distinguish
   "no such record" from "could not ask", and neither survives a second layer underneath doing
