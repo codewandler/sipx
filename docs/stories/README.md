@@ -35,7 +35,6 @@ _None._
 
 ### Transport layer
 _The transport layer is the only place in the signalling stack that touches the network, which_
-- [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
 - [T-4 — Implement RFC 3263 target resolution](T-4-rfc3263-resolution.md) · Signalling
 
 ## Done
@@ -49,6 +48,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [S-8 — Implement the transaction layer and message matching](S-8-transaction-layer.md) · Signalling
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
+- [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core
