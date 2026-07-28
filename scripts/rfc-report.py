@@ -99,8 +99,8 @@ def check(entries) -> list[str]:
 # exactly what happened when the QUIC entries landed and four documents kept saying 61.
 COUNTED_IN = [
     "README.md",
-    "docs/introduction.md",
-    "docs/guides/does-this-fit.md",
+    "website/docs/guides/does-this-fit.md",
+    "website/docs/reference/compliance.md",
     # Not generated, and it opens by counting the gaps — so it drifts the moment an RFC is
     # added. It did, between one story and the next, which is why it is on this list.
     "docs/rfc-roadmap.md",

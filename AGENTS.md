@@ -42,7 +42,7 @@ cargo test --workspace --all-features
 ./scripts/check-provenance.sh
 scripts/check-features.sh
 ./scripts/rfc-report.py --check
-./scripts/build-docs.sh   # needs: cargo install mdbook --locked
+./scripts/build-docs.sh   # needs: node >= 20 (builds website/ and the API reference)
 ```
 
 `rfc-report.py` regenerates `docs/compliance.md` from `docs/rfc/registry.toml` and checks that

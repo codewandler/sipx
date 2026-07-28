@@ -1,8 +1,11 @@
 # sipx docs
 
-Start here to find anything inside the repository. These are the internal contributor docs:
-vision, roadmap, story status, specs, design records, and notes. Work is tracked with the
-**track** framework — see [AGENTS.md](../AGENTS.md) → **"Start here"** for the working loop.
+Start here to find anything inside the repository. These are the **internal contributor
+docs**: vision, roadmap, story status, specs, design records, and notes. The public user
+documentation lives in [`../website`](../website) and is deployed to
+[codewandler.github.io/sipx](https://codewandler.github.io/sipx/) — nothing under `docs/` is
+published there. Work is tracked with the **track** framework — see
+[AGENTS.md](../AGENTS.md) → **"Start here"** for the working loop.
 
 ## Map
 

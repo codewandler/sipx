@@ -121,13 +121,20 @@ Three things follow from it:
 
 ## Documentation
 
-**[codewandler.github.io/sipx](https://codewandler.github.io/sipx/)** is the site; the pages
-below are its source, readable here too.
+**[codewandler.github.io/sipx](https://codewandler.github.io/sipx/)** is the public site — for
+users and integrators, hand-written under [`website/`](website/). The internal contributor
+material stays in [`docs/`](docs/):
 
-- **[Does sipx fit?](docs/guides/does-this-fit.md)** — what it is for and what it is not
-- **Guides** — [place a call](docs/guides/place-a-call.md),
-  [answer one](docs/guides/answer-a-call.md), [register](docs/guides/register.md),
-  [use it as a library](docs/guides/as-a-library.md)
+- **[Does sipx fit?](https://codewandler.github.io/sipx/docs/guides/does-this-fit)** — what it
+  is for and what it is not
+- **Guides** — [getting started](https://codewandler.github.io/sipx/docs/getting-started),
+  [place a call](https://codewandler.github.io/sipx/docs/guides/place-a-call),
+  [answer one](https://codewandler.github.io/sipx/docs/guides/answer-a-call),
+  [use it as a library](https://codewandler.github.io/sipx/docs/guides/as-a-library)
+- **[The SDK preview](https://codewandler.github.io/sipx/docs/sdk/overview)** — call control
+  without Rust: where it is headed, what is real
+- **[Migrating](https://codewandler.github.io/sipx/docs/migrate/from-kamailio)** — from
+  Kamailio or Asterisk, what maps where
 - **[API reference](https://codewandler.github.io/sipx/api/)** — `cargo doc` for every crate,
   built with warnings denied so a missing doc or a dead link fails the build
 - **[RFC compliance](docs/compliance.md)** — what is supported, measured rather than asserted
@@ -136,8 +143,9 @@ below are its source, readable here too.
 - **[Specs](docs/specs/)** — an implementable contract per subsystem, written before the code
 - **[Board](docs/stories/README.md)** — what is being worked on now
 
-The site is built from `docs/` rather than from a copy of it — `./scripts/build-docs.sh` builds
-it locally and fails if a page links to something the site does not publish.
+`./scripts/build-docs.sh` builds the site locally: it compiles the example files the guides
+inline, refuses a stale inlined sample, and fails on any link that goes nowhere — on the site
+and inside `docs/`.
 
 ---
 
