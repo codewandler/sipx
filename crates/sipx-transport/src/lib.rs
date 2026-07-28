@@ -10,6 +10,8 @@
 //!
 //! See `docs/specs/sip-transport.md`.
 
+#[cfg(feature = "dns")]
+pub mod dns;
 pub mod endpoint;
 pub mod error;
 pub mod nat;

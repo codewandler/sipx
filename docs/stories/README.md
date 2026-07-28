@@ -31,10 +31,6 @@ _None._
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
 - [M-6 — Implement RTCP sender and receiver reports](M-6-rtcp-reports.md) · Media · gap left explicitly by M3
 
-### Transport layer
-_The transport layer is the only place in the signalling stack that touches the network, which_
-- [T-5 — Wire a real DNS client behind the resolver trait](T-5-dns-resolver-backend.md) · Signalling · T-4 implements every selection rule but has no DNS backend
-
 ## Blocked
 _None._
 
@@ -61,6 +57,7 @@ _None._
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
 - [T-4 — Implement RFC 3263 target resolution](T-4-rfc3263-resolution.md) · Signalling
+- [T-5 — Wire a real DNS client behind the resolver trait](T-5-dns-resolver-backend.md) · Signalling · T-4 implements every selection rule but has no DNS backend
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core

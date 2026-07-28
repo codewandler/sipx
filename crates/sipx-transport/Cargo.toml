@@ -11,8 +11,10 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["udp", "tcp"]
+default = ["udp", "tcp", "dns"]
 udp = []
+## A real DNS client behind the RFC 3263 resolver trait.
+dns = ["dep:hickory-resolver"]
 tcp = []
 ## TLS over TCP (SIPS).
 tls = ["tcp"]
@@ -27,9 +29,12 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "io-util", "macros"] }
 rand.workspace = true
+hickory-resolver = { workspace = true, optional = true }
 tokio-util.workspace = true
 
 [dev-dependencies]
+sipx-sip.workspace = true
+hickory-resolver.workspace = true
 sipx-testkit.workspace = true
 # test-util gives the paused clock the timer-queue tests need: they assert on ordering and
 # cancellation, which would otherwise mean sleeping for real.
