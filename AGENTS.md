@@ -20,6 +20,15 @@ tie-breaker when a design choice is unclear.
 4. **Spec before code.** Non-trivial subsystems get a spec in `docs/specs/` first: normative
    RFC references, types, state tables, timers, and byte-level test vectors. Tests are
    derived from the spec's vectors.
+
+   Test modules opt out of the no-panic lints — a test that cannot read its own fixtures
+   should fail loudly. Annotate the module, not the crate:
+
+   ```rust
+   #[cfg(test)]
+   #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+   mod tests { … }
+   ```
 5. **Never commit without an explicit instruction from the user.**
 
 ## The gate

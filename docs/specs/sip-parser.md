@@ -181,13 +181,20 @@ case carries an expected outcome:
 | Class | RFC section | Count | Expectation |
 |---|---|---|---|
 | `ParseOk` | §3.1.1 | 13 | parses, and re-serializes byte-identically |
-| `ParseErr` | §3.1.2 (structural) | 13 | `parse_datagram` returns the specified `ParseError` |
-| `HeaderErr` | §3.1.2 (value-level) | 6 | parses; the named header returns `HeaderError` |
-| `ParseOk` | §3.2, §3.3, §3.4 | 18 | parses; behaviour belongs to later layers |
+| `ParseErr` | §3.1.2 structural | 8 | `parse_datagram` returns the specified `ParseError` |
+| `HeaderErr` | §3.1.2 value-level | 7 | parses; the named header returns `HeaderError` |
+| `ValidateErr` | §3.1.2 semantic | 4 | parses, headers parse; `validate_*` rejects |
+| `ParseOk` | §3.2, §3.3, §3.4 | 14 | parses; behaviour belongs to later layers |
+| `ParseErr` | §3.3.9 | 1 | `mcl01`, per the repeated-`Content-Length` rule in §4.4 |
+| `ValidateErr` | §3.3.1, §3.3.8 | 2 | `insuf`, `multi01` |
 
-The split between `ParseErr` and `HeaderErr` is the point of the classification: `ncl`
-(negative `Content-Length`) is a framing failure, while `scalar02` (`CSeq` too large) is a
-message that parses and whose `CSeq` is bad. Conflating them produces a stack that either
+Totals 49; the Appendix A archive holds a fiftieth file that no section references, carried
+unclassified so the corpus stays a faithful copy of the archive.
+
+The split between these classes is the point of the classification: `ncl` (negative
+`Content-Length`) is a framing failure, `scalar02` (`CSeq` too large) is a message that frames
+and forwards perfectly well and whose `CSeq` is bad, and `insuf` is a message where every
+header is fine and the *set* of them is not. Conflating them produces a stack that either
 drops forwardable messages or accepts unframeable ones.
 
 ### 7.1 Structural test vectors

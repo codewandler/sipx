@@ -26,7 +26,6 @@ _None._
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
-- [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 
 ## Blocked
@@ -53,6 +52,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 ## Done
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
+- [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._

@@ -1,0 +1,9 @@
+# The RFC 4475 corpus is bit-exact test data. SIP is a CRLF protocol and several cases turn
+# on exact octets — a trailing space on a request line, an escaped NUL, a bare CR. Git's
+# end-of-line normalization would silently rewrite them and every parser test would then be
+# asserting against the wrong bytes. Never normalize these.
+crates/sipx-testkit/corpus/rfc4475/*.dat -text
+
+# Same reasoning for any future protocol fixture.
+*.dat -text
+*.sip -text
