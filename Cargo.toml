@@ -29,6 +29,7 @@ sipx-testkit = { path = "crates/sipx-testkit", version = "0.1.0" }
 # Core
 bytes = "1"
 thiserror = "2"
+rand = "0.9"
 tracing = "0.1"
 
 # Async runtime (never used by the sans-IO crates)

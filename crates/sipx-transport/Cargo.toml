@@ -26,11 +26,14 @@ bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "io-util", "macros"] }
+rand.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
 sipx-testkit.workspace = true
-tokio = { workspace = true, features = ["full"] }
+# test-util gives the paused clock the timer-queue tests need: they assert on ordering and
+# cancellation, which would otherwise mean sleeping for real.
+tokio = { workspace = true, features = ["full", "test-util"] }
 pretty_assertions.workspace = true
 
 [lints]

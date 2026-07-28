@@ -1,0 +1,480 @@
+//! The endpoint: one event loop driving the sans-IO core.
+//!
+//! Everything mutable lives in this loop — the transaction layer, the timer queue, the
+//! sockets. No transaction is reachable from two tasks, so there are no locks in the
+//! signalling path and no way to observe a half-applied transition. Applications talk to the
+//! loop over channels.
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use bytes::Bytes;
+use sipx_sip::transaction::{Dispatch, Output, TransactionKey, TransactionLayer, TuEvent};
+use sipx_sip::{Header, HeaderName, Limits, Message, Request, Response, Timers, parse_datagram};
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, oneshot};
+
+use crate::error::{Error, Result};
+use crate::nat::apply_received_and_rport;
+use crate::target::{Target, TransportKind, response_destination};
+use crate::timers::TimerQueue;
+
+/// How an endpoint is configured.
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Where to bind.
+    pub bind: SocketAddr,
+    /// The host to put in `Via` sent-by.
+    ///
+    /// Deliberately separate from the bind address: behind a NAT or a load balancer the two
+    /// differ, and the socket's view is the wrong one to advertise.
+    pub sent_by: String,
+    /// The port to put in `Via` sent-by.
+    ///
+    /// `None` — and `Some(0)`, which means the same thing — is filled in with the port the
+    /// socket actually got. Binding to port 0 asks the OS to choose one, and advertising the
+    /// literal zero would tell peers to send responses to port 0.
+    pub sent_by_port: Option<u16>,
+    /// Transaction timer constants.
+    pub timers: Timers,
+    /// Parser limits.
+    pub limits: Limits,
+    /// How many events may queue for the application before new transactions are refused.
+    pub capacity: usize,
+}
+
+impl Config {
+    /// A configuration bound to an address, advertising that same address.
+    ///
+    /// If the bind address names port 0, the advertised port is the one the socket is
+    /// actually given. Note that binding to an unspecified address (`0.0.0.0`) leaves nothing
+    /// sensible to advertise; set [`Config::sent_by`] explicitly in that case.
+    #[must_use]
+    pub fn new(bind: SocketAddr) -> Self {
+        Self {
+            bind,
+            sent_by: bind.ip().to_string(),
+            sent_by_port: None,
+            timers: Timers::default(),
+            limits: Limits::datagram(),
+            capacity: 1024,
+        }
+    }
+}
+
+/// A request that arrived and created a server transaction.
+#[derive(Debug)]
+pub struct Incoming {
+    /// The transaction it belongs to; respond with [`Handle::respond`].
+    pub key: TransactionKey,
+    /// The request, with `received` and `rport` already applied to its topmost `Via`.
+    pub request: Request,
+    /// Where it came from.
+    pub source: SocketAddr,
+    /// How it arrived.
+    pub transport: TransportKind,
+}
+
+/// Events from a client transaction: responses, then a terminal event.
+#[derive(Debug)]
+pub struct Responses {
+    rx: mpsc::Receiver<TuEvent>,
+}
+
+impl Responses {
+    /// The next event, or `None` once the transaction has finished.
+    pub async fn next(&mut self) -> Option<TuEvent> {
+        self.rx.recv().await
+    }
+
+    /// Wait for the first final response.
+    ///
+    /// Returns `None` if the transaction ended without one — a timeout or a transport error,
+    /// both of which arrive as events on [`Self::next`] if the caller wants to tell them
+    /// apart.
+    pub async fn final_response(&mut self) -> Option<Response> {
+        while let Some(event) = self.next().await {
+            if let TuEvent::Response(response) = event {
+                if response.status.is_final() {
+                    return Some(*response);
+                }
+            }
+        }
+        None
+    }
+}
+
+#[derive(Debug)]
+enum Command {
+    Request {
+        request: Box<Request>,
+        target: Target,
+        events: mpsc::Sender<TuEvent>,
+        reply: oneshot::Sender<Result<TransactionKey>>,
+    },
+    Respond {
+        key: TransactionKey,
+        response: Box<Response>,
+    },
+    Shutdown,
+}
+
+/// A handle to a running endpoint.
+#[derive(Debug, Clone)]
+pub struct Handle {
+    commands: mpsc::Sender<Command>,
+    local_addr: SocketAddr,
+    sent_by: Arc<String>,
+    sent_by_port: u16,
+}
+
+impl Handle {
+    /// The address the endpoint is bound to.
+    #[must_use]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Send a request, creating a client transaction.
+    ///
+    /// A `Via` is added if the request has none — the transport owns that header, since only
+    /// it knows the branch and where responses should come back to.
+    pub async fn send(&self, mut request: Request, target: Target) -> Result<Responses> {
+        if request.headers.get(&HeaderName::Via).is_none() {
+            let via = format!(
+                "SIP/2.0/{} {}:{};rport;branch={}",
+                target.transport.as_str(),
+                self.sent_by,
+                self.sent_by_port,
+                new_branch()
+            );
+            let header = Header::build(HeaderName::Via, Bytes::from(via))?;
+            request.headers.push_front(header);
+        }
+
+        let (events_tx, events_rx) = mpsc::channel(32);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(Command::Request {
+                request: Box::new(request),
+                target,
+                events: events_tx,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Error::EndpointClosed)?;
+        reply_rx.await.map_err(|_| Error::EndpointClosed)??;
+        Ok(Responses { rx: events_rx })
+    }
+
+    /// Send a response on a server transaction.
+    pub async fn respond(&self, key: &TransactionKey, response: Response) -> Result<()> {
+        self.commands
+            .send(Command::Respond {
+                key: key.clone(),
+                response: Box::new(response),
+            })
+            .await
+            .map_err(|_| Error::EndpointClosed)
+    }
+
+    /// Stop the endpoint.
+    pub async fn shutdown(&self) {
+        let _ = self.commands.send(Command::Shutdown).await;
+    }
+}
+
+/// A `branch` token: the RFC's magic cookie plus 64 bits from a cryptographic RNG.
+///
+/// The width is ours, not the RFC's. A guessable branch lets an off-path attacker inject
+/// responses into a transaction, so this is not a place for a counter.
+#[must_use]
+pub fn new_branch() -> String {
+    use rand::Rng;
+    let value: u64 = rand::rng().random();
+    format!("z9hG4bK{value:016x}")
+}
+
+/// Bind an endpoint and start its loop.
+///
+/// Returns a handle for sending, and a receiver of the requests that arrive.
+pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> {
+    let socket = UdpSocket::bind(config.bind).await?;
+    let local_addr = socket.local_addr()?;
+    // Port 0 in the configuration means the same as absent: it is a request for any port,
+    // not an advertisement of port zero.
+    let sent_by_port = match config.sent_by_port {
+        Some(port) if port != 0 => port,
+        _ => local_addr.port(),
+    };
+
+    let (commands_tx, commands_rx) = mpsc::channel(config.capacity);
+    let (incoming_tx, incoming_rx) = mpsc::channel(config.capacity);
+
+    let handle = Handle {
+        commands: commands_tx,
+        local_addr,
+        sent_by: Arc::new(config.sent_by.clone()),
+        sent_by_port,
+    };
+
+    let driver = Driver {
+        socket: Arc::new(socket),
+        layer: TransactionLayer::new(config.timers),
+        timers: TimerQueue::new(),
+        destinations: HashMap::new(),
+        clients: HashMap::new(),
+        incoming: incoming_tx,
+        commands: commands_rx,
+        limits: config.limits,
+    };
+    tokio::spawn(driver.run());
+
+    Ok((handle, incoming_rx))
+}
+
+struct Driver {
+    socket: Arc<UdpSocket>,
+    layer: TransactionLayer,
+    timers: TimerQueue,
+    destinations: HashMap<TransactionKey, Target>,
+    clients: HashMap<TransactionKey, mpsc::Sender<TuEvent>>,
+    incoming: mpsc::Sender<Incoming>,
+    commands: mpsc::Receiver<Command>,
+    limits: Limits,
+}
+
+impl Driver {
+    async fn run(mut self) {
+        let mut buf = vec![0u8; 65_536];
+        loop {
+            let deadline = self.timers.next_deadline();
+            tokio::select! {
+                received = self.socket.recv_from(&mut buf) => match received {
+                    Ok((len, source)) => {
+                        let datagram = Bytes::copy_from_slice(buf.get(..len).unwrap_or(&[]));
+                        self.on_datagram(datagram, source).await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "receive failed");
+                    }
+                },
+                () = sleep_until(deadline), if deadline.is_some() => {
+                    self.on_timers().await;
+                }
+                command = self.commands.recv() => match command {
+                    Some(Command::Shutdown) | None => return,
+                    Some(command) => self.on_command(command).await,
+                },
+            }
+        }
+    }
+
+    async fn on_datagram(&mut self, datagram: Bytes, source: SocketAddr) {
+        let message = match parse_datagram(datagram, &self.limits) {
+            Ok(message) => message,
+            Err(error) => {
+                // One malformed packet must not disturb the socket. The alternative is a
+                // trivial denial of service.
+                tracing::debug!(%error, %source, "dropping malformed datagram");
+                return;
+            }
+        };
+
+        let transport = TransportKind::Udp;
+        let message = match message {
+            Message::Request(mut request) => {
+                apply_received_and_rport(&mut request, source);
+                Message::Request(request)
+            }
+            response @ Message::Response(_) => response,
+        };
+
+        // A server transaction's responses go wherever its topmost Via says, which is why the
+        // destination is computed now, from the request as amended above.
+        let reply_to = match &message {
+            Message::Request(request) => request
+                .headers
+                .typed::<sipx_sip::headers::Via>()
+                .and_then(std::result::Result::ok)
+                .map_or_else(
+                    || Target::new(source, transport),
+                    |via| response_destination(&via, source, transport),
+                ),
+            Message::Response(_) => Target::new(source, transport),
+        };
+
+        match self.layer.receive(message, transport.reliability()) {
+            Dispatch::Created { key, outputs } => {
+                self.destinations.insert(key.clone(), reply_to);
+                self.perform(&key, outputs, Some((source, transport))).await;
+            }
+            Dispatch::Matched { key, outputs } => {
+                self.perform(&key, outputs, Some((source, transport))).await;
+            }
+            Dispatch::Unmatched(message) => {
+                tracing::debug!(%source, "message matched no transaction");
+                // An unmatched ACK belongs to the application; anything else is noise it can
+                // still choose to look at.
+                if let Message::Request(request) = *message {
+                    let Some(key) = TransactionKey::from_request(&request) else {
+                        return;
+                    };
+                    let _ = self.incoming.try_send(Incoming {
+                        key,
+                        request,
+                        source,
+                        transport,
+                    });
+                }
+            }
+        }
+    }
+
+    async fn on_timers(&mut self) {
+        let due = self.timers.take_due(tokio::time::Instant::now());
+        for fired in due {
+            let outputs = self.layer.on_timer(&fired.key, fired.timer);
+            self.perform(&fired.key, outputs, None).await;
+        }
+    }
+
+    async fn on_command(&mut self, command: Command) {
+        match command {
+            Command::Request {
+                request,
+                target,
+                events,
+                reply,
+            } => {
+                let Some((key, outputs)) = self
+                    .layer
+                    .send_request(*request, target.transport.reliability())
+                else {
+                    let _ = reply.send(Err(Error::NoVia));
+                    return;
+                };
+                self.destinations.insert(key.clone(), target);
+                self.clients.insert(key.clone(), events);
+                let _ = reply.send(Ok(key.clone()));
+                self.perform(&key, outputs, None).await;
+            }
+            Command::Respond { key, response } => {
+                let outputs = self.layer.send_response(&key, *response);
+                self.perform(&key, outputs, None).await;
+            }
+            Command::Shutdown => {}
+        }
+    }
+
+    /// Perform a transaction's outputs, in order.
+    async fn perform(
+        &mut self,
+        key: &TransactionKey,
+        outputs: Vec<Output>,
+        origin: Option<(SocketAddr, TransportKind)>,
+    ) {
+        for output in outputs {
+            match output {
+                Output::Send(message) => {
+                    let target =
+                        self.destinations.get(key).copied().or_else(|| {
+                            origin.map(|(addr, transport)| Target::new(addr, transport))
+                        });
+                    let Some(target) = target else {
+                        tracing::warn!("no destination for a message the transaction wants sent");
+                        continue;
+                    };
+                    let bytes = message.to_bytes();
+                    if let Err(error) = self.socket.send_to(&bytes, target.addr).await {
+                        tracing::warn!(%error, addr = %target.addr, "send failed");
+                        let outputs = self.layer.on_transport_error(key);
+                        Box::pin(self.perform(key, outputs, origin)).await;
+                        return;
+                    }
+                }
+                Output::SetTimer { timer, after } => self.timers.set(key.clone(), timer, after),
+                Output::ClearTimer(timer) => self.timers.clear(key, timer),
+                Output::ToTu(event) => self.deliver(key, *event, origin).await,
+                Output::Terminated(_) => {
+                    self.timers.forget(key);
+                    self.destinations.remove(key);
+                    // Dropping the sender closes the application's response stream, which is
+                    // how it learns the transaction is over.
+                    self.clients.remove(key);
+                }
+            }
+        }
+    }
+
+    async fn deliver(
+        &mut self,
+        key: &TransactionKey,
+        event: TuEvent,
+        origin: Option<(SocketAddr, TransportKind)>,
+    ) {
+        // A client transaction's events go to whoever sent the request.
+        if let Some(sender) = self.clients.get(key) {
+            let _ = sender.send(event).await;
+            return;
+        }
+
+        let (source, transport) = origin.unwrap_or((self.local_addr(), TransportKind::Udp));
+        match event {
+            TuEvent::Request(request) | TuEvent::Ack(request) => {
+                if self
+                    .incoming
+                    .try_send(Incoming {
+                        key: key.clone(),
+                        request: *request,
+                        source,
+                        transport,
+                    })
+                    .is_err()
+                {
+                    // The application is not keeping up. Blocking the loop would stop timers,
+                    // which turns a slow application into a stack that drops established
+                    // calls; dropping the event silently loses a request. 503 tells the peer
+                    // something true.
+                    tracing::warn!("application queue full; refusing the transaction");
+                    self.refuse(key).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn refuse(&mut self, key: &TransactionKey) {
+        let Some(status) = sipx_sip::StatusCode::new(503) else {
+            return;
+        };
+        let Some(request) = self.layer.server_request(key).cloned() else {
+            return;
+        };
+        let Ok(builder) =
+            sipx_sip::build::ResponseBuilder::to_request(&request, status, "Service Unavailable")
+        else {
+            return;
+        };
+        let Ok(builder) = builder.header(HeaderName::RetryAfter, Bytes::from_static(b"5")) else {
+            return;
+        };
+        let outputs = self.layer.send_response(key, builder.build());
+        Box::pin(self.perform(key, outputs, None)).await;
+    }
+
+    fn local_addr(&self) -> SocketAddr {
+        self.socket
+            .local_addr()
+            .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)))
+    }
+}
+
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        // Never resolves; the `if` guard in `select!` keeps this branch disabled anyway.
+        None => std::future::pending().await,
+    }
+}

@@ -239,7 +239,14 @@ impl ClientTransaction {
                     },
                 ]
             }
-            (ClientState::Calling | ClientState::Proceeding, Timer::B | Timer::F) => {
+            // Timer B belongs to the INVITE machine, which waits in Calling; Timer F to the
+            // non-INVITE one, which waits in Trying. Both also apply from Proceeding, where a
+            // provisional response has arrived but no final one — the far end is alive and
+            // still has to answer within 64*T1.
+            (
+                ClientState::Calling | ClientState::Trying | ClientState::Proceeding,
+                Timer::B | Timer::F,
+            ) => {
                 self.state = ClientState::Terminated;
                 vec![
                     Output::to_tu(TuEvent::Timeout),

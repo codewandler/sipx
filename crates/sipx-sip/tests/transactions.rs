@@ -306,6 +306,44 @@ fn non_invite_client_backoff_is_capped_at_t2() {
     }
 }
 
+/// Timer F must terminate the non-INVITE machine from `Trying`, which is where it waits.
+/// Handling the timeout only from `Calling` — the INVITE machine's waiting state — leaves a
+/// transaction to nowhere hanging forever.
+#[test]
+fn non_invite_client_times_out_from_trying() {
+    let (mut tx, _) = ClientTransaction::new(
+        request(&Method::Options, "z9hG4bK2"),
+        Reliability::Unreliable,
+        timers(),
+    );
+    assert_eq!(tx.state(), ClientState::Trying);
+
+    let out = tx.on_timer(Timer::F);
+    assert!(matches!(tu_events(&out).as_slice(), [TuEvent::Timeout]));
+    assert_eq!(tx.state(), ClientState::Terminated);
+}
+
+/// And from `Proceeding`, where the far end has answered provisionally and then gone quiet.
+#[test]
+fn a_client_transaction_times_out_from_proceeding_too() {
+    let req = request(&Method::Options, "z9hG4bK2");
+    let (mut tx, _) = ClientTransaction::new(req.clone(), Reliability::Unreliable, timers());
+    let _ = tx.on_response(response(&req, 100, None));
+    assert_eq!(tx.state(), ClientState::Proceeding);
+
+    let out = tx.on_timer(Timer::F);
+    assert!(matches!(tu_events(&out).as_slice(), [TuEvent::Timeout]));
+    assert_eq!(tx.state(), ClientState::Terminated);
+
+    let req = request(&Method::Invite, "z9hG4bK3");
+    let (mut tx, _) = ClientTransaction::new(req.clone(), Reliability::Unreliable, timers());
+    let _ = tx.on_response(response(&req, 180, None));
+    assert_eq!(tx.state(), ClientState::Proceeding);
+    let out = tx.on_timer(Timer::B);
+    assert!(matches!(tu_events(&out).as_slice(), [TuEvent::Timeout]));
+    assert_eq!(tx.state(), ClientState::Terminated);
+}
+
 #[test]
 fn non_invite_client_completes_on_a_final_response() {
     let req = request(&Method::Options, "z9hG4bK2");

@@ -177,6 +177,16 @@ impl TransactionLayer {
         Vec::new()
     }
 
+    /// The request that created a server transaction.
+    ///
+    /// A driver needs this to build a response on the transaction's behalf — refusing an
+    /// overloaded endpoint with 503, for instance — without the application having been given
+    /// the request in the first place.
+    #[must_use]
+    pub fn server_request(&self, key: &TransactionKey) -> Option<&Request> {
+        self.server.get(key).map(ServerTransaction::request)
+    }
+
     /// The state of a client transaction, if it exists.
     #[must_use]
     pub fn client_state(&self, key: &TransactionKey) -> Option<ClientState> {

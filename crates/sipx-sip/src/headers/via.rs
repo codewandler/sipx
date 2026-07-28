@@ -167,6 +167,32 @@ impl Via {
     }
 }
 
+/// The index just past the first `via-parm` in a header value that may carry several
+/// comma-separated hops.
+///
+/// A server has to add `received` and `rport` to the **topmost** hop and only that one, so it
+/// needs to know where the first hop ends without reserializing the rest — the other hops
+/// belong to other elements and must go back out exactly as they arrived.
+///
+/// Commas inside quoted parameter values are not separators, which is why this is not a call
+/// to `position`.
+#[must_use]
+pub fn first_hop_end(value: &[u8]) -> usize {
+    let mut i = 0usize;
+    while i < value.len() {
+        match value.get(i) {
+            Some(b'"') => match grammar::quoted_string_end(value, i) {
+                Some(end) => i = end,
+                None => return value.len(),
+            },
+            Some(b',') => return i,
+            Some(_) => i += 1,
+            None => break,
+        }
+    }
+    value.len()
+}
+
 impl TypedHeader for Via {
     const NAME: HeaderName = HeaderName::Via;
 
@@ -277,6 +303,17 @@ mod tests {
                 "{value:?} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn the_first_hop_ends_at_the_first_real_comma() {
+        let single = b"SIP/2.0/UDP a;branch=x";
+        assert_eq!(first_hop_end(single), single.len());
+        let two = b"SIP/2.0/UDP a;branch=x, SIP/2.0/UDP b;branch=y";
+        assert_eq!(&two[..first_hop_end(two)], b"SIP/2.0/UDP a;branch=x");
+        // A comma inside a quoted parameter value is not a separator.
+        let quoted = br#"SIP/2.0/UDP a;note="one, two";branch=x"#;
+        assert_eq!(first_hop_end(quoted), quoted.len());
     }
 
     #[test]
