@@ -210,6 +210,14 @@ enum Command {
         /// Fired once the driver has actually performed the send.
         sent: oneshot::Sender<Result<()>>,
     },
+    /// A keep-alive on a flow (RFC 5626 §4.4): a STUN Binding Request over UDP, a CRLFCRLF ping
+    /// over anything connection-oriented.
+    Keepalive {
+        target: Target,
+        /// Fired when the answer arrives: the reflexive address for STUN, `None` for a CRLF pong
+        /// which carries no information beyond having arrived.
+        answered: oneshot::Sender<Result<Option<SocketAddr>>>,
+    },
     /// How much state the driver is holding, for a soak test to assert on.
     Outstanding(oneshot::Sender<usize>),
     Shutdown,
@@ -438,6 +446,43 @@ impl Handle {
         delivered.await.map_err(|_| Error::EndpointClosed)?
     }
 
+    /// Keep a flow alive, and wait for the answer (RFC 5626 §4.4).
+    ///
+    /// Over UDP this is a STUN Binding Request (§4.4.2) and the answer carries the reflexive
+    /// address the far end saw — which is the reason to prefer STUN over a SIP request: §4.4.2 has
+    /// a *changed* mapped address mean the flow has failed, so the keep-alive detects a NAT
+    /// rebinding rather than only proving the socket still works. Over anything
+    /// connection-oriented it is §4.4.1's CRLFCRLF ping, and the pong carries nothing but its own
+    /// arrival, so the answer is `None`.
+    ///
+    /// `within` is how long to wait. §4.4.1 sets it at 10 seconds for the CRLF technique and
+    /// requires a UA whose pong does not arrive to "treat the flow as failed"; the number is the
+    /// caller's because it is RFC 5626 policy rather than a property of the transport.
+    ///
+    /// Sent over the same connection a request would take, which is the whole point: a ping on a
+    /// second connection proves a flow nobody is using.
+    pub async fn keepalive(
+        &self,
+        target: Target,
+        within: std::time::Duration,
+    ) -> Result<Option<SocketAddr>> {
+        let (answered_tx, answered_rx) = oneshot::channel();
+        self.commands
+            .send(Command::Keepalive {
+                target,
+                answered: answered_tx,
+            })
+            .await
+            .map_err(|_| Error::EndpointClosed)?;
+        match tokio::time::timeout(within, answered_rx).await {
+            Ok(Ok(result)) => result,
+            // The driver dropped the waiter, which happens only on shutdown.
+            Ok(Err(_)) => Err(Error::EndpointClosed),
+            // §4.4.1: no answer in time is a failed flow, not a slow one.
+            Err(_) => Err(Error::KeepaliveUnanswered),
+        }
+    }
+
     /// How many transactions and destinations the endpoint is still holding.
     ///
     /// Exposed for the soak test in `sipx-testkit`, and worth exposing: a transaction store
@@ -566,6 +611,8 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         pool: Pool::new(config.pool, config.limits, net_tx),
         limits: config.limits,
         mtu: config.mtu,
+        stun_waiters: HashMap::new(),
+        pong_waiters: HashMap::new(),
     };
     tokio::spawn(driver.run());
 
@@ -791,6 +838,16 @@ struct Driver {
     pool: Pool,
     limits: Limits,
     mtu: usize,
+    /// Keep-alives sent over UDP, waiting for the STUN response that answers them.
+    stun_waiters: HashMap<crate::stun::TransactionId, oneshot::Sender<Result<Option<SocketAddr>>>>,
+    /// Keep-alives sent over a connection, waiting for a CRLF pong.
+    ///
+    /// A queue per connection rather than one slot: nothing stops a caller pinging twice, and
+    /// pongs are indistinguishable from each other, so the only honest match is first-in-first-out.
+    pong_waiters: HashMap<
+        ConnectionKey,
+        std::collections::VecDeque<oneshot::Sender<Result<Option<SocketAddr>>>>,
+    >,
 }
 
 impl Driver {
@@ -833,6 +890,12 @@ impl Driver {
     }
 
     async fn on_datagram(&mut self, datagram: Bytes, source: SocketAddr) {
+        // RFC 5389 §7.3's test, before the SIP parser sees it: a STUN response is not a SIP
+        // message and would be dropped as malformed, taking the keep-alive with it.
+        if crate::stun::is_stun(&datagram) {
+            self.on_stun(&datagram, source);
+            return;
+        }
         match parse_datagram(datagram, &self.limits) {
             Ok(message) => self.on_message(message, source, TransportKind::Udp).await,
             Err(error) => {
@@ -841,6 +904,79 @@ impl Driver {
                 tracing::debug!(%error, %source, "dropping malformed datagram");
             }
         }
+    }
+
+    /// Send one keep-alive and remember who is waiting for the answer (RFC 5626 §4.4).
+    async fn on_keepalive(
+        &mut self,
+        target: Target,
+        answered: oneshot::Sender<Result<Option<SocketAddr>>>,
+    ) {
+        // Waiters whose caller has given up. Swept here rather than on a timer: the only thing
+        // that creates them is this method, so this is the only place the map can grow.
+        self.stun_waiters.retain(|_, waiter| !waiter.is_closed());
+        self.pong_waiters.retain(|_, queue| {
+            queue.retain(|waiter| !waiter.is_closed());
+            !queue.is_empty()
+        });
+
+        if target.transport == TransportKind::Udp {
+            // §4.4.2: STUN for UDP flows. The transaction ID is what ties the response back, and
+            // §6 of RFC 5389 wants it unguessable — a forged response naming a different mapped
+            // address would have a UA declare a working flow dead.
+            let id = crate::stun::new_transaction_id();
+            let request = Bytes::from(crate::stun::binding_request(&id));
+            match self.transmit_raw(request, &target).await {
+                Ok(()) => {
+                    self.stun_waiters.insert(id, answered);
+                }
+                Err(error) => {
+                    let _ = answered.send(Err(error));
+                }
+            }
+            return;
+        }
+
+        // §4.4.1: CRLFCRLF is the ping, and the pong is a lone CRLF the peer's parser is
+        // otherwise told to ignore.
+        let key = target.connection();
+        match self
+            .transmit_raw(Bytes::from_static(b"\r\n\r\n"), &target)
+            .await
+        {
+            Ok(()) => {
+                self.pong_waiters
+                    .entry(key)
+                    .or_default()
+                    .push_back(answered);
+            }
+            Err(error) => {
+                let _ = answered.send(Err(error));
+            }
+        }
+    }
+
+    /// Answer the waiter a STUN reply belongs to (RFC 5626 §4.4.2).
+    fn on_stun(&mut self, datagram: &[u8], source: SocketAddr) {
+        let Some(reply) = crate::stun::parse_reply(datagram) else {
+            // A Binding *Request*: something on the network is treating this socket as a STUN
+            // server. Not ours to answer, and not an error worth raising.
+            tracing::debug!(%source, "ignoring a STUN message that is not a reply");
+            return;
+        };
+        let Some(waiter) = self.stun_waiters.remove(&reply.id()) else {
+            // An unsolicited or late reply. Dropping it is right: matching it to a *different*
+            // keep-alive would report one flow's liveness as another's.
+            tracing::debug!(%source, "a STUN reply matched no keep-alive");
+            return;
+        };
+        let answer = match reply {
+            crate::stun::Reply::Bound { mapped, .. } => Ok(mapped),
+            // §4.4.2: "If a STUN Binding Error Response is received ... the UA considers the flow
+            // failed."
+            crate::stun::Reply::Failed { .. } => Err(Error::KeepaliveRefused),
+        };
+        let _ = waiter.send(answer);
     }
 
     async fn on_net_event(&mut self, event: tcp::Event) {
@@ -852,8 +988,24 @@ impl Driver {
             } => {
                 self.on_message(*message, source, transport).await;
             }
+            tcp::Event::Pong { key } => {
+                // First waiter for this connection, or nobody — a peer is entitled to send a
+                // CRLF we did not ask for, and RFC 3261 §7.5 says to ignore it.
+                if let Some(queue) = self.pong_waiters.get_mut(&key)
+                    && let Some(waiter) = queue.pop_front()
+                {
+                    let _ = waiter.send(Ok(None));
+                }
+            }
             tcp::Event::Closed { key } => {
                 self.pool.remove(&key);
+                // A flow whose connection has gone is a failed flow, and saying so now beats
+                // making the caller wait out its own timeout for something already known.
+                if let Some(queue) = self.pong_waiters.remove(&key) {
+                    for waiter in queue {
+                        let _ = waiter.send(Err(Error::ConnectionClosed));
+                    }
+                }
                 self.fail_transactions_on(&key).await;
             }
         }
@@ -1074,6 +1226,9 @@ impl Driver {
                 let result = self.transmit(bytes, target, false, None).await;
                 let _ = sent.send(result);
             }
+            Command::Keepalive { target, answered } => {
+                self.on_keepalive(target, answered).await;
+            }
             Command::Outstanding(reply) => {
                 let (clients, servers) = self.layer.len();
                 // Every per-transaction map, not just the transactions. An entry that outlives
@@ -1134,6 +1289,16 @@ impl Driver {
                 }
             }
         }
+    }
+
+    /// Put bytes on the wire that are not a SIP message.
+    ///
+    /// A keep-alive is not a request and must not be treated as one: no MTU refusal (a STUN
+    /// header is 20 bytes), no transaction, no `Via`. It reuses [`Driver::transmit`] so a flow's
+    /// ping travels over the *same connection* its requests do — which is the whole of RFC 5626
+    /// §4.4, since a ping on a second connection tests a flow nobody is using.
+    async fn transmit_raw(&mut self, bytes: Bytes, target: &Target) -> Result<()> {
+        self.transmit(bytes, target.clone(), true, None).await
     }
 
     /// Put bytes on the wire, opening a connection if the transport needs one.

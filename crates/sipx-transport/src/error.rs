@@ -33,6 +33,21 @@ pub enum Error {
     /// caller has already timed out.
     #[error("no such transaction; it was abandoned or has already ended")]
     NoTransaction,
+    /// A keep-alive was answered with a STUN Binding Error Response (RFC 5626 §4.4.2).
+    ///
+    /// §4.4.2 says the flow "is considered failed" — a *refused* keep-alive is a stronger signal
+    /// than an unanswered one, since something is there and it does not want this flow.
+    #[error("the keep-alive was refused; the flow has failed")]
+    KeepaliveRefused,
+    /// A keep-alive went unanswered (RFC 5626 §4.4.1, §4.4.2).
+    ///
+    /// §4.4.1: "If a pong is not received within 10 seconds after sending a ping ... then the
+    /// client MUST treat the flow as failed."
+    #[error("the keep-alive went unanswered; the flow has failed")]
+    KeepaliveUnanswered,
+    /// The connection a keep-alive was sent on closed before it was answered.
+    #[error("the connection closed")]
+    ConnectionClosed,
     /// A URI that resolved to no usable candidate (RFC 3263).
     #[error("no usable candidate for {}", String::from_utf8_lossy(.0))]
     Unresolvable(Vec<u8>),

@@ -150,12 +150,29 @@ evidence = ["crates/sipx-transport/src/ws.rs"]
 note = "Through `tokio-tungstenite`. sipx owns the subprotocol negotiation and the framing rules that RFC 7118 layers on top."
 
 [[rfc]]
+number = 5389
+title = "Session Traversal Utilities for NAT (STUN)"
+layer = "transport"
+status = "partial"
+roles = ["uac"]
+evidence = ["crates/sipx-transport/src/stun.rs"]
+note = "A Binding client, as much as RFC 5626 §4.4.2's keep-alive needs: a request with no attributes, and a response read for XOR-MAPPED-ADDRESS. Decoding is verified against the vectors RFC 5769 publishes, including the padded attribute that trips a decoder ignoring §15's alignment rule. No MESSAGE-INTEGRITY, no FINGERPRINT, no credentials, and no server role — ICE (RFC 8445) needs the full protocol, not more attributes on this."
+
+[[rfc]]
 number = 5626
 title = "Managing Client-Initiated Connections in SIP (Outbound)"
 layer = "transport"
-status = "none"
-evidence = []
-note = "Flow tokens, `reg-id` and redundant registrations. Needed before a registrar can route back to a NATed client reliably."
+status = "partial"
+roles = ["uac"]
+headers = ["FlowTimer"]
+evidence = [
+  "crates/sipx-ua/src/outbound.rs",
+  "crates/sipx-ua/src/flows.rs",
+  "crates/sipx-transport/src/stun.rs",
+  "crates/sipx-ua/tests/outbound.rs",
+  "crates/sipx-transport/tests/keepalive.rs",
+]
+note = "The UA side. `+sip.instance` and `reg-id` on REGISTER, `outbound` offered, `Require: outbound` on the 2xx read as acceptance (§6), `ob` on a dialog-forming Contact (§4.3), one registration per outbound proxy with each flow failing independently, §4.5's backoff, and §4.4 keep-alives — CRLF for connection-oriented flows, STUN Binding for UDP, including §4.4.2's rule that a changed reflexive address is a failed flow. Not implemented: the *registrar* side (flow tokens in Path, §5), which is what makes the mechanism useful to the network rather than to the client."
 
 [[rfc]]
 number = 3327

@@ -118,6 +118,13 @@ pub struct StreamParser {
     /// at a time does not rescan the buffer each time.
     scanned: usize,
     failed: bool,
+    /// CRLF pairs discarded between messages since the last [`StreamParser::take_keepalives`].
+    ///
+    /// RFC 3261 §7.5 says to ignore these, and the parser does. But RFC 5626 §4.4.1 gives them a
+    /// meaning — CRLFCRLF is a keep-alive ping and a lone CRLF is the pong — and a transport
+    /// waiting for a pong needs to know one arrived. Counting is the whole of it: the parser still
+    /// ignores them for framing purposes, and a caller that does not ask never learns.
+    keepalives: usize,
 }
 
 #[derive(Debug)]
@@ -145,7 +152,20 @@ impl StreamParser {
             state: State::Head,
             scanned: 0,
             failed: false,
+            keepalives: 0,
         }
+    }
+
+    /// How many CRLF pairs have been discarded between messages, resetting the count.
+    ///
+    /// RFC 5626 §4.4.1's keep-alive is framed entirely out of bytes RFC 3261 §7.5 tells a parser
+    /// to ignore: CRLFCRLF is the ping, a lone CRLF is the pong. So the parser goes on ignoring
+    /// them and counts them on the way past, and a transport that is waiting for a pong asks.
+    ///
+    /// The count is of *pairs*, not of pings: a ping is two and a pong is one, and which it was
+    /// depends on who sent it — which the parser has no way to know and no business deciding.
+    pub fn take_keepalives(&mut self) -> usize {
+        std::mem::take(&mut self.keepalives)
     }
 
     /// Bytes buffered but not yet part of a completed message.
@@ -188,6 +208,7 @@ impl StreamParser {
                     while self.buf.starts_with(b"\r\n") {
                         let _crlf = self.buf.split_to(2);
                         self.scanned = self.scanned.saturating_sub(2);
+                        self.keepalives = self.keepalives.saturating_add(1);
                     }
                     let Some(head_end) = find_header_terminator(&self.buf, self.scanned) else {
                         // Remember how far we looked. Back up three bytes so a terminator

@@ -10,9 +10,13 @@
 pub mod agent;
 pub mod auth;
 pub mod error;
+pub mod flows;
+pub mod outbound;
 pub mod registrar;
 
-pub use agent::{Config, UserAgent};
+pub use agent::{Config, Flow, UserAgent};
 pub use auth::{Algorithm, Challenge, Credentials};
 pub use error::{Error, Result};
+pub use flows::{Attempt, Flows};
+pub use outbound::{InstanceId, Keepalive, Power, RegId};
 pub use registrar::{Lease, Outcome, PathSet, Registered, Registration, ServiceRoute};

@@ -68,6 +68,17 @@ pub struct Registered {
     pub path: PathSet,
     /// The proxies this UA's own outbound requests must traverse (RFC 3608).
     pub service_route: ServiceRoute,
+    /// Whether the registrar reports having performed an *outbound* registration (RFC 5626 §6).
+    ///
+    /// §6 requires a registrar that did to say so in `Require`. Believing it happened without
+    /// being told means keeping a flow alive that nothing is routing down, and treating a binding
+    /// that is only as durable as its NAT mapping as though it were durable.
+    pub flow_accepted: bool,
+    /// The `Flow-Timer` the registrar named, if any (RFC 5626 §4.4).
+    ///
+    /// How long it will hold the flow open without traffic. When present it replaces the UA's own
+    /// choice of keep-alive interval outright.
+    pub flow_timer: Option<Duration>,
 }
 
 /// What a registration attempt produced.
@@ -101,6 +112,11 @@ pub struct Registration {
     pub call_id: String,
     /// The `CSeq`, increasing across refreshes.
     pub cseq: u32,
+    /// Whether this registration is one Outbound flow (RFC 5626), and which.
+    ///
+    /// When set, the `Contact` carries `reg-id` and `+sip.instance` and the REGISTER offers the
+    /// `outbound` option tag.
+    pub outbound: Option<crate::agent::Flow>,
 }
 
 /// The proxies a registrar recorded as being on the path back to this contact (RFC 3327).
@@ -304,12 +320,12 @@ impl Registration {
                 )?
                 .header(HeaderName::CallId, Bytes::from(self.call_id.clone()))?
                 .cseq(self.cseq, &Method::Register)?
-                .header(HeaderName::Contact, Bytes::from(self.contact.clone()))?
+                .header(HeaderName::Contact, Bytes::from(self.contact()))?
                 // RFC 3327 §5.1: a UA "SHOULD include the option tag 'path' ... in all
                 // Supported header fields". Without it §5.2 tells intermediate proxies not to
                 // add themselves, so a UA that stays quiet here is unreachable from behind the
                 // very proxies the mechanism exists to traverse.
-                .header(HeaderName::Supported, Bytes::from_static(b"path"))?
+                .header(HeaderName::Supported, Bytes::from(self.supported()))?
                 .header(
                     HeaderName::Expires,
                     Bytes::from(self.expires.as_secs().to_string()),
@@ -317,6 +333,28 @@ impl Registration {
                 .max_forwards(70)
                 .build(),
         )
+    }
+
+    /// The `Contact` to register: the configured one, plus the Outbound parameters when this
+    /// registration is a flow (RFC 5626 §4.1, §4.2).
+    #[must_use]
+    pub fn contact(&self) -> String {
+        match &self.outbound {
+            Some(flow) => crate::outbound::contact(&self.contact, &flow.instance, flow.reg_id),
+            None => self.contact.clone(),
+        }
+    }
+
+    /// The option tags this REGISTER offers.
+    ///
+    /// `path` always (RFC 3327 §5.1), and `outbound` when this is a flow — §4.2 makes that a MUST,
+    /// and without it a registrar has no way to know the request wants flow semantics.
+    #[must_use]
+    fn supported(&self) -> String {
+        match self.outbound {
+            Some(_) => format!("path, {}", crate::outbound::OPTION_TAG),
+            None => "path".to_owned(),
+        }
     }
 
     /// Advance the sequence number for the next attempt.
@@ -347,6 +385,8 @@ pub fn interpret(response: &Response, asked_for: Duration, contact: &str) -> Out
             lease: Lease::from_granted(granted),
             path: PathSet::from_response(response),
             service_route: ServiceRoute::from_response(response),
+            flow_accepted: crate::outbound::accepted(response),
+            flow_timer: crate::outbound::flow_timer(response),
         }));
     }
 
@@ -456,6 +496,7 @@ mod tests {
             expires: Duration::from_secs(3600),
             call_id: "reg-1@192.0.2.5".to_owned(),
             cseq: 1,
+            outbound: None,
         }
     }
 

@@ -12,14 +12,14 @@ compliance document usually becomes untrue.
 
 ## Where it stands
 
-**64 RFCs tracked.**
+**65 RFCs tracked.**
 
 | | Meaning | Count |
 |---|---|---|
 | ✅ implemented | Behaviour present and tested for the roles listed | 27 |
-| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 9 |
+| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 11 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 8 |
-| ⬜ not started | Tracked as a target, not started | 19 |
+| ⬜ not started | Tracked as a target, not started | 18 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
 The list is bounded on purpose: it is what sipx already touches plus what it has decided
@@ -53,8 +53,9 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | [3608](https://www.rfc-editor.org/rfc/rfc3608) | SIP Extension Header Field for Service Route Discovery During Registration | ✅ implemented | — | Parsed with route-header list semantics and order preserved (§6.1), stored against the registration and replaced on every 2xx — so a response with no Service-Route clears it, which is what §6.1 requires. Exercised as a pre-loaded Route set on outgoing initial requests via `DialOptions::with_service_route`, not attached behind the caller's back. A hop missing the `;lr` §5 requires is reported rather than dropped. |
 | [6455](https://www.rfc-editor.org/rfc/rfc6455) | The WebSocket Protocol | ✅ implemented | — | Through `tokio-tungstenite`. sipx owns the subprotocol negotiation and the framing rules that RFC 7118 layers on top. |
 | [7118](https://www.rfc-editor.org/rfc/rfc7118) | The WebSocket Protocol as a Transport for SIP | ✅ implemented | uac, uas | Subprotocol negotiation, one message per frame, and the invented sent-by. Verified against Kamailio's WebSocket module. |
+| [5389](https://www.rfc-editor.org/rfc/rfc5389) | Session Traversal Utilities for NAT (STUN) | 🟡 partial | uac | A Binding client, as much as RFC 5626 §4.4.2's keep-alive needs: a request with no attributes, and a response read for XOR-MAPPED-ADDRESS. Decoding is verified against the vectors RFC 5769 publishes, including the padded attribute that trips a decoder ignoring §15's alignment rule. No MESSAGE-INTEGRITY, no FINGERPRINT, no credentials, and no server role — ICE (RFC 8445) needs the full protocol, not more attributes on this. |
+| [5626](https://www.rfc-editor.org/rfc/rfc5626) | Managing Client-Initiated Connections in SIP (Outbound) | 🟡 partial | uac | The UA side. `+sip.instance` and `reg-id` on REGISTER, `outbound` offered, `Require: outbound` on the 2xx read as acceptance (§6), `ob` on a dialog-forming Contact (§4.3), one registration per outbound proxy with each flow failing independently, §4.5's backoff, and §4.4 keep-alives — CRLF for connection-oriented flows, STUN Binding for UDP, including §4.4.2's rule that a changed reflexive address is a failed flow. Not implemented: the *registrar* side (flow tokens in Path, §5), which is what makes the mechanism useful to the network rather than to the client. |
 | [5923](https://www.rfc-editor.org/rfc/rfc5923) | Connection Reuse in SIP | 🟡 partial | — | A response returns over the connection its request arrived on, and the pool distinguishes inbound from outbound. The `alias` parameter is not implemented. |
-| [5626](https://www.rfc-editor.org/rfc/rfc5626) | Managing Client-Initiated Connections in SIP (Outbound) | ⬜ not started | — | Flow tokens, `reg-id` and redundant registrations. Needed before a registrar can route back to a NATed client reliably. |
 | [7339](https://www.rfc-editor.org/rfc/rfc7339) | SIP Overload Control | ⬜ not started | — | sipx answers 503 when its application queue is full, which is the behaviour 7339 exists to improve on. |
 | [7415](https://www.rfc-editor.org/rfc/rfc7415) | SIP Rate Control | ⬜ not started | — | The rate-based half of overload control. Depends on 7339. |
 | [8599](https://www.rfc-editor.org/rfc/rfc8599) | Push Notification with SIP | ⬜ not started | — | How a mobile client that is not holding a connection gets woken. Depends on 5626. |

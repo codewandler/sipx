@@ -31,7 +31,7 @@ registers, transfers, bridges and conferences. It does not route other people's 
 
 Every claim above is backed by [the compliance table](../compliance.md), which is generated from
 a registry and checked in CI — a header it says sipx parses must actually be known to the
-parser, and a file it cites must exist. It marks 64 RFCs as implemented, partial, parse-only or
+parser, and a file it cites must exist. It marks 65 RFCs as implemented, partial, parse-only or
 not started, and *partial* entries say which part is missing.
 
 Three things are worth reading there before committing to sipx:

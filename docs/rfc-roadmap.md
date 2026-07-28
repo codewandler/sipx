@@ -16,7 +16,7 @@ fit.
 
 ## Where the gaps actually are
 
-64 tracked RFCs; [the table](compliance.md) has the per-status counts, and it is generated, so it
+65 tracked RFCs; [the table](compliance.md) has the per-status counts, and it is generated, so it
 is the one place worth reading them from.
 
 The interesting status is **parse-only**: `Accept-Contact`, `Identity`, `Reason` and the rest all
@@ -50,8 +50,8 @@ against what happened.
 | 3608 Service-Route | The same route set in the direction requests actually leave | `T-16` |
 | 5626 Outbound | Flow tokens, `reg-id`, redundant registrations, NAT survival | `T-15` |
 | 5764 DTLS-SRTP | Keying that does not trust the signalling path; also the WebRTC path | `M-15` |
-| 5627 GRUU | A URI that reaches one specific instance | after M6 |
-| 8599 Push | Waking a mobile client that is not holding a connection | after M6 |
+| 5627 GRUU | A URI that reaches one specific instance | **M10** (`T-20`) |
+| 8599 Push | Waking a mobile client that is not holding a connection | **M10** (`T-21`) |
 
 This is the group that turns a UA into something a real deployment can register. Strictly
 ordered: Outbound builds on `Path`, GRUU on both, push on Outbound. It is also the group that
@@ -86,35 +86,47 @@ The packages are ordered by what they report. Dialog and registration state is s
 own; presence needs somewhere for presence to come from, which is a separate question and why
 PUBLISH travels with it.
 
-### 4. Session integrity, the remaining piece
+### 4. Session integrity, the remaining piece — **M9**
 
 | RFC | What it unlocks |
 |---|---|
-| 3311 UPDATE | Renegotiating before the call is answered |
+| 3311 UPDATE | Renegotiating before the call is answered (`S-19`) |
 
 The other two in this group are done (`S-11`, `S-12`). UPDATE is what makes an early
 renegotiation possible at all, and 100rel is its prerequisite — which is now in place, so this is
 the smallest unstarted item on the list.
 
-### 5. Identity and interconnect
+It is one RFC and does not fill a milestone, so **M9** wraps it with the two non-RFC gaps of the
+same shape: early media, which `S-12` built the offer/answer for and never used (`C-2`), and two
+dialogs driven as one call (`C-1`). All three are about a session before it is confirmed, which is
+where a forwarding element's hard cases live.
+
+### 5. Identity and interconnect — **M11**
 
 | RFC | What it unlocks |
 |---|---|
-| 8224 / 8225 STIR/PASSporT | Signed caller identity |
-| 7044 History-Info | Saying who forwarded a call and why |
-| 7339 / 7415 Overload control | Something better than answering 503 |
+| 8224 / 8225 STIR/PASSporT | Signed caller identity (`S-20`) |
+| 7044 History-Info + 3326 Reason | Saying who forwarded a call and why (`S-21`) |
+| 7339 / 7415 Overload control | Something better than answering 503 (`T-22`) |
 
 8760 was the small self-contained one and is done (`S-14`). STIR is not small, and it is the one
 that matters for anything touching the public telephone network.
+
+RFC 3326 joins History-Info rather than sitting in the parse-only list on its own: RFC 7044 §10.2
+requires the `Reason` inside the `hi-targeted-to-uri`, so the two are one piece of work.
 
 ### 6. Recording and the rest
 
 | RFC | What it unlocks |
 |---|---|
 | 7865 / 7866 SIPREC | Recording as a protocol rather than a local file |
-| 5118 | The IPv6 torture corpus, as a check rather than a feature |
-| 8445 ICE | The hard NAT cases symmetric RTP does not solve |
 | 3428 MESSAGE, 6086 INFO | Methods that currently parse and do nothing |
+
+Two things have moved out of this group. **5118**, the IPv6 torture corpus, is in **M12** (`X-16`)
+with the rest of the measurement work — it is a check rather than a feature, so it belongs beside
+the interop matrix and the fuzzers rather than beside a recording protocol. **8445 ICE** is in
+**M10** (`M-16`), because listing it here was a mis-grouping: reaching the far end at all is not a
+feature, it is the same class of gap as GRUU and push, which is the group ICE now sits in.
 
 ## What is deliberately not on this list
 
@@ -123,6 +135,10 @@ implement — forking, Record-Route insertion, loop detection. That is not an ov
 user agent, and becoming a proxy is a decision about what the project is rather than a gap to
 close. The compliance table's `Roles` column says so per RFC rather than leaving a reader to
 infer it.
+
+M9's `C-1` is not an exception to that. A B2BUA is *two user agents*, which is precisely why the
+primitive belongs in a user-agent stack while forking and Record-Route insertion do not — and why
+M9 adds the coupling and nothing that would make sipx a proxy.
 
 **IMS.** A different trust model and a different header set. Tracking it would mean tracking
 documents nothing in sipx will read.

@@ -32,6 +32,15 @@ pub enum Event {
         /// arrived over TLS must not be reported as cleartext.
         transport: TransportKind,
     },
+    /// A CRLF keep-alive arrived on this connection (RFC 5626 §4.4.1).
+    ///
+    /// Reported rather than dropped because it is the *pong* half of the mechanism: a UA that sent
+    /// a CRLFCRLF ping "MUST treat the flow as failed" if no single-CRLF pong comes back within 10
+    /// seconds, which it cannot do if nothing tells it one arrived.
+    Pong {
+        /// Which connection it arrived on.
+        key: ConnectionKey,
+    },
     /// The connection is gone.
     ///
     /// Every transaction bound to it is given a transport error rather than being left to
@@ -482,6 +491,13 @@ async fn pump<S>(
                     let chunk = buf.get(..n).unwrap_or(&[]);
                     match parser.push(chunk) {
                         Ok(messages) => {
+                            // Before the messages: a pong can arrive in the same chunk as an
+                            // unrelated request, and the flow is alive either way.
+                            for _ in 0..parser.take_keepalives() {
+                                if events.send(Event::Pong { key: key.clone() }).await.is_err() {
+                                    return;
+                                }
+                            }
                             for message in messages {
                                 if events
                                     .send(Event::Message {
@@ -595,7 +611,7 @@ mod tests {
             Event::Message { message, .. } => {
                 assert_eq!(message.to_bytes().as_ref(), MESSAGE.as_bytes());
             }
-            Event::Closed { .. } => panic!("expected a message"),
+            Event::Pong { .. } | Event::Closed { .. } => panic!("expected a message"),
         }
     }
 

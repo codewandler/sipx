@@ -98,6 +98,7 @@ header_names! {
     From                => "From" | b'f';
     Identity            => "Identity" | b'y';             // RFC 4474
     IdentityInfo        => "Identity-Info" | b'n';        // RFC 4474
+    FlowTimer           => "Flow-Timer";                  // RFC 5626
     InReplyTo           => "In-Reply-To";
     MaxForwards         => "Max-Forwards";
     MimeVersion         => "MIME-Version";

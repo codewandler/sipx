@@ -9,6 +9,7 @@ use sipx_transport::{Handle, Incoming, Target};
 
 use crate::auth::Credentials;
 use crate::error::{Error, Result};
+use crate::outbound;
 use crate::registrar::{self, Lease, Outcome, Registration};
 
 /// How a user agent is configured.
@@ -28,6 +29,33 @@ pub struct Config {
     pub expires: Duration,
     /// What to put in `User-Agent`.
     pub user_agent: String,
+    /// Which flow this registration is, when Outbound is in use (RFC 5626).
+    ///
+    /// `None` registers the ordinary way: a `Contact` naming an address, and a binding that is
+    /// only as durable as the NAT mapping behind it.
+    pub outbound: Option<Flow>,
+    /// How long a keep-alive may go unanswered before the flow is failed (RFC 5626 §4.4).
+    ///
+    /// Defaults to §4.4.1's ten seconds. It is configurable because the RFC gives *two* rules and
+    /// only one of them is a duration: §4.4.1 fixes ten seconds for the CRLF pong, while §4.4.2
+    /// bounds the STUN case by 7 retransmissions of an RTO estimate instead. Ten seconds is the
+    /// conservative reading of both, and a deployment that knows its round-trip times — or a test
+    /// that does not want to wait — is entitled to a shorter one.
+    pub keepalive_timeout: Duration,
+}
+
+/// The identity of one Outbound flow: the device, and which of its flows this is (RFC 5626 §4.1,
+/// §4.2).
+///
+/// The instance ID belongs to the *device* and must outlive a reboot; the `reg-id` belongs to the
+/// flow and must be the same number every time that flow is re-established, which is what makes a
+/// new registration replace the old binding rather than add a second one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Flow {
+    /// The device identity, stable across reboots.
+    pub instance: crate::outbound::InstanceId,
+    /// Which flow of that device this registration is for.
+    pub reg_id: crate::outbound::RegId,
 }
 
 impl Config {
@@ -47,7 +75,28 @@ impl Config {
             credentials: None,
             expires: Duration::from_secs(3600),
             user_agent: concat!("sipx/", env!("CARGO_PKG_VERSION")).to_owned(),
+            outbound: None,
+            keepalive_timeout: outbound::PONG_TIMEOUT,
         }
+    }
+
+    /// Fail a flow whose keep-alive is unanswered for this long (RFC 5626 §4.4).
+    #[must_use]
+    pub fn with_keepalive_timeout(mut self, within: Duration) -> Self {
+        self.keepalive_timeout = within;
+        self
+    }
+
+    /// Register this contact as one Outbound flow (RFC 5626).
+    ///
+    /// The `Contact` gains `reg-id` and `+sip.instance`, and the REGISTER offers the `outbound`
+    /// option tag. Whether the registrar actually *did* an outbound registration is a separate
+    /// question, answered by `UserAgent::flow_accepted` after the fact — §6 has the registrar say
+    /// so in `Require`, and a UA that assumes it would keep a flow alive that nothing routes down.
+    #[must_use]
+    pub fn with_outbound(mut self, flow: Flow) -> Self {
+        self.outbound = Some(flow);
+        self
     }
 
     /// Add credentials.
@@ -71,6 +120,15 @@ pub struct UserAgent {
     path: registrar::PathSet,
     /// The proxies this UA's own outbound requests must traverse (RFC 3608).
     service_route: registrar::ServiceRoute,
+    /// Whether the registrar reported an *outbound* registration (RFC 5626 §6).
+    flow_accepted: bool,
+    /// The `Flow-Timer` the registrar named, if it named one (RFC 5626 §4.4).
+    flow_timer: Option<Duration>,
+    /// The reflexive address the last keep-alive reported (RFC 5626 §4.4.2).
+    ///
+    /// Kept because a *change* in it is a flow failure: the NAT has rebound, so the address the
+    /// registrar has for this flow no longer reaches it, even though the socket still works.
+    reflexive: Option<std::net::SocketAddr>,
 }
 
 impl UserAgent {
@@ -88,6 +146,7 @@ impl UserAgent {
             // number inside the same Call-ID is out of order, and a registrar is entitled to
             // ignore it — which looks exactly like the refresh silently not happening.
             cseq: 0,
+            outbound: config.outbound.clone(),
         };
         Self {
             endpoint,
@@ -96,6 +155,9 @@ impl UserAgent {
             nonce_use: None,
             path: registrar::PathSet::default(),
             service_route: registrar::ServiceRoute::default(),
+            flow_accepted: false,
+            flow_timer: None,
+            reflexive: None,
         }
     }
 
@@ -125,6 +187,91 @@ impl UserAgent {
     #[must_use]
     pub fn service_route(&self) -> &registrar::ServiceRoute {
         &self.service_route
+    }
+
+    /// Whether the registrar reported performing an Outbound registration (RFC 5626 §6).
+    ///
+    /// False until a registration succeeds, and false afterwards if the registrar did not put the
+    /// option tag in `Require` — which is the case for every registrar that does not implement
+    /// RFC 5626 at all. Asking for Outbound and not getting it is not an error: the binding is an
+    /// ordinary one, and the only thing that changes is that there is no flow to keep alive.
+    #[must_use]
+    pub fn flow_accepted(&self) -> bool {
+        self.flow_accepted
+    }
+
+    /// How long to wait before the next keep-alive on this flow, if it is one (RFC 5626 §4.4).
+    ///
+    /// `None` when the registrar did not perform an Outbound registration — there is no flow, so
+    /// pinging would be traffic with nothing at the far end that cares. Re-drawn on every call,
+    /// because §4.4.1 requires a fresh random interval for each ping: a fleet on a fixed period
+    /// synchronises after any shared outage and arrives back as one spike.
+    #[must_use]
+    pub fn keepalive_after(&self, power: crate::outbound::Power) -> Option<Duration> {
+        self.flow_accepted.then(|| {
+            crate::outbound::keepalive_interval(
+                self.flow_timer,
+                crate::outbound::keepalive_for(self.config.target.transport),
+                power,
+                crate::outbound::fraction(),
+            )
+        })
+    }
+
+    /// Send one keep-alive on this flow and judge the answer (RFC 5626 §4.4).
+    ///
+    /// Three ways this reports a failed flow, and §4.4 makes each of them one:
+    ///
+    /// - no answer within [`outbound::PONG_TIMEOUT`] (§4.4.1),
+    /// - a STUN Binding Error Response (§4.4.2),
+    /// - a reflexive address **different from the last one** (§4.4.2).
+    ///
+    /// The third is the one that is easy to leave out and the reason STUN is the UDP technique at
+    /// all. The socket still works; what has changed is that the NAT rebound, so the mapping the
+    /// registrar holds for this flow no longer reaches it. A keep-alive that only asked "did
+    /// anything come back" would call that flow healthy right up until a call failed to arrive.
+    ///
+    /// `Ok(())` on a flow the registrar did not accept: there is no flow, so there is nothing to
+    /// keep alive and nothing has failed.
+    pub async fn keepalive(&mut self) -> Result<()> {
+        if !self.flow_accepted {
+            return Ok(());
+        }
+        let mapped = self
+            .endpoint
+            .keepalive(self.config.target.clone(), self.config.keepalive_timeout)
+            .await?;
+        if let (Some(previous), Some(current)) = (self.reflexive, mapped)
+            && previous != current
+        {
+            self.reflexive = Some(current);
+            return Err(Error::FlowRebound { previous, current });
+        }
+        if mapped.is_some() {
+            self.reflexive = mapped;
+        }
+        Ok(())
+    }
+
+    /// The reflexive address the last keep-alive reported, if one did (RFC 5626 §4.4.2).
+    #[must_use]
+    pub fn reflexive_address(&self) -> Option<std::net::SocketAddr> {
+        self.reflexive
+    }
+
+    /// The `Contact` to put on a dialog-forming request (RFC 5626 §4.3).
+    ///
+    /// Carries `ob` when this is an accepted flow and no GRUU is in play: §4.3 makes that a MUST,
+    /// and it is what tells the far end that mid-dialog requests belong on *this flow* rather than
+    /// at the address in the URI — which, behind a NAT, is the difference between a re-INVITE
+    /// arriving and vanishing.
+    #[must_use]
+    pub fn dialog_contact(&self) -> String {
+        if self.flow_accepted {
+            crate::outbound::with_ob(&self.config.contact)
+        } else {
+            self.config.contact.clone()
+        }
     }
 
     /// Register, answering a challenge if one comes.
@@ -170,7 +317,11 @@ impl UserAgent {
                     lease,
                     path,
                     service_route,
+                    flow_accepted,
+                    flow_timer,
                 } = *registered;
+                self.flow_accepted = flow_accepted;
+                self.flow_timer = flow_timer;
                 self.path = path;
                 // Replaced on every success, never merged. RFC 3608 §6.1: the stored value is
                 // "updated according to the Service-Route header field of the latest 200 class

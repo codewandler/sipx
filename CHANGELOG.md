@@ -9,6 +9,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Outbound, the client half (`T-15`, RFC 5626).** A `Contact` naming an address behind a NAT is
+  unroutable the moment the mapping lapses. Outbound routes down a *flow* the client opened
+  instead: `+sip.instance` and `reg-id` on every REGISTER, `outbound` offered, `ob` on a
+  dialog-forming `Contact`, and one registration per outbound proxy so that a proxy going away is
+  survivable.
+  - **`Flows::register` and `Flows::keepalive` return one outcome per flow and no aggregate
+    `Result`.** Registering to several proxies exists so one failing is survivable, and a function
+    returning a single `Result` cannot help but let one failure stand for all of them. The type is
+    the guarantee.
+  - **Keep-alives, both techniques.** CRLFCRLF/CRLF for connection-oriented flows (§4.4.1) and STUN
+    Binding for UDP (§4.4.2), each over the flow it is testing — a ping on a second connection
+    proves a flow nobody is using.
+  - **A changed reflexive address is a failed flow**, even when every ping is answered (§4.4.2).
+    That is the reason STUN is the UDP technique rather than an `OPTIONS`: the socket still works,
+    but the mapping the registrar holds no longer reaches the UA, so a call routed down the flow
+    would silently never arrive.
+  - §4.5's backoff, with its asymmetric base — 30 seconds when every flow is down, 90 when one is
+    still up. A UA that is reachable already has nothing to gain by hurrying.
+- **A STUN Binding client (RFC 5389)**, scoped to what the keep-alive needs and no further.
+  Decoding is checked against the vectors RFC 5769 publishes — including the 11-byte attribute whose
+  padding a decoder must skip to find `XOR-MAPPED-ADDRESS` at all.
+- `StreamParser::take_keepalives` counts the CRLFs RFC 3261 §7.5 tells a parser to ignore. It still
+  ignores them; RFC 5626 §4.4.1 gives them a meaning, and a transport waiting for a pong has to be
+  able to tell one arrived.
+
 - **The registrar's outbound route set, obeyed — `Service-Route` (`T-16`, RFC 3608).** `Path`
   (`T-14`) fixed routing *toward* a UA. This is the other direction: a registration can dictate
   which proxies the UA's own requests must traverse, and a UA that ignores it sends every call
