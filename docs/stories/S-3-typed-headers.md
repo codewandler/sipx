@@ -19,8 +19,11 @@ sipx does not understand survive a forward byte for byte.
 ## Acceptance
 - [x] Typed: `Via` (with `branch`, `received`, `rport`, `maddr`, `ttl`), `From`, `To`,
       `Call-ID`, `CSeq`, `Contact`, `Route`, `Record-Route`, `Max-Forwards`, `Expires`,
-      `Content-Type`, `Content-Length`, `Allow`, `Supported`, `Require`, `Authorization`,
-      `WWW-Authenticate`, `Proxy-Authorization`, `Proxy-Authenticate`.
+      `Content-Type`, `Content-Length`, `Date`, `Allow`, `Supported`, `Require`,
+      `Proxy-Require`, `Unsupported`.
+- [ ] `Authorization`, `WWW-Authenticate`, `Proxy-Authorization`, `Proxy-Authenticate` —
+      **deferred to the user-agent epic** (`sip-ua`). Nothing in the core can act on a
+      challenge, and a type nobody uses is a type nobody has tested. Carried as a story there.
 - [x] Multi-value headers handle both repeated header lines and comma-separated values on one
       line (RFC 3261 §7.3.1), and know which headers may **not** be combined that way.
 - [x] Unknown headers are retained with their original bytes, order and spelling; a
