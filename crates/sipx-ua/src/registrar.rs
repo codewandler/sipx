@@ -116,7 +116,7 @@ pub struct Registration {
     ///
     /// When set, the `Contact` carries `reg-id` and `+sip.instance` and the REGISTER offers the
     /// `outbound` option tag.
-    pub outbound: Option<crate::agent::Flow>,
+    pub outbound: Option<crate::outbound::Flow>,
 }
 
 /// The proxies a registrar recorded as being on the path back to this contact (RFC 3327).

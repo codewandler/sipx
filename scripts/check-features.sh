@@ -68,6 +68,43 @@ for features in "${media_combinations[@]}"; do
     rm -f /tmp/sipx-features.$$
 done
 
+# `sipx-ua` carries the digest primitives, and a caller with no async runtime has to be able to
+# take them. Only `agent`, `flows` and `error` need one; `auth`, `challenge`, `outbound` and
+# `registrar` are hashing and header text.
+ua_combinations=(
+    ""
+    "runtime"
+)
+
+for features in "${ua_combinations[@]}"; do
+    label="sipx-ua ${features:-<none>}"
+    printf '  %-24s ' "$label"
+    if cargo check --quiet -p sipx-ua --no-default-features \
+        ${features:+--features "$features"} 2>/tmp/sipx-features.$$; then
+        echo "ok"
+    else
+        echo "FAILED"
+        cat /tmp/sipx-features.$$
+        status=1
+    fi
+    rm -f /tmp/sipx-features.$$
+done
+
+# **That it builds is not the claim.** A runtime-free `sipx-ua` that still resolved `tokio` would
+# compile perfectly and be useless for the thing the feature exists for, so the assertion is on the
+# resolved graph rather than on the exit code of a build.
+printf '  %-24s ' "sipx-ua no runtime dep"
+if cargo tree --quiet -p sipx-ua --no-default-features --edges normal --prefix none \
+    2>/dev/null | grep -qE '^(tokio|sipx-transport) '; then
+    echo "FAILED"
+    echo "    a runtime-free sipx-ua still resolves a runtime:"
+    cargo tree -p sipx-ua --no-default-features --edges normal --prefix none \
+        2>/dev/null | grep -E '^(tokio|sipx-transport) ' | sed 's/^/      /'
+    status=1
+else
+    echo "ok"
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "features: every combination builds"
 fi

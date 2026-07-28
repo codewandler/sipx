@@ -44,19 +44,7 @@ pub struct Config {
     pub keepalive_timeout: Duration,
 }
 
-/// The identity of one Outbound flow: the device, and which of its flows this is (RFC 5626 §4.1,
-/// §4.2).
-///
-/// The instance ID belongs to the *device* and must outlive a reboot; the `reg-id` belongs to the
-/// flow and must be the same number every time that flow is re-established, which is what makes a
-/// new registration replace the old binding rather than add a second one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Flow {
-    /// The device identity, stable across reboots.
-    pub instance: crate::outbound::InstanceId,
-    /// Which flow of that device this registration is for.
-    pub reg_id: crate::outbound::RegId,
-}
+pub use crate::outbound::Flow;
 
 impl Config {
     /// A configuration for an address of record.

@@ -10,9 +10,16 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["runtime"]
+# The parts that drive a socket: `agent`, `flows`, and the error type that wraps a transport
+# failure. Off by default for nobody — this is on unless a caller asks for the digest primitives
+# alone, which is the whole reason the seam exists.
+runtime = ["dep:tokio", "dep:sipx-transport"]
+
 [dependencies]
 sipx-sip.workspace = true
-sipx-transport.workspace = true
+sipx-transport = { workspace = true, optional = true }
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -23,7 +30,7 @@ sha2.workspace = true
 # `subtle` compares a digest without leaking how far a guess matched through timing.
 hmac.workspace = true
 subtle.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"], optional = true }
 
 [dev-dependencies]
 sipx-testkit.workspace = true

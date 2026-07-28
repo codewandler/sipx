@@ -41,6 +41,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     was its timing.
   - SHA-256 by default. A server is the only party that can make that choice.
 
+- **The digest primitives can be taken without a runtime (`X-20`).** `sipx-ua` depended on `tokio`
+  and `sipx-transport` unconditionally, though only `agent`, `flows` and `error` need either — so
+  the caller `S-16` was written for, a proxy or registrar whose decision logic touches no IO, could
+  not use the authenticator without linking an async runtime into its core. Its alternative was to
+  write digest a second time, and two implementations of one algorithm eventually disagree about
+  who is authenticated. A default-on `runtime` feature now carries the two dependencies;
+  `default-features = false` leaves `auth`, `challenge`, `outbound` and `registrar` with neither in
+  the resolved graph. Nothing changes for anyone who does not ask.
+  - The gate asserts on the **resolved dependency graph**, not on whether the build succeeds. A
+    runtime-free `sipx-ua` that still pulled `tokio` would compile perfectly and deliver nothing,
+    which is precisely the outcome a build check calls success.
+  - `outbound::Flow` moved there from `agent`, where it had been sitting for no reason but history:
+    it is a pair of the two identifiers `outbound` defines and needs no runtime to be one. `agent`
+    re-exports it, so `agent::Flow` still resolves.
+
 - **`Headers` can be edited, not only read (`S-15`).** `remove_first`, `insert` and `retain` — the
   three operations rewriting a message in flight needs. `Via`, `Route`, `Record-Route` and `Path`
   order *is* the routing, so these are exact positions rather than set operations.

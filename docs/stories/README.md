@@ -47,12 +47,7 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 - [A-7 — The deterministic harness — fake time, scripted bindings, scripted calls](A-7-deterministic-harness.md) · Application · app-host phase 1 · built with the host, not after it · startable against contract vectors alone
 
 ### Conformance
-- [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
 - [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · M8 · RFC 6665 · large; the other two packages are on it
-
-### Transport layer
-_The transport layer is the only place in the signalling stack that touches the network, which_
-- [T-17 — Resolve at proxy throughput — async and shared-cache](T-17-resolution-at-proxy-throughput.md) · Signalling · M7 · the Resolver trait is shaped for one UA, not for a forwarding element
 
 ## Blocked
 _None._
@@ -158,6 +153,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · track: reachability · RFC 3327 · gates T-15 and GRUU
 - [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · M6 · RFC 5626 · T-14 unblocked it
 - [T-16 — Implement the Service-Route header](T-16-service-route-header.md) · Signalling · M6 · RFC 3608 · the outbound twin of T-14's Path
+- [T-17 — Resolve at proxy throughput — async and shared-cache](T-17-resolution-at-proxy-throughput.md) · Signalling · M7 · the Resolver trait is shaped for one UA, not for a forwarding element
 - [T-18 — Surface unmatched responses to the application](T-18-surface-unmatched-responses.md) · Signalling · M7 · the endpoint drops what a forwarding element is required to forward
 - [T-19 — Stop dropping incoming requests silently](T-19-stop-dropping-incoming-requests-silently.md) · Signalling · M7 · a full channel loses requests with no counter and no log
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
@@ -171,6 +167,8 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [X-11 — Publish a documentation site](X-11-publish-a-documentation-site.md) · Build · seeds the docs-site epic
 - [X-12 — Write the user-facing guides](X-12-write-the-user-facing-guides.md) · Build · track: docs · nothing else touches docs/
 - [X-13 — Publish the API documentation](X-13-publish-the-api-documentation.md) · Build · track: docs · after X-12 in the same crate-free track
+- [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
+- [X-20 — Let a caller take the digest primitives without taking a runtime](X-20-digest-without-a-runtime.md) · Build · sipx-ua pulls tokio unconditionally, so sans-IO code cannot use S-16's Authenticator
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

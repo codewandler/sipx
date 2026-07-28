@@ -240,7 +240,25 @@ pub enum Power {
     Constrained,
 }
 
+/// The identity of one Outbound flow: the device, and which of its flows this is (RFC 5626 §4.1,
+/// §4.2).
+///
+/// The instance ID belongs to the *device* and must outlive a reboot; the `reg-id` belongs to the
+/// flow and must be the same number every time that flow is re-established, which is what makes a
+/// new registration replace the old binding rather than add a second one.
+///
+/// Lives here rather than in `agent` because it is a pair of the two identifiers this module
+/// defines and needs no runtime to be one — `agent` re-exports it, so it is `agent::Flow` as well.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Flow {
+    /// The device identity, stable across reboots.
+    pub instance: InstanceId,
+    /// Which flow of that device this registration is for.
+    pub reg_id: RegId,
+}
+
 /// Pick the keep-alive technique §4.4 mandates for a transport.
+#[cfg(feature = "runtime")]
 #[must_use]
 pub fn keepalive_for(transport: sipx_transport::TransportKind) -> Keepalive {
     match transport {
@@ -524,6 +542,7 @@ mod tests {
         assert_eq!(interval(Keepalive::Stun, Power::Unconstrained, 9.0), 29);
     }
 
+    #[cfg(feature = "runtime")]
     #[test]
     fn udp_is_kept_alive_with_stun_and_everything_else_with_crlf() {
         use sipx_transport::TransportKind;
