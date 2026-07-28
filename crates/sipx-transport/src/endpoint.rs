@@ -95,12 +95,27 @@ pub struct Incoming {
 #[derive(Debug)]
 pub struct Responses {
     rx: mpsc::Receiver<TuEvent>,
+    peeked: Option<TuEvent>,
 }
 
 impl Responses {
     /// The next event, or `None` once the transaction has finished.
     pub async fn next(&mut self) -> Option<TuEvent> {
+        if let Some(event) = self.peeked.take() {
+            return Some(event);
+        }
         self.rx.recv().await
+    }
+
+    /// Look at the next event without consuming it.
+    ///
+    /// Used to decide whether a resolved candidate is viable before handing the stream to the
+    /// caller, who must still see whatever was peeked at.
+    pub async fn peek(&mut self) -> Option<&TuEvent> {
+        if self.peeked.is_none() {
+            self.peeked = self.rx.recv().await;
+        }
+        self.peeked.as_ref()
     }
 
     /// Wait for the first final response.
@@ -180,7 +195,52 @@ impl Handle {
             .await
             .map_err(|_| Error::EndpointClosed)?;
         reply_rx.await.map_err(|_| Error::EndpointClosed)??;
-        Ok(Responses { rx: events_rx })
+        Ok(Responses {
+            rx: events_rx,
+            peeked: None,
+        })
+    }
+
+    /// Resolve a URI (RFC 3263) and send to the resulting candidates in order.
+    ///
+    /// A candidate that fails is not the request failing — the next one is tried, and only an
+    /// exhausted list is an error. Each attempt is its own transaction with its own branch,
+    /// which is what makes retrying legal: a transaction is bound to the destination it was
+    /// created for.
+    ///
+    /// Note what "fails" costs on an unreliable transport. A dead TCP peer refuses the
+    /// connection and is known bad in milliseconds; a dead UDP peer says nothing at all, and
+    /// the only way to learn it is dead is to let the transaction time out — 64·T1, or 32
+    /// seconds with the default constants. That is a property of UDP, not of this function,
+    /// but it means a long candidate list over UDP is slow to exhaust. Callers that cannot
+    /// afford it should use [`Handle::send`] with a candidate list they manage themselves.
+    pub async fn send_to_uri<R: crate::resolve::Resolver + ?Sized>(
+        &self,
+        request: Request,
+        uri: &sipx_sip::Uri,
+        resolver: &R,
+    ) -> Result<Responses> {
+        let candidates = crate::resolve::resolve(uri, resolver, &mut crate::resolve::OsRng);
+        if candidates.is_empty() {
+            return Err(Error::Unresolvable(uri.to_bytes().to_vec()));
+        }
+
+        let mut last = Err(Error::Unresolvable(uri.to_bytes().to_vec()));
+        for target in candidates {
+            let mut responses = self.send(request.clone(), target).await?;
+            // Peek at the first event. A transport error here means this candidate is dead;
+            // anything else means the exchange has begun and belongs to the caller.
+            match responses.peek().await {
+                // Both are "this candidate is dead". A transport error says so directly; a
+                // timeout is how UDP says it, since a black hole sends nothing back.
+                Some(TuEvent::TransportError) => last = Err(Error::EndpointClosed),
+                Some(TuEvent::Timeout) => {
+                    last = Err(Error::Unresolvable(uri.to_bytes().to_vec()));
+                }
+                _ => return Ok(responses),
+            }
+        }
+        last
     }
 
     /// Send a response on a server transaction.

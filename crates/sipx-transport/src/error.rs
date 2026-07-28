@@ -18,6 +18,9 @@ pub enum Error {
     /// A message could not be built.
     #[error("build: {0}")]
     Build(#[from] sipx_sip::error::BuildError),
+    /// A URI that resolved to no usable candidate (RFC 3263).
+    #[error("no usable candidate for {}", String::from_utf8_lossy(.0))]
+    Unresolvable(Vec<u8>),
     /// A transport that is declared but not yet implemented.
     #[error("the {0} transport is not implemented yet")]
     UnsupportedTransport(&'static str),

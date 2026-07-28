@@ -13,11 +13,13 @@
 pub mod endpoint;
 pub mod error;
 pub mod nat;
+pub mod resolve;
 pub mod target;
 pub mod tcp;
 pub mod timers;
 
 pub use endpoint::{Config, Handle, Incoming, Responses, bind, new_branch};
 pub use error::{Error, Result};
+pub use resolve::{Naptr, Resolver, Srv, resolve};
 pub use target::{Target, TransportKind};
 pub use tcp::{Pool, PoolConfig};

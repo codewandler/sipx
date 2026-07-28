@@ -9,6 +9,7 @@
     clippy::indexing_slicing
 )]
 
+use sipx_transport::resolve::{Naptr, Resolver, Srv};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -303,4 +304,86 @@ async fn an_oversized_datagram_is_refused_rather_than_truncated() {
         server_rx.try_recv().is_err(),
         "an oversized message must not be sent at all"
     );
+}
+
+struct TwoCandidates {
+    live_port: u16,
+}
+impl Resolver for TwoCandidates {
+    fn naptr(&self, _: &str) -> Vec<Naptr> {
+        Vec::new()
+    }
+    fn srv(&self, name: &str) -> Vec<Srv> {
+        if name.starts_with("_sip._udp.") {
+            // Priority 1 is a port nothing listens on; priority 2 is the real endpoint.
+            vec![
+                Srv {
+                    priority: 1,
+                    weight: 0,
+                    port: 9,
+                    target: "dead.example".to_owned(),
+                },
+                Srv {
+                    priority: 2,
+                    weight: 0,
+                    port: self.live_port,
+                    target: "live.example".to_owned(),
+                },
+            ]
+        } else {
+            Vec::new()
+        }
+    }
+    fn addresses(&self, _: &str) -> Vec<std::net::IpAddr> {
+        vec!["127.0.0.1".parse().expect("valid")]
+    }
+}
+
+/// T-4: a candidate that fails at the transport level is not the request failing. The first
+/// candidate here is a black hole; the second is a live endpoint, and the exchange completes.
+#[tokio::test]
+async fn resolution_falls_through_to_the_next_candidate() {
+    let (server, mut server_rx) = endpoint().await;
+    let live_port = server.local_addr().port();
+
+    // Compressed timers: a dead UDP candidate can only be detected by letting the transaction
+    // time out, which with the default constants is 32 seconds.
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.timers = sipx_sip::Timers {
+        t1: Duration::from_millis(5),
+        t2: Duration::from_millis(20),
+        t4: Duration::from_millis(20),
+    };
+    let (client, _rx) = bind(config).await.expect("binds");
+    let uri = sipx_sip::Uri::sip(Host::Name(HostName::new("example.com").expect("valid")));
+
+    let responder = tokio::spawn(async move {
+        let incoming = server_rx
+            .recv()
+            .await
+            .expect("a request reaches the live candidate");
+        let response = ResponseBuilder::to_request(
+            &incoming.request,
+            StatusCode::new(200).expect("valid"),
+            "OK",
+        )
+        .expect("builds")
+        .build();
+        server
+            .respond(&incoming.key, response)
+            .await
+            .expect("responds");
+    });
+
+    let mut responses = client
+        .send_to_uri(options_to(&client), &uri, &TwoCandidates { live_port })
+        .await
+        .expect("at least one candidate works");
+
+    let response = tokio::time::timeout(Duration::from_secs(3), responses.final_response())
+        .await
+        .expect("no timeout")
+        .expect("a final response");
+    assert_eq!(response.status.code(), 200);
+    responder.await.expect("the responder finishes");
 }
