@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use sipx_sip::transaction::{Dispatch, Output, TransactionKey, TransactionLayer, TuEvent};
+use sipx_sip::transaction::{Dispatch, Output, Timer, TransactionKey, TransactionLayer, TuEvent};
 use sipx_sip::{Header, HeaderName, Limits, Message, Request, Response, Timers, parse_datagram};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
@@ -932,7 +932,7 @@ async fn bind_matching_ports(
 struct Driver {
     socket: Arc<UdpSocket>,
     layer: TransactionLayer,
-    timers: TimerQueue,
+    timers: TimerQueue<(TransactionKey, Timer)>,
     destinations: HashMap<TransactionKey, Target>,
     /// When each server transaction was handed to the application, so one it never answers can
     /// be abandoned rather than held for the life of the process.
@@ -1328,7 +1328,7 @@ impl Driver {
             if self.clients.contains_key(&key) {
                 continue;
             }
-            self.timers.forget(&key);
+            self.timers.forget_matching(|(k, _)| k == &key);
             self.destinations.remove(&key);
             // `reconnect` too. It is removed nowhere else but `Output::Terminated`, which an
             // abandoned transaction never reaches — so leaving it here would trade one
@@ -1339,9 +1339,9 @@ impl Driver {
 
     async fn on_timers(&mut self) {
         let due = self.timers.take_due(tokio::time::Instant::now());
-        for fired in due {
-            let outputs = self.layer.on_timer(&fired.key, fired.timer);
-            self.perform(&fired.key, outputs, None).await;
+        for (key, timer) in due {
+            let outputs = self.layer.on_timer(&key, timer);
+            self.perform(&key, outputs, None).await;
         }
     }
 
@@ -1454,11 +1454,16 @@ impl Driver {
                         return;
                     }
                 }
-                Output::SetTimer { timer, after } => self.timers.set(key.clone(), timer, after),
-                Output::ClearTimer(timer) => self.timers.clear(key, timer),
+                // The clock is read *here*, by the driver, and handed to the queue. That is what
+                // lets any other driver — one on virtual time, say — use the same queue.
+                Output::SetTimer { timer, after } => {
+                    self.timers
+                        .set((key.clone(), timer), tokio::time::Instant::now(), after);
+                }
+                Output::ClearTimer(timer) => self.timers.clear(&(key.clone(), timer)),
                 Output::ToTu(event) => self.deliver(key, *event, origin).await,
                 Output::Terminated(_) => {
-                    self.timers.forget(key);
+                    self.timers.forget_matching(|(k, _)| k == key);
                     self.destinations.remove(key);
                     self.handed_over.remove(key);
                     self.reconnect.remove(key);

@@ -9,6 +9,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The loopback link the testkit has always promised (`X-14`).** Two full stacks talk in one
+  process with no sockets, over a link with seeded loss, duplication, latency and jitter. The same
+  seed replays the same trace, so a failure found by varying the loss rate is one that can be
+  re-run.
+  - **Reordering is not a knob.** Packets overtake because one took longer than another, not
+    because a path chose to shuffle them — so jitter produces reordering, and a separate
+    probability would model the symptom and permit orderings no real path can produce.
+- **The timer queue is generic over its key and no longer reads the clock** — `now` is an argument
+  to `set`. It called `Instant::now()` internally, which made it unusable by any driver but the one
+  it was written for, and made "when was this scheduled?" a question you could only answer by
+  sleeping. Together with the link, a dropped INVITE and the Timer A retransmission that recovers
+  from it now cost no wall-clock time at all.
+
 - **A genuine negative DNS answer is cached (`T-17`, RFC 2308 §5).** It was not: an SOA-backed
   NXDOMAIN returned early and was re-queried every time. For a user agent that is one extra lookup
   per call; for a forwarding element resolving for every call it forwards, a domain with no

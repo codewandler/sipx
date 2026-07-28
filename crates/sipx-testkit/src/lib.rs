@@ -8,6 +8,7 @@
 //! Not published to crates.io.
 
 pub mod certs;
+pub mod link;
 pub mod load;
 pub mod rfc4475;
 pub mod soak;
