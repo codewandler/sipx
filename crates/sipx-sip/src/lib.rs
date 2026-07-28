@@ -23,6 +23,7 @@
 pub mod build;
 pub mod error;
 mod escape;
+pub mod event;
 pub mod headers;
 pub mod message;
 pub mod name;

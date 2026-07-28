@@ -113,6 +113,7 @@ header_names! {
     RAck                => "RAck";                        // RFC 3262
     Reason              => "Reason";                      // RFC 3326
     RecordRoute         => "Record-Route";
+    ReferSub            => "Refer-Sub";                   // RFC 4488
     ReferTo             => "Refer-To" | b'r';             // RFC 3515
     ReferredBy          => "Referred-By" | b'b';          // RFC 3892
     RejectContact       => "Reject-Contact" | b'j';       // RFC 3841

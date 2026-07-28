@@ -16,10 +16,10 @@ compliance document usually becomes untrue.
 
 | | Meaning | Count |
 |---|---|---|
-| ✅ implemented | Behaviour present and tested for the roles listed | 30 |
+| ✅ implemented | Behaviour present and tested for the roles listed | 31 |
 | 🟡 partial | Some of the normative behaviour; the note says which part is missing | 12 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 8 |
-| ⬜ not started | Tracked as a target, not started | 17 |
+| ⬜ not started | Tracked as a target, not started | 16 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
 The list is bounded on purpose: it is what sipx already touches plus what it has decided
@@ -70,7 +70,7 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | [4028](https://www.rfc-editor.org/rfc/rfc4028) | Session Timers in SIP | ✅ implemented | — | Negotiated on the INVITE and its 2xx, Table 2 election, refresh by re-INVITE, 422 with Min-SE below the floor, and a local BYE when no refresh arrives. UPDATE is not used for the refresh. |
 | [6026](https://www.rfc-editor.org/rfc/rfc6026) | Correct Transaction Handling for 2xx Responses to INVITE | ✅ implemented | uac, uas | The Accepted state. Without this a 2xx retransmission is absorbed by a transaction that should already have ended. |
 | [2543](https://www.rfc-editor.org/rfc/rfc2543) | SIP: Session Initiation Protocol (obsoleted by 3261) | 🟡 partial | — | Not implemented as a protocol. The transaction key falls back to 2543-style matching for a request whose branch lacks the magic cookie, because such requests still arrive. |
-| [6665](https://www.rfc-editor.org/rfc/rfc6665) | SIP-Specific Event Notification | 🟡 partial | — | The implicit subscription a REFER creates, including its termination. There is no SUBSCRIBE, no general event package framework and no subscription store. |
+| [6665](https://www.rfc-editor.org/rfc/rfc6665) | SIP-Specific Event Notification | 🟡 partial | uas | The notifier side: a subscription store keyed on dialog *and* package (§4.4.1), establish/refresh/unsubscribe with §4.2.1.1's shorten-never-lengthen rule, expiry, termination that is final — a terminated subscription produces no further notification and cannot be refreshed back to life — and 489 for an unserved package. `Subscription-State` and its reasons are typed, and the implicit subscription a REFER creates is expressed in those terms rather than beside them. Not implemented: the *subscriber* side, so sipx serves subscriptions and does not place them; and no event packages ship yet (`S-17`, `S-18`). |
 | [3311](https://www.rfc-editor.org/rfc/rfc3311) | The SIP UPDATE Method | 🔤 syntax only | — | The method is represented. Renegotiation uses re-INVITE only. |
 | [3326](https://www.rfc-editor.org/rfc/rfc3326) | The Reason Header Field for SIP | 🔤 syntax only | — | Parsed and preserved. sipx does not populate it on CANCEL or BYE. |
 | [3841](https://www.rfc-editor.org/rfc/rfc3841) | Caller Preferences for SIP | 🔤 syntax only | — | The headers parse and round-trip. Nothing acts on a preference. |
@@ -116,6 +116,7 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 |---|---|---|---|---|
 | [3515](https://www.rfc-editor.org/rfc/rfc3515) | The SIP Refer Method | ✅ implemented | uac, uas | Blind transfer, with the outcome reported by NOTIFY and the implicit subscription terminated. A 202 is modelled as `Trying`, never as success. |
 | [3891](https://www.rfc-editor.org/rfc/rfc3891) | The SIP Replaces Header | ✅ implemented | uas | Matched on Call-ID and both tags. Matching on the Call-ID alone is a call-hijack primitive, and the refusal is the same 481 whichever field was wrong. |
+| [4488](https://www.rfc-editor.org/rfc/rfc4488) | Suppression of SIP REFER Method Implicit Subscription | ✅ implemented | uac, uas | `Refer-Sub: false` on the REFER *and* echoed in the 2xx, because §3 makes it a request and an agreement rather than a declaration — a transferor that assumed agreement would stop watching for notifications the transferee is still sending. |
 | [3892](https://www.rfc-editor.org/rfc/rfc3892) | The SIP Referred-By Mechanism | 🟡 partial | — | Sent and surfaced to the application. The signed `Referred-By` token is not implemented, so the identity is a claim rather than a proof. |
 | [3428](https://www.rfc-editor.org/rfc/rfc3428) | SIP Extension for Instant Messaging | 🔤 syntax only | — | The method is represented and nothing handles it. |
 | [3903](https://www.rfc-editor.org/rfc/rfc3903) | SIP Extension for Event State Publication | 🔤 syntax only | — | The method is represented. Depends on 6665 for anything further. |
@@ -123,7 +124,6 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | [3680](https://www.rfc-editor.org/rfc/rfc3680) | A SIP Event Package for Registrations | ⬜ not started | — | Depends on 6665 and on a registrar. |
 | [3856](https://www.rfc-editor.org/rfc/rfc3856) | A Presence Event Package for SIP | ⬜ not started | — | Depends on a real 6665 implementation. |
 | [4235](https://www.rfc-editor.org/rfc/rfc4235) | An INVITE-Initiated Dialog Event Package for SIP | ⬜ not started | — | Depends on 6665. What a busy-lamp field subscribes to. |
-| [4488](https://www.rfc-editor.org/rfc/rfc4488) | Suppression of SIP REFER Method Implicit Subscription | ⬜ not started | — | `Refer-Sub: false`, for a transferor that does not want the NOTIFYs. |
 | [5627](https://www.rfc-editor.org/rfc/rfc5627) | Obtaining and Using GRUUs in SIP | ⬜ not started | — | A URI that reaches one specific instance of a registered user. Depends on 3327 and 5626. |
 | [7044](https://www.rfc-editor.org/rfc/rfc7044) | An Extension to SIP for Request History Information | ⬜ not started | — | `History-Info`, for a call that was forwarded and needs to say by whom. |
 | [7865](https://www.rfc-editor.org/rfc/rfc7865) | SDP Recording Metadata | ⬜ not started | — | The metadata half of SIPREC. |

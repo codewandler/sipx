@@ -293,9 +293,14 @@ number = 6665
 title = "SIP-Specific Event Notification"
 layer = "core"
 status = "partial"
+roles = ["uas"]
 headers = ["Event", "SubscriptionState", "AllowEvents"]
-evidence = ["crates/sipx-call/src/transfer.rs", "crates/sipx-call/src/call.rs"]
-note = "The implicit subscription a REFER creates, including its termination. There is no SUBSCRIBE, no general event package framework and no subscription store."
+evidence = [
+  "crates/sipx-sip/src/event.rs",
+  "crates/sipx-ua/src/subscribe.rs",
+  "crates/sipx-call/src/transfer.rs",
+]
+note = "The notifier side: a subscription store keyed on dialog *and* package (§4.4.1), establish/refresh/unsubscribe with §4.2.1.1's shorten-never-lengthen rule, expiry, termination that is final — a terminated subscription produces no further notification and cannot be refreshed back to life — and 489 for an unserved package. `Subscription-State` and its reasons are typed, and the implicit subscription a REFER creates is expressed in those terms rather than beside them. Not implemented: the *subscriber* side, so sipx serves subscriptions and does not place them; and no event packages ship yet (`S-17`, `S-18`)."
 
 [[rfc]]
 number = 3841
@@ -574,9 +579,11 @@ note = "Sent and surfaced to the application. The signed `Referred-By` token is 
 number = 4488
 title = "Suppression of SIP REFER Method Implicit Subscription"
 layer = "services"
-status = "none"
-evidence = []
-note = "`Refer-Sub: false`, for a transferor that does not want the NOTIFYs."
+status = "implemented"
+roles = ["uac", "uas"]
+headers = ["ReferSub"]
+evidence = ["crates/sipx-call/src/transfer.rs"]
+note = "`Refer-Sub: false` on the REFER *and* echoed in the 2xx, because §3 makes it a request and an agreement rather than a declaration — a transferor that assumed agreement would stop watching for notifications the transferee is still sending."
 
 [[rfc]]
 number = 3428

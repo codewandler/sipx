@@ -26,6 +26,7 @@ pub mod error;
 pub mod flows;
 pub mod outbound;
 pub mod registrar;
+pub mod subscribe;
 
 #[cfg(feature = "runtime")]
 pub use agent::{Config, Flow, UserAgent};

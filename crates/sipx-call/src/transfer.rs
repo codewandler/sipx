@@ -226,11 +226,40 @@ pub fn parse_sipfrag(body: &[u8]) -> Option<(u16, String)> {
 }
 
 /// Whether a `Subscription-State` says the subscription is over (RFC 6665 §4.1.3).
+///
+/// Asks the event framework rather than reading the header again. The implicit subscription a
+/// REFER creates is a subscription — `S-13` made that a thing sipx has a general answer for — and
+/// two parsers for one header eventually disagree about whether a transfer has finished.
 #[must_use]
 pub fn is_terminated(subscription_state: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(subscription_state);
-    let state = text.split(';').next().unwrap_or("").trim();
-    state.eq_ignore_ascii_case("terminated")
+    sipx_sip::event::Subscription::parse(subscription_state)
+        .is_some_and(|subscription| subscription.state == sipx_sip::event::State::Terminated)
+}
+
+/// Whether a transferor asked for no implicit subscription (RFC 4488 §3).
+///
+/// `Refer-Sub: false` on a REFER says "do not create one". It exists because the implicit
+/// subscription is the expensive part of a transfer for a network that does many: each one is a
+/// dialog, a NOTIFY, and a terminating NOTIFY, for progress the transferor may not want.
+///
+/// §3 is careful about who decides: the transferor *requests* it and the transferee agrees by
+/// echoing `Refer-Sub: false` in its 2xx. A transferor that assumed agreement would stop watching
+/// for notifications the transferee is still sending.
+#[must_use]
+pub fn subscription_suppressed(request: &sipx_sip::Request, response: &sipx_sip::Response) -> bool {
+    says_false(request.headers.value(&HeaderName::ReferSub).as_deref())
+        && says_false(response.headers.value(&HeaderName::ReferSub).as_deref())
+}
+
+fn says_false(value: Option<&[u8]>) -> bool {
+    value.is_some_and(|value| {
+        String::from_utf8_lossy(value)
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .eq_ignore_ascii_case("false")
+    })
 }
 
 #[cfg(test)]
@@ -457,5 +486,94 @@ mod tests {
         assert!(is_terminated(b"  terminated  ;reason=timeout"));
         assert!(!is_terminated(b"active;expires=60"));
         assert!(!is_terminated(b"pending"));
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod refer_sub_tests {
+    use super::*;
+    use bytes::Bytes;
+    use sipx_sip::{Limits, Message, parse_datagram};
+
+    fn refer(refer_sub: Option<&str>) -> sipx_sip::Request {
+        let line = refer_sub.map_or_else(String::new, |value| format!("Refer-Sub: {value}\r\n"));
+        let text = format!(
+            "REFER sip:bob@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP a.example;branch=z9hG4bKx\r\n\
+             To: <sip:bob@example.com>;tag=b\r\n\
+             From: <sip:alice@example.net>;tag=a\r\n\
+             Call-ID: xfer@sipx\r\n\
+             CSeq: 2 REFER\r\n\
+             Refer-To: <sip:carol@example.org>\r\n\
+             {line}\
+             Max-Forwards: 70\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        match parse_datagram(Bytes::from(text), &Limits::datagram()).expect("parses") {
+            Message::Request(request) => request,
+            Message::Response(_) => panic!("a request"),
+        }
+    }
+
+    fn accepted(refer_sub: Option<&str>) -> sipx_sip::Response {
+        let line = refer_sub.map_or_else(String::new, |value| format!("Refer-Sub: {value}\r\n"));
+        let text = format!(
+            "SIP/2.0 202 Accepted\r\n\
+             Via: SIP/2.0/UDP a.example;branch=z9hG4bKx\r\n\
+             To: <sip:bob@example.com>;tag=b\r\n\
+             From: <sip:alice@example.net>;tag=a\r\n\
+             Call-ID: xfer@sipx\r\n\
+             CSeq: 2 REFER\r\n\
+             {line}\
+             Content-Length: 0\r\n\r\n"
+        );
+        match parse_datagram(Bytes::from(text), &Limits::datagram()).expect("parses") {
+            Message::Response(response) => response,
+            Message::Request(_) => panic!("a response"),
+        }
+    }
+
+    /// RFC 4488 §3: the transferor *requests* suppression and the transferee *agrees*. Both halves
+    /// are required, and that is the whole subtlety — a transferor that assumed agreement would
+    /// stop watching for notifications the transferee is still sending.
+    #[test]
+    fn suppression_needs_both_sides_to_say_so() {
+        assert!(
+            subscription_suppressed(&refer(Some("false")), &accepted(Some("false"))),
+            "asked and agreed"
+        );
+        assert!(
+            !subscription_suppressed(&refer(Some("false")), &accepted(None)),
+            "asked, and the transferee said nothing — so it is still notifying"
+        );
+        assert!(
+            !subscription_suppressed(&refer(None), &accepted(Some("false"))),
+            "not asked for"
+        );
+        assert!(
+            !subscription_suppressed(&refer(Some("true")), &accepted(Some("true"))),
+            "`true` asks *for* the subscription"
+        );
+        assert!(!subscription_suppressed(&refer(None), &accepted(None)));
+    }
+
+    /// The implicit subscription now reads `Subscription-State` through the event framework, so
+    /// there is one answer to "is this over" rather than two that can disagree.
+    #[test]
+    fn the_implicit_subscription_uses_the_frameworks_notion_of_terminated() {
+        assert!(is_terminated(b"terminated;reason=noresource"));
+        assert!(is_terminated(b"TERMINATED"));
+        assert!(!is_terminated(b"active;expires=60"));
+        assert!(!is_terminated(b"pending"));
+        // And a value the framework cannot parse is not a termination — a NOTIFY nobody can read
+        // must not be taken as the end of a transfer.
+        assert!(!is_terminated(b"finished"));
+        assert!(!is_terminated(b""));
     }
 }
