@@ -26,10 +26,7 @@ resolution turn the core into something that talks to a network.
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
-
-### Media
-_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-6 — Implement RTCP sender and receiver reports](M-6-rtcp-reports.md) · Media · gap left explicitly by M3
+_None._
 
 ## Blocked
 _None._
@@ -43,6 +40,7 @@ _None._
 - [M-3 — Implement G.711 and WAV handling](M-3-g711-and-wav.md) · Media
 - [M-4 — Implement the media session](M-4-media-session.md) · Media
 - [M-5 — Implement dialogs and the call framework](M-5-call-framework.md) · Media
+- [M-6 — Implement RTCP sender and receiver reports](M-6-rtcp-reports.md) · Media · gap left explicitly by M3
 - [M-7 — Implement RFC 4733 DTMF events](M-7-dtmf-events.md) · Media · gap left explicitly by M3
 - [M-8 — Handle re-INVITE and in-dialog requests](M-8-reinvite-and-in-dialog.md) · Media · gap left explicitly by M3
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story

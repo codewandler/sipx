@@ -20,6 +20,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use sipx_audio::g711;
 use sipx_rtp::dtmf::{self, Digit, Event as DtmfEvent};
+use sipx_rtp::rtcp::{ReceiverReport, Rtcp, StreamStats};
 use sipx_rtp::{JitterBuffer, Packet};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc};
@@ -81,6 +82,13 @@ pub struct Config {
     pub clock_rate: u32,
     /// How many packets the jitter buffer holds.
     pub jitter_depth: usize,
+    /// How often to send RTCP receiver reports. `None` disables RTCP entirely.
+    ///
+    /// RFC 3550 §6.2 scales the interval with the session's bandwidth and membership; for a
+    /// two-party call that arithmetic lands at the five-second minimum, so sipx uses it
+    /// directly rather than implementing a calculation that would always return the same
+    /// answer.
+    pub rtcp_interval: Option<Duration>,
     /// The payload type carrying `telephone-event`, if the SDP negotiated one.
     ///
     /// It is dynamic, so the number is whatever the answer said — assuming 101 because that
@@ -98,6 +106,7 @@ impl Config {
             packet_duration: Duration::from_millis(20),
             clock_rate: 8000,
             jitter_depth: 3,
+            rtcp_interval: Some(Duration::from_secs(5)),
             dtmf_payload_type: Some(dtmf::DEFAULT_PAYLOAD_TYPE),
         }
     }
@@ -141,6 +150,7 @@ pub struct MediaSession {
     packet_duration: Duration,
     sent: Arc<AtomicU64>,
     received: Arc<AtomicU64>,
+    stats: Arc<Mutex<StreamStats>>,
     stop: Arc<Stop>,
 }
 
@@ -223,12 +233,15 @@ impl MediaSession {
     fn on_socket(socket: Arc<UdpSocket>, local_addr: SocketAddr, config: Config) -> Self {
         let samples_per_packet = config.samples_per_packet();
         let packet_duration = config.packet_duration;
+        let rtcp_interval = config.rtcp_interval;
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(64);
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
         let (digits_tx, digits_rx) = mpsc::channel::<Digit>(32);
 
         let sent = Arc::new(AtomicU64::new(0));
         let received = Arc::new(AtomicU64::new(0));
+        // Zero until the first packet names the far end's synchronisation source.
+        let stats = Arc::new(Mutex::new(StreamStats::new(0)));
         let stop = Arc::new(Stop::default());
 
         // Where to send. Starts at the SDP address and is replaced by the first observed
@@ -244,14 +257,27 @@ impl MediaSession {
             Arc::clone(&stop),
         ));
         tokio::spawn(receive_loop(
-            socket,
-            incoming_tx,
-            digits_tx,
-            remote,
-            config,
-            Arc::clone(&received),
-            Arc::clone(&stop),
+            Arc::clone(&socket),
+            Inbound {
+                audio: incoming_tx,
+                digits: digits_tx,
+                remote: Arc::clone(&remote),
+                config,
+                received: Arc::clone(&received),
+                stats: Arc::clone(&stats),
+                stop: Arc::clone(&stop),
+            },
         ));
+
+        if let Some(interval) = rtcp_interval {
+            tokio::spawn(rtcp_loop(
+                socket,
+                remote,
+                interval,
+                Arc::clone(&stats),
+                Arc::clone(&stop),
+            ));
+        }
 
         Self {
             outgoing: outgoing_tx,
@@ -263,6 +289,7 @@ impl MediaSession {
             packet_duration,
             sent,
             received,
+            stats,
             stop,
         }
     }
@@ -362,6 +389,14 @@ impl MediaSession {
     #[must_use]
     pub fn packets_received(&self) -> u64 {
         self.received.load(Ordering::Relaxed)
+    }
+
+    /// What the receive path has seen: loss, jitter and sequence position.
+    ///
+    /// Readable mid-call, which is the point — statistics that only appear when the call ends
+    /// cannot be used to do anything about the call.
+    pub async fn stats(&self) -> sipx_rtp::rtcp::ReportBlock {
+        self.stats.lock().await.report_block()
     }
 
     /// Stop the session and release its socket.
@@ -508,18 +543,33 @@ async fn send_loop(
     }
 }
 
-async fn receive_loop(
-    socket: Arc<UdpSocket>,
-    incoming: mpsc::Sender<Vec<i16>>,
+/// Everything the receive loop needs, grouped because eight positional arguments is a
+/// mis-ordering waiting to happen — two of them are `Arc<AtomicU64>`-shaped and swapping them
+/// would compile.
+struct Inbound {
+    audio: mpsc::Sender<Vec<i16>>,
     digits: mpsc::Sender<Digit>,
     remote: Arc<Mutex<SocketAddr>>,
     config: Config,
     received: Arc<AtomicU64>,
+    stats: Arc<Mutex<StreamStats>>,
     stop: Arc<Stop>,
-) {
+}
+
+async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
+    let Inbound {
+        audio: incoming,
+        digits,
+        remote,
+        config,
+        received,
+        stats,
+        stop,
+    } = inbound;
     let mut buffer = JitterBuffer::new(config.jitter_depth);
     let mut datagram = vec![0u8; 2048];
     let mut dtmf = sipx_rtp::dtmf::Receiver::new();
+    let started = tokio::time::Instant::now();
     // The synchronisation source this session is carrying. RTP has no authentication, so this
     // is not a security control — anyone who can guess the port can still forge a first
     // packet. What it does buy is that once a stream is established, a *later* forged packet
@@ -590,6 +640,16 @@ async fn receive_loop(
         }
 
         received.fetch_add(1, Ordering::Relaxed);
+
+        // The arrival clock has to be in the same units as the RTP timestamp — 8000 per second
+        // for G.711 — or the jitter estimate measures the difference between two unit systems
+        // rather than between two packets.
+        {
+            let mut stats = stats.lock().await;
+            let arrival = arrival_in_timestamp_units(started, config.clock_rate);
+            stats.on_packet(packet.sequence, packet.timestamp, arrival);
+        }
+
         buffer.push(packet);
 
         while let Some(packet) = buffer.pop() {
@@ -603,6 +663,57 @@ async fn receive_loop(
 /// Hand one packet's audio to the application.
 ///
 /// Returns whether the loop should keep running.
+/// The local clock in RTP timestamp units.
+fn arrival_in_timestamp_units(started: tokio::time::Instant, clock_rate: u32) -> u32 {
+    let elapsed = started.elapsed().as_secs_f64() * f64::from(clock_rate);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let units = elapsed as u64;
+    u32::try_from(units & u64::from(u32::MAX)).unwrap_or(0)
+}
+
+/// Send a receiver report every interval, so the far end can see what we saw.
+async fn rtcp_loop(
+    socket: Arc<UdpSocket>,
+    remote: Arc<Mutex<SocketAddr>>,
+    interval: Duration,
+    stats: Arc<Mutex<StreamStats>>,
+    stop: Arc<Stop>,
+) {
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first tick is immediate and would report an empty stream.
+    tick.tick().await;
+
+    loop {
+        tokio::select! {
+            () = stop.wait() => return,
+            _ = tick.tick() => {}
+        }
+        if stop.is_stopped() {
+            return;
+        }
+
+        let block = stats.lock().await.report_block();
+        // Nothing has arrived yet, so there is nothing to report on.
+        if block.extended_highest_sequence == 0 {
+            continue;
+        }
+
+        let report = Rtcp::Receiver(ReceiverReport {
+            ssrc: block.ssrc,
+            reports: vec![block],
+        });
+
+        // RTCP conventionally travels on the RTP port plus one (RFC 3550 §11).
+        let destination = *remote.lock().await;
+        let rtcp_port = destination.port().saturating_add(1);
+        let rtcp_to = SocketAddr::new(destination.ip(), rtcp_port);
+        if socket.send_to(&report.encode(), rtcp_to).await.is_err() {
+            return;
+        }
+    }
+}
+
 async fn deliver(
     incoming: &mpsc::Sender<Vec<i16>>,
     digits: &mpsc::Sender<Digit>,
@@ -915,6 +1026,45 @@ mod tests {
             .is_err(),
             "nothing should go on the wire"
         );
+    }
+
+    /// Statistics are readable mid-call, and count what the receive path actually saw.
+    /// Numbers that only appear when a call ends cannot be used to do anything about it.
+    #[tokio::test]
+    async fn a_session_reports_the_loss_it_saw() {
+        let (left, right) = pair(Codec::Pcmu).await;
+
+        // Ten packets from `right`, of which two are dropped in flight by sending them from a
+        // socket the far end will ignore — simpler: send nine of ten sequence numbers by
+        // hand, so the gap is exact.
+        let raw = UdpSocket::bind(any()).await.expect("binds");
+        for sequence in 1u16..=10 {
+            if sequence == 4 || sequence == 8 {
+                continue;
+            }
+            let packet = Packet::new(
+                0,
+                sequence,
+                u32::from(sequence) * 160,
+                0xAB,
+                Bytes::from(vec![0xFFu8; 160]),
+            );
+            raw.send_to(&packet.encode(), left.local_addr())
+                .await
+                .expect("sends");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let block = left.stats().await;
+        assert_eq!(
+            block.extended_highest_sequence, 10,
+            "sequence 10 was the highest"
+        );
+        assert_eq!(block.cumulative_lost, 2, "four and eight never arrived");
+        assert!(block.fraction_lost > 0, "and the interval shows loss");
+
+        drop(right);
     }
 
     #[test]

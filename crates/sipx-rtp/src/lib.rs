@@ -11,7 +11,9 @@
 pub mod dtmf;
 pub mod jitter;
 pub mod packet;
+pub mod rtcp;
 
 pub use dtmf::{Digit, Event as DtmfEvent, Receiver as DtmfReceiver};
 pub use jitter::JitterBuffer;
 pub use packet::{HEADER_LEN, Packet, RtpError, sequence_distance, sequence_is_newer};
+pub use rtcp::{ReceiverReport, ReportBlock, Rtcp, RtcpError, SenderReport, StreamStats};
