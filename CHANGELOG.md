@@ -9,6 +9,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **sipx can issue a digest challenge, not only answer one (`S-16`, RFC 7616 / 8760).**
+  `Authenticator` mints a nonce, emits `WWW-Authenticate` or `Proxy-Authenticate`, and verifies the
+  credentials that come back. The credential store stays out: `verify` takes the password as an
+  argument, so which credential a username maps to is the caller's business.
+  - **Nonces are self-describing** — issue time plus an HMAC over it and the realm — so a server
+    recognises its own nonce and its expiry without a table of every nonce it ever issued.
+  - **A replay and a retransmission are told apart** by the response digest: the same count with
+    the same digest is one request seen twice, which is ordinary over UDP and must still
+    authenticate; the same count with a different digest is a captured credential.
+  - The digest is checked before the clock, so a wrong password on an expired nonce is a rejection
+    rather than `stale=true` — which would tell an attacker the only thing wrong with their guess
+    was its timing.
+  - SHA-256 by default. A server is the only party that can make that choice.
+
 - **`Headers` can be edited, not only read (`S-15`).** `remove_first`, `insert` and `retain` — the
   three operations rewriting a message in flight needs. `Via`, `Route`, `Record-Route` and `Path`
   order *is* the routing, so these are exact positions rather than set operations.

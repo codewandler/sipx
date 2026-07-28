@@ -50,10 +50,6 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 - [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
 - [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · M8 · RFC 6665 · large; the other two packages are on it
 
-### SIP core (sans-IO)
-_Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
-- [S-16 — Implement the server side of digest authentication](S-16-server-side-digest.md) · Signalling · M7 · RFC 7616 · sipx can answer a challenge but cannot issue one
-
 ### Transport layer
 _The transport layer is the only place in the signalling stack that touches the network, which_
 - [T-17 — Resolve at proxy throughput — async and shared-cache](T-17-resolution-at-proxy-throughput.md) · Signalling · M7 · the Resolver trait is shaped for one UA, not for a forwarding element
@@ -147,6 +143,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [S-12 — Implement reliable provisional responses](S-12-reliable-provisional-responses.md) · Signalling · track: signalling · RFC 3262 · same files as S-11, take it second
 - [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · track: auth · RFC 8760 · sipx-ua only, isolated
 - [S-15 — Add editing operations to Headers](S-15-header-editing-operations.md) · Signalling · M7 · a forwarding element cannot edit a header list without rebuilding it
+- [S-16 — Implement the server side of digest authentication](S-16-server-side-digest.md) · Signalling · M7 · RFC 7616 · sipx can answer a challenge but cannot issue one
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling

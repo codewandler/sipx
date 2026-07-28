@@ -9,6 +9,7 @@
 
 pub mod agent;
 pub mod auth;
+pub mod challenge;
 pub mod error;
 pub mod flows;
 pub mod outbound;
@@ -16,6 +17,7 @@ pub mod registrar;
 
 pub use agent::{Config, Flow, UserAgent};
 pub use auth::{Algorithm, Challenge, Credentials};
+pub use challenge::{Authenticator, Presented, Reason, Verdict};
 pub use error::{Error, Result};
 pub use flows::{Attempt, Flows};
 pub use outbound::{InstanceId, Keepalive, Power, RegId};

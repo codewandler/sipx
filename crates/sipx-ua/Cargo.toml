@@ -19,6 +19,10 @@ tracing.workspace = true
 rand.workspace = true
 md-5.workspace = true
 sha2.workspace = true
+# Server-side digest: HMAC keys the nonce so a server recognises its own without a table, and
+# `subtle` compares a digest without leaking how far a guess matched through timing.
+hmac.workspace = true
+subtle.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
