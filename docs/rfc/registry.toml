@@ -225,10 +225,14 @@ note = "The method is represented. Renegotiation uses re-INVITE only."
 number = 4028
 title = "Session Timers in SIP"
 layer = "core"
-status = "syntax"
+status = "implemented"
 headers = ["SessionExpires", "MinSe"]
-evidence = ["crates/sipx-sip/src/name.rs"]
-note = "The headers parse. No session refresh, so a call whose far end vanishes is not detected by sipx."
+evidence = [
+  "crates/sipx-sip/src/session.rs",
+  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/tests/session_timer.rs",
+]
+note = "Negotiated on the INVITE and its 2xx, Table 2 election, refresh by re-INVITE, 422 with Min-SE below the floor, and a local BYE when no refresh arrives. UPDATE is not used for the refresh."
 
 [[rfc]]
 number = 6665

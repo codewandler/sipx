@@ -29,6 +29,7 @@ registrations.
 | **Transports** | UDP, TCP, TLS, WebSocket, secure WebSocket |
 | **Reachability** | NAT via `rport` and symmetric RTP. No Outbound, Path, GRUU or push yet. |
 | **Multi-party** | Bridge two calls, or conference several with N−1 mixing |
+| **Liveness** | RFC 4028 session timers, so a far end that loses power is noticed rather than billed for |
 | **Quality** | Loss, jitter, round-trip time and an estimated MOS, readable mid-call |
 
 Verified against **Kamailio**, not only against itself: registration over UDP, TCP, TLS and

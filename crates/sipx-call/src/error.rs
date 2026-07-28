@@ -48,6 +48,15 @@ pub enum Error {
     /// Negotiation produced no usable audio stream.
     #[error("no codec in common")]
     NoCommonCodec,
+    /// A `422` refused the session interval we asked for (RFC 4028 §6), naming its own minimum.
+    ///
+    /// Carries the minimum rather than folding into [`Self::Rejected`] because the whole point
+    /// of a 422 is that it is retryable, and only the value it carries makes the retry possible.
+    #[error("the far end requires a session interval of at least {0:?}")]
+    IntervalTooBrief(std::time::Duration),
+    /// The far end never refreshed the session, so it was torn down locally (RFC 4028 §10).
+    #[error("the session expired without a refresh")]
+    SessionExpired,
 }
 
 /// A call result.

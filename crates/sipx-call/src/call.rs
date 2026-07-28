@@ -4,10 +4,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::time::Instant;
+
 use bytes::Bytes;
 use sipx_media::{Codec, MediaPort, MediaSession};
 use sipx_sdp::{Capabilities, Direction, SessionDescription};
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
+use sipx_sip::session::{self, MinSe, SessionExpires};
 use sipx_sip::{HeaderName, Method, Request, Response, StatusCode, Uri};
 use sipx_transport::{Handle, Incoming, Target, TransportKind};
 
@@ -63,6 +66,29 @@ pub struct Call {
     referral: Option<Referral>,
     /// A transfer we asked for, and what has become of it.
     transfer: Option<Transfer>,
+    /// The RFC 4028 session timer, if one was negotiated.
+    session: Option<SessionState>,
+}
+
+/// A negotiated session timer and the deadline it is currently counting down to.
+#[derive(Debug, Clone, Copy)]
+struct SessionState {
+    terms: session::Session,
+    /// When [`Call::on_session_deadline`] should be called.
+    ///
+    /// Held as an absolute instant rather than recomputed from "now" on each poll, so that a
+    /// call driven by a loop that also does other work cannot have its timer pushed back
+    /// indefinitely by its own busyness.
+    act_at: Instant,
+}
+
+impl SessionState {
+    fn armed(terms: session::Session) -> Self {
+        Self {
+            terms,
+            act_at: Instant::now() + terms.act_after(),
+        }
+    }
 }
 
 impl Call {
@@ -164,6 +190,10 @@ impl Call {
 
                 self.media.stop();
                 self.ended = true;
+                // Nothing left to keep alive, and leaving an elapsed deadline armed would have
+                // `session_deadline` keep returning a time in the past, spinning any loop that
+                // selects on it.
+                self.session = None;
                 if let Some(notify) = self.awaiting_ack.take() {
                     notify.notify_waiters();
                 }
@@ -173,6 +203,82 @@ impl Call {
                 Ok(true)
             }
             _ => Ok(false),
+        }
+    }
+
+    /// The negotiated session interval, and whether this side is the one refreshing it.
+    ///
+    /// `None` means no timer was agreed, so nothing will ever notice a far end that stops
+    /// answering — worth being able to check, because that is a property of the *peer*, not of
+    /// what this side asked for.
+    #[must_use]
+    pub fn session_interval(&self) -> Option<(Duration, bool)> {
+        self.session
+            .map(|state| (state.terms.interval, state.terms.we_refresh))
+    }
+
+    /// When [`Self::on_session_deadline`] next needs to be called, if a timer was negotiated.
+    ///
+    /// Returned as an instant rather than as a future on purpose. A future would borrow the
+    /// call for as long as it was being awaited, which is exactly the borrow
+    /// [`Self::handle`] needs in the other arm of the `select!` this is written for.
+    #[must_use]
+    pub fn session_deadline(&self) -> Option<Instant> {
+        self.session.map(|state| state.act_at)
+    }
+
+    /// Do whatever the session timer's deadline asked for (RFC 4028 §10).
+    ///
+    /// For the refresher that is a re-INVITE; for the other side it is a BYE, because nothing
+    /// arrived and the far end is presumed gone. Calling this early is harmless — it re-reads
+    /// the deadline and does nothing if it has not passed.
+    pub async fn on_session_deadline(&mut self) -> Result<()> {
+        let Some(state) = self.session else {
+            return Ok(());
+        };
+        if Instant::now() < state.act_at {
+            return Ok(());
+        }
+        if !state.terms.we_refresh {
+            // §10: the side that is not refreshing "SHOULD send a BYE to terminate the
+            // session". The media stops with it — a half-torn-down call that keeps streaming
+            // is the failure this whole mechanism exists to end, not a gentler version of it.
+            self.hang_up().await?;
+            return Err(Error::SessionExpired);
+        }
+        match self.reinvite(self.hold).await {
+            Ok(()) => Ok(()),
+            // §10: a refresh that times out or draws a 408 or 481 means the dialog is gone at
+            // the far end, and RFC 3261 §12.2.1.2 says to BYE. Any other failure is about the
+            // refresh, not the call: a 491 glare or a 500 leaves the session running until the
+            // deadline we do not move, so the next attempt is the retry.
+            Err(Error::NoResponse) => {
+                self.hang_up().await?;
+                Err(Error::SessionExpired)
+            }
+            Err(Error::Rejected { status, reason }) => {
+                const REQUEST_TIMEOUT: u16 = 408;
+                const NO_SUCH_DIALOG: u16 = 481;
+                if status == REQUEST_TIMEOUT || status == NO_SUCH_DIALOG {
+                    self.hang_up().await?;
+                    return Err(Error::SessionExpired);
+                }
+                // Push the retry out so a peer answering 500 to every refresh is not asked
+                // again immediately for the rest of the session interval.
+                self.rearm();
+                Err(Error::Rejected { status, reason })
+            }
+            Err(other) => {
+                self.rearm();
+                Err(other)
+            }
+        }
+    }
+
+    /// Restart the countdown, because the session was refreshed.
+    fn rearm(&mut self) {
+        if let Some(state) = self.session.as_mut() {
+            state.act_at = Instant::now() + state.terms.act_after();
         }
     }
 
@@ -220,6 +326,11 @@ impl Call {
             .map_or(Direction::SendRecv, sipx_sdp::MediaDescription::direction);
 
         self.move_media_if_changed(renegotiated).await?;
+
+        // RFC 4028 §7.2: any re-INVITE inside the dialog refreshes the session, whether or not
+        // it was sent for that reason. Only counting the ones that carry `Session-Expires`
+        // would hang up on a peer that is demonstrably alive and talking to us.
+        self.rearm();
 
         // RFC 3261 §12.2.2: a re-INVITE is a target refresh request, so its `Contact` replaces
         // the dialog's remote target. Without this the BYE still goes to where the peer was
@@ -347,6 +458,28 @@ impl Call {
             .max_forwards(70)
             .body(Bytes::from(offer.to_string_sdp()));
 
+        // RFC 4028 §7.4: a refresh names the current interval and the current refresher, so
+        // that proxies on the path can see the value in force and object to it. Any re-INVITE
+        // refreshes the session (§7.2), so these go on every one rather than only on the ones
+        // sent because the timer asked.
+        let mut builder = builder.header(HeaderName::Supported, Bytes::from_static(b"timer"))?;
+        if let Some(state) = self.session {
+            let expires = SessionExpires {
+                interval: state.terms.interval,
+                refresher: Some(if state.terms.we_refresh {
+                    session::Refresher::Uac
+                } else {
+                    session::Refresher::Uas
+                }),
+            };
+            builder = builder
+                .header(HeaderName::SessionExpires, Bytes::from(expires.to_string()))?
+                .header(
+                    HeaderName::MinSe,
+                    Bytes::from(session::ABSOLUTE_MIN_INTERVAL.as_secs().to_string()),
+                )?;
+        }
+
         let request = add_routes(builder, &routes)?.build();
         let mut responses = self.endpoint.send(request, self.target.clone()).await?;
         let response = responses.final_response().await.ok_or(Error::NoResponse)?;
@@ -354,6 +487,16 @@ impl Call {
         if !response.status.is_success() {
             // The far end refused the change. The call it refused to change is still running,
             // so this is an error about the renegotiation, not about the call.
+            const INTERVAL_TOO_SMALL: u16 = 422;
+            if response.status.code() == INTERVAL_TOO_SMALL
+                && let Some(required) = required_interval(&response)
+                && let Some(state) = self.session.as_mut()
+            {
+                // §10: only a 2xx extends the expiration, so adopting the longer interval does
+                // *not* buy time — the refresh still has to succeed before the deadline that
+                // was already running. The next attempt is the one that must land.
+                state.terms.interval = required.max(session::ABSOLUTE_MIN_INTERVAL);
+            }
             return Err(Error::Rejected {
                 status: response.status.code(),
                 reason: String::from_utf8_lossy(&response.reason).into_owned(),
@@ -374,6 +517,19 @@ impl Call {
             self.move_media_if_changed(renegotiated).await?;
         }
         self.hold = direction;
+        // §7.2: the session expiration is measured from the 2xx, and a re-INVITE sent for any
+        // other reason refreshes it just the same.
+        if let Some(agreed) = session::adopt(
+            response
+                .headers
+                .typed::<SessionExpires>()
+                .and_then(std::result::Result::ok),
+            self.session.map(|state| state.terms.interval),
+        ) && let Some(state) = self.session.as_mut()
+        {
+            state.terms = agreed;
+        }
+        self.rearm();
         Ok(())
     }
 
@@ -693,6 +849,7 @@ impl Call {
         self.media.flush(Duration::from_secs(5)).await;
         self.media.stop();
         self.ended = true;
+        self.session = None;
         if let Some(notify) = self.awaiting_ack.take() {
             notify.notify_waiters();
         }
@@ -704,6 +861,49 @@ impl Call {
         // that cannot be hung up because the far end has already gone.
         let _ = tokio::time::timeout(Duration::from_secs(2), responses.final_response()).await;
         Ok(())
+    }
+}
+
+/// Drive a call until it ends, honouring its session timer.
+///
+/// The loop a call needs is not just "read the next message": a session timer is a deadline,
+/// and a call that only ever wakes on incoming traffic can never notice that no traffic has
+/// arrived. This is that loop, written once so that the RFC 4028 half of it is not something
+/// every caller has to remember.
+///
+/// Returns when the far end hangs up, or [`Error::SessionExpired`] when it stops answering.
+/// Messages for other dialogs are ignored rather than consumed silently — [`Call::handle`]
+/// reports whether it recognised one, and this passes that judgement straight through by
+/// dropping what it does not own.
+pub async fn serve(
+    call: &mut Call,
+    incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
+) -> Result<()> {
+    while !call.is_ended() {
+        let deadline = call.session_deadline();
+        tokio::select! {
+            message = incoming.recv() => match message {
+                Some(message) => {
+                    call.handle(&message).await?;
+                }
+                // The endpoint has shut down. The call cannot be worked any further, and
+                // pretending otherwise would spin on a closed channel.
+                None => return Ok(()),
+            },
+            () = sleep_until(deadline) => call.on_session_deadline().await?,
+        }
+    }
+    Ok(())
+}
+
+/// Wait for a deadline, or forever if there is none.
+///
+/// A free function rather than a method so that it borrows nothing: a future that borrowed the
+/// call would collide with the `&mut` the other arm of the `select!` needs.
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -795,6 +995,12 @@ pub struct DialOptions {
     /// correct: dropping the future partway through leaves the far end believing it is in a
     /// call, and only code inside the exchange can send the CANCEL that stops it.
     pub timeout: Option<Duration>,
+    /// Ask for an RFC 4028 session timer of this length.
+    ///
+    /// `None` is the default and means no timer is requested. That is not the same as no timer
+    /// being *run*: a far end that asks for one gets it, because refusing to refresh a session
+    /// the peer is timing would have it hang up on a call that is working.
+    pub session_expires: Option<Duration>,
 }
 
 impl DialOptions {
@@ -805,7 +1011,20 @@ impl DialOptions {
             from: from.into(),
             media_address,
             timeout: None,
+            session_expires: None,
         }
+    }
+
+    /// Detect a far end that vanishes, by refreshing the session on this interval (RFC 4028).
+    ///
+    /// Without this, a peer that loses power leaves the call up forever: there is no BYE, the
+    /// socket never closes, and nothing else in SIP notices. The interval is raised to the
+    /// RFC's ninety-second floor if it is shorter, because a shorter one is an amplification
+    /// vector rather than a configuration choice.
+    #[must_use]
+    pub fn with_session_timer(mut self, interval: Duration) -> Self {
+        self.session_expires = Some(interval.max(session::ABSOLUTE_MIN_INTERVAL));
+        self
     }
 
     /// Give up after this long.
@@ -836,15 +1055,66 @@ fn offered_media(
 ///
 /// Its own function only because `dial` had grown past the point where the interesting part —
 /// what happens to the *response* — was visible among the header construction.
+/// What identifies the dialog an INVITE is trying to create.
+///
+/// Held apart from the message so a retry can keep it. RFC 4028 §7.3 says a request re-sent
+/// after a `422` "SHOULD have the same value as the Call-ID, To, and From of the previous
+/// request" — a fresh identity would look to the far end like a second, unrelated call attempt
+/// rather than the answer to the counter-offer it just made.
+#[derive(Debug, Clone)]
+struct Identity {
+    call_id: String,
+    from_tag: String,
+    cseq: u32,
+}
+
+impl Identity {
+    fn fresh() -> Self {
+        Self {
+            call_id: format!("{}@sipx", token()),
+            from_tag: token(),
+            cseq: 1,
+        }
+    }
+
+    /// The same dialog, one transaction later.
+    fn again(&self) -> Self {
+        Self {
+            cseq: self.cseq.saturating_add(1),
+            ..self.clone()
+        }
+    }
+}
+
+/// Everything that goes into the INVITE besides where it is being sent.
+struct Invitation<'a> {
+    to: &'a Uri,
+    from: &'a str,
+    via: &'a str,
+    offer: &'a SessionDescription,
+    session_expires: Option<Duration>,
+    identity: &'a Identity,
+}
+
 fn build_invite(
     endpoint: &Handle,
     target: &Target,
-    to: &Uri,
-    from: &str,
-    via: &str,
-    offer: &SessionDescription,
+    invitation: &Invitation<'_>,
 ) -> Result<Request> {
-    Ok(RequestBuilder::new(Method::Invite, to.clone())
+    let &Invitation {
+        to,
+        from,
+        via,
+        offer,
+        session_expires,
+        identity,
+    } = invitation;
+    let Identity {
+        call_id,
+        from_tag,
+        cseq,
+    } = identity;
+    let mut builder = RequestBuilder::new(Method::Invite, to.clone())
         .header(HeaderName::Via, Bytes::from(via.to_owned()))?
         .header(
             HeaderName::To,
@@ -852,10 +1122,10 @@ fn build_invite(
         )?
         .header(
             HeaderName::From,
-            Bytes::from(format!("{from};tag={}", token())),
+            Bytes::from(format!("{from};tag={from_tag}")),
         )?
-        .header(HeaderName::CallId, Bytes::from(format!("{}@sipx", token())))?
-        .cseq(1, &Method::Invite)?
+        .header(HeaderName::CallId, Bytes::from(call_id.clone()))?
+        .cseq(*cseq, &Method::Invite)?
         .header(
             HeaderName::Contact,
             Bytes::from(contact_for(endpoint, target.transport)),
@@ -865,25 +1135,93 @@ fn build_invite(
             Bytes::from_static(b"application/sdp"),
         )?
         .max_forwards(70)
-        .body(Bytes::from(offer.to_string_sdp()))
-        .build())
+        .body(Bytes::from(offer.to_string_sdp()));
+
+    // `Supported: timer` goes on unconditionally. It is a statement of capability, not a
+    // request: it tells a far end that wants a timer that it may have one, which is what makes
+    // the far end's own liveness detection work even when this side has not asked for any.
+    builder = builder.header(HeaderName::Supported, Bytes::from_static(b"timer"))?;
+    if let Some(interval) = session_expires {
+        // No `refresher` parameter. RFC 4028 Table 2 row 4 lets the UAS choose when the UAC
+        // has not, and the UAS is the side that knows whether it is behind a NAT or a proxy
+        // that cares. Naming ourselves would override a better-informed decision.
+        let expires = SessionExpires {
+            interval,
+            refresher: None,
+        };
+        builder = builder
+            .header(HeaderName::SessionExpires, Bytes::from(expires.to_string()))?
+            .header(
+                HeaderName::MinSe,
+                Bytes::from(session::ABSOLUTE_MIN_INTERVAL.as_secs().to_string()),
+            )?;
+    }
+    Ok(builder.build())
 }
 
+/// The `Min-SE` a `422` demands, if it named one (RFC 4028 §6).
+fn required_interval(response: &Response) -> Option<Duration> {
+    response
+        .headers
+        .typed::<MinSe>()
+        .and_then(std::result::Result::ok)
+        .map(|min| min.0)
+}
+
+/// Place a call, retrying once if the far end refuses the session interval.
+///
+/// RFC 4028 §7.3: a `422` is not a refusal of the call, it is a counter-offer of an interval.
+/// Retrying is bounded to a single attempt on purpose — a peer that answers 422 to its own
+/// stated minimum is broken, and a loop there is an outbound call flood.
 pub async fn dial(
     endpoint: &Handle,
     target: Target,
     to: &Uri,
     options: &DialOptions,
 ) -> Result<Call> {
-    let media_address = options.media_address;
-    let from = options.from.as_str();
+    let identity = Identity::fresh();
+    match dial_with(endpoint, target.clone(), to, options, &identity).await {
+        Err(Error::IntervalTooBrief(required)) => {
+            let mut retried = options.clone();
+            retried.session_expires = Some(required.max(session::ABSOLUTE_MIN_INTERVAL));
+            dial_with(endpoint, target, to, &retried, &identity.again()).await
+        }
+        other => other,
+    }
+}
+
+/// Place a call, surfacing a `422` instead of retrying it.
+///
+/// [`dial`] is this plus one retry, and is what almost everything wants. This is here for a
+/// caller that would rather decide for itself what to do about an interval it does not like —
+/// a gateway with a policy about how often it is willing to be woken, say.
+pub async fn dial_once(
+    endpoint: &Handle,
+    target: Target,
+    to: &Uri,
+    options: &DialOptions,
+) -> Result<Call> {
+    dial_with(endpoint, target, to, options, &Identity::fresh()).await
+}
+
+/// Bind the media port and build the INVITE that will advertise it.
+///
+/// Split out of `dial_with` only for length: what is interesting there is what happens to the
+/// *response*, and it was buried under header construction.
+async fn open_invitation(
+    endpoint: &Handle,
+    target: &Target,
+    to: &Uri,
+    options: &DialOptions,
+    identity: &Identity,
+) -> Result<(MediaPort, Capabilities, String, Request)> {
     // The offer has to name the port audio will arrive on, and only a bound socket knows it.
     // So the port is bound now and the session started once the answer says where and in what.
-    let port = MediaPort::bind(SocketAddr::new(media_address, 0))
+    let port = MediaPort::bind(SocketAddr::new(options.media_address, 0))
         .await
         .map_err(Error::Io)?;
 
-    let (capabilities, offer) = offered_media(media_address, &port, target.transport);
+    let (capabilities, offer) = offered_media(options.media_address, &port, target.transport);
 
     // The `Via` is built here rather than left to the transport, because a CANCEL has to carry
     // the *same* branch as the INVITE it cancels — that identity is what matches the two at the
@@ -896,7 +1234,86 @@ pub async fn dial(
         sipx_transport::new_branch()
     );
 
-    let invite = build_invite(endpoint, &target, to, from, &via, &offer)?;
+    let invite = build_invite(
+        endpoint,
+        target,
+        &Invitation {
+            to,
+            from: options.from.as_str(),
+            via: &via,
+            offer: &offer,
+            session_expires: options.session_expires,
+            identity,
+        },
+    )?;
+    Ok((port, capabilities, via, invite))
+}
+
+/// Take back an invitation the caller has stopped waiting for.
+///
+/// Split out of `dial_with` for length, but it is the part with all the hazards in it, so it
+/// keeps its own name: everything here is about not leaving the far end in a call.
+async fn withdraw(
+    endpoint: &Handle,
+    invite: &Request,
+    via: &str,
+    target: Target,
+    responses: &mut sipx_transport::Responses,
+    provisional: bool,
+) {
+    // Giving up is not just ceasing to wait. The far end is ringing and has been told
+    // nothing; without a CANCEL it goes on ringing, and someone answering afterwards
+    // ends up in a call with a party that has left.
+    //
+    // Only once it has answered provisionally, though. RFC 3261 §9.1: with nothing
+    // received, "the client MUST wait for the arrival of a provisional response before
+    // sending" the CANCEL — one sent first can overtake the INVITE it refers to, match
+    // nothing at the far end, and leave the invitation it was meant to withdraw
+    // running. So this waits rather than giving up on cancelling, bounded because a
+    // peer that never answers at all would otherwise hold the call attempt open.
+    if provisional {
+        let _ = send_cancel(endpoint, invite, via, target.clone()).await;
+    }
+
+    // CANCEL cannot close the race it exists to manage: a 200 already in flight
+    // arrives anyway, and RFC 3261 §15 says a UAC that will not proceed must
+    // acknowledge it and then hang up rather than leave it unanswered.
+    let mut cancelled = provisional;
+    let grace = tokio::time::Instant::now() + Duration::from_secs(2);
+    while let Ok(Some(event)) = tokio::time::timeout_at(grace, responses.next()).await {
+        let sipx_sip::transaction::TuEvent::Response(late) = event else {
+            continue;
+        };
+        if !late.status.is_final() {
+            if !cancelled {
+                cancelled = true;
+                let _ = send_cancel(endpoint, invite, via, target.clone()).await;
+            }
+            continue;
+        }
+        if late.status.is_success()
+            && let Some(dialog) = Dialog::from_response(invite, &late)
+        {
+            let in_dialog = in_dialog_target(&dialog, target.clone());
+            let _ = send_ack(endpoint, &dialog, in_dialog.clone()).await;
+            if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
+                let _ = endpoint.send(bye, in_dialog).await;
+            }
+        }
+        break;
+    }
+}
+
+async fn dial_with(
+    endpoint: &Handle,
+    target: Target,
+    to: &Uri,
+    options: &DialOptions,
+    identity: &Identity,
+) -> Result<Call> {
+    let media_address = options.media_address;
+    let (port, capabilities, via, invite) =
+        open_invitation(endpoint, &target, to, options, identity).await?;
 
     let mut responses = endpoint.send(invite.clone(), target.clone()).await?;
 
@@ -904,47 +1321,15 @@ pub async fn dial(
         Waited::Final(response) => response,
         Waited::Gone => return Err(Error::NoResponse),
         Waited::GaveUp { provisional } => {
-            // Giving up is not just ceasing to wait. The far end is ringing and has been told
-            // nothing; without a CANCEL it goes on ringing, and someone answering afterwards
-            // ends up in a call with a party that has left.
-            //
-            // Only once it has answered provisionally, though. RFC 3261 §9.1: with nothing
-            // received, "the client MUST wait for the arrival of a provisional response before
-            // sending" the CANCEL — one sent first can overtake the INVITE it refers to, match
-            // nothing at the far end, and leave the invitation it was meant to withdraw
-            // running. So this waits rather than giving up on cancelling, bounded because a
-            // peer that never answers at all would otherwise hold the call attempt open.
-            if provisional {
-                let _ = send_cancel(endpoint, &invite, &via, target.clone()).await;
-            }
-
-            // CANCEL cannot close the race it exists to manage: a 200 already in flight
-            // arrives anyway, and RFC 3261 §15 says a UAC that will not proceed must
-            // acknowledge it and then hang up rather than leave it unanswered.
-            let mut cancelled = provisional;
-            let grace = tokio::time::Instant::now() + Duration::from_secs(2);
-            while let Ok(Some(event)) = tokio::time::timeout_at(grace, responses.next()).await {
-                let sipx_sip::transaction::TuEvent::Response(late) = event else {
-                    continue;
-                };
-                if !late.status.is_final() {
-                    if !cancelled {
-                        cancelled = true;
-                        let _ = send_cancel(endpoint, &invite, &via, target.clone()).await;
-                    }
-                    continue;
-                }
-                if late.status.is_success()
-                    && let Some(dialog) = Dialog::from_response(&invite, &late)
-                {
-                    let in_dialog = in_dialog_target(&dialog, target.clone());
-                    let _ = send_ack(endpoint, &dialog, in_dialog.clone()).await;
-                    if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
-                        let _ = endpoint.send(bye, in_dialog).await;
-                    }
-                }
-                break;
-            }
+            withdraw(
+                endpoint,
+                &invite,
+                &via,
+                target.clone(),
+                &mut responses,
+                provisional,
+            )
+            .await;
             return Err(Error::Cancelled(options.timeout.unwrap_or(Duration::ZERO)));
         }
     };
@@ -952,6 +1337,12 @@ pub async fn dial(
     if !response.status.is_success() {
         // A non-2xx is acknowledged by the transaction layer itself, so there is nothing to
         // send here — only a media port to release, which happens when `port` drops.
+        const INTERVAL_TOO_SMALL: u16 = 422;
+        if response.status.code() == INTERVAL_TOO_SMALL
+            && let Some(required) = required_interval(&response)
+        {
+            return Err(Error::IntervalTooBrief(required));
+        }
         return Err(Error::Rejected {
             status: response.status.code(),
             reason: String::from_utf8_lossy(&response.reason).into_owned(),
@@ -995,6 +1386,14 @@ pub async fn dial(
                 hold: Direction::SendRecv,
                 referral: None,
                 transfer: None,
+                session: session::adopt(
+                    response
+                        .headers
+                        .typed::<SessionExpires>()
+                        .and_then(std::result::Result::ok),
+                    options.session_expires,
+                )
+                .map(SessionState::armed),
             })
         }
         Err(error) => {
@@ -1044,7 +1443,69 @@ fn establish(
 pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAddr) -> Result<Call> {
     let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
+    answer_negotiated(endpoint, incoming, media_address, offer).await
+}
 
+/// Settle the RFC 4028 session timer for an incoming INVITE, refusing it if it asks for too
+/// little.
+///
+/// Sends the `422` itself, because the refusal has to carry the floor and the only thing that
+/// knows the floor is the negotiation. Returning "too brief" and leaving the caller to build
+/// the response would make the one header that makes a 422 useful optional.
+async fn negotiate_session(
+    endpoint: &Handle,
+    incoming: &Incoming,
+) -> Result<Option<session::Accepted>> {
+    Ok(
+        match session::answer(
+            incoming
+                .request
+                .headers
+                .typed::<sipx_sip::headers::misc::Supported>()
+                .and_then(std::result::Result::ok)
+                .is_some_and(|s| s.contains(session::OPTION_TAG)),
+            incoming
+                .request
+                .headers
+                .typed::<SessionExpires>()
+                .and_then(std::result::Result::ok),
+            incoming
+                .request
+                .headers
+                .typed::<MinSe>()
+                .and_then(std::result::Result::ok)
+                .map(|min| min.0),
+            session::ABSOLUTE_MIN_INTERVAL,
+        ) {
+            session::Answer::TooBrief(floor) => {
+                // RFC 4028 §6: the 422 has to carry the minimum, or the caller learns only that it
+                // was wrong and not what would be right, and retries the same interval forever.
+                const INTERVAL_TOO_SMALL: u16 = 422;
+                let status = StatusCode::new(INTERVAL_TOO_SMALL)
+                    .unwrap_or_else(|| unreachable!("422 is a valid status code"));
+                let refusal = ResponseBuilder::to_request(
+                    &incoming.request,
+                    status,
+                    "Session Interval Too Small",
+                )?
+                .header(HeaderName::MinSe, Bytes::from(floor.as_secs().to_string()))?
+                .build();
+                endpoint.respond(&incoming.key, refusal).await?;
+                return Err(Error::IntervalTooBrief(floor));
+            }
+            session::Answer::None => None,
+            session::Answer::Accept(accepted) => Some(accepted),
+        },
+    )
+}
+
+/// Answer an INVITE whose offer has already been parsed.
+async fn answer_negotiated(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    offer: SessionDescription,
+) -> Result<Call> {
     let negotiated = negotiated(&offer)?;
 
     // The port is bound before the session starts, because the answer has to name it *and* the
@@ -1083,7 +1544,9 @@ pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAdd
         format!("{};tag={tag}", strip_header_params(&existing))
     };
 
-    let response = ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?
+    let agreed = negotiate_session(endpoint, incoming).await?;
+
+    let mut response = ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?
         .set_header(&HeaderName::To, Bytes::from(to_with_tag))?
         .header(
             HeaderName::Contact,
@@ -1093,8 +1556,21 @@ pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAdd
             HeaderName::ContentType,
             Bytes::from_static(b"application/sdp"),
         )?
-        .body(Bytes::from(answer_sdp.to_string_sdp()))
-        .build();
+        .body(Bytes::from(answer_sdp.to_string_sdp()));
+
+    if let Some(accepted) = agreed {
+        let expires = SessionExpires {
+            interval: accepted.interval,
+            refresher: Some(accepted.refresher),
+        };
+        response = response
+            .header(HeaderName::SessionExpires, Bytes::from(expires.to_string()))?
+            .header(HeaderName::Supported, Bytes::from_static(b"timer"))?;
+        if accepted.require {
+            response = response.header(HeaderName::Require, Bytes::from_static(b"timer"))?;
+        }
+    }
+    let response = response.build();
 
     // Before the 200, not after. An INVITE with no usable `Contact` cannot form a dialog
     // (RFC 3261 §12.1.1), and answering first would put a 2xx on the wire for a call this side
@@ -1126,6 +1602,12 @@ pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAdd
         encrypted: settled.srtp.is_some(),
         referral: None,
         transfer: None,
+        session: agreed.map(|accepted| {
+            SessionState::armed(session::Session {
+                interval: accepted.interval,
+                we_refresh: accepted.refresher == session::Refresher::Uas,
+            })
+        }),
     })
 }
 

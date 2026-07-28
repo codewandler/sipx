@@ -28,6 +28,7 @@ pub mod message;
 pub mod name;
 pub mod params;
 pub mod parser;
+pub mod session;
 pub mod transaction;
 pub mod uri;
 pub mod validate;

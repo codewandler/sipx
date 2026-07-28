@@ -13,6 +13,8 @@ registers, transfers, bridges and conferences. It does not route other people's 
   or SDP offer/answer as a pure function.
 - **Encrypt a call end to end**, signalling and media, without a way to accidentally turn the
   verification off.
+- **Notice a far end that vanishes.** RFC 4028 session timers turn "the other phone lost power"
+  from a call that stays up forever into one that ends — see [placing a call](place-a-call.md).
 
 ## It does not fit if you want
 

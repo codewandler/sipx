@@ -28,10 +28,11 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [S-11 — Implement session timers](S-11-session-timers.md) · Signalling · track: signalling · RFC 4028 · headers already parse
 - [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · track: reachability · RFC 3327 · gates T-15 and GRUU
 - [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · track: auth · RFC 8760 · sipx-ua only, isolated
 - [S-12 — Implement reliable provisional responses](S-12-reliable-provisional-responses.md) · Signalling · track: signalling · RFC 3262 · same files as S-11, take it second
+- [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · track: test infrastructure · two items, both useful to sipx on their own
+- [T-16 — Implement the Service-Route header](T-16-service-route-header.md) · Signalling · track: reachability · RFC 3608 · the outbound twin of T-14's Path
 
 ### Docs Site
 - [X-12 — Write the user-facing guides](X-12-write-the-user-facing-guides.md) · Build · track: docs · nothing else touches docs/
@@ -39,6 +40,15 @@ _None._
 
 ### Quic
 - [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · track: quic · a draft rather than an RFC, so it sits below the RFC work
+
+### SIP core (sans-IO)
+_Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
+- [S-15 — Add editing operations to Headers](S-15-header-editing-operations.md) · Signalling · track: core · a forwarding element cannot edit a header list without rebuilding it
+- [S-16 — Implement the server side of digest authentication](S-16-server-side-digest.md) · Signalling · track: auth · RFC 7616 · sipx can answer a challenge but cannot issue one
+
+### Transport layer
+_The transport layer is the only place in the signalling stack that touches the network, which_
+- [T-17 — Resolve at proxy throughput — async and shared-cache](T-17-resolution-at-proxy-throughput.md) · Signalling · track: reachability · the Resolver trait is shaped for one UA, not for a forwarding element
 
 ## Blocked
 _None._
@@ -49,6 +59,7 @@ _None._
 - [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · track: media · RFC 5764 · blocked by M-14
 - [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · track: signalling · RFC 6665 · large; gates presence and BLF
 - [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · track: reachability · RFC 5626 · blocked by T-14
+- [X-15 — Consider requirement-grain rows in the RFC registry](X-15-requirement-grain-registry.md) · Build · track: docs · an offer, not a dependency — decide whether per-RFC grain is enough
 
 ### Quic
 - [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11
@@ -83,6 +94,7 @@ _None._
 - [S-8 — Implement the transaction layer and message matching](S-8-transaction-layer.md) · Signalling
 - [S-9 — Implement blind transfer (REFER)](S-9-implement-blind-transfer-refer.md) · Signalling
 - [S-10 — Implement attended transfer](S-10-implement-attended-transfer.md) · Signalling
+- [S-11 — Implement session timers](S-11-session-timers.md) · Signalling · track: signalling · RFC 4028 · headers already parse
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
