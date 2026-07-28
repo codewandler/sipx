@@ -1,0 +1,23 @@
+[package]
+name = "sipx-sip"
+description = "Sans-IO SIP core: messages, parser, transactions and dialog state (RFC 3261)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

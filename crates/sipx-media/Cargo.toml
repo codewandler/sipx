@@ -1,0 +1,27 @@
+[package]
+name = "sipx-media"
+description = "Media sessions: RTP/RTCP sockets bound to negotiated SDP, with NAT handling"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+sipx-sdp.workspace = true
+sipx-rtp.workspace = true
+sipx-audio.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

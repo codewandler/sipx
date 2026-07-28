@@ -1,0 +1,22 @@
+[package]
+name = "sipx-sdp"
+description = "SDP session descriptions (RFC 8866) and offer/answer negotiation (RFC 3264)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

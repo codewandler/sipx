@@ -1,0 +1,27 @@
+[package]
+name = "sipx-audio"
+description = "Telephony audio: G.711, G.722, PCM mixing and resampling, WAV I/O, RFC 4733 DTMF"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+## Opus support. Pulls in a C dependency; off by default so the stack stays pure Rust.
+opus = []
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

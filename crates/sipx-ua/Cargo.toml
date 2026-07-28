@@ -1,0 +1,27 @@
+[package]
+name = "sipx-ua"
+description = "SIP user agent: client and server roles, dialogs, digest authentication, registration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+sipx-sip.workspace = true
+sipx-transport.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+sipx-testkit.workspace = true
+tokio = { workspace = true, features = ["full"] }
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

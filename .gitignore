@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Fuzzing artifacts
+/fuzz/target
+/fuzz/artifacts
+/fuzz/corpus
+
+# Local research and scratch material — must never be committed.
+/notes/
+/research/
+/scratch/
+*.local.md
+
+# Recordings produced by tests and manual runs
+*.wav.out
+/recordings/

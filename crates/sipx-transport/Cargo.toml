@@ -1,0 +1,37 @@
+[package]
+name = "sipx-transport"
+description = "Async SIP transports: UDP, TCP, TLS, WebSocket, with RFC 3263 resolution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["udp", "tcp"]
+udp = []
+tcp = []
+## TLS over TCP (SIPS).
+tls = ["tcp"]
+## SIP over WebSocket (RFC 7118).
+ws = ["tcp"]
+wss = ["ws", "tls"]
+
+[dependencies]
+sipx-sip.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "io-util", "macros"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+sipx-testkit.workspace = true
+tokio = { workspace = true, features = ["full"] }
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

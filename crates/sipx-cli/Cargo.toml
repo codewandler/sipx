@@ -1,0 +1,29 @@
+[package]
+name = "sipx-cli"
+description = "sipx — a command line SIP softphone"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "sipx"
+path = "src/main.rs"
+
+[dependencies]
+sipx-sip.workspace = true
+sipx-call.workspace = true
+sipx-ua.workspace = true
+sipx-transport.workspace = true
+sipx-audio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true
