@@ -267,7 +267,7 @@ impl Call {
             .body(Bytes::from(offer.to_string_sdp()));
 
         let request = add_route_set(builder, &self.dialog)?.build();
-        let mut responses = self.endpoint.send(request, self.target).await?;
+        let mut responses = self.endpoint.send(request, self.target.clone()).await?;
         let response = responses.final_response().await.ok_or(Error::NoResponse)?;
 
         if !response.status.is_success() {
@@ -279,7 +279,7 @@ impl Call {
             });
         }
 
-        send_ack(&self.endpoint, &self.dialog, self.target).await?;
+        send_ack(&self.endpoint, &self.dialog, self.target.clone()).await?;
 
         if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
             && let Ok(renegotiated) = negotiated(&answer)
@@ -309,7 +309,7 @@ impl Call {
 
         let cseq = self.dialog.next_cseq();
         let bye = bye_request(&self.dialog, cseq)?;
-        let mut responses = self.endpoint.send(bye, self.target).await?;
+        let mut responses = self.endpoint.send(bye, self.target.clone()).await?;
         // A BYE that is never answered still ends the call locally: the alternative is a call
         // that cannot be hung up because the far end has already gone.
         let _ = tokio::time::timeout(Duration::from_secs(2), responses.final_response()).await;
@@ -428,7 +428,7 @@ pub async fn dial(
         .body(Bytes::from(offer.to_string_sdp()))
         .build();
 
-    let mut responses = endpoint.send(invite.clone(), target).await?;
+    let mut responses = endpoint.send(invite.clone(), target.clone()).await?;
 
     let response = match options.timeout {
         None => responses.final_response().await.ok_or(Error::NoResponse)?,
@@ -438,7 +438,7 @@ pub async fn dial(
                 // Giving up is not just ceasing to wait. The far end is ringing and has been
                 // told nothing; without a CANCEL it goes on ringing, and someone answering
                 // afterwards ends up in a call with a party that has left.
-                let _ = send_cancel(endpoint, &invite, &via, target).await;
+                let _ = send_cancel(endpoint, &invite, &via, target.clone()).await;
 
                 // CANCEL cannot close the race it exists to manage: a 200 already in flight
                 // arrives anyway, and RFC 3261 §15 says a UAC that will not proceed must
@@ -448,8 +448,8 @@ pub async fn dial(
                     && late.status.is_success()
                     && let Some(dialog) = Dialog::from_response(&invite, &late)
                 {
-                    let in_dialog = in_dialog_target(&dialog, target);
-                    let _ = send_ack(endpoint, &dialog, in_dialog).await;
+                    let in_dialog = in_dialog_target(&dialog, target.clone());
+                    let _ = send_ack(endpoint, &dialog, in_dialog.clone()).await;
                     if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
                         let _ = endpoint.send(bye, in_dialog).await;
                     }
@@ -471,9 +471,9 @@ pub async fn dial(
     // From here the far end believes a dialog exists, so *every* path must acknowledge.
     // Returning an error without one leaves it retransmitting its 200 for 32 seconds and then
     // streaming media at a port we have closed.
-    match establish(&invite, &response, target, port) {
+    match establish(&invite, &response, target.clone(), port) {
         Ok((dialog, media, in_dialog, negotiated)) => {
-            send_ack(endpoint, &dialog, in_dialog).await?;
+            send_ack(endpoint, &dialog, in_dialog.clone()).await?;
             Ok(Call {
                 dialog,
                 media,
@@ -490,8 +490,8 @@ pub async fn dial(
             // RFC 3261 §15: a UAC that cannot proceed after a 2xx acknowledges it and then
             // sends BYE. Walking away silently is what leaves the far end streaming.
             if let Some(dialog) = Dialog::from_response(&invite, &response) {
-                let in_dialog = in_dialog_target(&dialog, target);
-                let _ = send_ack(endpoint, &dialog, in_dialog).await;
+                let in_dialog = in_dialog_target(&dialog, target.clone());
+                let _ = send_ack(endpoint, &dialog, in_dialog.clone()).await;
                 if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
                     let _ = endpoint.send(bye, in_dialog).await;
                 }

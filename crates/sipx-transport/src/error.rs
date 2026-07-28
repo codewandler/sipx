@@ -18,6 +18,13 @@ pub enum Error {
     /// A message could not be built.
     #[error("build: {0}")]
     Build(#[from] sipx_sip::error::BuildError),
+    /// TLS could not be established or verified.
+    ///
+    /// A `sips:` request that reaches this has failed. There is deliberately no path from here
+    /// to a cleartext retry: a downgrade would defeat exactly what the scheme asked for.
+    #[cfg(feature = "tls")]
+    #[error("tls: {0}")]
+    Tls(#[from] crate::tls::TlsError),
     /// A URI that resolved to no usable candidate (RFC 3263).
     #[error("no usable candidate for {}", String::from_utf8_lossy(.0))]
     Unresolvable(Vec<u8>),

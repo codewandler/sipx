@@ -136,7 +136,10 @@ impl UserAgent {
     }
 
     async fn attempt(&self, request: Request) -> Result<Outcome> {
-        let mut responses = self.endpoint.send(request, self.config.target).await?;
+        let mut responses = self
+            .endpoint
+            .send(request, self.config.target.clone())
+            .await?;
         let response = responses.final_response().await.ok_or(Error::NoResponse)?;
         Ok(registrar::interpret(&response, self.config.expires))
     }

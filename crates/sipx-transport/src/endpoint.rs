@@ -52,6 +52,15 @@ pub struct Config {
     pub mtu: usize,
     /// Whether to listen for TCP connections on the same port.
     pub tcp: bool,
+    /// How sipx behaves as a TLS client, if TLS is to be used at all.
+    #[cfg(feature = "tls")]
+    pub tls_client: Option<crate::tls::ClientTls>,
+    /// The identity sipx presents as a TLS server, and the port to listen on.
+    ///
+    /// A separate port from the cleartext one, because RFC 3261 §19.1.2 gives `sips` its own
+    /// default (5061) and a peer connecting to 5060 does not expect a handshake.
+    #[cfg(feature = "tls")]
+    pub tls_server: Option<(crate::tls::ServerTls, u16)>,
     /// How the connection pool behaves.
     pub pool: PoolConfig,
 }
@@ -73,6 +82,10 @@ impl Config {
             capacity: 1024,
             mtu: 1300,
             tcp: true,
+            #[cfg(feature = "tls")]
+            tls_client: None,
+            #[cfg(feature = "tls")]
+            tls_server: None,
             pool: PoolConfig::default(),
         }
     }
@@ -157,6 +170,8 @@ enum Command {
 pub struct Handle {
     commands: mpsc::Sender<Command>,
     local_addr: SocketAddr,
+    #[cfg(feature = "tls")]
+    tls_addr: Option<SocketAddr>,
     sent_by: Arc<String>,
     sent_by_port: u16,
 }
@@ -166,6 +181,16 @@ impl Handle {
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// The address the TLS listener is bound to, if one was configured.
+    ///
+    /// Needed because the TLS port may be 0 — "any" — and the caller cannot put a port it does
+    /// not know into a `Contact`.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn tls_addr(&self) -> Option<SocketAddr> {
+        self.tls_addr
     }
 
     /// The host and port this endpoint tells peers to reach it on.
@@ -304,12 +329,44 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         _ => local_addr.port(),
     };
 
+    #[cfg(feature = "tls")]
+    let (tls_accept_tx, tls_accept_rx) = mpsc::channel(64);
+    #[cfg(feature = "tls")]
+    let mut tls_addr = None;
+    #[cfg(feature = "tls")]
+    if let Some((server, port)) = config.tls_server.clone() {
+        let tls_listener = TcpListener::bind(SocketAddr::new(config.bind.ip(), port)).await?;
+        tls_addr = Some(tls_listener.local_addr()?);
+        let (raw_tx, mut raw_rx) = mpsc::channel(64);
+        tokio::spawn(tcp::accept_loop(tls_listener, raw_tx));
+        tokio::spawn(async move {
+            // The handshake happens off the accept path, so one slow or hostile peer cannot
+            // hold up every other connection waiting behind it.
+            while let Some((stream, peer)) = raw_rx.recv().await {
+                let acceptor = server.acceptor();
+                let accepted = tls_accept_tx.clone();
+                tokio::spawn(async move {
+                    match acceptor.accept(stream).await {
+                        Ok(tls) => {
+                            let _ = accepted.send((tls, peer)).await;
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, %peer, "inbound TLS handshake failed");
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     let (commands_tx, commands_rx) = mpsc::channel(config.capacity);
     let (incoming_tx, incoming_rx) = mpsc::channel(config.capacity);
 
     let handle = Handle {
         commands: commands_tx,
         local_addr,
+        #[cfg(feature = "tls")]
+        tls_addr,
         sent_by: Arc::new(config.sent_by.clone()),
         sent_by_port,
     };
@@ -330,6 +387,10 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         commands: commands_rx,
         net: net_rx,
         accepts: accept_rx,
+        #[cfg(feature = "tls")]
+        tls_accepts: tls_accept_rx,
+        #[cfg(feature = "tls")]
+        tls_client: config.tls_client.clone(),
         pool: Pool::new(config.pool, config.limits, net_tx),
         limits: config.limits,
         mtu: config.mtu,
@@ -397,6 +458,13 @@ struct Driver {
     commands: mpsc::Receiver<Command>,
     net: mpsc::Receiver<tcp::Event>,
     accepts: mpsc::Receiver<(tokio::net::TcpStream, SocketAddr)>,
+    #[cfg(feature = "tls")]
+    tls_accepts: mpsc::Receiver<(
+        tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+        SocketAddr,
+    )>,
+    #[cfg(feature = "tls")]
+    tls_client: Option<crate::tls::ClientTls>,
     pool: Pool,
     limits: Limits,
     mtu: usize,
@@ -430,6 +498,9 @@ impl Driver {
                 },
                 Some(event) = self.net.recv() => self.on_net_event(event).await,
                 Some((stream, peer)) = self.accepts.recv() => self.pool.accept(stream, peer),
+                Some((stream, peer)) = recv_tls(&mut self.tls_accepts) => {
+                    self.pool.accept_tls(stream, peer);
+                }
                 _ = idle_sweep.tick() => {
                     for peer in self.pool.evict_idle() {
                         tracing::debug!(%peer, "closed an idle connection");
@@ -452,12 +523,16 @@ impl Driver {
 
     async fn on_net_event(&mut self, event: tcp::Event) {
         match event {
-            tcp::Event::Message { message, source } => {
-                self.on_message(*message, source, TransportKind::Tcp).await;
+            tcp::Event::Message {
+                message,
+                source,
+                transport,
+            } => {
+                self.on_message(*message, source, transport).await;
             }
-            tcp::Event::Closed { peer } => {
+            tcp::Event::Closed { peer, transport } => {
                 self.pool.remove(peer);
-                self.fail_transactions_on(peer, TransportKind::Tcp).await;
+                self.fail_transactions_on(peer, transport).await;
             }
         }
     }
@@ -586,7 +661,7 @@ impl Driver {
             match output {
                 Output::Send(message) => {
                     let target =
-                        self.destinations.get(key).copied().or_else(|| {
+                        self.destinations.get(key).cloned().or_else(|| {
                             origin.map(|(addr, transport)| Target::new(addr, transport))
                         });
                     let Some(target) = target else {
@@ -595,8 +670,9 @@ impl Driver {
                     };
                     let is_response = matches!(*message, Message::Response(_));
                     let bytes = message.to_bytes();
+                    let addr = target.addr;
                     if let Err(error) = self.transmit(bytes, target, is_response).await {
-                        tracing::warn!(%error, addr = %target.addr, "send failed");
+                        tracing::warn!(%error, %addr, "send failed");
                         let outputs = self.layer.on_transport_error(key);
                         Box::pin(self.perform(key, outputs, origin)).await;
                         return;
@@ -643,6 +719,28 @@ impl Driver {
                     return Ok(());
                 }
                 self.pool.send(target.addr, bytes).await
+            }
+            #[cfg(feature = "tls")]
+            TransportKind::Tls => {
+                // Answering on the connection the request arrived over comes first, and needs
+                // no client configuration at all — a pure TLS server has no reason to hold
+                // one, and requiring it would leave such a server unable to reply.
+                if is_response && self.pool.send_on_existing(target.addr, bytes.clone()).await {
+                    return Ok(());
+                }
+                // Only opening a *new* connection needs somewhere to verify against.
+                let Some(client) = self.tls_client.clone() else {
+                    return Err(Error::UnsupportedTransport(
+                        "TLS (no client configuration, so no outbound connection can be verified)",
+                    ));
+                };
+                // The name a certificate is checked against is the host from the URI, carried
+                // on the target rather than derived from the address it resolved to.
+                let name = target
+                    .verify_as
+                    .as_deref()
+                    .map_or_else(|| target.addr.ip().to_string(), str::to_owned);
+                self.pool.send_tls(target.addr, &name, &client, bytes).await
             }
             other => Err(Error::UnsupportedTransport(other.as_str())),
         }
@@ -709,6 +807,20 @@ impl Driver {
             .local_addr()
             .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)))
     }
+}
+
+/// Receive from the TLS accept channel, or never when TLS is not configured.
+#[cfg(feature = "tls")]
+async fn recv_tls(
+    accepts: &mut mpsc::Receiver<(
+        tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+        SocketAddr,
+    )>,
+) -> Option<(
+    tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    SocketAddr,
+)> {
+    accepts.recv().await
 }
 
 async fn sleep_until(deadline: Option<tokio::time::Instant>) {

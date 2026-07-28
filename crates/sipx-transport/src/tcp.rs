@@ -27,6 +27,10 @@ pub enum Event {
         message: Box<Message>,
         /// Which peer sent it.
         source: SocketAddr,
+        /// Which transport carried it. A TLS connection and a TCP one are both streams and
+        /// share every line of framing below; only this distinguishes them, and a message that
+        /// arrived over TLS must not be reported as cleartext.
+        transport: TransportKind,
     },
     /// The connection is gone.
     ///
@@ -36,6 +40,8 @@ pub enum Event {
     Closed {
         /// The peer whose connection closed.
         peer: SocketAddr,
+        /// Which transport it was.
+        transport: TransportKind,
     },
 }
 
@@ -163,10 +169,17 @@ impl Pool {
         let limits = self.limits;
         tokio::spawn(async move {
             match TcpStream::connect(peer).await {
-                Ok(stream) => pump(stream, peer, writer_rx, events, limits).await,
+                Ok(stream) => {
+                    pump(stream, peer, writer_rx, events, limits, TransportKind::Tcp).await;
+                }
                 Err(error) => {
                     tracing::debug!(%error, %peer, "connect failed");
-                    let _ = events.send(Event::Closed { peer }).await;
+                    let _ = events
+                        .send(Event::Closed {
+                            peer,
+                            transport: TransportKind::Tcp,
+                        })
+                        .await;
                 }
             }
         });
@@ -179,6 +192,109 @@ impl Pool {
                 last_used: Instant::now(),
             },
         );
+    }
+
+    /// Adopt a TLS connection a peer opened, once the handshake has completed.
+    #[cfg(feature = "tls")]
+    pub fn accept_tls(
+        &mut self,
+        stream: tokio_rustls::server::TlsStream<TcpStream>,
+        peer: SocketAddr,
+    ) {
+        self.insert_stream(stream, peer, Origin::Inbound, TransportKind::Tls);
+    }
+
+    /// Send to a peer over TLS, connecting and verifying if there is no usable connection.
+    ///
+    /// The verification name is the host from the URI, not the address — see
+    /// `docs/specs/sip-tls.md` §3.3.
+    #[cfg(feature = "tls")]
+    pub async fn send_tls(
+        &mut self,
+        peer: SocketAddr,
+        verification_name: &str,
+        client: &crate::tls::ClientTls,
+        bytes: Bytes,
+    ) -> Result<()> {
+        let reusable = self.connections.get(&peer).is_some_and(|pooled| {
+            !pooled.writer.is_closed()
+                && (pooled.origin == Origin::Outbound || self.config.reuse_inbound_for_outbound)
+        });
+        if !reusable {
+            self.connections.remove(&peer);
+            self.insert_connecting_tls(peer, verification_name, client)?;
+        }
+
+        let Some(pooled) = self.connections.get_mut(&peer) else {
+            return Err(crate::error::Error::EndpointClosed);
+        };
+        pooled.last_used = Instant::now();
+        let writer = pooled.writer.clone();
+        writer
+            .send(bytes)
+            .await
+            .map_err(|_| crate::error::Error::EndpointClosed)
+    }
+
+    #[cfg(feature = "tls")]
+    fn insert_connecting_tls(
+        &mut self,
+        peer: SocketAddr,
+        verification_name: &str,
+        client: &crate::tls::ClientTls,
+    ) -> Result<()> {
+        if self.connections.len() >= self.config.max_connections {
+            self.evict_least_recently_used();
+        }
+
+        let name = crate::tls::verification_name(verification_name)?;
+        let connector = client.connector();
+        let (writer_tx, writer_rx) = mpsc::channel::<Bytes>(64);
+        let events = self.events.clone();
+        let limits = self.limits;
+
+        tokio::spawn(async move {
+            let stream = match TcpStream::connect(peer).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    tracing::debug!(%error, %peer, "connect failed");
+                    let _ = events
+                        .send(Event::Closed {
+                            peer,
+                            transport: TransportKind::Tcp,
+                        })
+                        .await;
+                    return;
+                }
+            };
+            match connector.connect(name, stream).await {
+                Ok(tls) => {
+                    pump(tls, peer, writer_rx, events, limits, TransportKind::Tls).await;
+                }
+                Err(error) => {
+                    // Every verification failure arrives here, with the reason attached. It is
+                    // logged rather than swallowed, and the connection simply does not exist —
+                    // there is no fallback to cleartext.
+                    tracing::warn!(%error, %peer, "TLS handshake failed");
+                    let _ = events
+                        .send(Event::Closed {
+                            peer,
+                            transport: TransportKind::Tls,
+                        })
+                        .await;
+                }
+            }
+        });
+
+        self.connections.insert(
+            peer,
+            Pooled {
+                writer: writer_tx,
+                origin: Origin::Outbound,
+                last_used: Instant::now(),
+            },
+        );
+        Ok(())
     }
 
     /// Forget a connection that has closed.
@@ -227,6 +343,18 @@ impl Pool {
     }
 
     fn insert(&mut self, stream: TcpStream, peer: SocketAddr, origin: Origin) {
+        self.insert_stream(stream, peer, origin, TransportKind::Tcp);
+    }
+
+    fn insert_stream<S>(
+        &mut self,
+        stream: S,
+        peer: SocketAddr,
+        origin: Origin,
+        transport: TransportKind,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+    {
         if self.connections.len() >= self.config.max_connections {
             self.evict_least_recently_used();
         }
@@ -234,7 +362,7 @@ impl Pool {
         let (writer_tx, writer_rx) = mpsc::channel::<Bytes>(64);
         let events = self.events.clone();
         let limits = self.limits;
-        tokio::spawn(pump(stream, peer, writer_rx, events, limits));
+        tokio::spawn(pump(stream, peer, writer_rx, events, limits, transport));
 
         self.connections.insert(
             peer,
@@ -244,6 +372,28 @@ impl Pool {
                 last_used: Instant::now(),
             },
         );
+    }
+
+    /// Accept a TLS connection, doing the handshake before it joins the pool.
+    #[cfg(feature = "tls")]
+    pub fn accept_tls_handshake(
+        &self,
+        stream: TcpStream,
+        peer: SocketAddr,
+        server: &crate::tls::ServerTls,
+        accepted: mpsc::Sender<(tokio_rustls::server::TlsStream<TcpStream>, SocketAddr)>,
+    ) {
+        let acceptor = server.acceptor();
+        tokio::spawn(async move {
+            match acceptor.accept(stream).await {
+                Ok(tls) => {
+                    let _ = accepted.send((tls, peer)).await;
+                }
+                Err(error) => {
+                    tracing::debug!(%error, %peer, "inbound TLS handshake failed");
+                }
+            }
+        });
     }
 
     fn evict_least_recently_used(&mut self) {
@@ -260,14 +410,21 @@ impl Pool {
 }
 
 /// Read and write one connection until it ends.
-async fn pump(
-    stream: TcpStream,
+///
+/// Generic over the stream so a TLS connection reuses this wholesale: a TLS connection differs
+/// from a TCP one in its bytes, not in its framing or its transaction handling, and a second
+/// copy of this loop is a second place for the framing rules to drift.
+async fn pump<S>(
+    stream: S,
     peer: SocketAddr,
     mut outgoing: mpsc::Receiver<Bytes>,
     events: mpsc::Sender<Event>,
     limits: Limits,
-) {
-    let (mut read_half, mut write_half) = stream.into_split();
+    transport: TransportKind,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+{
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
     let mut parser = StreamParser::new(limits);
     let mut buf = vec![0u8; 8192];
 
@@ -281,7 +438,11 @@ async fn pump(
                         Ok(messages) => {
                             for message in messages {
                                 if events
-                                    .send(Event::Message { message: Box::new(message), source: peer })
+                                    .send(Event::Message {
+                                        message: Box::new(message),
+                                        source: peer,
+                                        transport,
+                                    })
                                     .await
                                     .is_err()
                                 {
@@ -307,7 +468,7 @@ async fn pump(
         }
     }
 
-    let _ = events.send(Event::Closed { peer }).await;
+    let _ = events.send(Event::Closed { peer, transport }).await;
 }
 
 /// Accept connections on a listener, adding each to the pool.

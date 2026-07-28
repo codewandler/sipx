@@ -1,6 +1,7 @@
 //! Where a message goes, and how a response finds its way back.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use sipx_sip::headers::Via;
 use sipx_sip::transaction::Reliability;
@@ -68,25 +69,45 @@ impl TransportKind {
 }
 
 /// A destination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Not `Copy`, because of `verify_as`. That field is the reason this type exists rather than a
+/// bare `(SocketAddr, TransportKind)`: under TLS the address says where to send and the name
+/// says who must be there, and the two are established by different means. Deriving the name
+/// from the address instead — a reverse lookup, or the SRV target — lets whoever controls DNS
+/// pick which certificate is acceptable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Target {
     /// Where to send.
     pub addr: SocketAddr,
     /// How to send.
     pub transport: TransportKind,
+    /// The name a TLS certificate must be valid for: the host from the URI sipx set out to
+    /// reach, before any resolution. `None` outside TLS, where nothing is verified.
+    pub verify_as: Option<Arc<str>>,
 }
 
 impl Target {
     /// A destination.
     #[must_use]
     pub fn new(addr: SocketAddr, transport: TransportKind) -> Self {
-        Self { addr, transport }
+        Self {
+            addr,
+            transport,
+            verify_as: None,
+        }
     }
 
     /// A UDP destination.
     #[must_use]
     pub fn udp(addr: SocketAddr) -> Self {
         Self::new(addr, TransportKind::Udp)
+    }
+
+    /// The same destination, with the name its certificate must be valid for.
+    #[must_use]
+    pub fn verifying(mut self, name: impl AsRef<str>) -> Self {
+        self.verify_as = Some(Arc::from(name.as_ref()));
+        self
     }
 }
 

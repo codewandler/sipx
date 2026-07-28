@@ -19,6 +19,8 @@ pub mod resolve;
 pub mod target;
 pub mod tcp;
 pub mod timers;
+#[cfg(feature = "tls")]
+pub mod tls;
 
 pub use endpoint::{Config, Handle, Incoming, Responses, bind, new_branch};
 pub use error::{Error, Result};
