@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img"
+     aria-label="A crab holding a telephone handset">
+  <title>sipx</title>
+  <desc>A crab holding an old telephone handset to one eye-stalk, its cord curling away.</desc>
+
+  <!-- Drawn for sipx rather than borrowed. Rust's own mascot is a crab, and so is this one,
+       but the shapes here are original: a flatter shell, square eye-stalks, and a handset,
+       which is the part that makes it a telephony logo rather than a Rust one. -->
+
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F98A3C"/>
+      <stop offset="1" stop-color="#E2622A"/>
+    </linearGradient>
+    <linearGradient id="claw" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FBA05B"/>
+      <stop offset="1" stop-color="#E76F35"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Legs: three a side, tucked under the shell. -->
+  <g stroke="#D2551F" stroke-width="17" stroke-linecap="round" fill="none">
+    <path d="M150 322 L104 360 L96 404"/>
+    <path d="M176 336 L142 388 L142 430"/>
+    <path d="M208 344 L192 400 L198 440"/>
+    <path d="M362 322 L408 360 L416 404"/>
+    <path d="M336 336 L370 388 L370 430"/>
+    <path d="M304 344 L320 400 L314 440"/>
+  </g>
+
+  <!-- Left claw: a pincer with an open gap, so it reads as a claw and not a mitten. -->
+  <g fill="url(#claw)" stroke="#C64E1C" stroke-width="9" stroke-linejoin="round"
+     stroke-linecap="round">
+    <path d="M152 262 L112 240 L74 244 L52 226 L74 206 L118 214 L150 232 Z"/>
+    <path d="M74 244 L40 262 L34 232 L52 226 Z"/>
+  </g>
+
+  <!-- The shell. -->
+  <path d="M256 118
+           C 352 118 404 178 404 246
+           C 404 306 344 342 256 342
+           C 168 342 108 306 108 246
+           C 108 178 160 118 256 118 Z"
+        fill="url(#shell)" stroke="#C64E1C" stroke-width="10"/>
+
+  <!-- A highlight, so the shell reads as curved at small sizes. -->
+  <path d="M168 176 C 200 148 312 148 344 176" fill="none"
+        stroke="#FFC48F" stroke-width="14" stroke-linecap="round" opacity="0.65"/>
+
+  <!-- Eye stalks and eyes. -->
+  <g>
+    <rect x="196" y="86" width="20" height="52" rx="9" fill="#E2622A"/>
+    <rect x="296" y="86" width="20" height="52" rx="9" fill="#E2622A"/>
+    <circle cx="206" cy="82" r="30" fill="#FFFFFF" stroke="#C64E1C" stroke-width="8"/>
+    <circle cx="306" cy="82" r="30" fill="#FFFFFF" stroke="#C64E1C" stroke-width="8"/>
+    <circle cx="214" cy="84" r="12" fill="#2B2118"/>
+    <circle cx="314" cy="84" r="12" fill="#2B2118"/>
+  </g>
+
+  <!-- A small mouth, so it is plainly a face. -->
+  <path d="M236 268 Q 256 288 276 268" fill="none" stroke="#C64E1C"
+        stroke-width="10" stroke-linecap="round"/>
+
+  <!-- The handset, held clear of the shell beside the right eye — the part that makes this a
+       telephone logo rather than a crab. Sized to survive a favicon, which is the real test. -->
+  <g transform="rotate(32 388 122)">
+    <rect x="368" y="58" width="40" height="128" rx="20" fill="#2F3A45"/>
+    <rect x="342" y="34" width="92" height="52" rx="24" fill="#3C4A57"
+          stroke="#26313B" stroke-width="6"/>
+    <rect x="342" y="158" width="92" height="52" rx="24" fill="#3C4A57"
+          stroke="#26313B" stroke-width="6"/>
+    <circle cx="388" cy="60" r="11" fill="#9DB2C6"/>
+    <circle cx="388" cy="184" r="11" fill="#9DB2C6"/>
+  </g>
+
+  <!-- Right claw, in front of the handset so it plainly grips it rather than sits behind. -->
+  <g fill="url(#claw)" stroke="#C64E1C" stroke-width="9" stroke-linejoin="round"
+     stroke-linecap="round">
+    <path d="M330 268 L360 218 L378 182 L412 196 L398 240 L368 274 Z"/>
+    <path d="M378 182 L400 154 L426 178 L412 196 Z"/>
+  </g>
+
+  <!-- The cord. Routed out past the shell rather than straight down from the mouthpiece: the
+       obvious placement puts it behind the claw and the body, where it reads as a smudge. -->
+  <path d="M406 236 c 36 6 12 40 46 50 c 32 9 14 38 40 48"
+        fill="none" stroke="#2F3A45" stroke-width="12" stroke-linecap="round"/>
+</svg>

@@ -1,10 +1,16 @@
+<img src="docs/assets/logo.svg" alt="" width="132" align="right">
+
 # sipx
 
 **A SIP and VoIP stack in Rust.** Place and answer calls, register against a PBX, carry real
 audio — as a library you embed, or as a command you run.
 
+[![docs](https://img.shields.io/badge/docs-codewandler.github.io%2Fsipx-blue)](https://codewandler.github.io/sipx/)
 [![RFCs tracked](https://img.shields.io/badge/RFCs%20tracked-61-blue)](docs/compliance.md)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
+**📖 [codewandler.github.io/sipx](https://codewandler.github.io/sipx/)** — what it supports,
+what it does not, and why.
 
 ---
 
@@ -114,14 +120,17 @@ Three things follow from it:
 
 ## Documentation
 
+**[codewandler.github.io/sipx](https://codewandler.github.io/sipx/)** is the site; the pages
+below are its source, readable here too.
+
 - **[RFC compliance](docs/compliance.md)** — what is supported, measured rather than asserted
 - **[RFC roadmap](docs/rfc-roadmap.md)** — what comes next, and why in that order
 - **[Roadmap and status](docs/roadmap.md)** — the narrative around the board
 - **[Specs](docs/specs/)** — an implementable contract per subsystem, written before the code
 - **[Board](docs/stories/README.md)** — what is being worked on now
 
-A documentation site is planned ([`X-11`](docs/stories/X-11-publish-a-documentation-site.md));
-until it exists, the links above are the documentation.
+The site is built from `docs/` rather than from a copy of it — `./scripts/build-docs.sh` builds
+it locally and fails if a page links to something the site does not publish.
 
 ---
 
@@ -131,6 +140,7 @@ until it exists, the links above are the documentation.
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ./scripts/rfc-report.py --check
+./scripts/build-docs.sh
 ```
 
 Design happens in `docs/specs/` before code, and every behavioural change names the test that

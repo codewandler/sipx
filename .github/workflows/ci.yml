@@ -106,6 +106,38 @@ jobs:
       # fails the build if it has drifted from either — a table nobody checks becomes marketing.
       - run: ./scripts/rfc-report.py --check
 
+  # The documentation site. Built on every push and pull request so a broken link fails review
+  # rather than the deployed page; published only from `main`.
+  site:
+    name: docs site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install mdBook
+        run: cargo install mdbook --locked --version ^0.5
+      - run: ./scripts/build-docs.sh
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        with:
+          path: target/book
+
+  deploy-site:
+    name: deploy docs site
+    needs: site
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

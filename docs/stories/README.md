@@ -35,9 +35,6 @@ _None._
 - [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · RFC 5626; blocked by T-14
 - [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · RFC 8760; small and self-contained
 
-### Docs Site
-- [X-11 — Publish a documentation site](X-11-publish-a-documentation-site.md) · Build · seeds the docs-site epic
-
 ### Quic
 - [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · gates T-12 and T-13
 - [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · blocked by T-11
@@ -102,6 +99,7 @@ _None._
 - [X-6 — Fix the RFC conformance defects found by review](X-6-fix-the-rfc-conformance-defects.md) · Core · review of implemented behaviour, not of gaps
 - [X-7 — Track RFC compliance, measured rather than asserted](X-7-track-rfc-compliance.md) · Build · seeds the conformance epic
 - [X-8 — Fail the build on unbacked compliance claims](X-8-fail-the-build-on-unbacked-compliance-claims.md) · Build
+- [X-11 — Publish a documentation site](X-11-publish-a-documentation-site.md) · Build · seeds the docs-site epic
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

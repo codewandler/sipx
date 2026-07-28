@@ -1,0 +1,35 @@
+# The documentation site, built from `docs/` rather than from a copy of it.
+#
+# `src` points at the existing documentation directory on purpose. A site with its own content
+# tree is a second copy of the truth, and the second copy is the one that rots — six months on
+# the site says sipx cannot do something it has done since spring.
+#
+# The cost of that choice is this file: `SUMMARY.md` decides what is a page and what is only a
+# file in the repository, and everything not listed there (stories, specs, designs) stays
+# internal. That is the right split — a spec is a contract for whoever implements it, not
+# something to send a user to.
+
+[book]
+title = "sipx"
+description = "A SIP and VoIP stack in Rust: place and answer calls, register, carry audio."
+authors = ["Timo Friedl"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+create-missing = false
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/codewandler/sipx"
+edit-url-template = "https://github.com/codewandler/sipx/edit/main/{path}"
+site-url = "/sipx/"
+additional-css = ["theme/sipx.css"]
+
+[output.html.print]
+enable = false
+
+[output.html.search]
+enable = true

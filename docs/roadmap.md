@@ -1,7 +1,7 @@
 # sipx — roadmap & status
 
 The big picture: what's delivered, what's next, and the epics that group related stories. The
-operational detail lives on the [board](stories/README.md) (generated from story frontmatter);
+operational detail lives on the [board](https://github.com/codewandler/sipx/blob/main/docs/stories/README.md) (generated from story frontmatter);
 this document is the hand-written narrative around it.
 
 Two companions to this one: [**RFC compliance**](compliance.md) is the measured list of what

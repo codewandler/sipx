@@ -1,0 +1,41 @@
+/* The landing page's hero: logo and title on one line, so the first thing a reader sees is what
+   this is rather than a wall of prose. */
+.sipx-hero {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+}
+
+.sipx-hero img {
+    width: 108px;
+    height: 108px;
+    flex: none;
+}
+
+.sipx-hero h1 {
+    margin: 0;
+    border: none;
+    font-size: 2.6rem;
+}
+
+.sipx-tagline {
+    font-size: 1.15rem;
+    opacity: 0.85;
+    margin-top: 0;
+}
+
+/* The support tables are the point of this site, and they are wide. Let them scroll on their
+   own rather than pushing the page sideways on a phone. */
+.content table {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+}
+
+/* A status cell should be readable at a glance; the emoji do the work, this keeps them from
+   wrapping away from their label. */
+.content table td:nth-child(3) {
+    white-space: nowrap;
+}
