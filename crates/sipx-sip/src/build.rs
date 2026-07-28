@@ -66,9 +66,8 @@ impl Header {
 /// Builds a request.
 ///
 /// ```
-/// # use sipx_sip::{build::RequestBuilder, Method, Uri, Host, HeaderName};
-/// # use bytes::Bytes;
-/// let uri = Uri::sip(Host::Name(Bytes::from_static(b"example.com")));
+/// # use sipx_sip::{build::RequestBuilder, Method, Uri, Host, HostName, HeaderName};
+/// let uri = Uri::sip(Host::Name(HostName::new("example.com")?));
 /// let request = RequestBuilder::new(Method::Options, uri)
 ///     .header(HeaderName::CallId, "abc123@example.com")?
 ///     .max_forwards(70)
@@ -254,10 +253,12 @@ impl ResponseBuilder {
 mod tests {
     use super::*;
     use crate::headers::CSeq;
-    use crate::uri::Host;
+    use crate::uri::{Host, HostName};
 
     fn uri() -> Uri {
-        Uri::sip(Host::Name(Bytes::from_static(b"example.com")))
+        Uri::sip(Host::Name(
+            HostName::new(Bytes::from_static(b"example.com")).expect("a valid host"),
+        ))
     }
 
     /// Every field a caller can populate, in one table.
@@ -317,6 +318,30 @@ mod tests {
                     .is_err(),
                 "CSeq method accepted {payload:?}"
             );
+            // A hostname, which reaches the wire inside the Request-URI. This is the field
+            // that made HostName a newtype with a private interior: a CRLF here forges an
+            // entire request line, not merely a header.
+            assert!(
+                HostName::new(p.clone()).is_err(),
+                "host name accepted {payload:?}"
+            );
+        }
+    }
+
+    /// A hostname must be a hostname, not merely free of line breaks.
+    #[test]
+    fn host_names_are_validated_not_just_screened() {
+        assert!(HostName::new("example.com").is_ok());
+        assert!(HostName::new("host-5.sub.example.com").is_ok());
+        for bad in [
+            "",
+            "exa mple.com",
+            "host@evil.com",
+            "host;lr",
+            "<host>",
+            "host/path",
+        ] {
+            assert!(HostName::new(bad).is_err(), "{bad:?} should be rejected");
         }
     }
 

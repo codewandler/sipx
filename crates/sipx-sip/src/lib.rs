@@ -40,5 +40,5 @@ pub use message::{
 pub use name::HeaderName;
 pub use params::{Param, Params};
 pub use parser::{Limits, StreamParser, parse_datagram};
-pub use uri::{Host, Scheme, Uri};
+pub use uri::{Host, HostName, Scheme, Uri};
 pub use validate::{Finding, validate, validate_request, validate_response};

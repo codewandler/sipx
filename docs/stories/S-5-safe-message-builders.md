@@ -22,7 +22,13 @@ caller might forget.
       that appends a raw header line from an unvalidated string.
 - [x] Header values containing CR, LF, NUL or an unescaped structural character are rejected
       at build time with a typed error, not silently escaped or truncated.
-- [x] The same guarantee holds for URI components, display names and reason phrases.
+- [x] The same guarantee holds for URI host components and reason phrases. Hostnames became a
+      `HostName` newtype with a private interior for this: a CRLF in a host forges an entire
+      request line, not merely a header, so screening at the builder was not enough — the
+      illegal value had to be unconstructible.
+- [ ] Display names — **deferred with the `Address` builder** to the user-agent epic. Nothing
+      in the core constructs an address yet, so there is no unguarded path today; the guard
+      lands with the constructor.
 - [x] Failing-first test: `crlf_injection_rejected_in_every_user_supplied_field`, driven by a
       table of every field a caller can populate — so a newly added field with no guard fails
       the test.
@@ -39,6 +45,8 @@ caller might forget.
 - `body()` sets `Content-Length` with the body and replaces any existing one, so a builder
   cannot produce an unframeable message. `build()` adds `Content-Length: 0` when there is no
   body, since a stream transport cannot frame without it.
+- `HostName::new` validates rather than merely screening: a host must be a host, not just free
+  of line breaks. The injection table covers it alongside the header fields.
 - `ResponseBuilder::to_request` copies `Via` in order and copies header *bytes* rather than
   re-deriving them, which means a request with an unparseable `To` still gets a well-formed
   400. There is a test for exactly that.

@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bytes::Bytes;
 
-use crate::error::UriError;
+use crate::error::{BuildError, UriError};
 use crate::escape;
 use crate::params::{Param, Params};
 
@@ -68,11 +68,53 @@ impl Scheme {
     }
 }
 
+/// A validated hostname.
+///
+/// The inner bytes are private and the only public constructor checks them. That is what
+/// stops a caller from putting a CRLF in a host and injecting a header through the
+/// Request-URI: without this, `Host::Name(b"evil\r\nInjected: yes")` would serialize into a
+/// perfectly convincing forged request line.
+#[derive(Debug, Clone)]
+pub struct HostName(Bytes);
+
+impl HostName {
+    /// Validate a hostname.
+    pub fn new(name: impl Into<Bytes>) -> Result<Self, BuildError> {
+        let name = name.into();
+        if name.is_empty() || !name.iter().all(|&b| is_host_char(b)) {
+            return Err(BuildError::NotAToken { field: "host" });
+        }
+        Ok(Self(name))
+    }
+
+    pub(crate) fn new_unchecked(name: Bytes) -> Self {
+        Self(name)
+    }
+
+    /// The hostname.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl PartialEq<&[u8]> for HostName {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<&str> for HostName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == other.as_bytes()
+    }
+}
+
 /// The host part of a URI.
 #[derive(Debug, Clone)]
 pub enum Host {
     /// A hostname.
-    Name(Bytes),
+    Name(HostName),
     /// A literal IPv4 or IPv6 address.
     Ip(IpAddr),
 }
@@ -90,7 +132,7 @@ impl Host {
     #[must_use]
     pub fn to_bytes(&self) -> Bytes {
         match self {
-            Self::Name(name) => name.clone(),
+            Self::Name(name) => name.0.clone(),
             Self::Ip(ip) => Bytes::from(ip.to_string()),
         }
     }
@@ -104,7 +146,7 @@ impl Host {
     pub fn equivalent(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Ip(a), Self::Ip(b)) => a == b,
-            (Self::Name(a), Self::Name(b)) => escape::eq_ignore_ascii_case(a, b),
+            (Self::Name(a), Self::Name(b)) => escape::eq_ignore_ascii_case(&a.0, &b.0),
             _ => false,
         }
     }
@@ -113,7 +155,7 @@ impl Host {
 impl fmt::Display for Host {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Name(name) => write!(f, "{}", String::from_utf8_lossy(name)),
+            Self::Name(name) => write!(f, "{}", String::from_utf8_lossy(&name.0)),
             Self::Ip(IpAddr::V6(ip)) => write!(f, "[{ip}]"),
             Self::Ip(ip) => write!(f, "{ip}"),
         }
@@ -571,7 +613,7 @@ fn parse_hostport(hostport: &Bytes) -> Result<(Host, Option<u16>), UriError> {
         .ok()
         .and_then(|s| s.parse::<Ipv4Addr>().ok())
         .map_or_else(
-            || Host::Name(host_raw.clone()),
+            || Host::Name(HostName::new_unchecked(host_raw.clone())),
             |ip| Host::Ip(IpAddr::V4(ip)),
         );
 
@@ -776,7 +818,7 @@ mod tests {
             u.password(),
             Some(&b"&it+has=1,weird!*pas$wo~d_too.(doesn't-it)"[..])
         );
-        assert!(matches!(u.host(), Some(Host::Name(h)) if h == "example.com"));
+        assert!(matches!(u.host(), Some(Host::Name(h)) if *h == "example.com"));
         assert!(u.params().is_some_and(Params::is_empty));
         assert!(!u.has_headers());
     }
@@ -884,7 +926,9 @@ mod tests {
 
     #[test]
     fn a_constructed_uri_serializes_from_its_parts() {
-        let mut u = Uri::sip(Host::Name(Bytes::from_static(b"example.com")));
+        let mut u = Uri::sip(Host::Name(
+            HostName::new(Bytes::from_static(b"example.com")).expect("a valid host"),
+        ));
         u.push_param(Param::new(
             Bytes::from_static(b"transport"),
             Bytes::from_static(b"tcp"),
