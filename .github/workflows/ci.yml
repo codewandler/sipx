@@ -74,11 +74,15 @@ jobs:
       - name: Fuzz the parsers
         run: |
           for target in parse_datagram parse_stream roundtrip; do
+            # The writable corpus directory has to exist before libFuzzer is handed it, and
+            # it is gitignored, so a clean checkout has no such directory.
+            mkdir -p "fuzz/corpus/$target"
             cargo fuzz run "$target" \
               "fuzz/corpus/$target" crates/sipx-testkit/corpus/rfc4475 \
               -- -max_total_time=60 -max_len=8192
           done
-          cargo fuzz run parse_uri -- -max_total_time=30 -max_len=512
+          mkdir -p fuzz/corpus/parse_uri
+          cargo fuzz run parse_uri fuzz/corpus/parse_uri -- -max_total_time=30 -max_len=512
       # The corpus is committed test data: prove the fuzzer did not modify it.
       - name: Verify the RFC 4475 corpus is untouched
         run: ./scripts/import-rfc4475-corpus.sh --check
