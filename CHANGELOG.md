@@ -7,7 +7,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+**Closing the gaps M3 left**
+
+- RFC 4733 DTMF (`M-7`). sipx had been advertising `telephone-event` in every offer since M3
+  with nothing able to encode or decode one. The payload type is read from the negotiation
+  rather than assumed, since it is dynamic.
+- re-INVITE (`M-8`). A call can be renegotiated from either side, including hold and resume. A
+  renegotiation that fails is refused with 488 and **leaves the call running**.
+- A real DNS client behind the RFC 3263 resolver trait (`T-5`), with a TTL-respecting cache
+  that tells "no such record" from "could not ask".
+- RTCP sender and receiver reports (`M-6`), with interarrival jitter computed by RFC 3550's
+  own recurrence rather than as a variance.
+
+**Milestone M4 — the phone**
+
+- `sipx dial`, `sipx answer` and `sipx register`, with WAV playback and recording, DTMF, a
+  `--json` output mode and a distinct exit code per outcome.
+
+### Fixed
+
+- A call hung up while packets were still in the paced send queue, so every call lost its last
+  word — or, for DTMF, its last digit. `MediaSession::flush` now drains the queue first.
+- The RTCP report block decoder read cumulative loss from byte 4 instead of byte 5, folding the
+  loss fraction into the high byte of the count.
 
 ## [0.1.0] — 2026-07-28
 
