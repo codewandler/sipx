@@ -53,7 +53,7 @@ refreshes hangs up locally and stops the media. Which side refreshes is negotiat
 job.
 
 A timer is a deadline, so a call that only ever wakes on incoming traffic can never notice that
-*no* traffic arrived. [`serve`](https://docs.rs/sipx-call) is the loop that handles both:
+*no* traffic arrived. [`serve`](../api/sipx_call/call/fn.serve.html) is the loop that handles both:
 
 ```rust
 match sipx_call::serve(&mut call, &mut incoming).await {

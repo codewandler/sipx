@@ -814,6 +814,10 @@ impl MediaSession {
         }
     }
 
+    /// The receiver report this session would send right now (RFC 3550 §6.4.1).
+    ///
+    /// Reading it does not consume the report window, so polling it does not make the *next*
+    /// RTCP report claim a clean interval that was in fact lossy.
     pub async fn stats(&self) -> sipx_rtp::rtcp::ReportBlock {
         self.stats.lock().await.report_block()
     }

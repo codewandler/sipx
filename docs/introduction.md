@@ -46,6 +46,7 @@ these reasons.
 - **[Does sipx fit?](guides/does-this-fit.md)** — the honest version, including the edges.
 - **Guides** — [place a call](guides/place-a-call.md), [answer one](guides/answer-a-call.md),
   [register against a PBX](guides/register.md), [use it as a library](guides/as-a-library.md).
+- **[API reference](api/)** — every crate, generated from the source.
 - **[What sipx supports, RFC by RFC](compliance.md)** — 63 RFCs, each marked implemented,
   partial, parse-only or not started. Generated from a registry and checked in CI, so it is a
   measurement rather than a claim.

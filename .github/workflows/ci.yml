@@ -120,6 +120,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install mdBook
         run: cargo install mdbook --locked --version ^0.5
+      # Builds the guides *and* the API reference, with `-D warnings` on the latter: a public
+      # item with no documentation, or an intra-doc link that resolves nowhere, fails here.
       - run: ./scripts/build-docs.sh
       - uses: actions/upload-pages-artifact@v3
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'

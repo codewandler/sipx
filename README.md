@@ -128,6 +128,8 @@ below are its source, readable here too.
 - **Guides** — [place a call](docs/guides/place-a-call.md),
   [answer one](docs/guides/answer-a-call.md), [register](docs/guides/register.md),
   [use it as a library](docs/guides/as-a-library.md)
+- **[API reference](https://codewandler.github.io/sipx/api/)** — `cargo doc` for every crate,
+  built with warnings denied so a missing doc or a dead link fails the build
 - **[RFC compliance](docs/compliance.md)** — what is supported, measured rather than asserted
 - **[RFC roadmap](docs/rfc-roadmap.md)** — what comes next, and why in that order
 - **[Roadmap and status](docs/roadmap.md)** — the narrative around the board

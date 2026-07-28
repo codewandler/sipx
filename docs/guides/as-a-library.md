@@ -34,3 +34,22 @@ object to each message that has to be rejected.
 | Registration and digest authentication | `sipx-ua` |
 | RTP, RTCP, jitter buffer, SRTP | `sipx-rtp` |
 | Calls with playback, recording, transfer | `sipx-call` |
+
+## The API reference
+
+Generated from the source with `cargo doc`, and published here rather than only on docs.rs so
+that it always matches the guides beside it.
+
+| Crate | Start at |
+|---|---|
+| `sipx-sip` | [`parser`](../api/sipx_sip/parser/index.html) · [`transaction`](../api/sipx_sip/transaction/index.html) · [`session`](../api/sipx_sip/session/index.html) |
+| `sipx-transport` | [`bind`](../api/sipx_transport/endpoint/fn.bind.html) · [`Config`](../api/sipx_transport/endpoint/struct.Config.html) · [`Target`](../api/sipx_transport/target/struct.Target.html) |
+| `sipx-ua` | [`UserAgent`](../api/sipx_ua/agent/struct.UserAgent.html) · [`registrar`](../api/sipx_ua/registrar/index.html) · [`auth`](../api/sipx_ua/auth/index.html) |
+| `sipx-sdp` | [`answer`](../api/sipx_sdp/answer/fn.answer.html) · [`Capabilities`](../api/sipx_sdp/answer/struct.Capabilities.html) |
+| `sipx-rtp` | [`srtp`](../api/sipx_rtp/srtp/index.html) · [`rtcp`](../api/sipx_rtp/rtcp/index.html) |
+| `sipx-media` | [`MediaSession`](../api/sipx_media/session/struct.MediaSession.html) |
+| `sipx-call` | [`dial`](../api/sipx_call/call/fn.dial.html) · [`answer`](../api/sipx_call/call/fn.answer.html) · [`Call`](../api/sipx_call/call/struct.Call.html) · [`serve`](../api/sipx_call/call/fn.serve.html) |
+
+Every public item in the workspace carries documentation, and the build denies both a missing
+one and an intra-doc link that resolves nowhere. That is not a claim about diligence — it is
+`RUSTDOCFLAGS="-D warnings"` in `scripts/build-docs.sh`, which is also what CI runs.

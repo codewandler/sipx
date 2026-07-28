@@ -1,6 +1,6 @@
 //! A real DNS client behind the RFC 3263 [`Resolver`] trait.
 //!
-//! [`crate::resolve`] implements every selection rule and knows nothing about DNS; this is the
+//! [`crate::resolve()`] implements every selection rule and knows nothing about DNS; this is the
 //! part that actually asks. The split is what lets the selection logic — where the bugs are —
 //! be tested against fixtures with no network.
 //!

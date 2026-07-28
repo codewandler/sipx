@@ -50,6 +50,23 @@ PYEOF
 echo "==> building"
 mdbook build
 
+# The API reference, published into the site rather than beside it. `-D warnings` is the point:
+# a missing doc on a public item or an intra-doc link that resolves nowhere fails here rather
+# than shipping as a 404 on a page nobody re-reads.
+echo "==> building the API reference"
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --quiet
+rm -rf target/book/api
+cp -r target/doc target/book/api
+# rustdoc writes no index at the root of a multi-crate build, so a link to /api/ would 404.
+# Send it to the crate a reader most likely wants first.
+cat > target/book/api/index.html <<'HTMLEOF'
+<!doctype html>
+<meta charset="utf-8">
+<title>sipx API reference</title>
+<meta http-equiv="refresh" content="0; url=sipx_call/index.html">
+<p><a href="sipx_call/index.html">sipx API reference</a></p>
+HTMLEOF
+
 # mdBook creates a directory for every subdirectory of the source, whether or not anything in it
 # was published. Empty ones are cruft in the deployed artefact.
 find target/book -type d -empty -delete
@@ -71,6 +88,11 @@ for page in sorted(root.rglob("*.html")):
         # Absolute paths are resolved against the deployed site root, not the build directory.
         # `site-url` makes them correct in production and unresolvable here.
         if link.startswith("/"):
+            continue
+        # rustdoc's output is checked by rustdoc, with `-D warnings` on broken intra-doc
+        # links. Re-walking tens of thousands of generated pages here would add a minute to
+        # every docs build to re-answer a question already answered.
+        if "/api/" in str(page) or page.parts[:1] == ("api",):
             continue
         target = (page.parent / link).resolve()
         if not target.exists():

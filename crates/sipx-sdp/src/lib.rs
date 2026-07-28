@@ -6,7 +6,7 @@
 //! does not understand breaks features it has never heard of. Parsing keeps every line; the
 //! typed accessors are a view over them, not a replacement.
 //!
-//! **Negotiation is a pure function.** [`answer`] takes an offer and a set of capabilities and
+//! **Negotiation is a pure function.** [`answer()`] takes an offer and a set of capabilities and
 //! returns an answer — no sockets, no clock, no shared mutable session object. The rules in
 //! RFC 3264 are full of cases that are awkward to reach through a live call (a stream with no
 //! common codec, a `sendonly` that must become `recvonly`, a dynamic payload type that means

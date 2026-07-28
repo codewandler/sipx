@@ -34,7 +34,6 @@ _None._
 
 ### Docs Site
 - [X-12 — Write the user-facing guides](X-12-write-the-user-facing-guides.md) · Build · track: docs · nothing else touches docs/
-- [X-13 — Publish the API documentation](X-13-publish-the-api-documentation.md) · Build · track: docs · after X-12 in the same crate-free track
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
@@ -114,6 +113,7 @@ _None._
 - [X-7 — Track RFC compliance, measured rather than asserted](X-7-track-rfc-compliance.md) · Build · seeds the conformance epic
 - [X-8 — Fail the build on unbacked compliance claims](X-8-fail-the-build-on-unbacked-compliance-claims.md) · Build
 - [X-11 — Publish a documentation site](X-11-publish-a-documentation-site.md) · Build · seeds the docs-site epic
+- [X-13 — Publish the API documentation](X-13-publish-the-api-documentation.md) · Build · track: docs · after X-12 in the same crate-free track
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
