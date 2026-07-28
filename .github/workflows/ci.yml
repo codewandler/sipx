@@ -56,6 +56,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  fuzz:
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked
+      # A short run on every push catches regressions; it is not a substitute for a long
+      # campaign before a release. The RFC 4475 corpus seeds each target, so the fuzzer starts
+      # from real messages rather than from noise.
+      - name: Fuzz the parsers
+        run: |
+          for target in parse_datagram parse_stream roundtrip; do
+            cargo fuzz run "$target" crates/sipx-testkit/corpus/rfc4475 \
+              -- -max_total_time=60 -max_len=8192
+          done
+          cargo fuzz run parse_uri -- -max_total_time=30 -max_len=512
+
   provenance:
     name: provenance
     runs-on: ubuntu-latest

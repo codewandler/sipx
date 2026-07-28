@@ -16,6 +16,9 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# A dev-dependency cycle: sipx-testkit depends on this crate. Cargo permits it, and the
+# alternative — a second copy of the corpus — is worse.
+sipx-testkit.workspace = true
 pretty_assertions.workspace = true
 proptest.workspace = true
 

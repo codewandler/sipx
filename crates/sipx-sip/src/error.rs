@@ -6,6 +6,142 @@
 
 use thiserror::Error;
 
+/// A message that could not be framed or whose structure is malformed.
+///
+/// Structural only: a message whose *headers* are bad still parses (see [`HeaderError`]).
+/// The transaction layer maps these onto a response status, which is why each variant says
+/// what went wrong rather than merely that something did.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ParseError {
+    /// The request or status line is malformed. Answer 400.
+    #[error("malformed start line: {0}")]
+    StartLine(#[from] StartLineError),
+    /// A header field line is malformed. Answer 400.
+    #[error("malformed header field on line {line}: {kind}")]
+    HeaderSyntax {
+        /// Which line of the header section, counting the start line as line 1.
+        line: usize,
+        /// What was wrong with it.
+        kind: HeaderSyntaxError,
+    },
+    /// The message body cannot be delimited. Answer 400; on a stream transport the framing
+    /// is unrecoverable and the connection must be closed.
+    #[error("cannot frame message body: {0}")]
+    Framing(#[from] FramingError),
+    /// A configured limit was exceeded. Answer 413 for body limits.
+    #[error("{limit} limit exceeded ({value})")]
+    Limit {
+        /// Which limit.
+        limit: LimitKind,
+        /// The value that exceeded it.
+        value: usize,
+    },
+    /// Not enough bytes yet. Only ever returned internally by the stream parser; callers see
+    /// it as "no message completed".
+    #[error("incomplete message")]
+    Incomplete,
+}
+
+/// What was wrong with a start line.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum StartLineError {
+    /// The message is empty, or the start line is.
+    #[error("empty")]
+    Empty,
+    /// A request line did not have exactly three space-separated elements. Covers multiple
+    /// spaces between elements and a trailing space (RFC 4475 §3.1.2.9, §3.1.2.10).
+    #[error("a request line must have exactly three space-separated elements")]
+    RequestLineShape,
+    /// The method is not a token.
+    #[error("method is not a token")]
+    Method,
+    /// The Request-URI did not parse — including when it is wrapped in `<>`
+    /// (RFC 4475 §3.1.2.7) or contains whitespace (§3.1.2.8).
+    #[error("bad Request-URI: {0}")]
+    Uri(#[from] UriError),
+    /// A status line had no status code.
+    #[error("status line has no status code")]
+    MissingStatusCode,
+    /// The status code is not exactly three digits in `100..=699` (RFC 4475 §3.1.2.19).
+    #[error("status code is not three digits in 100..=699")]
+    StatusCode,
+}
+
+/// What was wrong with a header field line.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum HeaderSyntaxError {
+    /// No colon separating name from value.
+    #[error("no colon")]
+    MissingColon,
+    /// The field name is empty.
+    #[error("empty field name")]
+    EmptyName,
+    /// The field name contains a character outside the `token` set.
+    #[error("field name is not a token")]
+    NameNotToken,
+    /// A bare CR or LF where a CRLF was required.
+    ///
+    /// sipx never accepts a bare LF as a line terminator: two elements disagreeing about
+    /// where a message ends is how a body becomes a second request.
+    #[error("bare CR or LF")]
+    BareNewline,
+    /// The first line of the header section begins with whitespace, so it continues a header
+    /// that does not exist.
+    #[error("header section begins with a continuation line")]
+    LeadingFold,
+}
+
+/// Why a body could not be delimited.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum FramingError {
+    /// No blank line terminating the header section.
+    #[error("no blank line after headers")]
+    NoHeaderTerminator,
+    /// More than one `Content-Length`. Rejected even when the values agree: two elements
+    /// having computed the same length is not worth a second code path (RFC 4475 §3.3.9).
+    #[error("repeated Content-Length")]
+    ContentLengthRepeated,
+    /// `Content-Length` is empty, signed, or not a decimal number. Never converted to a
+    /// number that could be negative, and never used as a length (RFC 4475 §3.1.2.3).
+    #[error("Content-Length is not a decimal number")]
+    ContentLengthMalformed,
+    /// `Content-Length` is larger than the octets actually present (RFC 4475 §3.1.2.2).
+    #[error("Content-Length exceeds the octets present")]
+    BodyTruncated,
+    /// A stream transport requires `Content-Length`; without it the stream cannot be cut into
+    /// messages (RFC 3261 §20.14).
+    #[error("Content-Length is required on stream transports")]
+    ContentLengthRequired,
+}
+
+/// Which limit was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitKind {
+    /// Total message size.
+    MessageBytes,
+    /// Declared or actual body size.
+    BodyBytes,
+    /// Number of header fields.
+    Headers,
+    /// Size of a single header field.
+    HeaderBytes,
+    /// Number of continuation lines in one header field.
+    FoldingLines,
+}
+
+impl std::fmt::Display for LimitKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::MessageBytes => "message size",
+            Self::BodyBytes => "body size",
+            Self::Headers => "header count",
+            Self::HeaderBytes => "header size",
+            Self::FoldingLines => "folding line count",
+        };
+        f.write_str(name)
+    }
+}
+
 /// A URI that could not be parsed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum UriError {

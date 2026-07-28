@@ -99,7 +99,7 @@ macro_rules! corpus {
 }
 
 use Expect::{HeaderErr, ParseErr, ParseOk, Unreferenced, ValidateErr};
-use Fault::{Framing, HeaderSyntax, StartLine};
+use Fault::{Framing, StartLine};
 
 corpus! {
     // ---- 3.1.1 Valid messages -------------------------------------------------------
@@ -119,7 +119,6 @@ corpus! {
 
     // ---- 3.1.2 Invalid messages -----------------------------------------------------
     // Structural: the bytes cannot be framed or the grammar is violated.
-    "badinv01"   => "3.1.2.1",  "Extraneous Header Field Separators", ParseErr(HeaderSyntax);
     "clerr"      => "3.1.2.2",  "Content Length Larger Than Message", ParseErr(Framing);
     "ncl"        => "3.1.2.3",  "Negative Content-Length", ParseErr(Framing);
     "ltgtruri"   => "3.1.2.7",  "<> Enclosing Request-URI", ParseErr(StartLine);
@@ -129,13 +128,29 @@ corpus! {
     "bigcode"    => "3.1.2.19", "Overlarge Response Code", ParseErr(StartLine);
 
     // Value-level: the message frames, and one header's value is bad.
+    //
+    // badinv01 reads like a structural fault and is not one: its Via is
+    // `SIP/2.0/UDP 192.0.2.15;;,;,,`, which frames as a perfectly ordinary header line. The
+    // stray separators violate the *Via grammar*. The same junk in an unknown header is legal
+    // — wsinv, a valid message, carries `UnknownHeaderWithUnusualValue: ;;,,;;,;` — so the
+    // fault cannot be found without knowing which header it is.
+    "badinv01"   => "3.1.2.1",  "Extraneous Header Field Separators", HeaderErr("Via");
     "scalar02"   => "3.1.2.4",  "Request Scalar Fields with Overlarge Values", HeaderErr("CSeq");
     "scalarlg"   => "3.1.2.5",  "Response Scalar Fields with Overlarge Values", HeaderErr("CSeq");
     "quotbal"    => "3.1.2.6",  "Unterminated Quoted String in Display Name", HeaderErr("To");
     "baddate"    => "3.1.2.12", "Invalid Time Zone in Date Header Field", HeaderErr("Date");
     "regbadct"   => "3.1.2.13", "Failure to Enclose name-addr URI in <>", HeaderErr("Contact");
     "badaspec"   => "3.1.2.14", "Spaces within addr-spec", HeaderErr("To");
-    "baddn"      => "3.1.2.15", "Non-token Characters in Display Name", HeaderErr("From");
+    // The fault this section illustrates is the unquoted comma in `From: Bell, Alexander
+    // <sip:...>`, which is a From-header fault. But this one file in the Appendix A archive
+    // has no terminating blank line — it is the only one of the fifty that does not — so it
+    // never reaches the header layer: the header section is unterminated, which on a datagram
+    // is indistinguishable from truncation and on a stream means "wait for more".
+    //
+    // We keep the parser strict rather than tolerate a missing terminator, because accepting
+    // one means accepting a truncated message as a complete one. The display-name fault is
+    // covered by a hand-built message in the From header's own tests.
+    "baddn"      => "3.1.2.15", "Non-token Characters in Display Name", ParseErr(Framing);
 
     // Semantic: everything parses; the message is still not one we may act on.
     "escruri"    => "3.1.2.11", "Escaped Headers in SIP Request-URI",

@@ -84,8 +84,11 @@ malformed (§3.1.2.10, `lwsstart`).
 
 ### 4.3 Start line
 
-**[RFC]** Exactly one SP separates the elements. Multiple SPs (§3.1.2.9, `multi01`) or a
-trailing SP (§3.1.2.10, `trws`) are malformed.
+**[RFC]** In a **request** line, exactly one SP separates the three elements. Multiple SPs
+(§3.1.2.9, `lwsstart`) or a trailing SP (§3.1.2.10, `trws`) are malformed.
+**[RFC]** In a **status** line the reason phrase may itself contain SP and HTAB, so the line is
+split at the first two spaces only and everything after them is the reason. The request-line
+strictness above must not be applied here.
 **[RFC]** The Request-URI is not enclosed in `<>` (§3.1.2.7, `ltgtruri`) and contains no
 whitespace (§3.1.2.8, `lwsruri`).
 **[RFC]** The reason phrase MAY be empty, in which case the line ends `SIP/2.0 200 CRLF` with
@@ -143,7 +146,13 @@ decoding into a Rust string type would either panic or lossily replace it.
 
 **[RFC]** Case-insensitive; compact forms are equivalent to their long forms.
 **[sipx]** A zero-length field name, or a name containing a character outside `token`, is
-`ParseError::HeaderSyntax` (§3.1.2.1, `badinv01`).
+`ParseError::HeaderSyntax`.
+
+Note that stray separators *within* a header value are not a structural fault: `badinv01`
+(§3.1.2.1) carries `Via: SIP/2.0/UDP 192.0.2.15;;,;,,`, which frames as an ordinary header
+line and violates only the `Via` grammar. The identical value under an unknown header name is
+legal — `wsinv`, a valid message, carries `UnknownHeaderWithUnusualValue: ;;,,;;,;`. The fault
+is therefore unreachable without knowing which header it is, and belongs to the typed layer.
 
 ## 5. Streaming
 
@@ -190,6 +199,13 @@ case carries an expected outcome:
 
 Totals 49; the Appendix A archive holds a fiftieth file that no section references, carried
 unclassified so the corpus stays a faithful copy of the archive.
+
+One case is classified against the RFC's own description: `baddn` (§3.1.2.15) illustrates an
+unquoted comma in a display name, but its archive file — alone among the fifty — has no
+terminating blank line, so it fails while framing and never reaches the header layer. sipx
+does not tolerate a missing terminator: on a datagram that is indistinguishable from a
+truncated message, and on a stream it means "wait for more". The display-name fault is covered
+by a hand-built message in the `From` header's tests instead.
 
 The split between these classes is the point of the classification: `ncl` (negative
 `Content-Length`) is a framing failure, `scalar02` (`CSeq` too large) is a message that frames

@@ -505,6 +505,7 @@ dependencies = [
  "bytes",
  "pretty_assertions",
  "proptest",
+ "sipx-testkit",
  "thiserror",
  "tracing",
 ]
