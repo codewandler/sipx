@@ -28,7 +28,6 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · track: auth · RFC 8760 · sipx-ua only, isolated
 - [S-12 — Implement reliable provisional responses](S-12-reliable-provisional-responses.md) · Signalling · track: signalling · RFC 3262 · same files as S-11, take it second
 - [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · track: test infrastructure · two items, both useful to sipx on their own
 - [T-16 — Implement the Service-Route header](T-16-service-route-header.md) · Signalling · track: reachability · RFC 3608 · the outbound twin of T-14's Path
@@ -47,7 +46,9 @@ _Everything above this layer inherits its correctness properties. SIP's genuinel
 
 ### Transport layer
 _The transport layer is the only place in the signalling stack that touches the network, which_
+- [T-19 — Stop dropping incoming requests silently](T-19-stop-dropping-incoming-requests-silently.md) · Signalling · track: reachability · a full channel loses requests with no counter and no log
 - [T-17 — Resolve at proxy throughput — async and shared-cache](T-17-resolution-at-proxy-throughput.md) · Signalling · track: reachability · the Resolver trait is shaped for one UA, not for a forwarding element
+- [T-18 — Surface unmatched responses to the application](T-18-surface-unmatched-responses.md) · Signalling · track: reachability · the endpoint drops what a forwarding element is required to forward
 
 ## Blocked
 _None._
@@ -94,6 +95,7 @@ _None._
 - [S-9 — Implement blind transfer (REFER)](S-9-implement-blind-transfer-refer.md) · Signalling
 - [S-10 — Implement attended transfer](S-10-implement-attended-transfer.md) · Signalling
 - [S-11 — Implement session timers](S-11-session-timers.md) · Signalling · track: signalling · RFC 4028 · headers already parse
+- [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · track: auth · RFC 8760 · sipx-ua only, isolated
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling

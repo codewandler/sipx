@@ -286,15 +286,16 @@ layer = "security"
 status = "implemented"
 roles = ["uac"]
 evidence = ["crates/sipx-ua/src/auth.rs"]
-note = "SHA-256 and SHA-256-sess as well as MD5, preferring SHA-256 whenever the server offers it."
+note = "MD5, SHA-256 and their session variants, checked against the §3.9.1 worked example rather than against sipx's own arithmetic. See RFC 8760 for SHA-512-256."
 
 [[rfc]]
 number = 8760
 title = "The SIP Digest Access Authentication Scheme"
 layer = "security"
-status = "none"
-evidence = []
-note = "Adds SHA-512-256 and the rules for offering several algorithms at once."
+status = "implemented"
+roles = ["uac"]
+evidence = ["crates/sipx-ua/src/auth.rs"]
+note = "SHA-512-256 and SHA-512-256-sess, and multiple challenges resolved by strength rather than by the server's order — §2.4's `unless a local policy dictates otherwise`, taken because §3 names the downgrade attack that ordering enables. `topmost_supported` is the literal rule for callers that want it."
 
 [[rfc]]
 number = 5922

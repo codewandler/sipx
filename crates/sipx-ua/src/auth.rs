@@ -33,6 +33,14 @@ pub enum Algorithm {
     Sha256,
     /// SHA-256 with the session variant of `HA1`.
     Sha256Sess,
+    /// RFC 8760's addition: SHA-512/256, the truncated SHA-512 variant.
+    ///
+    /// Not SHA-512 truncated by hand — SHA-512/256 is a distinct function with its own initial
+    /// values (FIPS 180-4 §5.3.6). Hashing with SHA-512 and taking the first half would produce
+    /// a different digest and fail against every peer.
+    Sha512_256,
+    /// SHA-512/256 with the session variant of `HA1`.
+    Sha512_256Sess,
 }
 
 impl Algorithm {
@@ -44,6 +52,8 @@ impl Algorithm {
             "MD5-SESS" => Some(Self::Md5Sess),
             "SHA-256" => Some(Self::Sha256),
             "SHA-256-SESS" => Some(Self::Sha256Sess),
+            "SHA-512-256" => Some(Self::Sha512_256),
+            "SHA-512-256-SESS" => Some(Self::Sha512_256Sess),
             _ => None,
         }
     }
@@ -56,16 +66,25 @@ impl Algorithm {
             Self::Md5Sess => "MD5-sess",
             Self::Sha256 => "SHA-256",
             Self::Sha256Sess => "SHA-256-sess",
+            Self::Sha512_256 => "SHA-512-256",
+            Self::Sha512_256Sess => "SHA-512-256-sess",
         }
     }
 
     /// Whether `HA1` is hashed again with the nonces.
     #[must_use]
     pub fn is_session(self) -> bool {
-        matches!(self, Self::Md5Sess | Self::Sha256Sess)
+        matches!(
+            self,
+            Self::Md5Sess | Self::Sha256Sess | Self::Sha512_256Sess
+        )
     }
 
     /// How strong it is, for choosing among several offered challenges.
+    ///
+    /// The session variants rank above their plain forms because they bind `HA1` to this
+    /// exchange's nonces, so a captured `HA1` cannot be replayed into a later one — a real
+    /// property, not a longer digest.
     #[must_use]
     pub fn strength(self) -> u8 {
         match self {
@@ -73,6 +92,8 @@ impl Algorithm {
             Self::Md5Sess => 2,
             Self::Sha256 => 3,
             Self::Sha256Sess => 4,
+            Self::Sha512_256 => 5,
+            Self::Sha512_256Sess => 6,
         }
     }
 
@@ -80,6 +101,9 @@ impl Algorithm {
         match self {
             Self::Md5 | Self::Md5Sess => hex(&Md5::digest(input.as_bytes())),
             Self::Sha256 | Self::Sha256Sess => hex(&Sha256::digest(input.as_bytes())),
+            Self::Sha512_256 | Self::Sha512_256Sess => {
+                hex(&sha2::Sha512_256::digest(input.as_bytes()))
+            }
         }
     }
 }
@@ -341,15 +365,45 @@ pub fn new_cnonce() -> String {
     format!("{value:016x}")
 }
 
-/// Pick the strongest challenge offered.
+/// Pick the strongest challenge offered, which is a deliberate departure from RFC 8760 §2.4.
 ///
-/// A server may offer several; answering the weakest when it also offered SHA-256 is a
-/// downgrade the client chose for itself.
+/// §2.4 says the UAC "SHOULD use the topmost header field that it supports **unless a local
+/// policy dictates otherwise**". This is that local policy, and the reason is in §3 of the same
+/// document: offering MD5 alongside a modern algorithm "opens the system to the potential for a
+/// downgrade attack by an on-path attacker". A challenge is not integrity-protected, so an
+/// attacker who can reorder the header fields can make the weakest algorithm topmost and a
+/// client that honours the order will comply. Ranking by strength removes that lever entirely,
+/// at the cost of ignoring a server's stated preference among algorithms it has already said it
+/// accepts.
+///
+/// [`topmost_supported`] is the other policy, for a deployment where the server's ordering
+/// carries information this client does not have.
+///
+/// Ties go to the earlier challenge, so the server's order still decides where strength does
+/// not — and the result does not depend on how the header rows happened to be collected.
 #[must_use]
 pub fn strongest(challenges: Vec<Challenge>) -> Option<Challenge> {
-    challenges
-        .into_iter()
-        .max_by_key(|challenge| challenge.algorithm.strength())
+    challenges.into_iter().reduce(|best, next| {
+        if next.algorithm.strength() > best.algorithm.strength() {
+            next
+        } else {
+            best
+        }
+    })
+}
+
+/// Pick the first challenge offered, which is RFC 8760 §2.4's own rule.
+///
+/// The server lists algorithms "in the order in which it would prefer to see them used" (§2.3),
+/// and honouring that is the specified behaviour. Prefer [`strongest`] unless the ordering
+/// genuinely carries information — see the downgrade note there for what this gives up.
+///
+/// Challenges the parser could not read never reach here: §2.4 also says "the client MUST
+/// ignore any challenge it does not understand", and an unknown `algorithm` fails to parse into
+/// a [`Challenge`] rather than being answered with the wrong hash.
+#[must_use]
+pub fn topmost_supported(challenges: Vec<Challenge>) -> Option<Challenge> {
+    challenges.into_iter().next()
 }
 
 #[cfg(test)]
@@ -394,19 +448,25 @@ mod tests {
         assert!(header.contains(r#"opaque="5ccc069c403ebaf9f0171e9517f40e41""#));
     }
 
-    /// The same inputs under SHA-256. The formula is the one confirmed above; only the hash
-    /// differs, and the expected value was computed independently.
+    /// RFC 7616 §3.9.1's worked example, verbatim.
+    ///
+    /// This replaced a test whose expected value had been "computed independently" — which is
+    /// to say, computed by the same reasoning that wrote the code. A digest that agrees with
+    /// itself proves nothing; this one agrees with the RFC.
     #[test]
-    fn sha256_uses_the_same_formula_with_a_different_hash() {
+    fn rfc7616_sha256_example_matches_the_published_digest() {
         let challenge = Challenge {
             realm: "http-auth@example.org".to_owned(),
-            nonce: "7ypf/xlj9XXwfFPEoyaVOOyLPE9BpNPCjZaeGVh6yF5w1M5PYqI=".to_owned(),
-            opaque: None,
+            nonce: "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v".to_owned(),
+            opaque: Some("FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS".to_owned()),
             algorithm: Algorithm::Sha256,
             qop_auth: true,
             stale: false,
             from_proxy: false,
         };
+        // Errata 4495 (verified): the password is "Circle of Life" with a lowercase "of",
+        // where RFC 2617 had "Of". The §3.9.1 digest only reproduces with the lowercase form,
+        // which is itself a check that the vector is being used rather than approximated.
         let header = respond(
             &challenge,
             &Credentials::new("Mufasa", "Circle of Life"),
@@ -416,9 +476,138 @@ mod tests {
             "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ",
         );
         assert!(
-            header.contains("509d5b9f5dc373a8ddb1aabccb60b1de2b8c19752bc72cc918da3a7d726aff8d"),
-            "{header}"
+            header.contains("753927fa0e85d155564e2e272a28d1802ca10daf4496794697cf8db5856cb6c1"),
+            "must match the digest RFC 7616 §3.9.1 publishes: {header}"
         );
+    }
+
+    /// RFC 7616 §3.9.2's SHA-512-256 example, **as corrected by errata 4897**.
+    ///
+    /// The values printed in the RFC do not reproduce, and the erratum is still in "Reported"
+    /// rather than "Verified" state, so neither source is authoritative on its own. Two things
+    /// make this usable as a vector anyway: the erratum's `response` was arrived at
+    /// independently by its reporter, and the erratum's *userhash* — a separate digest over
+    /// different input — is asserted below and also reproduces. A pair of independent values
+    /// agreeing is a much stronger signal than either one alone.
+    ///
+    /// The username carries a U+00E4 and a U+00F8 on purpose. `A1` is built from the raw
+    /// UTF-8 octets, and an implementation that mangled the encoding would still pass an
+    /// ASCII-only vector.
+    #[test]
+    fn rfc7616_sha512_256_example_matches_the_corrected_digest() {
+        let challenge = Challenge {
+            realm: "api@example.org".to_owned(),
+            nonce: "5TsQWLVdgBdmrQ0XsxbDODV+57QdFR34I9HAbC/RVvkK".to_owned(),
+            opaque: Some("HRPCssKJSGjCrkzDg8OhwpzCiGPChXYjwrI2QmXDnsOS".to_owned()),
+            algorithm: Algorithm::Sha512_256,
+            qop_auth: true,
+            stale: false,
+            from_proxy: false,
+        };
+        let header = respond(
+            &challenge,
+            &Credentials::new("J\u{e4}s\u{f8}n Doe", "Secret, or not?"),
+            "GET",
+            "/doe.json",
+            1,
+            "NTg6RKcb9boFIAS3KrFK9BGeh+iDa/sm6jUMp2wds69v",
+        );
+        assert!(
+            header.contains("3798d4131c277846293534c3edc11bd8a5e4cdcbff78b05db9d95eeb1cec68a5"),
+            "must match the digest errata 4897 publishes: {header}"
+        );
+    }
+
+    #[test]
+    fn sha512_256_is_the_fips_function_not_a_truncated_sha512() {
+        // SHA-512/256 has its own initial hash values (FIPS 180-4 §5.3.6). Hashing with
+        // SHA-512 and keeping the first 32 bytes gives a different answer, and a peer would
+        // reject every response. The userhash from errata 4897 is the check: a second digest
+        // over different input, from the same published example.
+        let hashed = Algorithm::Sha512_256.hash("J\u{e4}s\u{f8}n Doe:api@example.org");
+        assert_eq!(
+            hashed,
+            "793263caabb707a56211940d90411ea4a575adeccb7e360aeb624ed06ece9b0b"
+        );
+        let truncated_sha512 = {
+            use sha2::{Digest as _, Sha512};
+            hex(&Sha512::digest("J\u{e4}s\u{f8}n Doe:api@example.org".as_bytes())[..32])
+        };
+        assert_ne!(
+            hashed, truncated_sha512,
+            "SHA-512/256 must not be SHA-512 cut in half"
+        );
+    }
+
+    /// The story's failing-first test.
+    #[test]
+    fn the_strongest_offered_algorithm_is_chosen() {
+        let offer = |algorithm| Challenge {
+            realm: "example.com".to_owned(),
+            nonce: "n".to_owned(),
+            opaque: None,
+            algorithm,
+            qop_auth: true,
+            stale: false,
+            from_proxy: false,
+        };
+        // A server that lists MD5 first — which RFC 8760 §2.3 lets it do, and which an on-path
+        // attacker can also arrange by reordering, since the challenge is not integrity
+        // protected.
+        let chosen = strongest(vec![
+            offer(Algorithm::Md5),
+            offer(Algorithm::Sha256),
+            offer(Algorithm::Sha512_256),
+        ])
+        .expect("one is chosen");
+        assert_eq!(chosen.algorithm, Algorithm::Sha512_256);
+
+        // And the other policy, which is §2.4's literal rule, answers the other way.
+        let topmost = topmost_supported(vec![offer(Algorithm::Md5), offer(Algorithm::Sha512_256)])
+            .expect("one is chosen");
+        assert_eq!(topmost.algorithm, Algorithm::Md5);
+    }
+
+    #[test]
+    fn an_equal_ranking_tie_goes_to_the_server_order() {
+        // Where strength does not decide, the server's stated preference still does — and the
+        // answer must not depend on which end of the list the iterator happened to reach last.
+        let offer = |realm: &str| Challenge {
+            realm: realm.to_owned(),
+            nonce: "n".to_owned(),
+            opaque: None,
+            algorithm: Algorithm::Sha256,
+            qop_auth: true,
+            stale: false,
+            from_proxy: false,
+        };
+        let chosen = strongest(vec![offer("first"), offer("second")]).expect("one is chosen");
+        assert_eq!(chosen.realm, "first");
+    }
+
+    #[test]
+    fn the_modern_algorithms_round_trip_their_names() {
+        for algorithm in [
+            Algorithm::Sha512_256,
+            Algorithm::Sha512_256Sess,
+            Algorithm::Sha256,
+            Algorithm::Md5,
+        ] {
+            assert_eq!(
+                Algorithm::parse(algorithm.as_str()),
+                Some(algorithm),
+                "{} did not survive a round trip",
+                algorithm.as_str()
+            );
+        }
+        // Case-insensitively, because servers spell it every way there is.
+        assert_eq!(Algorithm::parse("sha-512-256"), Some(Algorithm::Sha512_256));
+        assert_eq!(
+            Algorithm::parse("SHA-512-256-SESS"),
+            Some(Algorithm::Sha512_256Sess)
+        );
+        // §2.4: "the client MUST ignore any challenge it does not understand".
+        assert_eq!(Algorithm::parse("SHA-3-512"), None);
     }
 
     /// `qop` changes the formula. A client that ignores it computes a different digest from

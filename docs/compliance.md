@@ -16,10 +16,10 @@ compliance document usually becomes untrue.
 
 | | Meaning | Count |
 |---|---|---|
-| ✅ implemented | Behaviour present and tested for the roles listed | 24 |
+| ✅ implemented | Behaviour present and tested for the roles listed | 25 |
 | 🟡 partial | Some of the normative behaviour; the note says which part is missing | 9 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 9 |
-| ⬜ not started | Tracked as a target, not started | 18 |
+| ⬜ not started | Tracked as a target, not started | 17 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
 The list is bounded on purpose: it is what sipx already touches plus what it has decided
@@ -79,13 +79,13 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | [2617](https://www.rfc-editor.org/rfc/rfc2617) | HTTP Authentication: Basic and Digest Access Authentication | ✅ implemented | uac | Checked against the worked example the RFC publishes for itself, rather than against sipx's own idea of the answer. |
 | [5922](https://www.rfc-editor.org/rfc/rfc5922) | Domain Certificates in SIP | ✅ implemented | uac, uas | The identity checked is the host from the URI, never the name resolution produced. There is no way to disable verification. |
 | [6125](https://www.rfc-editor.org/rfc/rfc6125) | Representation and Verification of Service Identity in TLS | ✅ implemented | — | Through rustls. §6.4.4 in particular: a certificate with a non-matching SAN is refused rather than falling back to the CN. |
-| [7616](https://www.rfc-editor.org/rfc/rfc7616) | HTTP Digest Access Authentication | ✅ implemented | uac | SHA-256 and SHA-256-sess as well as MD5, preferring SHA-256 whenever the server offers it. |
+| [7616](https://www.rfc-editor.org/rfc/rfc7616) | HTTP Digest Access Authentication | ✅ implemented | uac | MD5, SHA-256 and their session variants, checked against the §3.9.1 worked example rather than against sipx's own arithmetic. See RFC 8760 for SHA-512-256. |
 | [8446](https://www.rfc-editor.org/rfc/rfc8446) | The Transport Layer Security (TLS) Protocol Version 1.3 | ✅ implemented | — | Through rustls, preferred over 1.2. |
+| [8760](https://www.rfc-editor.org/rfc/rfc8760) | The SIP Digest Access Authentication Scheme | ✅ implemented | uac | SHA-512-256 and SHA-512-256-sess, and multiple challenges resolved by strength rather than by the server's order — §2.4's `unless a local policy dictates otherwise`, taken because §3 names the downgrade attack that ordering enables. `topmost_supported` is the literal rule for callers that want it. |
 | [8996](https://www.rfc-editor.org/rfc/rfc8996) | Deprecating TLS 1.0 and TLS 1.1 | ✅ implemented | — | 1.2 is the floor and is not configurable downward. |
 | [4474](https://www.rfc-editor.org/rfc/rfc4474) | Enhancements for Authenticated Identity Management in SIP | 🔤 syntax only | — | Headers only, and obsoleted by 8224. Tracked because the header names still arrive on the wire. |
 | [8224](https://www.rfc-editor.org/rfc/rfc8224) | Authenticated Identity Management in SIP (STIR) | ⬜ not started | — | The replacement for 4474. Signing and verifying caller identity. |
 | [8225](https://www.rfc-editor.org/rfc/rfc8225) | PASSporT: Personal Assertion Token | ⬜ not started | — | The token 8224 carries. |
-| [8760](https://www.rfc-editor.org/rfc/rfc8760) | The SIP Digest Access Authentication Scheme | ⬜ not started | — | Adds SHA-512-256 and the rules for offering several algorithms at once. |
 
 ## Media — describing it, carrying it, encoding it
 
