@@ -262,3 +262,45 @@ async fn a_request_to_nowhere_times_out() {
     }
     assert!(ended, "the transaction must end rather than hang");
 }
+
+/// RFC 3261 §18.1.1: a request approaching the path MTU must not go out as a datagram. sipx
+/// refuses it by name rather than sending something that will be fragmented or truncated — a
+/// truncated SIP message is a security problem, not a degraded one.
+#[tokio::test]
+async fn an_oversized_datagram_is_refused_rather_than_truncated() {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.mtu = 500;
+    let (client, _rx) = bind(config).await.expect("binds");
+
+    let (server, mut server_rx) = endpoint().await;
+    let mut request = options_to(&client);
+    // A body that puts the message comfortably over the limit.
+    request.set_body(Bytes::from(vec![b'x'; 800]));
+
+    let mut responses = client
+        .send(request, Target::udp(server.local_addr()))
+        .await
+        .expect("the send is accepted; the failure surfaces on the transaction");
+
+    let saw_error = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = responses.next().await {
+            if matches!(event, sipx_sip::transaction::TuEvent::TransportError) {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .expect("no timeout");
+    assert!(
+        saw_error,
+        "the transaction must be told, not left to time out"
+    );
+
+    // And nothing reached the far end.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        server_rx.try_recv().is_err(),
+        "an oversized message must not be sent at all"
+    );
+}

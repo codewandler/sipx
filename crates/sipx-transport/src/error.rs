@@ -18,6 +18,9 @@ pub enum Error {
     /// A message could not be built.
     #[error("build: {0}")]
     Build(#[from] sipx_sip::error::BuildError),
+    /// A transport that is declared but not yet implemented.
+    #[error("the {0} transport is not implemented yet")]
+    UnsupportedTransport(&'static str),
     /// A datagram larger than the path MTU on an unreliable transport (RFC 3261 §18.1.1).
     ///
     /// Named rather than truncated: a truncated SIP message is a security problem, not a

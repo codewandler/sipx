@@ -12,12 +12,13 @@ use std::sync::Arc;
 use bytes::Bytes;
 use sipx_sip::transaction::{Dispatch, Output, TransactionKey, TransactionLayer, TuEvent};
 use sipx_sip::{Header, HeaderName, Limits, Message, Request, Response, Timers, parse_datagram};
-use tokio::net::UdpSocket;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
 use crate::nat::apply_received_and_rport;
 use crate::target::{Target, TransportKind, response_destination};
+use crate::tcp::{self, Pool, PoolConfig};
 use crate::timers::TimerQueue;
 
 /// How an endpoint is configured.
@@ -42,6 +43,17 @@ pub struct Config {
     pub limits: Limits,
     /// How many events may queue for the application before new transactions are refused.
     pub capacity: usize,
+    /// The largest datagram sipx will put on an unreliable transport.
+    ///
+    /// RFC 3261 §18.1.1 says a request approaching the path MTU must go over a
+    /// congestion-controlled transport instead. Until sipx can switch transports mid-request —
+    /// which changes the `Via` and therefore the transaction — it refuses with a named error
+    /// rather than sending something that will be fragmented or silently truncated.
+    pub mtu: usize,
+    /// Whether to listen for TCP connections on the same port.
+    pub tcp: bool,
+    /// How the connection pool behaves.
+    pub pool: PoolConfig,
 }
 
 impl Config {
@@ -59,6 +71,9 @@ impl Config {
             timers: Timers::default(),
             limits: Limits::datagram(),
             capacity: 1024,
+            mtu: 1300,
+            tcp: true,
+            pool: PoolConfig::default(),
         }
     }
 }
@@ -202,6 +217,14 @@ pub fn new_branch() -> String {
 pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> {
     let socket = UdpSocket::bind(config.bind).await?;
     let local_addr = socket.local_addr()?;
+
+    // The TCP listener shares the UDP port, which is what peers expect: a `Via` naming
+    // `SIP/2.0/TCP host:port` and one naming UDP refer to the same port number.
+    let listener = if config.tcp {
+        Some(TcpListener::bind(local_addr).await?)
+    } else {
+        None
+    };
     // Port 0 in the configuration means the same as absent: it is a request for any port,
     // not an advertisement of port zero.
     let sent_by_port = match config.sent_by_port {
@@ -219,6 +242,12 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         sent_by_port,
     };
 
+    let (net_tx, net_rx) = mpsc::channel(config.capacity);
+    let (accept_tx, accept_rx) = mpsc::channel(64);
+    if let Some(listener) = listener {
+        tokio::spawn(tcp::accept_loop(listener, accept_tx));
+    }
+
     let driver = Driver {
         socket: Arc::new(socket),
         layer: TransactionLayer::new(config.timers),
@@ -227,7 +256,11 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         clients: HashMap::new(),
         incoming: incoming_tx,
         commands: commands_rx,
+        net: net_rx,
+        accepts: accept_rx,
+        pool: Pool::new(config.pool, config.limits, net_tx),
         limits: config.limits,
+        mtu: config.mtu,
     };
     tokio::spawn(driver.run());
 
@@ -242,12 +275,20 @@ struct Driver {
     clients: HashMap<TransactionKey, mpsc::Sender<TuEvent>>,
     incoming: mpsc::Sender<Incoming>,
     commands: mpsc::Receiver<Command>,
+    net: mpsc::Receiver<tcp::Event>,
+    accepts: mpsc::Receiver<(tokio::net::TcpStream, SocketAddr)>,
+    pool: Pool,
     limits: Limits,
+    mtu: usize,
 }
 
 impl Driver {
     async fn run(mut self) {
         let mut buf = vec![0u8; 65_536];
+        // Idle connections are swept periodically rather than given a timer each; the pool is
+        // small and the sweep is cheap.
+        let mut idle_sweep = tokio::time::interval(std::time::Duration::from_secs(30));
+        idle_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let deadline = self.timers.next_deadline();
             tokio::select! {
@@ -267,22 +308,58 @@ impl Driver {
                     Some(Command::Shutdown) | None => return,
                     Some(command) => self.on_command(command).await,
                 },
+                Some(event) = self.net.recv() => self.on_net_event(event).await,
+                Some((stream, peer)) = self.accepts.recv() => self.pool.accept(stream, peer),
+                _ = idle_sweep.tick() => {
+                    for peer in self.pool.evict_idle() {
+                        tracing::debug!(%peer, "closed an idle connection");
+                    }
+                }
             }
         }
     }
 
     async fn on_datagram(&mut self, datagram: Bytes, source: SocketAddr) {
-        let message = match parse_datagram(datagram, &self.limits) {
-            Ok(message) => message,
+        match parse_datagram(datagram, &self.limits) {
+            Ok(message) => self.on_message(message, source, TransportKind::Udp).await,
             Err(error) => {
                 // One malformed packet must not disturb the socket. The alternative is a
                 // trivial denial of service.
                 tracing::debug!(%error, %source, "dropping malformed datagram");
-                return;
             }
-        };
+        }
+    }
 
-        let transport = TransportKind::Udp;
+    async fn on_net_event(&mut self, event: tcp::Event) {
+        match event {
+            tcp::Event::Message { message, source } => {
+                self.on_message(*message, source, TransportKind::Tcp).await;
+            }
+            tcp::Event::Closed { peer } => {
+                self.pool.remove(peer);
+                self.fail_transactions_on(peer, TransportKind::Tcp).await;
+            }
+        }
+    }
+
+    /// Fail every transaction bound to a connection that has gone.
+    ///
+    /// The alternative is letting them time out, which means waiting up to 32 seconds to
+    /// discover something already known — a bad experience and a resource leak.
+    async fn fail_transactions_on(&mut self, peer: SocketAddr, transport: TransportKind) {
+        let affected: Vec<TransactionKey> = self
+            .destinations
+            .iter()
+            .filter(|(_, target)| target.addr == peer && target.transport == transport)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in affected {
+            let outputs = self.layer.on_transport_error(&key);
+            self.perform(&key, outputs, None).await;
+        }
+    }
+
+    async fn on_message(&mut self, message: Message, source: SocketAddr, transport: TransportKind) {
         let message = match message {
             Message::Request(mut request) => {
                 apply_received_and_rport(&mut request, source);
@@ -293,8 +370,11 @@ impl Driver {
 
         // A server transaction's responses go wherever its topmost Via says, which is why the
         // destination is computed now, from the request as amended above.
+        // RFC 5923: on a connection-oriented transport the response goes back over the
+        // connection the request arrived on, before §18.2.2 is consulted at all. Opening a new
+        // connection to a NATed client's `Via` cannot work.
         let reply_to = match &message {
-            Message::Request(request) => request
+            Message::Request(request) if transport == TransportKind::Udp => request
                 .headers
                 .typed::<sipx_sip::headers::Via>()
                 .and_then(std::result::Result::ok)
@@ -302,7 +382,7 @@ impl Driver {
                     || Target::new(source, transport),
                     |via| response_destination(&via, source, transport),
                 ),
-            Message::Response(_) => Target::new(source, transport),
+            _ => Target::new(source, transport),
         };
 
         match self.layer.receive(message, transport.reliability()) {
@@ -386,8 +466,9 @@ impl Driver {
                         tracing::warn!("no destination for a message the transaction wants sent");
                         continue;
                     };
+                    let is_response = matches!(*message, Message::Response(_));
                     let bytes = message.to_bytes();
-                    if let Err(error) = self.socket.send_to(&bytes, target.addr).await {
+                    if let Err(error) = self.transmit(bytes, target, is_response).await {
                         tracing::warn!(%error, addr = %target.addr, "send failed");
                         let outputs = self.layer.on_transport_error(key);
                         Box::pin(self.perform(key, outputs, origin)).await;
@@ -405,6 +486,38 @@ impl Driver {
                     self.clients.remove(key);
                 }
             }
+        }
+    }
+
+    /// Put bytes on the wire, opening a connection if the transport needs one.
+    ///
+    /// `is_response` decides whether an inbound connection may be used. A response goes back
+    /// over the connection its request arrived on — RFC 5923, and the only thing that works
+    /// when the peer is behind a NAT. An outbound *request* is different: reusing an inbound
+    /// connection for one is how a peer that connected to you gets your traffic routed
+    /// through it, so that is off unless configured.
+    async fn transmit(&mut self, bytes: Bytes, target: Target, is_response: bool) -> Result<()> {
+        match target.transport {
+            TransportKind::Udp => {
+                if bytes.len() > self.mtu {
+                    // RFC 3261 §18.1.1. Refusing by name beats sending something that will be
+                    // fragmented or silently truncated — a truncated SIP message is a security
+                    // problem, not a degraded one.
+                    return Err(Error::TooLarge {
+                        size: bytes.len(),
+                        mtu: self.mtu,
+                    });
+                }
+                self.socket.send_to(&bytes, target.addr).await?;
+                Ok(())
+            }
+            TransportKind::Tcp => {
+                if is_response && self.pool.send_on_existing(target.addr, bytes.clone()).await {
+                    return Ok(());
+                }
+                self.pool.send(target.addr, bytes).await
+            }
+            other => Err(Error::UnsupportedTransport(other.as_str())),
         }
     }
 
