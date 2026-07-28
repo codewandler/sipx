@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Unmatched responses can be watched (`T-18`).** A response that matches no client transaction was
+  logged and dropped — right for a user agent, wrong for anything that forwards: RFC 3261 §16.7
+  step 1 requires a stateful proxy that finds no response context to forward the response
+  statelessly, which it cannot do if it never sees one. `Handle::watch_unmatched` delivers them.
+  - **Opt-in, and that is the design.** Widening `Incoming` into an enum would make every user agent
+    handle a case it has no answer for; a second channel out of `bind` would change the signature
+    for everyone. An endpoint nobody is watching allocates no channel and behaves exactly as before.
+
 - **Backpressure is visible now (`T-19`).** The endpoint's delivery path ended in
   `let _ = try_send(…)`: a request the application could not take was gone, with nothing logged and
   no counter moved. `Handle::shed()` now reports what was dropped, and both paths log it.

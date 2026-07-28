@@ -219,6 +219,8 @@ enum Command {
         /// which carries no information beyond having arrived.
         answered: oneshot::Sender<Result<Option<SocketAddr>>>,
     },
+    /// Install a sink for responses that match no client transaction.
+    WatchUnmatched(mpsc::Sender<Unmatched>),
     /// How much state the driver is holding, for a soak test to assert on.
     Outstanding(oneshot::Sender<usize>),
     Shutdown,
@@ -238,6 +240,26 @@ struct Shed {
     requests: AtomicU64,
     acks: AtomicU64,
     unmatched: AtomicU64,
+}
+
+/// A response that matched no client transaction (RFC 3261 §16.7).
+///
+/// A user agent has nothing to do with one of these and is right to ignore it: it either answers a
+/// request this endpoint did not send, or it arrived after its transaction was already gone. A
+/// *forwarding element* is in the opposite position — §16.7 step 1 requires a stateful proxy that
+/// finds no response context to "forward the response statelessly", which it cannot do if the
+/// response never reaches it.
+///
+/// Delivered only to a caller that asked, through [`Handle::watch_unmatched`]. Nothing is allocated
+/// and nothing changes for an endpoint that never asks.
+#[derive(Debug, Clone)]
+pub struct Unmatched {
+    /// The response itself, unaltered.
+    pub response: Response,
+    /// Where it came from.
+    pub source: SocketAddr,
+    /// Which transport carried it.
+    pub transport: TransportKind,
 }
 
 /// A snapshot of what an endpoint has shed (see [`Handle::shed`]).
@@ -543,6 +565,27 @@ impl Handle {
         }
     }
 
+    /// Watch for responses that match no client transaction (RFC 3261 §16.7).
+    ///
+    /// Opt-in, and the reason it is opt-in is the whole design: a user agent has no answer for one
+    /// of these — it either answers a request this endpoint did not send, or it arrived after its
+    /// transaction was gone — and should not have to handle a case it cannot act on. A forwarding
+    /// element is required to act on it, so it asks.
+    ///
+    /// Until someone calls this, unmatched responses are logged and dropped exactly as before, and
+    /// no channel exists to allocate into.
+    ///
+    /// Calling it twice **replaces** the sink. Two watchers would each see some of the responses
+    /// and neither would see all of them, which is a subtler failure than having none.
+    pub async fn watch_unmatched(&self, capacity: usize) -> Result<mpsc::Receiver<Unmatched>> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        self.commands
+            .send(Command::WatchUnmatched(tx))
+            .await
+            .map_err(|_| Error::EndpointClosed)?;
+        Ok(rx)
+    }
+
     /// What this endpoint has dropped because the application was not keeping up.
     ///
     /// Read straight from a shared counter rather than by asking the event loop, because the loop
@@ -691,6 +734,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         limits: config.limits,
         mtu: config.mtu,
         shed,
+        unmatched: None,
         stun_waiters: HashMap::new(),
         pong_waiters: HashMap::new(),
     };
@@ -921,6 +965,11 @@ struct Driver {
     /// Keep-alives sent over UDP, waiting for the STUN response that answers them.
     /// Shared with every [`Handle`]; see [`ShedCounts`].
     shed: Arc<Shed>,
+    /// Where to send responses that match no client transaction, if anyone asked for them.
+    ///
+    /// `None` is the ordinary case and costs nothing: no channel exists, and the response is
+    /// logged and dropped exactly as before.
+    unmatched: Option<mpsc::Sender<Unmatched>>,
     stun_waiters: HashMap<crate::stun::TransactionId, oneshot::Sender<Result<Option<SocketAddr>>>>,
     /// Keep-alives sent over a connection, waiting for a CRLF pong.
     ///
@@ -1161,6 +1210,32 @@ impl Driver {
             }
             Dispatch::Unmatched(message) => {
                 tracing::debug!(%source, "message matched no transaction");
+                // A response that matched nothing. RFC 3261 §16.7 step 1 makes this a forwarding
+                // element's business — it must forward such a response statelessly — and no
+                // business at all of a user agent, which is why it goes only to a caller that
+                // asked for it.
+                if let Message::Response(response) = &*message {
+                    if let Some(sink) = &self.unmatched {
+                        // `try_send`, and a full watcher's channel is its own problem: blocking
+                        // the loop here would stop every timer in the endpoint to wait for a
+                        // consumer that is already behind.
+                        if sink
+                            .try_send(Unmatched {
+                                response: response.clone(),
+                                source,
+                                transport,
+                            })
+                            .is_err()
+                        {
+                            self.shed.unmatched.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(
+                                %source,
+                                "unmatched-response watcher is not keeping up; dropped one"
+                            );
+                        }
+                    }
+                    return;
+                }
                 // An unmatched ACK belongs to the application; anything else is noise it can
                 // still choose to look at.
                 if let Message::Request(request) = *message {
@@ -1323,6 +1398,12 @@ impl Driver {
                 let bytes = Message::Request(*request).to_bytes();
                 let result = self.transmit(bytes, target, false, None).await;
                 let _ = sent.send(result);
+            }
+            Command::WatchUnmatched(sink) => {
+                // Replaces rather than fans out. Two watchers would each see some of the
+                // responses and neither would see all of them, which is worse than one watcher
+                // and much worse than an error.
+                self.unmatched = Some(sink);
             }
             Command::Keepalive { target, answered } => {
                 self.on_keepalive(target, answered).await;

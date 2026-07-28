@@ -57,7 +57,6 @@ _Everything above this layer inherits its correctness properties. SIP's genuinel
 
 ### Transport layer
 _The transport layer is the only place in the signalling stack that touches the network, which_
-- [T-18 — Surface unmatched responses to the application](T-18-surface-unmatched-responses.md) · Signalling · M7 · the endpoint drops what a forwarding element is required to forward
 - [T-17 — Resolve at proxy throughput — async and shared-cache](T-17-resolution-at-proxy-throughput.md) · Signalling · M7 · the Resolver trait is shaped for one UA, not for a forwarding element
 
 ## Blocked
@@ -162,6 +161,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · track: reachability · RFC 3327 · gates T-15 and GRUU
 - [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · M6 · RFC 5626 · T-14 unblocked it
 - [T-16 — Implement the Service-Route header](T-16-service-route-header.md) · Signalling · M6 · RFC 3608 · the outbound twin of T-14's Path
+- [T-18 — Surface unmatched responses to the application](T-18-surface-unmatched-responses.md) · Signalling · M7 · the endpoint drops what a forwarding element is required to forward
 - [T-19 — Stop dropping incoming requests silently](T-19-stop-dropping-incoming-requests-silently.md) · Signalling · M7 · a full channel loses requests with no counter and no log
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core

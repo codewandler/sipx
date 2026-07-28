@@ -190,3 +190,104 @@ async fn an_endpoint_that_keeps_up_sheds_nothing() {
         calm.shed()
     );
 }
+
+/// A response that answers no transaction this endpoint started.
+fn stray_response(target_via: &str, call_id: &'static str) -> Vec<u8> {
+    format!(
+        "SIP/2.0 200 OK\r\n\
+         Via: SIP/2.0/UDP {target_via};branch=z9hG4bK-nothing-matches-this\r\n\
+         To: <sip:callee.example>;tag=r\r\n\
+         From: <sip:caller@example.net>;tag=abc\r\n\
+         Call-ID: {call_id}\r\n\
+         CSeq: 1 OPTIONS\r\n\
+         Content-Length: 0\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// The `T-18` story's failing-first test.
+///
+/// RFC 3261 §16.7 step 1 requires a stateful proxy that finds no response context to forward the
+/// response statelessly. It cannot do that if the endpoint drops the response first — which is
+/// what happened, because the unmatched arm forwarded only `Message::Request`.
+#[tokio::test]
+async fn a_response_matching_no_transaction_reaches_the_application() {
+    let (endpoint, _incoming) = bind(Config::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
+    let mut unmatched = endpoint
+        .watch_unmatched(8)
+        .await
+        .expect("the endpoint accepts a watcher");
+
+    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    sender
+        .send_to(
+            &stray_response(
+                &endpoint.sent_by_for(sipx_transport::TransportKind::Udp),
+                "stray@sipx",
+            ),
+            endpoint.local_addr(),
+        )
+        .await
+        .expect("sends");
+
+    let seen = tokio::time::timeout(Duration::from_secs(2), unmatched.recv())
+        .await
+        .expect("a response that matches nothing must still reach a watcher")
+        .expect("the channel is open");
+
+    assert_eq!(seen.response.status.code(), 200);
+    assert_eq!(
+        seen.transport,
+        sipx_transport::TransportKind::Udp,
+        "a decision about forwarding needs to know how it arrived"
+    );
+    assert_eq!(seen.source.ip().to_string(), "127.0.0.1", "and where from");
+    assert_eq!(
+        seen.response
+            .headers
+            .value(&HeaderName::CallId)
+            .map(|value| String::from_utf8_lossy(&value).into_owned()),
+        Some("stray@sipx".to_owned()),
+        "the response is delivered unaltered"
+    );
+}
+
+/// An endpoint nobody is watching keeps behaving exactly as it did: the response is logged and
+/// dropped, no channel exists, and nothing anywhere has to handle a case it has no answer for.
+#[tokio::test]
+async fn an_endpoint_with_no_watcher_is_undisturbed_by_a_stray_response() {
+    let (endpoint, mut incoming) = bind(Config::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
+
+    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    sender
+        .send_to(
+            &stray_response(
+                &endpoint.sent_by_for(sipx_transport::TransportKind::Udp),
+                "ignored@sipx",
+            ),
+            endpoint.local_addr(),
+        )
+        .await
+        .expect("sends");
+
+    // Nothing arrives on the request channel — a response is not a request, and widening
+    // `Incoming` to carry one would make every user agent handle a case it cannot act on.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), incoming.recv())
+            .await
+            .is_err(),
+        "a stray response must not appear as an incoming request"
+    );
+    assert!(
+        !endpoint.shed().any(),
+        "and dropping it is not shedding: nobody wanted it"
+    );
+}

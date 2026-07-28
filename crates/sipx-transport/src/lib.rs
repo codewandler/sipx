@@ -25,7 +25,7 @@ pub mod tls;
 #[cfg(feature = "ws")]
 pub mod ws;
 
-pub use endpoint::{Config, Handle, Incoming, Responses, ShedCounts, bind, new_branch};
+pub use endpoint::{Config, Handle, Incoming, Responses, ShedCounts, Unmatched, bind, new_branch};
 pub use error::{Error, Result};
 pub use resolve::{Naptr, Resolver, Srv, resolve};
 pub use stun::Reply as StunReply;
