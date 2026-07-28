@@ -143,6 +143,23 @@ impl TransactionLayer {
         outputs
     }
 
+    /// Abandon a server transaction the transaction user never answered.
+    ///
+    /// RFC 3261 §17.2 gives a server transaction in `Trying` no timer, because the model is
+    /// that the transaction user always responds. A stack exposed to a network needs the case
+    /// where it does not: an application that forgot a request, or one that is wedged, both
+    /// look like this, and a transaction held for the life of the process is a leak that grows
+    /// with traffic.
+    ///
+    /// Deliberately *not* a timer inside the transaction: that would change what the state
+    /// machine does, and the machine is right. This is the layer above admitting that its user
+    /// is fallible, and it is the driver — which owns the clock — that decides when.
+    ///
+    /// Returns whether there was one to abandon.
+    pub fn abandon(&mut self, key: &TransactionKey) -> bool {
+        self.server.remove(key).is_some()
+    }
+
     /// A timer fired for a transaction.
     pub fn on_timer(&mut self, key: &TransactionKey, timer: Timer) -> Vec<Output> {
         if let Some(tx) = self.client.get_mut(key) {

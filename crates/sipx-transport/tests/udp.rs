@@ -525,3 +525,136 @@ async fn an_oversized_response_is_sent_rather_than_refused() {
     .expect("no timeout");
     assert_eq!(status, Some(200), "the response must reach the caller");
 }
+
+/// A request the application never answers must not pin a transaction for the life of the
+/// process.
+///
+/// RFC 3261 §17.2 gives a server transaction in `Trying` no timer, because its model is that
+/// the transaction user always responds. Real applications do not — one that ignores a method
+/// it does not implement leaves the transaction there, and nothing collects it. A soak run
+/// found 300 of them for 300 calls, still present two minutes later.
+///
+/// The clock is paused, so the three minutes cost no wall time. Asserting only that an
+/// unanswered request *is* counted would pass with the whole backstop deleted; what has to be
+/// asserted is that it eventually stops being counted.
+#[tokio::test(start_paused = true)]
+async fn a_request_the_application_never_answers_is_eventually_abandoned() {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.unanswered_limit = Duration::from_secs(60);
+    let (server, mut incoming) = bind(config).await.expect("binds");
+    let server_addr = server.local_addr();
+    let (client, _client_rx) = endpoint().await;
+
+    assert_eq!(server.outstanding().await.expect("idle"), 0);
+
+    let mut responses = client
+        .send(options_to(&server), Target::udp(server_addr))
+        .await
+        .expect("sends");
+    // Drained so the client transaction's own timers do not stall the paused clock.
+    tokio::spawn(async move { while responses.next().await.is_some() {} });
+
+    let request = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("no timeout")
+        .expect("a request arrives");
+
+    let held = server.outstanding().await.expect("readable");
+    assert!(
+        held > 0,
+        "an unanswered request must be visible as outstanding work"
+    );
+
+    // The client goes away first. Under a paused clock its retransmission timers fire whenever
+    // the runtime idles, and a retransmission arriving after the sweep creates the server
+    // transaction again — which would make this test a race rather than a measurement.
+    client.shutdown().await;
+
+    // Past the limit, and past the sweep interval that acts on it. The sweep and the command
+    // are separate branches of the driver's `select!`, and which fires first is not ordered —
+    // so the count is read until it settles rather than once.
+    tokio::time::advance(Duration::from_secs(150)).await;
+    let mut after = server.outstanding().await.expect("readable");
+    for _ in 0..20 {
+        if after == 0 {
+            break;
+        }
+        tokio::time::advance(Duration::from_secs(31)).await;
+        after = server.outstanding().await.expect("readable");
+    }
+    assert_eq!(
+        after, 0,
+        "a transaction nobody answered must not be held for the life of the process"
+    );
+
+    // And answering it now is refused rather than silently discarded: the application would
+    // otherwise believe its response went out while the caller heard nothing at all.
+    let response = sipx_sip::build::ResponseBuilder::to_request(
+        &request.request,
+        sipx_sip::StatusCode::new(200).expect("valid"),
+        "OK",
+    )
+    .expect("builds")
+    .build();
+    let outcome = server.respond(&request.key, response).await;
+    assert!(
+        outcome.is_err(),
+        "responding on an abandoned transaction must report that it is gone"
+    );
+}
+
+/// A *provisional* response is not an answer. An application that sends 180 Ringing and then
+/// wedges leaves a transaction in `Proceeding`, which RFC 3261 §17.2.1 gives no timer either —
+/// so the backstop has to keep watching it. Exempting anything that got a response would exempt
+/// exactly the calls most likely to be abandoned: the ones that rang.
+#[tokio::test(start_paused = true)]
+async fn a_transaction_that_only_ever_rang_is_still_abandoned() {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.unanswered_limit = Duration::from_secs(60);
+    let (server, mut incoming) = bind(config).await.expect("binds");
+    let server_addr = server.local_addr();
+    let (client, _client_rx) = endpoint().await;
+
+    let mut responses = client
+        .send(options_to(&server), Target::udp(server_addr))
+        .await
+        .expect("sends");
+    tokio::spawn(async move { while responses.next().await.is_some() {} });
+
+    let request = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("no timeout")
+        .expect("a request arrives");
+
+    let ringing = sipx_sip::build::ResponseBuilder::to_request(
+        &request.request,
+        sipx_sip::StatusCode::new(180).expect("valid"),
+        "Ringing",
+    )
+    .expect("builds")
+    .build();
+    server
+        .respond(&request.key, ringing)
+        .await
+        .expect("the provisional goes out");
+
+    assert!(
+        server.outstanding().await.expect("readable") > 0,
+        "it is still waiting on the application"
+    );
+
+    tokio::time::advance(Duration::from_secs(150)).await;
+    let mut after = server.outstanding().await.expect("readable");
+    for _ in 0..20 {
+        if after == 0 {
+            break;
+        }
+        tokio::time::advance(Duration::from_secs(31)).await;
+        after = server.outstanding().await.expect("readable");
+    }
+
+    assert_eq!(
+        after, 0,
+        "a 180 is not an answer; the transaction must still be abandoned"
+    );
+}

@@ -16,6 +16,14 @@
 //! distributed — it is a tight cluster with a tail of retransmission timeouts — and a mean sits
 //! in the empty space between the two, describing a call that never happened.
 
+// Counts here are call counts and percentile ranks: a run large enough to lose `f64` precision
+// would need more calls than there are microseconds in a century.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -79,12 +87,18 @@ impl Plan {
     }
 
     /// The gap between two calls starting.
+    ///
+    /// `rate` is a public field, so it can be anything a caller can write — and
+    /// `Duration::from_secs_f64` *panics* on NaN or on a value too large to represent. A
+    /// denormal rate such as `1e-300` reaches the second case. A load harness that panics on
+    /// its own configuration is not a load harness, so both collapse to "as fast as possible",
+    /// which is what a nonsensical rate most nearly means.
     #[must_use]
     pub fn interval(&self) -> Duration {
-        if self.rate <= 0.0 {
+        if !self.rate.is_finite() || self.rate <= 0.0 {
             return Duration::ZERO;
         }
-        Duration::from_secs_f64(1.0 / self.rate)
+        Duration::try_from_secs_f64(1.0 / self.rate).unwrap_or(Duration::ZERO)
     }
 }
 
@@ -122,13 +136,17 @@ impl Outcome {
     /// happened rather than interpolating between two that did.
     #[must_use]
     pub fn percentile(&self, fraction: f64) -> Option<Duration> {
-        if self.setup.is_empty() {
+        if self.setup.is_empty() || !fraction.is_finite() {
+            // A NaN fraction would `clamp` to NaN, cast to 0, and silently return the *fastest*
+            // call as though it were the answer to whatever was asked.
             return None;
         }
         let mut sorted = self.setup.clone();
         sorted.sort_unstable();
         let rank = (fraction.clamp(0.0, 1.0) * sorted.len() as f64).ceil() as usize;
-        sorted.get(rank.saturating_sub(1).min(sorted.len() - 1)).copied()
+        sorted
+            .get(rank.saturating_sub(1).min(sorted.len() - 1))
+            .copied()
     }
 
     /// How many failed, all causes.
@@ -176,11 +194,10 @@ where
 {
     let place = std::sync::Arc::new(place);
     let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(plan.most_in_flight.max(1)));
-    let (results_tx, mut results_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let started = tokio::time::Instant::now();
     let interval = plan.interval();
-    let mut launched = 0usize;
+    let mut running = Vec::with_capacity(plan.calls);
 
     for index in 0..plan.calls {
         // Paced by the clock rather than by completion, so the load applied does not depend on
@@ -193,29 +210,42 @@ where
         };
 
         let place = std::sync::Arc::clone(&place);
-        let results = results_tx.clone();
-        launched += 1;
-        tokio::spawn(async move {
+        running.push(tokio::spawn(async move {
             let at = tokio::time::Instant::now();
             let outcome = place(index).await;
             let took = at.elapsed();
             drop(permit);
-            let _ = results.send((outcome, took));
-        });
+            (outcome, took)
+        }));
     }
-    drop(results_tx);
 
     let mut outcome = Outcome {
-        attempted: launched,
+        attempted: running.len(),
         ..Outcome::default()
     };
-    while let Some((result, took)) = results_rx.recv().await {
-        match result {
-            Ok(()) => {
+    // Joined rather than collected from a channel, because a channel only hears from calls that
+    // *finished*. A `place` future that panics unwinds its task and sends nothing, so its call
+    // would appear in neither `succeeded` nor `failures` — a run with fifty panics reporting
+    // "300 attempted, 250 succeeded, 0 failed" and an empty cause map. The one thing this
+    // module promises is that every failure has a cause.
+    for handle in running {
+        match handle.await {
+            Ok((Ok(()), took)) => {
                 outcome.succeeded += 1;
                 outcome.setup.push(took);
             }
-            Err(cause) => *outcome.failures.entry(cause).or_default() += 1,
+            Ok((Err(cause), _)) => *outcome.failures.entry(cause).or_default() += 1,
+            Err(joined) => {
+                let what = if joined.is_panic() {
+                    "panicked"
+                } else {
+                    "cancelled"
+                };
+                *outcome
+                    .failures
+                    .entry(Cause::Other(what.to_owned()))
+                    .or_default() += 1;
+            }
         }
     }
     outcome.elapsed = started.elapsed();
@@ -285,13 +315,13 @@ mod tests {
         // Ninety fast calls and ten very slow ones — the shape call setup actually has.
         outcome.setup = (0..90)
             .map(|_| Duration::from_millis(20))
-            .chain((0..10).map(|_| Duration::from_millis(2000)))
+            .chain((0..10).map(|_| Duration::from_secs(2)))
             .collect();
 
         assert_eq!(outcome.percentile(0.50), Some(Duration::from_millis(20)));
         assert_eq!(
             outcome.percentile(0.95),
-            Some(Duration::from_millis(2000)),
+            Some(Duration::from_secs(2)),
             "the tail must be visible at p95"
         );
 
@@ -360,5 +390,73 @@ mod tests {
         assert!(report.contains("timeout"), "{report}");
         assert!(report.contains("no route"), "{report}");
         assert!(report.contains("4 attempted"), "{report}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod robustness {
+    use super::*;
+
+    /// A call whose future panics must still be accounted for. Losing it makes the harness
+    /// under-report silently, and the one thing this module promises is that every failure has
+    /// a cause.
+    #[tokio::test]
+    async fn a_panicking_call_is_reported_rather_than_lost() {
+        let outcome = run(Plan::new(6, 1000.0), |index| async move {
+            assert!(index % 2 != 0, "deliberate");
+            Ok(())
+        })
+        .await;
+
+        assert_eq!(outcome.attempted, 6);
+        assert_eq!(outcome.succeeded, 3);
+        assert_eq!(
+            outcome.succeeded + outcome.failed(),
+            outcome.attempted,
+            "every attempt must land somewhere: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.failures.get(&Cause::Other("panicked".to_owned())),
+            Some(&3)
+        );
+    }
+
+    /// `rate` is a public field, so it can be anything a caller can write — and
+    /// `Duration::from_secs_f64` panics on NaN. A load harness that panics on its own
+    /// configuration is not a load harness.
+    #[test]
+    fn a_nonsensical_rate_does_not_panic() {
+        for rate in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -1.0,
+            0.0,
+            1e-300,
+        ] {
+            let interval = Plan {
+                calls: 1,
+                rate,
+                most_in_flight: 1,
+            }
+            .interval();
+            assert!(
+                interval.is_zero() || interval > Duration::ZERO,
+                "rate {rate}"
+            );
+        }
+    }
+
+    /// And a NaN percentile answers "no measurement" rather than silently returning the fastest
+    /// call as though it were the answer.
+    #[test]
+    fn a_nonsensical_percentile_is_none_rather_than_the_fastest_call() {
+        let outcome = Outcome {
+            setup: vec![Duration::from_millis(1), Duration::from_secs(9)],
+            ..Outcome::default()
+        };
+        assert_eq!(outcome.percentile(f64::NAN), None);
+        assert_eq!(outcome.percentile(0.0), Some(Duration::from_millis(1)));
     }
 }

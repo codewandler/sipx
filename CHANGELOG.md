@@ -51,6 +51,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that accepted a timeout would also pass against a stack that had simply hung. WebSocket
   registration is proved the same way, against Kamailio's own WebSocket module.
 
+**Load and stability**
+
+- **A load harness** (`X-4`) in `sipx-testkit`, generic over what a call is so it can be pointed
+  at sipx or at somebody else's server — a limit found with sipx on both ends cannot be
+  attributed to either half. Failures are reported **by cause**, never aggregated, and latency
+  as **percentiles**, never a mean: setup latency is a tight cluster with a tail of
+  retransmission timeouts, and a mean sits in the empty space between them.
+- **A soak assertion** (`X-5`) that tasks, file descriptors and the transaction store are *flat*
+  rather than merely bounded, run nightly in CI rather than on every push.
+
 **Media**
 
 - **Opus** (`M-13`, RFC 6716), behind the `opus` feature. Note the one exception in
@@ -206,6 +216,12 @@ rewritten rather than deleted.
   a branch out behind a `#[cfg]`, so each optional listener's branch referred to a field that
   was not there. CI only ever built `--all-features`, so nothing noticed. Every optional
   listener now shares one channel and one branch, and each feature combination is checked.
+- **A server transaction the application never answered was held for the life of the process.**
+  RFC 3261 §17.2 gives one in `Trying` no timer, because its model is that the transaction user
+  always responds; an application that ignores a method it does not implement, or that panics in
+  a handler, leaves it there and nothing collects it. Found by the new soak run — 300 of them
+  for 300 calls, still present two minutes later. The endpoint now abandons one unanswered after
+  three minutes and logs it as the application bug it is.
 - **A URI carrying the same header name twice was not equivalent to itself.** Each occurrence
   was compared against the *first* header of that name rather than its counterpart, so
   `sip:a?f=a&f=b` failed reflexivity. Headers are now compared as multisets. Found by a

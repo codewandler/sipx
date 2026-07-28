@@ -41,6 +41,13 @@ pub struct Reading {
     pub descriptors: usize,
     /// Whatever the stack under test counts as outstanding — transactions, dialogs, connections.
     pub outstanding: usize,
+    /// Resident memory, in kilobytes.
+    ///
+    /// The dimension the other three cannot see. A session that grows a `Vec` for every packet
+    /// leaks steadily while its task count and transaction count stay perfectly flat, and that
+    /// is an ordinary shape for a leak — a recording buffer, a statistics history, a queue with
+    /// no bound.
+    pub resident_kb: usize,
 }
 
 /// How much drift is noise rather than a leak.
@@ -57,6 +64,14 @@ pub struct Tolerance {
     pub descriptors: usize,
     /// Extra outstanding items allowed.
     pub outstanding: usize,
+    /// Extra resident kilobytes allowed.
+    ///
+    /// Much the largest tolerance here, and it has to be. An allocator does not return every
+    /// freed page to the kernel, a runtime grows its per-thread caches on first use, and the
+    /// first few hundred calls touch code paths that are still being faulted in. Sixteen
+    /// megabytes is loose enough not to fail on any of that and tight enough that a leak of a
+    /// kilobyte per call shows up within a few thousand calls.
+    pub resident_kb: usize,
 }
 
 impl Default for Tolerance {
@@ -67,6 +82,7 @@ impl Default for Tolerance {
             tasks: 4,
             descriptors: 8,
             outstanding: 0,
+            resident_kb: 16 * 1024,
         }
     }
 }
@@ -91,7 +107,12 @@ impl Soak {
     pub fn leaks(&self, tolerance: Tolerance) -> Vec<String> {
         let mut found = Vec::new();
         for (what, before, after, allowed) in [
-            ("tasks", self.before.tasks, self.after.tasks, tolerance.tasks),
+            (
+                "tasks",
+                self.before.tasks,
+                self.after.tasks,
+                tolerance.tasks,
+            ),
             (
                 "descriptors",
                 self.before.descriptors,
@@ -103,6 +124,12 @@ impl Soak {
                 self.before.outstanding,
                 self.after.outstanding,
                 tolerance.outstanding,
+            ),
+            (
+                "resident_kb",
+                self.before.resident_kb,
+                self.after.resident_kb,
+                tolerance.resident_kb,
             ),
         ] {
             let grew = after.saturating_sub(before);
@@ -127,14 +154,17 @@ impl Soak {
         let leaks = self.leaks(tolerance);
         if leaks.is_empty() {
             return format!(
-                "flat after {:.0}s: tasks {}→{}, descriptors {}→{}, outstanding {}→{}",
+                "flat after {:.0}s: tasks {}→{}, descriptors {}→{}, outstanding {}→{}, \
+                 resident {} kB→{} kB",
                 self.settled_for.as_secs_f64(),
                 self.before.tasks,
                 self.after.tasks,
                 self.before.descriptors,
                 self.after.descriptors,
                 self.before.outstanding,
-                self.after.outstanding
+                self.after.outstanding,
+                self.before.resident_kb,
+                self.after.resident_kb
             );
         }
         format!("leaked:\n  {}", leaks.join("\n  "))
@@ -148,9 +178,29 @@ impl Soak {
 /// pretending to a descriptor count that was never taken would be worse than admitting to none.
 #[must_use]
 pub fn open_descriptors() -> usize {
-    std::fs::read_dir("/proc/self/fd")
-        .map(|entries| entries.count())
-        .unwrap_or(0)
+    std::fs::read_dir("/proc/self/fd").map_or(0, std::iter::Iterator::count)
+}
+
+/// Resident memory in kilobytes.
+///
+/// Linux only, from `/proc/self/statm`, whose second field is the resident set in pages.
+/// Elsewhere it reports zero and the tolerance trivially accepts it — a soak on another
+/// platform still checks the other three, and inventing a figure that was never measured would
+/// be worse than admitting to none.
+#[must_use]
+pub fn resident_kb() -> usize {
+    let Ok(statm) = std::fs::read_to_string("/proc/self/statm") else {
+        return 0;
+    };
+    let Some(pages) = statm.split_whitespace().nth(1) else {
+        return 0;
+    };
+    let Ok(pages) = pages.parse::<usize>() else {
+        return 0;
+    };
+    // 4 kB pages on every platform this runs on. Reading the real page size would mean a libc
+    // call for a number that has not changed on x86-64 or aarch64 Linux.
+    pages.saturating_mul(4)
 }
 
 /// The number of tasks alive in the current runtime.
@@ -170,6 +220,7 @@ pub fn sample(outstanding: usize) -> Reading {
         tasks: alive_tasks(),
         descriptors: open_descriptors(),
         outstanding,
+        resident_kb: resident_kb(),
     }
 }
 
@@ -179,20 +230,25 @@ pub fn sample(outstanding: usize) -> Reading {
 /// as work in progress.
 /// `settle` should be at least [`SETTLE_PAST_TIMERS`] for anything driving SIP — see the module
 /// documentation for why a shorter one reports RFC-mandated state as a leak.
-pub async fn soak<L, Fut, O>(settle: Duration, outstanding: O, load: L) -> Soak
+pub async fn soak<L, Load, O, Count>(settle: Duration, outstanding: O, load: L) -> Soak
 where
-    L: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = ()>,
-    O: Fn() -> usize,
+    L: FnOnce() -> Load,
+    Load: std::future::Future<Output = ()>,
+    // Async, because what is being counted usually lives behind an event loop. A synchronous
+    // bound forces the caller into `block_in_place` and a nested `block_on`, which panics
+    // outright on a current-thread runtime — an undocumented runtime-flavour requirement
+    // inherited by everyone who samples an async quantity.
+    O: Fn() -> Count,
+    Count: std::future::Future<Output = usize>,
 {
-    let before = sample(outstanding());
+    let before = sample(outstanding().await);
     load().await;
     // Settling is not optional, and it is not about teardown. A completed SIP transaction sits
     // in `Completed` for Timer J — 64·T1, thirty-two seconds — absorbing retransmissions, which
     // is what the RFC asks of it. Sampling before that has elapsed counts every one of those as
     // a leaked task.
     tokio::time::sleep(settle).await;
-    let after = sample(outstanding());
+    let after = sample(outstanding().await);
     Soak {
         before,
         after,
@@ -215,6 +271,7 @@ mod tests {
             tasks,
             descriptors,
             outstanding,
+            resident_kb: 0,
         }
     }
 
@@ -235,16 +292,20 @@ mod tests {
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let leaking = std::sync::Arc::clone(&held);
-        let result = soak(Duration::from_millis(200), || 0, || async move {
-            for _ in 0..40 {
-                let handle = tokio::spawn(async {
-                    // Never finishes: the leak.
-                    std::future::pending::<()>().await;
-                });
-                leaking.lock().expect("not poisoned").push(handle);
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        })
+        let result = soak(
+            Duration::from_millis(200),
+            || async { 0 },
+            || async move {
+                for _ in 0..40 {
+                    let handle = tokio::spawn(async {
+                        // Never finishes: the leak.
+                        std::future::pending::<()>().await;
+                    });
+                    leaking.lock().expect("not poisoned").push(handle);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            },
+        )
         .await;
 
         assert!(
@@ -278,14 +339,18 @@ mod tests {
     /// against an assertion that fails everything.
     #[tokio::test]
     async fn a_clean_run_is_flat() {
-        let result = soak(Duration::from_millis(200), || 0, || async {
-            for _ in 0..40 {
-                tokio::spawn(async {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        })
+        let result = soak(
+            Duration::from_millis(200),
+            || async { 0 },
+            || async {
+                for _ in 0..40 {
+                    tokio::spawn(async {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    });
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            },
+        )
         .await;
 
         assert!(
@@ -301,7 +366,10 @@ mod tests {
     fn growth_within_a_ceiling_is_still_a_leak() {
         let run = soak_of(reading(10, 20, 0), reading(10, 20, 40));
         assert!(!run.is_flat(Tolerance::default()));
-        assert!(run.report(Tolerance::default()).contains("outstanding grew"));
+        assert!(
+            run.report(Tolerance::default())
+                .contains("outstanding grew")
+        );
     }
 
     /// Each dimension is reported on its own. "Something leaked" is not actionable.
@@ -320,7 +388,11 @@ mod tests {
     #[test]
     fn ordinary_runtime_drift_is_not_a_leak() {
         let run = soak_of(reading(10, 20, 0), reading(12, 24, 0));
-        assert!(run.is_flat(Tolerance::default()), "{}", run.report(Tolerance::default()));
+        assert!(
+            run.is_flat(Tolerance::default()),
+            "{}",
+            run.report(Tolerance::default())
+        );
     }
 
     /// Shrinking is never a leak.
@@ -340,5 +412,77 @@ mod tests {
             "a single leftover transaction is a leak: {}",
             run.report(Tolerance::default())
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod memory_tests {
+    use super::*;
+
+    /// The dimension the other three cannot see: a leak that grows buffers while task and
+    /// transaction counts stay perfectly flat. `X-5` names memory in its acceptance, and a
+    /// `Reading` without it would have that criterion ticked and unmet.
+    #[test]
+    fn memory_growth_is_a_leak_the_other_dimensions_would_miss() {
+        let run = Soak {
+            before: Reading {
+                tasks: 10,
+                descriptors: 20,
+                outstanding: 0,
+                resident_kb: 50_000,
+            },
+            after: Reading {
+                tasks: 10,
+                descriptors: 20,
+                outstanding: 0,
+                // A hundred megabytes more, with everything else identical.
+                resident_kb: 150_000,
+            },
+            settled_for: Duration::from_secs(1),
+        };
+        assert!(!run.is_flat(Tolerance::default()));
+        assert!(
+            run.leaks(Tolerance::default())
+                .iter()
+                .any(|leak| leak.starts_with("resident_kb")),
+            "{:?}",
+            run.leaks(Tolerance::default())
+        );
+    }
+
+    /// And the tolerance is loose enough for the ordinary case. An allocator that has not
+    /// returned a few megabytes of freed pages is not a leak, and a soak that said it was would
+    /// fail at random.
+    #[test]
+    fn a_few_megabytes_of_allocator_drift_is_not_a_leak() {
+        let run = Soak {
+            before: Reading {
+                tasks: 10,
+                descriptors: 20,
+                outstanding: 0,
+                resident_kb: 50_000,
+            },
+            after: Reading {
+                tasks: 10,
+                descriptors: 20,
+                outstanding: 0,
+                resident_kb: 54_000,
+            },
+            settled_for: Duration::from_secs(1),
+        };
+        assert!(
+            run.is_flat(Tolerance::default()),
+            "{}",
+            run.report(Tolerance::default())
+        );
+    }
+
+    /// It reports something real on Linux, which is where it claims to work.
+    #[test]
+    fn resident_memory_is_readable_here() {
+        if std::path::Path::new("/proc/self/statm").exists() {
+            assert!(resident_kb() > 0, "a running process has a resident set");
+        }
     }
 }

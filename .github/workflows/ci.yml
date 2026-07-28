@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The soak needs minutes and would make every push slower for a failure that takes hours to
+  # develop in the first place. Nightly is often enough to catch a leak while it is still one
+  # commit old.
+  schedule:
+    - cron: "0 3 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -70,6 +75,27 @@ jobs:
       # cannot compile a branch out behind a `#[cfg]`, and an optional transport's branch
       # referred to a field that only existed with its feature on. Nothing here noticed.
       - run: ./scripts/check-features.sh
+
+  soak:
+    name: soak
+    # Scheduled only. It takes minutes, and a suite people skip is worse than one that runs.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    # A leak's own failure mode is a run that never finishes. Without a bound that costs the
+    # GitHub default of six hours of runner time every night before anyone is told.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Named explicitly rather than `--workspace -- --ignored`. The interop tests are ignored
+      # too, and they need a Kamailio container that is not running here — a job that swept up
+      # every ignored test would fail nightly for a reason that has nothing to do with leaks.
+      #
+      # `--all-features` because the transports with connection state are exactly the ones worth
+      # soaking, and a default-features build never touches them.
+      - run: cargo test -p sipx-call --test load --all-features -- --ignored
 
   deny:
     name: cargo-deny

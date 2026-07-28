@@ -77,6 +77,17 @@ pub struct Config {
     /// connection died silently is a phone that rings nowhere.
     #[cfg(feature = "ws")]
     pub ws_keepalive: std::time::Duration,
+    /// How long a request may sit unanswered by the application before the transaction is
+    /// abandoned.
+    ///
+    /// RFC 3261 §17.2 gives a server transaction in `Trying` or `Proceeding` no timer at all,
+    /// because its model is that the transaction user always responds. Real applications do
+    /// not, and a transaction nobody ever answers is held for the life of the process.
+    ///
+    /// Configurable because three minutes is not long for a telephone. A hunt group that rings
+    /// for five before an agent picks up is ordinary, and an endpoint that abandoned the
+    /// transaction at three would simply stop being able to answer such calls.
+    pub unanswered_limit: std::time::Duration,
     /// How the connection pool behaves.
     pub pool: PoolConfig,
 }
@@ -108,6 +119,7 @@ impl Config {
             wss_server: None,
             #[cfg(feature = "ws")]
             ws_keepalive: std::time::Duration::from_secs(25),
+            unanswered_limit: std::time::Duration::from_secs(180),
             pool: PoolConfig::default(),
         }
     }
@@ -187,8 +199,9 @@ enum Command {
     Respond {
         key: TransactionKey,
         response: Box<Response>,
-        /// Fired once the driver has actually performed the send.
-        sent: oneshot::Sender<()>,
+        /// Fired once the driver has performed the send, or with an error if there was no
+        /// transaction left to send it on.
+        sent: oneshot::Sender<Result<()>>,
     },
     /// A request handed straight to the transport, with no transaction behind it.
     Direct {
@@ -422,7 +435,7 @@ impl Handle {
             })
             .await
             .map_err(|_| Error::EndpointClosed)?;
-        delivered.await.map_err(|_| Error::EndpointClosed)
+        delivered.await.map_err(|_| Error::EndpointClosed)?
     }
 
     /// How many transactions and destinations the endpoint is still holding.
@@ -536,7 +549,9 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         layer: TransactionLayer::new(config.timers),
         timers: TimerQueue::new(),
         destinations: HashMap::new(),
+        handed_over: HashMap::new(),
         reconnect: HashMap::new(),
+        unanswered_limit: config.unanswered_limit,
         clients: HashMap::new(),
         incoming: incoming_tx,
         commands: commands_rx,
@@ -748,6 +763,9 @@ struct Driver {
     layer: TransactionLayer,
     timers: TimerQueue,
     destinations: HashMap<TransactionKey, Target>,
+    /// When each server transaction was handed to the application, so one it never answers can
+    /// be abandoned rather than held for the life of the process.
+    handed_over: HashMap<TransactionKey, tokio::time::Instant>,
     /// Where a response goes if the connection its request arrived on has closed.
     ///
     /// RFC 3261 §18.2.2: the address from `received` at the `sent-by` port, which is a port the
@@ -755,6 +773,8 @@ struct Driver {
     /// from. Held only for server transactions on a connection-oriented transport, because it
     /// is the only case where the question arises.
     reconnect: HashMap<TransactionKey, Target>,
+    /// How long a request may sit unanswered before its transaction is abandoned.
+    unanswered_limit: std::time::Duration,
     clients: HashMap<TransactionKey, mpsc::Sender<TuEvent>>,
     incoming: mpsc::Sender<Incoming>,
     commands: mpsc::Receiver<Command>,
@@ -806,6 +826,7 @@ impl Driver {
                     for closed in self.pool.evict_idle() {
                         tracing::debug!(peer = %closed.peer, "closed an idle connection");
                     }
+                    self.abandon_unanswered();
                 }
             }
         }
@@ -891,6 +912,8 @@ impl Driver {
         match self.layer.receive(message, transport.reliability()) {
             Dispatch::Created { key, outputs } => {
                 self.destinations.insert(key.clone(), reply_to);
+                self.handed_over
+                    .insert(key.clone(), tokio::time::Instant::now());
                 // §18.2.2's fallback only arises on a transport that has a connection to lose.
                 if transport.reliability().is_reliable()
                     && let Some(advertised) = advertised
@@ -918,6 +941,74 @@ impl Driver {
                     });
                 }
             }
+        }
+    }
+
+    /// Drop server transactions the application never answered.
+    ///
+    /// RFC 3261 §17.2 gives a server transaction in `Trying` no timer at all, because its model
+    /// is that the transaction user always responds. Real applications do not: one that ignores
+    /// a method it does not implement, or that panics in a handler, leaves the transaction
+    /// there — and nothing ever collects it, so the store grows for as long as traffic arrives.
+    /// A soak run found exactly this: 300 of them for 300 calls, still present two minutes on.
+    ///
+    /// The bound is generous on purpose. A request may legitimately take a long time to answer
+    /// — a call that rings for a minute is an unanswered INVITE the whole time — so this is a
+    /// backstop against *never*, not a deadline.
+    fn abandon_unanswered(&mut self) {
+        let now = tokio::time::Instant::now();
+        let stale: Vec<TransactionKey> = self
+            .handed_over
+            .iter()
+            .filter(|(_, at)| now.saturating_duration_since(**at) > self.unanswered_limit)
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        for key in stale {
+            self.handed_over.remove(&key);
+
+            // What is being abandoned, named. A warning that blames the application and then
+            // says nothing about which request, which method or which peer leaves an operator
+            // with N identical lines and nowhere to start.
+            let described = self.layer.server_request(&key).map(|request| {
+                (
+                    request.method.clone(),
+                    request
+                        .headers
+                        .value(&HeaderName::CallId)
+                        .map(|id| String::from_utf8_lossy(&id).into_owned())
+                        .unwrap_or_default(),
+                )
+            });
+
+            if !self.layer.abandon(&key) {
+                continue;
+            }
+            if let Some((method, call_id)) = described {
+                tracing::warn!(
+                    ?method,
+                    %call_id,
+                    limit = ?self.unanswered_limit,
+                    "abandoning a transaction the application never answered; that is an \
+                     application bug rather than a network one"
+                );
+            }
+
+            // `clients` is never touched, and `destinations` only when nothing else claims the
+            // key. A `TransactionKey` carries no client/server role, so an endpoint that sends
+            // a request to itself — a proxy, a B2BUA, a loopback test — can have a live *client*
+            // transaction under the same key. Cleaning the shared maps then closes that
+            // client's response stream and strands its retransmissions, which is a worse fault
+            // than the leak being fixed.
+            if self.clients.contains_key(&key) {
+                continue;
+            }
+            self.timers.forget(&key);
+            self.destinations.remove(&key);
+            // `reconnect` too. It is removed nowhere else but `Output::Terminated`, which an
+            // abandoned transaction never reaches — so leaving it here would trade one
+            // unbounded map for another.
+            self.reconnect.remove(&key);
         }
     }
 
@@ -954,11 +1045,25 @@ impl Driver {
                 response,
                 sent,
             } => {
+                // Nothing is removed from `handed_over` here, and that is the point. A
+                // provisional response is not an answer: an application that sends 180 Ringing
+                // and then wedges has a transaction sitting in `Proceeding`, which RFC 3261
+                // §17.2.1 gives no timer either. Clearing on any response would exempt exactly
+                // the calls most likely to be abandoned — the ones that rang. A transaction
+                // that *is* answered reaches `Output::Terminated` through Timer J at 32 s, well
+                // inside the limit, and is cleaned there.
+                if self.layer.server_request(&key).is_none() {
+                    // No transaction to answer on. Reporting success here would tell an
+                    // application its 200 OK went out while the caller heard nothing — the
+                    // caller times out believing the call failed, the callee believes it is up.
+                    let _ = sent.send(Err(Error::NoTransaction));
+                    return;
+                }
                 let outputs = self.layer.send_response(&key, *response);
                 self.perform(&key, outputs, None).await;
                 // After performing, so a caller that exits on return has already put the
                 // response on the wire.
-                let _ = sent.send(());
+                let _ = sent.send(Ok(()));
             }
             Command::Direct {
                 request,
@@ -971,10 +1076,16 @@ impl Driver {
             }
             Command::Outstanding(reply) => {
                 let (clients, servers) = self.layer.len();
-                // Destinations too, not only transactions: an entry there outlives its
-                // transaction only if `Terminated` failed to clean up, which is exactly the
-                // kind of leak a count of transactions alone would miss.
-                let _ = reply.send(clients + servers + self.destinations.len());
+                // Every per-transaction map, not just the transactions. An entry that outlives
+                // its transaction is exactly the leak a count of transactions alone would miss,
+                // and a map left out here is a map a soak run is structurally blind to.
+                let _ = reply.send(
+                    clients
+                        + servers
+                        + self.destinations.len()
+                        + self.reconnect.len()
+                        + self.handed_over.len(),
+                );
             }
             Command::Shutdown => {}
         }
@@ -1015,6 +1126,7 @@ impl Driver {
                 Output::Terminated(_) => {
                     self.timers.forget(key);
                     self.destinations.remove(key);
+                    self.handed_over.remove(key);
                     self.reconnect.remove(key);
                     // Dropping the sender closes the application's response stream, which is
                     // how it learns the transaction is over.

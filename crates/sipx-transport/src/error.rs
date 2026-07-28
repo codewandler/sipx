@@ -25,6 +25,14 @@ pub enum Error {
     #[cfg(feature = "tls")]
     #[error("tls: {0}")]
     Tls(#[from] crate::tls::TlsError),
+    /// A response was given for a transaction that no longer exists.
+    ///
+    /// Almost always means the application took longer to answer than
+    /// [`crate::Config::unanswered_limit`] allows. Reported rather than swallowed: an
+    /// application told its 200 OK went out, when it did not, believes a call is up while the
+    /// caller has already timed out.
+    #[error("no such transaction; it was abandoned or has already ended")]
+    NoTransaction,
     /// A URI that resolved to no usable candidate (RFC 3263).
     #[error("no usable candidate for {}", String::from_utf8_lossy(.0))]
     Unresolvable(Vec<u8>),

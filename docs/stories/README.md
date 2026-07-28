@@ -27,10 +27,6 @@ _None._
 
 ## Next (ready — take the top one unless the user named a story)
 
-### Depth
-- [X-4 — Build the load testing harness](X-4-build-the-load-testing-harness.md) · Build
-- [X-5 — Assert stability under sustained load](X-5-assert-stability-under-sustained-load.md) · Build
-
 ### Quic
 - [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · gates T-12 and T-13
 - [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · blocked by T-11
@@ -83,6 +79,8 @@ _None._
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core
+- [X-4 — Build the load testing harness](X-4-build-the-load-testing-harness.md) · Build
+- [X-5 — Assert stability under sustained load](X-5-assert-stability-under-sustained-load.md) · Build
 - [X-6 — Fix the RFC conformance defects found by review](X-6-fix-the-rfc-conformance-defects.md) · Core · review of implemented behaviour, not of gaps
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
