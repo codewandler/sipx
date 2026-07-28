@@ -25,7 +25,7 @@ registrations.
 | **Calls** | Place and answer, SDP offer/answer, hold and resume, blind and attended transfer |
 | **Audio** | G.711 µ-law and A-law, Opus behind a feature, DTMF, play and record WAV |
 | **Signalling security** | TLS and secure WebSocket, with certificate verification that **cannot be turned off** |
-| **Media security** | **Not yet** — audio goes out unencrypted. It is the next thing on [the roadmap](docs/rfc-roadmap.md). |
+| **Media security** | SRTP with SDES keying, negotiated automatically when the signalling is secure |
 | **Transports** | UDP, TCP, TLS, WebSocket, secure WebSocket |
 | **Reachability** | NAT via `rport` and symmetric RTP. No Outbound, Path, GRUU or push yet. |
 | **Multi-party** | Bridge two calls, or conference several with N−1 mixing |
@@ -123,6 +123,10 @@ Three things follow from it:
 **[codewandler.github.io/sipx](https://codewandler.github.io/sipx/)** is the site; the pages
 below are its source, readable here too.
 
+- **[Does sipx fit?](docs/guides/does-this-fit.md)** — what it is for and what it is not
+- **Guides** — [place a call](docs/guides/place-a-call.md),
+  [answer one](docs/guides/answer-a-call.md), [register](docs/guides/register.md),
+  [use it as a library](docs/guides/as-a-library.md)
 - **[RFC compliance](docs/compliance.md)** — what is supported, measured rather than asserted
 - **[RFC roadmap](docs/rfc-roadmap.md)** — what comes next, and why in that order
 - **[Roadmap and status](docs/roadmap.md)** — the narrative around the board

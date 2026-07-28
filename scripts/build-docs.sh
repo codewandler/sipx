@@ -19,6 +19,34 @@ if ! command -v mdbook >/dev/null; then
     exit 1
 fi
 
+# The guides include real example files rather than quoting code into prose. Building them is
+# what makes "every sample compiles" true rather than aspirational: a sample that has rotted is
+# worse than no sample, because it is read as working code.
+echo "==> building the samples the guides include"
+cargo build --workspace --examples --quiet
+
+echo "==> checking every included sample exists"
+python3 - <<'PYEOF'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(".")
+missing = []
+for page in sorted((root / "docs").rglob("*.md")):
+    for include in re.findall(r"\{\{#include ([^}]+)\}\}", page.read_text()):
+        target = (page.parent / include.split(":")[0]).resolve()
+        if not target.exists():
+            missing.append(f"{page} includes {include}")
+
+if missing:
+    print("guides including files that do not exist:", file=sys.stderr)
+    for problem in missing:
+        print(f"  {problem}", file=sys.stderr)
+    sys.exit(1)
+print("samples: every include resolves")
+PYEOF
+
 echo "==> building"
 mdbook build
 

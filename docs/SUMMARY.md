@@ -4,6 +4,14 @@
 
 [Introduction](introduction.md)
 
+# Guides
+
+- [Does sipx fit?](guides/does-this-fit.md)
+- [Place a call](guides/place-a-call.md)
+- [Answer a call](guides/answer-a-call.md)
+- [Register against a PBX](guides/register.md)
+- [Use sipx as a library](guides/as-a-library.md)
+
 # What sipx supports
 
 - [RFC compliance](compliance.md)

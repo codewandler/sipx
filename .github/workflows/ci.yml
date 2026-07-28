@@ -49,6 +49,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
+      # The documentation guides include these files verbatim. A sample that no longer compiles
+      # is worse than no sample: it is read as working code.
+      - run: cargo build --workspace --all-features --examples
 
   msrv:
     name: msrv

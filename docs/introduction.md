@@ -17,7 +17,7 @@ people's registrations.
 | **Calls** | Place and answer, SDP offer/answer, hold and resume, blind and attended transfer |
 | **Audio** | G.711 µ-law and A-law, Opus behind a feature, DTMF, play and record WAV |
 | **Signalling security** | TLS and secure WebSocket, with certificate verification that **cannot be turned off** |
-| **Media security** | **Not yet** — audio goes out unencrypted. It is next on [the RFC roadmap](rfc-roadmap.md). |
+| **Media security** | SRTP with SDES keying, negotiated automatically when the signalling is secure |
 | **Transports** | UDP, TCP, TLS, WebSocket, secure WebSocket |
 | **Reachability** | NAT via `rport` and symmetric RTP. No Outbound, Path, GRUU or push yet. |
 | **Multi-party** | Bridge two calls, or conference several with N−1 mixing |
@@ -30,16 +30,22 @@ and WebSocket — and the refusals that make the successes mean something.
 
 Two things are worth knowing before you decide.
 
-**Media is not encrypted.** Signalling can be — `sips:` and WSS work, and the TLS policy has no
-way to disable verification anywhere — and then the audio goes out in the clear. That is the
-largest gap in the stack and the first thing on the roadmap.
-
 **It is a phone, not an exchange.** If you need something that routes other people's calls,
 sipx is not that yet, and the [compliance table](compliance.md) says so per RFC rather than
 leaving you to find out.
 
+**The encryption has edges.** Media is encrypted when the signalling is — `sips:` or WSS —
+using SRTP's default transform keyed by SDES. What that does *not* cover: SDES puts the key in
+the SDP body, so any intermediary that terminates the TLS can read it. DTLS-SRTP, which keys on
+the media path and does not have that property, is next. There is one transform, no rekeying,
+and [the table](compliance.md) marks RFC 3711 *partial* rather than implemented for exactly
+these reasons.
+
 ## What is here
 
+- **[Does sipx fit?](guides/does-this-fit.md)** — the honest version, including the edges.
+- **Guides** — [place a call](guides/place-a-call.md), [answer one](guides/answer-a-call.md),
+  [register against a PBX](guides/register.md), [use it as a library](guides/as-a-library.md).
 - **[What sipx supports, RFC by RFC](compliance.md)** — 61 RFCs, each marked implemented,
   partial, parse-only or not started. Generated from a registry and checked in CI, so it is a
   measurement rather than a claim.
@@ -70,6 +76,6 @@ Three things follow from it:
 
 ## Getting it
 
-The source is on [GitHub](https://github.com/codewandler/sipx), under `MIT OR Apache-2.0`.
-Guides and API documentation are being written; until they land, the
-[README](https://github.com/codewandler/sipx#readme) has the shortest path to a working call.
+The source is on [GitHub](https://github.com/codewandler/sipx), under `MIT OR Apache-2.0`. The
+guides above are the shortest path to a working call; every code sample in them is a real file
+that CI compiles, because a sample that has rotted is worse than none.
