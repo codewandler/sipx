@@ -28,6 +28,7 @@ pub mod message;
 pub mod name;
 pub mod params;
 pub mod parser;
+pub mod transaction;
 pub mod uri;
 pub mod validate;
 
@@ -40,5 +41,9 @@ pub use message::{
 pub use name::HeaderName;
 pub use params::{Param, Params};
 pub use parser::{Limits, StreamParser, parse_datagram};
+pub use transaction::{
+    ClientTransaction, Output, Reliability, ServerTransaction, Timer, Timers, TransactionKey,
+    TransactionLayer, TuEvent,
+};
 pub use uri::{Host, HostName, Scheme, Uri};
 pub use validate::{Finding, validate, validate_request, validate_response};

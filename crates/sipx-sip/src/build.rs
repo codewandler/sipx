@@ -100,6 +100,22 @@ impl RequestBuilder {
         Ok(self)
     }
 
+    /// Replace every header of this name with one carrying this value.
+    ///
+    /// Distinct from [`Self::header`] because appending is right for `Via` and `Route`, where
+    /// repetition is meaningful, and wrong for `To` or `CSeq`, where a second copy makes the
+    /// message invalid.
+    pub fn set_header(
+        mut self,
+        name: &HeaderName,
+        value: impl Into<Bytes>,
+    ) -> Result<Self, BuildError> {
+        let header = Header::build(name.clone(), value)?;
+        self.headers.remove_all(name);
+        self.headers.push(header);
+        Ok(self)
+    }
+
     /// Append a `Max-Forwards` header. Cannot fail: a `u8` has no CRLF in it.
     #[must_use]
     pub fn max_forwards(mut self, hops: u8) -> Self {
@@ -211,6 +227,18 @@ impl ResponseBuilder {
     /// Append a header, rejecting a value that could inject a line break.
     pub fn header(mut self, name: HeaderName, value: impl Into<Bytes>) -> Result<Self, BuildError> {
         self.headers.push(Header::build(name, value)?);
+        Ok(self)
+    }
+
+    /// Replace every header of this name with one carrying this value.
+    pub fn set_header(
+        mut self,
+        name: &HeaderName,
+        value: impl Into<Bytes>,
+    ) -> Result<Self, BuildError> {
+        let header = Header::build(name.clone(), value)?;
+        self.headers.remove_all(name);
+        self.headers.push(header);
         Ok(self)
     }
 
