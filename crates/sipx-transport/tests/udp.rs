@@ -421,3 +421,61 @@ async fn binding_finds_a_port_free_for_both_transports() {
         assert_ne!(port, taken, "it must not have taken the held port");
     }
 }
+
+/// `respond` must mean the response is on the wire, not merely queued. The difference only
+/// shows when a process answers and exits: a queued response is lost to the exit, and the
+/// caller sees a timeout for a call that was in fact answered.
+#[tokio::test]
+async fn respond_returns_only_once_the_response_has_been_sent() {
+    let (server, mut server_rx) = endpoint().await;
+
+    // A raw socket standing in for the caller, so nothing else can be doing the receiving.
+    let caller = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let caller_addr = caller.local_addr().expect("has an address");
+
+    let text = format!(
+        "OPTIONS sip:a@b.com SIP/2.0\r\n\
+         Via: SIP/2.0/UDP {caller_addr};branch=z9hG4bKflush\r\n\
+         To: <sip:a@b.com>\r\n\
+         From: <sip:c@d.net>;tag=1\r\n\
+         Call-ID: flush@example.net\r\n\
+         CSeq: 1 OPTIONS\r\n\
+         Max-Forwards: 70\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    caller
+        .send_to(text.as_bytes(), server.local_addr())
+        .await
+        .expect("sends");
+
+    let incoming = tokio::time::timeout(Duration::from_secs(2), server_rx.recv())
+        .await
+        .expect("no timeout")
+        .expect("a request");
+
+    let response = ResponseBuilder::to_request(
+        &incoming.request,
+        StatusCode::new(200).expect("valid"),
+        "OK",
+    )
+    .expect("builds")
+    .build();
+    server
+        .respond(&incoming.key, response)
+        .await
+        .expect("responds");
+
+    // The moment `respond` returned, the datagram must already be readable. No sleep: if the
+    // send were merely queued, this would time out.
+    let mut buf = vec![0u8; 4096];
+    let (len, _) = tokio::time::timeout(Duration::from_millis(50), caller.recv_from(&mut buf))
+        .await
+        .expect("the response is already on the wire when respond returns")
+        .expect("receives");
+    assert!(
+        String::from_utf8_lossy(&buf[..len]).starts_with("SIP/2.0 200"),
+        "expected the 200 we just sent"
+    );
+}

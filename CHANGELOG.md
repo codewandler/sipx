@@ -50,6 +50,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   word — or, for DTMF, its last digit. `MediaSession::flush` now drains the queue first.
 - The RTCP report block decoder read cumulative loss from byte 4 instead of byte 5, folding the
   loss fraction into the high byte of the count.
+- **`Handle::respond` returned before the response was sent.** It queued a command for the
+  endpoint loop and returned, so a process that answered a call and exited could lose the
+  response to its own exit — the caller then saw a timeout for a call that had in fact been
+  answered or refused. It now returns once the response is on the wire, which is what every
+  caller already assumed. Found by a CI-only failure of the `--busy` test.
 - **A received CANCEL was absorbed as an INVITE retransmission.** The transaction key folded
   CANCEL to INVITE, but RFC 3261 §17.2.3 folds the method only for ACK — so a CANCEL matched
   the INVITE's own transaction, was swallowed as a duplicate, and nobody was told. Nothing

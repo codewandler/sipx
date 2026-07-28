@@ -146,6 +146,8 @@ enum Command {
     Respond {
         key: TransactionKey,
         response: Box<Response>,
+        /// Fired once the driver has actually performed the send.
+        sent: oneshot::Sender<()>,
     },
     Shutdown,
 }
@@ -255,14 +257,22 @@ impl Handle {
     }
 
     /// Send a response on a server transaction.
+    ///
+    /// Returns once the response has been handed to the socket, not merely queued. The
+    /// difference is invisible until a process answers a call and exits — then the queued
+    /// version loses the response to the exit, and the caller sees a timeout for a call that
+    /// was in fact refused. Every caller already assumed this; now it is true.
     pub async fn respond(&self, key: &TransactionKey, response: Response) -> Result<()> {
+        let (sent, delivered) = oneshot::channel();
         self.commands
             .send(Command::Respond {
                 key: key.clone(),
                 response: Box::new(response),
+                sent,
             })
             .await
-            .map_err(|_| Error::EndpointClosed)
+            .map_err(|_| Error::EndpointClosed)?;
+        delivered.await.map_err(|_| Error::EndpointClosed)
     }
 
     /// Stop the endpoint.
@@ -550,9 +560,16 @@ impl Driver {
                 let _ = reply.send(Ok(key.clone()));
                 self.perform(&key, outputs, None).await;
             }
-            Command::Respond { key, response } => {
+            Command::Respond {
+                key,
+                response,
+                sent,
+            } => {
                 let outputs = self.layer.send_response(&key, *response);
                 self.perform(&key, outputs, None).await;
+                // After performing, so a caller that exits on return has already put the
+                // response on the wire.
+                let _ = sent.send(());
             }
             Command::Shutdown => {}
         }
