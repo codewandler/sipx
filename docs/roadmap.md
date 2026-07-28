@@ -6,14 +6,14 @@ this document is the hand-written narrative around it.
 
 ## Status
 
-_As of 2026-07-28:_ **M0 and M1 are complete.** `sipx-sip` is a working sans-IO SIP core:
+_As of 2026-07-28:_ **M0, M1 and M2 are complete.** `sipx-sip` is a working sans-IO SIP core:
 URIs, headers, an incremental parser for both datagram and stream transports, message
 validation, injection-proof builders, and all four transaction state machines with matching
 and stores. 157 tests pass; clippy is clean at `-D warnings`; the whole RFC 4475 torture
 corpus is green across all four of its layers.
 
-Next is **M2**: the transport layer, which turns the sans-IO core into something that talks
-to a network.
+sipx registers against a real Kamailio over both UDP and TCP, and answers `OPTIONS`. Next is
+**M3**: media, and a call that carries audio.
 
 ## Delivered
 
@@ -32,6 +32,17 @@ to a network.
     and hostnames are a newtype whose interior cannot be forged.
   - All four transaction FSMs, RFC 3261 §17 amended by RFC 6026, driven with no clock and no
     socket.
+- **M2 — It talks.** Transports and the user agent:
+  - One event loop per endpoint owning the transaction layer, timers and sockets, so nothing
+    in the signalling path takes a lock.
+  - UDP with `received`/`rport`, and TCP with a pool that distinguishes inbound from outbound
+    connections — a response returns the way it came without an inbound connection becoming a
+    route for unrelated outbound requests.
+  - RFC 3263 selection with RFC 2782 weighting, asserted against a seeded distribution.
+  - Digest authentication checked against the digest RFC 2617 publishes for its own example,
+    and registration treated as a lease rather than a request.
+  - **Verified against a real Kamailio**, not only against sipx: `./tests/interop/run.sh`
+    registers over UDP and TCP, refreshes, is refused with a wrong password, and pings.
 
 ## Next
 
