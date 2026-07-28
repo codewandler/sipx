@@ -2,8 +2,8 @@
 id: X-12
 title: Write the user-facing guides
 pillar: Build
-status: ready
-priority: 2
+status: done
+priority:
 design:
 epic: docs-site
 areas: [docs]

@@ -28,12 +28,8 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [S-12 — Implement reliable provisional responses](S-12-reliable-provisional-responses.md) · Signalling · track: signalling · RFC 3262 · same files as S-11, take it second
 - [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · track: test infrastructure · two items, both useful to sipx on their own
 - [T-16 — Implement the Service-Route header](T-16-service-route-header.md) · Signalling · track: reachability · RFC 3608 · the outbound twin of T-14's Path
-
-### Docs Site
-- [X-12 — Write the user-facing guides](X-12-write-the-user-facing-guides.md) · Build · track: docs · nothing else touches docs/
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
@@ -91,6 +87,7 @@ _None._
 - [S-9 — Implement blind transfer (REFER)](S-9-implement-blind-transfer-refer.md) · Signalling
 - [S-10 — Implement attended transfer](S-10-implement-attended-transfer.md) · Signalling
 - [S-11 — Implement session timers](S-11-session-timers.md) · Signalling · track: signalling · RFC 4028 · headers already parse
+- [S-12 — Implement reliable provisional responses](S-12-reliable-provisional-responses.md) · Signalling · track: signalling · RFC 3262 · same files as S-11, take it second
 - [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · track: auth · RFC 8760 · sipx-ua only, isolated
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
@@ -113,6 +110,7 @@ _None._
 - [X-7 — Track RFC compliance, measured rather than asserted](X-7-track-rfc-compliance.md) · Build · seeds the conformance epic
 - [X-8 — Fail the build on unbacked compliance claims](X-8-fail-the-build-on-unbacked-compliance-claims.md) · Build
 - [X-11 — Publish a documentation site](X-11-publish-a-documentation-site.md) · Build · seeds the docs-site epic
+- [X-12 — Write the user-facing guides](X-12-write-the-user-facing-guides.md) · Build · track: docs · nothing else touches docs/
 - [X-13 — Publish the API documentation](X-13-publish-the-api-documentation.md) · Build · track: docs · after X-12 in the same crate-free track
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._

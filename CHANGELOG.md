@@ -5,6 +5,24 @@ All notable changes to sipx are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Reliable provisional responses — 100rel and PRACK (`S-12`, RFC 3262).** A `180 Ringing` is
+  fire-and-forget over UDP, and some carriers will not accept a call without the option tag at
+  all. `100rel` is offered on every INVITE, honoured when a peer requires it, and refused with
+  `420 Bad Extension` + `Unsupported: 100rel` when it is switched off locally — refusing plainly,
+  because a caller waiting for an `RSeq` that never comes cannot tell that from a dead network.
+  - The retransmission schedule doubles from T1 and **deliberately does not cap at T2**, which
+    every other retransmission in SIP does. §3 gives the reason: an ACK is resent because a 2xx
+    arrived again, but a PRACK is sent once and is not re-triggered by a further 1xx.
+  - The `To` tag is chosen when the provisional is sent and reused by the answer. A reliable
+    provisional establishes a dialog, so a fresh tag on the 200 would create a *second* one — the
+    caller ACKs the dialog it knows while this side retransmits the 200 into a working call.
+  - `RSeq` is chosen uniformly in `1..2^31-1` rather than sequentially: it is the only thing an
+    off-path attacker would need to forge a PRACK and silence the retransmissions.
+
 ## [0.2.1] — 2026-07-28
 
 Documentation and tooling only. **No crate changed**, so the libraries are byte-identical to

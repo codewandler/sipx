@@ -36,7 +36,7 @@ fn ok_status() -> StatusCode {
 /// Its own function rather than the user agent's digest `cnonce`: a dialog identifier is not an
 /// authentication nonce, and borrowing one ties this layer to the one that handles credentials
 /// for no reason beyond both wanting random hex.
-fn token() -> String {
+pub(crate) fn token() -> String {
     use rand::Rng as _;
     let value: u64 = rand::rng().random();
     format!("{value:016x}")
@@ -959,7 +959,7 @@ fn remote_cseq(request: &Request) -> Option<u32> {
         .map(|cseq| cseq.sequence)
 }
 
-fn add_routes(
+pub(crate) fn add_routes(
     mut builder: RequestBuilder,
     routes: &[String],
 ) -> std::result::Result<RequestBuilder, sipx_sip::error::BuildError> {
@@ -1137,10 +1137,12 @@ fn build_invite(
         .max_forwards(70)
         .body(Bytes::from(offer.to_string_sdp()));
 
-    // `Supported: timer` goes on unconditionally. It is a statement of capability, not a
-    // request: it tells a far end that wants a timer that it may have one, which is what makes
-    // the far end's own liveness detection work even when this side has not asked for any.
-    builder = builder.header(HeaderName::Supported, Bytes::from_static(b"timer"))?;
+    // One `Supported` row listing everything this side can do. Both tags are statements of
+    // capability rather than requests: `timer` tells a far end that wants liveness detection
+    // that it may have it, and `100rel` (RFC 3262 §4) is what permits the far end to send a
+    // reliable provisional at all — §3 forbids it outright if we stay quiet, which means a
+    // silent UAC gets unreliable ringing even from a UAS that would rather not send it.
+    builder = builder.header(HeaderName::Supported, Bytes::from_static(b"timer, 100rel"))?;
     if let Some(interval) = session_expires {
         // No `refresher` parameter. RFC 4028 Table 2 row 4 lets the UAS choose when the UAC
         // has not, and the UAS is the side that knows whether it is behind a NAT or a proxy
@@ -1317,7 +1319,14 @@ async fn dial_with(
 
     let mut responses = endpoint.send(invite.clone(), target.clone()).await?;
 
-    let response = match await_final(&mut responses, options.timeout).await {
+    let mut acknowledging = Acknowledging {
+        endpoint,
+        invite: &invite,
+        target: &target,
+        capabilities: &capabilities,
+        seen: sipx_sip::rel::Sequence::default(),
+    };
+    let response = match await_final(&mut responses, options.timeout, &mut acknowledging).await {
         Waited::Final(response) => response,
         Waited::Gone => return Err(Error::NoResponse),
         Waited::GaveUp { provisional } => {
@@ -1443,7 +1452,32 @@ fn establish(
 pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAddr) -> Result<Call> {
     let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    answer_negotiated(endpoint, incoming, media_address, offer).await
+    answer_negotiated(endpoint, incoming, media_address, offer, &token()).await
+}
+
+/// Answer an INVITE that has already been rung (RFC 3262).
+///
+/// The tag comes from the [`Ringing`](crate::Ringing) rather than being fresh, and that is the
+/// whole reason this exists. A provisional that established a dialog has already told the caller
+/// what this side's tag is (RFC 3261 §12.1.1); a 200 with a different one creates a *second*
+/// dialog. The caller ACKs the dialog it knows about, this side waits for an ACK to the other,
+/// and the 200 is retransmitted for 32 seconds into a call that is actually up.
+pub async fn answer_ringing(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    ringing: &crate::Ringing,
+) -> Result<Call> {
+    // §3: a 2xx must not go out while a reliable provisional carrying a session description is
+    // unacknowledged. sipx never puts one in a provisional, so the narrower rule here is enough
+    // — but answering before the PRACK still means retransmitting a `180` at a caller that has
+    // moved on, so the ringing is stopped either way when `Ringing` drops.
+    if !ringing.is_acknowledged() {
+        tracing::debug!("answering before the reliable provisional was acknowledged");
+    }
+    let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
+        .map_err(|error| Error::Sdp(error.to_string()))?;
+    answer_negotiated(endpoint, incoming, media_address, offer, ringing.tag()).await
 }
 
 /// Settle the RFC 4028 session timer for an incoming INVITE, refusing it if it asks for too
@@ -1505,6 +1539,7 @@ async fn answer_negotiated(
     incoming: &Incoming,
     media_address: IpAddr,
     offer: SessionDescription,
+    tag: &str,
 ) -> Result<Call> {
     let negotiated = negotiated(&offer)?;
 
@@ -1533,7 +1568,6 @@ async fn answer_negotiated(
     };
     let media = port.start(settled.media_config());
 
-    let tag = token();
     let to_with_tag = {
         let existing = incoming
             .request
@@ -1576,7 +1610,7 @@ async fn answer_negotiated(
     // (RFC 3261 §12.1.1), and answering first would put a 2xx on the wire for a call this side
     // is then unable to hold: the caller ACKs, believes it has a confirmed dialog, and streams
     // media at an endpoint that has forgotten it and can never send the BYE.
-    let dialog = Dialog::from_request(&incoming.request, &tag).ok_or(Error::NoDialog)?;
+    let dialog = Dialog::from_request(&incoming.request, tag).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, Target::new(incoming.source, incoming.transport));
 
     endpoint.respond(&incoming.key, response.clone()).await?;
@@ -1660,7 +1694,20 @@ enum Waited {
 /// The provisional is not incidental bookkeeping: RFC 3261 §9.1 forbids cancelling an
 /// invitation the far end has not answered provisionally, so the deadline alone does not
 /// decide what to do when the wait runs out — what came back matters too.
-async fn await_final(responses: &mut sipx_transport::Responses, limit: Option<Duration>) -> Waited {
+/// What a UAC needs in order to acknowledge a reliable provisional while it waits.
+struct Acknowledging<'a> {
+    endpoint: &'a Handle,
+    invite: &'a Request,
+    target: &'a Target,
+    capabilities: &'a Capabilities,
+    seen: sipx_sip::rel::Sequence,
+}
+
+async fn await_final(
+    responses: &mut sipx_transport::Responses,
+    limit: Option<Duration>,
+    acknowledging: &mut Acknowledging<'_>,
+) -> Waited {
     let deadline = limit.map(|limit| tokio::time::Instant::now() + limit);
     let mut provisional = false;
     loop {
@@ -1677,11 +1724,49 @@ async fn await_final(responses: &mut sipx_transport::Responses, limit: Option<Du
                     return Waited::Final(*response);
                 }
                 provisional = true;
+                // RFC 3262 §4. A failure here is logged rather than fatal: the invitation is
+                // still running, and abandoning a ringing call because one PRACK did not get
+                // through would be a worse outcome than the unreliability it was fixing.
+                if let Err(error) = acknowledge(&response, acknowledging).await {
+                    tracing::debug!(%error, "could not acknowledge a reliable provisional");
+                }
             }
             Some(_) => {}
             None => return Waited::Gone,
         }
     }
+}
+
+/// PRACK a reliable provisional, if that is what this is (RFC 3262 §4).
+async fn acknowledge(response: &Response, ctx: &mut Acknowledging<'_>) -> Result<()> {
+    let Some(rseq) = crate::rel::reliable_sequence(response) else {
+        return Ok(());
+    };
+    // §4: out of order means an earlier one is missing, and a duplicate has already been
+    // acknowledged. Neither is PRACKed — re-acknowledging a retransmission would turn one lost
+    // packet into a stream of PRACKs, and acknowledging a gap would tell the UAS that
+    // everything up to this number arrived when it did not.
+    if ctx.seen.accept(rseq) != sipx_sip::rel::Received::Acknowledge {
+        return Ok(());
+    }
+
+    // §4: "The provisional response MUST establish a dialog if one is not yet created." The
+    // PRACK is an in-dialog request and has nowhere to go without it.
+    let mut dialog = Dialog::from_response(ctx.invite, response).ok_or(Error::NoDialog)?;
+    let target = in_dialog_target(&dialog, ctx.target.clone());
+    let invite_cseq = ctx
+        .invite
+        .headers
+        .typed::<sipx_sip::CSeq>()
+        .and_then(std::result::Result::ok)
+        .map_or(1, |cseq| cseq.sequence);
+
+    let body = crate::rel::prack_body(
+        !ctx.invite.body().is_empty(),
+        response.body(),
+        ctx.capabilities,
+    );
+    crate::rel::send_prack(ctx.endpoint, &mut dialog, &target, rseq, invite_cseq, body).await
 }
 
 /// Cancel an INVITE that has not been answered (RFC 3261 §9.1).

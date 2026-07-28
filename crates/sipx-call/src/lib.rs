@@ -11,9 +11,13 @@
 pub mod call;
 pub mod dialog;
 pub mod error;
+pub mod rel;
 pub mod transfer;
 
-pub use call::{Call, DialOptions, answer, answer_replacing, dial, dial_once, serve};
+pub use call::{
+    Call, DialOptions, answer, answer_replacing, answer_ringing, dial, dial_once, serve,
+};
 pub use dialog::{Dialog, DialogId, Role};
 pub use error::{Error, Result};
+pub use rel::{Ringing, ring};
 pub use transfer::{Referral, Replaces, Transfer, TransferState};

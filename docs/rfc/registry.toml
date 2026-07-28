@@ -227,10 +227,14 @@ note = "A pure function from offer and capabilities to answer. The offerer's for
 number = 3262
 title = "Reliability of Provisional Responses in SIP (100rel)"
 layer = "core"
-status = "syntax"
+status = "implemented"
 headers = ["RAck", "RSeq"]
-evidence = ["crates/sipx-sip/src/name.rs"]
-note = "The headers parse. Nothing sends PRACK or retransmits a reliable provisional."
+evidence = [
+  "crates/sipx-sip/src/rel.rs",
+  "crates/sipx-call/src/rel.rs",
+  "crates/sipx-call/tests/reliable_provisional.rs",
+]
+note = "Offered in Supported, honoured in Require. A reliable provisional carries RSeq and is retransmitted from T1 with no T2 cap until PRACK or 64*T1; PRACK carries RAck and is answered 2xx, or 481 when it matches nothing. A peer that requires 100rel while it is off gets 420 with Unsupported. An offer arriving in the provisional is answered in the PRACK. UPDATE (RFC 3311) is not implemented, so an early-dialog renegotiation is not available."
 
 [[rfc]]
 number = 3311
