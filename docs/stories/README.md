@@ -52,7 +52,6 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
-- [S-15 — Add editing operations to Headers](S-15-header-editing-operations.md) · Signalling · M7 · a forwarding element cannot edit a header list without rebuilding it
 - [S-16 — Implement the server side of digest authentication](S-16-server-side-digest.md) · Signalling · M7 · RFC 7616 · sipx can answer a challenge but cannot issue one
 
 ### Transport layer
@@ -147,6 +146,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [S-11 — Implement session timers](S-11-session-timers.md) · Signalling · track: signalling · RFC 4028 · headers already parse
 - [S-12 — Implement reliable provisional responses](S-12-reliable-provisional-responses.md) · Signalling · track: signalling · RFC 3262 · same files as S-11, take it second
 - [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · track: auth · RFC 8760 · sipx-ua only, isolated
+- [S-15 — Add editing operations to Headers](S-15-header-editing-operations.md) · Signalling · M7 · a forwarding element cannot edit a header list without rebuilding it
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling

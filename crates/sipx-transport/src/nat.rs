@@ -142,21 +142,21 @@ fn quoted_end(input: &[u8], at: usize) -> Option<usize> {
 }
 
 /// Replace the first `Via` header, keeping every other header where it was.
+///
+/// Was a rebuild of the whole collection — a fresh `Headers` and a clone of every header, to
+/// change one — because that was the only thing the API allowed. `remove_first` plus `push_front`
+/// says the same thing in two operations and clones nothing.
 fn replace_top_via(request: &mut Request, value: Bytes) {
     let Ok(header) = Header::build(HeaderName::Via, value) else {
         return;
     };
-    let mut rebuilt = sipx_sip::Headers::new();
-    let mut replaced = false;
-    for existing in request.headers.iter() {
-        if !replaced && existing.name() == &HeaderName::Via {
-            rebuilt.push(header.clone());
-            replaced = true;
-        } else {
-            rebuilt.push(existing.clone());
-        }
+    // Only when there is one to replace. The one caller today has already read the top `Via`, so
+    // this cannot fire from there — it is the function's contract rather than a live guard, and it
+    // is here because "replace" and "add" differ in a way that matters: the topmost `Via` is where
+    // the response goes, so adding one to a request that had none redirects the answer.
+    if request.headers.remove_first(&HeaderName::Via).is_some() {
+        request.headers.push_front(header);
     }
-    request.headers = rebuilt;
 }
 
 #[cfg(test)]
@@ -324,5 +324,40 @@ mod tests {
         let (start, end) = param_span(hop, b"note").expect("note is there");
         assert_eq!(&hop[start..end], br#";note="x;y""#);
         assert!(param_span(hop, b"absent").is_none());
+    }
+
+    /// `replace_top_via` replaces and does not add.
+    ///
+    /// Its one caller today has already read a `Via`, so it cannot reach this — which is exactly
+    /// why the property is worth pinning here rather than left to that caller's shape. Adding a
+    /// `Via` to a request that had none redirects the response, and the second caller is how that
+    /// bug arrives.
+    #[test]
+    fn replacing_the_top_via_on_a_request_without_one_adds_nothing() {
+        let text = "OPTIONS sip:a@b.com SIP/2.0\r\n\
+             To: <sip:a@b.com>\r\n\
+             From: <sip:c@d.net>;tag=1\r\n\
+             Call-ID: x@y\r\n\
+             CSeq: 1 OPTIONS\r\n\
+             Max-Forwards: 70\r\n\
+             Content-Length: 0\r\n\r\n";
+        let mut request = match parse_datagram(Bytes::from(text.to_owned()), &Limits::datagram())
+            .expect("parses")
+        {
+            Message::Request(r) => r,
+            Message::Response(_) => panic!("a request"),
+        };
+        assert_eq!(request.headers.count(&HeaderName::Via), 0);
+
+        replace_top_via(
+            &mut request,
+            Bytes::from_static(b"SIP/2.0/UDP invented.example"),
+        );
+
+        assert_eq!(
+            request.headers.count(&HeaderName::Via),
+            0,
+            "a request with no Via must not acquire one; the topmost Via is where the response goes"
+        );
     }
 }

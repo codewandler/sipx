@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`Headers` can be edited, not only read (`S-15`).** `remove_first`, `insert` and `retain` — the
+  three operations rewriting a message in flight needs. `Via`, `Route`, `Record-Route` and `Path`
+  order *is* the routing, so these are exact positions rather than set operations.
+  - `insert` past the end appends rather than panicking: this crate parses hostile input, and a
+    panic on an index derived from it would be a remote denial of service reachable by arithmetic.
+  - The transport's top-`Via` rewrite used to allocate a fresh `Headers` and clone every header to
+    change one, on the received-path. It is now two operations that clone nothing.
+
 - **Unmatched responses can be watched (`T-18`).** A response that matches no client transaction was
   logged and dropped — right for a user agent, wrong for anything that forwards: RFC 3261 §16.7
   step 1 requires a stateful proxy that finds no response context to forward the response

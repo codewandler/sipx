@@ -377,6 +377,38 @@ impl Headers {
         before - self.entries.len()
     }
 
+    /// Remove the **topmost** header with this name and return it.
+    ///
+    /// The one a forwarding element needs constantly: RFC 3261 §16.7 step 2 has a proxy remove the
+    /// topmost `Via` from a response before forwarding it, and §16.6 has it push its own onto a
+    /// request. Order is semantic for `Via`, `Route`, `Record-Route` and `Path` — it *is* the
+    /// routing — so this is an exact position rather than a set operation, and everything else
+    /// keeps its place.
+    pub fn remove_first(&mut self, name: &HeaderName) -> Option<Header> {
+        let index = self.entries.iter().position(|h| h.name() == name)?;
+        Some(self.entries.remove(index))
+    }
+
+    /// Insert a header at an absolute position.
+    ///
+    /// An index past the end **appends** rather than panicking. This crate parses hostile input and
+    /// a caller's index is often derived from it; a panic here would be a remote denial of service
+    /// reachable through arithmetic, which is exactly the class of bug the builders exist to make
+    /// unrepresentable.
+    pub fn insert(&mut self, index: usize, header: Header) {
+        let index = index.min(self.entries.len());
+        self.entries.insert(index, header);
+    }
+
+    /// Keep the headers a predicate accepts, in place and in order.
+    ///
+    /// The general case behind [`Headers::remove_all`], for the filters a forwarding element writes
+    /// that are not "by name" — stripping hop-by-hop headers, dropping a `Route` that names this
+    /// proxy, removing everything a policy did not whitelist.
+    pub fn retain(&mut self, f: impl FnMut(&Header) -> bool) {
+        self.entries.retain(f);
+    }
+
     /// The first value with this name, unfolded.
     #[must_use]
     pub fn value(&self, name: &HeaderName) -> Option<Cow<'_, [u8]>> {
@@ -709,6 +741,122 @@ mod tests {
         assert_eq!(
             Method::parse(&Bytes::from_static(b"INVITE")),
             Method::Invite
+        );
+    }
+
+    /// The story's failing-first test.
+    ///
+    /// RFC 3261 §16.7 step 2 has a proxy remove the topmost `Via` from a response and forward what
+    /// is left. "Topmost" is exact: removing the wrong one, or removing all of them, sends the
+    /// response to the wrong element or to nowhere.
+    #[test]
+    fn remove_first_takes_only_the_topmost_via() {
+        let mut headers = Headers::new();
+        for value in [&b"first"[..], b"second", b"third"] {
+            headers.push(Header::new_unchecked(
+                HeaderName::Via,
+                Bytes::copy_from_slice(value),
+            ));
+        }
+        // A header of another name between them, to catch an implementation that counts positions
+        // among matching headers rather than among all of them.
+        headers.insert(
+            1,
+            Header::new_unchecked(HeaderName::Route, Bytes::from_static(b"r")),
+        );
+
+        let taken = headers.remove_first(&HeaderName::Via).expect("a Via");
+        assert_eq!(taken.value().as_ref(), b"first");
+        assert_eq!(
+            headers
+                .get_all(&HeaderName::Via)
+                .map(|h| h.value().to_vec())
+                .collect::<Vec<_>>(),
+            vec![b"second".to_vec(), b"third".to_vec()],
+            "the remaining Vias keep their order"
+        );
+        assert_eq!(
+            headers.iter().map(|h| h.name().clone()).collect::<Vec<_>>(),
+            vec![HeaderName::Route, HeaderName::Via, HeaderName::Via],
+            "and every other header stays where it was"
+        );
+    }
+
+    #[test]
+    fn remove_first_on_a_name_that_is_absent_yields_nothing_and_changes_nothing() {
+        let mut headers = Headers::new();
+        headers.push(Header::new_unchecked(
+            HeaderName::Via,
+            Bytes::from_static(b"v"),
+        ));
+        assert!(headers.remove_first(&HeaderName::Route).is_none());
+        assert_eq!(headers.len(), 1);
+    }
+
+    /// An index past the end appends. This crate parses hostile input, and a caller's index is
+    /// often derived from it — a panic here would be a remote denial of service reachable through
+    /// arithmetic.
+    #[test]
+    fn inserting_past_the_end_appends_rather_than_panicking() {
+        let mut headers = Headers::new();
+        headers.push(Header::new_unchecked(
+            HeaderName::Via,
+            Bytes::from_static(b"v"),
+        ));
+        headers.insert(
+            9999,
+            Header::new_unchecked(HeaderName::Route, Bytes::from_static(b"r")),
+        );
+        assert_eq!(headers.len(), 2);
+        assert_eq!(
+            headers.iter().last().map(|h| h.name().clone()),
+            Some(HeaderName::Route)
+        );
+    }
+
+    #[test]
+    fn insert_places_a_header_at_an_absolute_position() {
+        let mut headers = Headers::new();
+        for name in [HeaderName::Via, HeaderName::To, HeaderName::From] {
+            headers.push(Header::new_unchecked(name, Bytes::from_static(b"x")));
+        }
+        headers.insert(
+            1,
+            Header::new_unchecked(HeaderName::RecordRoute, Bytes::from_static(b"rr")),
+        );
+        assert_eq!(
+            headers.iter().map(|h| h.name().clone()).collect::<Vec<_>>(),
+            vec![
+                HeaderName::Via,
+                HeaderName::RecordRoute,
+                HeaderName::To,
+                HeaderName::From
+            ]
+        );
+        // Zero is the front, which is `push_front`.
+        headers.insert(
+            0,
+            Header::new_unchecked(HeaderName::Via, Bytes::from_static(b"newest")),
+        );
+        assert_eq!(headers.value(&HeaderName::Via).unwrap().as_ref(), b"newest");
+    }
+
+    /// The general case behind `remove_all`: a filter that is not "by name".
+    #[test]
+    fn retain_filters_in_place_and_keeps_order() {
+        let mut headers = Headers::new();
+        for (name, value) in [
+            (HeaderName::Via, &b"keep"[..]),
+            (HeaderName::Route, b"drop"),
+            (HeaderName::Via, b"drop"),
+            (HeaderName::To, b"keep"),
+        ] {
+            headers.push(Header::new_unchecked(name, Bytes::copy_from_slice(value)));
+        }
+        headers.retain(|header| header.value().as_ref() == b"keep");
+        assert_eq!(
+            headers.iter().map(|h| h.name().clone()).collect::<Vec<_>>(),
+            vec![HeaderName::Via, HeaderName::To]
         );
     }
 
