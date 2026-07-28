@@ -128,6 +128,65 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+**Conformance defects found by reviewing implemented behaviour against the RFCs** (`X-6`).
+Deliberately not a gap analysis — a missing feature is visible, a subtly wrong one is not. Every
+fix landed with a failing-first test, and the tests that asserted the old behaviour were
+rewritten rather than deleted.
+
+- **Timer B fired from `Proceeding`**, so a callee who took longer than 64·T1 to answer was hung
+  up on, and `send_to_uri` then dialled the next RFC 3263 candidate while the first phone was
+  still ringing. RFC 3261 §17.1.1.2 fires it from `Calling` only; §16.6 item 11 is explicit that
+  the INVITE client transaction no longer times out once a provisional has arrived, which is
+  precisely why proxies need Timer C.
+- **A `sips:` URI with a `transport` parameter resolved to cleartext.** Table 1 and §26.2.2: in a
+  SIPS URI the parameter names the transport carried *under* TLS, so `transport=tcp` asks for TLS
+  over TCP. The scheme filter lived in the SRV stage, which an IP literal, an explicit port and
+  the bare A-record fallback all skip. `sips` over UDP now yields no candidate rather than a
+  downgrade, there being no TLS over UDP to offer.
+- **RFC 3581 was broken in both halves.** `received` was omitted when the sent-by matched the
+  source, though §4 requires it "even if it is identical to the value of the `sent-by`
+  component"; and `rport` was consulted only alongside `received`, so a response went to the
+  sent-by port a NAT had rewritten. A client on an ephemeral port never got its answers.
+- **In-dialog requests carried the route set but were addressed to the remote target**, bypassing
+  the record-routing proxy that inserted itself in the dialog in order to be traversed. Where
+  that proxy is the only element that can reach the far end, this is the BYE that never arrives —
+  with the media still running. §12.2.1.1, now including strict routing and the parameters
+  §19.1.1 bars from a Request-URI.
+- **The ACK to a 2xx ran inside a transaction**, earning it the retransmission timers of a
+  non-INVITE request aimed at a response that never comes; and a *retransmitted* 2xx was never
+  acknowledged again, though §13.2.2.4 requires an ACK for each one received.
+- **The 200 to a re-INVITE was sent once.** §13.3.1.4 governs the 2xx to any INVITE, and RFC 6026
+  has the server transaction absorb the retransmitted requests without answering them, so a
+  single lost packet deadlocked hold and resume until the peer's Timer B.
+- **§18.1.1's size limit was applied to responses**, which §18.2.2 gives a UAS no transport to
+  escape to. A 200 carrying a full SDP answer was refused outright: the caller timed out while
+  the callee believed it had answered.
+- **A CRLF before a start-line was a fatal framing error**, so the RFC 5626 keepalives that
+  mainstream stacks send routinely closed the connection and every dialog riding it. §7.5 makes
+  ignoring them a MUST, and only for stream transports.
+- **RTCP named both parties SSRC 0** — the report block never learned the peer's synchronisation
+  source and the sender field carried the reportee's — so a conforming peer found no block
+  matching itself and discarded every loss and jitter figure. Interarrival jitter also used
+  non-modular arithmetic, so a 32-bit timestamp wrap (normal, since §5.1 randomises the starting
+  timestamp) injected 2³²/16 into the estimate and poisoned it for hundreds of packets.
+- **FQDNs in SDP `o=` and `c=` lines were rejected**, failing the whole description — including
+  RFC 3264 §10.1's own example offer, which could therefore never be answered.
+- **The digest nonce count was global rather than per-nonce**, so a registrar enforcing the replay
+  protection that `nc` exists for rejected every fresh nonce answered with a count above one.
+  RFC 7616 §3.4.3 counts requests sent *with the nonce in this request*.
+- **`sipx register` advertised the registrar's address in its own `Via`** and, on the default
+  `--local`, registered a `sip:user@0.0.0.0` binding — so every inbound call to the
+  address-of-record was routed nowhere.
+- Smaller ones, each with its citation in the story: comma-separated `Contact`/`Route` rows
+  rejected (§7.3), case-sensitive SIP-Version (§7.1), `tel:` URIs compared as opaque bytes,
+  escaped parameter names not folded (§19.1.4), no target refresh on a re-INVITE (§12.2.2), the
+  ordering check applied only to re-INVITEs so a stale BYE ended a live call, `answer()`
+  committing a 2xx before it knew a dialog could be formed, weight-0 SRV records unreachable
+  (RFC 2782), TLS advertising the cleartext port in `Via`, session-level SDP direction ignored
+  and rtpmap matched without its clock rate (RFC 3264 §6.1), DTMF fed to the jitter estimator and
+  saturating instead of segmenting (RFC 4733 §2.5.1.3), and UAS final responses without a To tag
+  (§8.2.6.2).
+
 - A call hung up while packets were still in the paced send queue, so every call lost its last
   word — or, for DTMF, its last digit. `MediaSession::flush` now drains the queue first.
 - The RTCP report block decoder read cumulative loss from byte 4 instead of byte 5, folding the

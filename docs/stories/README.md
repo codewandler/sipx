@@ -83,6 +83,7 @@ _None._
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core
+- [X-6 — Fix the RFC conformance defects found by review](X-6-fix-the-rfc-conformance-defects.md) · Core · review of implemented behaviour, not of gaps
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
