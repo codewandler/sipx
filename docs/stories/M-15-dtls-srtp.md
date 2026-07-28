@@ -3,11 +3,11 @@ id: M-15
 title: Key SRTP with DTLS
 pillar: Media
 status: backlog
-priority: 7
+priority: 10
 design:
 epic: conformance
 areas: [sipx-media]
-note: RFC 5764; blocked by M-14
+note: track: media · RFC 5764 · blocked by M-14
 ---
 
 # Key SRTP with DTLS

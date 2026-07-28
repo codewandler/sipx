@@ -2,12 +2,12 @@
 id: X-12
 title: Write the user-facing guides
 pillar: Build
-status: backlog
+status: ready
 priority: 2
 design:
 epic: docs-site
 areas: [docs]
-note: blocked by X-8
+note: track: docs · nothing else touches docs/
 ---
 
 # Write the user-facing guides

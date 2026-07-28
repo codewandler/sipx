@@ -3,11 +3,11 @@ id: M-14
 title: Encrypt the media
 pillar: Media
 status: ready
-priority: 2
+priority: 1
 design:
 epic: conformance
 areas: [sipx-rtp, sipx-media, sipx-sdp]
-note: RFC 3711 + 4568; the largest gap in the stack
+note: track: media · RFC 3711 + 4568 · the largest gap in the stack
 ---
 
 # Encrypt the media

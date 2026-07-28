@@ -7,7 +7,7 @@ priority: 3
 design:
 epic: conformance
 areas: [sipx-call, sipx-sip]
-note: RFC 4028; headers already parse
+note: track: signalling · RFC 4028 · headers already parse
 ---
 
 # Implement session timers

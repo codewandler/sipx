@@ -3,11 +3,11 @@ id: S-12
 title: Implement reliable provisional responses
 pillar: Signalling
 status: ready
-priority: 4
+priority: 7
 design:
 epic: conformance
 areas: [sipx-sip, sipx-call]
-note: RFC 3262; RAck and RSeq already parse
+note: track: signalling · RFC 3262 · same files as S-11, take it second
 ---
 
 # Implement reliable provisional responses

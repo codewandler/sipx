@@ -2,12 +2,12 @@
 id: T-15
 title: Implement Outbound, for client-initiated connections
 pillar: Signalling
-status: ready
-priority: 6
+status: backlog
+priority: 9
 design:
 epic: conformance
 areas: [sipx-transport, sipx-ua]
-note: RFC 5626; blocked by T-14
+note: track: reachability · RFC 5626 · blocked by T-14
 ---
 
 # Implement Outbound, for client-initiated connections

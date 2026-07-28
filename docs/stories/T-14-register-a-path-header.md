@@ -3,11 +3,11 @@ id: T-14
 title: Implement the Path header
 pillar: Signalling
 status: ready
-priority: 5
+priority: 4
 design:
 epic: conformance
 areas: [sipx-sip, sipx-ua]
-note: RFC 3327; gates Outbound and GRUU
+note: track: reachability · RFC 3327 · gates T-15 and GRUU
 ---
 
 # Implement the Path header

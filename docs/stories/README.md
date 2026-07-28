@@ -28,17 +28,18 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [M-14 — Encrypt the media](M-14-secure-media.md) · Media · RFC 3711 + 4568; the largest gap in the stack
-- [S-11 — Implement session timers](S-11-session-timers.md) · Signalling · RFC 4028; headers already parse
-- [S-12 — Implement reliable provisional responses](S-12-reliable-provisional-responses.md) · Signalling · RFC 3262; RAck and RSeq already parse
-- [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · RFC 3327; gates Outbound and GRUU
-- [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · RFC 5626; blocked by T-14
-- [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · RFC 8760; small and self-contained
+- [M-14 — Encrypt the media](M-14-secure-media.md) · Media · track: media · RFC 3711 + 4568 · the largest gap in the stack
+- [S-11 — Implement session timers](S-11-session-timers.md) · Signalling · track: signalling · RFC 4028 · headers already parse
+- [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · track: reachability · RFC 3327 · gates T-15 and GRUU
+- [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · track: auth · RFC 8760 · sipx-ua only, isolated
+- [S-12 — Implement reliable provisional responses](S-12-reliable-provisional-responses.md) · Signalling · track: signalling · RFC 3262 · same files as S-11, take it second
+
+### Docs Site
+- [X-12 — Write the user-facing guides](X-12-write-the-user-facing-guides.md) · Build · track: docs · nothing else touches docs/
+- [X-13 — Publish the API documentation](X-13-publish-the-api-documentation.md) · Build · track: docs · after X-12 in the same crate-free track
 
 ### Quic
-- [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · gates T-12 and T-13
-- [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · blocked by T-11
-- [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · blocked by T-12; third-party SIP-over-QUIC peers may not exist yet
+- [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · track: quic · a draft rather than an RFC, so it sits below the RFC work
 
 ## Blocked
 _None._
@@ -46,12 +47,13 @@ _None._
 ## Backlog
 
 ### Conformance
-- [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · RFC 5764; blocked by M-14
-- [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · RFC 6665; generalises what REFER already does implicitly
+- [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · track: media · RFC 5764 · blocked by M-14
+- [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · track: signalling · RFC 6665 · large; gates presence and BLF
+- [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · track: reachability · RFC 5626 · blocked by T-14
 
-### Docs Site
-- [X-12 — Write the user-facing guides](X-12-write-the-user-facing-guides.md) · Build · blocked by X-8
-- [X-13 — Publish the API documentation](X-13-publish-the-api-documentation.md) · Build · blocked by X-8
+### Quic
+- [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11
+- [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · track: quic · blocked by T-12
 
 ## Done
 - [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media

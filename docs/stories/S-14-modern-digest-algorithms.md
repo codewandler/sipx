@@ -3,11 +3,11 @@ id: S-14
 title: Add the modern digest algorithms
 pillar: Signalling
 status: ready
-priority: 9
+priority: 5
 design:
 epic: conformance
 areas: [sipx-ua]
-note: RFC 8760; small and self-contained
+note: track: auth · RFC 8760 · sipx-ua only, isolated
 ---
 
 # Add the modern digest algorithms

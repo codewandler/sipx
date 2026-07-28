@@ -2,12 +2,12 @@
 id: X-13
 title: Publish the API documentation
 pillar: Build
-status: backlog
-priority: 3
+status: ready
+priority: 6
 design:
 epic: docs-site
 areas: [docs]
-note: blocked by X-8
+note: track: docs · after X-12 in the same crate-free track
 ---
 
 # Publish the API documentation

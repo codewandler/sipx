@@ -2,12 +2,12 @@
 id: T-13
 title: Verify QUIC against a real peer
 pillar: Signalling
-status: ready
-priority: 7
+status: backlog
+priority: 13
 design: docs/specs/sip-quic.md
 epic: quic
 areas: [sipx-transport]
-note: blocked by T-12; third-party SIP-over-QUIC peers may not exist yet
+note: track: quic · blocked by T-12
 ---
 
 # Verify QUIC against a real peer

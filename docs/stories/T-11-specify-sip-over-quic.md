@@ -3,11 +3,11 @@ id: T-11
 title: Specify SIP over QUIC
 pillar: Signalling
 status: ready
-priority: 5
+priority: 8
 design: docs/designs/sip-transport.md
 epic: quic
 areas: [sipx-transport]
-note: gates T-12 and T-13
+note: track: quic · a draft rather than an RFC, so it sits below the RFC work
 ---
 
 # Specify SIP over QUIC

@@ -59,6 +59,60 @@ testing.
   JSON output mode and an exit code per outcome. Two `sipx` processes place a call to each
   other and the recording contains the audio that was played.
 
+## What to work on next
+
+Ten items, ordered by the [RFC roadmap](rfc-roadmap.md) and grouped so several can run at once.
+The grouping is the point: the constraint is not how much there is to do, it is how much of it
+touches the same files.
+
+| # | Story | Track | Crates it touches |
+|---|---|---|---|
+| 1 | **M-14** Encrypt the media | media | `sipx-rtp` `sipx-sdp` `sipx-media` |
+| 2 | **X-12** Write the user-facing guides | docs | none |
+| 3 | **S-11** Implement session timers | signalling | `sipx-call` `sipx-sip` |
+| 4 | **T-14** Implement the Path header | reachability | `sipx-sip` `sipx-ua` |
+| 5 | **S-14** Add the modern digest algorithms | auth | `sipx-ua` |
+| 6 | **X-13** Publish the API documentation | docs | none |
+| 7 | **S-12** Reliable provisional responses | signalling | `sipx-call` `sipx-sip` |
+| 8 | **T-11** Specify SIP over QUIC | quic | none (a spec) |
+| 9 | **T-15** Outbound — *blocked by T-14* | reachability | `sipx-transport` `sipx-ua` |
+| 10 | **M-15** DTLS-SRTP — *blocked by M-14* | media | `sipx-media` |
+
+### Five tracks that do not collide
+
+**Media** (M-14 → M-15) owns `sipx-rtp`, `sipx-sdp` and `sipx-media`. **Signalling** (S-11 → S-12)
+owns `sipx-call` and the transaction layer. **Reachability** (T-14 → T-15) owns registration and
+`sipx-transport`. **Auth** (S-14) is one crate on its own. **Docs** (X-12, X-13) touches no crate
+at all.
+
+Those five can be worked simultaneously. What cannot: S-11 and S-12 are one track rather than
+two, because both rewrite the same parts of `sipx-call` and would spend more time merging than
+implementing. The same is true of T-14 and T-15, and of M-14 and M-15 — and those two pairs are
+strictly ordered anyway, since each second half needs the first.
+
+### Why in this order
+
+**M-14 is first because it is the sentence that disqualifies the stack.** `sips:` and WSS work
+today, the TLS policy has no way to disable verification anywhere, and then the audio goes out
+in the clear. Nothing else on the list changes as much about where sipx can be deployed.
+
+**X-12 is second because it costs nothing to run alongside** and the README now points at a site
+that has a landing page and no guides.
+
+**S-11 before S-12** because a call whose far end vanishes without a BYE currently stays up in
+sipx forever, and that is a fault rather than a missing feature.
+
+**T-14 before everything else in its track** because `Path` is not known to the parser at all,
+and Outbound, GRUU and push all sit behind it.
+
+**T-11 sits below the RFC work** deliberately. SIP over QUIC is a draft rather than a published
+RFC; it is a reasonable bet and not a reasonable thing to do before media is encrypted. That is
+a re-ranking of the epic as seeded, and it is easy to reverse if the bet is meant to be taken
+sooner.
+
+Not in the ten: **S-13** (the event framework) is large and gates presence and busy-lamp fields,
+but nothing currently in the stack is waiting on it; **T-12** and **T-13** are behind T-11.
+
 ## Next
 
 Milestones, in order. Each is independently demonstrable.
