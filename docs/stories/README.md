@@ -43,6 +43,10 @@ _None._
 - [M-6 — Implement RTCP sender and receiver reports](M-6-rtcp-reports.md) · Media · gap left explicitly by M3
 - [M-7 — Implement RFC 4733 DTMF events](M-7-dtmf-events.md) · Media · gap left explicitly by M3
 - [M-8 — Handle re-INVITE and in-dialog requests](M-8-reinvite-and-in-dialog.md) · Media · gap left explicitly by M3
+- [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
+- [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
+- [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
+- [P-4 — Implement `sipx answer`](P-4-cli-answer.md) · Phone
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 - [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling

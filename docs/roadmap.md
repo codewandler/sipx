@@ -6,14 +6,16 @@ this document is the hand-written narrative around it.
 
 ## Status
 
-_As of 2026-07-28:_ **M0 through M3 are complete.** `sipx-sip` is a working sans-IO SIP core:
+_As of 2026-07-28:_ **M0 through M4 are complete.** `sipx-sip` is a working sans-IO SIP core:
 URIs, headers, an incremental parser for both datagram and stream transports, message
 validation, injection-proof builders, and all four transaction state machines with matching
 and stores. 157 tests pass; clippy is clean at `-D warnings`; the whole RFC 4475 torture
 corpus is green across all four of its layers.
 
 sipx registers against a real Kamailio over both UDP and TCP, answers `OPTIONS`, and places
-calls that carry G.711 audio in both directions. Next is **M4**: the `sipx` command-line phone.
+calls that carry G.711 audio in both directions, and `sipx dial | answer | register` does all
+of that from a terminal. Next is **M5**: TLS and WebSocket, bridging, transfer and load
+testing.
 
 ## Delivered
 
@@ -47,19 +49,19 @@ calls that carry G.711 audio in both directions. Next is **M4**: the `sipx` comm
   algorithm, RTP with a jitter buffer that treats the 16-bit sequence wrap as ordinary, media
   sessions with symmetric RTP, and dialogs. Two endpoints establish a call, play a WAV and
   record it back bit-exact after the codec.
-  - Known gaps, filed rather than implied: RTCP reports (`M-6`), RFC 4733 DTMF (`M-7`), and
-    re-INVITE plus in-dialog request routing (`M-8`).
+  - The gaps this milestone left were closed before M4: RTCP (`M-6`), DTMF (`M-7`), re-INVITE
+    (`M-8`) and a DNS client (`T-5`).
+- **M4 — Phone.** `sipx dial | answer | register`, with WAV playback and recording, DTMF, a
+  JSON output mode and an exit code per outcome. Two `sipx` processes place a call to each
+  other and the recording contains the audio that was played.
 
 ## Next
 
 Milestones, in order. Each is independently demonstrable.
 
-Before M4, the gaps M3 left are being closed — DTMF, re-INVITE, a DNS backend and RTCP — so
-that nothing the stack advertises is left unimplemented. They are on the board as `M-6`,
-`M-7`, `M-8` and `T-5`.
+The gaps M3 left — DTMF, re-INVITE, a DNS backend and RTCP — were closed before M4 began, so
+nothing the stack advertises is left unimplemented.
 
-- **M4 — Phone.** `sipx dial | answer | register` with file/log media, recording, DTMF and
-  machine-readable output.
 - **M5 — Depth.** TLS/WS/WSS, bridging and mixing, transfer, jitter-buffer tuning, RTCP
   statistics, Opus, load testing.
 

@@ -399,6 +399,24 @@ impl MediaSession {
         self.stats.lock().await.report_block()
     }
 
+    /// Wait until everything queued has actually been sent.
+    ///
+    /// Sending is paced, so `play` and `send_digit` return as soon as the packets are queued —
+    /// which is long before they are on the wire. Hanging up at that point discards the tail:
+    /// the last word of a clip, or the last digit of a PIN. Anything still queued after
+    /// `within` is given up on, so this cannot hold a caller open indefinitely.
+    pub async fn flush(&self, within: Duration) {
+        let deadline = tokio::time::Instant::now() + within;
+        while self.outgoing.capacity() < self.outgoing.max_capacity() {
+            if tokio::time::Instant::now() >= deadline || self.stop.is_stopped() {
+                return;
+            }
+            tokio::time::sleep(self.packet_duration.max(Duration::from_millis(5))).await;
+        }
+        // The last packet has left the queue but not yet the socket.
+        tokio::time::sleep(self.packet_duration).await;
+    }
+
     /// Stop the session and release its socket.
     pub fn stop(&self) {
         self.stop.stop();

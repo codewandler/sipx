@@ -292,12 +292,15 @@ impl Call {
 
     /// End the call.
     ///
-    /// The media stops first: a BYE answered while audio is still flowing leaves the far end
-    /// hearing a call it has already torn down.
+    /// Anything still queued is sent first, then the media stops, then the BYE goes out.
+    /// Stopping first would discard the tail of whatever was playing — the last word of a
+    /// clip, the last digit of a PIN — because sending is paced and the queue outlives the
+    /// call by however much is left in it.
     pub async fn hang_up(&mut self) -> Result<()> {
         if self.ended {
             return Ok(());
         }
+        self.media.flush(Duration::from_secs(5)).await;
         self.media.stop();
         self.ended = true;
         if let Some(notify) = self.awaiting_ack.take() {

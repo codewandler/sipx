@@ -966,8 +966,10 @@ name = "sipx-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "sipx-audio",
  "sipx-call",
+ "sipx-rtp",
  "sipx-sip",
  "sipx-transport",
  "sipx-ua",
