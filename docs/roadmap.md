@@ -233,9 +233,12 @@ The alpha is the point at which a v1 **could** technically be cut. Each item is 
 person reading the repo, and most are already checked by the gate.
 
 1. **No claim outlives its caller.** No entry in [`docs/rfc/registry.toml`](rfc/registry.toml)
-   claims a role that nothing above the implementing crate can reach, at *any* layer — not only
-   `media`. `X-30` made this mechanical for media and deliberately went no further; `X-33`
-   generalises it. Rows that cannot be made true are demoted, not explained.
+   claims a role that nothing above the implementing crate can reach, at *any* layer. `X-30` made
+   this mechanical for `media`, `X-33` widened it to `security` and measured and *declined* the rest:
+   a path check is satisfied by citing a file whose relevant branch is dead, and a syntactic caller
+   check would be fitted to the three rows that motivated it. The honest closure is not a better
+   check but a real application — `X-38` — after which the reachable-from-a-call surface is *defined*
+   as what that application uses. Rows that cannot be made true are demoted, not explained.
 2. **Adversarial input and adversarial timing are both fuzzed.** Four parser targets and the
    transaction-sequence driver (`X-19`), the second with an oracle that can fail without a panic.
    Met, subject to `X-31` closing the harness's own drift holes.

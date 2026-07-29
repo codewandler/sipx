@@ -179,7 +179,6 @@ number = 5626
 title = "Managing Client-Initiated Connections in SIP (Outbound)"
 layer = "transport"
 status = "partial"
-roles = ["uac"]
 headers = ["FlowTimer"]
 evidence = [
   "crates/sipx-ua/src/outbound.rs",
@@ -188,7 +187,7 @@ evidence = [
   "crates/sipx-ua/tests/outbound.rs",
   "crates/sipx-transport/tests/keepalive.rs",
 ]
-note = "The UA side. `+sip.instance` and `reg-id` on REGISTER, `outbound` offered, `Require: outbound` on the 2xx read as acceptance (§6), `ob` on a dialog-forming Contact (§4.3), one registration per outbound proxy with each flow failing independently, §4.5's backoff, and §4.4 keep-alives — CRLF for connection-oriented flows, STUN Binding for UDP, including §4.4.2's rule that a changed reflexive address is a failed flow. Not implemented: the *registrar* side (flow tokens in Path, §5), which is what makes the mechanism useful to the network rather than to the client."
+note = "**Missing: a call. No role is reachable**, which is why this row lists none — `with_outbound` has no caller outside the `sipx-ua` tests, so no INVITE sipx sends uses a flow. The UA side. `+sip.instance` and `reg-id` on REGISTER, `outbound` offered, `Require: outbound` on the 2xx read as acceptance (§6), `ob` on a dialog-forming Contact (§4.3), one registration per outbound proxy with each flow failing independently, §4.5's backoff, and §4.4 keep-alives — CRLF for connection-oriented flows, STUN Binding for UDP, including §4.4.2's rule that a changed reflexive address is a failed flow. Not implemented: the *registrar* side (flow tokens in Path, §5), which is what makes the mechanism useful to the network rather than to the client."
 
 [[rfc]]
 number = 3327
@@ -220,7 +219,6 @@ number = 8599
 title = "Push Notification with SIP"
 layer = "transport"
 status = "partial"
-roles = ["uac"]
 headers = ["FeatureCaps"]
 evidence = [
   "crates/sipx-sip/src/push.rs",
@@ -228,7 +226,7 @@ evidence = [
   "crates/sipx-ua/src/registrar.rs",
   "crates/sipx-ua/tests/push.rs",
 ]
-note = "The UA half only. `pn-provider`, `pn-param` and `pn-prid` go on the REGISTER's `Contact` as the URI parameters §8.7 registers them as; the `sip.pns`, `sip.pnsreg` and `sip.pnspurr` feature-capability indicators (§8.2) are read out of `Feature-Caps` (RFC 6809 §4) so a client can tell whether the registrar supports the push service it named; 555 (§8.1) is surfaced as its own outcome rather than a generic failure; and a push leads to §4.1.3's binding-refresh REGISTER *before* the pending request is expected — `UserAgent::woken` is that ordering as a type. The push service itself is a trait sipx ships no implementation of, and `pn-purr` is read and carried but not matched against stored bindings — matching is for the party that stores them, which is §5.6's proxy role and not played here. **Not the registrar or proxy half**: minting the PURR (§4.2), the push-bucket hold of §5.6, and sending the push itself are out of scope."
+note = "**Missing: a call. No role is reachable**, which is why this row lists none — `with_push` has no caller outside the `sipx-ua` tests. The UA half only. `pn-provider`, `pn-param` and `pn-prid` go on the REGISTER's `Contact` as the URI parameters §8.7 registers them as; the `sip.pns`, `sip.pnsreg` and `sip.pnspurr` feature-capability indicators (§8.2) are read out of `Feature-Caps` (RFC 6809 §4) so a client can tell whether the registrar supports the push service it named; 555 (§8.1) is surfaced as its own outcome rather than a generic failure; and a push leads to §4.1.3's binding-refresh REGISTER *before* the pending request is expected — `UserAgent::woken` is that ordering as a type. The push service itself is a trait sipx ships no implementation of, and `pn-purr` is read and carried but not matched against stored bindings — matching is for the party that stores them, which is §5.6's proxy role and not played here. **Not the registrar or proxy half**: minting the PURR (§4.2), the push-bucket hold of §5.6, and sending the push itself are out of scope."
 
 [[rfc]]
 number = 7339

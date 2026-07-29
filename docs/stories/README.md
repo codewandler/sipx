@@ -44,13 +44,13 @@ _None._
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
 - [A-9 — Make the published crates safe to freeze — `#[non_exhaustive]` and a README per crate](A-9-freeze-what-a-published-crate-can-add.md) · Application · A-8 stated the promise and left the two mechanical halves — every public error enum outside sipx-app-protocol is exhaustive, so it promises never to add a variant, and ten of eleven crates will publish to crates.io with no README at all
+- [X-38 — Ship a real application, and let its reality say what a check cannot](X-38-ship-an-app-and-let-it-say-what-the-check-cannot.md) · Build · alpha predicate 1, reconsidered at X-37 — a syntactic caller-check would be fitted to three rows, wrong in the ways macros and re-exports are wrong, and fitted to what is testable rather than what is true; the honest gate is that the reachable-from-a-call surface is exactly what one real application uses
 
 ### Call framework
 _This is the layer applications actually program against, so it is the one that decides whether_
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
-- [X-37 — Decide reachability by resolving callers, not by matching evidence paths](X-37-bind-reachability-to-callers-not-to-paths.md) · Build · the recorded successor to X-30 and X-33 — a path check is satisfied by citing a file, so a dead branch counts as reachable, the transport layer cannot be adjudicated at all, and a relabelled layer still escapes
 - [S-25 — Give the early-dialog loop a way to fail](S-25-early-dialog-observation-has-no-error-channel.md) · Signalling · found by M-29 — adopt_early_answer returns (), so a parse failure, a negotiation failure and a refused a=crypto in a reliable provisional are all discarded identically
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
@@ -70,6 +70,7 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
+- [S-29 — Register over an Outbound flow, and let a registration wake on push](S-29-register-over-an-outbound-flow-and-push.md) · Signalling · with_outbound and with_push have no caller outside sipx-ua's own tests — the eighth instance of the recurring defect — so X-37 demoted RFC 5626 and 8599 to no roles; wiring them is what makes the roles honest again
 - [S-28 — Answer a 401 or 407 on an outbound INVITE](S-28-a-call-cannot-answer-an-authentication-challenge.md) · Signalling · found while closing P-7 — sipx-call has no credential type and no 401/407 path at all, so a challenged call fails outright; the digest machinery exists in sipx-ua and nothing above the registration path can reach it
 
 ### Transport layer
@@ -222,6 +223,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-34 — Make the gate fail honestly when the disk is full](X-34-the-gate-has-no-disk-guard.md) · Build · five times on 2026-07-29 a full disk produced a red gate that read as a code defect — cargo reports ENOENT on build artifacts, and a correct merge was nearly reverted for it
 - [X-35 — Make the public capability tables measured, not hand-maintained](X-35-the-public-capability-tables-are-not-measured.md) · Build · two independent read-only sweeps found the front page advertising Opus, bridging and a DTLS-SRTP workaround that no call can reach — the same shape X-30 removed from the registry, in the four hand-maintained tables no script reads
 - [X-36 — Pin the send ordering `respond` already promises, and drop the clock that pretends to](X-36-respond-has-no-flushed-observable.md) · Build · respond_returns_only_once_the_response_has_been_sent cannot detect the thing it is named for — the ordering can be reversed in endpoint.rs and the test still passes, so its 50 ms bound is pure flake risk
+- [X-37 — Decide reachability by resolving callers, not by matching evidence paths](X-37-bind-reachability-to-callers-not-to-paths.md) · Build · the recorded successor to X-30 and X-33 — a path check is satisfied by citing a file, so a dead branch counts as reachable, the transport layer cannot be adjudicated at all, and a relabelled layer still escapes
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

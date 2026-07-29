@@ -71,7 +71,16 @@ class Predicate:
 #: when every story named here is `done`; that is the whole rule, and it is why the stories are named
 #: rather than the state being restated.
 ALPHA = (
-    Predicate(1, "No claim outlives its caller, at any layer", "computed", ["X-30", "X-33", "X-37"]),
+    Predicate(
+        1,
+        "No claim outlives its caller, at any layer",
+        "attested",
+        ["X-30", "X-33", "X-37", "X-38"],
+        "Mechanical as far as a path check can go, which is not far: `unreachable_claims` covers "
+        "`media` and `security` and was measured and declined for `transport`. The rest is attested "
+        "by shipping an application whose every dependency is visible — `X-38` — because a capability "
+        "that exists but cannot be selected is a question of use, and use is observed, not grepped.",
+    ),
     Predicate(2, "Adversarial input and adversarial timing are both fuzzed", "computed", ["X-19", "X-31"]),
     Predicate(3, "A red gate means a defect", "computed", ["X-28", "X-29", "X-34", "X-36"]),
     Predicate(

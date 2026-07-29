@@ -14,7 +14,7 @@ repository and are recorded when they happen rather than computed.
 
 | # | Predicate | State | Waiting on |
 |---|---|---|---|
-| 1 | No claim outlives its caller, at any layer | open | `X-37` |
+| 1 | No claim outlives its caller, at any layer | open | `X-38` |
 | 2 | Adversarial input and adversarial timing are both fuzzed | met | — |
 | 3 | A red gate means a defect | met | — |
 | 4 | No known-wrong shipped path | met (attested) | — |
@@ -24,6 +24,7 @@ repository and are recorded when they happen rather than computed.
 
 **6 of 7 predicates met.** A predicate is met when every story named for it is `done` — the stories are the definition, so this table cannot drift from the board.
 
+- **Predicate 1 is attested, not computed.** Mechanical as far as a path check can go, which is not far: `unreachable_claims` covers `media` and `security` and was measured and declined for `transport`. The rest is attested by shipping an application whose every dependency is visible — `X-38` — because a capability that exists but cannot be selected is a question of use, and use is observed, not grepped.
 - **Predicate 4 is attested, not computed.** Cannot be computed: a defect nobody has found leaves no trace in either source. What is reported is the absence of *open* stories describing one.
 - **Predicate 6 is attested, not computed.** Met at filing and not re-derived here: it is a property of the CLI's test suite, which the gate runs.
 
@@ -46,15 +47,15 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Signalling | 10 |
+| Signalling | 11 |
 | Media | 7 |
 | Application | 6 |
 | Build | 3 |
 | Phone | 1 |
 | Transport | 1 |
-| **total** | **28** |
+| **total** | **29** |
 
-111 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+112 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
@@ -64,7 +65,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 |---|---|---|---|
 | 2026-07-28 | 95 | 58 | -37 |
 | 2026-07-29 | 43 | 47 | +4 |
-| 2026-07-30 | 2 | 4 | +2 |
+| 2026-07-30 | 2 | 5 | +3 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

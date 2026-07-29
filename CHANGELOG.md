@@ -43,6 +43,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Reachability now measures *use*, not *paths* — and the caller-check was deliberately not built
+  (`X-37`)** — `X-30` and `X-33` both recorded a cross-crate caller check as their successor. This
+  story reconsidered it, and the answer was to adjudicate the three named cases by hand and file the
+  rest, rather than build a check fitted to the data it was tested on.
+  - **RFC 5626 and 8599 are demoted to no roles**, and `docs/compliance.md` moves with it — the
+    honest state, not a verdict. Verified by grep: `with_outbound` and `with_push` have **zero
+    callers outside `sipx-ua`'s own tests**, the same ICE shape `X-33` suspected and its path check
+    could not adjudicate, because both rows satisfied it by citing a genuine caller — `register.rs`
+    — for a plain registration. Wiring them back is `S-29`.
+  - **Why no check was built.** A syntactic caller-check would be fitted to three rows — wrong in the
+    ways macros and re-exports are wrong, and it would quietly stop finding the next shape. The
+    accurate version is a dependency plus minutes on the gate. A grep proved the return on either to
+    be two honest demotions. Both predecessors named the check a *successor* in prose, after building
+    the path check — the one moment building the next check is most tempting and least examined.
+  - **Alpha predicate 1 is re-framed.** It now attests the mechanical half (`X-30`, `X-33`, this) and
+    defers the rest to `X-38`: ship a real application, after which the reachable-from-a-call surface
+    is *defined* as what it uses. That is v1 predicate 3 in other words, and it cannot be gamed by a
+    dead-branch citation the way a path check can.
+
 - **The transaction-sequence fuzzer can no longer stop covering something silently (`X-31`,
   alpha predicate 2)** — three of its guards could not catch the thing they were written for, and a
   fuzzer that silently stops covering something is worse than one never written, because the green
