@@ -13,20 +13,20 @@
 //! `sipx-app-protocol` crate (`C-5`). See also
 //! [`docs/designs/app-sdk.md`](../../../docs/designs/app-sdk.md).
 //!
-//! Two things every variant is not, yet:
+//! Every variant here is emitted by this crate except one, and that one is deliberate:
 //!
-//! - `PlaybackFinished` and `RecordingFinished` have no producer in this crate today. Nothing
-//!   in `sipx-call` can start a playback or a recording that resolves — that machinery is
-//!   `M-17`'s — so these variants exist only to fix the vocabulary's shape now, ahead of the
-//!   story that will construct them.
-//! - `EndCause::Rejected` has no producer either, for a structural reason rather than a
-//!   sequencing one: a [`Call`](crate::Call) does not exist until an INVITE has already
-//!   succeeded (2xx and ACK), so nothing at this layer is ever in a position to reject *this*
-//!   call's own attempt — a rejection ends an invitation before a `Call` is built. It is kept
-//!   in the enum because a future call-lifecycle change (an app-visible call that exists from
-//!   the incoming INVITE onward, likely `C-4`/`app-host` territory) will need it, and adding a
-//!   variant later is exactly the kind of wire-breaking change §4 of the contract spec warns
-//!   about.
+//! - `EndCause::Rejected` has no producer at this layer for a structural reason rather than a
+//!   sequencing one. A [`Call`](crate::Call) does not exist until an INVITE has already
+//!   succeeded (2xx and ACK), so by the time there is a call to end, refusing it is no longer
+//!   possible — what ends an answered call is a BYE. Refusing happens before a `Call` is built.
+//!   It is kept in the enum because the app-visible call of `C-4`/`app-host` exists from the
+//!   incoming INVITE onward and will produce it, and because adding a variant after the fact is
+//!   exactly the kind of wire-breaking change §4 of the contract spec warns about.
+//!
+//! `PlaybackFinished` and `RecordingFinished` are emitted by [`Call::play`](crate::Call::play)
+//! and [`Call::record_until_idle`](crate::Call::record_until_idle). `M-17` adds the *control*
+//! half of playback — a queue, stopping, interrupting on a digit — and reports completion
+//! through the same variants rather than new ones.
 
 use std::time::Duration;
 
@@ -66,19 +66,20 @@ pub enum CallEvent {
         /// How long it was held, from the event's own duration field.
         duration: Duration,
     },
-    /// A queued playback ran out, or was cut short.
+    /// A playback ran out, or was cut short.
     ///
-    /// Not yet emitted anywhere in this crate — see the module docs. `M-17` gives playback a
-    /// handle to observe completion on.
+    /// Emitted by [`Call::play`](crate::Call::play). `M-17` adds the control half — a queue,
+    /// stopping, and interrupting on a digit — and reports through this same variant.
     PlaybackFinished {
         /// Whether it ran to the end, as opposed to being stopped or interrupted.
         completed: bool,
     },
     /// A recording resolved.
     ///
-    /// Not yet emitted anywhere in this crate — see the module docs; `M-17` again.
+    /// Emitted by [`Call::record_until_idle`](crate::Call::record_until_idle).
     RecordingFinished {
-        /// How much was recorded.
+        /// How much was recorded — the audio itself, not counting the trailing silence that
+        /// detected the end of it.
         duration: Duration,
     },
     /// The far end asked to transfer this call here (RFC 3515 REFER).
@@ -108,11 +109,25 @@ pub enum EndCause {
     LocalHangup,
     /// The far end sent a BYE.
     RemoteBye,
-    /// An attempt this call represents was refused, with the status the far end gave.
+    /// The call was refused with a status, rather than answered and later ended.
     ///
-    /// Not yet emitted — see the module docs.
+    /// The direction is worth being exact about: this is the contract's `reject` *instruction*
+    /// (`docs/specs/app-contract.md` §5.3, `call.ended` with cause `rejected{status}`) — **this
+    /// side refusing an invitation** — not the far end refusing an attempt of ours. An outbound
+    /// attempt that is refused is `call.dial.finished` with outcome `rejected`, a different
+    /// event about a different leg.
+    ///
+    /// Has no producer at this layer, and the reason is structural rather than unfinished work:
+    /// a [`Call`](crate::Call) does not exist until an INVITE has already succeeded (2xx and
+    /// ACK), so by the time there is a call to end, refusing it is no longer possible — what
+    /// ends an answered call is a BYE. Refusing happens before a `Call` is built, and the
+    /// refusal is a response rather than an event on a stream nobody is holding yet.
+    ///
+    /// It stays in the enum because the app-visible call of `C-4`/`A-2` exists from the incoming
+    /// INVITE onward and will produce it, and because adding a variant after the fact is exactly
+    /// the wire-breaking change §4 of the contract spec warns about.
     Rejected {
-        /// The status the far end gave.
+        /// The status the call was refused with.
         status: u16,
     },
     /// The far end stopped answering (the RFC 4028 session timer expired, RFC 3261 Timer B/F

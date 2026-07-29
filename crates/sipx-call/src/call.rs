@@ -146,6 +146,42 @@ impl Call {
             .map(|(digit, _duration)| digit)
     }
 
+    /// Play a clip, and report on the event stream when it stops.
+    ///
+    /// Paced by the send loop, so this resolves when the audio has actually gone out rather than
+    /// when it was queued. Emits [`CallEvent::PlaybackFinished`] either way, with `completed`
+    /// saying which happened: the clip ran to the end, or the call ended underneath it. A host
+    /// driving the call from its events needs that distinction — "the announcement finished" and
+    /// "the caller hung up during the announcement" lead to different next steps.
+    ///
+    /// The packet size is the session's own, so a clip plays correctly under a codec whose clock
+    /// is not 8 kHz without the caller knowing the rate. `M-17` adds the *control* half — a queue,
+    /// stopping, and interrupting on a digit; this is the completion half those will report
+    /// through.
+    pub async fn play(&self, samples: &[i16]) -> bool {
+        let completed = self
+            .media
+            .play(samples, self.media.samples_per_packet())
+            .await;
+        self.events.emit(CallEvent::PlaybackFinished { completed });
+        completed
+    }
+
+    /// Record until the far end goes quiet for `idle`, and report the result on the event stream.
+    ///
+    /// Emits [`CallEvent::RecordingFinished`] carrying how much audio was captured — measured
+    /// from the samples themselves and the session's clock rate, not by timing the call, so the
+    /// number describes the recording rather than how long this side waited for it. The trailing
+    /// `idle` silence is not part of it: it is how the end was detected, not something the far
+    /// end said.
+    pub async fn record_until_idle(&self, idle: Duration) -> Vec<i16> {
+        let samples = self.media.record_until_idle(idle).await;
+        let rate = u64::from(self.media.codec().clock_rate()).max(1);
+        let duration = Duration::from_micros(samples.len() as u64 * 1_000_000 / rate);
+        self.events.emit(CallEvent::RecordingFinished { duration });
+        samples
+    }
+
     /// Whether the media is encrypted (RFC 3711).
     ///
     /// Worth asking, and worth being able to answer without a packet capture. A call whose

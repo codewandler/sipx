@@ -77,7 +77,7 @@ async fn a_call_over_secure_signalling_encrypts_its_media() {
 
     // And the encryption is real: audio crosses it.
     let tone: Vec<i16> = (0..8000).map(|_| 8000i16).collect();
-    let ((), heard) = tokio::join!(
+    let (_played, heard) = tokio::join!(
         caller.media().play(&tone, 160),
         callee.media().record_until_idle(Duration::from_millis(400)),
     );
@@ -131,7 +131,7 @@ async fn a_call_over_cleartext_signalling_does_not_pretend_to_encrypt() {
 
     // The call still works. Refusing to encrypt is not refusing to call.
     let tone: Vec<i16> = (0..8000).map(|_| 8000i16).collect();
-    let ((), heard) = tokio::join!(
+    let (_played, heard) = tokio::join!(
         caller.media().play(&tone, 160),
         callee.media().record_until_idle(Duration::from_millis(400)),
     );

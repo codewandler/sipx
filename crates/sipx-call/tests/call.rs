@@ -141,7 +141,7 @@ async fn audio_flows_in_both_directions() {
     let (heard_by_callee, heard_by_caller) = tokio::join!(
         async {
             let played = from_caller.clone();
-            let ((), recorded) = tokio::join!(
+            let (_played, recorded) = tokio::join!(
                 caller.media().play(&played, 160),
                 callee.media().record_until_idle(Duration::from_millis(500))
             );
@@ -149,7 +149,7 @@ async fn audio_flows_in_both_directions() {
         },
         async {
             let played = from_callee.clone();
-            let ((), recorded) = tokio::join!(
+            let (_played, recorded) = tokio::join!(
                 callee.media().play(&played, 160),
                 caller.media().record_until_idle(Duration::from_millis(500))
             );

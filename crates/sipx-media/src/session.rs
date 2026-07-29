@@ -744,17 +744,34 @@ impl MediaSession {
         samples
     }
 
+    /// How many samples one packet of this session's audio carries.
+    ///
+    /// Settled once when the session started, from the negotiated codec's clock rate and the
+    /// packet duration. Exposed so a caller playing a clip does not have to recompute what the
+    /// session already decided — and get it wrong for a codec whose rate is not 8 kHz.
+    #[must_use]
+    pub fn samples_per_packet(&self) -> usize {
+        self.samples_per_packet
+    }
+
     /// Send a whole clip, paced by the send loop.
-    pub async fn play(&self, samples: &[i16], samples_per_packet: usize) {
+    ///
+    /// Returns whether the clip reached the end. `false` means the send queue closed part way —
+    /// the call ended, or the session was stopped, under a playback still running. The caller
+    /// needs to be able to tell those apart: "the clip finished" and "the clip was cut off" are
+    /// different things to anything waiting on the playback, and returning `()` made them
+    /// indistinguishable.
+    pub async fn play(&self, samples: &[i16], samples_per_packet: usize) -> bool {
         for chunk in samples.chunks(samples_per_packet) {
             let mut frame = chunk.to_vec();
             // The last chunk may be short. Padding with silence keeps every packet the same
             // size, which is what a far-end jitter buffer expects.
             frame.resize(samples_per_packet, 0);
             if !self.send(frame).await {
-                return;
+                return false;
             }
         }
+        true
     }
 
     /// How many packets have been sent.

@@ -7,6 +7,44 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A call reports what happens to it as a typed event stream (`C-3`).** A `Call` was only visible
+  by calling methods on it at the right moment — `is_on_hold`, `is_ended`, `transfer` — which meant
+  a host had to know when to look. Every state change is now also pushed once onto a channel the
+  call owns: ringing (with whether the provisional was reliable), answered, a DTMF digit and how
+  long it was held, playback and recording finishing, an inbound REFER with its target, transfer
+  progress, hold and resume by the far end, and ended with a cause.
+  - **`Call::events` hands out the receiver exactly once** and returns `None` after — one consumer
+    by construction rather than by convention.
+  - **The overflow policy is the part worth knowing.** The channel holds 32, and one slot is
+    reserved for `Ended` at construction, before any ordinary event can claim it. Ordinary events
+    are dropped rather than queued when the consumer is behind — each carries a snapshot, so a
+    consumer that missed one resynchronises from the next. `Ended` is not like that: it is a call's
+    last word, and a consumer that never learns a call ended waits forever. So it gets a reserved
+    slot rather than a policy, and nothing on the ending path awaits the channel having room. A
+    consumer that never reads at all cannot stall a call's teardown, which is tested directly.
+  - Events are emitted where the state changes rather than reconstructed afterwards, so the stream
+    cannot disagree with the call, and `dial` and `serve` go through the same path. No clock reads
+    were added to `sipx-call`.
+- **`Call::play` and `Call::record_until_idle`**, which report completion on that stream.
+  `PlaybackFinished` carries whether the clip ran to the end or the call cut it off — "the
+  announcement finished" and "the caller hung up during it" lead somewhere different, and one flag
+  is what keeps them apart. `RecordingFinished` carries how much audio was captured, measured from
+  the samples and the negotiated clock rate rather than from how long this side waited: counting
+  the idle timeout would describe our own patience rather than the recording.
+
+### Changed
+
+- **`MediaSession::play` returns whether the clip reached the end** instead of `()`. A playback cut
+  off by the session stopping was previously indistinguishable from one that finished.
+- **`MediaSession::samples_per_packet()` is public.** Callers were passing a literal `160`, which is
+  only right for an 8 kHz codec; `Call::play` uses the session's own packet size instead.
+- `MediaSession::recv_digit` yields the digit **and how long it was held**, taken from the RFC 4733
+  event's own duration field rather than from timing its arrival — the event carries the sender's
+  clock, and measuring anything else would make the number depend on jitter rather than on how long
+  the key was down. `Call::recv_digit` still yields just the digit.
+
 ## [0.5.0] — 2026-07-29
 
 ### Added

@@ -85,7 +85,7 @@ async fn an_opus_call_carries_audio_that_survives_the_round_trip() {
     let (alice, bob) = opus_pair(111).await;
 
     let source = tone(FRAME * 40, 440.0);
-    let ((), heard) = tokio::join!(
+    let (_played, heard) = tokio::join!(
         alice.play(&source, FRAME),
         bob.record_until_idle(Duration::from_millis(500)),
     );

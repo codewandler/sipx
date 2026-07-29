@@ -59,7 +59,7 @@ async fn audio_played_into_one_call_is_heard_on_the_other() {
     );
 
     let clip = tone(400);
-    let ((), heard) = tokio::join!(
+    let (_played, heard) = tokio::join!(
         alice.play(&clip, 160),
         bob.record_until_idle(Duration::from_millis(400))
     );
@@ -90,7 +90,7 @@ async fn a_bridge_carries_audio_both_ways() {
     let bridge = Bridge::connect(Arc::new(left), Arc::new(right));
 
     let clip = tone(300);
-    let ((), heard_by_alice) = tokio::join!(
+    let (_played, heard_by_alice) = tokio::join!(
         bob.play(&clip, 160),
         alice.record_until_idle(Duration::from_millis(400))
     );
@@ -118,7 +118,7 @@ async fn differing_codecs_are_transcoded_and_the_fact_is_reported() {
     );
 
     let clip = tone(400);
-    let ((), heard) = tokio::join!(
+    let (_played, heard) = tokio::join!(
         alice.play(&clip, 160),
         bob.record_until_idle(Duration::from_millis(400))
     );
@@ -154,7 +154,7 @@ async fn a_pass_through_bridge_delivers_the_audio_unchanged() {
         .map(|s| sipx_audio::g711::ulaw_decode(sipx_audio::g711::ulaw_encode(s)))
         .collect();
 
-    let ((), heard) = tokio::join!(
+    let (_played, heard) = tokio::join!(
         alice.play(&clip, 160),
         bob.record_until_idle(Duration::from_millis(400))
     );
@@ -254,7 +254,7 @@ async fn dropping_a_bridge_stops_the_forwarding() {
 
     // Nothing crosses any more.
     let clip = tone(200);
-    let ((), heard) = tokio::join!(
+    let (_played, heard) = tokio::join!(
         alice.play(&clip, 160),
         bob.record_until_idle(Duration::from_millis(250))
     );

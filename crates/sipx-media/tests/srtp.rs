@@ -123,7 +123,7 @@ async fn an_encrypted_call_still_carries_the_audio() {
     let (alice, bob) = pair(true).await;
 
     let audio = recognisable();
-    let ((), heard) = tokio::join!(
+    let (_played, heard) = tokio::join!(
         alice.play(&audio, 160),
         bob.record_until_idle(Duration::from_millis(400)),
     );
@@ -223,7 +223,7 @@ async fn a_packet_under_the_wrong_key_is_refused() {
 async fn a_plain_call_still_works() {
     let (alice, bob) = pair(false).await;
     let audio = recognisable();
-    let ((), heard) = tokio::join!(
+    let (_played, heard) = tokio::join!(
         alice.play(&audio, 160),
         bob.record_until_idle(Duration::from_millis(400)),
     );

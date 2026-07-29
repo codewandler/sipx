@@ -56,6 +56,16 @@ async fn next_ended(events: &mut CallEvents) -> CallEvent {
     }
 }
 
+/// The next event satisfying `want`, skipping whatever construction queued ahead of it.
+async fn next_matching(events: &mut CallEvents, want: impl Fn(&CallEvent) -> bool) -> CallEvent {
+    loop {
+        let event = next_event(events).await;
+        if want(&event) {
+            return event;
+        }
+    }
+}
+
 /// A caller and a callee, connected, with nothing further driving either side's incoming
 /// requests — enough for tests that only hang up or only inspect construction-time events.
 async fn connected() -> (Call, Call) {
@@ -366,4 +376,117 @@ async fn serve_reports_dtmf_as_an_event() {
     }
 
     serving.abort();
+}
+
+/// A playback that runs to the end reports itself, and says it completed.
+///
+/// The completion half of the contract's `play` instruction (§5.3 `call.playback.finished`).
+/// Without it a host driving a call from its events has to guess when an announcement is over,
+/// and the only way to guess is a timer that does not know the clip's length.
+#[tokio::test]
+async fn playing_a_clip_to_the_end_reports_it_as_completed() {
+    let (mut caller, _callee) = connected().await;
+    let mut events = caller.events().expect("the stream is taken once");
+
+    // Two packets' worth at the session's own rate, so this does not assume 8 kHz.
+    let per_packet = caller.media().samples_per_packet();
+    let completed = caller.play(&vec![0i16; per_packet * 2]).await;
+    assert!(completed, "the send queue was open the whole way");
+
+    let event = next_matching(&mut events, |event| {
+        matches!(event, CallEvent::PlaybackFinished { .. })
+    })
+    .await;
+    assert!(
+        matches!(event, CallEvent::PlaybackFinished { completed: true }),
+        "a clip that ran out must not be reported as cut short: {event:?}"
+    );
+}
+
+/// A playback the call cuts off short is reported as *not* completed.
+///
+/// The distinction is the point of the flag: "the announcement finished" and "the caller hung up
+/// during the announcement" lead a host to do different things next, and a `PlaybackFinished`
+/// that always said `true` would collapse them into one.
+#[tokio::test]
+async fn a_playback_cut_short_is_not_reported_as_completed() {
+    let (mut caller, _callee) = connected().await;
+    let mut events = caller.events().expect("the stream is taken once");
+    let per_packet = caller.media().samples_per_packet();
+
+    // Stopping the session makes its send loop exit and drop the queue — which is what the end
+    // of a call does to a clip still going out. The loop is a task, so the close is not
+    // instantaneous; wait for it rather than racing it, or this asserts on timing instead of on
+    // behaviour.
+    caller.media().stop();
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while caller.media().send(vec![0i16; per_packet]).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the send queue closed once the session stopped"
+    );
+
+    let completed = caller.play(&vec![0i16; per_packet * 4]).await;
+    assert!(!completed, "the queue was closed, so nothing went out");
+
+    let event = next_matching(&mut events, |event| {
+        matches!(event, CallEvent::PlaybackFinished { .. })
+    })
+    .await;
+    assert!(
+        matches!(event, CallEvent::PlaybackFinished { completed: false }),
+        "a clip the call cut off must say so: {event:?}"
+    );
+}
+
+/// A recording reports how much audio it captured, measured from the samples themselves rather
+/// than from how long this side sat waiting for them.
+#[tokio::test]
+async fn a_recording_reports_the_duration_of_what_it_captured() {
+    let (caller, mut callee) = connected().await;
+    let mut events = callee.events().expect("the stream is taken once");
+
+    let per_packet = caller.media().samples_per_packet();
+    let rate = u64::from(caller.media().codec().clock_rate());
+    // Ten packets the far end actually sends — a duration distinct from the idle timeout that
+    // detects the end of it, which is the thing being asserted about.
+    let packets = 10usize;
+    let spoken = Duration::from_micros((packets * per_packet) as u64 * 1_000_000 / rate);
+
+    let idle = Duration::from_millis(500);
+    let recorded = tokio::join!(
+        async {
+            caller
+                .media()
+                .play(&vec![64i16; per_packet * packets], per_packet)
+                .await
+        },
+        async { callee.record_until_idle(idle).await }
+    )
+    .1;
+    assert!(!recorded.is_empty(), "the callee heard nothing at all");
+
+    let event = next_matching(&mut events, |event| {
+        matches!(event, CallEvent::RecordingFinished { .. })
+    })
+    .await;
+    let CallEvent::RecordingFinished { duration } = event else {
+        panic!("a recording event, got {event:?}");
+    };
+
+    // The captured audio, not the half-second of silence that ended it. A duration that counted
+    // the idle timeout would describe this side's patience rather than the recording, and would
+    // grow if someone tuned the timeout.
+    assert!(
+        duration < idle,
+        "the idle timeout must not be counted as recorded audio: {duration:?}"
+    );
+    assert!(
+        duration >= spoken,
+        "every sample that arrived must be reported: {duration:?} for {spoken:?} spoken"
+    );
 }

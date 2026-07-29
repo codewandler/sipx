@@ -99,7 +99,7 @@ async fn no_participant_hears_their_own_audio() {
     assert_eq!(conference.len().await, 3);
 
     let voice = tone(440.0, 500, 10_000.0);
-    let ((), heard_by_alice, heard_by_bob, heard_by_carol) = tokio::join!(
+    let (_played, heard_by_alice, heard_by_bob, heard_by_carol) = tokio::join!(
         alice.far.play(&voice, 160),
         record_for(&alice.far, Duration::from_millis(600)),
         record_for(&bob.far, Duration::from_millis(600)),
@@ -143,7 +143,7 @@ async fn a_participant_hears_everyone_else_at_once() {
     // not clip — a clipped mix would pass a loudness check for the wrong reason.
     let voice = tone(440.0, 500, 8_000.0);
     let other = tone(880.0, 500, 8_000.0);
-    let ((), (), heard_by_carol) = tokio::join!(
+    let (_played, _played_other, heard_by_carol) = tokio::join!(
         alice.far.play(&voice, 160),
         bob.far.play(&other, 160),
         record_for(&carol.far, Duration::from_millis(600)),
@@ -180,7 +180,7 @@ async fn participants_join_and_leave_without_disturbing_the_others() {
             conference.join(carol_near).await
         }
     };
-    let ((), heard_by_bob, heard_by_carol, _carol_id) = tokio::join!(
+    let (_played, heard_by_bob, heard_by_carol, _carol_id) = tokio::join!(
         alice.far.play(&voice, 160),
         record_for(&bob.far, Duration::from_millis(600)),
         record_for(&carol.far, Duration::from_millis(600)),
@@ -203,7 +203,7 @@ async fn participants_join_and_leave_without_disturbing_the_others() {
     conference.leave(bob_id).await;
     assert_eq!(conference.len().await, 2);
 
-    let ((), heard_after) = tokio::join!(
+    let (_played, heard_after) = tokio::join!(
         alice.far.play(&voice, 160),
         record_for(&carol.far, Duration::from_millis(600)),
     );
@@ -229,7 +229,7 @@ async fn someone_who_has_left_is_no_longer_mixed_in() {
     conference.leave(alice_id).await;
 
     let voice = tone(440.0, 400, 12_000.0);
-    let ((), heard_by_bob) = tokio::join!(
+    let (_played, heard_by_bob) = tokio::join!(
         alice.far.play(&voice, 160),
         record_for(&bob.far, Duration::from_millis(500)),
     );
@@ -250,7 +250,7 @@ async fn a_lone_participant_hears_silence() {
     conference.join(Arc::clone(&alice.near)).await;
 
     let voice = tone(440.0, 400, 12_000.0);
-    let ((), heard) = tokio::join!(
+    let (_played, heard) = tokio::join!(
         alice.far.play(&voice, 160),
         record_for(&alice.far, Duration::from_millis(500)),
     );
