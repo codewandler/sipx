@@ -39,8 +39,15 @@ pub const TAG_LEN: usize = 10;
 
 const SESSION_KEY_LEN: usize = 16;
 const SESSION_SALT_LEN: usize = 14;
-/// HMAC-SHA1 takes a key of any length; RFC 3711 §4.3.1 derives 94 octets for it.
-const SESSION_AUTH_LEN: usize = 94;
+/// `n_a`, the session authentication key length: 160 bits (RFC 3711 §5.2, §8.2).
+///
+/// §4.3.1 derives `n = n_a` octets under label 0x01 and fixes no length of its own; §5.2 fixes
+/// `n_a` at 160 bits for the pre-defined HMAC-SHA1 transform, and §8.2's table lists it as both
+/// mandatory-to-support and the default. §B.3's worked example derives **94** octets because that
+/// appendix posits an authentication function needing 94, in order to walk the PRF through six AES
+/// blocks — a property of the example, not of the transform. HMAC accepts a key of any length,
+/// which is what lets the two be confused without any error to say so.
+const SESSION_AUTH_LEN: usize = 20;
 
 /// Which session key is being derived (RFC 3711 §4.3.1).
 #[derive(Debug, Clone, Copy)]
@@ -268,8 +275,11 @@ impl Context {
                 .and_then(|s| s.try_into().ok())
                 .ok_or(SrtpError::TooShort(packet.len()))?,
         );
-        self.rtcp_index = (self.rtcp_index + 1) & 0x7FFF_FFFF;
+        // §3.4: the index "MUST be set to zero before the first SRTCP packet is sent, and MUST be
+        // incremented by one, modulo 2^31, *after* each SRTCP packet is sent". Read then advance,
+        // so the first packet carries zero and no index is ever skipped.
         let index = self.rtcp_index;
+        self.rtcp_index = self.rtcp_index.wrapping_add(1) & 0x7FFF_FFFF;
 
         let mut out = packet.to_vec();
         let (_, payload) = out.split_at_mut(RTCP_HEADER_LEN);
@@ -439,8 +449,12 @@ fn keystream(
     Aes128Ctr::new(key.into(), (&iv).into())
 }
 
-/// HMAC-SHA1 over the packet, truncated to 80 bits.
-fn authenticate(key: &[u8; SESSION_AUTH_LEN], data: &[u8], roc: Option<u32>) -> [u8; TAG_LEN] {
+/// HMAC-SHA1 over the packet, truncated to `n_tag` = 80 bits (RFC 3711 §4.2.1).
+///
+/// `M` is the authenticated portion of the packet, followed by the rollover counter for SRTP and
+/// by nothing for SRTCP (§4.2). The key is taken as a slice rather than as `[u8; SESSION_AUTH_LEN]`
+/// so a test can hand it one the RFC published rather than one this module derived.
+fn authenticate(key: &[u8], data: &[u8], roc: Option<u32>) -> [u8; TAG_LEN] {
     let mut mac = <HmacSha1 as Mac>::new_from_slice(key)
         .unwrap_or_else(|_| unreachable!("HMAC accepts a key of any length"));
     mac.update(data);
@@ -509,6 +523,12 @@ mod tests {
     /// This is the test that matters most in the file. A key derivation that is wrong but
     /// self-consistent produces two endpoints that interoperate perfectly with each other and
     /// with nothing else in the world — and every round-trip test in this module would pass.
+    ///
+    /// It exercises the PRF at the lengths §B.3 uses, which for the authentication label is 94
+    /// octets — six AES blocks, enough to catch a counter that does not advance. That is a property
+    /// of the appendix and **not** the transform's `n_a`; how many of these octets the default
+    /// transform actually keys with is
+    /// `the_session_authentication_key_is_the_160_bits_the_rfc_fixes`.
     #[test]
     fn key_derivation_matches_the_rfc() {
         let master_key: [u8; 16] = hex("E1F97A0D3E018BE0D64FA32C06DE4139").try_into().unwrap();
@@ -543,6 +563,99 @@ mod tests {
                  6D6E919A48B610EF17C2041E47403576\
                  6B68642C59BBFC2F34DB60DBDFB2")
         );
+    }
+
+    /// The session authentication key is 160 bits, not §B.3's 94 octets.
+    ///
+    /// RFC 3711 §5.2: "The default session authentication key-length (n_a) SHALL be 160 bits", and
+    /// §8.2's table repeats it. §4.3.1 derives `n = n_a` octets under label 0x01 — it does not fix
+    /// a length of its own. §B.3 walks through a **94**-octet derivation because that appendix
+    /// posits "an authentication function which requires a 94-octet session authentication key" to
+    /// exercise six AES blocks of the PRF; 94 is a property of the worked example, not of the
+    /// default transform.
+    ///
+    /// Reading it the other way produces a stack whose HMAC key is a different length from every
+    /// conformant peer's, so every packet fails authentication in both directions — and every
+    /// round-trip test still passes, because both ends are wrong the same way.
+    #[test]
+    fn the_session_authentication_key_is_the_160_bits_the_rfc_fixes() {
+        let context = Context::new(
+            &hex("E1F97A0D3E018BE0D64FA32C06DE4139"),
+            &hex("0EC675AD498AFEEBB6960B3AABE6"),
+        )
+        .expect("a context");
+
+        assert_eq!(
+            context.session.rtp_auth.len(),
+            20,
+            "n_a SHALL be 160 bits (RFC 3711 §5.2, §8.2)"
+        );
+        // The first 160 bits of §B.3's own derived block, which is what `n = n_a` selects.
+        assert_eq!(
+            context.session.rtp_auth.to_vec(),
+            hex("CEBE321F6FF7716B6FD4AB49AF256A156D38BAA4")
+        );
+        assert_eq!(context.session.rtcp_auth.len(), 20, "and for SRTCP too");
+    }
+
+    /// RFC 3711 §4.2.1's tag, over inputs the RFC publishes and against a value this stack did not
+    /// produce.
+    ///
+    /// `k_a` is §B.3's derived authentication key truncated to `n_a`; `M` is §B.1's published RTP
+    /// header and the ROC is §B.1's published rollover counter. The expected tags are HMAC-SHA1
+    /// (RFC 2104) truncated to `n_tag` = 80 bits, computed with an implementation outside this
+    /// repository — a tag that agrees only with [`authenticate`] proves nothing about either.
+    ///
+    /// Both forms of `M` are pinned, because they differ: §4.2 appends the ROC for SRTP and not for
+    /// SRTCP, whose index travels in the packet instead.
+    #[test]
+    fn the_authentication_tag_is_hmac_sha1_over_the_packet_and_the_roc() {
+        let k_a = hex("CEBE321F6FF7716B6FD4AB49AF256A156D38BAA4");
+        let m = hex("806E5CBA50681DE55C621599");
+
+        assert_eq!(
+            authenticate(&k_a, &m, Some(0xD462_564A)).to_vec(),
+            hex("2E19C5351B7F99278F33"),
+            "SRTP: M = Authenticated Portion || ROC"
+        );
+        assert_eq!(
+            authenticate(&k_a, &m, None).to_vec(),
+            hex("66126DD7550B7E7C90A4"),
+            "SRTCP: M = Authenticated Portion only"
+        );
+    }
+
+    /// RFC 3711 §3.4: "The SRTCP index MUST be set to zero before the first SRTCP packet is sent,
+    /// and MUST be incremented by one, modulo 2^31, **after** each SRTCP packet is sent."
+    ///
+    /// Incrementing first makes the first packet carry 1 and never emits index 0 at all. It is not
+    /// an interoperability failure — the index is explicit in the trailer, so a receiver reads
+    /// whatever arrives — but it is a stated MUST, and the index feeds the SRTCP keystream IV, so
+    /// "which packet used which counter block" is not a free choice.
+    #[test]
+    fn the_first_srtcp_packet_carries_index_zero() {
+        let (mut send, _) = pair();
+        let mut packet = vec![0x80, 201, 0x00, 0x07];
+        packet.extend_from_slice(&0xCAFE_BABEu32.to_be_bytes());
+        packet.extend_from_slice(b"REPORTBODY-REPORTBODY-RE");
+
+        let first = send.protect_rtcp(&packet).expect("protects");
+        let trailer = trailer_of(&first);
+        assert_eq!(trailer & 0x8000_0000, 0x8000_0000, "the E flag is set");
+        assert_eq!(trailer & 0x7FFF_FFFF, 0, "the first index is zero");
+
+        let second = send.protect_rtcp(&packet).expect("protects");
+        assert_eq!(
+            trailer_of(&second) & 0x7FFF_FFFF,
+            1,
+            "and it increments after each packet, not before"
+        );
+    }
+
+    /// The four trailer octets that precede the authentication tag.
+    fn trailer_of(protected: &[u8]) -> u32 {
+        let end = protected.len() - TAG_LEN;
+        u32::from_be_bytes(protected[end - 4..end].try_into().expect("four octets"))
     }
 
     /// RFC 3711 §B.2. The counter block and the keystream it produces, from the RFC.

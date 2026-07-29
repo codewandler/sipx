@@ -2,7 +2,7 @@
 id: M-25
 title: Specify SRTP and its two keyings, after the fact
 pillar: Media
-status: ready
+status: in-progress
 priority: 9
 design: docs/designs/media.md
 epic: media
