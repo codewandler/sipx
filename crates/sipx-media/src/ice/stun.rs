@@ -20,17 +20,32 @@
 //! `MESSAGE-INTEGRITY`, with the length field again adjusted to include *it* (§15.5), and its
 //! value is the CRC-32 XOR `0x5354554e`. Both adjustments are easy to skip and neither is
 //! visible in a self-test: the message round-trips through this module perfectly and every real
-//! peer rejects it. [`the_rfc_5769_sample_request_is_produced_byte_for_byte`] is the guard,
+//! peer rejects it. The guard is `a_connectivity_check_encodes_to_the_rfc_5769_sample_request`,
 //! because the IETF computed that tag and not this crate.
 //!
 //! **The direction of `USERNAME`.** See [`Peering`].
 //!
 //! Everything here is handed unauthenticated datagrams from whoever can reach the media port
-//! (spec §11.3): no `unwrap`, no raw indexing, no length arithmetic that can wrap. A malformed
+//! ([spec] §11.3): no `unwrap`, no raw indexing, no length arithmetic that can wrap. A malformed
 //! message is an [`Error`] and a dropped datagram.
 //!
-//! [`the_rfc_5769_sample_request_is_produced_byte_for_byte`]: self#tests
-//! [spec §11]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+//! ## `PRIORITY` is range-checked, and that is a deliberate trade
+//!
+//! A `PRIORITY` outside RFC 8839 §5.1's `1..=2^31−1` makes [`Message::decode`] reject the **whole
+//! datagram**, not just the attribute, because [`Priority`] will not hold the value.
+//!
+//! Chosen with the cost known. [spec] §6.2 is explicit that the range check on parse is what keeps
+//! RFC 8445 §6.1.2.3's pair-priority arithmetic inside a `u64`, and §5.1.2.1's formula cannot
+//! reach 2^31 for a conforming peer, so nothing legitimate is being refused. What is being risked
+//! is a peer that treats the field as a plain `u32` and sets the high bit: **every** check it
+//! sends is dropped, and the failure has precisely the signature [`Peering`] warns about — it
+//! looks like a blocked path and gets diagnosed as a network fault. That is written down here
+//! rather than left to be rediscovered, because the alternative — accepting the value and
+//! range-checking it at the point the arithmetic happens — moves an overflow that a peer chooses
+//! into a crate that cannot see where the number came from. Failing closed at the parser is worth
+//! the interop risk; failing closed silently would not be.
+//!
+//! [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -77,6 +92,11 @@ const FINGERPRINT_ATTR_LEN: usize = 8;
 /// RFC 8445 §7.3.1.1's error response code: 487 Role Conflict.
 pub const ROLE_CONFLICT: u16 = 487;
 
+/// The error codes RFC 5389 §15.6's three-bit class can carry: "The value MUST be between 3 and
+/// 6." Enforced in both directions, so that neither a code this module sends nor one it reports
+/// having received is a number §15.6 does not define.
+pub const ERROR_CODES: std::ops::RangeInclusive<u16> = 300..=699;
+
 /// The byte an attribute value is padded to a 32-bit boundary with.
 ///
 /// RFC 5389 §15 says the padding "may be any value", so this is a free choice — but it is a
@@ -105,6 +125,13 @@ pub enum Error {
     /// A known attribute whose value is the wrong length, not UTF-8, or out of range.
     #[error("STUN attribute {0:#06x} is malformed")]
     MalformedAttribute(u16),
+    /// An [`Attribute::Unknown`] naming a type this module computes for itself.
+    ///
+    /// Encoding only, and only from a caller that assembled the message by hand: the two
+    /// integrity values must be the last two attributes and must be derived from everything
+    /// before them, so a hand-supplied copy of either is refused rather than emitted.
+    #[error("STUN attribute {0:#06x} is computed by the encoder and cannot be supplied")]
+    ReservedAttribute(u16),
     /// `FINGERPRINT` is present and does not match the message (RFC 5389 §15.5).
     #[error("FINGERPRINT does not match the message")]
     Fingerprint,
@@ -170,6 +197,12 @@ const fn split_type(raw: u16) -> (Class, u16) {
 /// `MESSAGE-INTEGRITY` and `FINGERPRINT` are deliberately not variants. They are not attributes a
 /// caller chooses to add: they are computed over whatever else is present and must come last, in
 /// that order, so [`Message::encode`] appends them and nothing else can.
+///
+/// [`Attribute::Unknown`] is the hole in that sentence, and it is closed rather than trusted:
+/// encoding one whose `kind` is either of those two types is [`Error::ReservedAttribute`]. It is
+/// not reachable from the wire — [`Message::decode`] matches both types before it ever builds an
+/// `Unknown` — but it is reachable from a caller assembling a message by hand, and a second
+/// `MESSAGE-INTEGRITY` in a message is a message that authenticates as nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attribute {
     /// `USERNAME` (RFC 5389 §15.3), in the direction [`Peering`] fixes.
@@ -187,7 +220,13 @@ pub enum Attribute {
     IceControlled(u64),
     /// `ICE-CONTROLLING` (§7.1.3) carrying the sender's tiebreaker.
     IceControlling(u64),
-    /// `ERROR-CODE` (RFC 5389 §15.6). 487 is the role conflict of §7.3.1.1.
+    /// `ERROR-CODE` (RFC 5389 §15.6). 487 is the role conflict of RFC 8445 §7.3.1.1.
+    ///
+    /// The code is held to [`ERROR_CODES`] in both directions. On decode that means an error
+    /// response carrying a class §15.6 does not define is a dropped datagram, which costs the
+    /// transaction a retransmission rather than an immediate failure — the same fail-closed trade
+    /// the module documentation records for `PRIORITY`, and only reachable from a peer that is
+    /// already violating §15.6's MUST.
     ErrorCode {
         /// The three-digit code, reassembled from §15.6's class and number.
         code: u16,
@@ -609,13 +648,20 @@ impl Attribute {
             Self::IceControlling(tiebreaker) => {
                 (ATTR_ICE_CONTROLLING, tiebreaker.to_be_bytes().to_vec())
             }
-            Self::ErrorCode { code, reason } => (ATTR_ERROR_CODE, encode_error_code(*code, reason)),
+            Self::ErrorCode { code, reason } => {
+                (ATTR_ERROR_CODE, encode_error_code(*code, reason)?)
+            }
             Self::XorMappedAddress(address) => (
                 ATTR_XOR_MAPPED_ADDRESS,
                 encode_xor_mapped(*address, transaction),
             ),
             Self::Software(text) => (ATTR_SOFTWARE, text.as_bytes().to_vec()),
-            Self::Unknown { kind, value } => (*kind, value.clone()),
+            Self::Unknown { kind, value } => {
+                if matches!(*kind, ATTR_MESSAGE_INTEGRITY | ATTR_FINGERPRINT) {
+                    return Err(Error::ReservedAttribute(*kind));
+                }
+                (*kind, value.clone())
+            }
         };
         push_attribute(out, kind, &value)
     }
@@ -646,6 +692,7 @@ impl Attribute {
                 let code = class
                     .checked_mul(100)
                     .and_then(|hundreds| hundreds.checked_add(number))
+                    .filter(|code| ERROR_CODES.contains(code))
                     .ok_or_else(malformed)?;
                 Self::ErrorCode {
                     code,
@@ -814,12 +861,21 @@ fn set_length(out: &mut [u8], extra: usize) -> Result<(), Error> {
 
 /// RFC 5389 §15.6: 21 reserved bits, a 3-bit class holding the hundreds digit, an 8-bit number
 /// holding the rest, then the reason phrase.
-fn encode_error_code(code: u16, reason: &str) -> Vec<u8> {
-    let class = u8::try_from((code / 100) & 0x07).unwrap_or_default();
+///
+/// Three bits hold the hundreds digit, so §15.6 bounds the code: "The Class represents the
+/// hundreds digit of the error code. The value MUST be between 3 and 6." Anything outside
+/// [`ERROR_CODES`] is refused rather than folded into range — 800 masked to three bits is 0 and
+/// 65535 is 735, and a codec that quietly sends a different number than it was asked for is worse
+/// than one that will not send at all.
+fn encode_error_code(code: u16, reason: &str) -> Result<Vec<u8>, Error> {
+    if !ERROR_CODES.contains(&code) {
+        return Err(Error::MalformedAttribute(ATTR_ERROR_CODE));
+    }
+    let class = u8::try_from(code / 100).unwrap_or_default();
     let number = u8::try_from(code % 100).unwrap_or_default();
     let mut value = vec![0, 0, class, number];
     value.extend_from_slice(reason.as_bytes());
-    value
+    Ok(value)
 }
 
 /// The 16-byte key §15.2 XORs an IPv6 address with: the cookie followed by the transaction ID.
@@ -1391,6 +1447,80 @@ mod tests {
         assert!(
             !decoded.use_candidate(),
             "an unauthenticated USE-CANDIDATE must not nominate a pair"
+        );
+    }
+
+    /// The two integrity values are computed, never supplied. `Attribute::Unknown` is the only
+    /// way a caller could name their types, and it is refused.
+    ///
+    /// Not reachable from the wire — `Message::decode` matches both types before it builds an
+    /// `Unknown` — but very reachable from an agent assembling a message by hand, and a message
+    /// carrying two `MESSAGE-INTEGRITY` attributes authenticates as nothing.
+    #[test]
+    fn an_unknown_attribute_cannot_smuggle_in_an_integrity_value() {
+        for kind in [ATTR_MESSAGE_INTEGRITY, ATTR_FINGERPRINT] {
+            let forged = Message::new(Class::Request, SAMPLE_ID)
+                .with(Attribute::Unknown {
+                    kind,
+                    value: vec![0; 20],
+                })
+                .with(Attribute::Username("evtj:h6vY".to_owned()));
+            assert_eq!(
+                forged.encode(Some(SAMPLE_PASSWORD)),
+                Err(Error::ReservedAttribute(kind))
+            );
+        }
+
+        // Every other type still passes through untouched.
+        let passthrough = Message::new(Class::Request, SAMPLE_ID)
+            .with(Attribute::Unknown {
+                kind: 0x8050,
+                value: vec![1, 2, 3],
+            })
+            .encode(None)
+            .expect("encodes");
+        assert!(Message::decode(&passthrough).is_ok());
+    }
+
+    /// RFC 5389 §15.6 gives the hundreds digit three bits and says "The value MUST be between 3
+    /// and 6", so a code outside that is not encodable. Folding it into range instead sends a
+    /// different number than the caller asked for: 800 becomes 0, and 65535 becomes 735.
+    #[test]
+    fn an_error_code_outside_rfc_5389s_range_is_refused_rather_than_folded() {
+        for code in [0, 99, 299, 700, 800, 1000, u16::MAX] {
+            let message = Message::new(Class::Error, SAMPLE_ID).with(Attribute::ErrorCode {
+                code,
+                reason: String::new(),
+            });
+            assert_eq!(
+                message.encode(Some(SAMPLE_PASSWORD)),
+                Err(Error::MalformedAttribute(ATTR_ERROR_CODE)),
+                "{code} is not an error code §15.6 defines"
+            );
+        }
+        for code in [*ERROR_CODES.start(), ROLE_CONFLICT, *ERROR_CODES.end()] {
+            let bytes = Message::new(Class::Error, SAMPLE_ID)
+                .with(Attribute::ErrorCode {
+                    code,
+                    reason: "because".to_owned(),
+                })
+                .encode(None)
+                .expect("encodes");
+            assert_eq!(
+                Message::decode(&bytes).expect("decodes").error_code(),
+                Some(code)
+            );
+        }
+
+        // And the same bound on the way in: class bits 0 and 7 are not codes §15.6 defines.
+        let mut bytes = role_conflict(SAMPLE_ID, &sample_receiver()).expect("encodes");
+        bytes[HEADER_LEN + 6] = 7;
+        let split = bytes.len() - FINGERPRINT_ATTR_LEN;
+        let crc = crc32(&bytes[..split]) ^ FINGERPRINT_XOR;
+        bytes[split + 4..].copy_from_slice(&crc.to_be_bytes());
+        assert_eq!(
+            Message::decode(&bytes),
+            Err(Error::MalformedAttribute(ATTR_ERROR_CODE))
         );
     }
 

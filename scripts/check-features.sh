@@ -68,6 +68,24 @@ for features in "${media_combinations[@]}"; do
     rm -f /tmp/sipx-features.$$
 done
 
+# `sipx-media` reuses `sipx_transport::stun` for RFC 5389's header, and takes it with
+# `default-features = false` — twenty bytes of header layout must not drag rustls, a WebSocket
+# stack and a DNS client behind them into every crate that plays audio. Nothing about the build
+# notices if that flag is dropped: everything still compiles, and the cost lands on downstream
+# users. So the assertion is on the resolved graph, the same shape as the `sipx-ua` one below.
+printf '  %-24s ' "sipx-media stun only"
+if cargo tree --quiet -p sipx-media --no-default-features --edges normal --prefix none \
+    2>/dev/null | grep -qE '^(tokio-rustls|tokio-tungstenite|hickory-resolver|rustls-native-certs) '; then
+    echo "FAILED"
+    echo "    sipx-media resolves a SIP transport it only wants a STUN header from:"
+    cargo tree -p sipx-media --no-default-features --edges normal --prefix none \
+        2>/dev/null | grep -E '^(tokio-rustls|tokio-tungstenite|hickory-resolver|rustls-native-certs) ' \
+        | sed 's/^/      /'
+    status=1
+else
+    echo "ok"
+fi
+
 # `sipx-ua` carries the digest primitives, and a caller with no async runtime has to be able to
 # take them. Only `agent`, `flows` and `error` need one; `auth`, `challenge`, `outbound` and
 # `registrar` are hashing and header text.

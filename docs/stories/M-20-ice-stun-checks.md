@@ -39,8 +39,14 @@ credentials and the two integrity values — so the agent has a transaction to r
 - [x] Failing-first test: `a_connectivity_check_encodes_to_the_rfc_5769_sample_request`.
 
 ## Progress
-The codec is [`sipx_media::ice::stun`](../../crates/sipx-media/src/ice/stun.rs). 23 tests, gate
+The codec is [`sipx_media::ice::stun`](../../crates/sipx-media/src/ice/stun.rs). 25 tests, gate
 green. `M-16`'s open question in spec §15 is answered below and can be struck from it.
+
+Review round: a doc reference to a `cfg(test)` anchor that rendered as a 404 on the published site,
+the `Attribute::Unknown` hole below, `ERROR-CODE` folding out-of-range codes into range instead of
+refusing them, spec §11.1's `USERNAME` row, and a `check-features.sh` guard for the
+`sipx-transport` edge this story adds — that edge takes `default-features = false`, and nothing
+about the build notices if the flag is dropped, so the assertion is on the resolved graph.
 
 ### The crate-graph decision: `sipx-media`, and it gains three dependency lines
 
@@ -81,16 +87,47 @@ nothing. Its `XOR-MAPPED-ADDRESS` reader did *not* fit: it is private, reachable
 write the attribute as well as read it. Exposing the helper would have been extending the module the
 Acceptance says must not be extended.
 
-### Two things a later story should know
+### A response carries no `USERNAME` — and spec §11.1 was wrong, not the code
 
-- **A success response carries no `USERNAME`,** against spec §11.1's table, which lists it "on every
-  check and its response". RFC 5389 §10.1.2 asks a short-term-credential response for
-  `MESSAGE-INTEGRITY` and nothing more, and RFC 5769 §2.2 — the IETF's own response to §2.1's
-  request — carries none. The published vector decided it; adding `USERNAME` would make §2.2
-  impossible to reproduce. Spec §11.1 should be corrected by whichever story next touches it.
+Spec §11.1's `USERNAME` row read "every check and its response". Both RFCs contradict it outright:
+RFC 5389 §10.1.2, "The response MUST NOT contain the USERNAME attribute", and RFC 8445 §7.2.2,
+"(note that the USERNAME attribute is not present in the response)". An encoder written from the
+old row could not have reproduced RFC 5769 §2.2 at all. **§11.1 is corrected in this story**, in the
+shape `M-19` used for §6.2: the row now reads "every check; **never a response**", with a dated
+attribution paragraph under the table saying what it used to say and why it was wrong. `M-21` and
+`M-22` build on §11, so the correction belongs here rather than in whichever story trips over it.
+
+### `PRIORITY` is range-checked, and the interop cost is accepted knowingly
+
+`Message::decode` rejects the **whole datagram** when `PRIORITY` is outside RFC 8839 §5.1's
+`1..=2^31−1`, because `sipx_sdp::ice::Priority` will not hold the value. Taken as a decision, not
+inherited by accident:
+
+- Spec §6.2 is explicit that the range check on parse is what keeps §6.1.2.3's pair-priority
+  arithmetic inside a `u64`, and RFC 8445 §5.1.2.1's formula cannot reach 2^31 for a conforming
+  peer. Nothing legitimate is refused.
+- The residual risk is real: a peer that treats `PRIORITY` as a plain `u32` and sets the high bit
+  has **every** check dropped, and the failure has exactly the signature this story's own
+  Acceptance warns about for the username direction — it looks like a blocked path and gets
+  diagnosed as a network fault.
+- Rejected alternative: accept the wide value and range-check where the arithmetic happens. That
+  moves an overflow a peer chooses into a crate that cannot see where the number came from.
+
+Failing closed at the parser is worth the interop risk; failing closed *silently* would not be, so
+it is written into the module documentation as well as here. If a real peer is ever found doing
+this, the fix is a counter and a warning at the drop site, not a widened bound.
+
+### Two smaller things a later story should know
+
 - **Attribute padding is `0x20`,** not zero. RFC 5389 §15 says the padding "may be any value", but
   `MESSAGE-INTEGRITY` is an HMAC over it, so the choice is visible in the bytes: both RFC 5769
   vectors pad with `0x20`, and an encoder padding with zeroes reproduces neither published tag.
+- **`Attribute::Unknown` cannot name `MESSAGE-INTEGRITY` or `FINGERPRINT`.** The module claims the
+  two integrity values are computed and never supplied; `Unknown` was the hole in that claim, since
+  it re-encodes any type verbatim. Encoding one now returns `Error::ReservedAttribute`. Unreachable
+  from the wire — `decode` matches both types before it builds an `Unknown` — but very reachable
+  from `M-21`, which assembles messages by hand, and two `MESSAGE-INTEGRITY` attributes in one
+  message authenticate as nothing.
 
 ## Notes
 - The spec is [`docs/specs/ice.md`](../specs/ice.md), written by `M-16` before any code. Read the
