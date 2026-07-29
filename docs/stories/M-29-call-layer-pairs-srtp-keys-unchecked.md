@@ -2,8 +2,7 @@
 id: M-29
 title: Make a live call run the SDES answer check it already owns
 pillar: Media
-status: in-progress
-priority: 2
+status: done
 design: docs/specs/srtp.md
 epic: media
 areas: [sipx-call]

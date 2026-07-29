@@ -7,6 +7,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A live call now runs the SDES answer check (`M-29`, RFC 4568 §5.1.3)** — `M-26` built the check
+  and could not reach `sipx-call`, which a concurrent story held. So the check existed, was tested,
+  and no call ran it: `srtp_keys` took two `Option`s, unwrapped both and compared nothing. A call
+  whose answer echoed a tag nobody offered connected and keyed media on it.
+  - `srtp_keys` now takes the offered attributes as a **slice** and returns `Result`, delegating to
+    `SrtpKeys::from_answer`. `establish`, `settle_from` and `dial` propagate the refusal, so the
+    call ends through `Error::Sdp` **naming the tag that came back** — and never the key material.
+  - **The offerer's check and the answerer's pairing are two functions on purpose.** §5.1.3 binds
+    only the offerer; when sipx answers it chose the attribute and echoed its own tag, so there is
+    nothing to verify. One function serving both moments would decide at run time which side of the
+    exchange it was on.
+  - **Behaviour change worth knowing about**: when this side offered a key, an answer carrying no
+    usable `a=crypto` is now **refused** rather than placed as a plain call — `docs/specs/srtp.md`
+    §5.4, because that is the shape in which "a suite that was never offered" arrives. A peer that
+    answered an `RTP/SAVP` offer without a usable crypto attribute previously got an unencrypted
+    call; it now gets `Error::Sdp`. Only a call that offered no key at all is still unencrypted.
+  - RFC 4568 stays `partial`, deliberately — now for what the RFC defines beyond this exchange (no
+    MKI, no key lifetimes, no session parameters, no `RTP/SAVPF`) rather than for a MUST no call
+    ran. `docs/specs/srtp.md` §12.3 is closed.
+  - Not covered: `Invitation::adopt_early_answer` has no error channel and logs the refusal instead
+    of reporting it. Nothing is keyed on the refused answer and the 2xx still ends the call, so the
+    loss is the reason rather than the safety — `S-25`.
+
 ## [0.9.0] — 2026-07-29
 
 **Secure media in this release does not interoperate with secure media in any earlier one.** The
