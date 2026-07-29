@@ -2,8 +2,8 @@
 id: X-25
 title: Write the media design record the ICE stories keep citing
 pillar: Build
-status: in-progress
-priority: 6
+status: done
+priority:
 design:
 epic: ice
 areas: [docs]

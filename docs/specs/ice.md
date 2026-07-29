@@ -549,8 +549,12 @@ Tests are derived from these, not from the implementation.
 | Reflexive gathering | `sipx-media`, over `sipx_transport::stun` | The Binding client already exists; a second one would be a second thing to get wrong |
 | Relayed gathering (TURN) | its own story | RFC 8656 is a protocol, not an attribute |
 
-**Open, and blocking the codec:** `MESSAGE-INTEGRITY` needs HMAC-SHA1. `hmac` and `sha1` are already
-workspace dependencies, but neither `sipx-media` nor `sipx-sdp` lists them; `sipx-rtp` does, for
-SRTP. Either the codec's crate gains two dependency lines that already exist elsewhere in the
-workspace, or the codec goes where they already are. That is a decision about the crate graph, and
-the story that implements the codec has to make it explicitly rather than discover it.
+**Settled by `M-20`.** `MESSAGE-INTEGRITY` needs HMAC-SHA1, and the question was which crate should
+carry it. The codec lives in `sipx-media`, which names `hmac`, `sha1` and `subtle` directly — all
+three were already in its transitive graph through `sipx-rtp`, so the lockfile gained four
+dependency lines and no new packages. `sipx-rtp` was rejected: an ICE connectivity check is not a
+media packet, every downstream user parsing RTP would have inherited a STUN codec in that crate's
+public API, and it would have put the codec a crate below its only caller. `sipx-media` also takes a
+`default-features = false` edge on `sipx-transport` to reuse the STUN header constants without
+inheriting a TLS stack, a WebSocket stack and a DNS client; `scripts/check-features.sh` asserts that
+on the resolved graph.
