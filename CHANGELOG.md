@@ -9,6 +9,42 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A WebSocket target names its own path and port (`T-23`)** — `Target::at_path` says where on a
+  server SIP lives. RFC 7118 §5 registers a subprotocol and fixes neither the resource nor the
+  port, so a server is entitled to serve SIP at `/ws` on its own HTTP server — and sipx asked for
+  `/` on the SIP port unconditionally, which reached one kind of server and none of the others.
+  - **The default is unchanged.** A target that names no resource asks for `/`, so every
+    arrangement that worked before works identically.
+  - **The resource is part of connection identity**, for the reason the verified TLS name already
+    is: a socket upgraded at `/ws` was accepted by whatever serves `/ws`, and handing it traffic
+    meant for another resource throws away the only thing the target said about where it was
+    going. Two resources on one address are two pooled connections.
+  - **The interop peer's divergence list is empty for the first time.** The shared WebSocket test
+    reads the port and path a peer's profile declares rather than assuming the SIP port and the
+    root, and it passes live against both peers — the disagreement `X-17` found is closed, not
+    worked around.
+- **The gate is a program that checks itself against CI (`X-22`)** — `./scripts/gate.py` replaces
+  the command list in `AGENTS.md`, which once omitted a job CI runs: the `msrv` job was red from
+  v0.4.0 through v0.7.0 while every documented command passed.
+  - `--check` reads `.github/workflows/ci.yml` and fails when the gate and CI disagree — a job
+    neither mirrored nor declared CI-only, a flag CI passes that a step drops, or an `msrv` pin
+    that differs from the workspace `rust-version`. It runs as a gate step and as a CI job.
+  - The MSRV toolchain is derived from the workspace `rust-version` and written nowhere else;
+    if it is not installed the step fails and prints the `rustup toolchain install` line — never
+    a skip, since a skipped MSRV check is indistinguishable from the defect it exists to catch.
+  - Two more omissions surfaced on the way and are steps now: the documented gate never built the
+    examples, and it ran without CI's `RUSTFLAGS: -D warnings`.
+- **Playback control — queue, stop, interrupt on digit (`M-17`)** — the primitive under "play a
+  prompt and collect digits". `MediaSession::start_playback` (mirrored on `Call`) returns a
+  `Playback` handle; `Call::play` keeps its signature as the uninterruptible await of one.
+  - Stopping takes effect within a stated, tested bound — `Playback::STOP_BOUND_PACKETS`, two
+    packet intervals — for `stop` and for interrupt-on-digit alike.
+  - Clips queue rather than replace, so stopping is never an implicit side effect of starting;
+    the choice and its queue-while-stopping edge are recorded in `docs/designs/app-sdk.md`.
+  - A received DTMF digit (RFC 4733) cuts the prompt short without being swallowed: the
+    interrupt arms in the receive path only after the digit reaches the application's channel.
+  - `CallEvent::PlaybackFinished` now says which playback ended and how — completed, stopped,
+    interrupted, or the session ended under it.
 - **A second independent interop peer, and the first foreign answer (`X-17`)** — until now every
   interop test ran against one peer, and no implementation sipx did not write had ever answered a
   call it placed. Both are now false.

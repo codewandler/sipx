@@ -94,6 +94,61 @@ epic's, one shelf up in the same workspace.
    own — the `CallEvent::Muted`/`Unmuted` transitions `C-3` carries are what let the interpreter
    build that snapshot from a push instead of by polling the call.
 
+   **`M-17` decided: clips queue, they do not replace.** The story leaves this open on purpose,
+   so it is settled here. Starting a second playback while one is running puts it *behind* the
+   one playing; it begins when that one ends, however it ends. Replacement was rejected because
+   it makes stopping an implicit side effect of starting: an application that wanted a prompt
+   followed by a menu would hear only the menu, and the first clip's cancellation would arrive as
+   a `PlaybackFinished{completed: false}` nobody asked for and no host could distinguish from a
+   real barge-in. Queueing keeps the two verbs separate and composable — sequencing is `play`
+   twice, replacement is `stop` then `play` — and it is what the contract's own execution model
+   already assumes (§6.1: instructions run strictly in order, and a verb with a completion event
+   blocks the queue until it resolves). The queue is bounded; a clip arriving at a full queue is
+   refused, with its handle saying so, rather than dropped silently or left waiting for room a
+   live call may never have.
+
+   **The edge is queueing while stopping**, and it is not a corner case — it is exactly what
+   barge-in does: cut the prompt, then say something else. A stopped clip releases the queue at
+   once, and the packets of it the send queue is still holding are **discarded rather than played
+   out**, so the clip queued behind it starts within the same bound the stop itself has. A queue
+   that only stopped the *producer* would have the far end sit through the rest of a prompt the
+   application had already abandoned — up to the whole depth of the send queue, which is the
+   backlog paced sending exists to keep.
+
+   **The bound is two packet intervals** (`Playback::STOP_BOUND_PACKETS`), for both `stop` and
+   interrupt-on-digit. A number rather than "promptly", because the whole difference between
+   playback that can be controlled and playback that cannot is whether an application can say how
+   long barge-in takes. It falls out of where the check goes: the send loop tests each frame
+   against its playback's stop signal *as it takes the frame off the queue*, and discarding one
+   costs no packet interval, so a whole backlog drains inside one tick. What can still reach the
+   wire is the packet already committed to the socket, plus the one after it if the stop landed
+   between taking a frame and sending it. Both are tested by measuring what actually went out
+   against what the far end received (`sipx-call/tests/playback.rs`).
+
+   Discarding those frames is **not** the case `M-18`'s RFC 3550 §6 rule forbids, and the
+   difference is worth being exact about. A mute is a session that is still talking and must go on
+   saying something on the same pacing; a stopped playback is a session with nothing left to say,
+   which is the state a session is in whenever the application is not feeding it — the send loop
+   parks on its queue. The counters and the sequence number stay put, exactly as they do between
+   clips, so there is no gap for a receiver to score: a gap needs a sequence number that was
+   allocated and never sent, and a discarded frame never allocates one.
+
+   **`play` stays cancel-on-drop.** Moving the feeding of a clip into a task of its own would
+   otherwise have quietly taken that away: a caller capping a clip with `timeout(d, play(..))` —
+   which is exactly what the CLI's `answer --play --duration` does — would get a future that
+   returns while the audio plays on out of a task it has no handle to. So `Playback` has two
+   waits, and the difference between them is only what dropping *the wait* means: `play_out`
+   stops the clip, `finished` observes it. `play` is the former; the watcher that reports a
+   fire-and-forget playback on the event stream is the latter.
+
+   **The interrupting digit is not consumed.** Interruption is armed in the *receive* path, not by
+   a task racing `recv_digit`: when a full RFC 4733 keypress is delivered to the application's
+   digit channel, the receive loop bumps a counter that an interruptible playback watches, and it
+   bumps it *only when the digit was accepted*. So a playback can only ever be cut short by a
+   keypress the application will go on to read. This is what makes `gather{prompt, interruptible}`
+   buildable at all: a gather that swallowed the digit that stopped its own prompt would collect
+   every digit of a PIN except the first, which is worse than not supporting barge-in.
+
    `C-6` is deliberately scoped to the *media* coupling of two calls the host owns. The
    signalling coupling — offer relay on every axis, glare, CANCEL/BYE mapping — is `C-1` (M9,
    after `S-19` and `C-2`), and when it lands it upgrades the contract's `bridge` verb from

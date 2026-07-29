@@ -40,7 +40,36 @@ and a scripted app. `A-1` is ready. Then the milestones below, each argued for i
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
-- [X-22 — Put the MSRV check in the documented gate](X-22-msrv-in-the-documented-gate.md) · Build · CI has an msrv job the gate does not name, so a green local gate lied through two releases
+- [X-23 — Find out why an interop call test times out one run in five](X-23-interop-call-test-flake.md) · Build · found by T-23 — a flake that a suite exists to be believed cannot afford
+- [X-24 — Stop the specs describing a connection pool key that has moved on twice](X-24-pool-key-spec-drift.md) · Build · sip-transport.md still says the key is two fields; it has been four since T-23
+
+### Application SDK
+_The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
+- [C-5 — The application contract crate and its sans-IO interpreter](C-5-app-contract-crate-and-interpreter.md) · Application · app-sdk · parallel to C-3/C-4/M-17/M-18 · spec is docs/specs/app-contract.md · size M
+- [C-4 — Serve many calls from one endpoint](C-4-serve-many-calls-from-one-endpoint.md) · Signalling · app-sdk · after C-3 · size M
+
+### Call framework
+_This is the layer applications actually program against, so it is the one that decides whether_
+- [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
+
+### Conformance
+- [S-19 — Implement the UPDATE method](S-19-update-method.md) · Signalling · M9 · RFC 3311 · the last session-integrity gap; 100rel unblocked it
+- [M-16 — Implement ICE](M-16-ice.md) · Media · M10 · RFC 8445 + 8839 · the NAT cases symmetric RTP does not solve
+- [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
+- [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
+- [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
+- [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
+
+### Quic
+- [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11
+
+### SIP core (sans-IO)
+_Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
+- [X-19 — Fuzz the transaction driver, not only the parser](X-19-fuzz-the-transaction-driver.md) · Build · M12 · four fuzz targets, all of them parsers; the timing half of the north star is untested
+
+### Transport layer
+_The transport layer is the only place in the signalling stack that touches the network, which_
+- [X-18 — Count what the stack discards, and capture what it sends](X-18-counters-and-capture.md) · Build · M12 · nothing leaves the process but tracing; T-19 adds the first counter and has nowhere to put it
 
 ## Blocked
 _None._
@@ -57,42 +86,17 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
-- [C-4 — Serve many calls from one endpoint](C-4-serve-many-calls-from-one-endpoint.md) · Signalling · app-sdk · after C-3 · size M
-- [C-5 — The application contract crate and its sans-IO interpreter](C-5-app-contract-crate-and-interpreter.md) · Application · app-sdk · parallel to C-3/C-4/M-17/M-18 · spec is docs/specs/app-contract.md · size M
 - [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
-- [M-17 — Control playback — queue, stop, interrupt on digit](M-17-playback-control.md) · Media · app-sdk · after C-3 · gates the contract's gather · size S/M
-
-### Call framework
-_This is the layer applications actually program against, so it is the one that decides whether_
-- [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
-- [M-16 — Implement ICE](M-16-ice.md) · Media · M10 · RFC 8445 + 8839 · the NAT cases symmetric RTP does not solve
-- [S-19 — Implement the UPDATE method](S-19-update-method.md) · Signalling · M9 · RFC 3311 · the last session-integrity gap; 100rel unblocked it
-- [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
-- [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [T-21 — Be reachable through a push notification](T-21-push-notification.md) · Signalling · M10 · RFC 8599 · a client holding no connection at all
-- [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
-- [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
-
-### Depth
-- [T-23 — Let a WebSocket target name its own path and port](T-23-websocket-request-path-and-port.md) · Signalling · found by X-17 — the second interop peer serves SIP over WebSocket somewhere sipx cannot ask for
 
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
 
 ### Quic
-- [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11
 - [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · track: quic · blocked by T-12
-
-### SIP core (sans-IO)
-_Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
-- [X-19 — Fuzz the transaction driver, not only the parser](X-19-fuzz-the-transaction-driver.md) · Build · M12 · four fuzz targets, all of them parsers; the timing half of the north star is untested
-
-### Transport layer
-_The transport layer is the only place in the signalling stack that touches the network, which_
-- [X-18 — Count what the stack discards, and capture what it sends](X-18-counters-and-capture.md) · Build · M12 · nothing leaves the process but tracing; T-19 adds the first counter and has nowhere to put it
 
 ## Done
 - [A-1 — Finish the host configuration and failure-semantics schema](A-1-host-configuration-schema.md) · Application · app-host phase 1 · spec work, no dependency on the app-sdk stories
@@ -113,6 +117,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [M-13 — Add the Opus codec](M-13-add-the-opus-codec.md) · Media
 - [M-14 — Encrypt the media](M-14-secure-media.md) · Media · track: media · RFC 3711 + 4568 · the largest gap in the stack
 - [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · M6 · RFC 5764 · M-14 unblocked it
+- [M-17 — Control playback — queue, stop, interrupt on digit](M-17-playback-control.md) · Media · app-sdk · after C-3 · gates the contract's gather · size S/M
 - [M-18 — Mute and unmute a call's outbound audio](M-18-mute-and-unmute.md) · Media · app-sdk · independent · size S
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
@@ -154,6 +159,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [T-18 — Surface unmatched responses to the application](T-18-surface-unmatched-responses.md) · Signalling · M7 · the endpoint drops what a forwarding element is required to forward
 - [T-19 — Stop dropping incoming requests silently](T-19-stop-dropping-incoming-requests-silently.md) · Signalling · M7 · a full channel loses requests with no counter and no log
 - [T-20 — Implement GRUU](T-20-gruu.md) · Signalling · M10 · RFC 5627 · needs T-14's Path and T-15's instance ID
+- [T-23 — Let a WebSocket target name its own path and port](T-23-websocket-request-path-and-port.md) · Signalling · found by X-17 — the second interop peer serves SIP over WebSocket somewhere sipx cannot ask for
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core
@@ -170,6 +176,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [X-17 — Interoperate against a second independent implementation](X-17-second-interop-peer.md) · Build · M12 · one interop peer is a sample of one, and no peer has ever answered a sipx call
 - [X-20 — Let a caller take the digest primitives without taking a runtime](X-20-digest-without-a-runtime.md) · Build · sipx-ua pulls tokio unconditionally, so sans-IO code cannot use S-16's Authenticator
 - [X-21 — Make the timer queue generic over its instant](X-21-timer-queue-generic-over-its-instant.md) · Build · the queue documents clock-independence its signature contradicts · additive, breaks nothing
+- [X-22 — Put the MSRV check in the documented gate](X-22-msrv-in-the-documented-gate.md) · Build · CI has an msrv job the gate does not name, so a green local gate lied through two releases
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

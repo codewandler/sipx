@@ -130,7 +130,7 @@ layer = "transport"
 status = "implemented"
 roles = ["uac", "uas"]
 evidence = ["crates/sipx-transport/src/ws.rs", "crates/sipx-transport/tests/ws.rs"]
-note = "Subprotocol negotiation, one message per frame, and the invented sent-by. Verified against Kamailio's WebSocket module."
+note = "Subprotocol negotiation, one message per frame, and the invented sent-by. A target names the resource the handshake asks for, since RFC 7118 fixes neither that nor the port. Verified against Kamailio's WebSocket module."
 
 [[rfc]]
 number = 9000

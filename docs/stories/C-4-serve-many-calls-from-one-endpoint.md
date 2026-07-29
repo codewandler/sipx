@@ -2,8 +2,8 @@
 id: C-4
 title: Serve many calls from one endpoint
 pillar: Signalling
-status: backlog
-priority:
+status: ready
+priority: 4
 design: docs/designs/app-sdk.md
 epic: app-sdk
 areas: [sipx-call]

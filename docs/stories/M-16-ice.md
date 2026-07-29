@@ -2,8 +2,8 @@
 id: M-16
 title: Implement ICE
 pillar: Media
-status: backlog
-priority:
+status: ready
+priority: 7
 design: docs/designs/media.md
 epic: conformance
 areas: [sipx-media, sipx-sdp, sipx-rtp]

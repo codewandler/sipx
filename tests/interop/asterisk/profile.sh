@@ -18,23 +18,28 @@ PEER_ROLES="server user-agent"
 # process that exists, which is not the same as a peer that will answer.
 PEER_READY_MARKER="Asterisk Ready"
 
-# Where this peer can be reached for a call, and where it will place one.
+# Where this peer can be reached for a call, and where it will place one — and, since `T-23`,
+# where it serves SIP over WebSocket. That is not 5060 and not `/`: this peer serves it from its
+# own HTTP server (`http.conf`), which cannot share the SIP transport's port. RFC 7118 §5 fixes
+# neither, so where a peer puts it is a fact about the peer and belongs here.
 PEER_ENV=(
     "SIPX_INTEROP_ECHO_URI=sip:echo@127.0.0.1:5060"
     "SIPX_INTEROP_UA_PORT=5080"
     "SIPX_INTEROP_ORIGINATE=PJSIP/sipx-ua"
+    "SIPX_INTEROP_WS_PORT=8088"
+    "SIPX_INTEROP_WS_PATH=/ws"
 )
 
 # What this peer and sipx disagree about, with the story that settles it. Recorded here rather
 # than by rewording a test: a test that is softened until every peer passes it measures the
 # peers' intersection, which is the one thing interop testing must not do.
 #
-# `T-23` — sipx's WebSocket client requests the path `/`. This peer serves SIP over WebSocket
-# from its HTTP server at `/ws`, on that server's own port. RFC 7118 §5 does not fix a path, so
-# both readings are legal and sipx simply cannot express the other one yet.
-PEER_DIVERGES_ON=(
-    "registers_against_a_real_server_over_websocket:T-23"
-)
+# Empty since `T-23`. The one divergence this list ever held was the WebSocket resource: this
+# peer serves SIP over WebSocket from its HTTP server at `/ws`, on that server's own port, and
+# sipx's client used to request `/` on the SIP port unconditionally. A `Target` now names both
+# (see `sipx-transport`'s `Target::at_path`), this peer declares both above, and the shared
+# WebSocket test reads them.
+PEER_DIVERGES_ON=()
 
 peer_prepare() {
     : # every configuration file this peer needs is committed; nothing to generate

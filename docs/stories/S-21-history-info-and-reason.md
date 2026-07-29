@@ -2,8 +2,8 @@
 id: S-21
 title: Implement History-Info, and populate Reason
 pillar: Signalling
-status: backlog
-priority:
+status: ready
+priority: 11
 design:
 epic: conformance
 areas: [sipx-sip, sipx-ua, sipx-call]
