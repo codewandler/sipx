@@ -2,8 +2,7 @@
 id: X-30
 title: Make the registry distinguish "implemented in a crate" from "reachable from a call"
 pillar: Build
-status: in-progress
-priority: 2
+status: done
 design: docs/designs/rfc-registry-grain.md
 epic: conformance
 areas: [docs, sipx-testkit]

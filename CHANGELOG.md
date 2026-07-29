@@ -9,6 +9,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The compliance table stops claiming roles no call can reach (`X-30`)** — `rfc-report.py --check`
+  verified that every cited file exists, never that a claimed capability had a caller. So a feature
+  implemented and tested inside one crate, selectable from nowhere above it, read as shipped: RFC 8122,
+  8445 and 8839 each claimed both roles on the strength of code no call has ever run. Those three now
+  carry **no roles**, RFC 3711 kept both and gained the citations that justify them, and
+  `unreachable_role_claims` makes it mechanical — a media row may claim a role only if some cited file
+  lives in a crate at or above `sipx-call`. **No suppression list, under any name**, which is the whole
+  reason the check is worth having.
+  - **Fifth instance of one defect in two days**, alongside ICE (`M-27`), UPDATE (`S-22`), DTLS-SRTP
+    (`M-28`) and the SDES answer check (`M-29`). The table is described in `README.md` as "a
+    measurement rather than a claim"; for these rows it was neither.
+  - **The scope is a choice and now says so.** Measured unscoped at `57857c6` the rule rejects 22 of 29
+    role-claiming rows while only 3 rows were over-claiming at all — wrong 19 times out of 22 on the
+    question it exists to answer. It is scoped to media because media is where a capability is
+    *selected* (`with_srtp`, `with_dtls_srtp`, `start_with_ice`) and selecting nothing is both the
+    default and silent: the call still connects and every test in the crate below still passes. Other
+    layers cannot fail this way because nothing selects them — there is no `with_transactions`.
+    `layer = "media"` is labelled a proxy for selection and held against it by a test.
+  - **Two justifications for that scope were shipped before this one and both were false.** The first
+    said seven `sipx-ua` rows "cannot satisfy it at any price"; `sipx-cli` sits above both `sipx-call`
+    and `sipx-ua`. Its replacement distinguished them from ICE by having a cross-crate caller "which
+    `start_with_ice` has none of, in any crate" — `crates/sipx-media/tests/ice.rs:149-150` calls it
+    twice, and had that been the criterion 8445 and 8839 would have passed and the correction would
+    have collapsed. Twice a crisp-sounding untrue fact stood in for a judgement; the design now names
+    that as this story's own failure mode.
+  - **Two escape hatches closed or recorded.** The repository-root `tests/` path is gone — it made
+    `tests/interop/README.md` proof that a role was reachable — and `layer` being author-set is
+    recorded, with the check's own test suite containing the dodge so it stays visible.
+  - **Known limit, filed as `X-33`: the gate is on `roles`, not on `status`.** RFC 6716 and 7587 are
+    `status = "implemented"`, `layer = "media"`, with no `roles` field at all, so the check never
+    interrogates them — while Opus is unreachable from any call, `sipx-call` hardcoding G.711 at six
+    sites and `Codec::from_payload_type` *deliberately* never returning it.
+
 - **The DNS TTL test stops racing the scheduler (`X-29`, partial)** — `an_expired_entry_is_not_returned`
   stored an entry with a 50 ms TTL and read it back immediately. Under load the entry expired *before*
   that read, so a gate for a diff that had never opened `sipx-transport` came back red — and a correct
