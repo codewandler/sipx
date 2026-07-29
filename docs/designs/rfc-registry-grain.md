@@ -289,9 +289,10 @@ here:
   flag (`crates/sipx-cli/src/main.rs:168`) and `crates/sipx-cli/src/dial.rs` never reads it, so a
   call challenged with 407 fails rather than retrying. RFC 2617's row now says so.
 - **The shipped binary cannot select TLS at all.** `dial` and `register` choose between UDP and
-  `--tcp`; a `sips:` URI is stripped to port 5060 over UDP rather than refused
-  (`crates/sipx-cli/src/dial.rs:229-241`). RFC 5922's role claim is reachable from the *library*,
-  proved by `crates/sipx-call/tests/wss.rs`, not from `sipx`.
+  `--tcp`; `target_of` in `crates/sipx-cli/src/dial.rs` strips `sips:` exactly as it strips `sip:`
+  and defaults the port to 5060, so a `sips:` URI is dialled in plaintext rather than refused. RFC
+  5922's role claim is reachable from the *library*, proved by `crates/sipx-call/tests/wss.rs`, not
+  from `sipx`.
 
 ### Axis two: `status = "implemented"` is a claim in the same table
 
