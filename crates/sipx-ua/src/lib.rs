@@ -28,7 +28,11 @@
 //!   you are prepared to follow it.
 //!
 //!
-//! **Supported**: registration leases, digest authentication, Path, Service-Route and Outbound.
+//! **Supported**: registration leases, digest authentication, Path, Service-Route, Outbound and
+//! push. The last two earned the word in `S-29`, when `sipx register --outbound` and
+//! `--push-provider`/`--push-prid` became their first callers above this crate — until then they
+//! were public and tested with nothing selecting them, which is the Experimental rule below, and
+//! `X-37` demoted their compliance rows to say so.
 //!
 //! **Experimental**: `presence`, `subscribe` and `packages`. They are public, tested and reachable from
 //! nothing above this crate — no `sipx-cli` command subscribes or publishes, and nothing in the

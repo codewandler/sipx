@@ -165,7 +165,11 @@ async fn register_advertises_this_client_in_via_and_contact() {
 /// Answer a REGISTER the way a registrar that implements RFC 5626 and RFC 8599 does: the
 /// option tag in `Require` says an outbound registration was performed (§6), the `Feature-Caps`
 /// name the push service the client asked for and assign the binding a PURR (§8.2).
-async fn answer_register(registrar: &tokio::net::UdpSocket, request: &str, source: std::net::SocketAddr) {
+async fn answer_register(
+    registrar: &tokio::net::UdpSocket,
+    request: &str,
+    source: std::net::SocketAddr,
+) {
     let field = |name: &str| header_line(request, name);
     let response = format!(
         "SIP/2.0 200 OK\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}\r\nRequire: outbound\r\nFlow-Timer: 30\r\n\
@@ -294,7 +298,10 @@ async fn register_over_a_flow_keeps_it_and_a_push_wakes_it() {
     let output = child.wait_with_output().await.expect("reports");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    assert!(output.status.success(), "register failed: {stdout} / {stderr}");
+    assert!(
+        output.status.success(),
+        "register failed: {stdout} / {stderr}"
+    );
     let mut lines = stdout.lines();
     let registered = lines.next().expect("the registration report");
     assert!(

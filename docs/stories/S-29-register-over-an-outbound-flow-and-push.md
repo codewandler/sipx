@@ -17,27 +17,52 @@ Give `sipx-ua`'s Outbound and push support a caller, so RFC 5626 and 8599 can cl
 again on the strength of a registration that actually uses them.
 
 ## Acceptance
-- [ ] **A registration can be placed over an Outbound flow.** `Config::with_outbound` exists
+- [x] **A registration can be placed over an Outbound flow.** `Config::with_outbound` exists
       (`crates/sipx-ua/src/agent.rs:109`) and has no caller outside `crates/sipx-ua/tests/outbound.rs` —
       verified by grep when `X-37` demoted the row. The natural caller is `sipx-cli`'s `register`
       (`crates/sipx-cli/src/register.rs`), which constructs a `UserAgent` with a plain `Config`.
-- [ ] **A registration can declare push parameters and be woken.** `Config::with_push`
+      → `register.rs` now calls it under `--outbound` (`--instance <URN>` adopts a persisted
+      identity rather than generating one), and reports §6's answer as the `flow` field.
+- [x] **A registration can declare push parameters and be woken.** `Config::with_push`
       (`crates/sipx-ua/src/agent.rs:156`) and `UserAgent::woken` (`agent.rs:421`) are exercised by
       `crates/sipx-ua/tests/push.rs` and by nothing above them.
-- [ ] **RFC 5626 and 8599 go back to `uac` in the same commit that makes it true**, and
+      → `--push-provider`/`--push-prid` (+ optional `--push-param`) build the `Device`; `--wake`
+      calls `woken` after registering and reports the refresh, including `purr` when assigned.
+- [x] **RFC 5626 and 8599 go back to `uac` in the same commit that makes it true**, and
       `docs/compliance.md` regenerates with it. `X-37` demoted both to no roles as the honest state —
       not as the verdict. Restoring them without the wiring would be the exact defect the reachability
       check exists to catch, and `sipx-ua`'s `# Stability` section already marks these experimental for
       the same reason, which must move with it.
-- [ ] The CLI flags follow the existing vocabulary and are documented in
+      → Roles restored, both notes rewritten to name the caller, evidence gains `register.rs` and
+      `cli.rs`; `./scripts/rfc-report.py --check` is green. One correction to this item's premise:
+      the `# Stability` section did **not** mark Outbound or push experimental — it listed Outbound
+      as Supported (a claim `X-37`'s demotion left behind) and did not classify push at all. The
+      section now lists both as Supported and says on the strength of which caller.
+- [x] The CLI flags follow the existing vocabulary and are documented in
       `website/docs/reference/cli.md`. `--outbound` and `--push` (or the forms that fit) must not be
       accepted-and-dropped the way `--password` was before `P-7`.
-- [ ] Failing-first test: a registration over a flow, asserted to keep the flow and be woken. It cannot
+      → Every combination that cannot work is a usage error (exit 2): half a push pair,
+      `--push-param` alone, `--wake` without the push flags, `--instance` without `--outbound`,
+      a non-URN `--instance`, and a `pn-*` value RFC 3261's `pvalue` cannot hold. Asserted in
+      `register.rs`'s unit tests; the flags are in `VALUED_FLAGS` so their values are never read
+      as the AOR.
+- [x] Failing-first test: a registration over a flow, asserted to keep the flow and be woken. It cannot
       pass today because no caller builds the config. Name it.
+      → `register_over_a_flow_keeps_it_and_a_push_wakes_it` in `crates/sipx-cli/tests/cli.rs`.
+      Before the wiring it failed with: "RFC 5626 §4.2's flow number is missing — nothing built
+      the Outbound config: Contact: <sip:alice@127.0.0.1:52382>".
 
 ## Progress
 - Not started. Filed at `X-37`'s close, which demoted the two rows to no roles as the honest state and
   found that `sipx-ua`'s own crate doc already said why.
+- **Implemented on `impl/S-29`.** `sipx register` gains `--outbound`, `--instance`, the
+  `--push-provider`/`--push-prid`/`--push-param` triple, and `--wake`; the report gains `flow`,
+  `push` and the `woken` line. The registry rows and `docs/compliance.md` moved in the same
+  commit, as did `sipx-ua`'s `# Stability` section and `website/docs/reference/cli.md`. The
+  failing-first test is named above. Deliberately out of scope, per the story: the registrar
+  side of both RFCs, and driving flow keep-alives from `register --keep-alive` — the CLI
+  reports whether a flow exists; holding it open across a long-lived registration is the
+  keep-alive loop's question, not this story's.
 
 ## Notes
 - **The eighth instance of the recurring defect** — after ICE (`M-27`), UPDATE (`S-22`), DTLS-SRTP

@@ -75,8 +75,21 @@ Register with a registrar: `sipx register sip:alice@example.com`
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
 | `--tcp` | Use TCP rather than UDP |
 | `--keep-alive` | Keep refreshing until interrupted |
+| `--outbound` | Register as one Outbound flow (RFC 5626): `reg-id` and `+sip.instance` on the Contact, the `outbound` option tag offered |
+| `--instance <URN>` | With `--outbound`: present this device identity rather than a freshly generated one — §4.1 wants it stable across restarts, and the CLI keeps no state, so persisting one is the caller's job |
+| `--push-provider <P>` | Push notification service this device can be woken through (RFC 8599). Requires `--push-prid` |
+| `--push-prid <T>` | The identifier the push service knows this device by. Requires `--push-provider` |
+| `--push-param <X>` | Service-specific extra, when the service needs one |
+| `--wake` | Act as though a push arrived once registered: send §4.1.3's binding-refresh REGISTER and report what it learned. Requires the push flags |
 
-Report fields: `status`, `aor`, `expires`, `refresh_in`.
+Report fields: `status`, `aor`, `expires`, `refresh_in` — plus `flow` under `--outbound`
+(whether the registrar reported an Outbound registration, RFC 5626 §6) and `push` under the push
+flags (whether the registrar named the same push service, RFC 8599 §8.2). `--wake` adds a second
+report line with `status: "woken"` and, when the registrar assigned one, `purr`.
+
+Combinations that cannot work are usage errors (exit 2), never parsed and dropped: half a push
+pair, `--push-param` alone, `--wake` without the push flags, `--instance` without `--outbound`,
+and a `--push-prid` that a URI parameter cannot hold.
 
 ## `sipx peers`
 

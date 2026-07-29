@@ -118,11 +118,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         ua_config = ua_config.with_credentials(Credentials::new(user.clone(), password));
     }
 
-    let Reachability {
-        flow,
-        device,
-        wake,
-    } = reach;
+    let Reachability { flow, device, wake } = reach;
     let outbound = flow.is_some();
     let provider = device.as_ref().map(|device| device.provider().to_owned());
     if let Some(flow) = flow {
@@ -281,11 +277,7 @@ fn reachability(args: &Args) -> Result<Reachability, String> {
         None
     };
 
-    Ok(Reachability {
-        flow,
-        device,
-        wake,
-    })
+    Ok(Reachability { flow, device, wake })
 }
 
 fn report_failure(format: Format, error: &sipx_ua::Error) -> Exit {
@@ -510,8 +502,8 @@ mod tests {
     /// parse, and nothing would ever call `woken`.
     #[test]
     fn a_wake_without_a_push_service_is_refused() {
-        let error = parsed(&["register", "sip:a@b.c", "--wake"])
-            .expect_err("nothing to be woken through");
+        let error =
+            parsed(&["register", "sip:a@b.c", "--wake"]).expect_err("nothing to be woken through");
         assert!(error.contains("--push-provider"), "{error}");
     }
 
@@ -524,8 +516,14 @@ mod tests {
 
     #[test]
     fn an_instance_that_is_not_a_urn_is_refused() {
-        let error = parsed(&["register", "sip:a@b.c", "--outbound", "--instance", "device-7"])
-            .expect_err("§4.1's grammar is instance-val = urn");
+        let error = parsed(&[
+            "register",
+            "sip:a@b.c",
+            "--outbound",
+            "--instance",
+            "device-7",
+        ])
+        .expect_err("§4.1's grammar is instance-val = urn");
         assert!(error.contains("--instance"), "{error}");
     }
 
