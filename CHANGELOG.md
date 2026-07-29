@@ -7,6 +7,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The transaction driver is fuzzed, not only the parser (`X-19`)** — four fuzz targets existed and
+  all four stopped at the parser, so the half of the north star about adversarial **timing** had
+  nothing at all. A new target drives `TransactionLayer` with a sequence decoded from the fuzzer's
+  bytes — incoming messages, application requests and fired timers in any order — with messages
+  **built** rather than parsed, so the budget is spent inside the RFC 3261 §17 state machines
+  instead of on bytes that do not parse.
+  - **The oracle is not "did it panic"**, which finds almost nothing in a state machine. Five
+    invariants, each with its own test: no state outside the §17 tables (as amended by RFC 6026),
+    no transaction outliving its terminal state, no timer firing for a removed key, a store bounded
+    by the vocabulary rather than by the program, and responses that must route.
+  - The corpus is seeded from the scenarios the existing FSM table tests already walk — 17 of them —
+    the way CI seeds the parser targets from the RFC 4475 corpus, and it runs in the existing fuzz
+    smoke job on the same time budget as one parser target.
+  - **It found a defect on its first campaign**, which is what the instrument is for:
+    `TransactionKey::from_sent_request` derives the *client* key through §17.2.3's **server** rules,
+    so a legacy (cookieless) key carries a Request-URI and `To` tag that `from_response` cannot —
+    the keys never compare equal and every response is unmatched. Committed as a minimised ignored
+    regression and a recorded spec deviation rather than fixed here; the fuzzer is the instrument,
+    not the repair. `S-26` fixes it.
+  - **Not reachable from the network** — established by independent review, not by the finding
+    itself. A client transaction's topmost `Via` is always sipx's own and always carries the magic
+    cookie, so this needs an application supplying its own `Via` to `Endpoint::send`. Recorded
+    because the first filing said otherwise.
+  - `sipx-sip` gained no dependency, no runtime and no clock read: the harness lives in
+    `sipx-testkit` and the diff adds zero lines to `sipx-sip/src/`.
+
 ## [0.10.0] — 2026-07-29
 
 The release about the difference between *implemented* and *reachable*. RFC 4568's answer check

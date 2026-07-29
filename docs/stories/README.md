@@ -66,7 +66,8 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
-- [X-19 — Fuzz the transaction driver, not only the parser](X-19-fuzz-the-transaction-driver.md) · Build · M12 · four fuzz targets, all of them parsers; the timing half of the north star is untested
+- [S-26 — Match a response to the RFC 2543 client transaction that sent it](S-26-legacy-client-transaction-never-matches-its-response.md) · Signalling · found by X-19's fuzzer — from_sent_request derives the client key by §17.2.3's server rules, so a legacy key carries a Request-URI and To tag that from_response cannot, and every response is Unmatched
+- [X-31 — Close the drift holes in the transaction-sequence harness](X-31-harden-the-transaction-sequence-harness.md) · Build · found by X-19's independent review — one invariant arm is unfalsifiable by pigeonhole, the timer table is hand-maintained with a const assert that cannot catch drift, and the CI corpus check cannot see added files
 
 ### Transport layer
 _The transport layer is the only place in the signalling stack that touches the network, which_
@@ -196,6 +197,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
 - [X-15 — Consider requirement-grain rows in the RFC registry](X-15-requirement-grain-registry.md) · Build · track: docs · an offer, not a dependency — decide whether per-RFC grain is enough
 - [X-17 — Interoperate against a second independent implementation](X-17-second-interop-peer.md) · Build · M12 · one interop peer is a sample of one, and no peer has ever answered a sipx call
+- [X-19 — Fuzz the transaction driver, not only the parser](X-19-fuzz-the-transaction-driver.md) · Build · M12 · four fuzz targets, all of them parsers; the timing half of the north star is untested
 - [X-20 — Let a caller take the digest primitives without taking a runtime](X-20-digest-without-a-runtime.md) · Build · sipx-ua pulls tokio unconditionally, so sans-IO code cannot use S-16's Authenticator
 - [X-21 — Make the timer queue generic over its instant](X-21-timer-queue-generic-over-its-instant.md) · Build · the queue documents clock-independence its signature contradicts · additive, breaks nothing
 - [X-22 — Put the MSRV check in the documented gate](X-22-msrv-in-the-documented-gate.md) · Build · CI has an msrv job the gate does not name, so a green local gate lied through two releases

@@ -2,8 +2,7 @@
 id: X-19
 title: Fuzz the transaction driver, not only the parser
 pillar: Build
-status: in-progress
-priority: 9
+status: done
 design: docs/designs/sip-core.md
 epic: sip-core
 areas: [sipx-sip, sipx-testkit]
