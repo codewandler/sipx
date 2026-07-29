@@ -205,11 +205,28 @@ how a stack accepts a codec it cannot decode. `M-13` is the case that rule was w
 **A stream offering only `telephone-event` is rejected** (`M-1`): DTMF alone is not a call, and
 accepting it would establish a session that can never carry speech.
 
-**G.722 is not implemented.** The outline this record replaces listed it, and
-[`sipx-audio`](../../crates/sipx-audio/src/lib.rs)'s crate documentation and package description
-still name it — along with "resampling", which also does not exist
-([`sipx-cli`](../../crates/sipx-cli/src/dial.rs) tells the user to resample before dialling). No
-story cut G.722 and none records a decision to drop it. See the gaps below.
+**G.722 is not implemented and is not planned** (`X-26`). The outline this record replaces listed
+it, and so did [`sipx-audio`](../../crates/sipx-audio/src/lib.rs)'s crate documentation, its
+package description and the website's crate table — along with "resampling", which also does not
+exist ([`sipx-cli`](../../crates/sipx-cli/src/dial.rs) tells the user to resample before
+dialling). When this record first went looking (`X-25`) it could find no story that cut G.722 and
+no decision to drop it, only the claim being repeated; `X-26` is where the decision was finally
+taken, so it is written here rather than left in the gaps.
+
+The argument, for whoever wants to reopen it. G.722's value is wideband audio over a static
+payload type, and that slot is Opus's here (`M-13`), which is wideband, better, and already
+negotiated by name. Nothing in the stack was ever built expecting G.722:
+`Codec::from_payload_type(9)` returns `None`, `sipx-sdp` answers an offer of it with port 0, and
+`sipx-call` refuses a call that offers nothing else — three tests assert exactly that, so the
+codec's absence is a specified behaviour rather than an omission. Resampling is likewise
+deliberate: `sipx-cli` rejects a clip that is not 8 kHz rather than resampling it quietly,
+because audio resampled by accident is recognisably wrong rather than obviously broken. Either
+one is welcome back as a story that argues for it; neither is owed by a package blurb.
+
+The claim cannot come back by itself. `scripts/check-audio-claims.py` reads the three strings
+that advertise `sipx-audio` — the manifest description, the crate documentation's summary
+paragraph and the website's crate table — and fails the gate on a codec named in any of them that
+no module both encodes and decodes.
 
 ## Addressing: symmetric RTP, and where ICE now sits
 
@@ -443,14 +460,15 @@ or the code:
    modification "belongs in the media layer", which draws the boundary without justifying it.
 2. **Why `MissedTickBehavior::Delay`.** Set in the commit that introduced media sessions, never
    commented on, and untouched by the two later commits that moved the surrounding lines.
-3. **Why G.722 was dropped.** The outline, [`roadmap.md`](../roadmap.md)'s `media` epic,
-   `sipx-audio`'s crate documentation and its package description all name it. No story cut it and
-   none records a decision not to. The same applies to "resampling" in the latter two strings.
-4. **Why `M-14` and `M-15` shipped without a spec** when `M-16` wrote one first for a comparable
+3. **Why `M-14` and `M-15` shipped without a spec** when `M-16` wrote one first for a comparable
    subsystem. Both stories are unusually thorough about *what* they decided; neither says why the
    spec-before-code rule was not applied to them.
-5. **Whether a bridge reports dropped frames when a leg falls behind.** The outline asked; nothing
+4. **Whether a bridge reports dropped frames when a leg falls behind.** The outline asked; nothing
    answers.
+
+*Why G.722 was dropped* was the third entry here when `X-25` wrote this list. It is no longer a
+gap: `X-26` took the decision rather than looking for one that was never made, and it is recorded
+under the codecs above.
 
 ## Acceptance / done
 
