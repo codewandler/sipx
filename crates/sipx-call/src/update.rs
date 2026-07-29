@@ -64,6 +64,23 @@ pub(crate) async fn refuse(endpoint: &Handle, incoming: &Incoming, refusal: Refu
     Ok(())
 }
 
+/// The `Warning` a 488 should carry (RFC 3311 §5.2, RFC 3261 §20.43).
+///
+/// §5.2 makes this a SHOULD, and it is the difference between a peer that can log why its
+/// renegotiation was refused and one that can only log that it was. Warn-code 304 — "Media type
+/// not available" — is the one that fits every way sipx reaches a 488 here: a description it
+/// could not read, or one whose media it cannot carry.
+///
+/// The warn-agent is this endpoint's own sent-by, because §20.43's grammar wants a host or a
+/// pseudonym and the host is the honest one.
+pub(crate) fn warning(endpoint: &Handle) -> String {
+    const MEDIA_TYPE_NOT_AVAILABLE: u16 = 304;
+    format!(
+        "{MEDIA_TYPE_NOT_AVAILABLE} {} \"Media type not available\"",
+        endpoint.sent_by_for(sipx_transport::TransportKind::Udp)
+    )
+}
+
 /// The `Retry-After` for a §5.2 refusal.
 ///
 /// Drawn here rather than in `sipx-sip`, which reads no entropy source: a sans-IO core that

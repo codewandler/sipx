@@ -220,7 +220,7 @@ impl Ringing {
     /// Empties this ringing rather than consuming it, because it still owns the retransmission
     /// of the provisional and must go on owning it until it is dropped.
     pub(crate) fn take_early(&mut self) -> Result<(Early, Dialog, update::Negotiation, bool)> {
-        let early = self.early.take().ok_or(Error::NoCommonCodec)?;
+        let early = self.early.take().ok_or(Error::NoEarlySession)?;
         let dialog = self.dialog.take().ok_or(Error::NoDialog)?;
         Ok((early, dialog, self.negotiation, self.peer_allows_update))
     }
@@ -247,6 +247,24 @@ impl Ringing {
         if !dialog.matches(&incoming.request) {
             return Ok(false);
         }
+
+        // RFC 3311 §5.2 sends this straight to RFC 3261 §12.2.2, and an early dialog is under
+        // §12.2.2 exactly as a confirmed one is. Without it the recorded sequence number rolls
+        // *backwards* to whatever the last UPDATE claimed, and a BYE replayed from behind it is
+        // then accepted — ending a call that is still running, which is the failure
+        // `Call::handle` already refuses in as many words.
+        if dialog.is_out_of_order(&incoming.request) {
+            return respond(
+                &self.endpoint,
+                incoming,
+                500,
+                "Server Internal Error",
+                Vec::new(),
+            )
+            .await
+            .map(|()| true);
+        }
+        dialog.record_remote_cseq(&incoming.request);
 
         let has_offer = crate::update::carries_offer(&incoming.request);
         if let Reception::Refuse(refusal) = self.negotiation.receive(has_offer) {
@@ -276,13 +294,18 @@ impl Ringing {
                 // §5.2 and `M-8`'s rule together: the change does not happen and the dialog
                 // carries on. An early dialog refused this way still rings, and still answers.
                 self.negotiation.answered();
-                let refusal = StatusCode::new(488)
-                    .ok_or_else(|| Error::Sdp("unreachable: literal status".to_owned()))?;
-                let response =
-                    ResponseBuilder::to_request(&incoming.request, refusal, "Not Acceptable Here")?
-                        .build();
-                self.endpoint.respond(&incoming.key, response).await?;
-                return Ok(true);
+                return respond(
+                    &self.endpoint,
+                    incoming,
+                    488,
+                    "Not Acceptable Here",
+                    vec![(
+                        HeaderName::Warning,
+                        Bytes::from(crate::update::warning(&self.endpoint)),
+                    )],
+                )
+                .await
+                .map(|()| true);
             };
             builder = builder
                 .header(
@@ -292,15 +315,9 @@ impl Ringing {
                 .body(Bytes::from(answer.to_string_sdp()));
         }
 
-        // §5.1: a target refresh request, in an early dialog as much as a confirmed one.
+        // §5.1: a target refresh request, in an early dialog as much as a confirmed one. The
+        // sequence number was recorded above, with the ordering check that earns the right to.
         dialog.refresh_target(&incoming.request.headers);
-        dialog.remote_cseq = incoming
-            .request
-            .headers
-            .typed::<sipx_sip::CSeq>()
-            .and_then(std::result::Result::ok)
-            .map(|cseq| cseq.sequence)
-            .or(dialog.remote_cseq);
         self.target =
             crate::call::in_dialog_target(dialog, Target::new(incoming.source, incoming.transport));
         self.peer_allows_update = update::peer_allows(&incoming.request.headers);
@@ -593,6 +610,28 @@ async fn ring_with(
         peer_allows_update: update::peer_allows(&incoming.request.headers),
         early,
     })
+}
+
+/// Send a bare final response to an in-dialog request, with any headers it must carry.
+///
+/// Its own function because the early dialog answers several of these — §12.2.2's 500, §5.2's
+/// 488 — and a response built inline at each site is a response whose headers drift between
+/// them.
+async fn respond(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    code: u16,
+    reason: &'static str,
+    headers: Vec<(HeaderName, Bytes)>,
+) -> Result<()> {
+    let status =
+        StatusCode::new(code).ok_or_else(|| Error::Sdp(format!("status {code} out of range")))?;
+    let mut builder = ResponseBuilder::to_request(&incoming.request, status, reason)?;
+    for (name, value) in headers {
+        builder = builder.header(name, value)?;
+    }
+    endpoint.respond(&incoming.key, builder.build()).await?;
+    Ok(())
 }
 
 /// Refuse an invitation that requires 100rel from a side that has it switched off (§3).

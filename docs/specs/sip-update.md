@@ -56,6 +56,19 @@ Hence `sipx-call`'s two ringing entry points:
 an unreliable provisional is forbidden outright, and sending one anyway would leave the two
 sides disagreeing about which description is in force with no way to notice.
 
+**And the 2xx waits for the PRACK.** RFC 3262 §5 makes that a MUST, and it is what makes the rest
+of the arrangement safe: `answer_early`'s 200 carries no session description at all — the offer
+was answered in the provisional, and anything an UPDATE renegotiated afterwards was answered in
+its own 2xx, so repeating either here would be a second answer or an undone renegotiation. That
+reasoning only holds while the caller is *known* to hold the answer, and the PRACK is the only
+thing that knows it. Without the wait, a lost 183 leaves the caller in a confirmed dialog with no
+description at all and no later message that would ever supply one.
+
+`answer_early` cannot wait on the caller's behalf — the PRACK arrives on the application's own
+inbox and `answer_early` holds the `&mut` that handling it would need — so it returns
+`Error::UnacknowledgedProvisional` and the application answers once `Ringing::is_acknowledged`
+is true.
+
 ## 4. Advertising it (§4)
 
 A peer may only decide to send an UPDATE if it has been told the method exists here. §4 puts
@@ -76,18 +89,31 @@ re-INVITE for a refresh.
 
 ## 5. The state a dialog keeps
 
-`sipx_sip::update::Negotiation` is pure and holds three booleans:
+`sipx_sip::update::Negotiation` is pure and holds three pieces of state:
 
 | Field | Set when | Cleared when |
 |---|---|---|
-| `offered` | we send an offer (INVITE, UPDATE or PRACK) | its answer arrives |
-| `owed` | an offer arrives that we have not answered | we send the answer |
-| `in_progress` | an UPDATE is accepted for processing | its final response is sent |
+| `offered` | we send an offer — in an UPDATE, or in an INVITE or re-INVITE | its answer arrives, or the exchange fails |
+| `owed` | an offer arrives that we have not answered | we send that offer's answer, or refuse it |
+| `in_progress` | an UPDATE is accepted for processing, **and which kind it was** | its final response is sent |
 
 `offered` and `owed` are RFC 3264's one-offer-at-a-time rule seen from each end. They are *not*
 the same flag: a dialog can owe an answer and have no offer outstanding, and the two produce
 different refusals below. `in_progress` is about transactions, not descriptions, and applies to
 an UPDATE with no body at all.
+
+**`in_progress` remembers whether the UPDATE carried an offer, and that is load-bearing.**
+Answering an UPDATE settles the debt *that UPDATE created* — and an offerless one created none.
+Clearing `owed` regardless was a real defect: an RFC 4028 §7.4 refresh, which carries no body and
+is the most ordinary UPDATE a peer sends, would wipe the INVITE's outstanding offer, and the next
+UPDATE carrying one would be accepted and answered **488** where rule 3 below requires **500**.
+That is the difference between telling a peer its description is unusable and telling it that it
+is early — the exact confusion this section exists to prevent.
+
+A corollary: `answered()` with nothing in progress is a no-op, so a caller that clears on an
+error path cannot destroy state it did not create. Both `on_update` implementations rely on
+that — they clear after a failed renegotiation and after a response that could not be sent, so a
+transaction nobody is waiting on cannot leave the dialog answering 500 forever.
 
 ## 6. Receiving an UPDATE (§5.2)
 
@@ -114,6 +140,9 @@ wall.
 supplied by the caller, not generated in `sipx-sip`: the core reads no clock and no entropy
 source. `sipx_sip::update::RETRY_AFTER_MAX_SECS` is the bound.
 
+Every one of these is checked **before** anything else about the request is acted on, and after
+RFC 3261 §12.2.2's ordering check — see §6.1.
+
 **Reachability.** Only rule 3 can be provoked through `sipx-call` as it dispatches today: an
 in-dialog request is handled through `&mut self`, so this side is never mid-way through
 answering one UPDATE when the next arrives and never has an offer outstanding while a request is
@@ -121,6 +150,25 @@ being handled. Rules 1 and 2 are therefore exercised by the vectors in §8.1 rat
 wire. They are not speculative: the state they read is kept for real on every dialog, a peer
 reaches them by doing something sipx would not, and a dispatcher that handles requests
 concurrently (`C-4`) reaches them from this side too.
+
+Rule 1 is also not about a *lost* response. RFC 3261 §17.2.2 has the server transaction resend
+its last response to a retransmitted request and tell the transaction user nothing, so a peer
+repeating an UPDATE because the answer went missing gets the answer again. Rule 1 fires only for
+a genuinely new transaction that arrives too soon.
+
+## 6.1 Ordering comes first (RFC 3261 §12.2.2)
+
+§5.2's first sentence puts UPDATE under §12.2.2 like every other in-dialog request: one behind
+the dialog's recorded sequence number is refused **500** and *not applied*, and the recorded
+number only ever moves forward.
+
+This is checked before §6's rules, on both the early and the confirmed path, and the rule itself
+lives on `Dialog` rather than being written out at each site. The reason is concrete: the early
+dialog's UPDATE handler was first written without it and assigned the dialog's remote sequence
+number from whatever arrived. An UPDATE from behind the sequence therefore rolled it *backwards*,
+and a BYE replayed from between the two numbers then looked in order — ending a call that was
+still running. A new path that sidesteps an existing guard is worse than no guard, so there is
+one guard and it belongs to the thing it guards.
 
 Once accepted:
 
@@ -177,6 +225,7 @@ Derived from §§4–7 and implemented in `crates/sipx-sip/src/update.rs` (pure)
 | `owed` | yes | 500, `Retry-After` |
 | `owed` | no | accept |
 | `offered` + `in_progress` | yes | 500 — rule 1 is checked first |
+| `owed`, then an offerless UPDATE accepted and answered | yes | 500 — answering the refresh settled nothing |
 
 ### 8.2 Sending
 

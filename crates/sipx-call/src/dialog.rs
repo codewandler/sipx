@@ -204,6 +204,40 @@ impl Dialog {
         }
     }
 
+    /// Whether an in-dialog request arrived out of order (RFC 3261 §12.2.2).
+    ///
+    /// §12.2.2 rejects a request behind the dialog's sequence number with a 500 rather than
+    /// applying it, and §12.2.1.1 requires each new in-dialog request to *increment* the
+    /// number — so a repeat of the current one is a duplicate that has escaped the transaction
+    /// layer's absorption window, not a fresh request, and is refused on the same grounds.
+    ///
+    /// **The rule lives here, on the dialog, because every in-dialog path needs it and each one
+    /// that carries its own copy is a way around it.** That is not hypothetical: the early
+    /// dialog's UPDATE handler was written without it, and a replayed BYE arriving afterwards
+    /// ended a call that was still running — the exact failure the guard on the confirmed path
+    /// was put there to stop.
+    #[must_use]
+    pub fn is_out_of_order(&self, request: &Request) -> bool {
+        let Some(sequence) = cseq_number(&request.headers) else {
+            // A request whose `CSeq` will not parse cannot be placed in the sequence at all.
+            // Refusing it here would answer 500 to something the message layer has already
+            // judged; letting it through leaves the recorded number where it was.
+            return false;
+        };
+        self.remote_cseq.is_some_and(|last| sequence <= last)
+    }
+
+    /// Record the sequence number of an in-dialog request accepted here (RFC 3261 §12.2.2).
+    ///
+    /// Only ever forwards. A lower number never reaches this — [`Self::is_out_of_order`] has
+    /// refused it — but the `max` makes that a property of this function rather than of every
+    /// caller remembering to ask first.
+    pub fn record_remote_cseq(&mut self, request: &Request) {
+        if let Some(sequence) = cseq_number(&request.headers) {
+            self.remote_cseq = Some(self.remote_cseq.map_or(sequence, |last| last.max(sequence)));
+        }
+    }
+
     /// Whether an in-dialog request belongs to this dialog.
     #[must_use]
     pub fn matches(&self, request: &Request) -> bool {

@@ -51,6 +51,22 @@ method RFC 4028 recommends rather than the only one sipx has.
   `ring_early` answers the INVITE's offer in the provisional, and `answer_early` hands the port
   it bound to the `Call` — a second port would make the 200 contradict the 183, and the 200
   therefore carries no description at all.
+- **Review round 1 found three defects, all now fixed and each pinned by a test that fails
+  without its fix.**
+  - `Negotiation::answered` cleared `owed` unconditionally, so an offerless refresh — the most
+    ordinary UPDATE there is — erased the debt the INVITE left, and the offer behind it drew a
+    488 where §5.2 rule 3 requires a 500. `in_progress` now remembers whether the UPDATE it is
+    tracking carried an offer, and only that kind of UPDATE settles anything.
+  - `Ringing::on_update` had no RFC 3261 §12.2.2 ordering check and assigned the dialog's remote
+    sequence number from whatever arrived, so an UPDATE from behind it rolled the number
+    *backwards* and a BYE replayed from between the two ended a live call. The rule now lives on
+    `Dialog` — `is_out_of_order` and `record_remote_cseq` — and both the early and the confirmed
+    path go through it. A new path that sidesteps an existing chokepoint is the shape of the
+    defect, so the chokepoint moved to where it cannot be sidestepped.
+  - `answer_early` sent the 2xx without waiting for the PRACK of the SDP-carrying provisional,
+    which RFC 3262 §5 forbids. It now returns `Error::UnacknowledgedProvisional`. This is also
+    what makes the bodiless 200 safe: the reasoning for omitting the description depends on the
+    caller demonstrably holding it, and the PRACK is the only proof of that.
 - **Two of the three refusals are 500**, which is what RFC 3311 §5.2 says: an UPDATE arriving
   before a previous one is answered, and an offer arriving while an answer is owed, both draw a
   500 with a random `Retry-After`. They are kept as separate decisions anyway, because the
@@ -68,6 +84,13 @@ method RFC 4028 recommends rather than the only one sipx has.
   check under §5.2's offer/answer rules, where it could be refused for a reason that has
   nothing to do with liveness. `S-11`'s re-INVITE path is unchanged and still runs whenever the
   peer's `Allow` does not list UPDATE.
+- Settled while fixing the above: a *retransmitted* UPDATE never reaches the transaction user
+  (RFC 3261 §17.2.2 — the server transaction resends its last response and says nothing), so
+  §5.2 rule 1 is about a genuinely new transaction arriving too soon and never about a lost
+  answer. And `Call` starts from `Negotiation::idle()`, so the offerless-refresh defect could
+  not bite a confirmed dialog: `owed` was never set there. It is set now, by `on_reinvite` and
+  `reinvite`, because §5.2 rule 2 names an offer sent "in an UPDATE, PRACK or INVITE" and the
+  spec should not describe state the code does not keep.
 - The `Allow` value is one constant, `sipx_sip::update::ALLOW`, used by the INVITE, its
   provisional and 2xx responses, re-INVITEs, UPDATEs and the user agent's OPTIONS answer. §4
   makes that header the peer's only permission, so a second copy that drifts is a peer that

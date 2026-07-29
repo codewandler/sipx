@@ -488,8 +488,17 @@ impl Call {
         }
         self.record_remote_cseq(&incoming.request);
 
-        let Some(answer_sdp) = self.renegotiate(incoming.request.body()).await? else {
-            return self.refuse(incoming, 488, "Not Acceptable Here").await;
+        // §5.2 rule 2's other source, and the reason the spec names INVITE alongside UPDATE: a
+        // re-INVITE's offer is one this side owes an answer to until it produces one.
+        if crate::update::carries_offer(&incoming.request) {
+            self.negotiation.received_offer();
+        }
+        let renegotiated = self.renegotiate(incoming.request.body()).await;
+        // On every path out of here the debt is settled: a 488 kills the offer and a 2xx
+        // answers it, and a failure to renegotiate at all leaves nothing to answer.
+        self.negotiation.sent_answer();
+        let Some(answer_sdp) = renegotiated? else {
+            return self.refuse_unacceptable(incoming).await;
         };
 
         // RFC 4028 §7.2: any re-INVITE inside the dialog refreshes the session, whether or not
@@ -629,11 +638,19 @@ impl Call {
         if has_offer {
             // §5.2: the UAS "MUST adjust the session parameters accordingly and generate an
             // answer in the 2xx response".
-            let Some(answer_sdp) = self.renegotiate(incoming.request.body()).await? else {
+            //
+            // The result is captured rather than propagated with `?`, because `renegotiate`
+            // can fail on something that has nothing to do with the peer — a media port that
+            // will not bind. Returning through the `?` would leave this UPDATE forever in
+            // progress and the offer forever owed, and every later UPDATE on the dialog would
+            // draw §5.2's "you are too early" for a transaction nobody is waiting on.
+            let renegotiated = self.renegotiate(incoming.request.body()).await;
+            let Some(answer_sdp) = renegotiated.inspect_err(|_| self.negotiation.answered())?
+            else {
                 // The offer is dead, so nothing is owed for it any more — and this is a final
                 // response, so no UPDATE is in progress either.
                 self.negotiation.answered();
-                return self.refuse(incoming, 488, "Not Acceptable Here").await;
+                return self.refuse_unacceptable(incoming).await;
             };
             builder = builder
                 .header(
@@ -746,17 +763,29 @@ impl Call {
     /// same grounds. This is not only the re-INVITE case: a stale BYE honoured here ends a
     /// call that a later request has already changed.
     fn out_of_order(&self, request: &Request) -> bool {
-        let Some(sequence) = remote_cseq(request) else {
-            return false;
-        };
-        self.dialog.remote_cseq.is_some_and(|last| sequence <= last)
+        self.dialog.is_out_of_order(request)
     }
 
     /// Record the sequence number of an in-dialog request this side has accepted.
     fn record_remote_cseq(&mut self, request: &Request) {
-        if let Some(sequence) = remote_cseq(request) {
-            self.dialog.remote_cseq = Some(sequence);
-        }
+        self.dialog.record_remote_cseq(request);
+    }
+
+    /// Refuse a renegotiation with 488, saying why (RFC 3311 §5.2, RFC 3261 §20.43).
+    ///
+    /// The `Warning` is a SHOULD, and it is the difference between a peer that can log why its
+    /// renegotiation was refused and one that can only log that it was.
+    async fn refuse_unacceptable(&self, incoming: &Incoming) -> Result<()> {
+        let status = StatusCode::new(488).unwrap_or_else(ok_status);
+        let response =
+            ResponseBuilder::to_request(&incoming.request, status, "Not Acceptable Here")?
+                .header(
+                    HeaderName::Warning,
+                    Bytes::from(crate::update::warning(&self.endpoint)),
+                )?
+                .build();
+        self.endpoint.respond(&incoming.key, response).await?;
+        Ok(())
     }
 
     /// Refuse a renegotiation without ending the call.
@@ -852,8 +881,18 @@ impl Call {
         }
 
         let request = add_routes(builder, &routes)?.build();
-        let mut responses = self.endpoint.send(request, self.target.clone()).await?;
-        let response = responses.final_response().await.ok_or(Error::NoResponse)?;
+        // RFC 3311 §5.2 rule 2 names an offer sent "in an UPDATE, PRACK or INVITE", and this is
+        // the INVITE case: the offer is outstanding for as long as the response takes. Marked
+        // and cleared around the whole exchange, so a failure cannot leave the flag set and
+        // refuse every later offer of ours.
+        self.negotiation.sent_offer();
+        let exchange = async {
+            let mut responses = self.endpoint.send(request, self.target.clone()).await?;
+            responses.final_response().await.ok_or(Error::NoResponse)
+        }
+        .await;
+        self.negotiation.received_answer();
+        let response = exchange?;
 
         if !response.status.is_success() {
             // The far end refused the change. The call it refused to change is still running,
@@ -1436,15 +1475,6 @@ fn unbracket(value: &str) -> String {
 /// Without these, a request through a Record-Routing proxy — which is to say almost any real
 /// deployment — is addressed straight at the peer's `Contact`, which the proxy will not relay
 /// and the peer may not be reachable at. The call establishes and cannot be ended.
-/// The sequence number of a request, if it has a well-formed `CSeq`.
-fn remote_cseq(request: &Request) -> Option<u32> {
-    request
-        .headers
-        .typed::<sipx_sip::headers::CSeq>()
-        .and_then(std::result::Result::ok)
-        .map(|cseq| cseq.sequence)
-}
-
 pub(crate) fn add_routes(
     mut builder: RequestBuilder,
     routes: &[String],
@@ -2097,10 +2127,12 @@ pub async fn answer_ringing(
     media_address: IpAddr,
     ringing: &crate::Ringing,
 ) -> Result<Call> {
-    // §3: a 2xx must not go out while a reliable provisional carrying a session description is
-    // unacknowledged. sipx never puts one in a provisional, so the narrower rule here is enough
-    // — but answering before the PRACK still means retransmitting a `180` at a caller that has
-    // moved on, so the ringing is stopped either way when `Ringing` drops.
+    // RFC 3262 §3 and §5: a 2xx must not go out while a reliable provisional carrying a session
+    // description is unacknowledged. This path never puts a description in one — `ring` sends a
+    // bodiless provisional, and `ring_early` is the entry point that does, where
+    // [`answer_early`] enforces the MUST. What is left here is the weaker concern: answering
+    // before the PRACK means retransmitting a `180` at a caller that has moved on, and the
+    // ringing is stopped either way when `Ringing` drops.
     if !ringing.is_acknowledged() {
         tracing::debug!("answering before the reliable provisional was acknowledged");
     }
@@ -2120,12 +2152,21 @@ pub async fn answer_ringing(
 /// Answer an INVITE that was rung with [`crate::rel::ring_early`].
 ///
 /// The counterpart of [`answer_ringing`] for a dialog whose offer/answer already completed in
-/// the provisional. Two things follow from that and neither is optional:
+/// the provisional. Three things follow from that and none is optional:
 ///
+/// - **The provisional must already be acknowledged.** RFC 3262 §5 is a MUST: a UAS that put a
+///   session description in a reliable provisional delays the 2xx until that provisional is
+///   acknowledged. So this returns [`Error::UnacknowledgedProvisional`] rather than answering, and
+///   the caller keeps feeding messages to [`Ringing::on_prack`](crate::Ringing::on_prack) until
+///   [`Ringing::is_acknowledged`](crate::Ringing::is_acknowledged) is true. It cannot wait on
+///   the caller's behalf: the PRACK arrives on the application's own inbox, and this holds the
+///   `&mut` that handling it would need.
 /// - **The 200 carries no session description.** There is nothing left to say: the offer was
 ///   answered in the 183, and anything an UPDATE renegotiated afterwards was answered in its own
 ///   2xx. Repeating the last answer here would be a second answer to the INVITE's offer, and
-///   repeating the *first* one would silently undo the renegotiation.
+///   repeating the *first* one would silently undo the renegotiation. That is only safe
+///   *because* of the rule above — the PRACK is proof the caller holds the answer, and without
+///   it a lost 183 would leave the caller in a confirmed dialog with no description at all.
 /// - **The media port is the one the provisional named**, not a fresh one, because that is the
 ///   port the far end has already been told to send to.
 ///
@@ -2136,10 +2177,17 @@ pub async fn answer_early(
     incoming: &Incoming,
     ringing: &mut crate::Ringing,
 ) -> Result<Call> {
+    if !ringing.is_acknowledged() {
+        return Err(Error::UnacknowledgedProvisional);
+    }
+
+    // Before anything is taken out of the `Ringing`. A 422 leaves here through the `?`, and it
+    // is a counter-offer rather than a failure — the caller is expected to be rung again — so
+    // it must not cost the bound port and the session the early exchange settled.
+    let agreed = negotiate_session(endpoint, incoming).await?;
+
     let (early, dialog, negotiation, peer_allows_update) = ringing.take_early()?;
     let target = in_dialog_target(&dialog, Target::new(incoming.source, incoming.transport));
-
-    let agreed = negotiate_session(endpoint, incoming).await?;
 
     let to_with_tag = {
         let existing = incoming

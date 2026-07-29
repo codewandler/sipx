@@ -113,20 +113,37 @@ pub enum Reception {
     Refuse(Refusal),
 }
 
+/// An UPDATE that has been accepted and not yet answered, and what it brought with it.
+///
+/// The distinction is load-bearing rather than descriptive. Answering an UPDATE settles the
+/// debt *that UPDATE created* — and an offerless one created none. Forgetting which kind it was
+/// is how a session refresh comes to cancel the INVITE's outstanding offer; see
+/// [`Negotiation::answered`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    /// It carried an offer, so its answer pays for that offer.
+    WithOffer,
+    /// It carried none — an RFC 4028 §7.4 refresh, say — so its 2xx settles nothing.
+    Offerless,
+}
+
 /// One dialog's offer/answer bookkeeping, as far as UPDATE is concerned (RFC 3264, RFC 3311 §5).
 ///
-/// Three booleans, and the reason they are three rather than one is §5.2: a dialog that owes an
-/// answer and a dialog whose own offer is unanswered are different situations that produce
-/// different refusals, and an UPDATE already being processed is a third that has nothing to do
-/// with descriptions at all.
+/// Three pieces of state, and the reason they are three rather than one is §5.2: a dialog that
+/// owes an answer and a dialog whose own offer is unanswered are different situations that
+/// produce different refusals, and an UPDATE already being processed is a third that has
+/// nothing to do with descriptions at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Negotiation {
     /// We have sent an offer and have not received its answer.
     offered: bool,
     /// We have received an offer and have not sent its answer.
+    ///
+    /// Set by an INVITE's offer as much as by an UPDATE's, which is why it cannot simply be
+    /// cleared whenever an UPDATE is answered.
     owed: bool,
-    /// We have accepted an UPDATE and not yet sent its final response.
-    in_progress: bool,
+    /// The UPDATE accepted and not yet answered, if there is one.
+    in_progress: Option<Pending>,
 }
 
 impl Negotiation {
@@ -136,7 +153,7 @@ impl Negotiation {
         Self {
             offered: false,
             owed: false,
-            in_progress: false,
+            in_progress: None,
         }
     }
 
@@ -210,7 +227,7 @@ impl Negotiation {
     /// A refusal changes nothing. It is itself a final response, so there is no transaction
     /// left in progress and no description has moved.
     pub const fn receive(&mut self, has_offer: bool) -> Reception {
-        if self.in_progress {
+        if self.in_progress.is_some() {
             return Reception::Refuse(Refusal::InProgress);
         }
         if has_offer {
@@ -221,18 +238,33 @@ impl Negotiation {
                 return Reception::Refuse(Refusal::AnswerOwed);
             }
             self.owed = true;
+            self.in_progress = Some(Pending::WithOffer);
+        } else {
+            self.in_progress = Some(Pending::Offerless);
         }
-        self.in_progress = true;
         Reception::Accept
     }
 
     /// Record that the final response to the accepted UPDATE has gone out.
     ///
-    /// It carries the answer when the UPDATE carried an offer (§5.2: the UAS "MUST ... generate
-    /// an answer in the 2xx response"), so both flags clear together.
+    /// Clears **only the debt that UPDATE created**. When it carried an offer the 2xx carried
+    /// the answer (§5.2: the UAS "MUST ... generate an answer in the 2xx response") and the
+    /// debt is paid; when it carried none — the RFC 4028 §7.4 refresh, which is the most
+    /// ordinary UPDATE a peer sends — it created no debt and pays none.
+    ///
+    /// Clearing `owed` regardless was a real defect and not a tidiness point. An offerless
+    /// refresh arriving in an early dialog would wipe the INVITE's outstanding offer, and the
+    /// next UPDATE carrying one would then be *accepted* and answered 488 for a description
+    /// that was perfectly good — where §5.2 rule 3 requires 500 with `Retry-After`, which is
+    /// the difference between "your description is unusable" and "you are early".
+    ///
+    /// Calling this with nothing in progress is a no-op, so a caller that clears on an error
+    /// path cannot destroy state it did not create.
     pub const fn answered(&mut self) {
-        self.in_progress = false;
-        self.owed = false;
+        if matches!(self.in_progress, Some(Pending::WithOffer)) {
+            self.owed = false;
+        }
+        self.in_progress = None;
     }
 }
 
@@ -358,6 +390,48 @@ mod tests {
         let mut busy = Negotiation::idle();
         assert_eq!(busy.receive(false), Reception::Accept);
         assert!(busy.may_offer());
+    }
+
+    /// The defect, stated as a test: an offerless UPDATE must not settle a debt it never took
+    /// on. RFC 4028 §7.4's refresh is exactly such an UPDATE and arrives on every timed call.
+    #[test]
+    fn an_offerless_update_does_not_pay_a_debt_it_never_incurred() {
+        // An early dialog: the INVITE's offer is in hand and unanswered.
+        let mut state = Negotiation::owing();
+
+        // A refresh comes through. Perfectly legal, and answered 200 with no description.
+        assert_eq!(state.receive(false), Reception::Accept);
+        state.answered();
+        assert!(
+            state.owes_answer(),
+            "an offerless refresh cancelled the INVITE's outstanding offer"
+        );
+
+        // So the next offer is still refused for the right reason. Without this the UPDATE
+        // would be accepted, renegotiated against a session whose first offer/answer never
+        // completed, and — when that failed — answered 488, telling the peer its description
+        // was unusable when the description was fine and the moment was not.
+        assert_eq!(
+            state.receive(true),
+            Reception::Refuse(Refusal::AnswerOwed),
+            "§5.2 rule 3 was lost to a refresh that arrived first"
+        );
+    }
+
+    /// The mirror: an UPDATE that *did* carry an offer settles that offer and nothing else.
+    #[test]
+    fn an_offer_carrying_update_settles_exactly_its_own_offer() {
+        let mut state = Negotiation::idle();
+        assert_eq!(state.receive(true), Reception::Accept);
+        assert!(state.owes_answer());
+        state.answered();
+        assert!(!state.owes_answer());
+
+        // And a stray `answered` with nothing in progress cannot clear a debt either, which is
+        // what makes it safe to call from an error path.
+        let mut owing = Negotiation::owing();
+        owing.answered();
+        assert!(owing.owes_answer());
     }
 
     #[test]

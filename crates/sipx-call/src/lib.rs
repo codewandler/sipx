@@ -14,7 +14,9 @@ pub mod error;
 pub mod event;
 pub mod rel;
 pub mod transfer;
-pub mod update;
+// Crate-private: every item in it is `pub(crate)`, and a `pub mod` whose contents are all
+// private renders as an empty page in the API reference — a promise of surface that is not there.
+mod update;
 
 pub use call::{
     Call, DialOptions, answer, answer_early, answer_replacing, answer_ringing, dial, dial_once,
