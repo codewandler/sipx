@@ -35,6 +35,24 @@ async fn session_and_peer() -> (MediaSession, UdpSocket, SocketAddr) {
     (port.start(config), peer, session_addr)
 }
 
+/// Wait until something has happened, rather than sleeping and assuming it has (`X-29`).
+///
+/// `within` is a **bound on failure** — how long before we conclude the thing is never going to
+/// happen — and not a window to measure in, so it is set orders of magnitude above the honest
+/// answer. `X-28` gave a *quantity* of audio its counted form of this; these tests wait on an
+/// *event*, so the shape is a deadline loop on the condition instead.
+async fn until(within: Duration, what: &str, mut condition: impl AsyncFnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + within;
+    while !condition().await {
+        assert!(tokio::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// How long these tests wait for hand-sent packets to reach the statistics before concluding they
+/// never will. Two orders of magnitude above the honest answer on an idle machine.
+const ARRIVAL_BOUND: Duration = Duration::from_secs(10);
+
 fn packet(sequence: u16) -> Bytes {
     Packet::new(
         Codec::Pcmu.payload_type(),
