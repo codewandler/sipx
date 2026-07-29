@@ -40,7 +40,8 @@ and a scripted app. `A-1` is ready. Then the milestones below, each argued for i
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
-_None._
+- [X-23 — Find out why an interop call test times out one run in five](X-23-interop-call-test-flake.md) · Build · found by T-23 — a flake that a suite exists to be believed cannot afford
+- [X-24 — Stop the specs describing a connection pool key that has moved on twice](X-24-pool-key-spec-drift.md) · Build · sip-transport.md still says the key is two fields; it has been four since T-23
 
 ## Blocked
 _None._
