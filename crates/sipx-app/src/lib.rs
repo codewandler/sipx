@@ -10,5 +10,11 @@
 //! and scripted call events, which is possible before the call-framework stories land and is the
 //! reason it comes first. The bindings (`A-2`, `A-4`) and the host process itself are built against
 //! it rather than beside it.
+//!
+//! Beside it is [`config`] (story `A-1`): the document that declares a host — its listeners, its
+//! apps, what each app is granted, and what a slow, wrong or absent app does to a live call. The
+//! two meet where they should: a failure policy read out of a document is the same value the
+//! harness runs a scenario with, so a knob nobody consults is not something this crate can express.
 
+pub mod config;
 pub mod harness;
