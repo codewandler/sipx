@@ -126,7 +126,10 @@ impl PeerLog {
     /// What the peer has said since `mark`, on either stream.
     fn since(&self, mark: &Self) -> String {
         let tail = |whole: &str, seen: usize| {
-            whole.get(seen.min(whole.len())..).unwrap_or_default().to_owned()
+            whole
+                .get(seen.min(whole.len())..)
+                .unwrap_or_default()
+                .to_owned()
         };
         format!(
             "{}{}",
@@ -176,14 +179,16 @@ async fn a_real_peer_accepts_media_sipx_encrypted_with_sdes() {
     let target = Target::new(addr_in(&uri), TransportKind::Tls).verifying("sipx.test");
     let options = DialOptions::new(sdes_from(), loopback()).with_timeout(Duration::from_secs(15));
 
-    let mut call =
-        tokio::time::timeout(Duration::from_secs(20), dial(&handle, target, &to, &options))
-            .await
-            .expect("the peer answers rather than leaving us ringing")
-            .expect(
-                "the peer accepts the encrypted call; it is configured to require SRTP, so a \
+    let mut call = tokio::time::timeout(
+        Duration::from_secs(20),
+        dial(&handle, target, &to, &options),
+    )
+    .await
+    .expect("the peer answers rather than leaving us ringing")
+    .expect(
+        "the peer accepts the encrypted call; it is configured to require SRTP, so a \
                  plain offer is refused rather than answered",
-            );
+    );
 
     // The keying is the thing under test, so it is asserted rather than inferred from the audio.
     // Without this, a run in which sipx offered cleartext — a transport that was not secure, an
