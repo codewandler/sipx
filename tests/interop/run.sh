@@ -80,6 +80,34 @@ if [[ ${#peers[@]} -eq 0 ]]; then
     exit 1
 fi
 
+# ------------------------------------------------------------------- one run at a time ----
+# Everything a run reserves is machine-global: the peer runs on the host network under one fixed
+# container name, on fixed ports, and the call tests bind a fixed port of their own because the
+# peer's contact is written into its configuration before any test starts. Start-up removes that
+# container by name and cleanup removes every container carrying the label above — neither asks
+# whether another run is using it.
+#
+# So two runs on one machine are not two runs. `X-23` measured what the second one does to the
+# first: its start-up deletes the peer out from under a call in progress, and both call tests
+# then fail on their twenty-second timeout with nothing on the far end. Nine times in ten when
+# the two overlap. That is the flake that was reported as one run in five, and nothing about it
+# is a race inside a test.
+#
+# A run therefore holds an exclusive lock for its whole life, and a second run waits its turn
+# instead of destroying the first. The lock is machine-global because what it guards is.
+LOCK_FILE="${SIPX_INTEROP_LOCK:-${TMPDIR:-/tmp}/sipx-interop.lock}"
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        echo "==> another interop run holds the peer; waiting for it to finish"
+        flock 9
+    fi
+else
+    # Refusing here would make the harness unrunnable where `flock` is absent; saying nothing
+    # would restore the silent collision. So it runs, and says what is not being guarded.
+    echo "!! flock is unavailable: a concurrent interop run on this machine would collide" >&2
+fi
+
 # ----------------------------------------------------------------------- one peer's turn ----
 # Containers are torn down by label rather than by name. The name lives in the profile, and a
 # cleanup path that has to reach into the profile to find out what to remove is a cleanup path
