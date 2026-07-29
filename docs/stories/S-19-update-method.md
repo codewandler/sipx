@@ -2,9 +2,9 @@
 id: S-19
 title: Implement the UPDATE method
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 1
-design:
+design: docs/specs/sip-update.md
 epic: conformance
 areas: [sipx-sip, sipx-call]
 note: M9 · RFC 3311 · the last session-integrity gap; 100rel unblocked it
