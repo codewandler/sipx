@@ -10,6 +10,7 @@
 
 pub mod call;
 pub mod dialog;
+pub mod dispatch;
 pub mod error;
 pub mod event;
 pub mod rel;
@@ -23,6 +24,7 @@ pub use call::{
     serve,
 };
 pub use dialog::{Dialog, DialogId, Role};
+pub use dispatch::{Calls, DispatchCounts, Dispatched, Dispatcher, Invitation};
 pub use error::{Error, Result};
 pub use event::{CallEvent, CallEvents, EndCause};
 pub use rel::{Ringing, ring, ring_early};
