@@ -10,6 +10,11 @@ What it deliberately does *not* claim to verify is behaviour. No script can read
 `crates/sipx-sip/src/transaction/client.rs` and decide whether Timer A is right; the tests do
 that. What it can do is stop an entry claiming syntax support for a header the code has never
 heard of, which is the failure mode a table like this actually has.
+
+The second failure mode, and the one that recurred: a capability implemented and tested inside
+one crate that nothing above it can select, reported as shipped because every check above passes
+for it. `unreachable_role_claims` is the check for that, scoped to the media layer for reasons
+measured in docs/designs/rfc-registry-grain.md.
 """
 
 import argparse
@@ -73,6 +78,81 @@ LIST_KEYS = {"evidence", "roles", "headers", "methods"}
 STRING_KEYS = {"spec"}
 
 
+# Where an application asks for a call. A media capability the call layer cannot select is one
+# no UA role can perform, however well the crate below implements and tests it.
+CALL_CRATE = "sipx-call"
+CRATES = ROOT / "crates"
+
+# The rule is scoped to one layer, and the scope is the finding rather than a convenience.
+# Measured against the whole registry it rejects 22 of the 29 role-claiming rows and only 3 of
+# those rejections are real; seven cannot satisfy it at any price, because they are implemented
+# in `sipx-ua`, a *sibling* of `sipx-call` rather than a crate below it, so no honest evidence
+# path at the call layer exists for them. Signalling, transport and security capabilities are on
+# the path every call already takes — "can a call reach the transaction layer" has no false
+# answer — whereas media capabilities are *selected*: a call picks a keying and a candidate
+# strategy, and picking nothing is how ICE and DTLS-SRTP came to be shipped unreachable.
+# docs/designs/rfc-registry-grain.md records the measurement.
+ROLE_REACHABILITY_LAYERS = {"media"}
+
+
+def call_layer_crates() -> set[str]:
+    """`sipx-call` and every workspace crate that can reach it.
+
+    Read from the manifests rather than listed here. A list would be one more hand-copied fact
+    about the workspace, and the way that fails is silent: a new crate above `sipx-call` would
+    not count as reachable, so a row citing it would be rejected for citing the right file.
+    """
+    dependencies = {}
+    for manifest in sorted(CRATES.glob("*/Cargo.toml")):
+        parsed = tomllib.loads(manifest.read_text())
+        named = set(parsed.get("dependencies", {})) | set(parsed.get("dev-dependencies", {}))
+        dependencies[manifest.parent.name] = {n for n in named if n.startswith("sipx-")}
+
+    reachable = {CALL_CRATE}
+    growing = True
+    while growing:
+        growing = False
+        for crate, on in dependencies.items():
+            if crate not in reachable and on & reachable:
+                reachable.add(crate)
+                growing = True
+    return reachable
+
+
+def reaches_the_call_layer(path: str, crates: set[str]) -> bool:
+    """Whether an evidence path is at or above the call layer.
+
+    `tests/` at the repository root is the interop harness: a call placed against another
+    implementation is the strongest evidence a role is reachable that this repository has.
+    """
+    if path.startswith("tests/"):
+        return True
+    parts = pathlib.PurePosixPath(path).parts
+    return len(parts) > 1 and parts[0] == "crates" and parts[1] in crates
+
+
+def unreachable_role_claims(entry, crates: set[str]) -> list[str]:
+    """A claimed role that no cited file shows a call can reach.
+
+    This is the one thing the other checks cannot see. A header must be in the parser's table and
+    a file must exist, but "implemented in a crate" and "reachable from a call" are different
+    facts, and until this check they were reported as the same one — five times in two days.
+    Unreachable code is untested code with better paperwork.
+    """
+    if entry.get("layer") not in ROLE_REACHABILITY_LAYERS:
+        return []
+    roles = entry.get("roles")
+    if not isinstance(roles, list) or not roles:
+        return []
+    if any(reaches_the_call_layer(p, crates) for p in entry.get("evidence", [])):
+        return []
+    return [
+        f"RFC {entry.get('number', '?')} claims {', '.join(roles)} but cites nothing a call can"
+        f" reach — no evidence at or above {CALL_CRATE}. Either cite the call-layer code or test"
+        f" that selects it, or drop the roles and say in the note what is missing"
+    ]
+
+
 def schema_problems(entry) -> list[str]:
     """Ways an entry departs from the per-RFC schema.
 
@@ -112,6 +192,7 @@ def schema_problems(entry) -> list[str]:
 def check(entries) -> list[str]:
     """Every claim that the code does not back up."""
     headers, methods = known_headers(), known_methods()
+    reachable = call_layer_crates()
     problems = []
 
     for entry in entries:
@@ -150,6 +231,8 @@ def check(entries) -> list[str]:
         # An entry that claims to be implemented and points at nothing is an assertion.
         if entry.get("status") in {"implemented", "partial"} and not entry.get("evidence"):
             problems.append(f"{where} claims {entry.get('status')} with no evidence cited")
+
+        problems.extend(unreachable_role_claims(entry, reachable))
 
     numbers = [e["number"] for e in entries if "number" in e]
     for number, count in Counter(numbers).items():

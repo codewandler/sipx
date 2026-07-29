@@ -29,7 +29,7 @@ One `[[rfc]]` table per document. **These keys and no others.**
 | `status` | yes | string | See below. |
 | `evidence` | yes | list of strings | Repo-relative paths to the code or tests backing the claim. Every path must exist. May be empty only when nothing is claimed. |
 | `note` | yes | string | Prose. For `partial`, it must name what is missing. |
-| `roles` | no | list of strings | Which roles the claim covers — `uac`, `uas`. Absent renders as an em dash. |
+| `roles` | no | list of strings | Which roles the claim covers — `uac`, `uas`. Absent renders as an em dash. On a `media` row, at least one `evidence` path must be at or above `sipx-call`: see below. |
 | `headers` | no | list of strings | Header variants the entry claims. Each must be known to the parser's name table. |
 | `methods` | no | list of strings | Method tokens the entry claims. Each must be known to the parser. |
 
@@ -56,8 +56,27 @@ PRACK, so both "we support RFC 3262" and "we reject it" would be false.
 - an `implemented` or `partial` entry citing no evidence;
 - a duplicate RFC number;
 - an unknown `status` or `layer`;
+- a `media` entry claiming a role while citing no evidence at or above `sipx-call`;
 - `docs/compliance.md` differing from what the script would generate;
 - prose elsewhere in the repo stating an RFC count the registry no longer agrees with.
+
+### Roles on a media row
+
+A role is a claim about what a *user agent does*, and media capabilities are selected by the call
+layer rather than reached automatically — so a media row claiming `uac` or `uas` must cite at
+least one file at or above `sipx-call` (the crate, anything depending on it, or the `tests/`
+interop harness). The set is read from the workspace manifests, not listed anywhere.
+
+This exists because the same over-claim landed five times in two days: a keying or a NAT strategy
+built and tested inside one crate, claimed for both roles, with no caller above the crate — and
+every other check on this list passes for such a row, since the header is known, the file exists,
+and evidence was cited. To drop a role, say in the `note` what is missing, as RFC 5763, 5764,
+8122, 8445 and 8839 do.
+
+The rule applies to the `media` layer only. It was measured against every row before adoption and
+does not hold for the rest: `sipx-ua` is a sibling of `sipx-call`, so the registration and
+authentication rows could not satisfy it at any price. `docs/designs/rfc-registry-grain.md`
+records the measurement and what would widen the scope.
 
 It deliberately does **not** verify behaviour. No script can read a transaction machine and decide
 whether Timer A is right — the tests do that, and each entry points at them. What it stops is the
