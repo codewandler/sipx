@@ -748,10 +748,11 @@ def infrastructure_report(step: str, evidence: str, why: str, free: int, require
     """
     return "\n".join(
         (
-            f"gate: NOT A RESULT — `{step}` was stopped by the machine, not by the tree",
-            f"  it said:      {evidence}",
+            "gate: NOT A RESULT — the machine stopped this run, not the tree",
+            f"  it stopped at: {step}",
+            f"  the evidence:  {evidence}",
             f"  why that is not your diff: {why}",
-            f"  disk now:     {human(free)} free, against the {human(required)} a run needs",
+            f"  disk now:      {human(free)} free, against the {human(required)} a run needs",
             "",
             "This run proved nothing about the tree, and no step after this one was attempted.",
             "Fix the machine — free space, or find what removed `target/` — and run the gate "
@@ -841,9 +842,10 @@ def run(steps: list[Step]) -> int:
         if free < FLOOR_FREE_BYTES:
             return stop_without_a_result(
                 step.name,
-                f"{human(free)} free before `{step.name}` was started",
-                "the disk fell below the margin a run still needs while the gate was running — "
-                "another worktree, or this one",
+                f"{human(free)} free with `{step.name}` still to run, below the "
+                f"{human(FLOOR_FREE_BYTES)} floor a run needs to keep going",
+                "the disk drained below the margin a run still needs while the gate was going, so "
+                "this step was not started rather than allowed to fail for it",
                 free,
                 failed,
             )
