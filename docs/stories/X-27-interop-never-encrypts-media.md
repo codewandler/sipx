@@ -2,7 +2,7 @@
 id: X-27
 title: Place an interop call with encrypted media
 pillar: Build
-status: ready
+status: in-progress
 priority: 1
 design: docs/designs/media.md
 epic: conformance
