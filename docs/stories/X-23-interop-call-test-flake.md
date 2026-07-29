@@ -2,8 +2,8 @@
 id: X-23
 title: Find out why an interop call test times out one run in five
 pillar: Build
-status: in-progress
-priority: 3
+status: done
+priority:
 design:
 epic:
 areas: [interop, sipx-cli]
