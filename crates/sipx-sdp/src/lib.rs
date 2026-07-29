@@ -15,6 +15,7 @@
 pub mod answer;
 pub mod crypto;
 pub mod fingerprint;
+pub mod ice;
 pub mod parse;
 pub mod session;
 

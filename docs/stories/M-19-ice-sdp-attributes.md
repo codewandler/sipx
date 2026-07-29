@@ -2,7 +2,7 @@
 id: M-19
 title: Parse and serialise the ICE attributes in SDP
 pillar: Media
-status: ready
+status: in-progress
 priority: 7
 design: docs/designs/media.md
 epic: ice
