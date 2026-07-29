@@ -3,13 +3,17 @@
 **Status:** normative, and **partly implemented**. The SDP grammar (§13) is
 [`sipx_sdp::ice`](../../crates/sipx-sdp/src/ice.rs) via `M-19`; the STUN profile (§11) is
 [`sipx_media::ice::stun`](../../crates/sipx-media/src/ice/stun.rs) via `M-20`; the agent (§2, §4 …
-§10, §14) is [`sipx_media::ice`](../../crates/sipx-media/src/ice/mod.rs) via `M-21`. Still unbuilt:
-the driver on the media port (`M-22`), restart (`M-23`) and the relayed candidate (`M-24`).
+§10, §14) is [`sipx_media::ice`](../../crates/sipx-media/src/ice/mod.rs) via `M-21`; the driver on
+the media port (§2, §6.1, §11, §13.2, §13.3) is
+[`sipx_media::ice::gather`](../../crates/sipx-media/src/ice/gather.rs),
+[`negotiate`](../../crates/sipx-media/src/ice/negotiate.rs) and
+[`driver`](../../crates/sipx-media/src/ice/driver.rs) via `M-22`. Still unbuilt: restart (`M-23`)
+and the relayed candidate (`M-24`).
 `M-16` was cut as one story, stopped at this spec, and asked to be split; its `## Progress` records
-why and along which of these section boundaries. **Three sections have since been corrected by the
-stories implementing against them** — §6.2 by `M-19`, §11.1 by `M-20`, §6.5 by `M-21`; each carries
-a dated attribution. · **Crates:** `sipx-sdp` (grammar), `sipx-media` (agent and driver) ·
-**Story:** [M-16](../stories/M-16-ice.md) · **Design:** [media](../designs/media.md)
+why and along which of these section boundaries. **Four sections have since been corrected by the
+stories implementing against them** — §6.2 by `M-19`, §11.1 by `M-20`, §6.5 by `M-21`, §2 by
+`M-22`; each carries a dated attribution. · **Crates:** `sipx-sdp` (grammar), `sipx-media` (agent
+and driver) · **Story:** [M-16](../stories/M-16-ice.md) · **Design:** [media](../designs/media.md)
 
 ## 1. Normative references
 
@@ -54,15 +58,15 @@ The agent is a state machine in the shape the transaction machines already use
 ```rust
 enum Input {
     /// The far end's ICE parameters, from an offer or an answer.
-    RemoteDescription { ufrag: String, pwd: String, candidates: Vec<Candidate>, lite: bool },
+    RemoteDescription { credentials: Credentials, candidates: Vec<Candidate>, lite: bool },
     /// A local candidate the driver gathered (host now, server-reflexive when STUN answers).
-    LocalCandidate(Candidate),
+    LocalCandidate(Gathered),
     /// Gathering will produce nothing further.
     GatheringDone,
     /// A datagram that `dtls::classify` called `Stun`, and where it came from.
     Datagram { from: SocketAddr, on: LocalBase, bytes: Vec<u8> },
-    /// Media went out on the selected pair; resets the keepalive timer (§11).
-    DataSent { pair: PairId },
+    /// Media went out on a component's selected pair; resets the keepalive timer (§11).
+    DataSent { component: ComponentId },
     TimerFired(Timer),
 }
 
@@ -83,6 +87,32 @@ that retransmits it — the same rule and for the same reason as the transaction
 
 `LocalBase` is an index into the sockets the driver bound, not a socket. The agent never learns
 what a socket is; it says "the one you called base 0" and the driver knows which.
+
+**And the mirror of that holds too: the driver never learns what a pair is.** Every field the
+driver *supplies* is something the driver can observe on its own — a source address, a socket it
+owns, a component it sent on. Every field it *receives* is resolved for it. An input that asked
+the driver for a value only the agent holds would make the two halves reach into each other, and
+the reaching would be one-way traffic in the direction the whole shape exists to forbid.
+
+*(Corrected by `M-22`, which implements the driver. `DataSent` read `{ pair: PairId }`, and a
+driver cannot produce one: `PairId` names a row of the agent's checklist, and the media path knows
+only that a packet went out for a component. Writing the driver from this line meant walking
+[`Agent::checklists`](../../crates/sipx-media/src/ice/agent.rs) to re-derive which pair §8.1.1 had
+selected — reimplementing, outside the agent, the one question the agent had just answered — and
+then holding that answer across a nomination that may move it. The agent as merged takes
+`component`, which is what §11 needs anyway: keepalives go on selected pairs, and a component has
+exactly one. The paragraph above is the rule the old line broke; the row of `LocalBase`'s own
+paragraph it mirrors was already there. Exercised by
+`a_selected_pair_is_kept_alive_with_a_binding_indication` in
+[`crates/sipx-media/tests/ice.rs`](../../crates/sipx-media/tests/ice.rs), which reaches §11's
+keepalive only through `Input::DataSent` fed from the send loop.)*
+
+Two smaller drifts in the same block, corrected without ceremony because nothing turned on them:
+`RemoteDescription` carries a [`Credentials`](../../crates/sipx-sdp/src/ice.rs) rather than a bare
+`ufrag`/`pwd` pair, since RFC 8839 §5.4's length rules belong to the type; and `LocalCandidate`
+carries a [`Gathered`](../../crates/sipx-media/src/ice/candidate.rs) rather than a `Candidate`,
+because §5.1.1.3's foundation and §5.1.2.1's local preference are properties of the gathered *set*
+and are assigned by the agent, not by whoever gathered one.
 
 ## 3. Types
 
