@@ -16,7 +16,9 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
 )]
 
 use std::net::SocketAddr;
@@ -101,9 +103,8 @@ fn read(text: &str) -> Negotiation {
 fn tone(samples: usize) -> Vec<i16> {
     (0..samples)
         .map(|index| {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-            let value = (8000.0 * f64::sin(index as f64 * 0.2)) as i16;
-            value
+            let seconds = index as f64 / 8000.0;
+            ((seconds * 440.0 * std::f64::consts::TAU).sin() * 12_000.0) as i16
         })
         .collect()
 }

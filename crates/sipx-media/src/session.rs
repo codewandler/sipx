@@ -486,6 +486,50 @@ impl Stop {
     }
 }
 
+/// The state every loop in a session shares, built in one place.
+///
+/// One place because two of these must not be rolled twice: RFC 3550 §8.1 requires a
+/// participant's RTCP to carry the same SSRC as its RTP, so the send loop and the report loop
+/// cannot each choose one, and §6.5.1's CNAME has to be stable for the session.
+struct Shared {
+    sent: Arc<AtomicU64>,
+    received: Arc<AtomicU64>,
+    outbound: Arc<Outbound>,
+    feedback: Arc<Mutex<Feedback>>,
+    /// Zero until the first packet names the far end's synchronisation source.
+    stats: Arc<Mutex<StreamStats>>,
+    stop: Arc<Stop>,
+    ssrc: u32,
+    cname: String,
+    /// Whether received packets are handed on encoded rather than decoded to samples.
+    relay: Arc<AtomicBool>,
+    /// Whether this side's outbound audio is gated to silence (`M-18`).
+    muted: Arc<AtomicBool>,
+    /// A counter of full keypresses received, for an `Interrupt::OnDigit` playback to watch.
+    keypresses: Arc<watch::Sender<u64>>,
+}
+
+impl Shared {
+    fn new(local_addr: SocketAddr) -> Self {
+        Self {
+            sent: Arc::new(AtomicU64::new(0)),
+            received: Arc::new(AtomicU64::new(0)),
+            outbound: Arc::new(Outbound::default()),
+            feedback: Arc::new(Mutex::new(Feedback::default())),
+            stats: Arc::new(Mutex::new(StreamStats::new(0))),
+            stop: Arc::new(Stop::default()),
+            ssrc: rand::random(),
+            // Unique in user@host form and stable for the session: a random token distinguishes
+            // sessions on this host, the local address distinguishes hosts, and neither needs a
+            // name lookup on the media path.
+            cname: format!("{:08x}@{}", rand::random::<u32>(), local_addr),
+            relay: Arc::new(AtomicBool::new(false)),
+            muted: Arc::new(AtomicBool::new(false)),
+            keypresses: Arc::new(watch::Sender::new(0u64)),
+        }
+    }
+}
+
 /// Identifies one playback on one session.
 ///
 /// Carried by [`Playback`] and by the completion event a call reports it through, so a caller
@@ -796,7 +840,7 @@ impl MediaPort {
     /// window a STUN transaction to a configured server needs.
     ///
     /// The result carries the `a=candidate` lines for the description
-    /// ([`LocalDescription::attributes`]) and the agent that will drive them.
+    /// ([`ice::LocalDescription::attributes`]) and the agent that will drive them.
     pub async fn gather(&self, gathering: &ice::Gathering) -> ice::LocalDescription {
         let mut bases = vec![ice::gather::Base {
             index: ice::LocalBase(0),
@@ -823,7 +867,7 @@ impl MediaPort {
     /// Start carrying media with ICE driving the path (`docs/specs/ice.md` §2, §11).
     ///
     /// The `local` description must already have been given the peer's half through
-    /// [`LocalDescription::accept`]. If that returned `false` — the peer offered no candidates,
+    /// [`ice::LocalDescription::accept`]. If that returned `false` — the peer offered no candidates,
     /// or RFC 8839 §5.3's `ice-mismatch` applies — no agent is driven and this is
     /// [`Self::start`]: no check is sent, no timer runs, and the stream is carried by symmetric
     /// RTP exactly as it is today.
@@ -867,26 +911,9 @@ impl MediaSession {
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(64);
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
         let (encoded_tx, encoded_rx) = mpsc::channel::<Encoded>(256);
-        let relay = Arc::new(AtomicBool::new(false));
-        let muted = Arc::new(AtomicBool::new(false));
         let (digits_tx, digits_rx) = mpsc::channel::<(Digit, Duration)>(32);
-        let keypresses = Arc::new(watch::Sender::new(0u64));
 
-        let sent = Arc::new(AtomicU64::new(0));
-        let received = Arc::new(AtomicU64::new(0));
-        let outbound = Arc::new(Outbound::default());
-        let feedback = Arc::new(Mutex::new(Feedback::default()));
-        // Zero until the first packet names the far end's synchronisation source.
-        let stats = Arc::new(Mutex::new(StreamStats::new(0)));
-        let stop = Arc::new(Stop::default());
-        // Chosen once and shared: RFC 3550 §8.1 requires a participant's RTCP to carry the
-        // same SSRC as its RTP, so the send loop and the report loop cannot each roll
-        // their own.
-        let ssrc: u32 = rand::random();
-        // RFC 3550 §6.5.1 wants the CNAME unique in user@host form and stable for the
-        // session: a random token distinguishes sessions on this host, the local address
-        // distinguishes hosts, and neither needs a name lookup on the media path.
-        let cname = format!("{:08x}@{}", rand::random::<u32>(), local_addr);
+        let shared = Shared::new(local_addr);
 
         // Where to send. Starts at the SDP address and is replaced by the first observed
         // source: behind a NAT the advertised address is private and unreachable.
@@ -896,9 +923,8 @@ impl MediaSession {
         // and cloning a pair of keys is cheaper than cloning the whole configuration twice.
         let srtp_keys = config.srtp.clone();
 
-        // Where RTCP goes once ICE has selected a pair for component 2. `None` — and it stays
-        // `None` for every stream without ICE — leaves the report loop on RFC 3550 §11's
-        // convention, which is what it has always done.
+        // See `ice::driver::Destinations::rtcp`: `None` here, and for every stream without ICE,
+        // leaves the report loop on RFC 3550 §11's convention.
         let rtcp_remote: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
         let ice = ice.map(|local| {
             spawn_ice(
@@ -909,7 +935,7 @@ impl MediaSession {
                     rtp: Arc::clone(&remote),
                     rtcp: Arc::clone(&rtcp_remote),
                 },
-                &stop,
+                &shared.stop,
             )
         });
 
@@ -919,55 +945,50 @@ impl MediaSession {
             Sending {
                 remote: Arc::clone(&remote),
                 config: config.clone(),
-                ssrc,
-                sent: Arc::clone(&sent),
-                outbound: Arc::clone(&outbound),
-                muted: Arc::clone(&muted),
+                ssrc: shared.ssrc,
+                sent: Arc::clone(&shared.sent),
+                outbound: Arc::clone(&shared.outbound),
+                muted: Arc::clone(&shared.muted),
                 ice: ice.clone(),
-                stop: Arc::clone(&stop),
+                stop: Arc::clone(&shared.stop),
             },
         ));
-        let clips_tx = spawn_playback_queue(&outgoing_tx, &stop);
+        let clips_tx = spawn_playback_queue(&outgoing_tx, &shared.stop);
         tokio::spawn(receive_loop(
             Arc::clone(socket),
             Inbound {
                 audio: incoming_tx,
                 encoded: encoded_tx,
-                relay: Arc::clone(&relay),
+                relay: Arc::clone(&shared.relay),
                 digits: Keypresses {
                     to: digits_tx,
-                    arrivals: Arc::clone(&keypresses),
+                    arrivals: Arc::clone(&shared.keypresses),
                 },
                 remote: Arc::clone(&remote),
                 config,
-                received: Arc::clone(&received),
-                stats: Arc::clone(&stats),
-                // On an ICE stream the destination is the selected pair's, not the first
-                // source's: `docs/specs/ice.md` §11.3 — an unauthenticated message must not move
-                // the path — and RFC 8445 §8.1.1, which is what "selected" means.
+                received: Arc::clone(&shared.received),
+                stats: Arc::clone(&shared.stats),
                 symmetric: ice.is_none(),
                 ice: ice.clone(),
-                stop: Arc::clone(&stop),
+                stop: Arc::clone(&shared.stop),
             },
         ));
 
-        spawn_control(
-            Control {
-                media: Arc::clone(socket),
-                rtcp,
-                remote: Arc::clone(&remote),
-                rtcp_remote,
-                interval: rtcp_interval,
-                ssrc,
-                cname,
-                stats: Arc::clone(&stats),
-                outbound,
-                feedback: Arc::clone(&feedback),
-                srtp: srtp_keys,
-                ice,
-                stop: Arc::clone(&stop),
-            },
-        );
+        spawn_control(Control {
+            media: Arc::clone(socket),
+            rtcp,
+            remote: Arc::clone(&remote),
+            rtcp_remote,
+            interval: rtcp_interval,
+            ssrc: shared.ssrc,
+            cname: shared.cname,
+            stats: Arc::clone(&shared.stats),
+            outbound: shared.outbound,
+            feedback: Arc::clone(&shared.feedback),
+            srtp: srtp_keys,
+            ice,
+            stop: Arc::clone(&shared.stop),
+        });
 
         Self {
             outgoing: outgoing_tx,
@@ -975,22 +996,22 @@ impl MediaSession {
             tones: AtomicU64::new(0),
             incoming: Mutex::new(incoming_rx),
             encoded: Mutex::new(encoded_rx),
-            relay,
-            muted,
+            relay: shared.relay,
+            muted: shared.muted,
             clips: clips_tx,
             playbacks: AtomicU64::new(0),
             outstanding: Arc::new(AtomicUsize::new(0)),
-            keypresses,
+            keypresses: shared.keypresses,
             codec: config_codec,
             local_addr,
             samples_per_packet,
             packet_duration,
             clock_rate,
-            sent,
-            received,
-            stats,
-            feedback,
-            stop,
+            sent: shared.sent,
+            received: shared.received,
+            stats: shared.stats,
+            feedback: shared.feedback,
+            stop: shared.stop,
         }
     }
 
@@ -2089,11 +2110,8 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
     let mut datagram = vec![0u8; 2048];
     let mut dtmf = sipx_rtp::dtmf::Receiver::new();
     let started = tokio::time::Instant::now();
-    // The synchronisation source this session is carrying. RTP has no authentication, so this
-    // is not a security control — anyone who can guess the port can still forge a first
-    // packet. What it does buy is that once a stream is established, a *later* forged packet
-    // with a different SSRC cannot redirect our media or poison the jitter buffer, which is
-    // the difference between a race an attacker has to win and one they can win at leisure.
+    // The synchronisation source this session is carrying; see `accept_source` for why one is
+    // pinned at all, and for what it does and does not buy.
     let mut stream: Option<u32> = None;
 
     // When the far end stops, whatever the buffer is still holding has to come out. Without
@@ -2136,12 +2154,8 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
             }
         };
 
-        let Some(media) = demultiplex(
-            datagram.get(..len).unwrap_or(&[]),
-            source,
-            ice::LocalBase(0),
-            ice.as_ref(),
-        ) else {
+        let arrived = datagram.get(..len).unwrap_or(&[]);
+        let Some(media) = demultiplex(arrived, source, ice::LocalBase(0), ice.as_ref()) else {
             continue;
         };
 
@@ -2172,18 +2186,7 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
         // buffer and the RTCP report disagree about when the same packet turned up, by however
         // long the lock took — and the whole point of both numbers is that they are comparable.
         let arrival = arrival_in_timestamp_units(started, config.clock_rate);
-        {
-            let mut stats = stats.lock().await;
-            if config.dtmf_payload_type == Some(packet.payload_type) {
-                // A telephone event's timestamp is the event's *start* (RFC 4733
-                // §2.5.1.2), not this packet's sampling instant, so its transit grows per
-                // packet by design and would fabricate jitter out of a keypress. It still
-                // counts for loss and sequence continuity.
-                stats.on_untimed_packet(packet.sequence);
-            } else {
-                stats.on_packet(packet.sequence, packet.timestamp, arrival);
-            }
-        }
+        note_arrival(&stats, &packet, &config, arrival).await;
 
         buffer.push_at(packet, arrival);
 
@@ -2212,6 +2215,25 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
 /// Hand one packet's audio to the application.
 ///
 /// Returns whether the loop should keep running.
+/// Score one arrival against the stream's statistics (RFC 3550 §6.4.1).
+///
+/// A telephone event's timestamp is the event's *start* (RFC 4733 §2.5.1.2) and not this
+/// packet's sampling instant, so its transit grows per packet by design and would fabricate
+/// jitter out of a keypress. It still counts for loss and sequence continuity.
+async fn note_arrival(
+    stats: &Arc<Mutex<StreamStats>>,
+    packet: &Packet,
+    config: &Config,
+    arrival: u32,
+) {
+    let mut stats = stats.lock().await;
+    if config.dtmf_payload_type == Some(packet.payload_type) {
+        stats.on_untimed_packet(packet.sequence);
+    } else {
+        stats.on_packet(packet.sequence, packet.timestamp, arrival);
+    }
+}
+
 /// The local clock in RTP timestamp units.
 fn arrival_in_timestamp_units(started: tokio::time::Instant, clock_rate: u32) -> u32 {
     let elapsed = started.elapsed().as_secs_f64() * f64::from(clock_rate);
@@ -2338,12 +2360,11 @@ async fn rtcp_loop(
         // selected a pair for component 2, in which case the checked path is where the reports
         // go and the convention is only what got them there.
         let selected = *rtcp_remote.lock().await;
-        let rtcp_to = match selected {
-            Some(pair) => pair,
-            None => {
-                let destination = *remote.lock().await;
-                SocketAddr::new(destination.ip(), destination.port().saturating_add(1))
-            }
+        let rtcp_to = if let Some(pair) = selected {
+            pair
+        } else {
+            let destination = *remote.lock().await;
+            SocketAddr::new(destination.ip(), destination.port().saturating_add(1))
         };
         if socket.send_to(&datagram, rtcp_to).await.is_err() {
             return;
@@ -2381,12 +2402,8 @@ async fn rtcp_receive_loop(
 
         // The control port carries the same three protocols the media port does, because ICE
         // checks component 2 over it.
-        let Some(control) = demultiplex(
-            datagram.get(..len).unwrap_or(&[]),
-            source,
-            ice::LocalBase(1),
-            ice.as_ref(),
-        ) else {
+        let arrived = datagram.get(..len).unwrap_or(&[]);
+        let Some(control) = demultiplex(arrived, source, ice::LocalBase(1), ice.as_ref()) else {
             continue;
         };
 
