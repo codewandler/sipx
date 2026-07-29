@@ -83,15 +83,20 @@ STRING_KEYS = {"spec"}
 CALL_CRATE = "sipx-call"
 CRATES = ROOT / "crates"
 
-# The rule is scoped to one layer, and the scope is the finding rather than a convenience.
-# Measured against the whole registry it rejects 22 of the 29 role-claiming rows and only 3 of
-# those rejections are real; seven cannot satisfy it at any price, because they are implemented
-# in `sipx-ua`, a *sibling* of `sipx-call` rather than a crate below it, so no honest evidence
-# path at the call layer exists for them. Signalling, transport and security capabilities are on
-# the path every call already takes — "can a call reach the transaction layer" has no false
-# answer — whereas media capabilities are *selected*: a call picks a keying and a candidate
-# strategy, and picking nothing is how ICE and DTLS-SRTP came to be shipped unreachable.
-# docs/designs/rfc-registry-grain.md records the measurement.
+# The rule is scoped to one layer. That is a *choice*, not something the workspace forced, and
+# the reason is that the media layer is the one place where the crate serving a role and the
+# crate implementing the capability come apart. A media row claims `uac`/`uas` — placing and
+# answering calls — which an application does through `sipx-call`, while the capability lives in
+# `sipx-media` or `sipx-sdp`. Nothing makes `sipx-call` select it, and twice it did not: ICE and
+# DTLS-SRTP were built, tested and claimed for both roles with no call able to ask for either.
+# Elsewhere that gap does not exist. Transport, core and security capabilities sit on the path
+# every call already takes, so "can a call reach the transaction layer" has no false answer; and
+# a services row like RFC 3856 claims `uas` for a surface `sipx-ua` itself serves, so the check
+# would only be asking whether a crate's public API reaches its own module.
+#
+# Measured before adoption, the unscoped rule rejects 22 of the 29 role-claiming rows, and only
+# 7 of those rejections are real. docs/designs/rfc-registry-grain.md carries the full count, the
+# argument, and what would widen this — including the two ways the scope can be worked around.
 ROLE_REACHABILITY_LAYERS = {"media"}
 
 
@@ -120,13 +125,14 @@ def call_layer_crates() -> set[str]:
 
 
 def reaches_the_call_layer(path: str, crates: set[str]) -> bool:
-    """Whether an evidence path is at or above the call layer.
+    """Whether an evidence path is a source file in a crate at or above the call layer.
 
-    `tests/` at the repository root is the interop harness: a call placed against another
-    implementation is the strongest evidence a role is reachable that this repository has.
+    Only `crates/<name>/…` counts. The repository-root `tests/` tree is the interop harness —
+    shell scripts and peer configuration, not Rust — and its Rust half lives in
+    `crates/sipx-cli/tests/`, which this already accepts. Admitting the root tree wholesale would
+    have made `tests/interop/README.md` proof that a role is reachable, since `evidence` may
+    legitimately cite markdown (RFC 5922 cites a spec). No row relied on it.
     """
-    if path.startswith("tests/"):
-        return True
     parts = pathlib.PurePosixPath(path).parts
     return len(parts) > 1 and parts[0] == "crates" and parts[1] in crates
 

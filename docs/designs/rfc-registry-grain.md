@@ -139,27 +139,68 @@ the decision above stands unchanged.
 
 **The rule proposed by `M-28` was measured before it was adopted, and it does not hold as
 stated.** "An entry may not claim `uac` or `uas` unless its `evidence` cites a file at or above
-`sipx-call`" rejects **22 of the 29 role-claiming rows**, and only three of those rejections are
-real (8122, 8445, 8839). Nineteen are false positives, because `evidence` cites the code that
-*implements* a behaviour — which is its job — and a citation in `sipx-transport` says nothing
-about whether a call reaches it. Every call reaches the transaction layer, DNS resolution, offer
-/answer and `rport`; those rows are honest and the rule calls them liars.
+`sipx-call`" rejects **22 of the 29 role-claiming rows**. Sorting those 22 by what is actually
+true of the code:
 
-**Seven of them cannot satisfy the rule at any price**, which is the finding that settles it:
-RFCs 2617, 3680, 3856, 3903, 4235, 7616 and 8760 are implemented in `sipx-ua`, and `sipx-ua` is a
-*sibling* of `sipx-call` — `sipx-call`'s manifest does not name it, and neither reaches the other.
-The rule's premise, that `sipx-call` is the layer everything must be reachable through, is false
-for the registration, authentication and presence half of the stack. There is no honest evidence
-path those rows could cite.
+| | Rows | What the rejection means |
+|---|---|---|
+| Genuine over-claims | 8122, 8445, 8839 | No caller above the implementing crate. Roles removed. |
+| Reachable, evidence incomplete | 3711, 2617, 7616, 8760 | Reachable; the row simply never cited the consumer. |
+| The rule asking the wrong question | 3263, 3264, 3581, 3680, 3856, 3903, 4235, 4475, 5389, 5626, 5627, 5922, 6026, 7118, 8599 | Reachable, and no citation would make the rule's premise true of them. |
 
-**So the rule is narrowed to `layer = "media"`, and the narrowing is the argument rather than a
-convenience.** Signalling, transport and security capabilities sit on the path every call already
-takes: "can a call reach the transaction layer" has no false answer, so the check would be asking
-a question that cannot come out `no`. Media capabilities are *selected* — a call picks a keying
-and a candidate strategy — and selecting nothing is exactly how ICE and DTLS-SRTP came to be
-shipped unreachable. Scoped to media the rule rejects four rows: three genuine over-claims, and
-RFC 3711, whose SRTP transform *is* keyed on a live call but whose evidence had never said so.
-That one was corrected by citing the call-layer tests; the other three lost their roles.
+So **7 of 22 rejections point at something real** and 15 do not. `evidence` cites the code that
+*implements* a behaviour — that is its job — and a citation in `sipx-transport` says nothing about
+whether a call reaches it. Every call reaches the transaction layer, DNS resolution, offer/answer
+and `rport`. Those rows are honest and the unscoped rule calls them liars.
+
+**The scope is a choice, and here is the argument for it.** The media layer is the one place where
+*the crate that serves a role* and *the crate that implements the capability* come apart. A media
+row claims `uac`/`uas` — placing and answering calls — which an application does through
+`sipx-call`, while the capability lives in `sipx-media` or `sipx-sdp`. Nothing forces the two to
+meet, and twice they did not: ICE and DTLS-SRTP were built, tested and claimed for both roles with
+no call able to ask for either. Everywhere else that gap is absent. Transport, core and security
+capabilities are on the path every call already takes, so the check would be asking a question
+that cannot come out `no`. And a services row claims a role for a surface `sipx-ua` *itself*
+serves, so the check would only be asking whether a crate's public API reaches its own module.
+
+Scoped to media the rule rejects four rows: three genuine over-claims, and RFC 3711, whose SRTP
+transform *is* keyed on a live call but whose evidence had never said so. That one was corrected
+by citing the call-layer tests; the other three lost their roles.
+
+### Why the four `sipx-ua` service rows keep their roles
+
+RFCs 3680, 3856, 3903 and 4235 implement a `uas` surface in `sipx-ua` that **nothing in
+`sipx-cli` calls** — `sipx-cli` offers `register`, `dial`, `answer` and `peers`, and mentions
+presence, publication and event packages nowhere. That looks like the ICE shape and it is worth
+saying why it is not, because the difference is the whole thesis of this check.
+
+sipx is a **library**. `sipx-ua` is not an internal layer that something else must wire up; it is
+the API an application serves subscriptions and publications *through*. The relevant question is
+therefore whether an external consumer can reach the capability, and
+`crates/sipx-ua/tests/packages.rs` is one: an integration test links against the crate from
+outside and imports `sipx_ua::presence::{Compositor, Pidf, Publish, Published, Tuple}` and
+`sipx_ua::packages`. That is an existence proof of a caller across the crate boundary — exactly
+what `Capabilities::with_dtls_srtp` and `MediaSession::start_with_ice` have none of, in any crate,
+including their own integration tests. `sipx-cli` not exercising them is a gap in the CLI's
+feature set, not a false claim in the table.
+
+`scripts/test-rfc-report.py` asserts this rather than leaving it to prose, so that deleting that
+integration test — the thing the argument rests on — fails the gate.
+
+### What was got wrong the first time
+
+The first version of this section claimed those seven `sipx-ua` rows "cannot satisfy the rule at
+any price", because `sipx-ua` is a sibling of `sipx-call`. **That is false.**
+`crates/sipx-cli/Cargo.toml` names both `sipx-call` and `sipx-ua`, so `sipx-cli` is already in the
+set `call_layer_crates()` computes, and it is a real consumer of the auth path:
+`crates/sipx-cli/src/register.rs` calls `with_credentials(Credentials::new(…))`, exercised by
+`crates/sipx-cli/tests/cli.rs`. RFCs 2617, 7616 and 8760 could satisfy the unscoped rule today for
+the price of one honest citation, which is why they are filed above as incomplete evidence rather
+than as the rule misfiring. They were left uncited because the check does not ask them for it;
+adding those citations would improve the table and is a loose end, not a defect.
+
+It is recorded because the error mattered: it made a chosen scope look forced, and a future
+author reading "structurally impossible" would not have re-examined it.
 
 There is **no suppression list**, deliberately. Every rejected row was corrected in the same
 commit. A check with an exceptions file stops working the first time somebody would rather add a
@@ -174,15 +215,22 @@ facts about the build drifts, and drifts silently.
 - **A non-media over-claim.** The scope is empirical — five instances, four of them media. A
   sixth outside the media layer is evidence the narrowing was too tight, and the check takes a
   layer set rather than a constant so that widening it is one edit and a test.
-- **`sipx-ua` and `sipx-call` acquiring a common layer above them.** The structural objection
-  above is about today's dependency graph. If an application crate came to sit above both, the
-  rule could be stated over *that* crate and would apply to the seven rows it currently cannot
-  reach.
+- **`layer` is author-chosen, and the check keys on it.** Nothing validates a row's layer beyond
+  membership of the enum, so relabelling a media row `security` exits the check entirely. This is
+  the strongest argument against scoping by layer at all, and the honest reason to accept it for
+  now is that moving a row between layers is conspicuous in the generated table, which groups by
+  layer — but it is not *checked*, and a rule that can be left by editing one field is weaker than
+  one that cannot.
 - **Reachability becoming directly enumerable.** The check binds to evidence paths, which is a
   proxy: a row could satisfy it by citing a call-layer file containing a dead branch — which is
   precisely what `sipx-call`'s `a=fingerprint` rendering is today. A cross-crate caller check, or
   coverage data from the call-layer tests, would bind to the fact itself rather than to a path,
-  and would be strictly better.
+  and would be strictly better. It would also replace the layer scope, since it could ask the
+  question of every row without false positives.
+- **Applying the services-row test mechanically.** The argument above turns on "an integration
+  test in another crate imports the module". That is enumerable, and a check built on it would
+  cover the services and transport layers on the same footing as media, rather than exempting
+  them by layer.
 
 ## Consequences
 

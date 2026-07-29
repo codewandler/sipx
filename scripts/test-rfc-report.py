@@ -232,15 +232,52 @@ class RoleReachability(unittest.TestCase):
     def test_the_rule_is_scoped_to_the_media_layer(self):
         """Deliberately narrow, and asserted so that widening it is a decision rather than a slip.
 
-        Measured against the whole registry, the unscoped rule rejects 22 of the 29 role-claiming
-        rows and only 3 of those are real. Seven cannot satisfy it at all: they are implemented in
-        `sipx-ua`, which is a *sibling* of `sipx-call` and not below it, so no honest evidence
-        path exists. `docs/designs/rfc-registry-grain.md` records the measurement.
+        The scope is a choice. Media is where the crate serving a role and the crate implementing
+        the capability come apart — a media row claims `uac`/`uas`, which an application reaches
+        through `sipx-call`, while the code sits in `sipx-media` or `sipx-sdp`, and twice nothing
+        connected the two. A security row like RFC 2617 is reachable through `sipx-cli`, which
+        depends on `sipx-ua` *and* `sipx-call`; it is out of scope because the check would be
+        asking a question that cannot come out `no`, not because it could not answer it.
+        `docs/designs/rfc-registry-grain.md` carries the count and the argument.
         """
         entry = self.a_media_entry(
             layer="security", evidence=["crates/sipx-ua/src/auth.rs"]
         )
         self.assertEqual([], [p for p in report.check([entry]) if "reach" in p])
+
+    def test_the_services_rows_keep_their_roles_and_why(self):
+        """RFC 3680, 3856, 3903 and 4235 are *not* the media over-claims one layer over.
+
+        They implement a `uas` surface in `sipx-ua` that nothing in `sipx-cli` calls, which looks
+        like the ICE shape and is not: sipx is a library, and `sipx-ua` is itself the API an
+        application serves subscriptions and publications through. `crates/sipx-ua/tests/
+        packages.rs` imports `sipx_ua::presence` and `sipx_ua::packages` across the crate
+        boundary, so an external consumer demonstrably reaches them — which is precisely what
+        `Capabilities::with_dtls_srtp` and `MediaSession::start_with_ice` have no example of.
+
+        Asserted so that the distinction is a recorded judgement rather than an omission, and so
+        that removing that integration test surfaces here.
+        """
+        by_number = {e["number"]: e for e in registry_entries()}
+        for number in (3680, 3856, 3903, 4235):
+            with self.subTest(rfc=number):
+                self.assertTrue(by_number[number].get("roles"))
+        reached = (ROOT / "crates" / "sipx-ua" / "tests" / "packages.rs").read_text()
+        self.assertIn("sipx_ua::presence", reached)
+        self.assertIn("sipx_ua::packages", reached)
+
+    def test_only_a_crate_path_proves_reachability(self):
+        """The repository-root `tests/` tree is not a way through the check.
+
+        `evidence` may legitimately cite markdown — RFC 5922 cites a spec — so accepting the root
+        tree wholesale would have let `tests/interop/README.md` stand as proof that a role is
+        reachable. Its Rust half is in `crates/sipx-cli/tests/`, which is accepted on its own.
+        """
+        entry = self.a_media_entry(evidence=["tests/interop/README.md"])
+        self.assertTrue(
+            any("reach" in p for p in report.check([entry])),
+            "a path outside crates/ was taken as proof a call can reach the capability",
+        )
 
     def test_the_call_layer_is_read_from_the_workspace(self):
         """The reachable set is Cargo's dependency graph, not a list in this script.

@@ -64,8 +64,8 @@ PRACK, so both "we support RFC 3262" and "we reject it" would be false.
 
 A role is a claim about what a *user agent does*, and media capabilities are selected by the call
 layer rather than reached automatically — so a media row claiming `uac` or `uas` must cite at
-least one file at or above `sipx-call` (the crate, anything depending on it, or the `tests/`
-interop harness). The set is read from the workspace manifests, not listed anywhere.
+least one file in `sipx-call` or a crate depending on it. That set is read from the workspace
+manifests, not listed anywhere; only `crates/…` paths count.
 
 This exists because the same over-claim landed five times in two days: a keying or a NAT strategy
 built and tested inside one crate, claimed for both roles, with no caller above the crate — and
@@ -73,10 +73,14 @@ every other check on this list passes for such a row, since the header is known,
 and evidence was cited. To drop a role, say in the `note` what is missing, as RFC 5763, 5764,
 8122, 8445 and 8839 do.
 
-The rule applies to the `media` layer only. It was measured against every row before adoption and
-does not hold for the rest: `sipx-ua` is a sibling of `sipx-call`, so the registration and
-authentication rows could not satisfy it at any price. `docs/designs/rfc-registry-grain.md`
-records the measurement and what would widen the scope.
+**The `media` scope is a deliberate choice, not a limit of the workspace.** Media is where the
+crate serving a role and the crate implementing the capability come apart: an application places
+calls through `sipx-call` while the keying lives in `sipx-media`. Elsewhere there is no such gap —
+transport and core capabilities are on the path every call takes, and a services row claims a role
+for a surface `sipx-ua` itself serves. Unscoped, the rule rejects 22 of the 29 role-claiming rows
+and only 7 of those rejections point at anything real.
+`docs/designs/rfc-registry-grain.md` records the full count, the argument, and the two known ways
+to work around the scope.
 
 It deliberately does **not** verify behaviour. No script can read a transaction machine and decide
 whether Timer A is right — the tests do that, and each entry points at them. What it stops is the

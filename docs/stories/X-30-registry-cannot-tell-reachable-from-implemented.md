@@ -24,8 +24,9 @@ one way it has repeatedly been wrong.
       the whole registry before adopting it — if it produces a wave of false positives it is the
       wrong rule, and saying so is a real outcome of this story.
       → `unreachable_role_claims` in `scripts/rfc-report.py`. **Validated, and the rule as stated
-      does not hold**: it rejects 22 of 29 role-claiming rows, 19 of them false. Adopted narrowed
-      to `layer = "media"`; measurement in `docs/designs/rfc-registry-grain.md`.
+      does not hold**: it rejects 22 of 29 role-claiming rows, and only 7 of those rejections point
+      at anything real. Adopted narrowed to `layer = "media"` — a choice, argued on the merits in
+      `docs/designs/rfc-registry-grain.md`, which carries the row-by-row count.
 - [x] The check runs in `./scripts/rfc-report.py --check`, which is already a gate step and a CI
       job, so a new over-claim fails the gate rather than being found by the next story to touch
       that code.
@@ -43,14 +44,24 @@ one way it has repeatedly been wrong.
 
 ## Progress
 - **Done.** The rule from `M-28` was measured before adoption and **does not hold as stated** —
-  22 of 29 role-claiming rows rejected, only 3 real. `evidence` cites the code that *implements* a
-  behaviour, which says nothing about whether a call reaches it; every call reaches the transaction
-  layer, DNS and offer/answer. Seven rows cannot satisfy it at any price: RFCs 2617, 3680, 3856,
-  3903, 4235, 7616 and 8760 live in `sipx-ua`, a **sibling** of `sipx-call`, so no honest
-  call-layer evidence path exists for them.
-- Adopted narrowed to the `media` layer, where capabilities are *selected* by the call rather than
-  reached automatically — which is what all five instances have in common. Scoped that way it
-  rejects four rows and three are genuine.
+  22 of 29 role-claiming rows rejected, only 7 of those rejections real (3 over-claims, 4 rows
+  whose evidence was merely incomplete). `evidence` cites the code that *implements* a behaviour,
+  which says nothing about whether a call reaches it; every call reaches the transaction layer,
+  DNS and offer/answer.
+- Adopted narrowed to the `media` layer. That is a **choice**, not something the workspace forced:
+  media is the one layer where the crate serving a role (`sipx-call`) and the crate implementing
+  the capability (`sipx-media`, `sipx-sdp`) come apart, which is the gap ICE and DTLS-SRTP fell
+  into. Scoped that way it rejects four rows and three are genuine.
+- **Corrected after review:** the first version justified the scope by claiming seven `sipx-ua`
+  rows could not satisfy the rule "at any price" because `sipx-ua` is a sibling of `sipx-call`.
+  That is false — `crates/sipx-cli/Cargo.toml` names both, and `sipx-cli/src/register.rs` is a
+  real caller of the auth path. The scope survives on its own merits; the false justification and
+  the already-fired widening trigger it produced are replaced, and the error is recorded in the
+  design doc so the next author does not inherit "structurally impossible".
+- RFCs 3680, 3856, 3903 and 4235 are addressed explicitly rather than counted as false positives:
+  they keep their roles because `crates/sipx-ua/tests/packages.rs` imports `sipx_ua::presence` and
+  `sipx_ua::packages` across the crate boundary, which is the external caller ICE and DTLS-SRTP
+  have nowhere. `sipx-cli` not using them is a CLI gap, not a false claim.
 - Corrected: **8122** (DTLS fingerprint, `implemented`+both roles → `partial`, no roles — the
   `a=fingerprint` branch in `sipx-call` is dead because `Capabilities::with_dtls_srtp` has no
   caller outside `sipx-sdp`'s tests); **8445** and **8839** (ICE, both roles → none —
@@ -58,9 +69,18 @@ one way it has repeatedly been wrong.
   wiring story); **3711** (SRTP *is* reachable — evidence now cites
   `crates/sipx-call/tests/secure_media.rs` and `crates/sipx-cli/tests/interop_srtp.rs`).
 - The reachable set is derived from the workspace manifests (`call_layer_crates`), not listed.
+  Only `crates/…` paths count: the repo-root `tests/` escape hatch was removed, since `evidence`
+  may cite markdown and `tests/interop/README.md` would otherwise have proved reachability.
+- RFC 3711's note said `secure_media.rs` carries audio "in each direction". It plays one
+  direction; both ends assert `is_encrypted()`, and the bidirectional evidence is `interop_srtp.rs`,
+  which is `#[ignore]`d and runs only in the interop matrix. The note now says exactly that.
 - Deliberately not done: a cross-crate caller check, which would bind to reachability itself
   rather than to evidence paths. The current check can be satisfied by citing a call-layer file
-  containing a dead branch — that is 8122's exact shape. Recorded under "what would widen this".
+  containing a dead branch — that is 8122's exact shape. Recorded under "what would widen this",
+  alongside the fact that `layer` is author-chosen, so relabelling a media row exits the check.
+- Loose end, not taken: RFCs 2617, 7616 and 8760 could cite `crates/sipx-cli/src/register.rs` and
+  `crates/sipx-cli/tests/cli.rs` and would then satisfy even the unscoped rule. The media-scoped
+  check does not ask them to, so the citations were left alone rather than churned.
 
 ## Notes
 - **Five instances in two days, which is the argument.** `M-22` built ICE no call could offer
