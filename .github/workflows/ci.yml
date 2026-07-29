@@ -94,6 +94,7 @@ jobs:
       # The registry's schema guard has had a suite since X-15 and no job ran it. Both suites are
       # milliseconds and need nothing but a Python interpreter, so this is their home.
       - run: python3 scripts/test-rfc-report.py
+      - run: python3 scripts/test-pool-key.py
 
   # The peer list is read from the repository rather than written here, so that adding an interop
   # peer stays what `tests/interop/README.md` promises it is: adding a profile. A matrix spelled
@@ -163,6 +164,10 @@ jobs:
       # The compliance table is generated from a registry and claims things about the code. This
       # fails the build if it has drifted from either — a table nobody checks becomes marketing.
       - run: ./scripts/rfc-report.py --check
+      # The connection pool key was restated in three specs and one of them was wrong through two
+      # changes to the type. The list is generated from `ConnectionKey`; this fails when a field
+      # is added to the key and the spec still describes the key before it.
+      - run: ./scripts/check-pool-key.py --check
 
   # The documentation site. Built on every push and pull request so a broken link fails review
   # rather than the deployed page; published only from `main`.

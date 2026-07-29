@@ -94,6 +94,7 @@ def gate_steps(msrv: str) -> list[Step]:
         # suite. It belongs here: it is a test of a gate script, it takes milliseconds, and the
         # alternative is a test file that can rot without anybody hearing about it.
         Step("rfc report tests", "gate", ("python3", "scripts/test-rfc-report.py")),
+        Step("pool key tests", "gate", ("python3", "scripts/test-pool-key.py")),
         Step(
             "provenance",
             "provenance",
@@ -107,6 +108,10 @@ def gate_steps(msrv: str) -> list[Step]:
             ),
         ),
         Step("rfc compliance", "docs", ("./scripts/rfc-report.py", "--check")),
+        # X-24: the connection pool key was described in three specs and had been wrong in one of
+        # them through two changes to the type. The list is generated from `ConnectionKey` now,
+        # and this is what makes a field added to the key fail before it reaches a reader.
+        Step("pool key", "docs", ("./scripts/check-pool-key.py", "--check")),
         Step("fmt", "fmt", ("cargo", "fmt", "--all", "--check")),
         Step(
             "clippy",

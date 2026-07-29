@@ -158,8 +158,10 @@ check is how one of the two ends up weaker.
 
 ## 5. Connection reuse under TLS
 
-**[sipx]** The pool keys connections by
-`(remote address, transport, verified identity, WebSocket resource)`.
+**[sipx]** Which fields the pool keys connections by is defined once, in
+[`sip-transport.md` §8](sip-transport.md), and generated there from the type — the list was
+restated in three specs and had gone stale in one of them twice. This section says *why* two of
+those fields are in the key, which is the half no generator can write.
 
 The *transport* is in the key because TCP, TLS and WebSocket to one address are not
 interchangeable — they can share a port, and a `sips:` request riding a cleartext socket has
