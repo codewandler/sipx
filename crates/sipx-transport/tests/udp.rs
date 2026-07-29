@@ -469,6 +469,20 @@ async fn respond_returns_only_once_the_response_has_been_sent() {
 
     // The moment `respond` returned, the datagram must already be readable. No sleep: if the
     // send were merely queued, this would time out.
+    //
+    // `X-29` looked at this bound and deliberately left it at 50 ms — the one enumerated site it
+    // did not convert. Here the bound *is* the assertion. Every other site in that story waits
+    // for an event whose timing is a property of the machine, so widening the wait costs nothing;
+    // this one distinguishes "already on the wire" from "merely queued", and a queued send would
+    // be flushed by the send loop within a packet interval. Any bound generous enough to survive
+    // load would therefore pass against the very defect the test exists to catch, which is
+    // exactly the weakening `X-29` forbids.
+    //
+    // Removing the clock entirely — `try_recv_from`, which is strictly stronger — was considered
+    // and rejected: loopback delivery completes in a softirq that the kernel may defer under
+    // load, so a non-blocking read can legitimately see nothing. That would trade a rare flake
+    // for a commoner one. Making this site load-proof needs an observable `respond` does not
+    // expose today, and that is a change to the transport rather than to its test.
     let mut buf = vec![0u8; 4096];
     let (len, _) = tokio::time::timeout(Duration::from_millis(50), caller.recv_from(&mut buf))
         .await

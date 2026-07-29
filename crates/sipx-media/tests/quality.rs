@@ -49,8 +49,8 @@ async fn until(within: Duration, what: &str, mut condition: impl AsyncFnMut() ->
     }
 }
 
-/// How long these tests wait for hand-sent packets to reach the statistics before concluding they
-/// never will. Two orders of magnitude above the honest answer on an idle machine.
+/// How long these tests wait for hand-sent packets to reach the statistics before calling them
+/// lost. Two orders of magnitude above the honest answer on an idle machine.
 const ARRIVAL_BOUND: Duration = Duration::from_secs(10);
 
 fn packet(sequence: u16) -> Bytes {
@@ -80,14 +80,15 @@ async fn statistics_report_the_loss_that_was_actually_injected() {
             .expect("sends");
         sent += 1;
         // Pacing, not a wait: the packets are spaced so they arrive as a stream rather than as
-        // one burst. Load lengthens the spacing, which changes nothing asserted below.
+        // one burst. Load lengthens the spacing, which changes nothing this test asserts.
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(sent, 16);
 
-    // Wait for the receive loop to have drained what it is holding, rather than assuming a fixed
-    // window was enough (`X-29`). The count is the event: until all sixteen have been through the
-    // receive path, the loss below is a partial answer that a slow machine turns into a wrong one.
+    // Wait for the receive loop to have drained what it is holding, rather than assuming a
+    // fixed window was enough (`X-29`). The count is the event: until all sixteen have been
+    // through the receive path, the loss below is a partial answer that a slow machine turns
+    // into a wrong one.
     until(
         ARRIVAL_BOUND,
         "the sixteen packets never reached the receive path",
@@ -148,10 +149,10 @@ async fn a_clean_stream_reports_no_loss() {
 async fn the_round_trip_is_absent_until_a_report_comes_back() {
     let (session, peer, session_addr) = session_and_peer().await;
     peer.send_to(&packet(1), session_addr).await.expect("sends");
-    // A fixed window, deliberately (`X-29`). The assertion below is *negative* — that nothing came
-    // back — so a window can only make it pass, and load makes it longer rather than shorter. The
-    // failure mode is a missed regression, not a flake; there is no arrival to wait for, and
-    // waiting for one that must never come would just be a ten-second sleep.
+    // A fixed window, deliberately (`X-29`). The assertion below is *negative* — that nothing
+    // came back — so a window can only make it pass, and load makes it longer rather than
+    // shorter. The failure mode is a missed regression, not a flake; there is no arrival to
+    // wait for, and waiting for one that must never come would be a ten-second sleep.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let quality = session.quality().await;
