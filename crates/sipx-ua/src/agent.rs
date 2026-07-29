@@ -49,6 +49,12 @@ pub struct Config {
     ///
     /// `None` does not ask. See [`gruu::Kind`] for why the choice is the application's.
     pub gruu: Option<gruu::Kind>,
+    /// How a push notification service can wake this device (RFC 8599 §4.1.2).
+    ///
+    /// `None` registers without push, which is every client that holds a connection of its
+    /// own. Set it with [`Config::with_push`]; the values come from the application's push
+    /// service, behind [`crate::push::PushService`].
+    pub push: Option<sipx_sip::push::Device>,
     /// How long a keep-alive may go unanswered before the flow is failed (RFC 5626 §4.4).
     ///
     /// Defaults to §4.4.1's ten seconds. It is configurable because the RFC gives *two* rules and
@@ -81,6 +87,7 @@ impl Config {
             instance: None,
             reg_id: None,
             gruu: None,
+            push: None,
             keepalive_timeout: outbound::PONG_TIMEOUT,
         }
     }
@@ -132,6 +139,24 @@ impl Config {
         self.credentials = Some(credentials);
         self
     }
+
+    /// Be reachable through this push notification service (RFC 8599 §4.1.2).
+    ///
+    /// The `Contact` **URI** gains `pn-provider`, `pn-param` and `pn-prid` — inside the angle
+    /// brackets, where a registrar's URI parser looks; §8.7 registers them as URI parameters
+    /// and a `;` outside the brackets starts a different grammar entirely.
+    ///
+    /// Registering is only half the mechanism. When the push arrives, call
+    /// [`UserAgent::woken`] — §4.1.3's binding-refresh REGISTER — *before* expecting the
+    /// request the push was sent for, because until the refresh there is no flow for it to
+    /// arrive on. And after any registration, ask [`UserAgent::push_support`] whether the
+    /// registrar named this service: a 200 from a registrar that supports a different one is a
+    /// binding nothing will ever wake.
+    #[must_use]
+    pub fn with_push(mut self, device: sipx_sip::push::Device) -> Self {
+        self.push = Some(device);
+        self
+    }
 }
 
 /// A user agent bound to a transport endpoint.
@@ -164,6 +189,12 @@ pub struct UserAgent {
     /// learned when its `Call-ID` changes. Keeping a stale one means publishing an address that
     /// no longer reaches anything, in the header a peer will route its next request by.
     gruus: gruu::Gruus,
+    /// What the registrar said about push (RFC 8599 §8.2).
+    ///
+    /// Replaced on every 2xx and cleared when an attempt fails, for the reason the GRUUs are:
+    /// it describes the registration that exists, and holding what an older one said would
+    /// answer [`UserAgent::push_support`]'s question about a binding that is gone.
+    push_support: crate::push::Support,
 }
 
 impl UserAgent {
@@ -184,6 +215,7 @@ impl UserAgent {
             instance: config.instance.clone(),
             reg_id: config.reg_id,
             gruu: config.gruu,
+            push: config.push.clone(),
         };
         Self {
             endpoint,
@@ -196,6 +228,7 @@ impl UserAgent {
             flow_timer: None,
             reflexive: None,
             gruus: gruu::Gruus::default(),
+            push_support: crate::push::Support::default(),
         }
     }
 
@@ -360,6 +393,39 @@ impl UserAgent {
         }
     }
 
+    /// What the registrar said about push notifications (RFC 8599 §8.2).
+    ///
+    /// Empty until a registration succeeds, and empty afterwards when the registrar implements
+    /// nothing of RFC 8599 — which is not a refusal, just silence. The question to ask it is
+    /// [`Support::supports`](crate::push::Support::supports) with the provider this side
+    /// registered: a registrar that answered 200 while naming a *different* push service has
+    /// recorded a binding nothing will ever wake, and this is the only place that says so.
+    #[must_use]
+    pub fn push_support(&self) -> &crate::push::Support {
+        &self.push_support
+    }
+
+    /// A push notification arrived: refresh the binding, and only then expect the request
+    /// (RFC 8599 §4.1.3).
+    ///
+    /// §4.1.3: "When a UA receives a push notification, the UA MUST send a binding-refresh
+    /// REGISTER request." The push is not the call — it is permission to go and get a flow,
+    /// and the request the push was sent for arrives down the flow this REGISTER creates. A
+    /// client that skips this and waits for the INVITE is waiting on a path that does not
+    /// exist yet, which is why the [`Pending`](crate::push::Pending) that licenses the wait
+    /// comes from here and nowhere else.
+    ///
+    /// sipx neither sends nor receives the push itself: the service is behind
+    /// [`crate::push::PushService`], and *when* to call this is the application's — it is
+    /// whatever "the notification fired" means on its platform.
+    pub async fn woken(&mut self) -> Result<crate::push::Pending> {
+        let lease = self.register().await?;
+        Ok(crate::push::Pending {
+            lease,
+            purr: self.push_support.purr().map(str::to_owned),
+        })
+    }
+
     /// Register, answering a challenge if one comes.
     ///
     /// One retry, not a loop. A second challenge after credentials were supplied means the
@@ -406,6 +472,7 @@ impl UserAgent {
                     flow_accepted,
                     flow_timer,
                     gruus,
+                    push,
                 } = *registered;
                 self.flow_accepted = flow_accepted;
                 self.flow_timer = flow_timer;
@@ -415,6 +482,10 @@ impl UserAgent {
                 // discarded outright rather than kept alongside, and a set that merges cannot
                 // tell which of the two it is holding.
                 self.gruus = gruus;
+                // Replaced, never merged, like the GRUUs: this is what the registrar said about
+                // the binding it just recorded, and what it said about an earlier one answers
+                // "can this registrar wake me" for a binding that no longer exists.
+                self.push_support = push;
                 // Replaced on every success, never merged. RFC 3608 §6.1: the stored value is
                 // "updated according to the Service-Route header field of the latest 200 class
                 // response", and a response with no such header "clears any service route ...
@@ -433,10 +504,20 @@ impl UserAgent {
             // have (RFC 5627 §5.2).
             Outcome::Challenged(_) => {
                 self.gruus = gruu::Gruus::default();
+                self.push_support = crate::push::Support::default();
                 Err(Error::AuthenticationFailed)
+            }
+            // §8.1's one answer that is not about this attempt: the named push service will not
+            // become usable on a retry, so it surfaces as itself rather than as the rejection
+            // below — folded in, it is indistinguishable from a bad password.
+            Outcome::PushNotSupported { reason } => {
+                self.gruus = gruu::Gruus::default();
+                self.push_support = crate::push::Support::default();
+                Err(Error::PushNotSupported { reason })
             }
             Outcome::Rejected { status, reason } => {
                 self.gruus = gruu::Gruus::default();
+                self.push_support = crate::push::Support::default();
                 Err(Error::Rejected { status, reason })
             }
         }

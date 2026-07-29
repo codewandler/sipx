@@ -97,6 +97,17 @@ impl Params {
         self.entries.push(param);
     }
 
+    /// Remove every parameter with this name, and say whether any was there.
+    ///
+    /// Every one, not the first: the list preserves duplicates because a message may contain them,
+    /// and leaving a second copy behind after removing the first would be a silent change of
+    /// meaning rather than a removal.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|p| !p.has_name(name));
+        self.entries.len() != before
+    }
+
     /// Every parameter, in wire order.
     pub fn iter(&self) -> impl Iterator<Item = &Param> {
         self.entries.iter()

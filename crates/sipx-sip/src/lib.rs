@@ -30,6 +30,7 @@ pub mod message;
 pub mod name;
 pub mod params;
 pub mod parser;
+pub mod push;
 pub mod rel;
 pub mod session;
 pub mod transaction;

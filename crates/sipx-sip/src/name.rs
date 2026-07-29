@@ -95,6 +95,7 @@ header_names! {
     ErrorInfo           => "Error-Info";
     Event               => "Event" | b'o';                // RFC 6665
     Expires             => "Expires";
+    FeatureCaps         => "Feature-Caps";                // RFC 6809
     From                => "From" | b'f';
     Identity            => "Identity" | b'y';             // RFC 4474
     IdentityInfo        => "Identity-Info" | b'n';        // RFC 4474
@@ -161,6 +162,8 @@ impl HeaderName {
                 | Self::ContentEncoding
                 | Self::ContentLanguage
                 | Self::ErrorInfo
+                // RFC 6809 §4: `Feature-Caps = "Feature-Caps" HCOLON fc-value *(COMMA fc-value)`.
+                | Self::FeatureCaps
                 | Self::InReplyTo
                 | Self::Path
                 | Self::ProxyRequire

@@ -351,10 +351,21 @@ impl Uri {
     }
 
     /// Add a URI parameter.
+    ///
+    /// Appended, not replaced: RFC 3261 §19.1.1 forbids a repeated `uri-parameter`, so a caller
+    /// re-setting one of its own parameters wants [`Uri::remove_param`] first — see [`Params`].
     pub fn push_param(&mut self, param: Param) {
         if let Some(parts) = self.sip_parts_mut() {
             parts.params.push(param);
         }
+    }
+
+    /// Remove a URI parameter, and say whether one was there.
+    ///
+    /// Names match the way §19.1.4 compares them, so `%74ransport` is `transport`.
+    pub fn remove_param(&mut self, name: &str) -> bool {
+        self.sip_parts_mut()
+            .is_some_and(|parts| parts.params.remove(name))
     }
 
     /// Whether this URI carries any header components.

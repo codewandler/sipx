@@ -23,6 +23,7 @@ use sipx_sip::{Address, HeaderName, Method, Request, Response, Uri};
 use crate::auth::{Challenge, Credentials, new_cnonce, respond, strongest};
 use crate::gruu::{self, Gruus};
 use crate::outbound::{InstanceId, RegId};
+use crate::push::{self, Support};
 
 /// How long a registration lease has left, and when to refresh it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +89,13 @@ pub struct Registered {
     /// because they expire with it: a GRUU outliving the registration that produced it is an
     /// address a UA would keep publishing after it had stopped resolving.
     pub gruus: Gruus,
+    /// What the registrar said about push notifications (RFC 8599 §8.2).
+    ///
+    /// Empty when push was not asked for, and empty when it was and the registrar implements
+    /// nothing of RFC 8599 — which is not a refusal. The case worth reading it for is the third
+    /// one: a registrar that answered 200 while naming a *different* push service has recorded a
+    /// binding nothing will ever wake, and this is the only place that says so.
+    pub push: Support,
 }
 
 /// What a registration attempt produced.
@@ -97,6 +105,19 @@ pub enum Outcome {
     Registered(Box<Registered>),
     /// The registrar wants credentials. Answer with [`authorize`] and send again.
     Challenged(Box<Challenge>),
+    /// 555: the registrar does not support the push notification service this `Contact` named
+    /// (RFC 8599 §8.1).
+    ///
+    /// Its own variant rather than a [`Outcome::Rejected`] with a number in it, because it is the
+    /// one refusal that is not about *this attempt*. Credentials can be corrected and a lease can
+    /// be re-asked for; a push service the registrar cannot use will not become usable on the next
+    /// try, and a client that retries into it is unreachable for as long as it keeps trying. The
+    /// answer is to register without push, or with a service the registrar names — which is what
+    /// [`Registered::push`] reports.
+    PushNotSupported {
+        /// The reason phrase, which §8.1 registers as [`push::NOT_SUPPORTED_REASON`].
+        reason: String,
+    },
     /// The registrar refused.
     Rejected {
         /// The status code.
@@ -142,6 +163,15 @@ pub struct Registration {
     /// `Some` asks for one: §4.1 has the REGISTER offer the `gruu` option tag alongside the
     /// instance ID. `None` does not ask, and no registrar will volunteer.
     pub gruu: Option<gruu::Kind>,
+    /// How a push notification service can wake this device (RFC 8599 §4.1.2).
+    ///
+    /// Beside the instance identity rather than in a story of its own, because it is the same
+    /// claim: this is the device, and *this* is how to reach it when there is no flow. When set,
+    /// the `Contact` **URI** carries `pn-provider`, `pn-param` and `pn-prid` — inside the angle
+    /// brackets, which is where a registrar's URI parser looks.
+    ///
+    /// `None` registers without push, which is every client that holds a connection of its own.
+    pub push: Option<sipx_sip::push::Device>,
 }
 
 /// The proxies a registrar recorded as being on the path back to this contact (RFC 3327).
@@ -364,17 +394,24 @@ impl Registration {
     ///
     /// `+sip.instance` appears exactly once, however many mechanisms want it — RFC 5626 §4.1 and
     /// RFC 5627 §4.1 name the same tag, and it is emitted from the one field that holds it.
+    ///
+    /// The push parameters go on first and go *inside*: RFC 8599 §8.7 registers them as URI
+    /// parameters, so they belong in the URI's own grammar, while `+sip.instance` and `reg-id` are
+    /// `contact-param`s and belong after the angle brackets. Two lists, two meanings, and putting
+    /// either in the other's place produces a `Contact` that parses and says the wrong thing.
     #[must_use]
     pub fn contact(&self) -> String {
+        let base = match &self.push {
+            Some(device) => push::in_contact(&self.contact, device),
+            None => self.contact.clone(),
+        };
         match (&self.instance, self.reg_id) {
             // An Outbound flow: `reg-id` and the instance, in RFC 5626 §4.2's order.
-            (Some(instance), Some(reg_id)) => {
-                crate::outbound::contact(&self.contact, instance, reg_id)
-            }
+            (Some(instance), Some(reg_id)) => crate::outbound::contact(&base, instance, reg_id),
             // An instance without a flow — a GRUU registration, or a UA that wants a registrar to
             // recognise it across reboots without asking for Outbound.
-            (Some(instance), None) => format!("{};{}", self.contact, instance.contact_param()),
-            (None, _) => self.contact.clone(),
+            (Some(instance), None) => format!("{};{}", base, instance.contact_param()),
+            (None, _) => base,
         }
     }
 
@@ -445,7 +482,19 @@ pub fn interpret(response: &Response, registration: &Registration) -> Outcome {
                 .map_or_else(Gruus::default, |instance| {
                     Gruus::from_response(response, instance)
                 }),
+            // Read whether or not this side asked for push, for the reason `path` is: a registrar
+            // that volunteers a `Feature-Caps` is telling us something, and §8.2's whole value is
+            // that a client can compare what it named against what the registrar can use.
+            push: Support::from_response(response),
         }));
+    }
+
+    // §8.1, and it is checked before the challenge codes because it is not about this attempt:
+    // no credential and no retry makes a push service the registrar cannot use usable.
+    if status == sipx_sip::push::NOT_SUPPORTED {
+        return Outcome::PushNotSupported {
+            reason: String::from_utf8_lossy(&response.reason).into_owned(),
+        };
     }
 
     if status == 401 || status == 407 {
@@ -557,6 +606,7 @@ mod tests {
             instance: None,
             reg_id: None,
             gruu: None,
+            push: None,
         }
     }
 
