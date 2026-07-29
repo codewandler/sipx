@@ -1,6 +1,6 @@
 [package]
 name = "sipx-app"
-description = "The application host: sipx.app.v1 handler programs executed on real calls (in development; nothing implemented yet)"
+description = "The application host: sipx.app.v1 handler programs executed on real calls (in development; the deterministic harness and the configuration reader, no host process yet)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

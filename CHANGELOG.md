@@ -9,6 +9,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The host configuration schema is normative (`A-1`)** — `docs/specs/host-config.md` goes from
+  draft to normative: a bounded TOML subset as the concrete syntax, the listener and app schema,
+  the failure and grants tables, reload semantics, and thirty vectors `HC-1` … `HC-30`.
+  - **The vectors execute.** `crates/sipx-app/src/config/` reads a document, so a normative point
+    is pinned by a test rather than by a paragraph. It adds no dependency — the subset is hand-read,
+    and §2 defines it narrowly enough that the reader cannot be more permissive than the page.
+  - **Coverage is measured against the page, not a copy of it.** The tests parse §3's points and
+    §8's vector table out of the spec itself and hold both against what actually runs, in both
+    directions — so a normative point added without a vector fails rather than passing quietly.
+  - **The failure knobs are the contract's own**, derived from the policy the `A-7` harness already
+    tests, so `app-contract.md` §9.2 cannot drift from what a document is able to set.
+  - **Secrets are by-name references only**, with a name grammar narrow enough that pasted key
+    material does not fit through it, and a vector asserting the reference document is committable.
+  - The multi-app-versus-multi-process question is recorded as **explicitly open**, with four
+    numbered requirements phase 4 needs preserved either way — the first of them a vector, not prose.
 - **The RFC registry's grain is decided, and now enforced (`X-15`)** — the registry stays at one row
   per RFC. Requirement-grain rows were considered against the alternative and declined, with the
   reasoning and the reopen triggers recorded in `docs/designs/rfc-registry-grain.md`.

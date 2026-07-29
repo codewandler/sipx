@@ -2,7 +2,7 @@
 id: A-1
 title: Finish the host configuration and failure-semantics schema
 pillar: Application
-status: ready
+status: done
 priority: 6
 design: docs/designs/app-host.md
 epic: app-host
@@ -17,13 +17,13 @@ Turn [specs/host-config.md](../specs/host-config.md) from draft to normative: co
 listener schema, app/binding/grants/failure tables, reload semantics — with vectors.
 
 ## Acceptance
-- [ ] The spec's §3 open points are closed and every normative point has at least one vector
+- [x] The spec's §3 open points are closed and every normative point has at least one vector
       (valid document, rejected document with the reason, reload accepted, reload rejected,
       live-call policy retention across reload).
-- [ ] Failure-semantics fields are byte-identical in name and default to
+- [x] Failure-semantics fields are byte-identical in name and default to
       [`app-contract.md`](../specs/app-contract.md) §9.2.
-- [ ] Secrets are by-name references; a vector shows a document with no secret material in it.
-- [ ] The multi-app-vs-multi-process stance is recorded as explicitly open with what phase 4
+- [x] Secrets are by-name references; a vector shows a document with no secret material in it.
+- [x] The multi-app-vs-multi-process stance is recorded as explicitly open with what phase 4
       needs preserved either way.
 
 ## Progress

@@ -42,10 +42,6 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 - [X-22 — Put the MSRV check in the documented gate](X-22-msrv-in-the-documented-gate.md) · Build · CI has an msrv job the gate does not name, so a green local gate lied through two releases
 
-### The application host
-_The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
-- [A-1 — Finish the host configuration and failure-semantics schema](A-1-host-configuration-schema.md) · Application · app-host phase 1 · spec work, no dependency on the app-sdk stories
-
 ## Blocked
 _None._
 
@@ -98,6 +94,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [X-18 — Count what the stack discards, and capture what it sends](X-18-counters-and-capture.md) · Build · M12 · nothing leaves the process but tracing; T-19 adds the first counter and has nowhere to put it
 
 ## Done
+- [A-1 — Finish the host configuration and failure-semantics schema](A-1-host-configuration-schema.md) · Application · app-host phase 1 · spec work, no dependency on the app-sdk stories
 - [A-7 — The deterministic harness — fake time, scripted bindings, scripted calls](A-7-deterministic-harness.md) · Application · app-host phase 1 · built with the host, not after it · startable against contract vectors alone
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
 - [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media
