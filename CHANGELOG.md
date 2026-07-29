@@ -43,6 +43,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A refused early answer now ends the invitation instead of hanging it (`S-25`)** — the one
+  place an RFC 4568 §5.1.3 refusal was reported nowhere: an answer arriving in a reliable
+  provisional (RFC 3262 §5). `observe`/`adopt_early_answer` now return `Result`, and a refusal
+  withdraws the invitation with a CANCEL (RFC 3261 §9.1) and returns `Error::Sdp` naming the
+  tag — instead of leaving a caller that never receives a 2xx to time out with no reason.
+  - A no-description provisional stays silent, and a guard test answers the 2xx afterwards to
+    prove the invitation lived.
+  - The registry row for RFC 4568 moves in the same commit, as `AGENTS.md` requires when
+    support changes.
+
 - **Reachability now measures *use*, not *paths* — and the caller-check was deliberately not built
   (`X-37`)** — `X-30` and `X-33` both recorded a cross-crate caller check as their successor. This
   story reconsidered it, and the answer was to adjudicate the three named cases by hand and file the
