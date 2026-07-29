@@ -61,11 +61,46 @@ nominate — as a pure function of events, so the socket work is a driver over i
   stated over the set) is implemented and tested as written rather than collapsed. The socket
   driver, reflexive gathering, and the SDP the agent's candidates turn into are not here — the
   first two are the epic's remaining stories and the third is `sipx-sdp`, which `M-19` did.
-- **A reading recorded.** §8.1.2 makes an agent prune every other pair for a nominated component,
-  and §8.1.1 makes it tolerate a peer that nominates more than once and then select the
-  highest-priority nominated pair. The two cannot both hold for the same agent, so only the
-  controlling side prunes — it is the side that knows there will be no second nomination — and a
-  Completed checklist still serves its triggered-check queue.
+- **A reading recorded.** §8.1.2 makes an agent prune every other pair for a nominated component;
+  §8.1.1 makes it tolerate a peer that nominates more than once and then select the
+  highest-priority nominated pair. Both can be satisfied by pruning and *declining* the second
+  nomination — §8.1.1's tolerance is conditional on the controlled agent accepting it — but this
+  story's Acceptance requires the tolerance, so only the controlling side prunes (it is the side
+  that knows there will be no second nomination) and a Completed checklist still serves its
+  triggered-check queue.
+- **Review round 1 (three blocking findings, all fixed, each with a regression test that fails
+  without its fix).**
+  - §6.1.2.5's limit was applied only at checklist formation, so §7.3.1.4's insertion path grew
+    the set without bound — 201 pairs against a configured limit of 4 under 200 authenticated
+    checks from distinct source addresses, each buying the sender a check sent to an address it
+    named. The limit now binds every time the set grows, discarding only pairs that are not
+    In-Progress, Succeeded or nominated, and the remote candidate table is pruned with it.
+    (`a_flood_of_checks_from_new_addresses_cannot_grow_the_set_past_the_limit`)
+  - Nothing re-armed Ta after a checklist completed, so a §7.3.1.4 check enqueued afterwards was
+    queued for a tick a driver would never deliver — which also made §8.1.1's tolerance clause
+    inoperative. Arming is now tracked and every path that creates work arms it; the tests drive Ta
+    from the agent's own outputs rather than firing it by hand.
+    (`a_check_arriving_after_the_checklist_concluded_still_arms_ta`)
+  - A second `RemoteDescription` replaced the remote candidate table under live pairs, which
+    re-pointed one pair and dangled the rest and left the agent permanently silent — reachable from
+    a 183-then-200 or any re-INVITE. `LocalId`/`RemoteId` are now allocated identities rather than
+    positions, as `PairId` already was; a second description for the same ICE session merges
+    additively, and only a change of **both** ufrag and pwd (RFC 8839 §4.4.1.1.1) rebuilds.
+    (`a_second_description_adds_candidates_without_re_pointing_the_live_pairs`,
+    `an_ice_restart_rebuilds_the_checklists_and_keeps_checking`)
+  - Found while fixing the second: two concluded agents re-triggered each other forever, because a
+    queued check of one's own moves a Succeeded pair to In-Progress and §7.3.1.4 then
+    cancel-and-re-enqueues it at the far end. §8.1.2's "an agent will no longer generate triggered
+    checks" now extends to a nominated pair in any state, and `two_agents_converge_on_a_selected_pair`
+    asserts both ends fall quiet.
+  - Smaller: §8.1.2's cancellation of In-Progress transactions is now performed when the
+    controlling agent prunes (unobservable with one component, a live retransmission loop with
+    two); the worst-case RTO is recorded where the stopping criterion is defined — 500 s at the
+    default 100-pair limit, so `Tn` and not the "every higher-priority pair Failed" half is the
+    criterion for any set of interesting size; the sans-IO guard scans whole files and names the
+    words it forbids in fragments; and `Agent::new`'s doc now says plainly that the *initial*
+    tiebreaker is the caller's and the redraw after a 487 is drawn from the process RNG, because
+    two ends of a symmetric conflict deriving it the same way stay equal and oscillate.
 
 ## Notes
 - The spec is [`docs/specs/ice.md`](../specs/ice.md), written by `M-16` before any code. Read the

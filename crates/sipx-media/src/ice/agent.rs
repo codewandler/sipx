@@ -29,8 +29,8 @@ use std::time::Duration;
 use sipx_sdp::ice::{Candidate, CandidateType, ComponentId, Credentials, Priority};
 
 use super::candidate::{
-    Foundations, Gathered, LocalBase, LocalCandidate, LocalId, PairFoundation, RemoteCandidate,
-    RemoteId, assign_local_preferences,
+    CandidateIds, Foundations, Gathered, LocalBase, LocalCandidate, LocalId, PairFoundation,
+    RemoteCandidate, RemoteId, assign_local_preferences, find_local, find_remote,
 };
 use super::checklist::{
     CandidatePair, Checklist, ChecklistSet, ChecklistState, PairId, PairIds, PairState, Role,
@@ -205,6 +205,20 @@ enum Conflict {
     Reject,
 }
 
+/// How far the agent has got towards having checklists to pace.
+///
+/// An ordered three-state and not a pair of flags: "gathering finished" and "the checklists are
+/// formed" are not independent, and the states they can be in together are exactly these three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Phase {
+    /// The driver is still gathering candidates.
+    Gathering,
+    /// Gathering is finished. The checklists form as soon as both halves of the exchange are in.
+    Gathered,
+    /// The checklists exist and Ta is pacing over them.
+    Checking,
+}
+
 /// How far [spec] §8's stopping criterion has got.
 ///
 /// `Tn` is armed by the first valid pair and not by the first check, because the criterion is
@@ -247,10 +261,18 @@ pub struct Agent {
     remote: Vec<RemoteCandidate>,
     foundations: Foundations,
     ids: PairIds,
+    candidate_ids: CandidateIds,
+    /// Whether a Ta timer is outstanding, so that a path which creates work after the checklist
+    /// set went quiet can arm one and a path that did not cannot arm two.
+    ///
+    /// Without it, §7.3.1.4's triggered check for an address first seen *after* a checklist
+    /// completed is enqueued and never sent: `conclude` cleared Ta and only a Ta tick sends
+    /// anything. That is §8.1.1's tolerance clause dead on arrival, and it is not observable in a
+    /// test that fires Ta by hand.
+    ta_armed: bool,
     set: ChecklistSet,
     transactions: Vec<Transaction>,
-    gathering_done: bool,
-    started: bool,
+    phase: Phase,
     /// Pairs the controlling agent has enqueued a nominating check for (§8.1.1). A component
     /// appears here once and once only: "the agent MUST NOT nominate another pair for [the] same
     /// component … within the ICE session".
@@ -270,9 +292,16 @@ impl Agent {
     /// A new agent.
     ///
     /// `offerer` is whether sipx sent the initial offer, which is §6.1.1's role determination for
-    /// two full agents; `tiebreaker` is §7.1.3's 64-bit value, chosen at random per ICE session by
-    /// the caller — a machine that reads no clock does not reach for an RNG behind the caller's
-    /// back either, and a test that wants the `T = V` row of §7.3.1.1's table needs to choose it.
+    /// two full agents; `tiebreaker` is §7.1.3's 64-bit value, chosen at random per ICE session.
+    ///
+    /// The *initial* tiebreaker is the caller's so that a test can choose it — §7.3.1.1's `T = V`
+    /// row is not reachable otherwise. The redraw after a 487 is not, and cannot be: §7.2.5.1
+    /// requires the value to change, and in the symmetric conflict both ends apply the same rule
+    /// to the same old value, so anything derived from it leaves them equal and oscillating (see
+    /// this module's `fresh_tiebreaker`). That one path reaches for the process RNG, as
+    /// [`stun::new_transaction_id`] already does for every check's transaction ID. Randomness is
+    /// not I/O — no clock is read and no socket is touched — but it does mean the 487 path is the
+    /// one place a test can pin only that the value *changed*, not what it became.
     #[must_use]
     pub fn new(config: Config, offerer: bool, credentials: Credentials, tiebreaker: u64) -> Self {
         Self {
@@ -286,10 +315,11 @@ impl Agent {
             remote: Vec::new(),
             foundations: Foundations::default(),
             ids: PairIds::default(),
+            candidate_ids: CandidateIds::default(),
+            ta_armed: false,
             set: ChecklistSet::new(),
             transactions: Vec::new(),
-            gathering_done: false,
-            started: false,
+            phase: Phase::Gathering,
             nominating: Vec::new(),
             nominate_on_success: Vec::new(),
             stopping: Stopping::Idle,
@@ -348,7 +378,7 @@ impl Agent {
             } => self.remote_description(credentials, &candidates, lite, &mut out),
             Input::LocalCandidate(gathered) => self.local_candidate(gathered),
             Input::GatheringDone => {
-                self.gathering_done = true;
+                self.phase = self.phase.max(Phase::Gathered);
                 self.start(&mut out);
             }
             Input::Datagram { from, on, bytes } => self.datagram(from, on, &bytes, &mut out),
@@ -367,6 +397,22 @@ impl Agent {
 
     // ---------------------------------------------------------------- gathering and description
 
+    /// A description from the peer — the first one, a later one for the same ICE session, or an
+    /// ICE restart.
+    ///
+    /// The candidate list is **merged**, never replaced. Every live [`CandidatePair`] holds a
+    /// [`RemoteId`], and RFC 8839 §4.2 lets a peer send more than one description for the same
+    /// session — a 183 with SDP and then a 200 with SDP, or any re-INVITE. Replacing the table
+    /// under the pairs would leave each of them naming a candidate it was never formed for, or
+    /// naming nothing at all, and an agent whose every pair dangles sends no checks, reports no
+    /// failure and is simply silent. The candidate list is the peer's to choose, so that is a
+    /// re-offer silencing ICE.
+    ///
+    /// Changing **both** `ice-ufrag` and `ice-pwd` is RFC 8839 §4.4.1.1.1's ICE restart, and only
+    /// that rebuilds: new checklists, new pair states, nothing carried over but the selected pair
+    /// media is still flowing on ([spec] §13.2).
+    ///
+    /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
     fn remote_description(
         &mut self,
         credentials: Credentials,
@@ -377,17 +423,110 @@ impl Agent {
         // §6.1.1, and the peer's `a=ice-lite` is the whole reason this is not decided in the
         // constructor: a full agent facing a lite one controls whoever offered.
         self.role = Role::determine(self.offerer, lite);
+        let restart = self.peering.as_ref().is_some_and(|peering| {
+            let known = peering.remote();
+            known.ufrag() != credentials.ufrag() && known.pwd() != credentials.pwd()
+        });
         self.peering = Some(Peering::new(self.credentials.clone(), credentials));
-        self.remote = candidates
+        if restart {
+            self.restart(out);
+        }
+        let added = self.merge_remote_candidates(candidates);
+        if self.phase == Phase::Checking {
+            if added > 0 {
+                self.extend(out);
+            }
+        } else {
+            self.start(out);
+        }
+    }
+
+    /// Add the candidates this description brought that we do not already have, by address.
+    ///
+    /// Returns how many were new. A candidate we learned as peer-reflexive (§7.3.1.3) and the
+    /// peer has now signalled properly keeps its identity and its pairs; §7.3.1.3 says as much —
+    /// "if any subsequent candidate exchanges contain this peer-reflexive candidate, it will
+    /// signal the actual foundation for the candidate".
+    fn merge_remote_candidates(&mut self, candidates: &[Candidate]) -> usize {
+        let mut added = 0usize;
+        for candidate in candidates {
+            let Some(parsed) = RemoteCandidate::signalled(RemoteId(0), candidate) else {
+                continue;
+            };
+            if let Some(known) = self
+                .remote
+                .iter_mut()
+                .find(|known| known.address == parsed.address)
+            {
+                // Keep the identity — pairs hold it — and take the description's word for the
+                // rest.
+                known.foundation = parsed.foundation;
+                known.kind = parsed.kind;
+                known.priority = parsed.priority;
+                continue;
+            }
+            let id = self.candidate_ids.remote();
+            self.remote.push(RemoteCandidate { id, ..parsed });
+            added = added.saturating_add(1);
+        }
+        added
+    }
+
+    /// RFC 8839 §4.4.1.1.1: everything is rebuilt for the new ICE session.
+    fn restart(&mut self, out: &mut Vec<Output>) {
+        for transaction in std::mem::take(&mut self.transactions) {
+            out.push(Output::ClearTimer(Timer::Retransmit(transaction.pair)));
+        }
+        self.remote.clear();
+        self.set = ChecklistSet::new();
+        self.nominating.clear();
+        self.nominate_on_success.clear();
+        self.stopping = Stopping::Idle;
+        self.failed.clear();
+        self.phase = self.phase.min(Phase::Gathered);
+        if self.ta_armed {
+            self.ta_armed = false;
+            out.push(Output::ClearTimer(Timer::Ta));
+        }
+        // `selected` is deliberately kept: media keeps flowing on the old selected pair until the
+        // new session selects one ([spec] §13.2), and the keepalive timer with it.
+    }
+
+    /// §6.1.2: "If candidates are added to a checklist … the agent will re-perform these steps for
+    /// the updated checklist."
+    ///
+    /// The pairs already in the set keep their state and their identities; only the new ones are
+    /// formed, pruned against what is there, limited and then unfrozen.
+    fn extend(&mut self, out: &mut Vec<Output>) {
+        let paired: Vec<RemoteId> = self
+            .set
+            .checklists()
             .iter()
-            .filter_map(RemoteCandidate::signalled)
+            .flat_map(|list| list.pairs().iter().map(|pair| pair.remote))
             .collect();
-        self.start(out);
+        let fresh: Vec<RemoteCandidate> = self
+            .remote
+            .iter()
+            .filter(|candidate| !paired.contains(&candidate.id))
+            .cloned()
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        let pairs = form_pairs(&mut self.ids, self.role, &self.local, &fresh);
+        for pair in pairs {
+            self.insert_pair(pair);
+        }
+        self.set.limit(self.config.pair_limit);
+        self.forget_unreferenced_remotes();
+        self.set.unfreeze_added();
+        self.arm_ta(out);
     }
 
     fn local_candidate(&mut self, gathered: Gathered) {
         let foundation = self.foundations.assign(&gathered, TRANSPORT);
         self.local.push(LocalCandidate {
+            id: self.candidate_ids.local(),
             gathered,
             foundation,
             local_preference: 0,
@@ -400,21 +539,88 @@ impl Agent {
 
     /// §6.1.2: form the checklists once both halves of the exchange are in.
     fn start(&mut self, out: &mut Vec<Output>) {
-        if self.started || !self.gathering_done || self.peering.is_none() {
+        if self.phase != Phase::Gathered || self.peering.is_none() {
             return;
         }
         if self.local.is_empty() || self.remote.is_empty() {
             return;
         }
-        self.started = true;
+        self.phase = Phase::Checking;
         let pairs = form_pairs(&mut self.ids, self.role, &self.local, &self.remote);
         self.set = ChecklistSet::new();
         self.set.push(Checklist::new(pairs));
         self.set.limit(self.config.pair_limit);
         self.set.compute_initial_states();
+        self.arm_ta(out);
+    }
+
+    /// Arm Ta if it is not already armed.
+    ///
+    /// Every path that creates work goes through here, not only [`Agent::start`]: a triggered
+    /// check enqueued after a checklist completed has to be able to restart the pacing, or it is
+    /// queued for a tick that will never come.
+    fn arm_ta(&mut self, out: &mut Vec<Output>) {
+        if self.ta_armed {
+            return;
+        }
+        self.ta_armed = true;
         out.push(Output::SetTimer {
             timer: Timer::Ta,
             after: self.config.timers.pacing(),
+        });
+    }
+
+    /// Insert a pair, unless the checklist already holds one that §6.1.2.4 would call redundant
+    /// with it — the same local base against the same remote address.
+    fn insert_pair(&mut self, pair: CandidatePair) {
+        let Some((base, remote)) = find_local(&self.local, pair.local)
+            .map(|local| local.gathered.base_address)
+            .zip(find_remote(&self.remote, pair.remote).map(|remote| remote.address))
+        else {
+            return;
+        };
+        let redundant = self.set.checklists().iter().any(|list| {
+            list.pairs().iter().any(|known| {
+                find_local(&self.local, known.local)
+                    .is_some_and(|local| local.gathered.base_address == base)
+                    && find_remote(&self.remote, known.remote)
+                        .is_some_and(|known| known.address == remote)
+            })
+        });
+        if redundant {
+            return;
+        }
+        if let Some(list) = self.set.checklists_mut().first_mut() {
+            list.insert(pair);
+        }
+    }
+
+    /// Drop peer-reflexive remote candidates that no pair and no valid pair refers to any more.
+    ///
+    /// §6.1.2.5's limit bounds the pairs; this bounds the table they index. Without it, §7.3.1.3
+    /// grows one remote candidate per distinct source address that can produce an authenticated
+    /// check, which is unbounded even when every pair it would have formed was discarded.
+    fn forget_unreferenced_remotes(&mut self) {
+        let mut live: Vec<RemoteId> = self
+            .set
+            .checklists()
+            .iter()
+            .flat_map(|list| list.pairs().iter().map(|pair| pair.remote))
+            .collect();
+        let addresses: Vec<SocketAddr> = self
+            .set
+            .checklists()
+            .iter()
+            .flat_map(|list| list.valid().iter().map(|valid| valid.remote))
+            .chain(self.selected.iter().map(|selection| selection.remote))
+            .collect();
+        for candidate in &self.remote {
+            if addresses.contains(&candidate.address) {
+                live.push(candidate.id);
+            }
+        }
+        self.remote.retain(|candidate| {
+            candidate.kind != CandidateType::PeerReflexive || live.contains(&candidate.id)
         });
     }
 
@@ -434,6 +640,8 @@ impl Agent {
 
     /// §6.1.4.2: one check per Ta tick, taken from the next checklist in the Running state.
     fn pace(&mut self, out: &mut Vec<Output>) {
+        // The timer that brought us here has fired, so it is no longer outstanding.
+        self.ta_armed = false;
         let count = self.set.checklists().len();
         for _ in 0..count {
             let Some(index) = self.set.next_active() else {
@@ -477,10 +685,7 @@ impl Agent {
             // Step 4: nothing to do for this checklist; try the next one without waiting for Ta.
         }
         if self.active() {
-            out.push(Output::SetTimer {
-                timer: Timer::Ta,
-                after: self.config.timers.pacing(),
-            });
+            self.arm_ta(out);
         }
     }
 
@@ -578,9 +783,10 @@ impl Agent {
             return;
         };
         let (local_id, remote_id, component) = (pair.local, pair.remote, pair.component);
-        let (Some(local), Some(remote)) =
-            (self.local.get(local_id.0), self.remote.get(remote_id.0))
-        else {
+        let (Some(local), Some(remote)) = (
+            find_local(&self.local, local_id),
+            find_remote(&self.remote, remote_id),
+        ) else {
             return;
         };
         let (on, from, to) = (
@@ -708,7 +914,7 @@ impl Agent {
                 bytes,
             });
         }
-        if !self.started {
+        if self.phase != Phase::Checking {
             // No checklist yet, so there is nothing to trigger. The response above still went, as
             // §7.3 requires of an agent that has published a candidate on this base.
             return;
@@ -717,10 +923,8 @@ impl Agent {
         let Some(local_id) = self.base_candidate(on) else {
             return;
         };
-        let Some(component) = self
-            .local
-            .get(local_id.0)
-            .map(|candidate| candidate.gathered.component)
+        let Some(component) =
+            find_local(&self.local, local_id).map(|candidate| candidate.gathered.component)
         else {
             return;
         };
@@ -736,14 +940,16 @@ impl Agent {
         component: ComponentId,
         claimed: Option<Priority>,
     ) -> RemoteId {
-        if let Some(index) = self
+        if let Some(known) = self
             .remote
             .iter()
-            .position(|candidate| candidate.address == from)
+            .find(|candidate| candidate.address == from)
         {
-            return RemoteId(index);
+            return known.id;
         }
+        let id = self.candidate_ids.remote();
         self.remote.push(RemoteCandidate {
+            id,
             address: from,
             kind: CandidateType::PeerReflexive,
             component,
@@ -754,7 +960,7 @@ impl Agent {
             // priority it did not claim.
             priority: claimed.unwrap_or(Priority::MIN),
         });
-        RemoteId(self.remote.len().saturating_sub(1))
+        id
     }
 
     /// §7.3.1.4, and §7.3.1.5's nomination when the check that arrived carried `USE-CANDIDATE`.
@@ -780,19 +986,47 @@ impl Agent {
                 return;
             };
             let id = pair.id;
-            if let Some(list) = self.set.checklists_mut().first_mut() {
-                list.insert(pair);
-                list.trigger(id);
-            }
+            self.insert_pair(pair);
             if let Some(pair) = self.set.pair_mut(id) {
                 pair.state = PairState::Waiting;
             }
+            // §6.1.2.5's limit binds here and not only at formation. This is the growth path a
+            // peer drives: one pair and one remote candidate per distinct source address that can
+            // produce an authenticated check, each of which would otherwise become an 88-byte
+            // check sent to an address the peer named and need not be able to receive at. The
+            // limit is the bound §19.5.1 asks for, so it is applied every time the set grows.
+            self.set.limit(self.config.pair_limit);
+            self.forget_unreferenced_remotes();
+            if self.set.pair(id).is_none() {
+                // The new pair was the lowest-priority discardable one: the set is full of better
+                // paths. The check that arrived is still answered, above; it just does not earn a
+                // check of its own.
+                return;
+            }
+            if let Some(index) = self.set.checklist_of(id)
+                && let Some(list) = self.set.checklists_mut().get_mut(index)
+            {
+                list.trigger(id);
+            }
+            self.arm_ta(out);
             id
         };
         let before = self.set.pair(id).map(|pair| pair.state);
         match before {
             Some(PairState::Succeeded) => {
                 // "If the state of that pair is Succeeded, nothing further is done."
+            }
+            Some(_) if self.set.pair(id).is_some_and(|pair| pair.nominated) => {
+                // §8.1.2: "when the state of a pair is Succeeded, an agent will no longer
+                // generate triggered checks when receiving a Binding request for the pair."
+                //
+                // It has to extend past Succeeded to a nominated pair in *any* state, or two
+                // concluded agents re-trigger each other forever: a queued check of our own moves
+                // the pair out of Succeeded, the peer's next request then finds it In-Progress
+                // and §7.3.1.4's cancel-and-re-enqueue fires, and each end keeps the other's
+                // queue full. Media flows on the selected pair the whole time, so the traffic is
+                // pure waste — and the checklist never falls quiet, which is what a driver waits
+                // for.
             }
             Some(state) => {
                 if state == PairState::InProgress {
@@ -814,6 +1048,9 @@ impl Agent {
                 {
                     list.trigger(id);
                 }
+                // §7.3.1.4's check has to be able to leave even when the checklist that holds it
+                // has already concluded — see [`Agent::ta_armed`].
+                self.arm_ta(out);
             }
             None => return,
         }
@@ -835,8 +1072,8 @@ impl Agent {
         remote: RemoteId,
         component: ComponentId,
     ) -> Option<CandidatePair> {
-        let local_candidate = self.local.get(local.0)?;
-        let remote_candidate = self.remote.get(remote.0)?;
+        let local_candidate = find_local(&self.local, local)?;
+        let remote_candidate = find_remote(&self.remote, remote)?;
         Some(CandidatePair {
             id: self.ids.allocate(),
             local,
@@ -859,10 +1096,10 @@ impl Agent {
     fn base_candidate(&self, on: LocalBase) -> Option<LocalId> {
         self.local
             .iter()
-            .position(|candidate| {
+            .find(|candidate| {
                 candidate.gathered.base == on && candidate.gathered.kind == CandidateType::Host
             })
-            .map(LocalId)
+            .map(|candidate| candidate.id)
     }
 
     // ------------------------------------------------------------------------------- a response
@@ -930,10 +1167,8 @@ impl Agent {
 
         // §7.2.5.3.2: the valid pair is built from the mapped address and the address the request
         // was sent to, which is very often not a pair in any checklist.
-        let priority = self
-            .local
-            .get(local.0)
-            .zip(self.remote.get(pair.remote.0))
+        let priority = find_local(&self.local, local)
+            .zip(find_remote(&self.remote, pair.remote))
             .map_or(pair.priority, |(local, remote)| {
                 ordered_pair_priority(self.role, local.priority, remote.priority)
             });
@@ -989,14 +1224,14 @@ impl Agent {
         pair: &CandidatePair,
         claimed: Priority,
     ) -> LocalId {
-        if let Some(index) = self
+        if let Some(known) = self
             .local
             .iter()
-            .position(|candidate| candidate.gathered.address == mapped)
+            .find(|candidate| candidate.gathered.address == mapped)
         {
-            return LocalId(index);
+            return known.id;
         }
-        let Some(base) = self.local.get(pair.local.0).copied() else {
+        let Some(base) = find_local(&self.local, pair.local).copied() else {
             return pair.local;
         };
         let gathered = Gathered {
@@ -1008,7 +1243,9 @@ impl Agent {
             server: None,
         };
         let foundation = self.foundations.assign(&gathered, TRANSPORT);
+        let id = self.candidate_ids.local();
         self.local.push(LocalCandidate {
+            id,
             gathered,
             foundation,
             local_preference: base.local_preference,
@@ -1017,7 +1254,7 @@ impl Agent {
             // preference. That is what makes both ends price this candidate the same.
             priority: claimed,
         });
-        LocalId(self.local.len().saturating_sub(1))
+        id
     }
 
     fn fail_pair(&mut self, id: PairId, nominating: bool, out: &mut Vec<Output>) {
@@ -1106,6 +1343,17 @@ impl Agent {
     /// Regular nomination and nothing else: the controlling agent picks a valid pair and repeats
     /// the check that produced it with `USE-CANDIDATE`, by enqueueing that pair on the
     /// triggered-check queue. Once a component is nominated it is never nominated again.
+    ///
+    /// **On a large checklist set only `Tn` fires this, and that is by design.** §14.3 scales the
+    /// RTO with `Ta × N × (Num-Waiting + Num-In-Progress)`, so a set at §6.1.2.5's default limit
+    /// of 100 pairs starts every transaction at `50 ms × 100 × 100` = **500 s**, and Rc = 7
+    /// transmissions with the doubling and the Rm final wait take over ten hours to exhaust. That
+    /// is one transmission per pair per call: a higher-priority pair that simply gets no answer
+    /// never reaches `Failed` inside any real session, so the "every pair of higher priority than
+    /// the best valid pair has reached `Failed`" half of the criterion cannot become true and the
+    /// whole decision rests on `Tn`. §19.5.1 treats that pacing as intended — it is the bound on
+    /// what a candidate list can cost — so `Tn` is the criterion for any set of interesting size
+    /// and the `Failed` half is the fast path for a small one, not the other way round.
     ///
     /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
     fn nominate(&mut self) {
@@ -1209,10 +1457,8 @@ impl Agent {
         }
 
         for (component, pair, local, remote, priority) in &chosen {
-            let Some(base) = self
-                .local
-                .get(local.0)
-                .map(|candidate| candidate.gathered.base)
+            let Some(base) =
+                find_local(&self.local, *local).map(|candidate| candidate.gathered.base)
             else {
                 continue;
             };
@@ -1241,10 +1487,28 @@ impl Agent {
             // A controlled agent must not do it: §8.1.1 requires it to tolerate a peer that
             // nominates more than once and then "use the pairs with the highest priority", and a
             // checklist it has already emptied has nothing left to raise the selection to.
-            if self.role.is_controlling()
-                && let Some(list) = self.set.checklists_mut().get_mut(index)
-            {
-                list.keep_only_nominated(*component, *pair);
+            if self.role.is_controlling() {
+                if let Some(list) = self.set.checklists_mut().get_mut(index) {
+                    list.keep_only_nominated(*component, *pair);
+                }
+                // §8.1.2: "if the state of a pair is In-Progress, the agent cancels the
+                // In-Progress transaction". A removed pair leaves a transaction behind that
+                // `retransmit` would happily keep servicing — invisible with one component,
+                // because the last of them is cleared below, and a live retransmission loop for a
+                // pair that no longer exists as soon as there are two.
+                let live: Vec<PairId> = self
+                    .set
+                    .checklists()
+                    .iter()
+                    .flat_map(|list| list.pairs().iter().map(|pair| pair.id))
+                    .collect();
+                for transaction in &self.transactions {
+                    if !live.contains(&transaction.pair) {
+                        out.push(Output::ClearTimer(Timer::Retransmit(transaction.pair)));
+                    }
+                }
+                self.transactions
+                    .retain(|transaction| live.contains(&transaction.pair));
             }
         }
 
@@ -1253,7 +1517,10 @@ impl Agent {
                 list.set_state(ChecklistState::Completed);
             }
             if !self.active() {
-                self.transactions.clear();
+                for transaction in std::mem::take(&mut self.transactions) {
+                    out.push(Output::ClearTimer(Timer::Retransmit(transaction.pair)));
+                }
+                self.ta_armed = false;
                 out.push(Output::ClearTimer(Timer::Ta));
                 out.push(Output::SetTimer {
                     timer: Timer::Keepalive,
@@ -1366,60 +1633,124 @@ mod tests {
         .unwrap()
     }
 
+    /// What a driver does with Ta: fire it when, and only when, the agent has armed one.
+    ///
+    /// A test that fires Ta by hand cannot tell an armed timer from an invented one, and that is
+    /// exactly the gap this type closes — a triggered check enqueued after a checklist concluded
+    /// is queued for a tick a real driver would never deliver.
+    #[derive(Debug, Default)]
+    struct Driver {
+        armed: bool,
+    }
+
+    impl Driver {
+        /// Deliver the Ta tick the agent asked for. A one-shot timer that has fired is no longer
+        /// armed, so only the agent's own `SetTimer` can arm the next one.
+        fn tick(&mut self, agent: &mut Agent) -> Vec<Output> {
+            self.armed = false;
+            let outputs = agent.handle(Input::TimerFired(Timer::Ta));
+            self.absorb(&outputs);
+            outputs
+        }
+
+        fn absorb(&mut self, outputs: &[Output]) {
+            for output in outputs {
+                match output {
+                    Output::SetTimer {
+                        timer: Timer::Ta, ..
+                    } => self.armed = true,
+                    Output::ClearTimer(Timer::Ta) => self.armed = false,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn two_agents(
+        offerer: (bool, bool),
+        tiebreakers: (u64, u64),
+    ) -> (Agent, Agent, Driver, Driver) {
+        let (alice_address, bob_address) = (address(ALICE), address(BOB));
+        let mut alice = Agent::new(
+            Config::default(),
+            offerer.0,
+            credentials("aaaa"),
+            tiebreakers.0,
+        );
+        let mut bob = Agent::new(
+            Config::default(),
+            offerer.1,
+            credentials("bbbb"),
+            tiebreakers.1,
+        );
+        let (mut left, mut right) = (Driver::default(), Driver::default());
+        left.absorb(&alice.handle(Input::LocalCandidate(host(alice_address))));
+        right.absorb(&bob.handle(Input::LocalCandidate(host(bob_address))));
+        left.absorb(&alice.handle(Input::RemoteDescription {
+            credentials: credentials("bbbb"),
+            candidates: vec![host_line(bob_address, "1")],
+            lite: false,
+        }));
+        right.absorb(&bob.handle(Input::RemoteDescription {
+            credentials: credentials("aaaa"),
+            candidates: vec![host_line(alice_address, "1")],
+            lite: false,
+        }));
+        left.absorb(&alice.handle(Input::GatheringDone));
+        right.absorb(&bob.handle(Input::GatheringDone));
+        (alice, bob, left, right)
+    }
+
     /// Two agents wired to each other, each believing it sent the initial offer and each holding
     /// `tiebreaker` — which is §7.3.1.1's `T = V` row, the one that decides whether two copies of
     /// the same stack converge.
-    fn both_controlling(tiebreaker: u64) -> (Agent, Agent) {
-        let (alice, bob) = (address(ALICE), address(BOB));
-        let mut a = Agent::new(Config::default(), true, credentials("aaaa"), tiebreaker);
-        let mut b = Agent::new(Config::default(), true, credentials("bbbb"), tiebreaker);
-        a.handle(Input::LocalCandidate(host(alice)));
-        b.handle(Input::LocalCandidate(host(bob)));
-        a.handle(Input::RemoteDescription {
-            credentials: credentials("bbbb"),
-            candidates: vec![host_line(bob, "1")],
-            lite: false,
-        });
-        b.handle(Input::RemoteDescription {
-            credentials: credentials("aaaa"),
-            candidates: vec![host_line(alice, "1")],
-            lite: false,
-        });
-        a.handle(Input::GatheringDone);
-        b.handle(Input::GatheringDone);
-        (a, b)
+    fn both_controlling(tiebreaker: u64) -> (Agent, Agent, Driver, Driver) {
+        two_agents((true, true), (tiebreaker, tiebreaker))
     }
 
-    /// Run `rounds` Ta ticks at both ends, carrying every datagram one produces to the other and
-    /// following the exchange until it goes quiet. No clock, no socket: the "network" is this
-    /// function, which is the point of the sans-IO shape.
-    fn exchange(a: &mut Agent, b: &mut Agent, rounds: usize) {
+    /// Run `rounds` Ta ticks at both ends — but only at an end that has a Ta armed — carrying
+    /// every datagram one produces to the other and following the exchange until it goes quiet.
+    /// No clock, no socket: the "network" is this function, which is the point of the sans-IO
+    /// shape.
+    fn exchange(
+        a: &mut Agent,
+        b: &mut Agent,
+        left: &mut Driver,
+        right: &mut Driver,
+        rounds: usize,
+    ) {
         let (alice, bob) = (address(ALICE), address(BOB));
         for _ in 0..rounds {
             let mut pending: Vec<(bool, Vec<u8>)> = Vec::new();
-            for output in a.handle(Input::TimerFired(Timer::Ta)) {
-                if let Output::Send { bytes, .. } = output {
-                    pending.push((true, bytes));
+            if left.armed {
+                for output in left.tick(a) {
+                    if let Output::Send { bytes, .. } = output {
+                        pending.push((true, bytes));
+                    }
                 }
             }
-            for output in b.handle(Input::TimerFired(Timer::Ta)) {
-                if let Output::Send { bytes, .. } = output {
-                    pending.push((false, bytes));
+            if right.armed {
+                for output in right.tick(b) {
+                    if let Output::Send { bytes, .. } = output {
+                        pending.push((false, bytes));
+                    }
                 }
             }
             for _ in 0..8 {
                 let mut next: Vec<(bool, Vec<u8>)> = Vec::new();
                 for (to_bob, bytes) in pending {
-                    let (target, from) = if to_bob {
-                        (&mut *b, alice)
+                    let (target, driver, from) = if to_bob {
+                        (&mut *b, &mut *right, alice)
                     } else {
-                        (&mut *a, bob)
+                        (&mut *a, &mut *left, bob)
                     };
-                    for output in target.handle(Input::Datagram {
+                    let outputs = target.handle(Input::Datagram {
                         from,
                         on: LocalBase(0),
                         bytes,
-                    }) {
+                    });
+                    driver.absorb(&outputs);
+                    for output in outputs {
                         if let Output::Send { bytes, .. } = output {
                             next.push((!to_bob, bytes));
                         }
@@ -1511,31 +1842,32 @@ mod tests {
     /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
     #[test]
     fn the_agent_reads_no_clock_and_owns_no_socket() {
-        // Code only: comments and this module both name the very words the code may not contain,
-        // and the assertion is about what the agent reaches for, not about what it explains.
+        // Comments are stripped — these modules explain the constraint in the words the
+        // constraint forbids — but everything else is scanned, including anything below the test
+        // module. A scan that stopped at the first `#[cfg(test)]` would not have looked at
+        // library code written after it.
         let code = |source: &str| -> String {
             source
-                .split("#[cfg(test)]")
-                .next()
-                .unwrap_or(source)
                 .lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
                 .collect::<Vec<_>>()
                 .join("\n")
         };
+        // Spelled in fragments so that this list is not itself a match for the scan it drives.
+        let forbidden = [
+            ["tok", "io"].concat(),
+            ["Udp", "Socket"].concat(),
+            ["Ins", "tant"].concat(),
+            ["System", "Time"].concat(),
+            ["std::", "thread"].concat(),
+        ];
         for source in [
             code(include_str!("agent.rs")),
             code(include_str!("checklist.rs")),
             code(include_str!("candidate.rs")),
             code(include_str!("timing.rs")),
         ] {
-            for forbidden in [
-                "tokio",
-                "UdpSocket",
-                "Instant::now",
-                "SystemTime::now",
-                "std::thread",
-            ] {
+            for forbidden in &forbidden {
                 assert!(
                     !source.contains(forbidden),
                     "the ICE agent must not reach for {forbidden}: time arrives as TimerFired \
@@ -1973,26 +2305,11 @@ mod tests {
     #[test]
     fn two_agents_converge_on_a_selected_pair() {
         let (alice_address, bob_address) = (address(ALICE), address(BOB));
-        let mut alice = Agent::new(Config::default(), true, credentials("aaaa"), 900);
-        let mut bob = Agent::new(Config::default(), false, credentials("bbbb"), 100);
-        alice.handle(Input::LocalCandidate(host(alice_address)));
-        bob.handle(Input::LocalCandidate(host(bob_address)));
-        alice.handle(Input::RemoteDescription {
-            credentials: credentials("bbbb"),
-            candidates: vec![host_line(bob_address, "1")],
-            lite: false,
-        });
-        bob.handle(Input::RemoteDescription {
-            credentials: credentials("aaaa"),
-            candidates: vec![host_line(alice_address, "1")],
-            lite: false,
-        });
-        alice.handle(Input::GatheringDone);
-        bob.handle(Input::GatheringDone);
+        let (mut alice, mut bob, mut left, mut right) = two_agents((true, false), (900, 100));
         assert_eq!(alice.role(), Role::Controlling);
         assert_eq!(bob.role(), Role::Controlled);
 
-        exchange(&mut alice, &mut bob, 6);
+        exchange(&mut alice, &mut bob, &mut left, &mut right, 6);
 
         assert_eq!(
             alice.selected(ComponentId::RTP),
@@ -2006,6 +2323,60 @@ mod tests {
             alice.checklists().checklists()[0].state(),
             ChecklistState::Completed
         );
+        // And both ends fall quiet. §8.1.2 stops an agent generating triggered checks for a
+        // concluded pair, without which each end's redundant check finds the other's pair
+        // In-Progress, §7.3.1.4 re-enqueues it, and two agreeing agents check each other for the
+        // life of the call.
+        assert!(!left.armed && !right.armed);
+    }
+
+    /// A §7.3.1.4 check for an address first seen *after* the checklist concluded has to be able
+    /// to leave. `conclude` clears Ta and `pace` re-arms only while there is work, so without an
+    /// arming of its own the triggered check is enqueued for a tick a driver would never deliver
+    /// — and the same silence swallows §8.1.1's tolerance clause below.
+    #[test]
+    fn a_check_arriving_after_the_checklist_concluded_still_arms_ta() {
+        let (mut alice, mut bob, mut left, mut right) = two_agents((true, false), (900, 100));
+        // Long enough for both ends to conclude and for the pacing to fall quiet.
+        exchange(&mut alice, &mut bob, &mut left, &mut right, 12);
+        assert_eq!(
+            bob.checklists().checklists()[0].state(),
+            ChecklistState::Completed
+        );
+        assert!(!right.armed, "a concluded checklist stops pacing");
+
+        // The peer checks from an address ICE has never seen — a NAT rebinding, say.
+        let surprise = address("198.51.100.77:41000");
+        let check = stun::connectivity_check(
+            stun::new_transaction_id(),
+            &Peering::new(credentials("aaaa"), credentials("bbbb")),
+            Priority::new(1_862_270_975).unwrap(),
+            RoleAttribute::Controlling {
+                tiebreaker: 900,
+                nominate: false,
+            },
+        )
+        .unwrap();
+        let outputs = bob.handle(Input::Datagram {
+            from: surprise,
+            on: LocalBase(0),
+            bytes: check,
+        });
+        right.absorb(&outputs);
+        assert!(
+            right.armed,
+            "the triggered check §7.3.1.4 just enqueued needs a Ta tick to leave"
+        );
+
+        let tick = right.tick(&mut bob);
+        let addressed: Vec<SocketAddr> = tick
+            .iter()
+            .filter_map(|output| match output {
+                Output::Send { to, bytes, .. } if Message::decode(bytes).is_ok() => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(addressed, vec![surprise]);
     }
 
     /// §8.1.1: "the agent MUST NOT nominate another pair for [the] same component … within the
@@ -2089,13 +2460,18 @@ mod tests {
     /// §8.1.1's tolerance clause: a peer implemented against RFC 5245 may nominate more than
     /// once, and "the agents MUST produce the selected pairs and use the pairs with the highest
     /// priority". Tolerating a legacy peer is not the same as being one.
+    ///
+    /// Ta is fired only when the agent has armed one, because the interesting half of this is
+    /// that the second nomination arrives *after* the checklist concluded and its triggered check
+    /// therefore has to arm a tick of its own. A test that fires Ta by hand passes without that.
     #[test]
     fn a_peer_that_nominates_twice_selects_the_highest_priority_nominated_pair() {
         let low = address("198.51.100.3:6000");
         let high = address("198.51.100.2:6000");
         let mut subject = Agent::new(Config::default(), false, credentials("aaaa"), 100);
-        subject.handle(Input::LocalCandidate(host(address(ALICE))));
-        subject.handle(Input::RemoteDescription {
+        let mut driver = Driver::default();
+        driver.absorb(&subject.handle(Input::LocalCandidate(host(address(ALICE)))));
+        driver.absorb(&subject.handle(Input::RemoteDescription {
             credentials: credentials("bbbb"),
             candidates: vec![
                 Candidate::parse(&format!(
@@ -2112,8 +2488,8 @@ mod tests {
                 .unwrap(),
             ],
             lite: false,
-        });
-        subject.handle(Input::GatheringDone);
+        }));
+        driver.absorb(&subject.handle(Input::GatheringDone));
 
         // The peer nominates the low-priority path first, then the high-priority one.
         for remote in [low, high] {
@@ -2127,20 +2503,26 @@ mod tests {
                 },
             )
             .unwrap();
-            deliver(&mut subject, remote, nominating);
-            // The triggered check each nomination enqueued, and its success.
-            for _ in 0..3 {
-                let outputs = subject.handle(Input::TimerFired(Timer::Ta));
-                for output in &outputs {
-                    if let Output::Send { to, bytes, .. } = output
-                        && let Ok(message) = Message::decode(bytes)
-                        && message.class() == Class::Request
-                    {
-                        let response =
-                            stun::check_success(message.transaction(), &peer(), address(ALICE))
-                                .unwrap();
-                        deliver(&mut subject, *to, response);
-                    }
+            driver.absorb(&deliver(&mut subject, remote, nominating));
+
+            let mut rounds = 0;
+            while driver.armed && rounds < 10 {
+                rounds += 1;
+                let outputs = driver.tick(&mut subject);
+                let destinations: Vec<(SocketAddr, TransactionId)> = outputs
+                    .iter()
+                    .filter_map(|output| match output {
+                        Output::Send { to, bytes, .. } => Message::decode(bytes)
+                            .ok()
+                            .filter(|message| message.class() == Class::Request)
+                            .map(|message| (*to, message.transaction())),
+                        _ => None,
+                    })
+                    .collect();
+                for (to, transaction) in destinations {
+                    let response =
+                        stun::check_success(transaction, &peer(), address(ALICE)).unwrap();
+                    driver.absorb(&deliver(&mut subject, to, response));
                 }
             }
         }
@@ -2152,6 +2534,211 @@ mod tests {
         );
     }
 
+    // ----------------------------------------------------------- §6.1.2.5 on the learning path
+
+    /// §6.1.2.5's limit is a MUST and §19.5.1 is the attack it names. It binds at formation *and*
+    /// on §7.3.1.4's insertion path, which is the one a peer drives: without it, each
+    /// authenticated check from a fresh source address buys the sender a remote candidate, a
+    /// pair, and eventually an 88-byte connectivity check sent to an address it named and need
+    /// not be able to receive at.
+    #[test]
+    fn a_flood_of_checks_from_new_addresses_cannot_grow_the_set_past_the_limit() {
+        let config = Config {
+            pair_limit: 4,
+            ..Config::default()
+        };
+        let mut subject = Agent::new(config, false, credentials("aaaa"), 100);
+        let mut driver = Driver::default();
+        driver.absorb(&subject.handle(Input::LocalCandidate(host(address(ALICE)))));
+        driver.absorb(&subject.handle(Input::RemoteDescription {
+            credentials: credentials("bbbb"),
+            candidates: vec![host_line(address(BOB), "1")],
+            lite: false,
+        }));
+        driver.absorb(&subject.handle(Input::GatheringDone));
+
+        let mut answered = 0usize;
+        for n in 0..200u32 {
+            let source = address(&format!("198.51.100.{}:{}", n % 200 + 1, 40000 + n));
+            let outputs = deliver(
+                &mut subject,
+                source,
+                peer_check(RoleAttribute::Controlling {
+                    tiebreaker: 999,
+                    nominate: false,
+                }),
+            );
+            driver.absorb(&outputs);
+            answered += sent(&outputs).len();
+        }
+
+        assert_eq!(
+            answered, 200,
+            "§7.3 still answers every authenticated check — a 64-byte response to an 88-byte \
+             request is not an amplifier"
+        );
+        assert!(
+            subject.checklists().total_pairs() <= 4,
+            "the checklist set grew to {} against a configured limit of 4",
+            subject.checklists().total_pairs()
+        );
+        assert!(
+            subject.remote_candidates().len() <= 5,
+            "the remote candidate table grew to {}",
+            subject.remote_candidates().len()
+        );
+
+        // And what the agent goes on to *send* is bounded by the limit, not by the flood.
+        let mut destinations: Vec<SocketAddr> = Vec::new();
+        let mut rounds = 0;
+        while driver.armed && rounds < 200 {
+            rounds += 1;
+            for output in driver.tick(&mut subject) {
+                if let Output::Send { to, bytes, .. } = output
+                    && Message::decode(&bytes).is_ok_and(|m| m.class() == Class::Request)
+                    && !destinations.contains(&to)
+                {
+                    destinations.push(to);
+                }
+            }
+        }
+        assert!(
+            destinations.len() <= 4,
+            "checks went to {} distinct addresses against a limit of 4",
+            destinations.len()
+        );
+    }
+
+    // ------------------------------------------------------------------- a second description
+
+    fn remote_address_of(subject: &Agent, pair: PairId) -> Option<SocketAddr> {
+        let remote = subject.checklists().pair(pair)?.remote;
+        find_remote(subject.remote_candidates(), remote).map(|candidate| candidate.address)
+    }
+
+    fn three_remote_agent() -> (Agent, Driver, Vec<SocketAddr>) {
+        let remotes: Vec<SocketAddr> = (1..=3)
+            .map(|n| address(&format!("198.51.100.{n}:6000")))
+            .collect();
+        let mut subject = Agent::new(Config::default(), true, credentials("aaaa"), 100);
+        let mut driver = Driver::default();
+        driver.absorb(&subject.handle(Input::LocalCandidate(host(address(ALICE)))));
+        driver.absorb(
+            &subject.handle(Input::RemoteDescription {
+                credentials: credentials("bbbb"),
+                candidates: remotes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, remote)| host_line(*remote, &(index + 1).to_string()))
+                    .collect(),
+                lite: false,
+            }),
+        );
+        driver.absorb(&subject.handle(Input::GatheringDone));
+        (subject, driver, remotes)
+    }
+
+    /// RFC 8839 §4.2 lets a peer send more than one description for the same ICE session — a 183
+    /// with SDP and then a 200 with SDP, or any re-INVITE — and the candidate list is the peer's
+    /// to choose. Replacing the remote table under the live pairs leaves each of them naming a
+    /// candidate it was never formed for, or nothing at all, and an agent whose pairs all dangle
+    /// sends no checks, reports no failure and is simply silent.
+    #[test]
+    fn a_second_description_adds_candidates_without_re_pointing_the_live_pairs() {
+        let (mut subject, mut driver, remotes) = three_remote_agent();
+        let before: Vec<(PairId, SocketAddr)> = subject.checklists().checklists()[0]
+            .pairs()
+            .iter()
+            .map(|pair| (pair.id, remote_address_of(&subject, pair.id).unwrap()))
+            .collect();
+        assert_eq!(before.len(), 3);
+
+        let fresh = address("203.0.113.99:6000");
+        driver.absorb(&subject.handle(Input::RemoteDescription {
+            credentials: credentials("bbbb"),
+            candidates: vec![host_line(fresh, "9")],
+            lite: false,
+        }));
+
+        for (pair, was) in &before {
+            assert_eq!(
+                remote_address_of(&subject, *pair),
+                Some(*was),
+                "a re-offer must not re-point a pair that is already being checked"
+            );
+        }
+        assert!(
+            subject
+                .remote_candidates()
+                .iter()
+                .any(|candidate| candidate.address == fresh),
+            "the candidate the second description brought is added"
+        );
+        for remote in &remotes {
+            assert!(
+                subject
+                    .remote_candidates()
+                    .iter()
+                    .any(|candidate| candidate.address == *remote),
+                "a candidate the second description omitted is not dropped underneath its pair"
+            );
+        }
+
+        // And the agent is still checking: it has a Ta armed and checks still leave.
+        assert!(driver.armed);
+        let destinations: Vec<SocketAddr> = driver
+            .tick(&mut subject)
+            .iter()
+            .filter_map(|output| match output {
+                Output::Send { to, bytes, .. } if Message::decode(bytes).is_ok() => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            destinations.len(),
+            1,
+            "a re-offer must not silence the agent"
+        );
+    }
+
+    /// RFC 8839 §4.4.1.1.1: **both** `ice-ufrag` and `ice-pwd` changing is an ICE restart, and
+    /// everything is rebuilt for the new session.
+    #[test]
+    fn an_ice_restart_rebuilds_the_checklists_and_keeps_checking() {
+        let (mut subject, mut driver, _) = three_remote_agent();
+        let before: Vec<PairId> = subject.checklists().checklists()[0]
+            .pairs()
+            .iter()
+            .map(|pair| pair.id)
+            .collect();
+
+        let fresh = address("203.0.113.99:6000");
+        driver.absorb(&subject.handle(Input::RemoteDescription {
+            credentials: credentials("cccc"),
+            candidates: vec![host_line(fresh, "1")],
+            lite: false,
+        }));
+
+        assert_eq!(subject.remote_candidates().len(), 1);
+        assert_eq!(subject.checklists().total_pairs(), 1);
+        for pair in before {
+            assert!(
+                subject.checklists().pair(pair).is_none(),
+                "a restart is a new ICE session, so none of the old pairs survive it"
+            );
+        }
+        assert!(driver.armed);
+        let destinations: Vec<SocketAddr> = driver
+            .tick(&mut subject)
+            .iter()
+            .filter_map(|output| match output {
+                Output::Send { to, bytes, .. } if Message::decode(bytes).is_ok() => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(destinations, vec![fresh]);
+    }
+
     /// The failing-first test of this story, and the one §7.1's note exists for: two agents can
     /// both believe they offered — third-party call control, glare, a re-INVITE crossing — and two
     /// controlling agents never converge, because neither will accept the other's nomination.
@@ -2161,11 +2748,11 @@ mod tests {
     /// tiebreakers §7.2.5.1 mandates break the symmetry on the second round.
     #[test]
     fn two_agents_that_both_start_controlling_converge_on_one_role() {
-        let (mut alice, mut bob) = both_controlling(0x1234_5678_9abc_def0);
+        let (mut alice, mut bob, mut left, mut right) = both_controlling(0x1234_5678_9abc_def0);
         assert_eq!(alice.role(), Role::Controlling);
         assert_eq!(bob.role(), Role::Controlling);
 
-        exchange(&mut alice, &mut bob, 6);
+        exchange(&mut alice, &mut bob, &mut left, &mut right, 6);
 
         assert_ne!(
             alice.role(),

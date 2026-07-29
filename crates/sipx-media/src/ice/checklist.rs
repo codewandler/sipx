@@ -15,7 +15,8 @@ use std::net::{IpAddr, SocketAddr};
 use sipx_sdp::ice::{CandidateType, ComponentId};
 
 use super::candidate::{
-    LocalCandidate, LocalId, PairFoundation, RemoteCandidate, RemoteId, pair_priority,
+    LocalCandidate, LocalId, PairFoundation, RemoteCandidate, RemoteId, find_local, find_remote,
+    pair_priority,
 };
 
 /// Which end decides (§6.1.1).
@@ -143,6 +144,21 @@ pub struct CandidatePair {
     pub state: PairState,
     /// Whether a check on this pair carried `USE-CANDIDATE` and succeeded (§7.2.5.3.4).
     pub nominated: bool,
+}
+
+impl CandidatePair {
+    /// Whether §6.1.2.5 may discard this pair.
+    ///
+    /// A pair with a check in flight or a check that succeeded is holding state outside the
+    /// checklist — a transaction, or an entry in the valid list — and removing it silently would
+    /// lose that rather than bound anything.
+    #[must_use]
+    pub const fn is_discardable(&self) -> bool {
+        matches!(
+            self.state,
+            PairState::Frozen | PairState::Waiting | PairState::Failed
+        ) && !self.nominated
+    }
 }
 
 /// A pair in a valid list (§7.2.5.3.2).
@@ -412,12 +428,20 @@ impl ChecklistSet {
     /// configurable. The discarding is spread across checklists ("SHOULD be done evenly so that
     /// the number of candidate pairs in each checklist is reduced the same amount") by always
     /// taking from the longest checklist.
+    ///
+    /// **Only pairs that have not been checked, or have finished failing, are discardable.**
+    /// §6.1.2.5 runs at checklist formation, when every pair is Frozen; this runs again every
+    /// time §7.3.1.4 inserts a pair, because that is the path a peer can drive. Discarding an
+    /// `In-Progress` pair would orphan its transaction, and discarding a `Succeeded` one would
+    /// take a working path out of the valid list — so a set already full of live pairs stops
+    /// shrinking rather than tearing itself down, and the limit then binds by refusing growth.
     pub fn limit(&mut self, limit: usize) {
         while self.total_pairs() > limit {
             let longest = self
                 .checklists
                 .iter()
                 .enumerate()
+                .filter(|(_, list)| list.pairs.iter().any(CandidatePair::is_discardable))
                 .max_by_key(|(_, list)| list.pairs.len())
                 .map(|(index, _)| index);
             let Some(index) = longest else { return };
@@ -428,11 +452,13 @@ impl ChecklistSet {
                 .pairs
                 .iter()
                 .enumerate()
+                .filter(|(_, pair)| pair.is_discardable())
                 .min_by_key(|(_, pair)| pair.priority)
                 .map(|(position, _)| position);
             match lowest {
                 Some(position) => {
-                    list.pairs.remove(position);
+                    let dropped = list.pairs.remove(position);
+                    list.triggered.retain(|id| *id != dropped.id);
                 }
                 None => return,
             }
@@ -455,8 +481,26 @@ impl ChecklistSet {
             }
             list.set_state(ChecklistState::Running);
         }
+        self.unfreeze_added();
+    }
 
-        let mut unfrozen: Vec<PairFoundation> = Vec::new();
+    /// §6.1.2, applied to a set that has grown: "if candidates are added to a checklist … the
+    /// agent will re-perform these steps for the updated checklist".
+    ///
+    /// The same rule as §6.1.2.6 step 4, expressed over whatever is Frozen now: for each
+    /// foundation that has no pair anywhere in the set outside the Frozen state, the first Frozen
+    /// pair with it — by lowest component ID, then highest priority, in the first checklist that
+    /// has it — moves to Waiting. Run over a set where everything is Frozen this *is* step 4; run
+    /// over a live set it unfreezes exactly the foundations the new pairs brought.
+    pub fn unfreeze_added(&mut self) {
+        let mut unfrozen: Vec<PairFoundation> = self
+            .checklists
+            .iter()
+            .flat_map(|list| list.pairs.iter())
+            .filter(|pair| pair.state != PairState::Frozen)
+            .map(|pair| pair.foundation.clone())
+            .collect();
+
         for list in &mut self.checklists {
             let mut order: Vec<usize> = (0..list.pairs.len()).collect();
             order.sort_by_key(|position| {
@@ -468,7 +512,7 @@ impl ChecklistSet {
                 let Some(pair) = list.pairs.get_mut(position) else {
                     continue;
                 };
-                if unfrozen.contains(&pair.foundation) {
+                if pair.state != PairState::Frozen || unfrozen.contains(&pair.foundation) {
                     continue;
                 }
                 pair.state = PairState::Waiting;
@@ -577,9 +621,10 @@ impl ChecklistSet {
     ) {
         for list in &mut self.checklists {
             for pair in &mut list.pairs {
-                let (Some(local), Some(remote)) =
-                    (locals.get(pair.local.0), remotes.get(pair.remote.0))
-                else {
+                let (Some(local), Some(remote)) = (
+                    find_local(locals, pair.local),
+                    find_remote(remotes, pair.remote),
+                ) else {
                     continue;
                 };
                 pair.priority = ordered_pair_priority(role, local.priority, remote.priority);
@@ -588,7 +633,7 @@ impl ChecklistSet {
         }
         for list in &mut self.checklists {
             for valid in &mut list.valid {
-                let Some(local) = locals.get(valid.local.0) else {
+                let Some(local) = find_local(locals, valid.local) else {
                     continue;
                 };
                 let remote = remotes
@@ -661,11 +706,11 @@ pub fn form_pairs(
     let ceiling = max_local.min(max_remote);
 
     let mut pairs = Vec::new();
-    for (local_index, local) in locals.iter().enumerate() {
+    for local in locals {
         if local.gathered.component > ceiling {
             continue;
         }
-        for (remote_index, remote) in remotes.iter().enumerate() {
+        for remote in remotes {
             if local.gathered.component != remote.component {
                 continue;
             }
@@ -679,8 +724,8 @@ pub fn form_pairs(
             }
             pairs.push(CandidatePair {
                 id: ids.allocate(),
-                local: LocalId(local_index),
-                remote: RemoteId(remote_index),
+                local: local.id,
+                remote: remote.id,
                 component: local.gathered.component,
                 foundation: PairFoundation {
                     local: local.foundation,
@@ -707,7 +752,7 @@ pub fn form_pairs(
 /// is the first in an already-sorted list.
 fn prune(pairs: &mut Vec<CandidatePair>, locals: &[LocalCandidate], remotes: &[RemoteCandidate]) {
     for pair in pairs.iter_mut() {
-        let Some(local) = locals.get(pair.local.0) else {
+        let Some(local) = find_local(locals, pair.local) else {
             continue;
         };
         if !matches!(
@@ -718,19 +763,21 @@ fn prune(pairs: &mut Vec<CandidatePair>, locals: &[LocalCandidate], remotes: &[R
         }
         let base = local.gathered.base_address;
         let component = local.gathered.component;
-        if let Some(index) = locals.iter().position(|candidate| {
+        if let Some(host) = locals.iter().find(|candidate| {
             candidate.gathered.kind == CandidateType::Host
                 && candidate.gathered.address == base
                 && candidate.gathered.component == component
         }) {
-            pair.local = LocalId(index);
+            pair.local = host.id;
         }
     }
 
     let mut kept: Vec<(SocketAddr, SocketAddr)> = Vec::new();
     pairs.retain(|pair| {
-        let (Some(local), Some(remote)) = (locals.get(pair.local.0), remotes.get(pair.remote.0))
-        else {
+        let (Some(local), Some(remote)) = (
+            find_local(locals, pair.local),
+            find_remote(remotes, pair.remote),
+        ) else {
             return false;
         };
         let key = (local.gathered.base_address, remote.address);
@@ -757,14 +804,16 @@ mod tests {
         Gathered, LocalBase, LocalFoundation, RemoteFoundation, SINGLE_ADDRESS_PREFERENCE,
         assign_local_preferences,
     };
+    use crate::ice::candidate::{find_local, find_remote};
 
     fn component(id: u16) -> ComponentId {
         ComponentId::new(id).unwrap()
     }
 
-    fn host(ip: &str, port: u16, component_id: u16) -> LocalCandidate {
+    fn host(id: usize, ip: &str, port: u16, component_id: u16) -> LocalCandidate {
         let address = SocketAddr::new(ip.parse().unwrap(), port);
         LocalCandidate {
+            id: LocalId(id),
             gathered: Gathered {
                 base: LocalBase(0),
                 base_address: address,
@@ -785,6 +834,8 @@ mod tests {
 
     fn remote(ip: &str, port: u16, component_id: u16, foundation: u32) -> RemoteCandidate {
         RemoteCandidate {
+            // Distinct per fixture: the address decides, as it does for a real candidate.
+            id: RemoteId(ip.bytes().map(usize::from).sum::<usize>() * 100_000 + usize::from(port)),
             address: SocketAddr::new(ip.parse().unwrap(), port),
             kind: CandidateType::Host,
             component: component(component_id),
@@ -955,7 +1006,7 @@ mod tests {
 
     #[test]
     fn candidates_pair_only_within_a_component_and_an_address_family() {
-        let locals = vec![host("192.0.2.1", 5000, 1), host("192.0.2.1", 5001, 2)];
+        let locals = vec![host(1, "192.0.2.1", 5000, 1), host(2, "192.0.2.1", 5001, 2)];
         let remotes = vec![
             remote("198.51.100.1", 6000, 1, 1),
             remote("198.51.100.1", 6001, 2, 1),
@@ -964,9 +1015,10 @@ mod tests {
         let mut ids = PairIds::default();
         let pairs = form_pairs(&mut ids, Role::Controlling, &locals, &remotes);
         assert_eq!(pairs.len(), 2);
-        assert!(pairs.iter().all(
-            |pair| locals[pair.local.0].gathered.component == remotes[pair.remote.0].component
-        ));
+        assert!(pairs.iter().all(|pair| {
+            find_local(&locals, pair.local).unwrap().gathered.component
+                == find_remote(&remotes, pair.remote).unwrap().component
+        }));
     }
 
     /// §6.1.2.2's MUST NOT: a link-local address pairs only with another link-local one.
@@ -976,7 +1028,7 @@ mod tests {
         assert!(!is_link_local("2001:db8::1".parse().unwrap()));
         assert!(!is_link_local("192.0.2.1".parse().unwrap()));
 
-        let locals = vec![host("fe80::1", 5000, 1), host("2001:db8::1", 5000, 1)];
+        let locals = vec![host(1, "fe80::1", 5000, 1), host(2, "2001:db8::1", 5000, 1)];
         let remotes = vec![
             remote("fe80::2", 6000, 1, 1),
             remote("2001:db8::2", 6000, 1, 2),
@@ -986,8 +1038,14 @@ mod tests {
         assert_eq!(pairs.len(), 2);
         for pair in &pairs {
             assert_eq!(
-                is_link_local(locals[pair.local.0].gathered.address.ip()),
-                is_link_local(remotes[pair.remote.0].address.ip())
+                is_link_local(
+                    find_local(&locals, pair.local)
+                        .unwrap()
+                        .gathered
+                        .address
+                        .ip()
+                ),
+                is_link_local(find_remote(&remotes, pair.remote).unwrap().address.ip())
             );
         }
     }
@@ -996,7 +1054,7 @@ mod tests {
     /// that offers RTCP to an agent that has no control port gets its RTCP candidates unpaired.
     #[test]
     fn a_peer_offering_rtcp_to_an_agent_without_one_gets_no_rtcp_pairs() {
-        let locals = vec![host("192.0.2.1", 5000, 1)];
+        let locals = vec![host(1, "192.0.2.1", 5000, 1)];
         let remotes = vec![
             remote("198.51.100.1", 6000, 1, 1),
             remote("198.51.100.1", 6001, 2, 1),
@@ -1013,8 +1071,9 @@ mod tests {
     fn a_reflexive_local_becomes_its_base_and_the_redundant_pair_goes() {
         let base = SocketAddr::new("192.0.2.1".parse().unwrap(), 5000);
         let mut locals = vec![
-            host("192.0.2.1", 5000, 1),
+            host(1, "192.0.2.1", 5000, 1),
             LocalCandidate {
+                id: LocalId(1),
                 gathered: Gathered {
                     base: LocalBase(0),
                     base_address: base,
@@ -1035,7 +1094,10 @@ mod tests {
         let pairs = form_pairs(&mut ids, Role::Controlling, &locals, &remotes);
         assert_eq!(pairs.len(), 1);
         // Whichever pair survived, its local candidate is one a socket exists at.
-        assert_eq!(locals[pairs[0].local.0].gathered.kind, CandidateType::Host);
+        assert_eq!(
+            find_local(&locals, pairs[0].local).unwrap().gathered.kind,
+            CandidateType::Host
+        );
     }
 
     /// §6.1.2.3: `G` is the controlling agent's candidate, so the same pair seen from the two
@@ -1052,7 +1114,7 @@ mod tests {
 
     #[test]
     fn a_role_change_recomputes_every_pair_priority_and_re_sorts() {
-        let locals = vec![host("192.0.2.1", 5000, 1)];
+        let locals = vec![host(1, "192.0.2.1", 5000, 1)];
         let remotes = vec![remote("198.51.100.1", 6000, 1, 1)];
         let mut ids = PairIds::default();
         let mut set = ChecklistSet::new();
@@ -1072,6 +1134,10 @@ mod tests {
             after,
             ordered_pair_priority(Role::Controlled, locals[0].priority, remotes[0].priority)
         );
+        // And the pair still names the candidates it was formed for.
+        let pair = &set.checklists()[0].pairs()[0];
+        assert!(find_local(&locals, pair.local).is_some());
+        assert!(find_remote(&remotes, pair.remote).is_some());
     }
 
     #[test]

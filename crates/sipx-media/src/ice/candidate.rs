@@ -45,17 +45,61 @@ pub const SINGLE_ADDRESS_PREFERENCE: u16 = 65535;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LocalBase(pub u16);
 
-/// Where a [`LocalCandidate`] sits in the agent's table of them.
+/// A local candidate's identity.
 ///
-/// An index and not a copy of the candidate: §7.2.5.3.1 adds peer-reflexive candidates to that
-/// table while pairs referring to it are live, and a pair that had copied its candidate would
-/// still be pointing at the priority the candidate had before the role switched.
+/// A handle and not a copy of the candidate: §7.2.5.3.1 adds peer-reflexive candidates while
+/// pairs are live, and a pair that had copied its candidate would still be holding the priority
+/// it had before the role switched.
+///
+/// An allocated identity and not a position, for the same reason [`PairId`](crate::ice::checklist::PairId)
+/// is: the tables these name are not append-only. A second offer replaces the remote candidates,
+/// §6.1.2.5's limit discards pairs, and §7.3.1.3 learns candidates that may later be forgotten —
+/// after any of which a stored position names a candidate the pair was never formed for, which is
+/// a check sent to an address the peer never offered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LocalId(pub usize);
 
-/// Where a [`RemoteCandidate`] sits in the agent's table of them.
+/// A remote candidate's identity, allocated and stable — see [`LocalId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemoteId(pub usize);
+
+/// Allocates the identities of [`LocalCandidate`]s and [`RemoteCandidate`]s.
+///
+/// One counter each, never reused, so a stale handle resolves to nothing rather than to whatever
+/// took the position.
+#[derive(Debug, Default)]
+pub struct CandidateIds {
+    local: usize,
+    remote: usize,
+}
+
+impl CandidateIds {
+    /// The next local identity.
+    pub fn local(&mut self) -> LocalId {
+        let id = LocalId(self.local);
+        self.local = self.local.saturating_add(1);
+        id
+    }
+
+    /// The next remote identity.
+    pub fn remote(&mut self) -> RemoteId {
+        let id = RemoteId(self.remote);
+        self.remote = self.remote.saturating_add(1);
+        id
+    }
+}
+
+/// The local candidate with this identity, if it is still known.
+#[must_use]
+pub fn find_local(candidates: &[LocalCandidate], id: LocalId) -> Option<&LocalCandidate> {
+    candidates.iter().find(|candidate| candidate.id == id)
+}
+
+/// The remote candidate with this identity, if it is still known.
+#[must_use]
+pub fn find_remote(candidates: &[RemoteCandidate], id: RemoteId) -> Option<&RemoteCandidate> {
+    candidates.iter().find(|candidate| candidate.id == id)
+}
 
 /// A local candidate's foundation (§5.1.1.3).
 ///
@@ -122,6 +166,8 @@ pub struct Gathered {
 /// A local candidate: what the driver gathered, plus what §5.1.1.3 and §5.1.2.1 make of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalCandidate {
+    /// Its identity, stable for the life of the agent.
+    pub id: LocalId,
     /// The gathered address and its base.
     pub gathered: Gathered,
     /// Its foundation (§5.1.1.3).
@@ -145,6 +191,8 @@ impl LocalCandidate {
 /// A remote candidate: one the peer signalled, or one §7.3.1.3 learned from a check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteCandidate {
+    /// Its identity, stable for the life of the agent.
+    pub id: RemoteId,
     /// Where to send a check.
     pub address: SocketAddr,
     /// How the peer obtained it, or [`CandidateType::PeerReflexive`] when it was learned here.
@@ -168,11 +216,12 @@ impl RemoteCandidate {
     ///
     /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
     #[must_use]
-    pub fn signalled(candidate: &Candidate) -> Option<Self> {
+    pub fn signalled(id: RemoteId, candidate: &Candidate) -> Option<Self> {
         if candidate.transport != Transport::Udp {
             return None;
         }
         Some(Self {
+            id,
             address: SocketAddr::new(candidate.address, candidate.port),
             kind: candidate.kind,
             component: candidate.component,
@@ -552,6 +601,7 @@ mod tests {
             server: None,
         };
         let candidate = |ip: &str| LocalCandidate {
+            id: LocalId(0),
             gathered: gathered(ip),
             foundation: LocalFoundation(1),
             local_preference: 0,
@@ -592,12 +642,14 @@ mod tests {
         };
         let mut candidates = vec![
             LocalCandidate {
+                id: LocalId(1),
                 gathered: gathered(1),
                 foundation: LocalFoundation(1),
                 local_preference: 0,
                 priority: Priority::MIN,
             },
             LocalCandidate {
+                id: LocalId(2),
                 gathered: gathered(2),
                 foundation: LocalFoundation(1),
                 local_preference: 0,
