@@ -567,7 +567,7 @@ mod tests {
 
     /// The session authentication key is 160 bits, not §B.3's 94 octets.
     ///
-    /// RFC 3711 §5.2: "The default session authentication key-length (n_a) SHALL be 160 bits", and
+    /// RFC 3711 §5.2: "The default session authentication key-length (`n_a`) SHALL be 160 bits", and
     /// §8.2's table repeats it. §4.3.1 derives `n = n_a` octets under label 0x01 — it does not fix
     /// a length of its own. §B.3 walks through a **94**-octet derivation because that appendix
     /// posits "an authentication function which requires a 94-octet session authentication key" to
