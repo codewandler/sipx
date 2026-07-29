@@ -178,12 +178,24 @@ With `G` the controlling agent's candidate priority and `D` the controlled agent
 pair priority = 2^32*MIN(G,D) + 2*MAX(G,D) + (G>D?1:0)
 ```
 
-It fits in `u64` — and only just, and only because §4 bounds a priority at 2^31 − 1: the largest
-value is `2^32*(2^31−1) + 2*(2^31−1) + 1`, which is `2^63 − 1`. Accept an unchecked priority from a
-peer instead — RFC 8839 §5.1's grammar is `1*10DIGIT`, so `4294967295` parses — and the same
-expression overflows. **The range check on parse is what makes this arithmetic safe**, and in a
-build without overflow checks the silent wrap reorders the checklist, which is the whole point of
-computing it.
+It fits in `u64`, with room to spare, because §4 bounds a priority at 2^31 − 1. The expression is
+bounded above by `2^32*(2^31−1) + 2*(2^31−1) + 1` = `2^63 − 1`, and that bound is approached and
+never reached: the `G>D` term is zero exactly when `G` and `D` are equal, so the largest value any
+pair of in-range priorities actually produces is `2^63 − 2`, at `G = D = 2^31 − 1`.
+
+Accept an unchecked priority from a peer instead — RFC 8839 §5.1's grammar is `1*10DIGIT`, so
+`4294967295` parses — and the same expression overflows. The overflow is **not** one step past
+2^31 − 1; the arithmetic is still exact for operands up to 4294967294. It is `u32::MAX` on both
+sides that breaks it: `2^32*(2^32−1) + 2*(2^32−1)` is `2^64 + 2^32 − 2`, which is past `u64::MAX`.
+That is a narrow window, and it is reachable by any peer that can write ten digits.
+**The range check on parse is what makes this arithmetic safe**, and in a build without overflow
+checks the silent wrap reorders the checklist, which is the whole point of computing it.
+
+*(Corrected by `M-19`, which implements the range check. The section previously stated `2^63 − 1`
+as an attained maximum and implied that anything past 2^31 − 1 overflows; both were wrong, the
+warning they supported was not. Asserted by
+`the_priority_bound_is_what_keeps_the_pair_priority_in_a_u64` in
+[`sipx_sdp::ice`](../../crates/sipx-sdp/src/ice.rs).)*
 
 Checklists sort in **decreasing** pair priority. Ties are ordered arbitrarily but must be ordered
 *stably*, so that a test asserting on a checklist gets the same answer twice.
