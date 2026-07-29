@@ -276,6 +276,25 @@ impl Checklist {
         self.triggered.contains(&id)
     }
 
+    /// The pair joining these two candidates, if the checklist has one.
+    #[must_use]
+    pub fn find(&self, local: LocalId, remote: RemoteId) -> Option<PairId> {
+        self.pairs
+            .iter()
+            .find(|pair| pair.local == local && pair.remote == remote)
+            .map(|pair| pair.id)
+    }
+
+    /// Insert a pair §7.3.1.4 built from an inbound check, "based on its priority".
+    pub fn insert(&mut self, pair: CandidatePair) {
+        let position = self
+            .pairs
+            .iter()
+            .position(|existing| existing.priority < pair.priority)
+            .unwrap_or(self.pairs.len());
+        self.pairs.insert(position, pair);
+    }
+
     /// Sort into decreasing pair priority (§6.1.2.3).
     ///
     /// Stable, so that equal priorities keep the order they were formed in: §6.1.2.3 says ties

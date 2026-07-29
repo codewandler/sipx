@@ -10,11 +10,13 @@
 //!
 //! [`docs/specs/ice.md`]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
 
+pub mod agent;
 pub mod candidate;
 pub mod checklist;
 pub mod stun;
 pub mod timing;
 
+pub use agent::{Agent, Config, Input, Output, Timer};
 pub use candidate::{Gathered, LocalBase, LocalCandidate, RemoteCandidate};
 pub use checklist::{ChecklistState, PairState, Role};
 pub use timing::Timers;
