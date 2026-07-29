@@ -67,6 +67,12 @@ finished. They now watch the invitation's event stream, which is the only instru
 difference. Both mutations are recorded in the spec's §9.6. One test also had a genuine defect: a
 `let invite = invite(...)` binding shadowed the helper function it later called.
 
+**One thing for the CHANGELOG at integration.** `Error::InvitationCancelled` is a new variant on
+`sipx_call::Error`, which — unlike `EndCause` — is *not* `#[non_exhaustive]`, so a downstream
+`match` without a wildcard arm stops compiling. Pre-1.0 (0.8.0) that is a permitted minor-bump
+break and it is what past stories did to this enum (`0a42ba6`, `c2ce7e3`), so no gate catches it
+and nothing here needs changing; it just wants a line rather than being discovered downstream.
+
 **Left undone, deliberately.**
 
 - `docs/rfc/registry.toml` is fenced for this story, so the RFC 3261 entry's `note` still describes
