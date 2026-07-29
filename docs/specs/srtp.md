@@ -4,8 +4,9 @@
 `M-15` built DTLS-SRTP, and neither wrote the spec [AGENTS.md](../../AGENTS.md) non-negotiable 4
 requires of a non-trivial subsystem; `X-25` found the breach and `M-25` is this document. The order
 is inverted and it cost something, which §12 records rather than smooths over: writing this found
-three places where the code and the RFC disagree, one of them fatal to interoperating with anything
-that is not sipx. That is the argument for the rule, made backwards. · **Crates:** `sipx-rtp` (the
+five places where the code and the RFC disagree — two fixed by `M-25`, three left open with an owner
+— and the first of them was fatal to interoperating with anything that is not sipx. That is the
+argument for the rule, made backwards. · **Crates:** `sipx-rtp` (the
 transform), `sipx-sdp` (SDES, the fingerprint and the offer/answer), `sipx-media` (DTLS-SRTP and the
 session) · **Stories:** [M-14](../stories/M-14-secure-media.md),
 [M-15](../stories/M-15-dtls-srtp.md), [M-25](../stories/M-25-srtp-spec.md) · **Design:**

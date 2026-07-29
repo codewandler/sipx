@@ -31,11 +31,12 @@ almost certainly want a different document as well:
 **SRTP, SDES and DTLS-SRTP have a spec now** — [`specs/srtp.md`](../specs/srtp.md), written by
 `M-25`. It was written *after* `M-14` and `M-15` built them, which is the departure from
 non-negotiable 4 that `X-25` recorded here as a gap. The gap is closed and the departure is not
-retracted: writing the spec found three places where the code and the RFCs disagree, one of them —
-a session authentication key derived to §B.3's example length rather than to `n_a` — fatal to
-interoperating with anything that is not sipx, and undetectable by any test in which both ends are.
-`specs/srtp.md` §12 is the list. Spec-first would have caught it before two releases shipped; that
-is the argument for the rule, made backwards.
+retracted: writing the spec found five places where the code and the RFCs disagree — two fixed by
+`M-25`, three left open with an owner — and the first of them, a session authentication key derived
+to §B.3's example length rather than to `n_a`, was fatal to interoperating with anything that is not
+sipx and undetectable by any test in which both ends are. `specs/srtp.md` §12 is the list.
+Spec-first would have caught it before two releases shipped; that is the argument for the rule, made
+backwards.
 
 ## Why
 
@@ -472,7 +473,7 @@ under the codecs above.
 *SRTP and DTLS-SRTP having no spec* was a gap in the list above until `M-25` wrote
 [`specs/srtp.md`](../specs/srtp.md). Entry 3 here is not closed by it: `M-25` wrote the spec, it did
 not discover why the two stories skipped it, and `X-25` had already looked. What `M-25` did add is
-the cost of the omission rather than the reason for it — three code/RFC disagreements found on the
+the cost of the omission rather than the reason for it — five code/RFC disagreements found on the
 first careful reading, listed in that spec's §12 — which is the more useful half of the answer if
 the question is ever asked again about a different subsystem.
 
