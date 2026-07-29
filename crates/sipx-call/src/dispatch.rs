@@ -186,6 +186,15 @@ struct Counters {
     unsupported: AtomicU64,
 }
 
+/// Which counter a request that was not delivered belongs on.
+#[derive(Debug, Clone, Copy)]
+enum Kind {
+    Shed,
+    Ack,
+    Unmatched,
+    Unsupported,
+}
+
 /// The set of calls a dispatcher routes to: a cheap, cloneable handle to its routing table.
 ///
 /// Needed because the dispatcher's loop and the code that places outbound calls are not the same
@@ -249,6 +258,22 @@ impl Calls {
             unmatched: counts.unmatched.load(Ordering::Relaxed),
             unsupported: counts.unsupported.load(Ordering::Relaxed),
         }
+    }
+
+    /// Record one request the dispatcher did not deliver.
+    ///
+    /// One method per kind rather than a field reached through from the dispatcher, because the
+    /// counters exist so that loss is visible and a caller that had to name a path to reach them
+    /// is a caller that can quietly name the wrong one.
+    fn counted(&self, kind: Kind) {
+        let counts = &self.0.counts;
+        match kind {
+            Kind::Shed => &counts.shed,
+            Kind::Ack => &counts.acks,
+            Kind::Unmatched => &counts.unmatched,
+            Kind::Unsupported => &counts.unsupported,
+        }
+        .fetch_add(1, Ordering::Relaxed);
     }
 
     /// The table, whether or not a previous holder panicked.
@@ -388,7 +413,7 @@ impl Dispatcher {
             // transaction of its own (RFC 3261 §17.1.1.3). Counted and logged instead, because
             // a stray one means a dialog somewhere completed against a call that is not here.
             Method::Ack => {
-                self.calls.0.counts.acks.fetch_add(1, Ordering::Relaxed);
+                self.calls.counted(Kind::Ack);
                 tracing::warn!(
                     source = %incoming.source,
                     "an ACK arrived for no live call and cannot be refused"
@@ -398,10 +423,8 @@ impl Dispatcher {
             // RFC 3261 §12.2.2. Either it says it is in a dialog, or its method exists only
             // inside one — an orphan of a dialog that is gone, not an invitation to open a new
             // exchange.
-            ref method
-                if to_tag(&incoming.request.headers).is_some() || dialog_only(method) =>
-            {
-                self.calls.0.counts.unmatched.fetch_add(1, Ordering::Relaxed);
+            ref method if to_tag(&incoming.request.headers).is_some() || dialog_only(method) => {
+                self.calls.counted(Kind::Unmatched);
                 self.refuse(&incoming, 481, "Call/Transaction Does Not Exist", None)
                     .await;
                 None
@@ -412,11 +435,7 @@ impl Dispatcher {
             // RFC 3261 §8.2.1: "the UAS MUST generate a 405 ... and MUST add an Allow header
             // field".
             _ => {
-                self.calls
-                    .0
-                    .counts
-                    .unsupported
-                    .fetch_add(1, Ordering::Relaxed);
+                self.calls.counted(Kind::Unsupported);
                 self.refuse(
                     &incoming,
                     405,
@@ -443,14 +462,14 @@ impl Dispatcher {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(incoming)) => {
                 if is_ack {
-                    self.calls.0.counts.acks.fetch_add(1, Ordering::Relaxed);
+                    self.calls.counted(Kind::Ack);
                     tracing::error!(
                         source = %incoming.source,
                         "a call's queue is full; an ACK was dropped and cannot be refused — \
                          the dialog it would have completed will not be reaped"
                     );
                 } else {
-                    self.calls.0.counts.shed.fetch_add(1, Ordering::Relaxed);
+                    self.calls.counted(Kind::Shed);
                     tracing::warn!(
                         source = %incoming.source,
                         method = %incoming.request.method,
@@ -471,9 +490,9 @@ impl Dispatcher {
                 // dialog this endpoint does not have gets.
                 self.calls.remove(key);
                 if is_ack {
-                    self.calls.0.counts.acks.fetch_add(1, Ordering::Relaxed);
+                    self.calls.counted(Kind::Ack);
                 } else {
-                    self.calls.0.counts.unmatched.fetch_add(1, Ordering::Relaxed);
+                    self.calls.counted(Kind::Unmatched);
                     self.refuse(&incoming, 481, "Call/Transaction Does Not Exist", None)
                         .await;
                 }
@@ -640,7 +659,10 @@ mod tests {
             Method::Options,
             Method::Update,
         ] {
-            assert!(advertised(&method), "{method} is on ALLOW but not advertised");
+            assert!(
+                advertised(&method),
+                "{method} is on ALLOW but not advertised"
+            );
         }
         for method in [
             Method::Register,

@@ -16,8 +16,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use sipx_call::{
-    Call, CallEvent, CallEvents, Calls, DialOptions, Dispatched, Dispatcher, EndCause, answer, dial,
-    serve,
+    Call, CallEvent, CallEvents, Calls, DialOptions, Dispatched, Dispatcher, EndCause, answer,
+    dial, serve,
 };
 use sipx_sip::{HeaderName, Host, HostName, Method, Request, Response, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
@@ -158,10 +158,7 @@ fn raw(
             bytes::Bytes::from(format!("<sip:peer@example.net>;tag={from_tag}")),
         )
         .expect("from")
-        .header(
-            HeaderName::CallId,
-            bytes::Bytes::from(call_id.to_owned()),
-        )
+        .header(HeaderName::CallId, bytes::Bytes::from(call_id.to_owned()))
         .expect("call-id")
         .cseq(cseq, method)
         .expect("cseq")
@@ -241,15 +238,7 @@ async fn establish(
     tell(
         peer,
         callee_addr,
-        raw(
-            peer,
-            &Method::Ack,
-            call_id,
-            from_tag,
-            Some(&tag),
-            1,
-            None,
-        ),
+        raw(peer, &Method::Ack, call_id, from_tag, Some(&tag), 1, None),
     )
     .await;
 
@@ -309,16 +298,8 @@ async fn two_calls_served_concurrently_from_one_endpoint() {
 
     let (a_endpoint, _a_incoming) = endpoint().await;
     let (b_endpoint, _b_incoming) = endpoint().await;
-    let dialling_a = tokio::spawn(dial_callee(
-        a_endpoint,
-        callee_addr,
-        "<sip:a@example.net>".into(),
-    ));
-    let dialling_b = tokio::spawn(dial_callee(
-        b_endpoint,
-        callee_addr,
-        "<sip:b@example.net>".into(),
-    ));
+    let dialling_a = tokio::spawn(dial_callee(a_endpoint, callee_addr, "<sip:a@example.net>"));
+    let dialling_b = tokio::spawn(dial_callee(b_endpoint, callee_addr, "<sip:b@example.net>"));
 
     let mut served = Vec::new();
     for _ in 0..2 {
@@ -1002,7 +983,10 @@ async fn an_update_arriving_while_another_is_in_progress_is_refused_500() {
         .headers
         .value(&HeaderName::RetryAfter)
         .expect("§5.2 requires a Retry-After on this one");
-    let seconds: u64 = String::from_utf8_lossy(&retry).trim().parse().expect("a number");
+    let seconds: u64 = String::from_utf8_lossy(&retry)
+        .trim()
+        .parse()
+        .expect("a number");
     assert!(
         seconds <= sipx_sip::update::RETRY_AFTER_MAX_SECS,
         "§5.2 asks for a value between 0 and 10 seconds, got {seconds}"

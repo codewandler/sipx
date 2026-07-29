@@ -41,8 +41,13 @@ status = "partial"
 roles = ["uac", "uas"]
 headers = ["Via", "From", "To", "CallId", "CSeq", "Contact", "MaxForwards", "Route", "RecordRoute"]
 methods = ["INVITE", "ACK", "BYE", "CANCEL", "REGISTER", "OPTIONS"]
-evidence = ["crates/sipx-sip/src/parser.rs", "crates/sipx-sip/src/transaction/mod.rs"]
-note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written."
+evidence = [
+  "crates/sipx-sip/src/parser.rs",
+  "crates/sipx-sip/src/transaction/mod.rs",
+  "crates/sipx-call/src/dispatch.rs",
+  "crates/sipx-call/tests/dispatch.rs",
+]
+note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2)."
 
 [[rfc]]
 number = 4475
@@ -293,8 +298,9 @@ evidence = [
   "crates/sipx-call/src/rel.rs",
   "crates/sipx-call/src/call.rs",
   "crates/sipx-call/tests/update.rs",
+  "crates/sipx-call/tests/dispatch.rs",
 ]
-note = "Sent and received in an early dialog and a confirmed one. Allow lists UPDATE on the INVITE, its provisional and 2xx responses, and on in-dialog requests (§4). §5.2's three refusals are three answers: 500 with a random Retry-After for a second UPDATE before the first is answered, 491 for glare, 500 with Retry-After when an answer is owed; an unusable description is 488 and the dialog survives. An early dialog is renegotiable only after the INVITE offer is answered in a reliable provisional (RFC 3262 §5), which ring_early does."
+note = "Sent and received in an early dialog and a confirmed one. Allow lists UPDATE on the INVITE, its provisional and 2xx responses, and on in-dialog requests (§4). §5.2's three refusals are three answers: 500 with a random Retry-After for a second UPDATE before the first is answered, 491 for glare, 500 with Retry-After when an answer is owed; an unusable description is 488 and the dialog survives. All three now have wire tests: the first two are reached through a per-call inbox holding the peer's next request while an exchange of ours was abandoned part-way, which is what C-4's dispatcher makes ordinary. An early dialog is renegotiable only after the INVITE offer is answered in a reliable provisional (RFC 3262 §5), which ring_early does."
 
 [[rfc]]
 number = 4028

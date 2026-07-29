@@ -850,8 +850,8 @@ impl Call {
         let Some(status) = StatusCode::new(code) else {
             return;
         };
-        let built = ResponseBuilder::to_request(&incoming.request, status, reason).and_then(
-            |builder| {
+        let built =
+            ResponseBuilder::to_request(&incoming.request, status, reason).and_then(|builder| {
                 if matches {
                     builder.header(
                         HeaderName::Allow,
@@ -860,8 +860,7 @@ impl Call {
                 } else {
                     Ok(builder)
                 }
-            },
-        );
+            });
         match built {
             Ok(builder) => {
                 if let Err(error) = self.endpoint.respond(&incoming.key, builder.build()).await {
