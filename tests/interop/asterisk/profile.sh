@@ -11,8 +11,15 @@ PEER_TITLE="a PBX and back-to-back user agent, C, on an independent SIP library"
 PEER_IMAGE="${SIPX_ASTERISK_IMAGE:-andrius/asterisk:20.20.1-alpine-3.24}"
 PEER_CONTAINER="sipx-asterisk"
 
-# This one answers calls, so it runs the call list as well as the server list.
-PEER_ROLES="server user-agent"
+# This one answers calls, so it runs the call list as well as the server list — and it keys
+# media, so it runs the encrypted-media list too.
+PEER_ROLES="server user-agent media-security"
+
+# Both SRTP keyings, which this peer does support: `media_encryption=sdes` and `=dtls` are both
+# settable on a `pjsip` endpoint. Declared honestly rather than trimmed to what sipx can
+# currently exercise — `run.sh` reports the sipx-side gap separately, and collapsing the two
+# would record a limitation of ours as a limitation of the peer's.
+PEER_KEYINGS=(sdes dtls)
 
 # Printed once the modules are loaded and the transports are bound. Anything earlier is a
 # process that exists, which is not the same as a peer that will answer.

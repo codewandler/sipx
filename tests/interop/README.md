@@ -40,7 +40,8 @@ A profile declares:
 | `PEER_TITLE` | one line, for the banner |
 | `PEER_IMAGE` | pinned, with an environment override |
 | `PEER_CONTAINER` | the container name |
-| `PEER_ROLES` | `server`, `user-agent`, or both — see below |
+| `PEER_ROLES` | `server`, `user-agent`, `media-security`, or any combination — see below |
+| `PEER_KEYINGS` | `sdes` and/or `dtls`, for a `media-security` peer — which SRTP keyings it can do |
 | `PEER_READY_MARKER` | the log line that means *listening*, not merely *started* |
 | `PEER_ENV` | environment the tests need to find this peer |
 | `PEER_DIVERGES_ON` | `test_name:STORY-ID` for a measured, filed disagreement |
@@ -56,6 +57,25 @@ A profile declares:
 - **`user-agent`** — a call sipx placed and a call sipx answered, with SDP negotiated, audio
   flowing and a BYE ending it. A proxy has no dialplan and cannot answer a call, so it does not
   claim this role; that is a property of the peer, not a per-peer wording of a test.
+- **`media-security`** — a call whose media is encrypted, keyed the way `PEER_KEYINGS` declares.
+  Added by `X-27`, because until then `grep -i "srtp\|savp\|dtls\|sdes"` over this directory
+  matched nothing: the harness had placed calls against real peers since `X-17` and had never
+  once done it with encrypted media. That is why `M-25`'s defect survived six releases — all 17
+  SRTP unit tests were round trips, and a round trip between two ends that are wrong the same way
+  is a round trip that works.
+
+SRTP's two keyings share no code path, so this role is run per keying and a peer declares which
+it can do. **Three different things can stop a keying from being exercised, and `run.sh` prints
+which one applies on every run:** the peer does not support it, sipx does not offer it, or it
+ran. The middle case is kept separate from the first on purpose — asterisk does DTLS-SRTP
+perfectly well; what is missing is on our side, and recording it against the peer would file our
+gap as theirs.
+
+Today that middle case is DTLS-SRTP: `sipx-media::dtls` implements RFC 5764's parts and
+`Capabilities::with_dtls_srtp` exists, but nothing in `sipx-call` calls either — `dial` offers
+SDES and only SDES. So there is no sipx side to a DTLS call to interoperate about, and the test
+named in `KEYING_TESTS[dtls]` does not exist yet. It is announced rather than omitted, because an
+unwritten test and a passing one look identical in a summary line.
 
 The list is the contract. A test that is softened until every peer passes it measures the
 intersection of the peers, which is the one thing an interop suite must not do — so a
@@ -109,6 +129,7 @@ The user agent peer additionally runs:
 |---|---|
 | `an_independent_user_agent_answers_a_call_sipx_placed` | sipx's offer is read by a foreign answerer, its answer is read back, audio flows and a BYE sipx sends ends it |
 | `an_independent_user_agent_places_a_call_sipx_answers` | The other half of RFC 3264: sipx reads a foreign *offer* and writes the answer |
+| `a_real_peer_accepts_media_sipx_encrypted_with_sdes` | A peer that derived the SRTP session keys by its own reading of RFC 3711 authenticates sipx's packets — and says so when it cannot. Reverting `M-25`'s `SESSION_AUTH_LEN` makes this fail with the peer's own `SRTP unprotect failed`, which is the measure of whether it would have caught the defect it exists for |
 
 The two TLS refusals assert that the failure is **immediate**, not merely that no lease was
 granted. A test that accepted a timeout would pass just as happily against a stack that had
