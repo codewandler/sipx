@@ -529,6 +529,96 @@ async fn a_valued_flag_before_the_uri_is_not_mistaken_for_it() {
     assert_eq!(output.status.code(), Some(5), "{stderr}");
 }
 
+/// The acceptance test for P-5: a name written into the peer book comes back out of
+/// `sipx peers`, in both forms, carrying the source it came from.
+#[tokio::test]
+async fn a_peer_written_to_the_book_is_listed_by_name() {
+    let dir = scratch("peers-list");
+    let book = dir.join("peers");
+    // Written the way a shell script would write it: append a line, no library, no escaping.
+    std::fs::write(
+        &book,
+        "# who this phone knows about\nalice   sip:alice@192.0.2.17:5060\n",
+    )
+    .expect("writes");
+
+    let json = sipx()
+        .args(["peers", "--book", book.to_str().expect("a path"), "--json"])
+        .output()
+        .await
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&json.stdout);
+    assert!(
+        json.status.success(),
+        "peers failed: {stdout} / {}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "one line per peer, so a reader can split on newlines: {stdout}"
+    );
+    assert!(stdout.contains("\"name\":\"alice\""), "{stdout}");
+    assert!(
+        stdout.contains("\"uri\":\"sip:alice@192.0.2.17:5060\""),
+        "an entry must carry enough to dial it: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"source\":\"book\""),
+        "an entry must say which source it came from, or S-24 and T-24 cannot be merged in: \
+         {stdout}"
+    );
+
+    // The human form carries the same facts.
+    let text = sipx()
+        .args(["peers", "--book", book.to_str().expect("a path")])
+        .output()
+        .await
+        .expect("runs");
+    let human = String::from_utf8_lossy(&text.stdout);
+    assert!(text.status.success(), "{human}");
+    for fact in ["alice", "sip:alice@192.0.2.17:5060", "book"] {
+        assert!(human.contains(fact), "{fact} missing from {human}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A source that cannot be read is a failure, not an empty list. An empty list on a fresh
+/// machine reads as "nobody to call" when the truth is "you have not been told about anyone",
+/// and the design is explicit that a partial list must never be presented as complete.
+#[tokio::test]
+async fn a_peer_book_that_cannot_be_read_is_an_error_not_an_empty_list() {
+    let dir = scratch("peers-missing");
+    let missing = dir.join("not-there");
+
+    let output = sipx()
+        .args([
+            "peers",
+            "--book",
+            missing.to_str().expect("a path"),
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("runs");
+
+    assert_eq!(output.status.code(), Some(1), "a read failure is not zero");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).is_empty(),
+        "a failure must not land on stdout where it would be parsed as a result"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("\"status\":\"failed\""), "{stderr}");
+    assert!(
+        stderr.contains("not-there"),
+        "the error must name the path it tried: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A non-numeric option is a usage error, not a silent fall back to the default — which would
 /// restore exactly the behaviour the flag exists to prevent.
 #[tokio::test]

@@ -5,8 +5,8 @@ description: Every sipx command, flag, exit code and JSON field — the surface 
 
 # CLI reference
 
-One binary, `sipx`. Three commands do work — `dial`, `answer` and `register`, documented below —
-alongside `help` and `version`. Global: `--json` switches the report to a single-line JSON
+One binary, `sipx`. Four commands do work — `dial`, `answer`, `register` and `peers`, documented
+below — alongside `help` and `version`. Global: `--json` switches the report to a single-line JSON
 object on stdout; `-v`/`-vv` raise log verbosity on stderr (never stdout, so JSON stays
 parseable); `-h`/`--help` on any command.
 
@@ -64,6 +64,40 @@ Register with a registrar: `sipx register sip:alice@example.com`
 
 Report fields: `status`, `aor`, `expires`, `refresh_in`.
 
+## `sipx peers`
+
+List what can be called: `sipx peers --json`
+
+| Flag | Meaning |
+|---|---|
+| `--book <FILE>` | Read this peer book rather than the default one |
+
+The book is looked for in `--book`, then `$SIPX_PEERS`, then `$XDG_CONFIG_HOME/sipx/peers`, then
+`$HOME/.config/sipx/peers`. It is a text file a shell can write — one peer per line, a name and a
+URI separated by whitespace, `#` for a comment, blank lines ignored:
+
+```text
+# who this phone knows about
+alice   sip:alice@192.0.2.17:5060
+bob     sips:bob@example.com
+```
+
+```sh
+echo "carol sip:carol@192.0.2.30:5060" >> ~/.config/sipx/peers
+sipx peers --json | jq -r 'select(.source == "book") | .uri'
+```
+
+Reports one line per peer with `status` (always `peer`), `name`, `uri` and `source`. `source` says
+where the entry was learned from — `book` is the only one today, and it is what keeps the list
+extensible when other sources are merged into it.
+
+A book that cannot be read — missing, unreadable, or holding a line that is not a name and a URI —
+exits non-zero and names the file and the line. It never prints an empty list: on a fresh machine
+that would read as "there is nobody to call" when the truth is "you have not been told about
+anyone". A book that exists and holds no peers prints nothing and exits 0.
+
+The command consults no network. It opens no socket and needs no registrar.
+
 ## Exit codes
 
 Scripts branch on the exit code, not on parsing prose:
@@ -80,6 +114,8 @@ Scripts branch on the exit code, not on parsing prose:
 
 ## The JSON contract
 
-`--json` emits exactly one JSON object per report, on one line, on stdout; failures emit
+`--json` emits exactly one JSON object per report, on one line, on stdout — a command with more
+than one thing to report, such as `answer`'s bound address or `peers`' list, emits one such line
+each; failures emit
 `{"status": …, "error": …}` on **stderr**. The text and JSON forms carry the same field set —
 that equality is asserted by a test, so a field you see in one is in the other.
