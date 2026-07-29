@@ -230,7 +230,15 @@ async fn dialing_through_a_provisional_reports_ringing_then_answered() {
         header("CSeq:")
     );
     peer.send_to(ringing.as_bytes(), from).await.expect("sends");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Left as a window and widened rather than converted (`X-29`). This sleep orders two inputs
+    // this test injects — the raw 180 must be *processed* before the raw 200 arrives, or the
+    // provisional is handled after the transaction has already completed and no `Ringing` is
+    // reported. Nothing observable sits between the two: a 180 moves no counter, sends nothing on
+    // the wire, and the `Call` whose event queue would show it does not exist until `dial`
+    // returns, which is after both. So there is no condition to poll, and the honest fix is a
+    // window far enough above the honest answer that load cannot close it — `X-28` left two
+    // sites this way for the same reason. 100 ms → 2 s.
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
                m=audio 41000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";

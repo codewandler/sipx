@@ -111,8 +111,12 @@ fn loud(samples: usize) -> Vec<i16> {
 /// Every test below that stops or interrupts a playback needs this first: without it the test
 /// races the first packet, and a stop that arrived before anything went out would pass for the
 /// wrong reason.
+/// The deadline is a **bound on failure** — how long before we conclude the far end is never
+/// going to hear anything — and not a window to measure in, so `X-29` raised it from two seconds
+/// to ten. Two seconds was already a deadline loop and the right shape; it was just close enough
+/// to the honest answer under load to be worth widening.
 async fn hearing(call: &Call) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while call.media().packets_received() == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -194,9 +198,25 @@ async fn stopping_a_playback_lands_within_the_stated_bound() {
     );
 
     let at_stop = caller.media().packets_sent();
-    // Far longer than the bound: if the backlog were being played out, it would show up here.
+    // The window stays, deliberately (`X-29`). Both assertions on `settled` below are *negative*
+    // — that no more than the bound went out, and that the whole clip did not — so this is a
+    // window to look in rather than a deadline to beat. Load lengthens it, and a longer window can
+    // only send the count up, which is the direction that fails. There is nothing to poll for:
+    // the thing being asserted is that nothing further happens.
     tokio::time::sleep(Duration::from_millis(600)).await;
     let settled = caller.media().packets_sent();
+
+    // The last assertion in this test is *positive*, though — that the far end received every
+    // packet this side counted as sent — and that is an arrival, so it gets a deadline loop rather
+    // than the window above (`X-29`).
+    let arrived = tokio::time::Instant::now() + Duration::from_secs(10);
+    while callee.media().packets_received() != settled {
+        assert!(
+            tokio::time::Instant::now() < arrived,
+            "the far end never received the {settled} packets this side sent"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     assert!(
         settled - at_stop <= Playback::STOP_BOUND_PACKETS,
@@ -236,6 +256,10 @@ async fn an_interrupting_digit_lands_within_the_stated_bound() {
     assert_eq!(end, PlaybackEnd::Interrupted);
 
     let at_interrupt = caller.media().packets_sent();
+    // Left as a fixed window, for the reason given in
+    // `stopping_a_playback_lands_within_the_stated_bound` (`X-29`): both assertions below are
+    // negative — nothing beyond the bound went out — so load can only make them pass, and there is
+    // no arrival to wait for. This test has no positive counterpart to poll for.
     tokio::time::sleep(Duration::from_millis(600)).await;
     let settled = caller.media().packets_sent();
 

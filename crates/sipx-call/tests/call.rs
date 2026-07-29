@@ -34,6 +34,26 @@ fn loopback() -> IpAddr {
 /// A bound on failure, not a window to measure in — see `MediaSession::record_at_least`.
 const DELIVERY_BOUND: Duration = Duration::from_secs(10);
 
+/// How long a test here waits for a signalling event — a request reaching the far end — before
+/// concluding it is never coming (`X-29`). Two orders of magnitude above the honest answer on an
+/// idle machine, for the same reason [`DELIVERY_BOUND`] is.
+const SIGNALLING_BOUND: Duration = Duration::from_secs(10);
+
+/// Wait until something has happened, rather than sleeping and assuming it has (`X-29`).
+///
+/// `within` is a **bound on failure** — how long before we conclude the thing is never going to
+/// happen — and not a window to measure in. `X-28` waited for a *quantity* of audio, which is why
+/// counting worked there; these tests wait for an *event*, so the shape is a deadline loop on the
+/// condition. Load can only lengthen the wait, and "it never arrived" fails with a message that
+/// says so instead of flaking.
+async fn until(within: Duration, what: &str, mut condition: impl AsyncFnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + within;
+    while !condition().await {
+        assert!(tokio::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 async fn endpoint() -> (Handle, Receiver<Incoming>) {
     bind(Config::new("127.0.0.1:0".parse().expect("valid")))
         .await
@@ -380,7 +400,18 @@ async fn a_2xx_the_caller_cannot_use_is_still_acknowledged() {
         "G.722 alone is not usable: {result:?}"
     );
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait for the teardown to reach the far end, rather than sleeping 300 ms and assuming it
+    // did (`X-29`). The recorder is a task on the other side of a real socket, so there is no
+    // happens-before to lean on here — only a bound on failure.
+    until(
+        SIGNALLING_BOUND,
+        "the 2xx was never acknowledged and torn down",
+        async || {
+            let methods = seen.lock().await;
+            methods.contains(&sipx_sip::Method::Ack) && methods.contains(&sipx_sip::Method::Bye)
+        },
+    )
+    .await;
     let methods = seen.lock().await.clone();
     assert!(
         methods.contains(&sipx_sip::Method::Ack),
@@ -563,7 +594,11 @@ async fn a_reinvite_moves_the_media_without_dropping_the_call() {
         .await
         .expect("the re-INVITE is accepted");
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // No wait at all, because there is already a happens-before to lean on (`X-29`). `reinvite`
+    // returns only once the 200 has come back, and the caller applies the renegotiation *before*
+    // it responds (`call.rs::on_reinvite`) — inside a `handle` call the pump holds this mutex
+    // across. So acquiring the lock here means the re-INVITE has been applied; the 200 cannot
+    // exist otherwise. A sleep was never what made this true, only what hid that it already was.
     let caller = caller.lock().await;
     assert!(!caller.is_ended(), "the call must still be running");
     assert_eq!(
@@ -586,7 +621,9 @@ async fn a_reinvite_can_put_the_call_on_hold_and_take_it_off() {
         .reinvite(sipx_sdp::Direction::SendOnly)
         .await
         .expect("hold is accepted");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Both waits here are gone rather than converted, for the reason given in
+    // `a_reinvite_moves_the_media_without_dropping_the_call`: `reinvite` returning means the far
+    // end answered 200, and it answers only after applying the direction (`X-29`).
     assert!(
         caller.lock().await.is_on_hold(),
         "sendonly from the far end means it will not play what we send"
@@ -596,7 +633,6 @@ async fn a_reinvite_can_put_the_call_on_hold_and_take_it_off() {
         .reinvite(sipx_sdp::Direction::SendRecv)
         .await
         .expect("resume is accepted");
-    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         !caller.lock().await.is_on_hold(),
         "sendrecv takes it off hold"
@@ -678,7 +714,10 @@ async fn an_out_of_order_reinvite_is_rejected() {
         .reinvite(sipx_sdp::Direction::SendOnly)
         .await
         .expect("accepted");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // The sequence number this test needs advanced is already advanced (`X-29`).
+    // `on_reinvite` records the remote CSeq before it answers, and `reinvite` returns only once
+    // that answer is back — so there is nothing left to wait for, and the 150 ms sleep that used
+    // to stand here was a guess at a happens-before that the exchange already provides.
 
     let (to, from, call_id) = {
         let guard = caller.lock().await;
@@ -764,7 +803,13 @@ async fn giving_up_cancels_the_invitation() {
         "expected a cancellation, got {result:?}"
     );
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Wait for the CANCEL to reach the ringing callee rather than sleeping past it (`X-29`).
+    until(
+        SIGNALLING_BOUND,
+        "the callee was never sent a CANCEL",
+        async || seen.lock().await.contains(&Method::Cancel),
+    )
+    .await;
     let methods = seen.lock().await.clone();
     assert!(
         methods.contains(&Method::Cancel),
@@ -818,7 +863,18 @@ async fn the_cancel_carries_the_invites_branch() {
         .with_timeout(Duration::from_millis(400));
     let _ = dial(&caller, Target::udp(ringing_addr), &to, &options).await;
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Both requests have to be on the recorder's list before their branches can be compared, so
+    // wait for the second of them rather than sleeping past both (`X-29`).
+    until(
+        SIGNALLING_BOUND,
+        "the INVITE and its CANCEL never both reached the callee",
+        async || {
+            let seen = branches.lock().await;
+            seen.iter().any(|(method, _)| *method == Method::Invite)
+                && seen.iter().any(|(method, _)| *method == Method::Cancel)
+        },
+    )
+    .await;
     let seen = branches.lock().await.clone();
 
     let invite = seen
@@ -991,7 +1047,26 @@ async fn a_cancel_is_not_sent_before_a_provisional_arrives() {
         "the dial still gives up: {result:?}"
     );
 
+    // This site has one assertion of each kind, so it keeps one wait of each kind (`X-29`).
+    //
+    // The window stays for the *negative* half below — that no CANCEL was sent. A CANCEL would
+    // leave at the moment the dial gave up, which has already happened, so this is a window to
+    // look in rather than a deadline to beat: load can only make it pass, and the failure mode is
+    // a missed regression rather than a flake.
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // The *positive* half — that the invitation was sent at all — is an arrival, and gets a
+    // deadline loop. Under load 300 ms was not always enough for it.
+    until(
+        SIGNALLING_BOUND,
+        "the invitation never reached the silent peer",
+        async || {
+            seen.lock()
+                .await
+                .iter()
+                .any(|line| line.starts_with("INVITE "))
+        },
+    )
+    .await;
     let lines = seen.lock().await.clone();
     assert!(
         lines.iter().any(|line| line.starts_with("INVITE ")),
@@ -1235,7 +1310,10 @@ async fn a_stale_bye_is_rejected_rather_than_ending_the_call() {
         .reinvite(sipx_sdp::Direction::SendOnly)
         .await
         .expect("accepted");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // The sequence number this test needs advanced is already advanced (`X-29`).
+    // `on_reinvite` records the remote CSeq before it answers, and `reinvite` returns only once
+    // that answer is back — so there is nothing left to wait for, and the 150 ms sleep that used
+    // to stand here was a guess at a happens-before that the exchange already provides.
 
     let (to, from, call_id) = {
         let guard = caller.lock().await;

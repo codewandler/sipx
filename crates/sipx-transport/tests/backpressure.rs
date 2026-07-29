@@ -19,6 +19,23 @@ use sipx_sip::{HeaderName, Host, HostName, Method, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind, new_branch};
 use tokio::sync::mpsc::Receiver;
 
+/// How long a test here waits for the receive loop to have shed something before concluding it
+/// never will (`X-29`). A bound on failure, not a window to measure in.
+const SHEDDING_BOUND: Duration = Duration::from_secs(10);
+
+/// Wait until something has happened, rather than sleeping and assuming it has (`X-29`).
+///
+/// Load can only lengthen the wait, and "it never happened" fails with a message that says so
+/// instead of flaking. `X-28` waited for a *quantity* of audio; this waits for an *event*, so the
+/// shape is a deadline loop on the condition.
+async fn until(within: Duration, what: &str, mut condition: impl AsyncFnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + within;
+    while !condition().await {
+        assert!(tokio::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 /// An endpoint whose application queue holds exactly one message.
 ///
 /// One, so the second request has nowhere to go. The alternative — filling a 1024-deep queue —
@@ -87,8 +104,15 @@ async fn a_request_dropped_for_backpressure_is_counted() {
             .await;
     }
 
-    // Give the loop time to process what it can.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait for the loop to have shed something, rather than giving it 300 ms and assuming it did
+    // (`X-29`). Eight requests into a one-deep queue must produce at least one drop; how long
+    // that takes is a property of the machine, not of the shedding.
+    until(
+        SHEDDING_BOUND,
+        "eight requests into a one-deep queue shed nothing",
+        async || busy.shed().any(),
+    )
+    .await;
 
     let shed = busy.shed();
     assert!(
