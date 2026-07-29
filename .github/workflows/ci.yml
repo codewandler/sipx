@@ -80,6 +80,21 @@ jobs:
       # referred to a field that only existed with its feature on. Nothing here noticed.
       - run: ./scripts/check-features.sh
 
+  # The gate in AGENTS.md used to be a list of commands, and a list can quietly omit one: the
+  # `msrv` job above was red from v0.4.0 through v0.7.0 while every documented command passed.
+  # `gate.py --check` reads this file and fails if any job here is neither a gate step nor
+  # declared as CI-only, so a job added to this file cannot go unnoticed the same way.
+  gate:
+    name: gate consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/gate.py --check
+      - run: python3 scripts/test-gate.py
+      # The registry's schema guard has had a suite since X-15 and no job ran it. Both suites are
+      # milliseconds and need nothing but a Python interpreter, so this is their home.
+      - run: python3 scripts/test-rfc-report.py
+
   # The peer list is read from the repository rather than written here, so that adding an interop
   # peer stays what `tests/interop/README.md` promises it is: adding a profile. A matrix spelled
   # out in this file would be a second place to remember, and the one that gets forgotten.
