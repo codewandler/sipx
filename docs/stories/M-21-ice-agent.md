@@ -2,7 +2,7 @@
 id: M-21
 title: The sans-IO ICE agent
 pillar: Media
-status: ready
+status: in-progress
 priority: 7
 design: docs/designs/media.md
 epic: ice
