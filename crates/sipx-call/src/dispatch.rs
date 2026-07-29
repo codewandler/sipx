@@ -798,10 +798,10 @@ impl Dispatcher {
     /// One term is added to §9.2's own, and it is §9.1's rather than an invention: a CANCEL "MUST
     /// have the same `Call-ID`, `To`, `From` and `CSeq` as the INVITE", so one whose dialog
     /// identifiers disagree with the transaction its branch names cannot be a legitimate CANCEL
-    /// for it. Every
-    /// well-formed CANCEL passes the check, which is what makes it free; what it costs an off-path
-    /// attacker is that guessing or observing a branch is no longer enough to stop somebody else's
-    /// phone ringing, since the sent-by in a `Via` is the attacker's to write.
+    /// for it. Every well-formed CANCEL passes the check, which is what makes it free; what it
+    /// costs an off-path attacker is that guessing or observing a branch is no longer enough to
+    /// stop somebody else's phone ringing, since the sent-by in a `Via` is the attacker's to
+    /// write.
     async fn cancel(&self, incoming: &Incoming) {
         let matched = TransactionKey::for_cancelled_invite(&incoming.request)
             .and_then(|key| self.calls.pending_invite(&key))
