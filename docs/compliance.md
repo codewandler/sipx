@@ -12,14 +12,14 @@ compliance document usually becomes untrue.
 
 ## Where it stands
 
-**68 RFCs tracked.**
+**69 RFCs tracked.**
 
 | | Meaning | Count |
 |---|---|---|
-| ✅ implemented | Behaviour present and tested for the roles listed | 31 |
-| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 12 |
-| 🔤 syntax only | The parser represents it; nothing acts on it | 8 |
-| ⬜ not started | Tracked as a target, not started | 16 |
+| ✅ implemented | Behaviour present and tested for the roles listed | 33 |
+| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 15 |
+| 🔤 syntax only | The parser represents it; nothing acts on it | 7 |
+| ⬜ not started | Tracked as a target, not started | 13 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
 The list is bounded on purpose: it is what sipx already touches plus what it has decided
@@ -115,15 +115,16 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | RFC | Title | Status | Roles | Notes |
 |---|---|---|---|---|
 | [3515](https://www.rfc-editor.org/rfc/rfc3515) | The SIP Refer Method | ✅ implemented | uac, uas | Blind transfer, with the outcome reported by NOTIFY and the implicit subscription terminated. A 202 is modelled as `Trying`, never as success. |
+| [3863](https://www.rfc-editor.org/rfc/rfc3863) | Presence Information Data Format (PIDF) | ✅ implemented | — | A typed document rather than a string template: tuples with an id, a `basic` status of open or closed, an optional contact with a priority clamped to §4.1.4's range, and an optional note. XML metacharacters are escaped, because one unescaped `&` in a SIP URI makes the whole document unparseable and a watcher then sees nothing at all. RFC 4480's richer vocabulary is a different document and is not implemented. |
 | [3891](https://www.rfc-editor.org/rfc/rfc3891) | The SIP Replaces Header | ✅ implemented | uas | Matched on Call-ID and both tags. Matching on the Call-ID alone is a call-hijack primitive, and the refusal is the same 481 whichever field was wrong. |
+| [3903](https://www.rfc-editor.org/rfc/rfc3903) | SIP Extension for Event State Publication | ✅ implemented | uas | Soft state with entity tags: initial publication, refresh, modify and remove read from what is present (§4.1), a fresh `SIP-ETag` on every acceptance (§6 step 6), and 412 for a tag the compositor does not hold (§6 step 3) — including one whose state expired, which must not be accepted as a new publication. Expiry is judged on the clock rather than on whether a sweep has run, so the answer is not a race. Composition policy is deliberately absent: a second publication for one presentity replaces the first, and merging several publishers is a policy question for whoever has one. |
 | [4488](https://www.rfc-editor.org/rfc/rfc4488) | Suppression of SIP REFER Method Implicit Subscription | ✅ implemented | uac, uas | `Refer-Sub: false` on the REFER *and* echoed in the 2xx, because §3 makes it a request and an agreement rather than a declaration — a transferor that assumed agreement would stop watching for notifications the transferee is still sending. |
+| [3680](https://www.rfc-editor.org/rfc/rfc3680) | A SIP Event Package for Registrations | 🟡 partial | uas | `reginfo` documents with per-contact state and the event that changed it — registered, refreshed, expired, unregistered, with the last two kept apart because why a contact went is what a display says. Same limit as 4235: the documents exist, the join to a live registrar does not, and sipx is not a registrar. |
+| [3856](https://www.rfc-editor.org/rfc/rfc3856) | A Presence Event Package for SIP | 🟡 partial | uas | The `presence` package serves PIDF documents published through RFC 3903. Watcher information (RFC 3857) and the `presence.winfo` template are not implemented. |
 | [3892](https://www.rfc-editor.org/rfc/rfc3892) | The SIP Referred-By Mechanism | 🟡 partial | — | Sent and surfaced to the application. The signed `Referred-By` token is not implemented, so the identity is a claim rather than a proof. |
+| [4235](https://www.rfc-editor.org/rfc/rfc4235) | An INVITE-Initiated Dialog Event Package for SIP | 🟡 partial | uas | `dialog-info` documents with the five states of §3.7.1, the full-then-partial discipline of §4.1, and a version counter scoped per subscription rather than per resource. What is not here is the join to a live dialog store — the package produces documents, and wiring them to running calls is the application's, because a package reaching into the call layer would reverse the workspace's dependency direction. |
 | [3428](https://www.rfc-editor.org/rfc/rfc3428) | SIP Extension for Instant Messaging | 🔤 syntax only | — | The method is represented and nothing handles it. |
-| [3903](https://www.rfc-editor.org/rfc/rfc3903) | SIP Extension for Event State Publication | 🔤 syntax only | — | The method is represented. Depends on 6665 for anything further. |
 | [6086](https://www.rfc-editor.org/rfc/rfc6086) | SIP INFO Method and Package Framework | 🔤 syntax only | — | The method is represented. sipx sends DTMF as RFC 4733 rather than as INFO. |
-| [3680](https://www.rfc-editor.org/rfc/rfc3680) | A SIP Event Package for Registrations | ⬜ not started | — | Depends on 6665 and on a registrar. |
-| [3856](https://www.rfc-editor.org/rfc/rfc3856) | A Presence Event Package for SIP | ⬜ not started | — | Depends on a real 6665 implementation. |
-| [4235](https://www.rfc-editor.org/rfc/rfc4235) | An INVITE-Initiated Dialog Event Package for SIP | ⬜ not started | — | Depends on 6665. What a busy-lamp field subscribes to. |
 | [5627](https://www.rfc-editor.org/rfc/rfc5627) | Obtaining and Using GRUUs in SIP | ⬜ not started | — | A URI that reaches one specific instance of a registered user. Depends on 3327 and 5626. |
 | [7044](https://www.rfc-editor.org/rfc/rfc7044) | An Extension to SIP for Request History Information | ⬜ not started | — | `History-Info`, for a call that was forwarded and needs to say by whom. |
 | [7865](https://www.rfc-editor.org/rfc/rfc7865) | SDP Recording Metadata | ⬜ not started | — | The metadata half of SIPREC. |

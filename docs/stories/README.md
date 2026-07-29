@@ -46,9 +46,6 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 - [A-1 — Finish the host configuration and failure-semantics schema](A-1-host-configuration-schema.md) · Application · app-host phase 1 · spec work, no dependency on the app-sdk stories
 - [A-7 — The deterministic harness — fake time, scripted bindings, scripted calls](A-7-deterministic-harness.md) · Application · app-host phase 1 · built with the host, not after it · startable against contract vectors alone
 
-### Conformance
-- [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · M8 · RFC 6665 · large; the other two packages are on it
-
 ## Blocked
 _None._
 
@@ -76,8 +73,6 @@ _This is the layer applications actually program against, so it is the one that 
 
 ### Conformance
 - [M-16 — Implement ICE](M-16-ice.md) · Media · M10 · RFC 8445 + 8839 · the NAT cases symmetric RTP does not solve
-- [S-17 — Implement the dialog and registration event packages](S-17-dialog-and-registration-event-packages.md) · Signalling · M8 · RFC 4235 + 3680 · blocked by S-13
-- [S-18 — Implement presence and PUBLISH](S-18-presence-and-publish.md) · Signalling · M8 · RFC 3856 + 3863 + 3903 · blocked by S-13
 - [S-19 — Implement the UPDATE method](S-19-update-method.md) · Signalling · M9 · RFC 3311 · the last session-integrity gap; 100rel unblocked it
 - [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
@@ -136,9 +131,12 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [S-10 — Implement attended transfer](S-10-implement-attended-transfer.md) · Signalling
 - [S-11 — Implement session timers](S-11-session-timers.md) · Signalling · track: signalling · RFC 4028 · headers already parse
 - [S-12 — Implement reliable provisional responses](S-12-reliable-provisional-responses.md) · Signalling · track: signalling · RFC 3262 · same files as S-11, take it second
+- [S-13 — Build the event notification framework](S-13-event-notification-framework.md) · Signalling · M8 · RFC 6665 · large; the other two packages are on it
 - [S-14 — Add the modern digest algorithms](S-14-modern-digest-algorithms.md) · Signalling · track: auth · RFC 8760 · sipx-ua only, isolated
 - [S-15 — Add editing operations to Headers](S-15-header-editing-operations.md) · Signalling · M7 · a forwarding element cannot edit a header list without rebuilding it
 - [S-16 — Implement the server side of digest authentication](S-16-server-side-digest.md) · Signalling · M7 · RFC 7616 · sipx can answer a challenge but cannot issue one
+- [S-17 — Implement the dialog and registration event packages](S-17-dialog-and-registration-event-packages.md) · Signalling · M8 · RFC 4235 + 3680 · blocked by S-13
+- [S-18 — Implement presence and PUBLISH](S-18-presence-and-publish.md) · Signalling · M8 · RFC 3856 + 3863 + 3903 · blocked by S-13
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling

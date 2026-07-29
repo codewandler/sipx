@@ -25,6 +25,8 @@ pub mod error;
 #[cfg(feature = "runtime")]
 pub mod flows;
 pub mod outbound;
+pub mod packages;
+pub mod presence;
 pub mod registrar;
 pub mod subscribe;
 

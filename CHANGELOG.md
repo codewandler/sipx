@@ -24,6 +24,48 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`Refer-Sub: false` (RFC 4488)** suppresses the implicit subscription — and needs *both* sides
   to say so. §3 makes it a request and an agreement; a transferor that assumed agreement would stop
   watching for notifications the transferee is still sending.
+- **The dialog and registration event packages (`S-17`, RFC 4235 and RFC 3680).** What a busy-lamp
+  field on a desk phone actually subscribes to: `dialog-info` documents carrying the five states of
+  RFC 4235 §3.7.1, and `reginfo` documents carrying per-contact state with the event that changed
+  it.
+  - **The first document is `full` and the rest are `partial`.** A watcher that joined mid-call is
+    given the whole picture once and told about changes after that; sending only changes from the
+    start leaves it inferring a state nobody ever described.
+  - **The version counter is scoped per subscription, not per resource.** Two watchers of the same
+    dialogs each count from zero — sharing a counter would make one of them see gaps it cannot
+    explain. It saturates rather than wraps, because a counter returning to zero looks like a new
+    subscription.
+  - `expired` and `unregistered` are kept apart, and so are `early` and `confirmed`. Both pairs mean
+    roughly one thing to a state machine and two different things to a display: "lost its
+    connection" reads differently from "logged out", and a lamp that lights on `early` lights while
+    the phone is still ringing.
+  - XML metacharacters are escaped. A SIP URI can carry `&` in its parameters, and one unescaped
+    makes the whole document unparseable — a watcher then sees nothing at all rather than a
+    slightly wrong dialog.
+- **Presence, and publishing it (`S-18`, RFC 3856, RFC 3863, RFC 3903).** Nothing in a SIP stack
+  knows whether a person is at their desk, so this is the half that lets somebody who does know put
+  it in: PUBLISH creates soft state, an entity tag identifies it, and a subscriber to the `presence`
+  package is told when it changes. PIDF is a typed document rather than a string template.
+  - **A fresh `SIP-ETag` on every acceptance, a refresh included** (RFC 3903 §6 step 6) — which is
+    what makes the tag mean anything: a publisher that kept its old one is refused next time.
+    Without tags at all, two publishers for one resource overwrite each other and neither can tell.
+  - **412 for a tag the compositor does not hold**, including one whose state expired while the
+    publisher was not looking. Accepting that refresh as a new publication would resurrect a
+    document the server had already forgotten and that nothing has re-sent. Expiry is judged on the
+    clock rather than on whether a sweep has run, so the answer is not a race.
+  - The three operations are read from what is present (§4.1) rather than dispatched by the caller:
+    a tag with no body is a refresh, with a body a modify, with `Expires: 0` a removal.
+  - Presence is `open` or `closed` and nothing else (RFC 3863 §4.1.3). The vocabulary people expect
+    — busy, away, on the phone — is RFC 4480's, a different document; inventing tokens here would
+    put values in a namespace that does not define them.
+  - Composition policy is deliberately absent: a second publication for one presentity replaces the
+    first. Merging several publishers' documents is a policy question, and a policy belongs to
+    whoever has one.
+
+  Both stories stop at the same line, and on purpose: the packages produce documents, and wiring
+  them to sipx's *live* dialog store and registration lease is the application's join. A package
+  that reached into the call layer would make `sipx-ua` depend on `sipx-call` and reverse the
+  dependency direction the workspace is built on.
 
 ### Changed
 
