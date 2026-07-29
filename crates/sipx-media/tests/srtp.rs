@@ -236,7 +236,11 @@ fn an_answer_that_echoes_the_offered_tag_produces_keys() {
     let keys = SrtpKeys::from_answer(std::slice::from_ref(&ours), Some(&theirs))
         .expect("the tag was offered");
 
-    assert_eq!(keys.local.0, ours.master_key(), "we protect with our own key");
+    assert_eq!(
+        keys.local.0,
+        ours.master_key(),
+        "we protect with our own key"
+    );
     assert_eq!(
         keys.remote.0,
         theirs.master_key(),
@@ -252,7 +256,10 @@ fn an_answer_whose_tag_was_never_offered_produces_no_keys() {
     let ours = offered(3);
     let theirs = offered(8);
     let refused = SrtpKeys::from_answer(std::slice::from_ref(&ours), Some(&theirs));
-    assert!(refused.is_err(), "keys were built from an answer nobody agreed on");
+    assert!(
+        refused.is_err(),
+        "keys were built from an answer nobody agreed on"
+    );
 }
 
 /// An `RTP/SAVP` answer that carried no `a=crypto` at all is the same failure. §5.1.3 requires

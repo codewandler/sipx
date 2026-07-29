@@ -17,21 +17,44 @@ Answer an `a=crypto` offer the way RFC 4568 requires: echo the tag of the crypto
 chosen, and verify the tag that comes back rather than assuming the peer chose what was offered.
 
 ## Acceptance
-- [ ] The answer echoes the `tag` of the accepted `a=crypto` line (RFC 4568 §5.1.2). A **MUST**
+- [x] The answer echoes the `tag` of the accepted `a=crypto` line (RFC 4568 §5.1.2). A **MUST**
       that sipx does not honour today.
-- [ ] An answer whose tag names a suite that was never offered is refused rather than used
+- [x] An answer whose tag names a suite that was never offered is refused rather than used
       (§5.1.3), and the call fails in the direction that says why instead of negotiating keys
       nobody agreed on.
-- [ ] The failure is reported to the application through the existing error vocabulary, not by a
+- [x] The failure is reported to the application through the existing error vocabulary, not by a
       silently unencrypted or silently dropped stream.
-- [ ] Byte-level: `docs/specs/srtp.md` §10.4 already restates a published `a=crypto` line ready to
+- [x] Byte-level: `docs/specs/srtp.md` §10.4 already restates a published `a=crypto` line ready to
       be asserted against `Crypto::parse` — assert it here, since that parser is currently tested
       only against its own output.
-- [ ] Failing-first test: an answer echoing a tag that was not offered is accepted today; name the
+- [x] Failing-first test: an answer echoing a tag that was not offered is accepted today; name the
       test that proves it stops being.
 
 ## Progress
-- Not started.
+- **Done in `sipx-sdp` and `sipx-media`. One wiring change is left over and has an owner** — see
+  the last bullet, and `docs/specs/srtp.md` §12.3.
+- §5.1.2: `Crypto::accepting` builds the answer's attribute from the *accepted* offer's tag and
+  suite with this side's own key; `answer_stream` uses it. Failing-first evidence: with only
+  `answer.rs` reverted to the merge base, `the_answer_echoes_the_tag_of_the_accepted_offer` fails
+  `left: 1, right: 9` — sipx answered tag 1 to every offer, because `Capabilities::with_srtp` fixes
+  its own tag at 1.
+- §5.1.3: `Crypto::verify_answer` is the three-part check (offered suite, accompanying tag, a key)
+  and returns the *offered* attribute the answer accepted, so the caller keys with the half it
+  sent. `SrtpKeys::from_answer` is the only route from an answer to keys, and it returns `Result`,
+  not `Option` — a mismatch is `SdpError::Invalid`, which `sipx-call` already maps to `Error::Sdp`,
+  rather than a stream that drops to unencrypted with nobody told.
+- An answer naming a suite that was never offered arrives as *no usable attribute at all*, because
+  `Crypto::parse` refuses a suite sipx cannot key. `verify_answer` therefore takes an `Option` and
+  refuses `None`; `an_answer_naming_a_suite_that_was_never_offered_is_refused` pins it.
+- §10.4's published `a=crypto` line is now asserted against `Crypto::parse` (vector 11 in the spec's
+  table). **It passed on the first run** — the parser was already right. That is the usual outcome
+  of a published-vector test and not a reason to have skipped it: nothing distinguished this case
+  from `sipx-rtp`'s `n_a` defect (§12.1) beforehand.
+- **Left for a new story, in `sipx-call`:** `srtp_keys` in `crates/sipx-call/src/call.rs` still
+  pairs `capabilities.crypto` with whatever `a=crypto` the answer carried, comparing nothing, and
+  returns `Option`. Until it is moved onto `SrtpKeys::from_answer` and `establish` propagates the
+  error, a *live* call still accepts an answer that echoed a tag nobody offered. `sipx-call` was
+  outside this story's write set and held by a concurrent story.
 
 ## Notes
 - Filed by `M-25` as `docs/specs/srtp.md` §12.3, which is where the normative statement now lives.

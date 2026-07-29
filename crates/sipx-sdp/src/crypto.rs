@@ -189,8 +189,8 @@ impl Crypto {
     ///
     /// # Errors
     ///
-    /// [`SdpError::Invalid`] naming the tag, and never the key material: an error string is a
-    /// log line waiting to happen.
+    /// [`crate::SdpError::Invalid`] naming the tag, and never the key material: an error string
+    /// is a log line waiting to happen.
     pub fn verify_answer<'o>(
         offered: &'o [Self],
         answered: Option<&Self>,
@@ -407,16 +407,15 @@ mod tests {
         assert_eq!(
             parsed.master_key(),
             [
-                0x77, 0x44, 0x66, 0x76, 0x67, 0x26, 0x54, 0x2B, 0x29, 0x78, 0x47, 0x37, 0x40,
-                0x66, 0x62, 0x35
+                0x77, 0x44, 0x66, 0x76, 0x67, 0x26, 0x54, 0x2B, 0x29, 0x78, 0x47, 0x37, 0x40, 0x66,
+                0x62, 0x35
             ],
             "the 16 master key octets §10.4 publishes"
         );
         assert_eq!(
             parsed.master_salt(),
             [
-                0x6A, 0x55, 0x2C, 0x52, 0x61, 0x41, 0x7D, 0x5C, 0x7C, 0x70, 0x30, 0x25, 0x2A,
-                0x23
+                0x6A, 0x55, 0x2C, 0x52, 0x61, 0x41, 0x7D, 0x5C, 0x7C, 0x70, 0x30, 0x25, 0x2A, 0x23
             ],
             "the 14 master salt octets §10.4 publishes"
         );

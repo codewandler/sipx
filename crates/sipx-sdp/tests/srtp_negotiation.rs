@@ -171,7 +171,9 @@ fn the_answer_echoes_the_tag_of_the_accepted_offer() {
         &offered,
         &Capabilities::g711(loopback(), 40_002).with_srtp(true),
     );
-    let ours = answered.media[0].crypto().expect("the answer carries a key");
+    let ours = answered.media[0]
+        .crypto()
+        .expect("the answer carries a key");
 
     assert_eq!(
         ours.tag, 9,
