@@ -4,12 +4,14 @@
 `M-15` built DTLS-SRTP, and neither wrote the spec [AGENTS.md](../../AGENTS.md) non-negotiable 4
 requires of a non-trivial subsystem; `X-25` found the breach and `M-25` is this document. The order
 is inverted and it cost something, which §12 records rather than smooths over: writing this found
-five places where the code and the RFC disagree — two fixed by `M-25`, three left open with an owner
-— and the first of them was fatal to interoperating with anything that is not sipx. That is the
+five places where the code and the RFC disagree — two fixed by `M-25`, a third by `M-26` down to
+the one wiring change §12.3 names, two left open with an owner — and the first of them was fatal to
+interoperating with anything that is not sipx. That is the
 argument for the rule, made backwards. · **Crates:** `sipx-rtp` (the
 transform), `sipx-sdp` (SDES, the fingerprint and the offer/answer), `sipx-media` (DTLS-SRTP and the
 session) · **Stories:** [M-14](../stories/M-14-secure-media.md),
-[M-15](../stories/M-15-dtls-srtp.md), [M-25](../stories/M-25-srtp-spec.md) · **Design:**
+[M-15](../stories/M-15-dtls-srtp.md), [M-25](../stories/M-25-srtp-spec.md),
+[M-26](../stories/M-26-sdes-tag-neither-echoed-nor-verified.md) · **Design:**
 [media](../designs/media.md)
 
 Where this document and the code disagree, this document is right until somebody changes it
@@ -357,7 +359,11 @@ there is no third option, and in particular there is no answering an `RTP/SAVP` 
 The accepted attribute in the answer MUST carry:
 
 - **the tag and crypto-suite from the accepted attribute in the offer.** The suite must be the same
-  in both directions. *(The tag is not echoed today; see §12.3.)*
+  in both directions. *(Implemented by `M-26` as `Crypto::accepting`, which takes the tag and the
+  suite from the accepted offer and keeps this side's own key; §12.3. Asserted by
+  `the_answer_echoes_the_tag_of_the_accepted_offer` and
+  `the_answer_echoes_the_tag_of_the_suite_it_actually_accepted` in
+  [`srtp_negotiation`](../../crates/sipx-sdp/tests/srtp_negotiation.rs).)*
 - **the answerer's own key** — the one it will use for media it sends. A key MUST be present
   whatever the direction attributes say.
 
@@ -369,7 +375,25 @@ suite, so "the first valid one" is the first `a=crypto` naming `AES_CM_128_HMAC_
 
 The offerer MUST verify that one of the crypto suites it offered **and its accompanying tag** were
 echoed in the answer, and that the answer carries a key. "If any of the above fails, the negotiation
-MUST fail." *(The tag is not verified today; see §12.3.)*
+MUST fail." *(Implemented by `M-26` as `Crypto::verify_answer`, which returns the offered attribute
+the answer accepted so the caller keys with the half it sent; `SrtpKeys::from_answer` is the only
+route from an answer to keys. Not yet wired into `sipx-call`; §12.3.)*
+
+**A failed check is an error, not an unkeyed call.** The verification returns
+[`SdpError`](../../crates/sipx-sdp/src/lib.rs) rather than `None`, and that choice is the whole
+value of the check: the two ways of "failing" that are not an error are both worse than one. A
+stream that drops to unencrypted because a tag disagreed hands the user an insecure call presented
+as a secure one, and a stream dropped without a reason ends the call with nothing anyone can act on.
+
+**An answer naming a suite that was never offered** reaches this side as an `a=crypto` carrying
+nothing sipx can perform, because `Crypto::parse` refuses a suite it cannot key (§5.1). So it
+arrives as *no usable attribute at all* rather than as a recognisable wrong one, and the check must
+treat an absent attribute as a failure and not as a plain call. That is why `verify_answer` takes an
+`Option` and refuses `None`.
+
+**The error never names key material.** It names the tag and the suite. An error string is a log
+line waiting to happen (§3), and for a key that arrives in signalling that is the likeliest way it
+escapes.
 
 **Both halves or neither.** A session is keyed only when both our key and theirs are present. A
 stream keyed at one end connects and carries silence, which is worse than one that fails to
@@ -652,6 +676,7 @@ from it or **reconciled** with it by `M-25`.
 | 8 | §5.1.2's demultiplexing ranges, at every boundary | RFC 5764 §5.1.2 | `one_port_tells_stun_dtls_and_rtp_apart_by_the_first_byte` | derived |
 | 9 | base64 of the `inline` parameter | RFC 4648 §10 | `base64_matches_the_published_vectors` | derived |
 | 10 | The first SRTCP packet carries index 0 | RFC 3711 §3.4 | `the_first_srtcp_packet_carries_index_zero` | **new** (`M-25`) — the vector §12.5 was found by |
+| 11 | The published `a=crypto` line and the 16 + 14 octets it decodes to | RFC 4568 §6.1, §9.1 (§10.4 below) | `the_published_crypto_line_parses_to_the_published_key_and_salt`, `the_other_published_inline_parameters_are_read` | **new** (`M-26`) — the first thing `Crypto::parse` has been held against that sipx did not write |
 
 The numbers themselves, so a reader can check a test without opening an RFC.
 
@@ -715,7 +740,10 @@ Two more from the same RFC, both 30 octets and both legal input:
 
 **The `|2^20|1:4` suffix must not stop the key being read** (§5.1): the lifetime and MKI are parsed
 past, and a parser that treats them as part of the base64 sees a key of the wrong length and refuses
-a valid offer. *(These lines are not yet asserted against `Crypto::parse`; see §12.6.)*
+a valid offer. *(Asserted by `M-26`: `the_published_crypto_line_parses_to_the_published_key_and_salt`
+and `the_other_published_inline_parameters_are_read` in
+[`crypto`](../../crates/sipx-sdp/src/crypto.rs). `Crypto::parse` agreed with the published octets
+already — the point is that until then nothing said so. §10.6 is still unasserted; see §12.6.)*
 
 ### 10.5 RFC 5764 §4.2 — the exported block
 
@@ -785,21 +813,37 @@ reception statistics, not audio, though a replayed receiver report can drive a c
 response. It is a behaviour change to a public method (`unprotect_rtcp` gains a `Replayed` return),
 so it is a story rather than something to fold into this one. **Owner: a new story.**
 
-### 12.3 The SDES tag is neither echoed nor verified — open
+### 12.3 The SDES tag is neither echoed nor verified — **echo fixed by `M-26`; the check is built and not yet wired**
 
 RFC 4568 §5.1.2: an accepted crypto attribute in the answer "MUST contain … the tag and
 crypto-suite from the accepted crypto attribute in the offer". §5.1.3: the offerer "MUST verify that
 one of the initially offered crypto suites and its accompanying tag were accepted and echoed in the
 answer … If any of the above fails, the negotiation MUST fail."
 
-sipx does neither. The answerer emits its **own** `Crypto`, whose tag `Capabilities::with_srtp`
-fixes at 1, so an offer of `a=crypto:2 …` is answered `a=crypto:1 …`; and the offerer reads the
+sipx did neither. The answerer emitted its **own** `Crypto`, whose tag `Capabilities::with_srtp`
+fixes at 1, so an offer of `a=crypto:2 …` was answered `a=crypto:1 …`; and the offerer read the
 answer's crypto without comparing tags at all.
 
 The visible failure is one-sided and easy to misread: a conformant peer that offers any tag but 1
 MUST fail the negotiation on sipx's answer, and calls to peers that happen to use tag 1 — which is
-most of them — work. Two MUSTs, one interop bug, one missing check. **Owner: a new story**, in
-`sipx-sdp` and `sipx-call`.
+most of them — work. Two MUSTs, one interop bug, one missing check.
+
+**§5.1.2 is closed.** `answer()` now takes the tag and suite from the attribute it accepted
+(§5.3). **Wire-visible**, and in the direction that fixes rather than breaks: a peer that offered
+tag 2 and was answered tag 1 was failing the call at its end.
+
+**§5.1.3 is built and not yet on the call path.** `Crypto::verify_answer` (§5.4) and
+`SrtpKeys::from_answer` implement the check, with tests; but `sipx-call`'s `srtp_keys`
+([`call.rs`](../../crates/sipx-call/src/call.rs)) still pairs `capabilities.crypto` with whatever
+`a=crypto` the answer carried, comparing nothing, and returns `Option` where the check returns
+`Result`. Until it is moved onto `SrtpKeys::from_answer`, a live call still accepts an answer that
+echoed a tag nobody offered.
+
+*(Recorded by `M-26`, 2026-07-29, which implements both halves in `sipx-sdp` and `sipx-media`. The
+wiring was left out because `M-26`'s write set did not extend to `sipx-call` — a concurrent story
+held that crate — and not because it is optional. **Owner: a new story**, in `sipx-call`: replace
+`srtp_keys`'s `Option` with `SrtpKeys::from_answer`'s `Result` and let `establish` propagate it, so
+a refused answer ends the call through `Error::Sdp` rather than placing it unencrypted.)*
 
 ### 12.4 The protection profile is named in OpenSSL's spelling — open
 
@@ -822,13 +866,19 @@ interoperability effect — the index travels explicitly in the trailer — but 
 keystream's counter block, so which packet uses which is not a free choice. Fixed in `M-25` with
 §10's vector 10.
 
-### 12.6 Two published SDP vectors are stated here and not yet asserted — open
+### 12.6 Two published SDP vectors are stated here and not yet asserted — **half closed by `M-26`**
 
 §10.4's `a=crypto` lines and §10.6's `a=fingerprint` lines are published, byte-level, and would test
-`Crypto::parse` and `Fingerprint::parse` against something other than their own output. Today both
-parsers are tested only against values this stack generated — round trips, plus negative cases.
-`M-25`'s write set did not extend to `sipx-sdp`, so they are recorded here as the vectors a test
-should use rather than added. **Owner: a new story**, in `sipx-sdp`.
+`Crypto::parse` and `Fingerprint::parse` against something other than their own output. Both parsers
+were tested only against values this stack generated — round trips, plus negative cases.
+
+**§10.4 is asserted** (`M-26`, vector 11). `Crypto::parse` reproduces the published key and salt
+exactly, so the finding is that the parser was right — which is the outcome this kind of test has
+most of the time and is not a reason to skip it: §12.1 is what the same blind spot cost in
+`sipx-rtp`, and nothing distinguished the two cases beforehand.
+
+**§10.6 is still unasserted.** `Fingerprint::parse` is tested only against its own output.
+**Owner: a new story**, in `sipx-sdp`.
 
 ### 12.7 Everything else was checked and agrees
 

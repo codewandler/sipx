@@ -514,8 +514,13 @@ layer = "media"
 status = "partial"
 spec = "docs/specs/srtp.md"
 roles = ["uac", "uas"]
-evidence = ["crates/sipx-sdp/src/crypto.rs", "crates/sipx-sdp/tests/srtp_negotiation.rs"]
-note = "`a=crypto` offered and answered, and **only over a secure signalling path** — §7.1 makes that a condition of use, and `Crypto::offer` returns nothing without it rather than leaving the check to every caller. No MKI, no key lifetimes, no session parameters. §5.1.2's tag is not echoed in the answer and §5.1.3's echo is not verified, both MUSTs; `M-25` found them and `docs/specs/srtp.md` §12.3 states what they should be."
+evidence = [
+  "crates/sipx-sdp/src/crypto.rs",
+  "crates/sipx-sdp/src/answer.rs",
+  "crates/sipx-media/src/session.rs",
+  "crates/sipx-sdp/tests/srtp_negotiation.rs",
+]
+note = "`a=crypto` offered and answered, and **only over a secure signalling path** — §7.1 makes that a condition of use, and `Crypto::offer` returns nothing without it rather than leaving the check to every caller. §5.1.2's tag and suite are echoed from the attribute actually accepted (`M-26`), and §6.1's published `inline` parameter is asserted against `Crypto::parse` rather than against sipx's own output. §5.1.3's check — offered suite, accompanying tag, and a key — is `Crypto::verify_answer`, and `SrtpKeys::from_answer` makes it the only way an answer becomes keys, so a mismatch is a typed failure and not a stream that quietly drops to unencrypted. **Still missing:** `sipx-call` has not yet been moved onto `SrtpKeys::from_answer`, so a live call's answer is paired without the check until that wiring lands; and no MKI, no key lifetimes, no session parameters. See `docs/specs/srtp.md` §12.3."
 
 [[rfc]]
 number = 5764
