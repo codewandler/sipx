@@ -128,6 +128,62 @@ Any one of these is enough to revisit — this is a decision about present cost,
 5. **Formal conformance reporting is required** — a certification programme or an interop matrix
    demanding per-requirement statements. External obligation beats internal cost.
 
+## X-30: reachability, and why the rule is scoped to media
+
+`X-30` asked whether the registry can distinguish *implemented in a crate* from *reachable from a
+call* — after the same over-claim landed five times in two days. The answer is yes, and it needs
+no new grain: it is a **constraint on the existing `roles` key**, not a third axis. A role is a
+claim about what a user agent *does*, so a row claiming one whose capability nothing above the
+implementing crate can select is making a claim the code does not support. No key was added, and
+the decision above stands unchanged.
+
+**The rule proposed by `M-28` was measured before it was adopted, and it does not hold as
+stated.** "An entry may not claim `uac` or `uas` unless its `evidence` cites a file at or above
+`sipx-call`" rejects **22 of the 29 role-claiming rows**, and only three of those rejections are
+real (8122, 8445, 8839). Nineteen are false positives, because `evidence` cites the code that
+*implements* a behaviour — which is its job — and a citation in `sipx-transport` says nothing
+about whether a call reaches it. Every call reaches the transaction layer, DNS resolution, offer
+/answer and `rport`; those rows are honest and the rule calls them liars.
+
+**Seven of them cannot satisfy the rule at any price**, which is the finding that settles it:
+RFCs 2617, 3680, 3856, 3903, 4235, 7616 and 8760 are implemented in `sipx-ua`, and `sipx-ua` is a
+*sibling* of `sipx-call` — `sipx-call`'s manifest does not name it, and neither reaches the other.
+The rule's premise, that `sipx-call` is the layer everything must be reachable through, is false
+for the registration, authentication and presence half of the stack. There is no honest evidence
+path those rows could cite.
+
+**So the rule is narrowed to `layer = "media"`, and the narrowing is the argument rather than a
+convenience.** Signalling, transport and security capabilities sit on the path every call already
+takes: "can a call reach the transaction layer" has no false answer, so the check would be asking
+a question that cannot come out `no`. Media capabilities are *selected* — a call picks a keying
+and a candidate strategy — and selecting nothing is exactly how ICE and DTLS-SRTP came to be
+shipped unreachable. Scoped to media the rule rejects four rows: three genuine over-claims, and
+RFC 3711, whose SRTP transform *is* keyed on a live call but whose evidence had never said so.
+That one was corrected by citing the call-layer tests; the other three lost their roles.
+
+There is **no suppression list**, deliberately. Every rejected row was corrected in the same
+commit. A check with an exceptions file stops working the first time somebody would rather add a
+line to the file than fix the row, and this check exists because five rows were wrong at once.
+
+The reachable set is computed from the workspace manifests (`call_layer_crates`) rather than
+listed in the script, for the reason `gate.py` exists one directory over: a hand-kept list of
+facts about the build drifts, and drifts silently.
+
+### What would widen this
+
+- **A non-media over-claim.** The scope is empirical — five instances, four of them media. A
+  sixth outside the media layer is evidence the narrowing was too tight, and the check takes a
+  layer set rather than a constant so that widening it is one edit and a test.
+- **`sipx-ua` and `sipx-call` acquiring a common layer above them.** The structural objection
+  above is about today's dependency graph. If an application crate came to sit above both, the
+  rule could be stated over *that* crate and would apply to the seven rows it currently cannot
+  reach.
+- **Reachability becoming directly enumerable.** The check binds to evidence paths, which is a
+  proxy: a row could satisfy it by citing a call-layer file containing a dead branch — which is
+  precisely what `sipx-call`'s `a=fingerprint` rendering is today. A cross-crate caller check, or
+  coverage data from the call-layer tests, would bind to the fact itself rather than to a path,
+  and would be strictly better.
+
 ## Consequences
 
 - The registry keeps one row per RFC, and gains an enforced key set.

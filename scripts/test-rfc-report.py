@@ -166,6 +166,108 @@ class SpecCitation(unittest.TestCase):
                 self.assertEqual(by_number[number].get("spec"), "docs/specs/srtp.md")
 
 
+class RoleReachability(unittest.TestCase):
+    """A media row may not claim a UA role no call can select.
+
+    The registry's one failure mode, five times in two days: a capability is built in a crate,
+    the row claims `uac` and `uas`, and nothing above the crate ever calls it — so the compliance
+    table reports as shipped something an application cannot ask for. Every existing check passes
+    for such a row, because the header is known, the file exists, and evidence was cited.
+
+    `sipx-call` is where an application asks for a call, so a media capability whose evidence
+    never reaches it is one no role can perform. See `docs/designs/rfc-registry-grain.md` for why
+    the rule is scoped to the media layer rather than applied to every row.
+    """
+
+    def a_media_entry(self, **overrides):
+        entry = an_entry(
+            number=9999,
+            layer="media",
+            status="implemented",
+            roles=["uac", "uas"],
+            note="A note.",
+        )
+        entry.update(overrides)
+        return entry
+
+    def test_a_media_role_claimed_from_a_leaf_crate_is_rejected(self):
+        """The failing-first case: both roles claimed, evidence only in the crate below.
+
+        This is `M-15`'s DTLS-SRTP row and `M-22`'s ICE rows in fixture form — code that exists,
+        is tested by its own crate, and that no call has ever reached.
+        """
+        entry = self.a_media_entry(
+            evidence=[
+                "crates/sipx-media/src/dtls/mod.rs",
+                "crates/sipx-media/tests/dtls_srtp.rs",
+            ]
+        )
+        problems = report.check([entry])
+        self.assertTrue(
+            any("9999" in p and "reach" in p for p in problems),
+            f"a media role no call can select was accepted; problems={problems}",
+        )
+
+    def test_evidence_at_the_call_layer_satisfies_the_rule(self):
+        """`M-29`'s fix to RFC 4568, in fixture form: a call-level test is what makes it true."""
+        entry = self.a_media_entry(
+            evidence=[
+                "crates/sipx-media/src/dtls/mod.rs",
+                "crates/sipx-call/tests/secure_media.rs",
+            ]
+        )
+        self.assertEqual([], [p for p in report.check([entry]) if "reach" in p])
+
+    def test_a_row_claiming_no_role_is_not_asked_to_reach_a_call(self):
+        """`M-28`'s fix was to *remove* `roles`, which must be a way through the check.
+
+        RFC 5763 and 5764 state the gap in prose and claim no role. That is an honest row, and a
+        check that still rejected it would push the next author towards a caveat nobody reads.
+        """
+        entry = self.a_media_entry(
+            roles=[], status="partial", evidence=["crates/sipx-media/src/dtls/mod.rs"]
+        )
+        self.assertEqual([], [p for p in report.check([entry]) if "reach" in p])
+
+    def test_the_rule_is_scoped_to_the_media_layer(self):
+        """Deliberately narrow, and asserted so that widening it is a decision rather than a slip.
+
+        Measured against the whole registry, the unscoped rule rejects 22 of the 29 role-claiming
+        rows and only 3 of those are real. Seven cannot satisfy it at all: they are implemented in
+        `sipx-ua`, which is a *sibling* of `sipx-call` and not below it, so no honest evidence
+        path exists. `docs/designs/rfc-registry-grain.md` records the measurement.
+        """
+        entry = self.a_media_entry(
+            layer="security", evidence=["crates/sipx-ua/src/auth.rs"]
+        )
+        self.assertEqual([], [p for p in report.check([entry]) if "reach" in p])
+
+    def test_the_call_layer_is_read_from_the_workspace(self):
+        """The reachable set is Cargo's dependency graph, not a list in this script.
+
+        A hand-kept list is the failure `gate.py` exists to prevent one directory over: a new
+        crate above `sipx-call` would silently fail to count as reachable.
+        """
+        crates = report.call_layer_crates()
+        self.assertIn("sipx-call", crates)
+        self.assertIn("sipx-cli", crates)
+        self.assertIn("sipx-app-protocol", crates)
+        # Below sipx-call, so citing them proves nothing about what a call can select.
+        self.assertNotIn("sipx-media", crates)
+        self.assertNotIn("sipx-sdp", crates)
+
+    def test_the_media_rows_that_prompted_this_story_claim_no_unreachable_role(self):
+        """RFC 8122, 8445 and 8839, named in X-30's Notes as carrying the shape today.
+
+        Asserted by number rather than left to the registry-wide check, so that restoring a role
+        to one of them names the story that removed it.
+        """
+        by_number = {e["number"]: e for e in registry_entries()}
+        for number in (5763, 5764, 8122, 8445, 8839):
+            with self.subTest(rfc=number):
+                self.assertEqual([], by_number[number].get("roles", []))
+
+
 class TheRealRegistry(unittest.TestCase):
     """The guard is only worth having if the registry it guards already satisfies it."""
 
