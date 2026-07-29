@@ -228,7 +228,8 @@ already unfrozen in another checklist.
 
 | State | Input | → State | Outputs / effect |
 |---|---|---|---|
-| Frozen | unfreeze (§7.2.5.3.3) | Waiting | — |
+| Frozen | a pair with the same foundation succeeded (§7.2.5.3.3) | Waiting | — |
+| Frozen | Ta fires, its checklist has no `Waiting` pair, and no pair anywhere in the set shares its foundation in `Waiting` or `In-Progress` (§6.1.4.2 step 2) | Waiting | — |
 | Waiting | Ta fires and this is the highest-priority `Waiting` pair | In-Progress | send check; set RTO |
 | In-Progress | RTO fires, attempt < Rc | — | resend check; set RTO ×2 |
 | In-Progress | RTO fires, attempt = Rc | Failed | update checklist state |
@@ -244,6 +245,17 @@ already unfrozen in another checklist.
 Triggered checks (§7.3.1.4) jump the queue: a pair with a triggered check is sent at the next Ta
 tick ahead of every `Waiting` pair, whatever its priority. This is what makes ICE converge quickly
 rather than in checklist order.
+
+*(Corrected by `M-21`, which implements the machine. The table had **one** Frozen row, naming
+§7.2.5.3.3's unfreeze — the one that fires when a pair of the same foundation *succeeds*. §6.1.4.2
+step 2 is a second unfreeze and the table did not have it, so a machine written from this section
+alone deadlocks: §6.1.2.6 unfreezes each foundation exactly once, so when that one pair fails, every
+remaining pair of that foundation stays Frozen for the rest of the session and ICE reports a failure
+for a path it never finished checking. The row above is §6.1.4.2 step 2 verbatim, including that the
+"is any pair of this foundation busy" test is over the whole checklist set and not over one
+checklist. Asserted by `a_foundation_whose_only_unfrozen_pair_failed_is_thawed_again` and
+`nothing_is_thawed_while_the_foundation_still_has_a_check_outstanding` in
+[`sipx_media::ice::checklist`](../../crates/sipx-media/src/ice/checklist.rs).)*
 
 ## 7. Roles and role conflict
 
