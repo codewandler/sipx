@@ -9,6 +9,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A caller can give up before sipx answers (`S-23`, RFC 3261 §9.2)** — the UAS half of CANCEL,
+  which sipx never implemented. A CANCEL for an invitation still ringing is answered `200` on its
+  own transaction and the INVITE it withdraws is answered `487 Request Terminated`; one matching
+  no pending INVITE draws `481` rather than being routed somewhere and ignored. Until now sipx
+  kept ringing and left the caller's stack to time out.
+  - The application is told, and cannot answer afterwards. `EndCause::RemoteCancel` reaches a
+    ringing host through the same event vocabulary a talking one uses, because "stop ringing" and
+    "hang up" are the same question asked at two different moments.
+  - A CANCEL arriving *after* a 2xx is not a teardown — §9.2 is explicit that it has no effect on
+    a transaction that has already answered, and BYE is the request for that. Tested as a negative.
+  - **Beyond what the story asked**: §9.1's `Call-ID` and `From` tag are checked on top of §9.2's
+    transaction match. Every well-formed CANCEL carries them, so the check costs nothing — and a
+    `Via` sent-by is the attacker's to write, so without it, observing a branch is enough to stop
+    someone else's phone ringing.
+
 - **ICE on the media port (`M-22`, RFC 8445 + 8839)** — the sans-IO agent `M-21` built now has the
   socket and the clock it was written for, so a call can traverse a NAT symmetric RTP cannot.
   Host and server-reflexive gathering off the bound media port, connectivity checks demultiplexed
@@ -155,8 +170,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     capability needs a public item, and an optional codec must be advertised as optional. Wired
     into the gate with its own suite beside it, per `X-22`; the gate is 17 steps.
 
-- `sipx_call::Error` gains `UnacknowledgedProvisional` and `NoEarlySession` (`S-19`). Additive, but
-  source-breaking for a downstream exhaustive `match`, as previous variants have been.
+- `sipx_call::Error` gains `UnacknowledgedProvisional` and `NoEarlySession` (`S-19`) and
+  `InvitationCancelled` (`S-23`). Additive, but source-breaking for a downstream exhaustive
+  `match`, as previous variants have been. `EndCause` is `#[non_exhaustive]`, so `RemoteCancel`
+  joining it breaks nothing.
+
+- **A CANCEL racing an answer is now honoured in full (`S-23`)** — one arriving while `answer` is
+  setting media up sends the `487` and returns `Error::InvitationCancelled`, where before it drew
+  a bare `200` and the answer succeeded, leaving the caller to notice the 2xx and send a BYE per
+  §9.1. Both are defensible; the new one is what the caller actually asked for.
 
 - **RFC 8839's ICE attributes in SDP (`M-19`)** — `sipx_sdp::ice` parses and serialises
   `candidate`, `ice-ufrag`/`ice-pwd`, `ice-options`, `ice-lite`, `ice-mismatch`,

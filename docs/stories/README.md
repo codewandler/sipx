@@ -50,12 +50,16 @@ _This is the layer applications actually program against, so it is the one that 
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
-- [S-23 — Answer a CANCEL — the UAS half sipx never implemented](S-23-uas-cancel.md) · Signalling · found by C-4 — no 487 for the INVITE and no 200 for the CANCEL anywhere in the workspace
+- [X-27 — Place an interop call with encrypted media](X-27-interop-never-encrypts-media.md) · Build · found by M-25 — the n_a defect shipped in v0.3.0 through v0.8.0 because nothing ever exchanged SRTP with a non-sipx peer
 - [S-22 — Give the caller a handle on its early dialog](S-22-caller-early-dialog.md) · Signalling · found by S-19 — sipx as caller can neither send nor receive an UPDATE while ringing
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
 - [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
+
+### Media
+_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [M-26 — Echo and verify the SDES tag, which RFC 4568 requires twice](M-26-sdes-tag-neither-echoed-nor-verified.md) · Media · found by M-25 — RFC 4568 §5.1.2 and §5.1.3 are both MUSTs and sipx honours neither
 
 ### Quic
 - [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11
@@ -146,6 +150,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [S-17 — Implement the dialog and registration event packages](S-17-dialog-and-registration-event-packages.md) · Signalling · M8 · RFC 4235 + 3680 · blocked by S-13
 - [S-18 — Implement presence and PUBLISH](S-18-presence-and-publish.md) · Signalling · M8 · RFC 3856 + 3863 + 3903 · blocked by S-13
 - [S-19 — Implement the UPDATE method](S-19-update-method.md) · Signalling · M9 · RFC 3311 · the last session-integrity gap; 100rel unblocked it
+- [S-23 — Answer a CANCEL — the UAS half sipx never implemented](S-23-uas-cancel.md) · Signalling · found by C-4 — no 487 for the INVITE and no 200 for the CANCEL anywhere in the workspace
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
