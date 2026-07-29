@@ -64,7 +64,6 @@ _The measure of this stack's reach is what can be built on it **without writing 
 - [C-5 — The application contract crate and its sans-IO interpreter](C-5-app-contract-crate-and-interpreter.md) · Application · app-sdk · parallel to C-3/C-4/M-17/M-18 · spec is docs/specs/app-contract.md · size M
 - [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
 - [M-17 — Control playback — queue, stop, interrupt on digit](M-17-playback-control.md) · Media · app-sdk · after C-3 · gates the contract's gather · size S/M
-- [M-18 — Mute and unmute a call's outbound audio](M-18-mute-and-unmute.md) · Media · app-sdk · independent · size S
 
 ### Call framework
 _This is the layer applications actually program against, so it is the one that decides whether_
@@ -116,6 +115,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [M-13 — Add the Opus codec](M-13-add-the-opus-codec.md) · Media
 - [M-14 — Encrypt the media](M-14-secure-media.md) · Media · track: media · RFC 3711 + 4568 · the largest gap in the stack
 - [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · M6 · RFC 5764 · M-14 unblocked it
+- [M-18 — Mute and unmute a call's outbound audio](M-18-mute-and-unmute.md) · Media · app-sdk · independent · size S
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
