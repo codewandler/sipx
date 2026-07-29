@@ -47,6 +47,7 @@ _This is the layer applications actually program against, so it is the one that 
 
 ### Conformance
 - [X-27 — Place an interop call with encrypted media](X-27-interop-never-encrypts-media.md) · Build · found by M-25 — the n_a defect shipped in v0.3.0 through v0.8.0 because nothing ever exchanged SRTP with a non-sipx peer
+- [X-28 — Make the bridge audio test deterministic under load](X-28-bridge-test-is-load-flaky.md) · Build · found by M-25 — it races play against a fixed 400ms record on real sockets and records zero samples under load, so it will be blamed on innocent diffs
 - [S-22 — Give the caller a handle on its early dialog](S-22-caller-early-dialog.md) · Signalling · found by S-19 — sipx as caller can neither send nor receive an UPDATE while ringing
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
@@ -56,6 +57,9 @@ _This is the layer applications actually program against, so it is the one that 
 ### Endpoint discovery
 _sipx can call any endpoint you can already name, and cannot help you name one. `sipx dial` takes a_
 - [P-5 — List what can be called with `sipx peers`](P-5-peer-book-and-list.md) · Phone · the epic's first story — a peer book and one command, with no protocol work
+
+### Ice
+- [M-27 — Offer and answer ICE from a call](M-27-ice-in-the-call-layer.md) · Media · found by M-22 — ICE works and is reachable only through sipx-media's API; no call places one with it
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
