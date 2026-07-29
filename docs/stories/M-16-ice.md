@@ -2,12 +2,12 @@
 id: M-16
 title: Implement ICE
 pillar: Media
-status: in-progress
-priority: 7
+status: blocked
+priority:
 design: docs/designs/media.md
-epic: conformance
+epic: ice
 areas: [sipx-media, sipx-sdp, sipx-rtp]
-note: M10 · RFC 8445 + 8839 · the NAT cases symmetric RTP does not solve
+note: epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
 ---
 
 # Implement ICE
@@ -76,6 +76,10 @@ audio.
   measurement.
 
 ## Proposed split
+> **Cut.** These six are now stories `M-19` … `M-24`, with this section's Acceptance carried
+> across verbatim. They are the contract; what follows is kept as the record of why the split
+> falls where it does.
+
 Six children, in dependency order. Each is `pillar: Media`, `epic: conformance`, `design:
 docs/designs/media.md`, and each cites [`docs/specs/ice.md`](../specs/ice.md) as its spec. The
 Acceptance below is the contract; the spec section named beside each item is where the detail is.

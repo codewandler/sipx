@@ -53,11 +53,14 @@ _This is the layer applications actually program against, so it is the one that 
 
 ### Conformance
 - [S-19 — Implement the UPDATE method](S-19-update-method.md) · Signalling · M9 · RFC 3311 · the last session-integrity gap; 100rel unblocked it
-- [M-16 — Implement ICE](M-16-ice.md) · Media · M10 · RFC 8445 + 8839 · the NAT cases symmetric RTP does not solve
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
 - [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
+
+### Ice
+- [M-19 — Parse and serialise the ICE attributes in SDP](M-19-ice-sdp-attributes.md) · Media · ice · RFC 8839 §5 · pure parsing; nothing else can negotiate until this exists
+- [M-20 — Encode and answer a STUN connectivity check](M-20-ice-stun-checks.md) · Media · ice · RFC 5389/5769 · carries the crate-graph decision; runs solo, it moves the lockfile
 
 ### Quic
 - [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11
@@ -71,7 +74,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [X-18 — Count what the stack discards, and capture what it sends](X-18-counters-and-capture.md) · Build · M12 · nothing leaves the process but tracing; T-19 adds the first counter and has nowhere to put it
 
 ## Blocked
-_None._
+- [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
 
 ## Backlog
 
@@ -90,6 +93,12 @@ _The measure of this stack's reach is what can be built on it **without writing 
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
+
+### Ice
+- [M-21 — The sans-IO ICE agent](M-21-ice-agent.md) · Media · ice · RFC 8445 · after M-20 · the state machine, no socket and no clock
+- [M-22 — Drive ICE on the media port](M-22-ice-on-media-port.md) · Media · ice · after M-19 and M-21 · owns M-16's named test and the registry rows
+- [M-23 — Recognise and act on an ICE restart](M-23-ice-restart.md) · Media · ice · RFC 8839 §4.4.1.1.1 · after M-22 · a restart that goes silent is worse than none
+- [M-24 — Gather a relayed candidate from a configured relay](M-24-ice-relayed-candidate.md) · Media · ice · RFC 8656 · after M-22 · the third RFC that made M-16 impossible as one story
 
 ### Quic
 - [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · track: quic · blocked by T-12

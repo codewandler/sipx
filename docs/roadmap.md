@@ -281,6 +281,23 @@ deny-by-default capabilities. Four phases, each shell-demonstrable: one call one
 call placed by the CLI and the absent-app case does what its declaration says.
 See [design](designs/app-host.md).
 
+### ICE — `ice` _(six stories, M10)_
+
+The media path where symmetric RTP cannot reach: candidate gathering, connectivity checks and
+nomination, so two endpoints that never see each other's real addresses still exchange audio.
+Cut from `M-16`, which was one story until it was specified and turned out to be three RFCs —
+RFC 8445, RFC 8839, and RFC 8656 hiding inside "relayed candidates". The spec
+([`specs/ice.md`](specs/ice.md)) was written first and is what the six children are measured
+against.
+
+The order is a dependency chain, not a preference. `M-19` (the RFC 8839 attributes) and `M-20`
+(the STUN check codec) are independent and can run together; `M-21` (the sans-IO agent) needs
+`M-20`; `M-22` (driving it on the media port) needs `M-19` and `M-21` and owns the test `M-16`
+named; `M-23` (restart) and `M-24` (a relayed candidate) follow. ICE-lite is deferred with its
+reason recorded — sipx is a UA behind NATs, which is the case lite does not serve — but
+*interoperating* with a lite peer is not, because an implementation that only handles a full peer
+hangs waiting for checks a lite peer is never required to send. See [design](designs/media.md).
+
 ### Edge / B2BUA — `edge` _(one story, in M9)_
 
 The design's open question — whether a programmable edge belongs in this repository, or in a
