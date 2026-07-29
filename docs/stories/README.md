@@ -12,13 +12,15 @@ the stories, not the generated region. New work? Copy [`_TEMPLATE.md`](_TEMPLATE
 **M0 through M8 are complete.** sipx registers against a real Kamailio over UDP, TCP and TLS,
 places calls with encrypted G.711 audio, bridges and mixes them, transfers them, authenticates the
 other side rather than only answering, and serves subscriptions to what its dialogs and
-registrations are doing — with 956 tests green and clippy clean at `-D warnings` on both feature
+registrations are doing — with 976 tests green and clippy clean at `-D warnings` on both feature
 sets.
 
 The open work is the **application SDK and its host**. `C-3`, the epic's keystone, is done: a call
 now reports what happens to it as a typed event stream, which is the input alphabet `C-4`, `C-5`,
-`M-17` and `M-18` all report through. `A-1` and `A-7` are ready. Then the milestones below, each
-argued for in the [roadmap](../roadmap.md#next):
+`M-17` and `M-18` all report through, and `A-7` has built the deterministic harness the host's
+behaviour claims are held to — the contract's own `AC-1`…`AC-9` run under it today, with fake time
+and a scripted app. `A-1` is ready. Then the milestones below, each argued for in the
+[roadmap](../roadmap.md#next):
 
 - **M9 — Bridgeable.** `S-19` UPDATE, `C-2` early media, `C-1` two dialogs as one call. What has to
   be true of a session before sipx can sit between two of them.
@@ -42,7 +44,6 @@ _None._
 ### The application host
 _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
 - [A-1 — Finish the host configuration and failure-semantics schema](A-1-host-configuration-schema.md) · Application · app-host phase 1 · spec work, no dependency on the app-sdk stories
-- [A-7 — The deterministic harness — fake time, scripted bindings, scripted calls](A-7-deterministic-harness.md) · Application · app-host phase 1 · built with the host, not after it · startable against contract vectors alone
 
 ## Blocked
 _None._
@@ -98,6 +99,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [X-18 — Count what the stack discards, and capture what it sends](X-18-counters-and-capture.md) · Build · M12 · nothing leaves the process but tracing; T-19 adds the first counter and has nowhere to put it
 
 ## Done
+- [A-7 — The deterministic harness — fake time, scripted bindings, scripted calls](A-7-deterministic-harness.md) · Application · app-host phase 1 · built with the host, not after it · startable against contract vectors alone
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
 - [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media
 - [M-2 — Implement RTP and RTCP](M-2-rtp-and-rtcp.md) · Media

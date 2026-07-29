@@ -7,6 +7,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The deterministic harness (`A-7`)** — `crates/sipx-app`'s first code, and the apparatus every
+  later claim about the application host is held to. It drives the host's decision logic with fake
+  time, a scripted app and scripted call events: no sockets, no engine, no transport endpoint, no
+  clock. The slow app, the flapping app and the absent app are ordinary test cases.
+  - **The contract's own vector set runs today.** `AC-1` … `AC-9` from `app-contract.md` §11 are
+    expressed as scenarios and pass — before `C-5`'s interpreter exists, which is the reason this
+    story came first. What is under test is the actor's logic: delivery and §6.3's alternation
+    rule, `seq` and redelivery, the bounded event queue, §6.1's blocking discipline, and §9.2's
+    declared failure semantics.
+  - **A scenario is data, and so is its expectation** — the app's script with per-reply delays, the
+    call events, the redeliveries, and the effects and outcome expected of them. That is what lets
+    `A-2` and `A-4` be held to the same twelve failure-semantics scenarios (four §9.2 knobs × three
+    declared actions) instead of each restating what `on_5xx: hangup` means.
+  - **A scenario needing a real socket or real time cannot be written down.** A binding does not
+    wait for an app and return what it said; it declares up front *when* it will answer and with
+    what. A real HTTP client cannot answer the second half before making the call. With a clock
+    that has no `now()`, that is acceptance enforced by types rather than by review — a minute of
+    virtual time costs under 250 ms of real time, and there is a test that says so.
+
 ## [0.7.0] — 2026-07-29
 
 ### Changed

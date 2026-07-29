@@ -2,8 +2,13 @@
 //! `sipx.app.v1` contract — webhook documents, full-duplex sessions, and an embedded
 //! TypeScript runtime as three transports of one vocabulary.
 //!
-//! **Nothing is implemented yet.** The contract is specified in `docs/specs/app-contract.md`,
-//! the host's design in `docs/designs/app-host.md`, and the work is tracked by the `A-*`
-//! stories on the board. This crate exists so the host has its home in the workspace from day
-//! one; the first code arrives with story `A-7` (the deterministic harness) and `A-2` (the
-//! document-mode host).
+//! The contract is specified in `docs/specs/app-contract.md`, the host's design in
+//! `docs/designs/app-host.md`, and the work is tracked by the `A-*` stories on the board.
+//!
+//! **What exists today is the [`harness`]** (story `A-7`): the deterministic apparatus every later
+//! behaviour claim is held to. It runs the contract's own vector set with fake time, a scripted app
+//! and scripted call events, which is possible before the call-framework stories land and is the
+//! reason it comes first. The bindings (`A-2`, `A-4`) and the host process itself are built against
+//! it rather than beside it.
+
+pub mod harness;

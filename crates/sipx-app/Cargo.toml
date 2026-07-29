@@ -11,6 +11,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+# The harness schedules on the kernel's own timer queue, generic over its instant since `X-21` —
+# which is what lets it run on virtual time with no clock and no runtime.
+sipx-transport.workspace = true
 
 [lints]
 workspace = true
