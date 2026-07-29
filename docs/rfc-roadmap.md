@@ -9,10 +9,10 @@ Two things shape it.
 real event framework. SRTP keying needs SRTP. Doing them out of order means building something
 twice.
 
-**A gap that changes what sipx can be deployed as beats a gap that adds a feature.** SRTP is
-first below not because it is interesting but because "signalling can be encrypted and media
+**A gap that changes what sipx can be deployed as beats a gap that adds a feature.** SRTP was
+taken first not because it is interesting but because "signalling can be encrypted and media
 cannot" is the sentence that disqualifies the stack from most of the places it would otherwise
-fit.
+fit. The same rule orders what is left.
 
 ## Where the gaps actually are
 
@@ -28,65 +28,27 @@ it.
 
 ## Done since this list was written
 
-The first two groups are closed, and the third is half closed. Kept here rather than deleted,
-because the *reasons* were the argument for the order and they are worth being able to check
-against what happened.
+The first three groups are closed. Kept here rather than deleted, because the *reasons* were the
+argument for the order and they are worth being able to check against what happened.
 
 | RFC | Story | What it turned out to be |
 |---|---|---|
-| 3711 SRTP + 4568 SDES | `M-14` | Encrypted media, keyed over the signalling path. The remaining half is DTLS-SRTP, now in **M6**. |
+| 3711 SRTP + 4568 SDES | `M-14` | Encrypted media, keyed over the signalling path. The other half, DTLS-SRTP, followed in `M-15`. |
 | 4028 Session timers | `S-11` | A call whose far end vanished is now torn down locally rather than kept forever. |
 | 3262 100rel / PRACK | `S-12` | Behaviour-only, as predicted: a module beside the parser. The retransmission schedule was the part with a surprise in it — no T2 cap. |
 | 3327 Path | `T-14` | Inbound routing back through the registrar's proxies. Its own surprise: RFC 3327 §5.1 has the *UA ignore* what comes back, which is why `T-16` exists. |
 | 8760 Digest | `S-14` | SHA-512-256 and several algorithms offered at once. |
+| 3608 Service-Route | `T-16` | The outbound twin of `Path`, and the reason `T-14` left the direction open. |
+| 5626 Outbound | `T-15` | `reg-id`, `+sip.instance` and a flow the client keeps open, so a NAT binding lapsing is survivable. |
+| 5764 DTLS-SRTP | `M-15` | The other half of encrypted media: keyed on the media path, so no proxy on the signalling path ever holds the key. |
+| — (API gaps) | `T-19`, `T-18`, `T-17`, `S-15`, `S-16`, `X-14` | The forwarding group turned out as predicted — five API gaps and one RFC, 7616's server half. The surprise was `T-19`: a live fault rather than a missing feature. |
+| 6665 + 4488 | `S-13` | The framework. The identity had to be the dialog *and* the package (§4.4.1), not the dialog alone — keying on the dialog lets a second subscription silently replace the first. |
+| 4235 + 3680 | `S-17` | Dialog and registration documents, with a version counter scoped per subscription rather than per resource. |
+| 3856 + 3863 + 3903 | `S-18` | Presence, PIDF and PUBLISH. The entity tag was the part worth being careful about: a fresh one on every acceptance, and 412 for one the server does not hold. |
 
 ## Order
 
-### 1. Reachability — **M6**
-
-| RFC | What it unlocks | Status |
-|---|---|---|
-| 3327 Path | Routing back toward a UA through the proxies it registered through | done (`T-14`) |
-| 3608 Service-Route | The same route set in the direction requests actually leave | `T-16` |
-| 5626 Outbound | Flow tokens, `reg-id`, redundant registrations, NAT survival | `T-15` |
-| 5764 DTLS-SRTP | Keying that does not trust the signalling path; also the WebRTC path | `M-15` |
-| 5627 GRUU | A URI that reaches one specific instance | **M10** (`T-20`) |
-| 8599 Push | Waking a mobile client that is not holding a connection | **M10** (`T-21`) |
-
-This is the group that turns a UA into something a real deployment can register. Strictly
-ordered: Outbound builds on `Path`, GRUU on both, push on Outbound. It is also the group that
-most changes what sipx *is*, since being reachable through infrastructure is a different problem
-from placing a call.
-
-DTLS-SRTP rides along here rather than in a media group of its own: it is the last piece of "can
-a real deployment, including a browser, talk to this", which is what M6 is about.
-
-### 2. Forwarding — **M7**
-
-Not RFC gaps but API ones, and they gate everything a proxy or B2BUA would need: a request that
-can be dropped without a counter (`T-19`), a response that matched nothing and is discarded
-rather than forwarded (`T-18`), a resolver shaped for one UA (`T-17`), a header collection with
-no editing operations (`S-15`), and digest that can only be answered and never issued (`S-16`).
-RFC 7616's server half is the only RFC-shaped item in the group.
-
-### 3. Event framework — **M8**
-
-| RFC | What it unlocks |
-|---|---|
-| 6665 SUBSCRIBE/NOTIFY + 4488 `Refer-Sub` | The framework, rather than REFER's implicit subscription — and suppressing that one when it is not wanted (`S-13`) |
-| 4235, 3680 | Dialog and registration event packages: busy-lamp fields, and watching a registration go stale (`S-17`) |
-| 3856, 3863, 3903 | Presence with PIDF, and PUBLISH to put state into the framework (`S-18`) |
-
-sipx already implements the *implicit* subscription a REFER creates, including terminating it.
-Generalising that into a subscription store with packages is a considerable piece of work, and
-everything in the presence and busy-lamp family waits behind it.
-
-The packages are ordered by what they report. Dialog and registration state is state sipx
-*already keeps*, so those two exercise the framework without also needing a state model of their
-own; presence needs somewhere for presence to come from, which is a separate question and why
-PUBLISH travels with it.
-
-### 4. Session integrity, the remaining piece — **M9**
+### 1. Session integrity, the remaining piece — **M9**
 
 | RFC | What it unlocks |
 |---|---|
@@ -101,7 +63,23 @@ same shape: early media, which `S-12` built the offer/answer for and never used 
 dialogs driven as one call (`C-1`). All three are about a session before it is confirmed, which is
 where a forwarding element's hard cases live.
 
-### 5. Identity and interconnect — **M11**
+### 2. Reachability, the part M6 left open — **M10**
+
+| RFC | What it unlocks |
+|---|---|
+| 5627 GRUU | A URI that reaches one specific *instance* of a registered user (`T-20`) |
+| 8599 Push | Waking a mobile client that is holding no connection at all (`T-21`) |
+| 8445 + 8839 ICE | The NAT cases symmetric RTP does not solve (`M-16`) |
+
+M6 made sipx registrable; it did not make one instance of a registration addressable, and it did
+not make a client reachable while it holds no connection. GRUU depends on both halves M6
+delivered — `T-14`'s `Path` and `T-15`'s instance ID — and push depends on Outbound, so the order
+inside this group is fixed by the last one.
+
+ICE sits here rather than with media because reaching the far end at all is not a feature; it is
+the same class of gap as GRUU and push.
+
+### 3. Identity and interconnect — **M11**
 
 | RFC | What it unlocks |
 |---|---|
@@ -115,7 +93,7 @@ that matters for anything touching the public telephone network.
 RFC 3326 joins History-Info rather than sitting in the parse-only list on its own: RFC 7044 §10.2
 requires the `Reason` inside the `hi-targeted-to-uri`, so the two are one piece of work.
 
-### 6. Recording and the rest
+### 4. Recording and the rest
 
 | RFC | What it unlocks |
 |---|---|
@@ -124,9 +102,8 @@ requires the `Reason` inside the `hi-targeted-to-uri`, so the two are one piece 
 
 Two things have moved out of this group. **5118**, the IPv6 torture corpus, is in **M12** (`X-16`)
 with the rest of the measurement work — it is a check rather than a feature, so it belongs beside
-the interop matrix and the fuzzers rather than beside a recording protocol. **8445 ICE** is in
-**M10** (`M-16`), because listing it here was a mis-grouping: reaching the far end at all is not a
-feature, it is the same class of gap as GRUU and push, which is the group ICE now sits in.
+the interop matrix and the fuzzers rather than beside a recording protocol. **8445 ICE** moved to
+**M10** above, because listing it here was a mis-grouping.
 
 ## What is deliberately not on this list
 

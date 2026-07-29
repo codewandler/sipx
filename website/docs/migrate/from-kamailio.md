@@ -24,7 +24,7 @@ part of that ecosystem is younger than your deployment.**
 | Registrar and location service | sipx-clstr | early — in development |
 | Load balancing / clustering | sipx-clstr — clustering is its founding concern, proved in deterministic simulation | early — in development |
 | The routing script | sipx-clstr composes routing from **typed modules**, by design; there is no script language | different by design |
-| Presence, dialog state (busy-lamp) | not built yet — the event framework is on the sipx roadmap | not yet |
+| Presence, dialog state (busy-lamp) | the event framework and the `dialog`, `reg` and `presence` packages are in sipx; the join to a live dialog store or registrar is not, and is where sipx-clstr's location service comes in | **partly today** |
 
 ## The parts you can move today
 

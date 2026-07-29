@@ -9,19 +9,15 @@ the stories, not the generated region. New work? Copy [`_TEMPLATE.md`](_TEMPLATE
 
 ## Status
 
-**M0 through M5 are complete**; **M6 is under way.** sipx registers against a real Kamailio over
-UDP, TCP and TLS, places calls with encrypted G.711 audio, bridges and mixes them, transfers
-them, and does all of it from a terminal — with 754 tests green and clippy clean at `-D warnings`
-on both feature sets.
+**M0 through M8 are complete.** sipx registers against a real Kamailio over UDP, TCP and TLS,
+places calls with encrypted G.711 audio, bridges and mixes them, transfers them, authenticates the
+other side rather than only answering, and serves subscriptions to what its dialogs and
+registrations are doing — with 941 tests green and clippy clean at `-D warnings` on both feature
+sets.
 
-The three milestones the open stories belong to, each argued for in the
-[roadmap](../roadmap.md#next):
+The open work is the **application SDK and its host** — `C-3` is in progress, `A-1` and `A-7` are
+ready — plus the milestones below, each argued for in the [roadmap](../roadmap.md#next):
 
-- **M6 — Registrable.** `T-16` Service-Route, `T-15` Outbound, `M-15` DTLS-SRTP. What a real
-  deployment needs before it will route to this stack.
-- **M7 — Forwardable.** `T-19`, `T-18`, `T-17`, `S-15`, `S-16`, `X-14`. Making the API right for
-  something that is not an endpoint.
-- **M8 — Subscribable.** `S-13` the framework, then `S-17` and `S-18` as packages on it.
 - **M9 — Bridgeable.** `S-19` UPDATE, `C-2` early media, `C-1` two dialogs as one call. What has to
   be true of a session before sipx can sit between two of them.
 - **M10 — Reachable.** `T-20` GRUU, `T-21` push, `M-16` ICE. The three ways of being reached that M6

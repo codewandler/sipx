@@ -21,6 +21,9 @@ registers, transfers, bridges and conferences. It does not route other people's 
   verification off.
 - **Notice a far end that vanishes.** RFC 4028 session timers turn "the other phone lost power"
   from a call that stays up forever into one that ends — see [placing a call](place-a-call.md).
+- **Serve subscriptions.** A notifier with a subscription store and packages registered by name
+  (RFC 6665), with `dialog`, `reg` and `presence` documents and PUBLISH behind an entity tag.
+  You supply what the documents describe; see the caveat below.
 
 ## It does not fit if you want
 
@@ -31,9 +34,15 @@ registers, transfers, bridges and conferences. It does not route other people's 
   cover the registered-phone case; there is no ICE yet, so the paths only a relay or
   connectivity checks would fix are not fixed. No GRUU and no push either — one instance of a
   registration cannot be addressed individually, and a sleeping client cannot be woken.
-- **Browser interoperability.** WebSocket transport works, but browsers require DTLS-SRTP and
-  sipx keys with SDES today.
-- **Presence, messaging or busy-lamp fields.** The event framework is not built.
+- **Browser interoperability.** WebSocket transport works and DTLS-SRTP keys the media, so the
+  two pieces browsers insist on are there — but ICE is not, and without it a browser and sipx
+  will agree on a session and then fail to find a media path in most networks.
+- **Presence or busy-lamp fields as a finished feature.** The event framework is built (RFC
+  6665), and so are the `dialog`, `reg` and `presence` packages with PIDF and PUBLISH — but the
+  packages produce documents, and joining them to sipx's live dialogs and registrations is
+  yours to write. A watcher gets what you publish to it, not an automatic view of what the
+  stack is doing.
+- **Messaging.** `MESSAGE` parses and nothing acts on it.
 
 ## The state of it, precisely
 

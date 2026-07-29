@@ -10,19 +10,21 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-07-28:_ **M0 through M5 are complete**, and **M6 is under way.** `sipx-sip` is a
-working sans-IO SIP core: URIs, headers, an incremental parser for both datagram and stream
-transports, message validation, injection-proof builders, and all four transaction state
-machines with matching and stores. 754 tests pass; clippy is clean at `-D warnings` on both
-feature sets; the whole RFC 4475 torture corpus is green across all four of its layers.
+_As of 2026-07-29:_ **M0 through M8 are complete.** `sipx-sip` is a working sans-IO SIP core:
+URIs, headers, an incremental parser for both datagram and stream transports, message validation,
+injection-proof builders, and all four transaction state machines with matching and stores. 941
+tests pass; clippy is clean at `-D warnings` on both feature sets; the whole RFC 4475 torture
+corpus is green across all four of its layers.
 
 sipx registers against a real Kamailio over UDP, TCP and TLS and answers `OPTIONS`. Between two
 sipx endpoints it places calls carrying G.711 audio in both directions, encrypted with SRTP when
 the offer and answer agree on it — and `sipx dial | answer | register` does all of that from a
-terminal.
+terminal. It is reachable behind NAT through a flow it opened, it can be the party that issues a
+challenge rather than only the one that answers, and it serves subscriptions to what its dialogs
+and registrations are doing.
 
-Next is **M6**: the last few things that decide whether a real deployment can register this
-stack and route back to it.
+Next is not a milestone but an epic: the **application SDK** and the **host** that runs it — the
+question of what can be built on this stack without writing Rust. **M9** waits behind it.
 
 ## Delivered
 
@@ -70,77 +72,35 @@ stack and route back to it.
     100rel and PRACK (`S-12`), a SIP-over-QUIC specification (`T-11`), the user guides (`X-12`)
     and the published API reference (`X-13`).
 
+- **M6 — Registrable.** What a real deployment needs before it will route to this stack: the
+  outbound route set the registrar dictates (`T-16`, RFC 3608), a registration that survives NAT
+  through a flow the client opened (`T-15`, RFC 5626), and DTLS-SRTP (`M-15`, RFC 5764) — keying
+  that never puts the key on the signalling path, and the only keying a browser will accept.
+
+- **M7 — Forwardable.** Six stories sharing one shape: an interface correct for a user agent and
+  wrong for anything that forwards. Requests are no longer dropped silently when a channel is full
+  (`T-19`), responses matching no client transaction reach the application (`T-18`), resolution is
+  async with a shared cache (`T-17`), `Headers` can be edited in flight rather than rebuilt
+  (`S-15`), sipx can *issue* a digest challenge and not only answer one (`S-16`), and the testkit
+  ships the generic timer queue and seeded lossy loopback link its docs promised (`X-14`).
+
+- **M8 — Subscribable.** The general case behind the one subscription REFER creates: a notifier
+  with a subscription store, packages registered by name, refresh, fetch and termination with a
+  reason (`S-13`, RFC 6665 and 4488) — and the three packages a desk phone subscribes to. `dialog`
+  and `reg` (`S-17`, RFC 4235 and 3680) report state sipx already keeps; `presence` with PIDF and
+  PUBLISH (`S-18`, RFC 3856, 3863, 3903) lets somebody who knows something sipx cannot observe
+  publish it, held as soft state under an entity tag.
+  - Where M8 stops: the packages produce documents, and joining them to a live dialog store or
+    registration lease is the application's. A package reaching into the call layer would make
+    `sipx-ua` depend on `sipx-call` and reverse the workspace's dependency direction.
+
 ## Next
 
-Seven milestones, each independently demonstrable, each ordered by the same rule the
+Four milestones, each independently demonstrable, each ordered by the same rule the
 [RFC roadmap](rfc-roadmap.md) uses: **a gap that changes what sipx can be deployed as beats a gap
-that adds a feature.** M6 to M8 are scoped and their stories are `ready`; M9 to M12 are defined
-and their stories are cut, not started.
-
-### M6 — Registrable
-
-*What a real deployment needs before it will route to this stack.*
-
-M5 left sipx able to place and receive calls with encrypted media. What it cannot yet do is be
-*reached* reliably: a registration that survives NAT, a route set for requests going out, and
-keying a browser will accept.
-
-| Story | RFC | Why it is in M6 |
-|---|---|---|
-| **T-16** Service-Route | 3608 | `Path` (`T-14`) fixed the inbound direction. Requests sipx *sends* still ignore the route set the registrar handed back, so they reach the proxy that has no state for them. |
-| **T-15** Outbound | 5626 | `reg-id`, `+sip.instance` and a flow the client opened. Without it a registration behind NAT is only usable until the binding lapses, and re-registering does not fix it. |
-| **M-15** DTLS-SRTP | 5764, 8842 | SDES (`M-14`) keys over the signalling path, which means every proxy on it has held the key. DTLS-SRTP does not, and it is the only keying a browser will accept. |
-
-**Done when** sipx registers through a proxy chain behind NAT, is reached back down the flow it
-opened, obeys the outbound route set the registrar dictated, and negotiates media keyed without
-the signalling path ever carrying the key.
-
-Three tracks, two crates each, no overlap: reachability owns `sipx-ua` and `sipx-transport`,
-media owns `sipx-media` and `sipx-rtp`. T-16 before T-15 — both touch registration, and
-Service-Route is the smaller half.
-
-### M7 — Forwardable
-
-*Making the API right for something that is not an endpoint.*
-
-Six stories that share one shape: the interface is correct for a user agent and wrong for
-anything that forwards. This is the layer the **edge epic** below sits on, and cutting it as its
-own milestone is what stops "become a proxy" from being one enormous story.
-
-| Story | What is wrong today |
-|---|---|
-| **T-19** Stop dropping incoming requests silently | A full channel loses a request with no counter and no log. That is a fault, not a missing feature, which is why it leads. |
-| **T-18** Surface unmatched responses | The endpoint logs and drops a response that matched no client transaction — exactly what a forwarding element is required to forward. |
-| **T-17** Resolve at proxy throughput | The `Resolver` trait is shaped for one UA: synchronous, one cache per caller. Resolving must not block the loop that is forwarding everything else. |
-| **S-15** Header editing operations | `Headers` cannot remove-first, insert-at or retain-by-predicate, so changing one header in flight means rebuilding the collection by hand. |
-| **S-16** Server-side digest | sipx can answer a challenge and not issue one. A registrar or proxy has to be the party that authenticates. |
-| **X-14** Timer queue + loopback link | The two pieces of scheduling machinery every sans-IO driver needs, still private to the endpoint; and the lossy in-process link the testkit's docs already promise. |
-
-**Done when** a message can be received, rewritten and forwarded with a shared resolver and a
-challenge issued by sipx, with nothing silently lost — and the testkit can drive that against a
-seeded lossy link with no sockets and no clock.
-
-T-19 is a live fault and goes first; the rest are independent.
-
-### M8 — Subscribable
-
-*The event framework, and the packages that wait behind it.*
-
-sipx implements exactly one subscription today: the implicit one a REFER creates. Everything in
-the presence and busy-lamp family needs the general case, and it does not exist yet.
-
-| Story | RFC | What it unlocks |
-|---|---|---|
-| **S-13** SUBSCRIBE/NOTIFY framework | 6665, 4488 | A subscription store with pluggable packages, refresh, fetch (`Expires: 0`), termination with a reason — and `Refer-Sub: false` to suppress the implicit one REFER creates. |
-| **S-17** Dialog and registration event packages | 4235, 3680 | Busy-lamp fields, and watching a registration go stale. Both report state sipx already tracks, which is what makes them the right first packages. |
-| **S-18** Presence and PUBLISH | 3856, 3863, 3903 | Presence with PIDF documents, and publishing state into the framework rather than only serving it out of local state. |
-
-**Done when** two sipx endpoints run a subscription through refresh and termination, a watcher
-sees a dialog change state and a registration expire, and a published presence document reaches a
-subscriber.
-
-S-13 first and alone — the other two are packages *on* it, and writing a package before the
-framework would shape the framework around that one package.
+that adds a feature.** M9 to M12 are defined and their stories are cut, not started; the
+in-progress work is the [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host)
+epics below, which are not milestones because they are not RFC gaps.
 
 ### M9 — Bridgeable
 
