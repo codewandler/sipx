@@ -7,6 +7,41 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The public capability tables stop selling three capabilities no call can reach (`X-35`)** —
+  `README.md` describes the compliance table as "a measurement rather than a claim"; the four
+  hand-maintained capability tables above it were the opposite, and three of them were wrong.
+  - **Opus** was advertised as a stack capability on the README, in `intro.md`, in
+    `does-this-fit.md`'s *"It fits if you want to"* list and on the landing page. No call can select
+    it: `sipx-call` hardcodes `Capabilities::g711` at six sites, and `Codec::from_payload_type`
+    **deliberately** never returns Opus, so even a hand-written peer offer cannot arrive at it. It is
+    now scoped to the crates, the way `as-a-library.md` already did it.
+  - **Bridging** was sold in five places plus `sipx-call`'s own package description. `Bridge::connect`
+    needs an `Arc<MediaSession>` and `Call` lends only `&MediaSession`, with no `into_media`, no
+    `Arc` and no `Clone` — so two `Call`s cannot be bridged. `sipx-call`'s description loses the word;
+    `sipx-media`'s gains it, because that is where the capability lives. The gap is `C-6`.
+  - **DTLS-SRTP** was sold with a workaround — "reachable by building your own capabilities" — that
+    cannot be written, because no `MediaSession` can be keyed by DTLS at all: the key types and
+    `Config.srtp` never meet, and the handshake cannot share the media port RFC 5764 §5.1.2 requires.
+    Both "the two pieces a browser insists on are in place" claims are reduced to one.
+  - Four **stale denials** of capabilities that do exist (Outbound, Path, GRUU, push), an RFC count
+    off by one, and an under-claim hiding the second interop peer are corrected.
+  - **A missing warning is added**: `sipx dial` parses only `--tcp`, so the CLI can never place an
+    encrypted call, while the README promised encrypted media beside a `sip:` example. Said plainly in
+    `reference/cli.md` without weakening the library's claim, which is true and tested.
+  - **The guard is the point.** `X-26` removed the same untruth from `sipx-audio` and it survived at
+    `README.md:114` because the check read three strings and the README's crate table was not one of
+    them — `--check` exited 0 with a phantom RFC 4733 DTMF claim in place. It now reads **44 front
+    doors across all 11 published crates** and asserts crate-table membership equals the set of crates
+    without `publish = false`. Still no suppression list, under any name.
+  - It also found a defect in its own guard: an earlier pattern for a public item did not allow
+    `async`, so `pub async fn play` backed nothing — a crate could have advertised playback with the
+    whole feature written in `async fn`s and passed.
+  - **Standing risk, recorded rather than left implicit**: the backing synonyms — `digit` for DTMF,
+    `refer` for transfer, `flow` for Outbound — are each a real second name, but a synonym added in
+    future to turn a red check green would be a suppression list in disguise.
+
 ## [0.11.0] — 2026-07-29
 
 ### Fixed
