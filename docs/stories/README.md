@@ -62,7 +62,6 @@ _This is the layer applications actually program against, so it is the one that 
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [X-26 — Stop sipx-audio advertising a codec and a resampler it does not have](X-26-audio-crate-claims-codecs-it-lacks.md) · Build · found by X-25 — the published crate description promises G.722 and resampling; neither exists
 - [M-25 — Specify SRTP and its two keyings, after the fact](M-25-srtp-spec.md) · Media · found by X-25 — M-14 and M-15 shipped without the spec non-negotiable 4 requires
 
 ### Quic
@@ -192,6 +191,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-23 — Find out why an interop call test times out one run in five](X-23-interop-call-test-flake.md) · Build · found by T-23 — a flake that a suite exists to be believed cannot afford
 - [X-24 — Stop the specs describing a connection pool key that has moved on twice](X-24-pool-key-spec-drift.md) · Build · sip-transport.md still says the key is two fields; it has been four since T-23
 - [X-25 — Write the media design record the ICE stories keep citing](X-25-media-design-record.md) · Build · found by M-16 — six stories name docs/designs/media.md as their design, and it is a stub
+- [X-26 — Stop sipx-audio advertising a codec and a resampler it does not have](X-26-audio-crate-claims-codecs-it-lacks.md) · Build · found by X-25 — the published crate description promises G.722 and resampling; neither exists
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

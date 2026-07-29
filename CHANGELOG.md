@@ -86,6 +86,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`sipx-audio` stops advertising what it does not have (`X-26`)** — the package description, the
+  crate documentation's summary and the website's "which crate" table all promised G.722,
+  resampling and RFC 4733 DTMF. The crate implements none of the three; DTMF lives in `sipx-rtp`,
+  and the CLI tells the user to resample the file themselves. All three strings now name what is
+  there, including Opus, which the crate *does* have and the description omitted.
+  - **The decision, recorded rather than deferred: G.722 is not coming.** `X-25` went looking for
+    why it had been dropped and found nothing — no story among twenty-five media stories, no spec,
+    no commit that implemented or cut it, only the scaffolding commit that wrote the blurb. The
+    stack is specified in the opposite direction: `Codec::from_payload_type(9)` returns `None`,
+    `sipx-sdp` answers an offer of G.722 with port 0, and `sipx-call` refuses a call offering
+    nothing else, with three tests asserting exactly that. The wideband slot it would have filled
+    is Opus's (`M-13`). Written down in `docs/designs/media.md`, closing gap 3 of the record.
+  - `scripts/check-audio-claims.py` holds the three front doors against the modules the crate
+    exposes, and against each other: a codec needs a module that both encodes and decodes it, a
+    capability needs a public item, and an optional codec must be advertised as optional. Wired
+    into the gate with its own suite beside it, per `X-22`; the gate is 17 steps.
+
 - `sipx_call::Error` gains `UnacknowledgedProvisional` and `NoEarlySession` (`S-19`). Additive, but
   source-breaking for a downstream exhaustive `match`, as previous variants have been.
 

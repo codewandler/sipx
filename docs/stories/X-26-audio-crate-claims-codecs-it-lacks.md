@@ -2,8 +2,8 @@
 id: X-26
 title: Stop sipx-audio advertising a codec and a resampler it does not have
 pillar: Build
-status: in-progress
-priority: 2
+status: done
+priority:
 design: docs/designs/media.md
 epic: media
 areas: [sipx-audio, docs]
