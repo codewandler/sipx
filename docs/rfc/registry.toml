@@ -179,6 +179,7 @@ number = 5626
 title = "Managing Client-Initiated Connections in SIP (Outbound)"
 layer = "transport"
 status = "partial"
+roles = ["uac"]
 headers = ["FlowTimer"]
 evidence = [
   "crates/sipx-ua/src/outbound.rs",
@@ -186,8 +187,10 @@ evidence = [
   "crates/sipx-transport/src/stun.rs",
   "crates/sipx-ua/tests/outbound.rs",
   "crates/sipx-transport/tests/keepalive.rs",
+  "crates/sipx-cli/src/register.rs",
+  "crates/sipx-cli/tests/cli.rs",
 ]
-note = "**Missing: a call. No role is reachable**, which is why this row lists none — `with_outbound` has no caller outside the `sipx-ua` tests, so no INVITE sipx sends uses a flow. The UA side. `+sip.instance` and `reg-id` on REGISTER, `outbound` offered, `Require: outbound` on the 2xx read as acceptance (§6), `ob` on a dialog-forming Contact (§4.3), one registration per outbound proxy with each flow failing independently, §4.5's backoff, and §4.4 keep-alives — CRLF for connection-oriented flows, STUN Binding for UDP, including §4.4.2's rule that a changed reflexive address is a failed flow. Not implemented: the *registrar* side (flow tokens in Path, §5), which is what makes the mechanism useful to the network rather than to the client."
+note = "Reachable since `S-29`: `sipx register --outbound` builds the config, and the command reports whether the registrar accepted the flow (§6) — the row `X-37` demoted for having no caller has one. The UA side. `+sip.instance` and `reg-id` on REGISTER, `outbound` offered, `Require: outbound` on the 2xx read as acceptance (§6), `ob` on a dialog-forming Contact (§4.3), one registration per outbound proxy with each flow failing independently, §4.5's backoff, and §4.4 keep-alives — CRLF for connection-oriented flows, STUN Binding for UDP, including §4.4.2's rule that a changed reflexive address is a failed flow. Not implemented: the *registrar* side (flow tokens in Path, §5), which is what makes the mechanism useful to the network rather than to the client."
 
 [[rfc]]
 number = 3327
