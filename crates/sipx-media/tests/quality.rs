@@ -35,6 +35,24 @@ async fn session_and_peer() -> (MediaSession, UdpSocket, SocketAddr) {
     (port.start(config), peer, session_addr)
 }
 
+/// Wait until something has happened, rather than sleeping and assuming it has (`X-29`).
+///
+/// `within` is a **bound on failure** — how long before we conclude the thing is never going to
+/// happen — and not a window to measure in, so it is set orders of magnitude above the honest
+/// answer. `X-28` gave a *quantity* of audio its counted form of this; these tests wait on an
+/// *event*, so the shape is a deadline loop on the condition instead.
+async fn until(within: Duration, what: &str, mut condition: impl AsyncFnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + within;
+    while !condition().await {
+        assert!(tokio::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// How long these tests wait for hand-sent packets to reach the statistics before concluding they
+/// never will. Two orders of magnitude above the honest answer on an idle machine.
+const ARRIVAL_BOUND: Duration = Duration::from_secs(10);
+
 fn packet(sequence: u16) -> Bytes {
     Packet::new(
         Codec::Pcmu.payload_type(),
@@ -52,7 +70,7 @@ fn packet(sequence: u16) -> Bytes {
 async fn statistics_report_the_loss_that_was_actually_injected() {
     let (session, peer, session_addr) = session_and_peer().await;
 
-    let mut sent = 0;
+    let mut sent = 0u64;
     for sequence in 1..=20u16 {
         if sequence % 5 == 0 {
             continue;
@@ -61,12 +79,21 @@ async fn statistics_report_the_loss_that_was_actually_injected() {
             .await
             .expect("sends");
         sent += 1;
+        // Pacing, not a wait: the packets are spaced so they arrive as a stream rather than as
+        // one burst. Load lengthens the spacing, which changes nothing asserted below.
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(sent, 16);
 
-    // Give the receive loop a moment to drain what it is holding.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait for the receive loop to have drained what it is holding, rather than assuming a fixed
+    // window was enough (`X-29`). The count is the event: until all sixteen have been through the
+    // receive path, the loss below is a partial answer that a slow machine turns into a wrong one.
+    until(
+        ARRIVAL_BOUND,
+        "the sixteen packets never reached the receive path",
+        async || session.packets_received() == sent,
+    )
+    .await;
 
     let quality = session.quality().await;
     // Three, not four. Sequences 5, 10, 15 and 20 were withheld, but the twentieth is the last
@@ -95,9 +122,15 @@ async fn a_clean_stream_reports_no_loss() {
         peer.send_to(&packet(sequence), session_addr)
             .await
             .expect("sends");
+        // Pacing, as above.
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    until(
+        ARRIVAL_BOUND,
+        "the twenty packets never reached the receive path",
+        async || session.packets_received() == 20,
+    )
+    .await;
 
     let quality = session.quality().await;
     assert_eq!(quality.cumulative_lost, 0, "{quality:?}");
@@ -115,6 +148,10 @@ async fn a_clean_stream_reports_no_loss() {
 async fn the_round_trip_is_absent_until_a_report_comes_back() {
     let (session, peer, session_addr) = session_and_peer().await;
     peer.send_to(&packet(1), session_addr).await.expect("sends");
+    // A fixed window, deliberately (`X-29`). The assertion below is *negative* — that nothing came
+    // back — so a window can only make it pass, and load makes it longer rather than shorter. The
+    // failure mode is a missed regression, not a flake; there is no arrival to wait for, and
+    // waiting for one that must never come would just be a ten-second sleep.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let quality = session.quality().await;
@@ -221,9 +258,15 @@ async fn polling_the_quality_does_not_empty_the_report_window() {
             .expect("sends");
         // Poll between every packet, as a live display would.
         let _ = session.quality().await;
+        // Pacing, as above.
         tokio::time::sleep(Duration::from_millis(3)).await;
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    until(
+        ARRIVAL_BOUND,
+        "the twenty packets never reached the receive path",
+        async || session.packets_received() == 20,
+    )
+    .await;
 
     // The report sipx would send still describes the loss.
     let block = session.stats().await;
