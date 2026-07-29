@@ -253,7 +253,8 @@ impl Checklist {
 
     /// Drop a valid pair whose nominated check later failed (§7.2.5.3.4).
     pub fn remove_valid(&mut self, generated_by: PairId) {
-        self.valid.retain(|valid| valid.generated_by != generated_by);
+        self.valid
+            .retain(|valid| valid.generated_by != generated_by);
     }
 
     /// Enqueue a triggered check (§7.3.1.4). A pair already queued is not queued twice.
@@ -268,6 +269,12 @@ impl Checklist {
     /// peer's check to arrive rather than in checklist order.
     pub fn take_triggered(&mut self) -> Option<PairId> {
         self.triggered.pop_front()
+    }
+
+    /// Whether anything at all is queued for a triggered check.
+    #[must_use]
+    pub fn has_triggered(&self) -> bool {
+        !self.triggered.is_empty()
     }
 
     /// Whether a triggered check is queued for this pair.
@@ -534,19 +541,21 @@ impl ChecklistSet {
         }
     }
 
-    /// The next checklist in the Running state, round-robin (§6.1.4.2).
+    /// The next checklist Ta may act on, round-robin (§6.1.4.2).
     ///
     /// "Whenever Ta fires the next checklist in the Running state in the checklist set is picked
     /// … After the last checklist in the Running state has been processed, the first checklist is
-    /// picked again."
-    pub fn next_running(&mut self) -> Option<usize> {
+    /// picked again." A Completed checklist is included when it still has a triggered check
+    /// queued, because §8.1.2 requires an agent to keep answering for a concluded stream and
+    /// §8.1.1's tolerance clause depends on it.
+    pub fn next_active(&mut self) -> Option<usize> {
         let count = self.checklists.len();
         for offset in 0..count {
             let index = (self.next.wrapping_add(offset)) % count.max(1);
             if self
                 .checklists
                 .get(index)
-                .is_some_and(|list| list.state() == ChecklistState::Running)
+                .is_some_and(|list| list.state() == ChecklistState::Running || list.has_triggered())
             {
                 self.next = index.wrapping_add(1) % count.max(1);
                 return Some(index);
@@ -619,9 +628,10 @@ pub fn ordered_pair_priority(
 #[must_use]
 pub fn is_link_local(address: IpAddr) -> bool {
     match address {
-        IpAddr::V6(v6) => v6.segments().first().is_some_and(|first| {
-            *first & 0xffc0 == 0xfe80
-        }),
+        IpAddr::V6(v6) => v6
+            .segments()
+            .first()
+            .is_some_and(|first| *first & 0xffc0 == 0xfe80),
         IpAddr::V4(_) => false,
     }
 }
@@ -874,10 +884,7 @@ mod tests {
     #[test]
     fn a_foundation_whose_only_unfrozen_pair_failed_is_thawed_again() {
         let mut set = ChecklistSet::new();
-        set.push(Checklist::new(vec![
-            pair(1, 1, 1, 300),
-            pair(2, 2, 1, 200),
-        ]));
+        set.push(Checklist::new(vec![pair(1, 1, 1, 300), pair(2, 2, 1, 200)]));
         set.compute_initial_states();
         assert_eq!(set.pair(PairId(1)).unwrap().state, PairState::Waiting);
         assert_eq!(set.pair(PairId(2)).unwrap().state, PairState::Frozen);
@@ -892,10 +899,7 @@ mod tests {
     #[test]
     fn nothing_is_thawed_while_the_foundation_still_has_a_check_outstanding() {
         let mut set = ChecklistSet::new();
-        set.push(Checklist::new(vec![
-            pair(1, 1, 1, 300),
-            pair(2, 2, 1, 200),
-        ]));
+        set.push(Checklist::new(vec![pair(1, 1, 1, 300), pair(2, 2, 1, 200)]));
         set.compute_initial_states();
         set.pair_mut(PairId(1)).unwrap().state = PairState::InProgress;
         set.unfreeze_idle(0);
@@ -960,12 +964,9 @@ mod tests {
         let mut ids = PairIds::default();
         let pairs = form_pairs(&mut ids, Role::Controlling, &locals, &remotes);
         assert_eq!(pairs.len(), 2);
-        assert!(
-            pairs
-                .iter()
-                .all(|pair| locals[pair.local.0].gathered.component
-                    == remotes[pair.remote.0].component)
-        );
+        assert!(pairs.iter().all(
+            |pair| locals[pair.local.0].gathered.component == remotes[pair.remote.0].component
+        ));
     }
 
     /// §6.1.2.2's MUST NOT: a link-local address pairs only with another link-local one.

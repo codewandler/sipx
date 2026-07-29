@@ -299,7 +299,11 @@ impl Foundations {
                 self.keys.push(key);
                 self.keys.len().saturating_sub(1)
             });
-        LocalFoundation(u32::try_from(existing).unwrap_or(u32::MAX).saturating_add(1))
+        LocalFoundation(
+            u32::try_from(existing)
+                .unwrap_or(u32::MAX)
+                .saturating_add(1),
+        )
     }
 
     /// The next foundation for a peer-reflexive *remote* candidate (§7.3.1.3): "an arbitrary
@@ -531,7 +535,10 @@ mod tests {
         let first = foundations.learn_remote();
         let second = foundations.learn_remote();
         assert_ne!(first, second);
-        assert_ne!(first, RemoteFoundation::Signalled(Foundation::new("1").unwrap()));
+        assert_ne!(
+            first,
+            RemoteFoundation::Signalled(Foundation::new("1").unwrap())
+        );
     }
 
     #[test]

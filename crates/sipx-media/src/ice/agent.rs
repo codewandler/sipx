@@ -436,7 +436,7 @@ impl Agent {
     fn pace(&mut self, out: &mut Vec<Output>) {
         let count = self.set.checklists().len();
         for _ in 0..count {
-            let Some(index) = self.set.next_running() else {
+            let Some(index) = self.set.next_active() else {
                 break;
             };
             // Step 1: the triggered-check queue first, whatever its pairs' priorities are. This
@@ -449,6 +449,16 @@ impl Agent {
             if let Some(id) = triggered {
                 self.send_check(id, out);
                 break;
+            }
+            if self
+                .set
+                .checklists()
+                .get(index)
+                .is_some_and(|list| list.state() != ChecklistState::Running)
+            {
+                // A concluded checklist answers what is still queued for it and starts nothing
+                // new (§8.1.2).
+                continue;
             }
             // Step 2: nothing Waiting here, so thaw what the set allows.
             self.set.unfreeze_idle(index);
@@ -466,7 +476,7 @@ impl Agent {
             }
             // Step 4: nothing to do for this checklist; try the next one without waiting for Ta.
         }
-        if self.running() {
+        if self.active() {
             out.push(Output::SetTimer {
                 timer: Timer::Ta,
                 after: self.config.timers.pacing(),
@@ -474,11 +484,19 @@ impl Agent {
         }
     }
 
-    fn running(&self) -> bool {
+    /// Whether any checklist still has work: one in the Running state, or one whose
+    /// triggered-check queue is not empty.
+    ///
+    /// The second half is what keeps §8.1.1's tolerance clause meaningful. A peer that nominates
+    /// more than once has its later nominations answered by a checklist that is already
+    /// Completed, and a Ta tick that stops at the first Completed checklist would leave those
+    /// triggered checks queued forever — so the highest-priority nominated pair would never be
+    /// the selected one.
+    fn active(&self) -> bool {
         self.set
             .checklists()
             .iter()
-            .any(|list| list.state() == ChecklistState::Running)
+            .any(|list| list.state() == ChecklistState::Running || list.has_triggered())
     }
 
     /// RFC 5389 §7.2.1: Rc transmissions, doubling the interval each time, then a final wait of
@@ -560,7 +578,8 @@ impl Agent {
             return;
         };
         let (local_id, remote_id, component) = (pair.local, pair.remote, pair.component);
-        let (Some(local), Some(remote)) = (self.local.get(local_id.0), self.remote.get(remote_id.0))
+        let (Some(local), Some(remote)) =
+            (self.local.get(local_id.0), self.remote.get(remote_id.0))
         else {
             return;
         };
@@ -669,7 +688,11 @@ impl Agent {
         match self.resolve_conflict(message.role()) {
             Conflict::Reject => {
                 if let Ok(bytes) = stun::role_conflict(message.transaction(), &peering) {
-                    out.push(Output::Send { on, to: from, bytes });
+                    out.push(Output::Send {
+                        on,
+                        to: from,
+                        bytes,
+                    });
                 }
                 return;
             }
@@ -679,7 +702,11 @@ impl Agent {
         // §7.3.1: the rest runs whether or not the role changed, so long as a success response is
         // generated — which it is, from here on.
         if let Ok(bytes) = stun::check_success(message.transaction(), &peering, from) {
-            out.push(Output::Send { on, to: from, bytes });
+            out.push(Output::Send {
+                on,
+                to: from,
+                bytes,
+            });
         }
         if !self.started {
             // No checklist yet, so there is nothing to trigger. The response above still went, as
@@ -956,7 +983,12 @@ impl Agent {
     }
 
     /// §7.2.5.3.1: a mapped address that is not a local candidate is a peer-reflexive one.
-    fn learn_local(&mut self, mapped: SocketAddr, pair: &CandidatePair, claimed: Priority) -> LocalId {
+    fn learn_local(
+        &mut self,
+        mapped: SocketAddr,
+        pair: &CandidatePair,
+        claimed: Priority,
+    ) -> LocalId {
         if let Some(index) = self
             .local
             .iter()
@@ -1205,7 +1237,13 @@ impl Agent {
                 local: base,
                 remote: *remote,
             });
-            if let Some(list) = self.set.checklists_mut().get_mut(index) {
+            // §8.1.2's pruning, for the agent that knows there will be no second nomination.
+            // A controlled agent must not do it: §8.1.1 requires it to tolerate a peer that
+            // nominates more than once and then "use the pairs with the highest priority", and a
+            // checklist it has already emptied has nothing left to raise the selection to.
+            if self.role.is_controlling()
+                && let Some(list) = self.set.checklists_mut().get_mut(index)
+            {
                 list.keep_only_nominated(*component, *pair);
             }
         }
@@ -1214,8 +1252,8 @@ impl Agent {
             if let Some(list) = self.set.checklists_mut().get_mut(index) {
                 list.set_state(ChecklistState::Completed);
             }
-            self.transactions.clear();
-            if !self.running() {
+            if !self.active() {
+                self.transactions.clear();
                 out.push(Output::ClearTimer(Timer::Ta));
                 out.push(Output::SetTimer {
                     timer: Timer::Keepalive,
@@ -1319,7 +1357,9 @@ mod tests {
 
     fn host_line(address: SocketAddr, foundation: &str) -> Candidate {
         Candidate::parse(&format!(
-            "{foundation} 1 UDP 2130706431 {} {} typ host",
+            // A priority of its own, so that a pair's `G` and `D` differ and §6.1.2.3's
+            // recomputation on a role change is visible.
+            "{foundation} 1 UDP 1694498815 {} {} typ host",
             address.ip(),
             address.port()
         ))
@@ -1370,7 +1410,11 @@ mod tests {
             for _ in 0..8 {
                 let mut next: Vec<(bool, Vec<u8>)> = Vec::new();
                 for (to_bob, bytes) in pending {
-                    let (target, from) = if to_bob { (&mut *b, alice) } else { (&mut *a, bob) };
+                    let (target, from) = if to_bob {
+                        (&mut *b, alice)
+                    } else {
+                        (&mut *a, bob)
+                    };
                     for output in target.handle(Input::Datagram {
                         from,
                         on: LocalBase(0),
@@ -1387,6 +1431,725 @@ mod tests {
                 pending = next;
             }
         }
+    }
+
+    fn agent(offerer: bool, tiebreaker: u64, remotes: &[SocketAddr]) -> Agent {
+        let mut agent = Agent::new(Config::default(), offerer, credentials("aaaa"), tiebreaker);
+        agent.handle(Input::LocalCandidate(host(address(ALICE))));
+        agent.handle(Input::RemoteDescription {
+            credentials: credentials("bbbb"),
+            candidates: remotes
+                .iter()
+                .enumerate()
+                .map(|(index, remote)| host_line(*remote, &(index + 1).to_string()))
+                .collect(),
+            lite: false,
+        });
+        agent.handle(Input::GatheringDone);
+        agent
+    }
+
+    /// The peer's view of the credential pair. Its `outbound_*` is what a check arriving at our
+    /// agent must carry, which is the direction rule `Peering` exists to keep straight.
+    fn peer() -> Peering {
+        Peering::new(credentials("bbbb"), credentials("aaaa"))
+    }
+
+    fn sent(outputs: &[Output]) -> Vec<Message> {
+        outputs
+            .iter()
+            .filter_map(|output| match output {
+                Output::Send { bytes, .. } => Message::decode(bytes).ok(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn requests(outputs: &[Output]) -> Vec<Message> {
+        sent(outputs)
+            .into_iter()
+            .filter(|message| message.class() == Class::Request)
+            .collect()
+    }
+
+    fn retransmit_after(outputs: &[Output]) -> Option<Duration> {
+        outputs.iter().find_map(|output| match output {
+            Output::SetTimer {
+                timer: Timer::Retransmit(_),
+                after,
+            } => Some(*after),
+            _ => None,
+        })
+    }
+
+    /// A check from the peer, with whatever role attribute the row under test needs.
+    fn peer_check(role: RoleAttribute) -> Vec<u8> {
+        stun::connectivity_check(
+            stun::new_transaction_id(),
+            &peer(),
+            Priority::new(1_862_270_975).unwrap(),
+            role,
+        )
+        .unwrap()
+    }
+
+    fn deliver(agent: &mut Agent, from: SocketAddr, bytes: Vec<u8>) -> Vec<Output> {
+        agent.handle(Input::Datagram {
+            from,
+            on: LocalBase(0),
+            bytes,
+        })
+    }
+
+    // --------------------------------------------------------------------------- sans-IO
+
+    /// [spec] §2 and the working agreement: no runtime, no socket, no clock read. Asserted on the
+    /// source rather than on behaviour, because the failure mode is a single `use` line that
+    /// nothing else in this crate would notice — `sipx-media` legitimately depends on `tokio` for
+    /// the driver and the session, so a compile-time barrier is not available here.
+    ///
+    /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+    #[test]
+    fn the_agent_reads_no_clock_and_owns_no_socket() {
+        // Code only: comments and this module both name the very words the code may not contain,
+        // and the assertion is about what the agent reaches for, not about what it explains.
+        let code = |source: &str| -> String {
+            source
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or(source)
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for source in [
+            code(include_str!("agent.rs")),
+            code(include_str!("checklist.rs")),
+            code(include_str!("candidate.rs")),
+            code(include_str!("timing.rs")),
+        ] {
+            for forbidden in [
+                "tokio",
+                "UdpSocket",
+                "Instant::now",
+                "SystemTime::now",
+                "std::thread",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "the ICE agent must not reach for {forbidden}: time arrives as TimerFired \
+                     and datagrams arrive as bytes"
+                );
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------- §7.3.1.1, row by row
+
+    /// [spec] §7.3's table, all seven rows, each its own assertion.
+    ///
+    /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+    #[test]
+    fn the_role_conflict_table_is_walked_row_by_row() {
+        let controlling = |tiebreaker: u64| RoleAttribute::Controlling {
+            tiebreaker,
+            nominate: false,
+        };
+        let controlled = |tiebreaker: u64| RoleAttribute::Controlled { tiebreaker };
+
+        // Row 1: controlling, ICE-CONTROLLING, T > V — 487 and keep controlling.
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        assert_eq!(
+            subject.resolve_conflict(Some(controlling(50))),
+            Conflict::Reject
+        );
+        assert_eq!(subject.role(), Role::Controlling);
+
+        // Row 1 again at T = V. `>=` and not `>` is the whole point: with equal tiebreakers
+        // neither side may switch on the request, or they simply swap roles.
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        assert_eq!(
+            subject.resolve_conflict(Some(controlling(100))),
+            Conflict::Reject
+        );
+        assert_eq!(subject.role(), Role::Controlling);
+
+        // Row 2: controlling, ICE-CONTROLLING, T < V — switch to controlled, answer normally.
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        assert_eq!(
+            subject.resolve_conflict(Some(controlling(200))),
+            Conflict::Switched
+        );
+        assert_eq!(subject.role(), Role::Controlled);
+
+        // Row 3: controlled, ICE-CONTROLLED, T >= V — switch to controlling, answer normally.
+        let mut subject = agent(false, 100, &[address(BOB)]);
+        assert_eq!(
+            subject.resolve_conflict(Some(controlled(100))),
+            Conflict::Switched
+        );
+        assert_eq!(subject.role(), Role::Controlling);
+
+        // Row 4: controlled, ICE-CONTROLLED, T < V — 487 and keep controlled.
+        let mut subject = agent(false, 100, &[address(BOB)]);
+        assert_eq!(
+            subject.resolve_conflict(Some(controlled(200))),
+            Conflict::Reject
+        );
+        assert_eq!(subject.role(), Role::Controlled);
+
+        // Row 5: controlling, ICE-CONTROLLED — no conflict.
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        assert_eq!(
+            subject.resolve_conflict(Some(controlled(200))),
+            Conflict::None
+        );
+        assert_eq!(subject.role(), Role::Controlling);
+
+        // Row 6: controlled, ICE-CONTROLLING — no conflict.
+        let mut subject = agent(false, 100, &[address(BOB)]);
+        assert_eq!(
+            subject.resolve_conflict(Some(controlling(200))),
+            Conflict::None
+        );
+        assert_eq!(subject.role(), Role::Controlled);
+
+        // Row 7: neither attribute — no conflict; the peer is not doing role signalling.
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        assert_eq!(subject.resolve_conflict(None), Conflict::None);
+        assert_eq!(subject.role(), Role::Controlling);
+    }
+
+    /// The rejecting rows put a 487 on the wire and answer nothing else.
+    #[test]
+    fn a_rejected_role_conflict_answers_487_and_not_a_success() {
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        let outputs = deliver(
+            &mut subject,
+            address(BOB),
+            peer_check(RoleAttribute::Controlling {
+                tiebreaker: 100,
+                nominate: false,
+            }),
+        );
+        let answers = sent(&outputs);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].class(), Class::Error);
+        assert_eq!(answers[0].error_code(), Some(stun::ROLE_CONFLICT));
+        assert_eq!(subject.role(), Role::Controlling);
+    }
+
+    /// …and the switching rows answer normally, because §7.3.1's remaining processing "[is]
+    /// followed if the agent generated a successful response, even if the agent changed roles".
+    #[test]
+    fn a_switched_role_still_answers_the_check_that_caused_it() {
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        let outputs = deliver(
+            &mut subject,
+            address(BOB),
+            peer_check(RoleAttribute::Controlling {
+                tiebreaker: 200,
+                nominate: false,
+            }),
+        );
+        let answers = sent(&outputs);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].class(), Class::Success);
+        assert_eq!(subject.role(), Role::Controlled);
+    }
+
+    /// §7.2.5.1, every clause of it: switch to the role opposite the attribute that went out,
+    /// change the tiebreaker, recompute every pair priority, and re-run the check as a triggered
+    /// one so the new role goes out immediately.
+    #[test]
+    fn a_487_switches_the_role_changes_the_tiebreaker_and_re_runs_the_check() {
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        let check = subject.handle(Input::TimerFired(Timer::Ta));
+        let outgoing = requests(&check);
+        assert_eq!(outgoing.len(), 1);
+        let transaction = outgoing[0].transaction();
+        let before = subject.checklists().checklists()[0].pairs()[0].priority;
+        let pair = subject.checklists().checklists()[0].pairs()[0].id;
+        assert_eq!(
+            subject.checklists().pair(pair).unwrap().state,
+            PairState::InProgress
+        );
+
+        let rejection = stun::role_conflict(transaction, &peer()).unwrap();
+        subject.handle(Input::Datagram {
+            from: address(BOB),
+            on: LocalBase(0),
+            bytes: rejection,
+        });
+
+        assert_eq!(subject.role(), Role::Controlled);
+        assert_ne!(subject.tiebreaker(), 100);
+        assert_ne!(
+            subject.checklists().checklists()[0].pairs()[0].priority,
+            before,
+            "a role switch swaps G and D, so every pair priority moves"
+        );
+        assert_eq!(
+            subject.checklists().pair(pair).unwrap().state,
+            PairState::Waiting
+        );
+        assert!(subject.checklists().checklists()[0].is_triggered(pair));
+
+        // And the re-run carries the new role.
+        let rerun = subject.handle(Input::TimerFired(Timer::Ta));
+        let rerun = requests(&rerun);
+        assert_eq!(rerun.len(), 1);
+        assert!(matches!(
+            rerun[0].role(),
+            Some(RoleAttribute::Controlled { .. })
+        ));
+    }
+
+    // ------------------------------------------------------------------------------- §7.1.1
+
+    /// §7.1.1: the `PRIORITY` in a check is the candidate's priority recomputed with the
+    /// peer-reflexive type preference. Get this wrong and the peer prices the peer-reflexive
+    /// candidate it learns from this very check differently from us.
+    #[test]
+    fn a_check_carries_the_peer_reflexive_priority_not_the_candidates_own() {
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        let outputs = subject.handle(Input::TimerFired(Timer::Ta));
+        let check = &requests(&outputs)[0];
+        let candidate = subject.local_candidates()[0];
+        assert_eq!(candidate.priority.get(), 2_130_706_431);
+        assert_eq!(check.priority(), Some(candidate.check_priority()));
+        assert_eq!(check.priority().unwrap().get(), 1_862_270_975);
+        assert_ne!(check.priority(), Some(candidate.priority));
+    }
+
+    // -------------------------------------------------------------- peer-reflexive candidates
+
+    /// §7.3.1.3: a check from an address no `a=candidate` named is a peer-reflexive *remote*
+    /// candidate, priced from the `PRIORITY` the check carried.
+    #[test]
+    fn a_check_from_an_unknown_address_teaches_a_remote_candidate() {
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        assert_eq!(subject.remote_candidates().len(), 1);
+        let behind_a_nat = address("198.51.100.7:41234");
+        deliver(
+            &mut subject,
+            behind_a_nat,
+            peer_check(RoleAttribute::Controlled { tiebreaker: 1 }),
+        );
+        let learned = subject
+            .remote_candidates()
+            .iter()
+            .find(|candidate| candidate.address == behind_a_nat)
+            .expect("§7.3.1.3 learns the source of an unmatched check");
+        assert_eq!(learned.kind, CandidateType::PeerReflexive);
+        assert_eq!(learned.priority.get(), 1_862_270_975);
+        assert_eq!(learned.component, ComponentId::RTP);
+    }
+
+    /// §7.2.5.3.1: a mapped address that is not one of our local candidates is a peer-reflexive
+    /// *local* candidate, and its priority is the `PRIORITY` we put in the request — not
+    /// something recomputed, or the two ends disagree.
+    #[test]
+    fn a_mapped_address_we_do_not_have_teaches_a_local_candidate() {
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        let outputs = subject.handle(Input::TimerFired(Timer::Ta));
+        let transaction = requests(&outputs)[0].transaction();
+        let reflexive = address("198.51.100.4:33445");
+        let response = stun::check_success(transaction, &peer(), reflexive).unwrap();
+        deliver(&mut subject, address(BOB), response);
+
+        let learned = subject
+            .local_candidates()
+            .iter()
+            .find(|candidate| candidate.gathered.address == reflexive)
+            .expect("§7.2.5.3.1 learns the mapped address");
+        assert_eq!(learned.gathered.kind, CandidateType::PeerReflexive);
+        assert_eq!(learned.priority.get(), 1_862_270_975);
+        assert_eq!(learned.gathered.base_address, address(ALICE));
+    }
+
+    // ---------------------------------------------------------------------- triggered checks
+
+    /// §7.3.1.4: a triggered check jumps the queue, whatever the priorities say. The peer's
+    /// low-priority path is checked before our own highest-priority `Waiting` pair.
+    #[test]
+    fn a_triggered_check_preempts_the_highest_priority_waiting_pair() {
+        let low = address("198.51.100.8:40000");
+        let mut subject = agent(true, 100, &[address(BOB), low]);
+        // The peer checks us from an address that is not even in the checklist yet.
+        let surprise = address("198.51.100.9:41000");
+        deliver(
+            &mut subject,
+            surprise,
+            peer_check(RoleAttribute::Controlled { tiebreaker: 1 }),
+        );
+
+        let outputs = subject.handle(Input::TimerFired(Timer::Ta));
+        let addressed: Vec<SocketAddr> = outputs
+            .iter()
+            .filter_map(|output| match output {
+                Output::Send { to, bytes, .. } if Message::decode(bytes).is_ok() => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            addressed,
+            vec![surprise],
+            "the triggered check goes first, ahead of every Waiting pair"
+        );
+    }
+
+    /// Nothing in the machine is a literal: a deployment that halves Ta gets checks at half the
+    /// interval, and one that lowers §6.1.2.5's limit gets a smaller checklist set.
+    #[test]
+    fn the_timers_and_the_pair_limit_are_the_configured_ones() {
+        let config = Config {
+            timers: Timers {
+                ta: Duration::from_millis(20),
+                ..Timers::default()
+            },
+            pair_limit: 3,
+        };
+        let remotes: Vec<SocketAddr> = (1..=8)
+            .map(|n| address(&format!("198.51.100.{n}:5000")))
+            .collect();
+        let mut subject = Agent::new(config, true, credentials("aaaa"), 100);
+        subject.handle(Input::LocalCandidate(host(address(ALICE))));
+        subject.handle(Input::RemoteDescription {
+            credentials: credentials("bbbb"),
+            candidates: remotes
+                .iter()
+                .enumerate()
+                .map(|(index, remote)| host_line(*remote, &(index + 1).to_string()))
+                .collect(),
+            lite: false,
+        });
+        let started = subject.handle(Input::GatheringDone);
+
+        assert_eq!(subject.checklists().total_pairs(), 3);
+        assert!(started.contains(&Output::SetTimer {
+            timer: Timer::Ta,
+            after: Duration::from_millis(20),
+        }));
+
+        let tick = subject.handle(Input::TimerFired(Timer::Ta));
+        assert!(tick.contains(&Output::SetTimer {
+            timer: Timer::Ta,
+            after: Duration::from_millis(20),
+        }));
+    }
+
+    // ------------------------------------------------------------------------- §7.2.5.2.1
+
+    /// §7.2.5.2.1: "the source IP address and port of the response MUST be equal to the
+    /// destination … to which the Binding request was sent". A response from anywhere else fails
+    /// the pair, however well formed and however well authenticated it is.
+    #[test]
+    fn a_response_from_the_wrong_address_fails_the_pair() {
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        let outputs = subject.handle(Input::TimerFired(Timer::Ta));
+        let transaction = requests(&outputs)[0].transaction();
+        let pair = subject.checklists().checklists()[0].pairs()[0].id;
+
+        let response = stun::check_success(transaction, &peer(), address(ALICE)).unwrap();
+        deliver(&mut subject, address("198.51.100.66:5000"), response);
+
+        assert_eq!(
+            subject.checklists().pair(pair).unwrap().state,
+            PairState::Failed
+        );
+        assert!(subject.checklists().checklists()[0].valid().is_empty());
+    }
+
+    /// …and an unauthenticated response moves nothing at all, not even into Failed — otherwise
+    /// anyone who can see a check can fail every pair by answering it ([spec] §11.3).
+    ///
+    /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+    #[test]
+    fn a_response_with_the_wrong_credential_moves_no_state() {
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        let outputs = subject.handle(Input::TimerFired(Timer::Ta));
+        let transaction = requests(&outputs)[0].transaction();
+        let pair = subject.checklists().checklists()[0].pairs()[0].id;
+
+        // Keyed with a password that is not ours: `check_success` keys a response with the
+        // responder's own credential, which is what our `outbound_key` has to match.
+        let forged = Peering::new(credentials("zzzz"), credentials("aaaa"));
+        let response = stun::check_success(transaction, &forged, address(ALICE)).unwrap();
+        let answered = deliver(&mut subject, address(BOB), response);
+
+        assert!(answered.is_empty());
+        assert_eq!(
+            subject.checklists().pair(pair).unwrap().state,
+            PairState::InProgress
+        );
+    }
+
+    // ------------------------------------------------------------------------------- §14.3
+
+    /// §14.3: "the RTO will be different for each transaction as the number of checks in the
+    /// Waiting and In-Progress states change", so it is computed when a check is sent.
+    #[test]
+    fn the_rto_is_recomputed_for_every_transaction() {
+        let remotes: Vec<SocketAddr> = (1..=5)
+            .map(|n| address(&format!("198.51.100.{n}:5000")))
+            .collect();
+        // Controlled, so that a success does not immediately start nominating and change what is
+        // outstanding for a second reason.
+        let mut subject = agent(false, 100, &remotes);
+
+        let first = subject.handle(Input::TimerFired(Timer::Ta));
+        let first_rto = retransmit_after(&first).expect("a check arms its retransmission timer");
+        let transaction = requests(&first)[0].transaction();
+        let destination = match first.first() {
+            Some(Output::Send { to, .. }) => *to,
+            other => panic!("expected a check, got {other:?}"),
+        };
+
+        let response = stun::check_success(transaction, &peer(), address(ALICE)).unwrap();
+        deliver(&mut subject, destination, response);
+
+        let second = subject.handle(Input::TimerFired(Timer::Ta));
+        let second_rto = retransmit_after(&second).expect("the next check arms its own");
+        assert!(
+            second_rto < first_rto,
+            "one fewer outstanding check must shorten the RTO: {second_rto:?} vs {first_rto:?}"
+        );
+    }
+
+    /// RFC 5389 §7.2.1: Rc transmissions, doubling, then a final wait of Rm times the RTO, and
+    /// only then is the pair Failed.
+    #[test]
+    fn a_check_is_retransmitted_rc_times_before_the_pair_fails() {
+        let mut subject = agent(true, 100, &[address(BOB)]);
+        let first = subject.handle(Input::TimerFired(Timer::Ta));
+        let pair = subject.checklists().checklists()[0].pairs()[0].id;
+        let mut interval = retransmit_after(&first).unwrap();
+
+        // Transmissions 2..=Rc, each after twice the last interval.
+        for _ in 1..Config::default().timers.rc {
+            let outputs = subject.handle(Input::TimerFired(Timer::Retransmit(pair)));
+            assert_eq!(requests(&outputs).len(), 1, "a retransmission is a resend");
+            let next = retransmit_after(&outputs).unwrap();
+            assert_eq!(next, interval * 2);
+            interval = next;
+            assert_eq!(
+                subject.checklists().pair(pair).unwrap().state,
+                PairState::InProgress
+            );
+        }
+
+        // The final wait: Rm times the transaction's first RTO, and no further request.
+        let last = subject.handle(Input::TimerFired(Timer::Retransmit(pair)));
+        assert!(requests(&last).is_empty());
+        let timers = Config::default().timers;
+        assert_eq!(
+            retransmit_after(&last),
+            Some(timers.final_wait(retransmit_after(&first).unwrap()))
+        );
+        assert_eq!(
+            subject.checklists().pair(pair).unwrap().state,
+            PairState::InProgress
+        );
+
+        // And now it has timed out (§7.2.5.2.3).
+        let done = subject.handle(Input::TimerFired(Timer::Retransmit(pair)));
+        assert_eq!(
+            subject.checklists().pair(pair).unwrap().state,
+            PairState::Failed
+        );
+        assert!(
+            done.iter()
+                .any(|output| matches!(output, Output::Failed { .. })),
+            "the only pair failed, so the component failed"
+        );
+    }
+
+    // -------------------------------------------------------------------------- nomination
+
+    /// Two agents that agree on their roles converge on a selected pair for the component, at
+    /// both ends, by §8.1.1's regular nomination.
+    #[test]
+    fn two_agents_converge_on_a_selected_pair() {
+        let (alice_address, bob_address) = (address(ALICE), address(BOB));
+        let mut alice = Agent::new(Config::default(), true, credentials("aaaa"), 900);
+        let mut bob = Agent::new(Config::default(), false, credentials("bbbb"), 100);
+        alice.handle(Input::LocalCandidate(host(alice_address)));
+        bob.handle(Input::LocalCandidate(host(bob_address)));
+        alice.handle(Input::RemoteDescription {
+            credentials: credentials("bbbb"),
+            candidates: vec![host_line(bob_address, "1")],
+            lite: false,
+        });
+        bob.handle(Input::RemoteDescription {
+            credentials: credentials("aaaa"),
+            candidates: vec![host_line(alice_address, "1")],
+            lite: false,
+        });
+        alice.handle(Input::GatheringDone);
+        bob.handle(Input::GatheringDone);
+        assert_eq!(alice.role(), Role::Controlling);
+        assert_eq!(bob.role(), Role::Controlled);
+
+        exchange(&mut alice, &mut bob, 6);
+
+        assert_eq!(
+            alice.selected(ComponentId::RTP),
+            Some((LocalBase(0), bob_address))
+        );
+        assert_eq!(
+            bob.selected(ComponentId::RTP),
+            Some((LocalBase(0), alice_address))
+        );
+        assert_eq!(
+            alice.checklists().checklists()[0].state(),
+            ChecklistState::Completed
+        );
+    }
+
+    /// §8.1.1: "the agent MUST NOT nominate another pair for [the] same component … within the
+    /// ICE session". One `USE-CANDIDATE` leaves this agent, ever.
+    #[test]
+    fn the_controlling_agent_nominates_a_component_exactly_once() {
+        let (alice_address, bob_address) = (address(ALICE), address(BOB));
+        let mut alice = Agent::new(Config::default(), true, credentials("aaaa"), 900);
+        let mut bob = Agent::new(Config::default(), false, credentials("bbbb"), 100);
+        alice.handle(Input::LocalCandidate(host(alice_address)));
+        bob.handle(Input::LocalCandidate(host(bob_address)));
+        alice.handle(Input::RemoteDescription {
+            credentials: credentials("bbbb"),
+            candidates: vec![host_line(bob_address, "1")],
+            lite: false,
+        });
+        bob.handle(Input::RemoteDescription {
+            credentials: credentials("aaaa"),
+            candidates: vec![host_line(alice_address, "1")],
+            lite: false,
+        });
+        alice.handle(Input::GatheringDone);
+        bob.handle(Input::GatheringDone);
+
+        let mut nominations = 0usize;
+        for _ in 0..10 {
+            let outputs = alice.handle(Input::TimerFired(Timer::Ta));
+            for message in requests(&outputs) {
+                if message.use_candidate() {
+                    nominations += 1;
+                }
+            }
+            for output in outputs {
+                if let Output::Send { bytes, .. } = output {
+                    for answer in bob.handle(Input::Datagram {
+                        from: alice_address,
+                        on: LocalBase(0),
+                        bytes,
+                    }) {
+                        if let Output::Send { bytes, .. } = answer {
+                            alice.handle(Input::Datagram {
+                                from: bob_address,
+                                on: LocalBase(0),
+                                bytes,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(nominations, 1, "regular nomination nominates once");
+    }
+
+    /// §7.1.2 makes `USE-CANDIDATE` the controlling agent's alone, and the type system makes it
+    /// unsendable by a controlled one — [`RoleAttribute::Controlled`] has no `nominate`. This
+    /// walks a whole controlled session to show that nothing routes round that.
+    #[test]
+    fn a_controlled_agent_never_sends_use_candidate() {
+        let mut subject = agent(false, 100, &[address(BOB)]);
+        let mut seen = 0usize;
+        for _ in 0..6 {
+            let outputs = subject.handle(Input::TimerFired(Timer::Ta));
+            for message in requests(&outputs) {
+                assert!(!message.use_candidate());
+                assert!(matches!(
+                    message.role(),
+                    Some(RoleAttribute::Controlled { .. })
+                ));
+                seen += 1;
+            }
+            // Answer everything, so the session actually gets somewhere.
+            for message in requests(&outputs) {
+                let response =
+                    stun::check_success(message.transaction(), &peer(), address(ALICE)).unwrap();
+                deliver(&mut subject, address(BOB), response);
+            }
+        }
+        assert!(seen > 0, "the controlled agent still sends checks");
+    }
+
+    /// §8.1.1's tolerance clause: a peer implemented against RFC 5245 may nominate more than
+    /// once, and "the agents MUST produce the selected pairs and use the pairs with the highest
+    /// priority". Tolerating a legacy peer is not the same as being one.
+    #[test]
+    fn a_peer_that_nominates_twice_selects_the_highest_priority_nominated_pair() {
+        let low = address("198.51.100.3:6000");
+        let high = address("198.51.100.2:6000");
+        let mut subject = Agent::new(Config::default(), false, credentials("aaaa"), 100);
+        subject.handle(Input::LocalCandidate(host(address(ALICE))));
+        subject.handle(Input::RemoteDescription {
+            credentials: credentials("bbbb"),
+            candidates: vec![
+                Candidate::parse(&format!(
+                    "1 1 UDP 1000 {} {} typ host",
+                    low.ip(),
+                    low.port()
+                ))
+                .unwrap(),
+                Candidate::parse(&format!(
+                    "2 1 UDP 2130706431 {} {} typ host",
+                    high.ip(),
+                    high.port()
+                ))
+                .unwrap(),
+            ],
+            lite: false,
+        });
+        subject.handle(Input::GatheringDone);
+
+        // The peer nominates the low-priority path first, then the high-priority one.
+        for remote in [low, high] {
+            let nominating = stun::connectivity_check(
+                stun::new_transaction_id(),
+                &peer(),
+                Priority::new(1_862_270_975).unwrap(),
+                RoleAttribute::Controlling {
+                    tiebreaker: 999,
+                    nominate: true,
+                },
+            )
+            .unwrap();
+            deliver(&mut subject, remote, nominating);
+            // The triggered check each nomination enqueued, and its success.
+            for _ in 0..3 {
+                let outputs = subject.handle(Input::TimerFired(Timer::Ta));
+                for output in &outputs {
+                    if let Output::Send { to, bytes, .. } = output
+                        && let Ok(message) = Message::decode(bytes)
+                        && message.class() == Class::Request
+                    {
+                        let response =
+                            stun::check_success(message.transaction(), &peer(), address(ALICE))
+                                .unwrap();
+                        deliver(&mut subject, *to, response);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            subject.selected(ComponentId::RTP),
+            Some((LocalBase(0), high)),
+            "§8.1.1: use the pair with the highest priority among the nominated ones"
+        );
     }
 
     /// The failing-first test of this story, and the one §7.1's note exists for: two agents can
