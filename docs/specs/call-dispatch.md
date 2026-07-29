@@ -69,6 +69,11 @@ header the peer's *only* permission to send an UPDATE). Because the list is that
 exists: OPTIONS and CANCEL are on it and the dispatcher does not place them itself, so they are
 handed to the application rather than refused with a status contradicting the list.
 
+Row 4 precedes rows 5–8, so a CANCEL for an invitation that *is* routed goes to that call's inbox
+rather than to row 7 — it belongs to that transaction, and an application that means to honour one
+reads the inbox while it decides how to answer. Answering the INVITE 487 and the CANCEL 200 is not
+something sipx does as a UAS at all, here or anywhere else; that gap predates this spec.
+
 ## 4. Nothing is dropped silently
 
 Every outcome above is a response, a surfaced event, or a counter. `Dispatcher::counts` returns

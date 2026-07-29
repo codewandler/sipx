@@ -66,13 +66,17 @@ pub enum Dispatched {
     /// none of them. Its inbox is already routed, so nothing that arrives while the application
     /// decides can be missed.
     Invitation(Invitation),
-    /// A request outside any dialog whose method this stack advertises but the dispatcher does
-    /// not place: OPTIONS and CANCEL.
+    /// A request outside any dialog whose method this stack advertises but that matched no
+    /// route: an OPTIONS ping, or a CANCEL for an invitation this dispatcher never issued.
     ///
     /// Surfaced rather than refused because the `Allow` a 405 would carry
     /// ([`sipx_sip::update::ALLOW`]) names them, and answering 405 to a method the same message
     /// says is supported tells the peer two different things at once. What answers an OPTIONS is
     /// a user agent (`sipx_ua::Agent::answer`), which the call framework does not have.
+    ///
+    /// A CANCEL for an invitation that *is* routed does not come here: it belongs to that
+    /// transaction, so it goes to that call's inbox like everything else with its key. An
+    /// application that means to honour one reads the inbox while it decides how to answer.
     OutOfDialog(Incoming),
 }
 
