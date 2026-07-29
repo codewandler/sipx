@@ -68,6 +68,9 @@ pub struct Call {
     ended: bool,
     /// Where this side receives media, so a re-offer can name the same address.
     media_address: IpAddr,
+    /// The codec set this call was placed or answered with, so a re-offer offers the same
+    /// set — a re-INVITE that silently narrowed to G.711 would move an Opus call mid-call.
+    codecs: Codecs,
     /// What the running session negotiated, for comparison against a re-offer.
     current: Negotiated,
     /// Whether the call is on hold, and which way.
@@ -599,11 +602,13 @@ impl Call {
         let Ok(offer) = sipx_sdp::parse(&String::from_utf8_lossy(body)) else {
             return Ok(None);
         };
-        let Ok(renegotiated) = negotiated(&offer) else {
+        let Ok(renegotiated) = negotiated(&offer, self.codecs) else {
             return Ok(None);
         };
 
-        let capabilities = Capabilities::g711(self.media_address, self.media.local_addr().port());
+        let capabilities = self
+            .codecs
+            .capabilities(self.media_address, self.media.local_addr().port());
         let answer_sdp = sipx_sdp::answer(&offer, &capabilities);
         if answer_sdp
             .media
@@ -748,8 +753,9 @@ impl Call {
             });
         }
 
-        let mut capabilities =
-            Capabilities::g711(self.media_address, self.media.local_addr().port());
+        let mut capabilities = self
+            .codecs
+            .capabilities(self.media_address, self.media.local_addr().port());
         capabilities.direction = direction;
         // As for a re-INVITE: the version must increase with each modified offer, so the far
         // end can tell a changed description from a repeated one.
@@ -926,7 +932,13 @@ impl Call {
     /// Restarting an unchanged session would drop packets for no reason on every re-INVITE, and
     /// some peers send one every thirty seconds as a keep-alive.
     async fn move_media_if_changed(&mut self, to: Negotiated) -> Result<()> {
-        if to.remote != self.current.remote || to.codec != self.current.codec {
+        // The payload type is the codec's number on the wire: a re-offer can move Opus from
+        // 111 to 96 and leave the codec unchanged, and a session not rebuilt for that goes on
+        // sending on the number the far end just reassigned.
+        if to.remote != self.current.remote
+            || to.codec != self.current.codec
+            || to.payload_type != self.current.payload_type
+        {
             let port = MediaPort::bind(SocketAddr::new(self.media_address, 0))
                 .await
                 .map_err(Error::Io)?;
@@ -951,8 +963,9 @@ impl Call {
         let (local, remote) = self.dialog.local_and_remote();
         let cseq = self.dialog.next_cseq();
 
-        let mut capabilities =
-            Capabilities::g711(self.media_address, self.media.local_addr().port());
+        let mut capabilities = self
+            .codecs
+            .capabilities(self.media_address, self.media.local_addr().port());
         capabilities.direction = direction;
         // The session version must increase with each modified offer, so the far end can tell
         // a changed description from a repeated one.
@@ -1642,6 +1655,50 @@ fn bye_request(dialog: &Dialog, cseq: u32) -> Result<Request> {
     Ok(add_routes(builder, &routes)?.build())
 }
 
+/// Which codecs a call offers and accepts, in preference order (`M-30`).
+///
+/// The default is the G.711 pair: it is mandatory-to-implement (RFC 3551 §4.5.14), needs no C
+/// library, and is what practically every endpoint accepts. Opus is better on a lossy network
+/// but links libopus, so it sits behind the `opus` feature and can never become the default by
+/// accident — selecting it is always a decision the application made.
+///
+/// Whichever set is chosen, G.711 stays in the offer alongside anything better: an endpoint
+/// that offered only Opus would fail to call most of the telephone network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Codecs {
+    /// PCMU and PCMA, plus RFC 4733 DTMF.
+    #[default]
+    G711,
+    /// Opus (RFC 6716, carried per RFC 7587) first, then the G.711 pair, then DTMF.
+    ///
+    /// Order matters in an offer — it is how this side says what it would rather use. Answering
+    /// still honours the offerer's order (RFC 3264 §6.1), so a peer that puts G.711 first is
+    /// answered G.711 first.
+    #[cfg(feature = "opus")]
+    Opus,
+}
+
+impl Codecs {
+    /// What this side offers or answers with.
+    fn capabilities(self, address: IpAddr, audio_port: u16) -> Capabilities {
+        match self {
+            Self::G711 => Capabilities::g711(address, audio_port),
+            #[cfg(feature = "opus")]
+            Self::Opus => Capabilities::with_opus(address, audio_port),
+        }
+    }
+
+    /// Whether this set carries a codec, so negotiation never settles on one the application
+    /// did not select — an Opus offer answered from a G.711 set is answered G.711, not Opus.
+    fn carries(self, codec: Codec) -> bool {
+        match self {
+            Self::G711 => matches!(codec, Codec::Pcmu | Codec::Pcma),
+            #[cfg(feature = "opus")]
+            Self::Opus => true,
+        }
+    }
+}
+
 /// How a call is placed.
 #[derive(Debug, Clone)]
 pub struct DialOptions {
@@ -1669,6 +1726,13 @@ pub struct DialOptions {
     /// registration says outbound requests must traverse proxies. Without it, a call placed
     /// through a registration reaches a proxy holding no state for it.
     pub service_route: Vec<String>,
+    /// Which codecs the call offers, most preferred first.
+    ///
+    /// [`Codecs::G711`] by default, and the default is deliberate: G.711 is
+    /// mandatory-to-implement and links no C library, while Opus links libopus and is behind
+    /// the `opus` feature — so the better codec is always a choice, never an accident of the
+    /// build.
+    pub codecs: Codecs,
 }
 
 impl DialOptions {
@@ -1681,7 +1745,18 @@ impl DialOptions {
             timeout: None,
             session_expires: None,
             service_route: Vec::new(),
+            codecs: Codecs::default(),
         }
+    }
+
+    /// Offer these codecs, most preferred first.
+    ///
+    /// [`Codecs::Opus`] puts Opus ahead of the G.711 pair in the offer; the far end's answer
+    /// decides what the call carries, and a peer without Opus still gets G.711.
+    #[must_use]
+    pub fn with_codecs(mut self, codecs: Codecs) -> Self {
+        self.codecs = codecs;
+        self
     }
 
     /// Traverse these proxies on the way out, outermost first (RFC 3608).
@@ -1724,8 +1799,10 @@ fn offered_media(
     media_address: IpAddr,
     port: &MediaPort,
     transport: TransportKind,
+    codecs: Codecs,
 ) -> (Capabilities, SessionDescription) {
-    let capabilities = Capabilities::g711(media_address, port.local_addr().port())
+    let capabilities = codecs
+        .capabilities(media_address, port.local_addr().port())
         .with_srtp(transport.is_secure());
     let offer = offer_from(&capabilities);
     (capabilities, offer)
@@ -1921,7 +1998,8 @@ async fn open_invitation(
         .await
         .map_err(Error::Io)?;
 
-    let (capabilities, offer) = offered_media(options.media_address, &port, target.transport);
+    let (capabilities, offer) =
+        offered_media(options.media_address, &port, target.transport, options.codecs);
 
     // The `Via` is built here rather than left to the transport, because a CANCEL has to carry
     // the *same* branch as the INVITE it cancels — that identity is what matches the two at the
@@ -3618,6 +3696,12 @@ pub(crate) fn offer_from(capabilities: &Capabilities) -> SessionDescription {
 pub(crate) struct Negotiated {
     remote: SocketAddr,
     codec: Codec,
+    /// The payload type to send `codec` with, when the description gave it a number.
+    ///
+    /// `None` only for a bare static type matched by number. Anything an rtpmap touched —
+    /// Opus always, a remapped static possibly — has no number of its own that means anything:
+    /// 111 is convention, and what the far end listens for is the number *it* assigned.
+    payload_type: Option<u8>,
     /// The payload type the far end uses for `telephone-event`, if it offered one.
     ///
     /// Taken from the description rather than assumed, because it is a *dynamic* type: 101 is
@@ -3637,6 +3721,7 @@ pub(crate) struct Settled {
 impl Negotiated {
     fn media_config(self) -> sipx_media::Config {
         let mut config = sipx_media::Config::new(self.remote, self.codec);
+        config.payload_type = self.payload_type;
         config.dtmf_payload_type = self.dtmf;
         config
     }
@@ -3737,7 +3822,11 @@ fn telephone_event_payload_type(audio: &sipx_sdp::MediaDescription) -> Option<u8
 }
 
 /// Where to send media, and in what codec, from a description.
-pub(crate) fn negotiated(sdp: &SessionDescription) -> Result<Negotiated> {
+///
+/// `codecs` is the set this side offered or answered from: negotiation may only settle on a
+/// codec the application selected, so an Opus offer answered from a G.711 set settles on
+/// G.711, not on a codec the answer never named.
+pub(crate) fn negotiated(sdp: &SessionDescription, codecs: Codecs) -> Result<Negotiated> {
     let audio = sdp
         .media
         .iter()
@@ -3753,18 +3842,80 @@ pub(crate) fn negotiated(sdp: &SessionDescription) -> Result<Negotiated> {
     let address = sdp.address_for(audio).ok_or(Error::NoCommonCodec)?;
 
     // The first format both sides can carry. The list is already in the offerer's preference
-    // order, so the first playable one is the one to use.
-    let codec = audio
+    // order, so the first playable one is the one to use. Playable is judged by what the
+    // format's rtpmap says, never by a dynamic number alone — the same rule the answer was
+    // built with, and the reason `Codec::from_payload_type` deliberately never returns Opus:
+    // 111 is Opus here only because this description said so.
+    let (codec, payload_type) = audio
         .formats
         .iter()
-        .find_map(|format| format.parse::<u8>().ok().and_then(Codec::from_payload_type))
+        .find_map(|format| codec_of(audio, format))
+        .filter(|(codec, _)| codecs.carries(*codec))
         .ok_or(Error::NoCommonCodec)?;
 
     Ok(Negotiated {
         remote: SocketAddr::new(address, audio.port),
         codec,
+        payload_type,
         dtmf: telephone_event_payload_type(audio),
     })
+}
+
+/// The codec a format names, and the payload type to put on the wire for it.
+///
+/// A format with an rtpmap is matched by the map: RFC 8866 §6.6 makes it authoritative even
+/// for a static number, which is how an offer of `8` meaning iLBC is not read as PCMA. The
+/// number is then *dynamic in meaning* — the map could have hung any name on it — so it goes
+/// home with the codec rather than being reassumed from [`Codec::payload_type`]. Only a bare
+/// static type, with no map at all, is matched by number.
+fn codec_of(audio: &sipx_sdp::MediaDescription, format: &str) -> Option<(Codec, Option<u8>)> {
+    let payload = format.parse::<u8>().ok()?;
+    if let Some(rtpmap) = audio.rtpmap(format) {
+        return codec_named(rtpmap).map(|codec| (codec, Some(payload)));
+    }
+    Codec::from_payload_type(payload).map(|codec| (codec, None))
+}
+
+/// The codec an rtpmap value names, if it is one we carry.
+///
+/// The clock rate and channel count are part of the format's identity (RFC 8866 §6.6), so the
+/// accepted shapes are exactly the ones [`Codecs::capabilities`] can have offered:
+/// `PCMU/8000` and `PCMA/8000` mono, and — with the `opus` feature — `opus/48000/2`, the only
+/// rtpmap RFC 7587 §7 assigns. `opus/16000` is nothing we have, whatever the number beside it.
+fn codec_named(rtpmap: &str) -> Option<Codec> {
+    let mut parts = rtpmap.split('/');
+    let name = parts.next()?;
+    let clock = parts.next()?.parse::<u32>().ok()?;
+    // RFC 8866 §6.6: an omitted channel count means one channel.
+    let channels = parts
+        .next()
+        .map_or(Ok(1), str::parse::<u32>)
+        .ok()?;
+    if clock == 8_000 && channels == 1 {
+        if name.eq_ignore_ascii_case("pcmu") {
+            return Some(Codec::Pcmu);
+        }
+        if name.eq_ignore_ascii_case("pcma") {
+            return Some(Codec::Pcma);
+        }
+    }
+    opus_named(name, clock, channels)
+}
+
+/// Opus, if the feature and the rtpmap both say so — one place the gated name is read, so the
+/// default build has nothing to compile out of a match arm.
+#[cfg(feature = "opus")]
+fn opus_named(name: &str, clock: u32, channels: u32) -> Option<Codec> {
+    // RFC 7587 §7 fixes the RTP clock at 48000 and the rtpmap's channel count at 2 whatever
+    // the audio actually is, so those are the name's identity rather than parameters to accept.
+    (name.eq_ignore_ascii_case("opus") && clock == Codec::Opus.clock_rate() && channels == 2)
+        .then_some(Codec::Opus)
+}
+
+/// The default build carries no Opus, so no rtpmap can name it.
+#[cfg(not(feature = "opus"))]
+fn opus_named(_name: &str, _clock: u32, _channels: u32) -> Option<Codec> {
+    None
 }
 
 /// The `Contact` this endpoint should advertise for a dialog on this transport.

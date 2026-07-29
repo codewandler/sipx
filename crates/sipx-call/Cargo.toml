@@ -10,6 +10,12 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+# Opus (RFC 6716/7587) for the calls this crate places and answers. Off by default: it links
+# libopus, and the default codec set stays the G.711 pair — mandatory-to-implement and pure
+# Rust. Enabling it does not change what a call offers; it makes `Codecs::Opus` selectable.
+opus = ["sipx-media/opus"]
+
 [dependencies]
 rand.workspace = true
 sipx-sip.workspace = true
