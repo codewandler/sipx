@@ -389,7 +389,7 @@ impl EndCause {
         }
     }
 
-    fn from_json(value: &Json) -> Option<Self> {
+    pub(crate) fn from_json(value: &Json) -> Option<Self> {
         match tagged::read(value)? {
             ("hangup", _) => Some(Self::Hangup),
             ("remote", _) => Some(Self::Remote),
@@ -463,7 +463,7 @@ impl DialOutcome {
         }
     }
 
-    fn from_json(value: &Json) -> Option<Self> {
+    pub(crate) fn from_json(value: &Json) -> Option<Self> {
         match tagged::read(value)? {
             ("answered", _) => Some(Self::Answered),
             ("busy", _) => Some(Self::Busy),
@@ -504,7 +504,7 @@ impl TransferState {
         }
     }
 
-    fn from_json(value: &Json) -> Option<Self> {
+    pub(crate) fn from_json(value: &Json) -> Option<Self> {
         match tagged::read(value)? {
             ("trying", _) => Some(Self::Trying),
             ("ringing", _) => Some(Self::Ringing),

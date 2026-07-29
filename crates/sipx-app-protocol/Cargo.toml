@@ -37,9 +37,6 @@ sipx-sip.workspace = true
 sipx-transport.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
-[[example]]
-name = "canned_program"
-required-features = ["call"]
 
 [lints]
 workspace = true
