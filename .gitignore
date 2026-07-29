@@ -26,6 +26,10 @@ Cargo.lock.orig
 # Recordings produced by tests and manual runs
 *.wav.out
 /recordings/
+# A manual `sipx call --record` drops its capture in the repo root, and an agent running
+# `git add -A` would commit someone's audio. Scoped to the root so a crate can still ship a
+# committed .wav fixture under its own tests/.
+/*.wav
 
 # Generated per interop run: a committed certificate is a committed private key. Every peer gets
 # its own, so this has to match every peer — a pattern naming one of them silently commits the
