@@ -143,6 +143,89 @@ impl Crypto {
         None
     }
 
+    /// This side's key, presented as the **accepted** attribute in an answer (RFC 4568 §5.1.2).
+    ///
+    /// The tag and the crypto-suite are the *offer's* — §5.1.2 requires the accepted attribute
+    /// in the answer to "contain … the tag and crypto-suite from the accepted crypto attribute
+    /// in the offer" — and the key is this side's own, because each direction is keyed
+    /// separately (RFC 3711 §3.2).
+    ///
+    /// Answering with a tag of this side's choosing is not a cosmetic difference. A conformant
+    /// offerer performs §5.1.3's check on the way back and MUST fail the negotiation when the
+    /// tag it sent is not the tag it gets, so an endpoint that always answers `1` interoperates
+    /// only with peers that happen to have offered `1`, and fails with no diagnosis at the end
+    /// that is wrong.
+    ///
+    /// `None` when this side's key cannot be presented under the offered suite — a key of the
+    /// wrong length for the suite named would be a well-formed answer nobody can decrypt.
+    #[must_use]
+    pub fn accepting(&self, offered: &Self) -> Option<Self> {
+        let (key_len, salt_len) = offered.suite.key_and_salt_len();
+        if self.key_and_salt.len() != key_len + salt_len {
+            return None;
+        }
+        Some(Self {
+            tag: offered.tag,
+            suite: offered.suite,
+            key_and_salt: self.key_and_salt.clone(),
+        })
+    }
+
+    /// Check an answer against what was offered, and return the offered attribute it accepted
+    /// (RFC 4568 §5.1.3).
+    ///
+    /// §5.1.3 is a MUST with three parts: the offerer verifies that one of the crypto suites it
+    /// offered **and its accompanying tag** were echoed, and that the answer carries a key. "If
+    /// any of the above fails, the negotiation MUST fail."
+    ///
+    /// `answered` is `None` when the answer carried no `a=crypto` this side can act on — which
+    /// is how an answer naming a suite that was never offered arrives, since [`Crypto::parse`]
+    /// refuses a suite sipx cannot perform. That is a failed negotiation and not a call in the
+    /// clear: a media path that quietly drops to no encryption because the answer disagreed is
+    /// worse than one that fails, because nothing tells anybody.
+    ///
+    /// What comes back is the *offered* attribute the answer accepted, so a caller keys with the
+    /// half it actually sent rather than with whichever of its offers came first.
+    ///
+    /// # Errors
+    ///
+    /// [`SdpError::Invalid`] naming the tag, and never the key material: an error string is a
+    /// log line waiting to happen.
+    pub fn verify_answer<'o>(
+        offered: &'o [Self],
+        answered: Option<&Self>,
+    ) -> crate::Result<&'o Self> {
+        let Some(answered) = answered else {
+            return Err(crate::SdpError::Invalid {
+                field: "crypto",
+                value: "the answer carried no crypto attribute this side can perform".to_owned(),
+            });
+        };
+        // Tag *and* suite together. §5.1.3 asks for both, and matching on the tag alone would
+        // accept an answer that renamed the transform under a number this side did recognise.
+        let accepted = offered
+            .iter()
+            .find(|ours| ours.tag == answered.tag && ours.suite == answered.suite)
+            .ok_or_else(|| crate::SdpError::Invalid {
+                field: "crypto",
+                value: format!(
+                    "the answer accepted tag {} ({}), which this side did not offer",
+                    answered.tag,
+                    answered.suite.as_str()
+                ),
+            })?;
+        // "and that the answer contains a key". Half a keying is a stream that connects and
+        // carries silence, which is the one outcome worse than a call that fails to connect.
+        let (key_len, salt_len) = answered.suite.key_and_salt_len();
+        if answered.key_and_salt.len() != key_len + salt_len {
+            return Err(crate::SdpError::Invalid {
+                field: "crypto",
+                value: format!("the answer to tag {} carried no usable key", answered.tag),
+            });
+        }
+        Ok(accepted)
+    }
+
     /// Render as an `a=crypto` value.
     #[must_use]
     pub fn to_value(&self) -> String {
@@ -304,6 +387,54 @@ mod tests {
             Crypto::parse("1 AES_CM_128_HMAC_SHA1_80 keymgmt:mikey AQAA").is_none(),
             "a keying method sipx cannot perform"
         );
+    }
+
+    /// **The published line, not one of ours.** `docs/specs/srtp.md` §10.4 restates RFC 4568
+    /// §6.1's `a=crypto` example and what its `inline` parameter decodes to; this asserts
+    /// `Crypto::parse` against those octets.
+    ///
+    /// Every other test in this module feeds the parser something [`Crypto::offer`] produced, so
+    /// a parser that is self-consistently wrong reads as correct — which is exactly how
+    /// `sipx-rtp` keyed HMAC with the wrong constant through six releases (§12.1).
+    #[test]
+    fn the_published_crypto_line_parses_to_the_published_key_and_salt() {
+        let published = "1 AES_CM_128_HMAC_SHA1_80 \
+                         inline:d0RmdmcmVCspeEc3QGZiNWpVLFJhQX1cfHAwJSoj|2^20|1:4";
+        let parsed = Crypto::parse(published).expect("RFC 4568 §6.1's own example");
+
+        assert_eq!(parsed.tag, 1);
+        assert_eq!(parsed.suite, Suite::AesCm128HmacSha1_80);
+        assert_eq!(
+            parsed.master_key(),
+            [
+                0x77, 0x44, 0x66, 0x76, 0x67, 0x26, 0x54, 0x2B, 0x29, 0x78, 0x47, 0x37, 0x40,
+                0x66, 0x62, 0x35
+            ],
+            "the 16 master key octets §10.4 publishes"
+        );
+        assert_eq!(
+            parsed.master_salt(),
+            [
+                0x6A, 0x55, 0x2C, 0x52, 0x61, 0x41, 0x7D, 0x5C, 0x7C, 0x70, 0x30, 0x25, 0x2A,
+                0x23
+            ],
+            "the 14 master salt octets §10.4 publishes"
+        );
+    }
+
+    /// The other two published `inline` parameters, from RFC 4568 §4 and §6.1. Both are 30
+    /// octets and both are legal input — including the one whose lifetime is written in the
+    /// decimal form rather than as a power of two.
+    #[test]
+    fn the_other_published_inline_parameters_are_read() {
+        for value in [
+            "1 AES_CM_128_HMAC_SHA1_80 inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR",
+            "1 AES_CM_128_HMAC_SHA1_80 inline:YUJDZGVmZ2hpSktMbW9QUXJzVHVWd3l6MTIzNDU2|1066:4",
+        ] {
+            let parsed = Crypto::parse(value).unwrap_or_else(|| panic!("published: {value}"));
+            assert_eq!(parsed.master_key().len(), 16, "{value}");
+            assert_eq!(parsed.master_salt().len(), 14, "{value}");
+        }
     }
 
     #[test]

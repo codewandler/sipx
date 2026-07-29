@@ -2,7 +2,7 @@
 id: M-26
 title: Echo and verify the SDES tag, which RFC 4568 requires twice
 pillar: Media
-status: ready
+status: in-progress
 priority: 2
 design: docs/specs/srtp.md
 epic: media

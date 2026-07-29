@@ -146,3 +146,138 @@ fn an_offer_is_answered_even_when_its_favourite_suite_is_unsupported() {
     );
     assert!(answered.media[0].crypto().is_some());
 }
+
+// -------------------------------------------------------------------------------------------
+// The tag, which RFC 4568 requires twice: echoed in the answer (§5.1.2) and verified when the
+// answer comes back (§5.1.3). `docs/specs/srtp.md` §5.3, §5.4 and §12.3.
+// -------------------------------------------------------------------------------------------
+
+/// RFC 4568 §5.1.2: the accepted attribute in the answer "MUST contain … the tag and
+/// crypto-suite from the accepted crypto attribute in the offer".
+///
+/// The failure this prevents is one-sided and therefore easy to miss: a conformant peer that
+/// offered any tag but 1 MUST fail the negotiation on an answer carrying 1, and nothing at this
+/// end reports anything. Calls to peers that happen to use tag 1 — most of them — work.
+#[test]
+fn the_answer_echoes_the_tag_of_the_accepted_offer() {
+    let their_key = Crypto::offer(9, Suite::AesCm128HmacSha1_80, true).expect("secure");
+    let offered = parse(&offer(
+        "RTP/SAVP",
+        &[format!("crypto:{}", their_key.to_value())],
+    ))
+    .expect("parses");
+
+    let answered = answer(
+        &offered,
+        &Capabilities::g711(loopback(), 40_002).with_srtp(true),
+    );
+    let ours = answered.media[0].crypto().expect("the answer carries a key");
+
+    assert_eq!(
+        ours.tag, 9,
+        "the answer must echo the offer's tag, not this side's own"
+    );
+    assert_eq!(ours.suite, their_key.suite, "and the offer's suite");
+    assert_ne!(
+        ours.key_and_salt, their_key.key_and_salt,
+        "the tag is echoed; the key is still this side's own"
+    );
+}
+
+/// The tag echoed is the one on the attribute **actually accepted**, not the offer's first.
+/// sipx takes the first `a=crypto` it can perform, which need not be the peer's first choice.
+#[test]
+fn the_answer_echoes_the_tag_of_the_suite_it_actually_accepted() {
+    let their_key = Crypto::offer(2, Suite::AesCm128HmacSha1_80, true).expect("secure");
+    let offered = parse(&offer(
+        "RTP/SAVP",
+        &[
+            "crypto:1 AES_256_CM_HMAC_SHA1_80 inline:AAAAAAAA".to_owned(),
+            format!("crypto:{}", their_key.to_value()),
+        ],
+    ))
+    .expect("parses");
+
+    let answered = answer(
+        &offered,
+        &Capabilities::g711(loopback(), 40_002).with_srtp(true),
+    );
+    assert_eq!(
+        answered.media[0]
+            .crypto()
+            .expect("the answer carries a key")
+            .tag,
+        2,
+        "tag 1 named a suite sipx cannot perform; the accepted attribute is tag 2"
+    );
+}
+
+/// RFC 4568 §5.1.3: the offerer "MUST verify that one of the initially offered crypto suites and
+/// its accompanying tag were accepted and echoed in the answer … If any of the above fails, the
+/// negotiation MUST fail."
+///
+/// **The failing-first test for this story.** Before it, nothing compared the tags at all: an
+/// answer naming a tag this side never sent was paired with our key and the call went ahead on
+/// keys neither end agreed on.
+#[test]
+fn an_answer_whose_tag_was_never_offered_is_refused() {
+    let ours = a_key();
+    let theirs = Crypto::offer(7, Suite::AesCm128HmacSha1_80, true).expect("secure");
+
+    let refused = Crypto::verify_answer(std::slice::from_ref(&ours), Some(&theirs));
+    let error = refused.expect_err("tag 7 was never offered");
+    let said = error.to_string();
+    assert!(said.contains('7'), "the error says which tag: {said}");
+    assert!(
+        !said.contains(&theirs.to_value()),
+        "and never the key material: {said}"
+    );
+}
+
+/// The other half: an answer that echoes the tag is accepted, and what comes back is the offered
+/// attribute it accepted — so the caller keys with *that* one rather than with any it sent.
+#[test]
+fn an_answer_that_echoes_an_offered_tag_is_accepted() {
+    let ours = Crypto::offer(4, Suite::AesCm128HmacSha1_80, true).expect("secure");
+    let theirs = Crypto::offer(4, Suite::AesCm128HmacSha1_80, true).expect("secure");
+
+    let accepted = Crypto::verify_answer(std::slice::from_ref(&ours), Some(&theirs))
+        .expect("tag 4 was offered");
+    assert_eq!(
+        accepted.key_and_salt, ours.key_and_salt,
+        "our half of the keying"
+    );
+}
+
+/// An answer naming a suite that was never offered is refused. It reaches this side as an
+/// `a=crypto` carrying nothing sipx can perform, so the answer has no usable attribute at all —
+/// which §5.1.3 makes a negotiation failure, not a call placed in the clear.
+#[test]
+fn an_answer_naming_a_suite_that_was_never_offered_is_refused() {
+    let answered = parse(&offer(
+        "RTP/SAVP",
+        &["crypto:1 AES_256_CM_HMAC_SHA1_80 inline:AAAAAAAA".to_owned()],
+    ))
+    .expect("parses");
+    let theirs = answered.media[0].crypto();
+    assert!(theirs.is_none(), "sipx cannot perform AES_256_CM");
+
+    assert!(
+        Crypto::verify_answer(&[a_key()], theirs.as_ref()).is_err(),
+        "an answer with nothing this side can key is a failed negotiation, not a plain call"
+    );
+}
+
+/// And an answer that echoes the tag but carries no key. RFC 4568 §5.1.3 requires the offerer to
+/// verify "that the answer contains a key" as well as the tag: half a keying is a stream that
+/// connects and carries silence.
+#[test]
+fn an_answer_that_echoes_the_tag_but_carries_no_key_is_refused() {
+    let ours = a_key();
+    let keyless = Crypto {
+        tag: ours.tag,
+        suite: ours.suite,
+        key_and_salt: Vec::new(),
+    };
+    assert!(Crypto::verify_answer(std::slice::from_ref(&ours), Some(&keyless)).is_err());
+}

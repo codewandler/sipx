@@ -237,9 +237,16 @@ fn answer_stream(
         (false, _) => None,
     };
 
+    // The attribute accepted is the first offered one sipx can perform (RFC 4568 §5.1.2: "the
+    // answerer MUST accept exactly one"), and the answer carries **its** tag and suite with this
+    // side's own key. Emitting a tag of our own choosing is what makes a conformant offerer fail
+    // §5.1.3's check on the way back.
     let answering_crypto = match (secure_offer && !dtls_offer, capabilities.crypto.as_ref()) {
-        (true, Some(crypto)) if offered.crypto().is_some() => Some(crypto),
-        (true, _) => return rejected(offered),
+        (true, Some(ours)) => match offered.crypto().and_then(|theirs| ours.accepting(&theirs)) {
+            Some(accepted) => Some(accepted),
+            None => return rejected(offered),
+        },
+        (true, None) => return rejected(offered),
         // A plain offer is answered plainly, even when this side would have preferred a key.
         // Answering `RTP/AVP` with `a=crypto` is how a stream ends up encrypted at one end only.
         (false, _) => None,
@@ -290,7 +297,7 @@ fn answer_stream(
     let direction = negotiate_direction(offered_direction, capabilities.direction);
     attributes.push(Attribute::flag(direction.as_str()));
 
-    if let Some(crypto) = answering_crypto {
+    if let Some(crypto) = &answering_crypto {
         attributes.push(Attribute::valued("crypto", crypto.to_value()));
     }
 

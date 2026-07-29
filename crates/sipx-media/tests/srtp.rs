@@ -218,6 +218,51 @@ async fn a_packet_under_the_wrong_key_is_refused() {
     session.stop();
 }
 
+// -----------------------------------------------------------------------------------------------
+// Turning an SDES answer into keys (RFC 4568 §5.1.3, `docs/specs/srtp.md` §5.4).
+// -----------------------------------------------------------------------------------------------
+
+fn offered(tag: u32) -> sipx_sdp::crypto::Crypto {
+    sipx_sdp::crypto::Crypto::offer(tag, sipx_sdp::crypto::Suite::AesCm128HmacSha1_80, true)
+        .expect("secure signalling")
+}
+
+/// An answer that echoed the tag keys the session: our half from the offer we sent, their half
+/// from the answer.
+#[test]
+fn an_answer_that_echoes_the_offered_tag_produces_keys() {
+    let ours = offered(3);
+    let theirs = offered(3);
+    let keys = SrtpKeys::from_answer(std::slice::from_ref(&ours), Some(&theirs))
+        .expect("the tag was offered");
+
+    assert_eq!(keys.local.0, ours.master_key(), "we protect with our own key");
+    assert_eq!(
+        keys.remote.0,
+        theirs.master_key(),
+        "and unprotect with theirs"
+    );
+}
+
+/// And one that did not is refused **as an error**, not as an unkeyed session. A media path that
+/// quietly degrades to no encryption because a tag mismatched is worse than a call that fails:
+/// nothing tells the application, and the user hears an unprotected call as a protected one.
+#[test]
+fn an_answer_whose_tag_was_never_offered_produces_no_keys() {
+    let ours = offered(3);
+    let theirs = offered(8);
+    let refused = SrtpKeys::from_answer(std::slice::from_ref(&ours), Some(&theirs));
+    assert!(refused.is_err(), "keys were built from an answer nobody agreed on");
+}
+
+/// An `RTP/SAVP` answer that carried no `a=crypto` at all is the same failure. §5.1.3 requires
+/// the offerer to verify that the answer contains a key.
+#[test]
+fn an_answer_with_no_crypto_at_all_produces_no_keys() {
+    let ours = offered(1);
+    assert!(SrtpKeys::from_answer(std::slice::from_ref(&ours), None).is_err());
+}
+
 /// Unencrypted calls are untouched by any of this.
 #[tokio::test]
 async fn a_plain_call_still_works() {

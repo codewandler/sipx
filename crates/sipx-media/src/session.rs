@@ -379,6 +379,43 @@ pub struct SrtpKeys {
     pub remote: (Vec<u8>, Vec<u8>),
 }
 
+impl SrtpKeys {
+    /// The keys an SDES answer settled on, **after** checking it against what was offered
+    /// (RFC 4568 §5.1.3; `docs/specs/srtp.md` §5.4).
+    ///
+    /// This is the seam between the signalling and the media path, and the reason it is fallible
+    /// rather than an `Option`: an answer that echoed a tag this side never sent has agreed to
+    /// nothing, and the two outcomes that are not an error are both worse than one. Returning
+    /// `None` would place the call unencrypted, so a user who asked for a secure call gets an
+    /// insecure one and nothing says so; dropping the stream would end the call with no reason
+    /// anyone can act on. The error carries which tag came back and why it was refused.
+    ///
+    /// `answered` is `None` when the answer carried no `a=crypto` this side can perform — the
+    /// shape in which "a suite that was never offered" arrives, since
+    /// [`sipx_sdp::crypto::Crypto::parse`] refuses one sipx cannot key.
+    ///
+    /// # Errors
+    ///
+    /// [`sipx_sdp::SdpError::Invalid`] when the answer accepted a tag and suite pair that was
+    /// never offered, or carried no key. It never names key material.
+    pub fn from_answer(
+        offered: &[sipx_sdp::crypto::Crypto],
+        answered: Option<&sipx_sdp::crypto::Crypto>,
+    ) -> Result<Self, sipx_sdp::SdpError> {
+        let ours = sipx_sdp::crypto::Crypto::verify_answer(offered, answered)?;
+        // `verify_answer` returning `Ok` is what makes this `answered` usable at all, so the
+        // far half is read only here and never from an answer that was not checked.
+        let theirs = answered.ok_or(sipx_sdp::SdpError::Invalid {
+            field: "crypto",
+            value: "the answer carried no crypto attribute this side can perform".to_owned(),
+        })?;
+        Ok(Self {
+            local: (ours.master_key().to_vec(), ours.master_salt().to_vec()),
+            remote: (theirs.master_key().to_vec(), theirs.master_salt().to_vec()),
+        })
+    }
+}
+
 impl std::fmt::Debug for SrtpKeys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Keys. A derived `Debug` puts them in whatever log the caller writes.
