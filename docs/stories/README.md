@@ -53,6 +53,10 @@ _This is the layer applications actually program against, so it is the one that 
 - [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 
+### Endpoint discovery
+_sipx can call any endpoint you can already name, and cannot help you name one. `sipx dial` takes a_
+- [P-5 — List what can be called with `sipx peers`](P-5-peer-book-and-list.md) · Phone · the epic's first story — a peer book and one command, with no protocol work
+
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
 - [M-26 — Echo and verify the SDES tag, which RFC 4568 requires twice](M-26-sdes-tag-neither-echoed-nor-verified.md) · Media · found by M-25 — RFC 4568 §5.1.2 and §5.1.3 are both MUSTs and sipx honours neither
@@ -70,6 +74,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
+- [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast
 
 ## Backlog
 
@@ -84,6 +89,11 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
 - [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
+
+### Endpoint discovery
+_sipx can call any endpoint you can already name, and cannot help you name one. `sipx dial` takes a_
+- [P-6 — Dial a peer by name](P-6-dial-a-peer-by-name.md) · Phone · needs P-5 — `sipx dial alice` where alice came out of `sipx peers`
+- [S-24 — Learn who is registered, with the registration event package](S-24-learn-who-is-registered.md) · Signalling · RFC 3680 is `partial` today — sipx parses the package and never subscribes to it
 
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_

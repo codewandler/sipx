@@ -298,6 +298,20 @@ reason recorded — sipx is a UA behind NATs, which is the case lite does not se
 *interoperating* with a lite peer is not, because an implementation that only handles a full peer
 hangs waiting for checks a lite peer is never required to send. See [design](designs/media.md).
 
+### Endpoint discovery — `discovery` _(four stories)_
+
+sipx can call any endpoint you can already name, and cannot help you name one: `dial` takes a URI,
+and nothing answers "who is there to call?". The epic closes the front-door gap with one command
+that lists what can be called and a `dial` that accepts what the list prints. Three sources, each
+answering a different question — a local peer book (`P-5`, no protocol at all), a registrar's
+registration event package (`S-24`, RFC 3680, `partial` today), and the local link (`T-24`,
+mDNS/DNS-SD, `blocked` on whether a second protocol earns its attack surface). Note that RFC 3263
+is *resolution*, not enumeration: it does the last mile of a call already decided on, and composes
+with this rather than competing with it. Done when a shell script runs `sipx peers`, takes a name
+from the output and places a call, with no URI written in the script. Discovery stops at naming —
+the moment a lookup is consulted while routing someone else's INVITE, that is a dial plan, and the
+[vision](vision.md) says those are built *with* sipx. See [design](designs/discovery.md).
+
 ### Edge / B2BUA — `edge` _(one story, in M9)_
 
 The design's open question — whether a programmable edge belongs in this repository, or in a
