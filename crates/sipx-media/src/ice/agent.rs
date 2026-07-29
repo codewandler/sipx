@@ -1013,13 +1013,50 @@ impl Agent {
             // The last row: the peer is not doing role signalling, so there is no conflict.
             return Conflict::None;
         };
-        let _ = attribute;
-        Conflict::None
+        let theirs = attribute.tiebreaker();
+        match (self.role, attribute) {
+            (Role::Controlling, RoleAttribute::Controlling { .. }) => {
+                if self.tiebreaker >= theirs {
+                    Conflict::Reject
+                } else {
+                    self.switch_role();
+                    Conflict::Switched
+                }
+            }
+            (Role::Controlled, RoleAttribute::Controlled { .. }) => {
+                if self.tiebreaker >= theirs {
+                    self.switch_role();
+                    Conflict::Switched
+                } else {
+                    Conflict::Reject
+                }
+            }
+            // Controlling against ICE-CONTROLLED, or controlled against ICE-CONTROLLING.
+            _ => Conflict::None,
+        }
     }
 
     /// §7.2.5.1: our own check drew a 487.
     fn role_conflict_response(&mut self, transaction: &Transaction) {
-        let _ = transaction;
+        // "If the agent included an ICE-CONTROLLED attribute in the request, the agent MUST switch
+        // to the controlling role. If the agent included an ICE-CONTROLLING attribute … switch to
+        // the controlled role." The attribute that went out decides, not the role we hold now.
+        self.role = match transaction.role {
+            RoleAttribute::Controlled { .. } => Role::Controlling,
+            RoleAttribute::Controlling { .. } => Role::Controlled,
+        };
+        // "The agent MUST change the tiebreaker value."
+        self.tiebreaker = fresh_tiebreaker(self.tiebreaker);
+        self.set
+            .recompute_priorities(self.role, &self.local, &self.remote);
+        if let Some(pair) = self.set.pair_mut(transaction.pair) {
+            pair.state = PairState::Waiting;
+        }
+        if let Some(index) = self.set.checklist_of(transaction.pair)
+            && let Some(list) = self.set.checklists_mut().get_mut(index)
+        {
+            list.trigger(transaction.pair);
+        }
     }
 
     fn switch_role(&mut self) {
