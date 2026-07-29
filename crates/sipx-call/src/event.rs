@@ -96,6 +96,20 @@ pub enum CallEvent {
     Hold,
     /// The far end took the call off hold.
     Resumed,
+    /// This side gated its own outbound audio ([`Call::mute`](crate::Call::mute)).
+    ///
+    /// A local decision, not a signalled one: unlike [`Self::Hold`] this reports something *this*
+    /// side did, and the far end was told nothing about it. It is emitted only on a transition —
+    /// muting a call that is already muted is not something that happened.
+    ///
+    /// The contract's own vocabulary has no wire event for this, deliberately
+    /// ([`docs/specs/app-contract.md`](../../../docs/specs/app-contract.md) §5.3 — `mute` is an
+    /// instruction that completes immediately). What a remote app sees is `media.muted` on the
+    /// next snapshot (§5.2). This variant is what lets the interpreter build that snapshot from a
+    /// push rather than by polling the call.
+    Muted,
+    /// This side let its outbound audio through again ([`Call::unmute`](crate::Call::unmute)).
+    Unmuted,
     /// The call is over. Always the last event on the stream — the channel's delivery policy
     /// reserves a slot for it specifically so this is never the one an overflow drops.
     Ended(EndCause),
