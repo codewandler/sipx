@@ -52,12 +52,14 @@ _This is the layer applications actually program against, so it is the one that 
 
 ### Conformance
 - [S-19 — Implement the UPDATE method](S-19-update-method.md) · Signalling · M9 · RFC 3311 · the last session-integrity gap; 100rel unblocked it
+- [S-22 — Give the caller a handle on its early dialog](S-22-caller-early-dialog.md) · Signalling · found by S-19 — sipx as caller can neither send nor receive an UPDATE while ringing
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
 - [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 
 ### Ice
+- [X-25 — Write the media design record the ICE stories keep citing](X-25-media-design-record.md) · Build · found by M-16 — six stories name docs/designs/media.md as their design, and it is a stub
 - [M-20 — Encode and answer a STUN connectivity check](M-20-ice-stun-checks.md) · Media · ice · RFC 5389/5769 · carries the crate-graph decision; runs solo, it moves the lockfile
 
 ### Quic
