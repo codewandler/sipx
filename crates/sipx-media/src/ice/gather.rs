@@ -20,7 +20,9 @@ use std::time::Duration;
 
 use tokio::net::UdpSocket;
 
-use sipx_sdp::ice::{Candidate, CandidateType, ComponentId, Credentials, Foundation, RelatedAddress, Transport};
+use sipx_sdp::ice::{
+    Candidate, CandidateType, ComponentId, Credentials, Foundation, RelatedAddress, Transport,
+};
 
 use super::agent::{Agent, Config, Input, Output};
 use super::candidate::{Gathered, LocalBase, LocalCandidate};
@@ -81,7 +83,7 @@ pub(crate) struct Base<'a> {
     /// The index the agent will name this socket by ([spec] §2).
     ///
     /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
-    pub base: LocalBase,
+    pub index: LocalBase,
     /// Which component of the stream it carries.
     pub component: ComponentId,
     /// The socket itself, still exclusively ours: gathering runs before any receive loop does.
@@ -221,7 +223,7 @@ pub(crate) async fn gather(bases: &[Base<'_>], config: &Gathering) -> LocalDescr
             continue;
         }
         pending.extend(agent.handle(Input::LocalCandidate(Gathered {
-            base: base.base,
+            base: base.index,
             base_address: address,
             address,
             kind: CandidateType::Host,
@@ -229,25 +231,26 @@ pub(crate) async fn gather(bases: &[Base<'_>], config: &Gathering) -> LocalDescr
             server: None,
         })));
 
-        if let Some(server) = config.stun_server {
-            if let Some(mapped) = reflexive(base.socket, server, config.stun_timeout).await {
-                if mapped == address {
-                    // §5.1.3: a server-reflexive candidate whose address is one of our host
-                    // candidates is redundant and is discarded. On a network with no NAT that is
-                    // every one of them.
-                    tracing::debug!(%address, "no nat: the reflexive candidate is the host one");
-                } else {
-                    pending.extend(agent.handle(Input::LocalCandidate(Gathered {
-                        base: base.base,
-                        base_address: address,
-                        address: mapped,
-                        kind: CandidateType::ServerReflexive,
-                        component: base.component,
-                        server: Some(server.ip()),
-                    })));
-                }
-            }
+        let Some(server) = config.stun_server else {
+            continue;
+        };
+        let Some(mapped) = reflexive(base.socket, server, config.stun_timeout).await else {
+            continue;
+        };
+        if mapped == address {
+            // §5.1.3: a server-reflexive candidate whose address is one of our host candidates is
+            // redundant and is discarded. On a network with no NAT that is every one of them.
+            tracing::debug!(%address, "no nat: the reflexive candidate is the host one");
+            continue;
         }
+        pending.extend(agent.handle(Input::LocalCandidate(Gathered {
+            base: base.index,
+            base_address: address,
+            address: mapped,
+            kind: CandidateType::ServerReflexive,
+            component: base.component,
+            server: Some(server.ip()),
+        })));
     }
 
     pending.extend(agent.handle(Input::GatheringDone));
@@ -272,11 +275,7 @@ pub(crate) async fn gather(bases: &[Base<'_>], config: &Gathering) -> LocalDescr
 /// Retransmission is RFC 5389 §7.2.1's, truncated at the deadline rather than at Rc: gathering is
 /// on the call-setup path, and an offer that waits out the full ladder for a server that is down
 /// is an offer nobody sends.
-async fn reflexive(
-    socket: &UdpSocket,
-    server: SocketAddr,
-    within: Duration,
-) -> Option<SocketAddr> {
+async fn reflexive(socket: &UdpSocket, server: SocketAddr, within: Duration) -> Option<SocketAddr> {
     let id = sipx_transport::stun::new_transaction_id();
     let request = sipx_transport::stun::binding_request(&id);
     let deadline = tokio::time::Instant::now().checked_add(within)?;
@@ -405,18 +404,18 @@ mod tests {
     /// priorities are §4's table: host, single address, RTP and RTCP.
     #[tokio::test]
     async fn host_candidates_come_off_the_bound_sockets() {
-        let (rtp, rtcp) = (bound().await, bound().await);
+        let (media, control) = (bound().await, bound().await);
         let description = gather(
             &[
                 Base {
-                    base: LocalBase(0),
+                    index: LocalBase(0),
                     component: ComponentId::RTP,
-                    socket: &rtp,
+                    socket: &media,
                 },
                 Base {
-                    base: LocalBase(1),
+                    index: LocalBase(1),
                     component: ComponentId::RTCP,
-                    socket: &rtcp,
+                    socket: &control,
                 },
             ],
             &Gathering::new(credentials(), true),
@@ -433,11 +432,11 @@ mod tests {
 
         assert_eq!(
             description.default_destination(ComponentId::RTP),
-            Some(rtp.local_addr().unwrap())
+            Some(media.local_addr().unwrap())
         );
         assert_eq!(
             description.default_destination(ComponentId::RTCP),
-            Some(rtcp.local_addr().unwrap())
+            Some(control.local_addr().unwrap())
         );
     }
 
@@ -452,7 +451,7 @@ mod tests {
         let rtp = bound().await;
         let description = gather(
             &[Base {
-                base: LocalBase(0),
+                index: LocalBase(0),
                 component: ComponentId::RTP,
                 socket: &rtp,
             }],
@@ -474,7 +473,7 @@ mod tests {
             .expect("bound");
         let description = gather(
             &[Base {
-                base: LocalBase(0),
+                index: LocalBase(0),
                 component: ComponentId::RTP,
                 socket: &any,
             }],
@@ -496,7 +495,7 @@ mod tests {
         let reported: SocketAddr = "198.51.100.7:31337".parse().unwrap();
         tokio::spawn(async move {
             let mut datagram = vec![0u8; 1500];
-            let Ok((len, from)) = server.recv_from(&mut datagram).await else {
+            let Ok((_len, from)) = server.recv_from(&mut datagram).await else {
                 return;
             };
             let id: [u8; 12] = datagram[8..20].try_into().expect("a header");
@@ -508,7 +507,7 @@ mod tests {
         gathering.stun_server = Some(server_address);
         let description = gather(
             &[Base {
-                base: LocalBase(0),
+                index: LocalBase(0),
                 component: ComponentId::RTP,
                 socket: &rtp,
             }],
@@ -549,7 +548,7 @@ mod tests {
 
         let description = gather(
             &[Base {
-                base: LocalBase(0),
+                index: LocalBase(0),
                 component: ComponentId::RTP,
                 socket: &rtp,
             }],

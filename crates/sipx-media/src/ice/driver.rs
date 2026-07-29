@@ -82,7 +82,11 @@ impl Handle {
     /// transaction (RFC 5389 §7.2.1) and the far end will send it again; blocking the receive loop
     /// on a slow driver would stall the *audio* to protect a check that is already redundant.
     pub(crate) fn datagram(&self, from: SocketAddr, on: LocalBase, bytes: Vec<u8>) {
-        if self.events.try_send(Event::Datagram { from, on, bytes }).is_err() {
+        if self
+            .events
+            .try_send(Event::Datagram { from, on, bytes })
+            .is_err()
+        {
             tracing::debug!(%from, "dropping a connectivity check the ice driver could not take");
         }
     }
@@ -175,23 +179,23 @@ impl Driver {
                 .min_by_key(|(_, at)| **at)
                 .map(|(timer, at)| (*timer, *at));
 
-            let event = match next {
-                Some((timer, at)) => tokio::select! {
-                    () = self.stop.wait() => return,
-                    event = self.events.recv() => event,
-                    () = tokio::time::sleep_until(at) => {
+            // Disabled outright when the agent has asked for nothing, so an agent that has gone
+            // quiet is not woken by a deadline this loop invented. The instant in that case is
+            // never waited on — the guard is what makes the arm inert.
+            let deadline = next.map_or_else(tokio::time::Instant::now, |(_, at)| at);
+            let event = tokio::select! {
+                () = self.stop.wait() => return,
+                event = self.events.recv() => event,
+                () = tokio::time::sleep_until(deadline), if next.is_some() => {
+                    if let Some((timer, _)) = next {
                         // A one-shot that has fired is no longer armed. Removing it *before* the
                         // agent sees it is what makes the next one the agent's to ask for.
                         self.deadlines.remove(&timer);
                         let outputs = self.agent.handle(Input::TimerFired(timer));
                         self.apply(outputs).await;
-                        continue;
                     }
-                },
-                None => tokio::select! {
-                    () = self.stop.wait() => return,
-                    event = self.events.recv() => event,
-                },
+                    continue;
+                }
             };
 
             let Some(event) = event else {
@@ -265,7 +269,10 @@ impl Driver {
                 // RTP leaves the media socket, which is base 0 by construction. A selected pair
                 // on any other base would mean audio and its checks on different sockets, and
                 // the far end would see media from an address it never validated.
-                tracing::warn!(base = local.0, "a selected rtp pair on a base that is not the media socket");
+                tracing::warn!(
+                    base = local.0,
+                    "a selected rtp pair on a base that is not the media socket"
+                );
                 return;
             }
             *self.destinations.rtp.lock().await = remote;

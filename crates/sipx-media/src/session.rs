@@ -799,14 +799,14 @@ impl MediaPort {
     /// ([`LocalDescription::attributes`]) and the agent that will drive them.
     pub async fn gather(&self, gathering: &ice::Gathering) -> ice::LocalDescription {
         let mut bases = vec![ice::gather::Base {
-            base: ice::LocalBase(0),
+            index: ice::LocalBase(0),
             component: ComponentId::RTP,
             socket: &self.socket,
         }];
         // Component 2 only when the control port was actually obtained (`ice.md` §6.1).
         if let Some(rtcp) = &self.rtcp {
             bases.push(ice::gather::Base {
-                base: ice::LocalBase(1),
+                index: ice::LocalBase(1),
                 component: ComponentId::RTCP,
                 socket: rtcp,
             });
@@ -832,7 +832,13 @@ impl MediaPort {
         if !local.running() {
             return self.start(config);
         }
-        MediaSession::on_socket(&self.socket, self.rtcp, self.local_addr, config, Some(local))
+        MediaSession::on_socket(
+            &self.socket,
+            self.rtcp,
+            self.local_addr,
+            config,
+            Some(local),
+        )
     }
 }
 
@@ -895,20 +901,15 @@ impl MediaSession {
         // convention, which is what it has always done.
         let rtcp_remote: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
         let ice = ice.map(|local| {
-            let (agent, pending) = local.into_driver_parts();
-            let mut sockets = vec![Arc::clone(socket)];
-            if let Some(control) = &rtcp {
-                sockets.push(Arc::clone(control));
-            }
-            ice::driver::spawn(
-                agent,
-                pending,
-                sockets,
-                ice::driver::Destinations {
+            spawn_ice(
+                local,
+                socket,
+                rtcp.as_ref(),
+                &ice::driver::Destinations {
                     rtp: Arc::clone(&remote),
                     rtcp: Arc::clone(&rtcp_remote),
                 },
-                Arc::clone(&stop),
+                &stop,
             )
         });
 
@@ -950,34 +951,23 @@ impl MediaSession {
             },
         ));
 
-        if let Some(interval) = rtcp_interval {
-            tokio::spawn(rtcp_loop(
-                // Reports go out from the control port when there is one, which is what a peer
-                // expects to see them come from; from the media port otherwise, which some
-                // peers will refuse but is better than not reporting at all.
-                rtcp.clone().unwrap_or_else(|| Arc::clone(socket)),
-                Arc::clone(&remote),
-                Arc::clone(&rtcp_remote),
-                interval,
+        spawn_control(
+            Control {
+                media: Arc::clone(socket),
+                rtcp,
+                remote: Arc::clone(&remote),
+                rtcp_remote,
+                interval: rtcp_interval,
                 ssrc,
                 cname,
-                Arc::clone(&stats),
-                Arc::clone(&outbound),
-                Arc::clone(&feedback),
-                srtp_keys.clone(),
-                Arc::clone(&stop),
-            ));
-        }
-        if let Some(control) = rtcp {
-            tokio::spawn(rtcp_receive_loop(
-                control,
-                ssrc,
-                Arc::clone(&feedback),
-                srtp_keys,
+                stats: Arc::clone(&stats),
+                outbound,
+                feedback: Arc::clone(&feedback),
+                srtp: srtp_keys,
                 ice,
-                Arc::clone(&stop),
-            ));
-        }
+                stop: Arc::clone(&stop),
+            },
+        );
 
         Self {
             outgoing: outgoing_tx,
@@ -1923,6 +1913,109 @@ struct Inbound {
     stop: Arc<Stop>,
 }
 
+/// Split a datagram arriving on a port that carries media three ways (RFC 5764 §5.1.2).
+///
+/// The first byte decides, and it decides **before anything else looks at the datagram**: a
+/// connectivity check must never reach the jitter buffer and an RTP packet must never reach the
+/// ICE agent. Returns the bytes only for the RTP path; a check goes to the agent and anything
+/// else is dropped by name rather than handed to whichever parser happens to be first.
+///
+/// A check is dropped rather than kept when no agent is running, which is what the media loops
+/// did with one before ICE existed — it would fail to parse as RTP one line later.
+fn demultiplex<'a>(
+    datagram: &'a [u8],
+    from: SocketAddr,
+    on: ice::LocalBase,
+    ice: Option<&ice::driver::Handle>,
+) -> Option<&'a [u8]> {
+    match crate::dtls::classify(datagram) {
+        crate::dtls::Arriving::Rtp => Some(datagram),
+        crate::dtls::Arriving::Stun => {
+            if let Some(handle) = ice {
+                handle.datagram(from, on, datagram.to_vec());
+            }
+            None
+        }
+        crate::dtls::Arriving::Dtls | crate::dtls::Arriving::Unknown => None,
+    }
+}
+
+/// Everything the two RTCP loops need, grouped because they share most of it.
+struct Control {
+    media: Arc<UdpSocket>,
+    rtcp: Option<Arc<UdpSocket>>,
+    remote: Arc<Mutex<SocketAddr>>,
+    rtcp_remote: Arc<Mutex<Option<SocketAddr>>>,
+    interval: Option<Duration>,
+    ssrc: u32,
+    cname: String,
+    stats: Arc<Mutex<StreamStats>>,
+    outbound: Arc<Outbound>,
+    feedback: Arc<Mutex<Feedback>>,
+    srtp: Option<SrtpKeys>,
+    ice: Option<ice::driver::Handle>,
+    stop: Arc<Stop>,
+}
+
+/// Start the report loops, as far as this session's configuration and sockets allow.
+fn spawn_control(control: Control) {
+    if let Some(interval) = control.interval {
+        tokio::spawn(rtcp_loop(
+            // Reports go out from the control port when there is one, which is what a peer
+            // expects to see them come from; from the media port otherwise, which some peers
+            // will refuse but is better than not reporting at all.
+            control.rtcp.clone().unwrap_or(control.media),
+            control.remote,
+            control.rtcp_remote,
+            interval,
+            control.ssrc,
+            control.cname,
+            control.stats,
+            control.outbound,
+            Arc::clone(&control.feedback),
+            control.srtp.clone(),
+            Arc::clone(&control.stop),
+        ));
+    }
+    if let Some(port) = control.rtcp {
+        tokio::spawn(rtcp_receive_loop(
+            port,
+            control.ssrc,
+            control.feedback,
+            control.srtp,
+            control.ice,
+            control.stop,
+        ));
+    }
+}
+
+/// Start the ICE driver for this session, over the sockets the session is running on.
+///
+/// The base numbering is the one gathering used and the only one there is: base 0 is the media
+/// socket, base 1 the control port when there is one. The agent names a socket by that index
+/// alone (`docs/specs/ice.md` §2), so the two lists have to be built the same way in both places
+/// or a check leaves the wrong port.
+fn spawn_ice(
+    local: ice::LocalDescription,
+    socket: &Arc<UdpSocket>,
+    rtcp: Option<&Arc<UdpSocket>>,
+    destinations: &ice::driver::Destinations,
+    stop: &Arc<Stop>,
+) -> ice::driver::Handle {
+    let (agent, pending) = local.into_driver_parts();
+    let mut sockets = vec![Arc::clone(socket)];
+    if let Some(control) = rtcp {
+        sockets.push(Arc::clone(control));
+    }
+    ice::driver::spawn(
+        agent,
+        pending,
+        sockets,
+        destinations.clone(),
+        Arc::clone(stop),
+    )
+}
+
 /// Decide whether a packet belongs to the stream this session is carrying.
 ///
 /// RTP has no authentication, so this is not a security control — anyone who can guess the port
@@ -2043,22 +2136,16 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
             }
         };
 
-        let arrived = datagram.get(..len).unwrap_or(&[]);
-        // One port, three protocols (RFC 5764 §5.1.2). The first byte decides, and it decides
-        // before anything else looks at the datagram: a connectivity check must never reach the
-        // jitter buffer, and an RTP packet must never reach the ICE agent.
-        match crate::dtls::classify(arrived) {
-            crate::dtls::Arriving::Rtp => {}
-            crate::dtls::Arriving::Stun => {
-                if let Some(handle) = &ice {
-                    handle.datagram(source, crate::ice::LocalBase(0), arrived.to_vec());
-                }
-                continue;
-            }
-            crate::dtls::Arriving::Dtls | crate::dtls::Arriving::Unknown => continue,
-        }
+        let Some(media) = demultiplex(
+            datagram.get(..len).unwrap_or(&[]),
+            source,
+            ice::LocalBase(0),
+            ice.as_ref(),
+        ) else {
+            continue;
+        };
 
-        let bytes = Bytes::copy_from_slice(arrived);
+        let bytes = Bytes::copy_from_slice(media);
         // Authenticated before it is parsed. A packet that fails is dropped and nothing about it
         // reaches the parser, the jitter buffer or the statistics — which is the point of
         // authenticating at all: forged packets must not be able to move any state.
@@ -2250,8 +2337,9 @@ async fn rtcp_loop(
         // RTCP conventionally travels on the RTP port plus one (RFC 3550 §11) — unless ICE has
         // selected a pair for component 2, in which case the checked path is where the reports
         // go and the convention is only what got them there.
-        let rtcp_to = match *rtcp_remote.lock().await {
-            Some(selected) => selected,
+        let selected = *rtcp_remote.lock().await;
+        let rtcp_to = match selected {
+            Some(pair) => pair,
             None => {
                 let destination = *remote.lock().await;
                 SocketAddr::new(destination.ip(), destination.port().saturating_add(1))
@@ -2291,21 +2379,18 @@ async fn rtcp_receive_loop(
             return;
         };
 
-        let arrived = datagram.get(..len).unwrap_or(&[]);
-        // The control port carries the same three protocols the media port does when ICE is
-        // checking component 2 over it (RFC 5764 §5.1.2, `docs/specs/ice.md` §11).
-        match crate::dtls::classify(arrived) {
-            crate::dtls::Arriving::Rtp => {}
-            crate::dtls::Arriving::Stun => {
-                if let Some(handle) = &ice {
-                    handle.datagram(source, crate::ice::LocalBase(1), arrived.to_vec());
-                }
-                continue;
-            }
-            crate::dtls::Arriving::Dtls | crate::dtls::Arriving::Unknown => continue,
-        }
+        // The control port carries the same three protocols the media port does, because ICE
+        // checks component 2 over it.
+        let Some(control) = demultiplex(
+            datagram.get(..len).unwrap_or(&[]),
+            source,
+            ice::LocalBase(1),
+            ice.as_ref(),
+        ) else {
+            continue;
+        };
 
-        let bytes = Bytes::copy_from_slice(arrived);
+        let bytes = Bytes::copy_from_slice(control);
         let bytes = match unprotect.as_mut() {
             Some(context) => match context.unprotect_rtcp(&bytes) {
                 Ok(plain) => Bytes::from(plain),

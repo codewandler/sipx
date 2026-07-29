@@ -159,15 +159,14 @@ fn default_destinations(
     }
 
     let mut defaults = vec![(ComponentId::RTP, SocketAddr::new(address, media.port))];
-    let rtcp = media.port.checked_add(1);
-    if let Some(port) = rtcp {
-        if media
-            .ice_candidates()
-            .iter()
-            .any(|candidate| candidate.component == ComponentId::RTCP)
-        {
-            defaults.push((ComponentId::RTCP, SocketAddr::new(address, port)));
-        }
+    let offers_rtcp = media
+        .ice_candidates()
+        .iter()
+        .any(|candidate| candidate.component == ComponentId::RTCP);
+    // `checked_add`, because a stream on port 65535 has no port above it and therefore no RTCP
+    // default destination at all.
+    if let Some(port) = media.port.checked_add(1).filter(|_| offers_rtcp) {
+        defaults.push((ComponentId::RTCP, SocketAddr::new(address, port)));
     }
     defaults
 }

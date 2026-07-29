@@ -101,7 +101,7 @@ fn read(text: &str) -> Negotiation {
 fn tone(samples: usize) -> Vec<i16> {
     (0..samples)
         .map(|index| {
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
             let value = (8000.0 * f64::sin(index as f64 * 0.2)) as i16;
             value
         })
@@ -159,9 +159,7 @@ async fn a_nominated_candidate_pair_carries_audio_when_the_host_candidates_canno
 
     let heard = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let Some(frame) = bob.recv().await else {
-                return None;
-            };
+            let frame = bob.recv().await?;
             if frame.iter().any(|sample| sample.abs() > 1000) {
                 return Some(frame);
             }
@@ -207,8 +205,14 @@ async fn a_peer_that_offers_no_ice_keeps_symmetric_rtp() {
     let local = session.local_addr();
 
     // The peer opens the pinhole with one packet from the address it is really on.
-    let packet = sipx_rtp::Packet::new(0, 1, 160, 0x1234_5678, bytes::Bytes::from(vec![0xffu8; 160]))
-        .encode();
+    let packet = sipx_rtp::Packet::new(
+        0,
+        1,
+        160,
+        0x1234_5678,
+        bytes::Bytes::from(vec![0xffu8; 160]),
+    )
+    .encode();
     peer.send_to(&packet, local).await.unwrap();
 
     // Now this side speaks, and it must arrive at the observed source rather than the advertised
@@ -282,10 +286,11 @@ async fn a_check_and_a_media_packet_are_demultiplexed_on_one_port() {
     let answered = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let (len, _) = peer.recv_from(&mut datagram).await.unwrap();
-            if let Ok(message) = Message::decode(&datagram[..len]) {
-                if message.transaction() == transaction && message.class() == Class::Success {
-                    return message;
-                }
+            let Ok(message) = Message::decode(&datagram[..len]) else {
+                continue;
+            };
+            if message.transaction() == transaction && message.class() == Class::Success {
+                return message;
             }
         }
     })
@@ -296,18 +301,19 @@ async fn a_check_and_a_media_packet_are_demultiplexed_on_one_port() {
     // And an RTP packet on the same port, which must not be answered as though it were a check.
     // A media packet reaching the agent would be a parse of unauthenticated bytes by the one
     // parser that may act on them.
-    let media = sipx_rtp::Packet::new(0, 1, 160, 0x1234_5678, bytes::Bytes::from(vec![0u8; 160]))
-        .encode();
+    let media =
+        sipx_rtp::Packet::new(0, 1, 160, 0x1234_5678, bytes::Bytes::from(vec![0u8; 160])).encode();
     peer.send_to(&media, local).await.unwrap();
     let quiet = tokio::time::timeout(Duration::from_millis(400), async {
         loop {
             let (len, _) = peer.recv_from(&mut datagram).await.unwrap();
-            if matches!(
+            let stun = matches!(
                 sipx_media::dtls::classify(&datagram[..len]),
                 sipx_media::Arriving::Stun
-            ) && Message::decode(&datagram[..len])
-                .is_ok_and(|message| message.class() == Class::Success)
-            {
+            );
+            let success = Message::decode(&datagram[..len])
+                .is_ok_and(|message| message.class() == Class::Success);
+            if stun && success {
                 return true;
             }
         }
@@ -441,8 +447,14 @@ async fn an_ice_mismatch_is_reported_and_the_stream_falls_back() {
     );
     let local = session.local_addr();
 
-    let packet = sipx_rtp::Packet::new(0, 1, 160, 0x9876_5432, bytes::Bytes::from(vec![0xffu8; 160]))
-        .encode();
+    let packet = sipx_rtp::Packet::new(
+        0,
+        1,
+        160,
+        0x9876_5432,
+        bytes::Bytes::from(vec![0xffu8; 160]),
+    )
+    .encode();
     peer.send_to(&packet, local).await.unwrap();
     let samples = session.samples_per_packet();
     tokio::spawn(async move {
