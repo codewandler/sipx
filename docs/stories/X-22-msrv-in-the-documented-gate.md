@@ -2,8 +2,8 @@
 id: X-22
 title: Put the MSRV check in the documented gate
 pillar: Build
-status: ready
-priority: 3
+status: done
+priority:
 design:
 epic:
 areas: [build, docs]
@@ -18,15 +18,15 @@ runs an `msrv` job that the gate never mentions. An implementor can run every do
 see green, and still break the build — which is not a hypothetical, it is what happened.
 
 ## Acceptance
-- [ ] `AGENTS.md`'s gate block names the MSRV check, with the toolchain version derived from the
+- [x] `AGENTS.md`'s gate block names the MSRV check, with the toolchain version derived from the
       workspace `rust-version` rather than written twice.
-- [ ] The gate's commands are runnable from one entry point, so "the gate" is a thing that can be
+- [x] The gate's commands are runnable from one entry point, so "the gate" is a thing that can be
       executed rather than a list that has to be transcribed correctly. Whether that is a script,
       a `just`/`make` target or a cargo alias is this story's decision, recorded.
-- [ ] That entry point runs the same set CI runs, and there is a check that fails when the two
+- [x] That entry point runs the same set CI runs, and there is a check that fails when the two
       drift — a gate that omits a CI job is exactly the defect this story exists for, and it must
       not be able to recur silently.
-- [ ] The missing toolchain is a clear failure, not a skip: if `1.88.0` is not installed the gate
+- [x] The missing toolchain is a clear failure, not a skip: if `1.88.0` is not installed the gate
       says so and how to install it, rather than passing.
 
 ## Progress
