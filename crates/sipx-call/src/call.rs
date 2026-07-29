@@ -670,12 +670,13 @@ impl Call {
         );
         self.peer_allows_update = update::peer_allows(&incoming.request.headers);
 
-        self.endpoint
-            .respond(&incoming.key, builder.build())
-            .await?;
-        // Only now. Until the final response is on the wire a second UPDATE is genuinely too
-        // early, and clearing this before responding would let one through.
+        let sent = self.endpoint.respond(&incoming.key, builder.build()).await;
+        // Cleared whether or not the response got out. A send that failed will not be retried
+        // here, so leaving the exchange open would answer every later UPDATE on this dialog
+        // with §5.2's "you are too early" — permanently, for a transaction nobody is waiting
+        // on any more.
         self.negotiation.answered();
+        sent?;
         self.rearm();
         Ok(())
     }

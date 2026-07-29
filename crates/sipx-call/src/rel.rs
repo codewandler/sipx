@@ -305,12 +305,11 @@ impl Ringing {
             crate::call::in_dialog_target(dialog, Target::new(incoming.source, incoming.transport));
         self.peer_allows_update = update::peer_allows(&incoming.request.headers);
 
-        self.endpoint
-            .respond(&incoming.key, builder.build())
-            .await?;
-        // Only after the final response is on the wire: until then a second UPDATE really is
-        // too early, and clearing this first would let one through.
+        let sent = self.endpoint.respond(&incoming.key, builder.build()).await;
+        // Cleared whether or not the response got out, for the reason `Call::on_update` gives:
+        // a send that will not be retried must not leave the exchange open forever.
         self.negotiation.answered();
+        sent?;
         Ok(true)
     }
 

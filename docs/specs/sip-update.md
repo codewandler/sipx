@@ -114,6 +114,14 @@ wall.
 supplied by the caller, not generated in `sipx-sip`: the core reads no clock and no entropy
 source. `sipx_sip::update::RETRY_AFTER_MAX_SECS` is the bound.
 
+**Reachability.** Only rule 3 can be provoked through `sipx-call` as it dispatches today: an
+in-dialog request is handled through `&mut self`, so this side is never mid-way through
+answering one UPDATE when the next arrives and never has an offer outstanding while a request is
+being handled. Rules 1 and 2 are therefore exercised by the vectors in §8.1 rather than on the
+wire. They are not speculative: the state they read is kept for real on every dialog, a peer
+reaches them by doing something sipx would not, and a dispatcher that handles requests
+concurrently (`C-4`) reaches them from this side too.
+
 Once accepted:
 
 - the description is renegotiated and the answer goes in the 2xx (§5.2: the UAS "MUST adjust the

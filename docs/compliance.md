@@ -16,9 +16,9 @@ compliance document usually becomes untrue.
 
 | | Meaning | Count |
 |---|---|---|
-| ✅ implemented | Behaviour present and tested for the roles listed | 33 |
+| ✅ implemented | Behaviour present and tested for the roles listed | 34 |
 | 🟡 partial | Some of the normative behaviour; the note says which part is missing | 17 |
-| 🔤 syntax only | The parser represents it; nothing acts on it | 7 |
+| 🔤 syntax only | The parser represents it; nothing acts on it | 6 |
 | ⬜ not started | Tracked as a target, not started | 11 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
@@ -65,13 +65,13 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 
 | RFC | Title | Status | Roles | Notes |
 |---|---|---|---|---|
-| [3262](https://www.rfc-editor.org/rfc/rfc3262) | Reliability of Provisional Responses in SIP (100rel) | ✅ implemented | — | Offered in Supported, honoured in Require. A reliable provisional carries RSeq and is retransmitted from T1 with no T2 cap until PRACK or 64*T1; PRACK carries RAck and is answered 2xx, or 481 when it matches nothing. A peer that requires 100rel while it is off gets 420 with Unsupported. An offer arriving in the provisional is answered in the PRACK. UPDATE (RFC 3311) is not implemented, so an early-dialog renegotiation is not available. |
+| [3262](https://www.rfc-editor.org/rfc/rfc3262) | Reliability of Provisional Responses in SIP (100rel) | ✅ implemented | — | Offered in Supported, honoured in Require. A reliable provisional carries RSeq and is retransmitted from T1 with no T2 cap until PRACK or 64*T1; PRACK carries RAck and is answered 2xx, or 481 when it matches nothing. A peer that requires 100rel while it is off gets 420 with Unsupported. An offer arriving in the provisional is answered in the PRACK, and an offer arriving in the INVITE may be answered in the provisional (ring_early), which is what makes an early-dialog renegotiation by UPDATE legal. |
 | [3264](https://www.rfc-editor.org/rfc/rfc3264) | An Offer/Answer Model with SDP | ✅ implemented | uac, uas | A pure function from offer and capabilities to answer. The offerer's format order is preserved, which is what stops two endpoints transcoding for no reason. |
-| [4028](https://www.rfc-editor.org/rfc/rfc4028) | Session Timers in SIP | ✅ implemented | — | Negotiated on the INVITE and its 2xx, Table 2 election, refresh by re-INVITE, 422 with Min-SE below the floor, and a local BYE when no refresh arrives. UPDATE is not used for the refresh. |
+| [3311](https://www.rfc-editor.org/rfc/rfc3311) | The SIP UPDATE Method | ✅ implemented | — | Sent and received in an early dialog and a confirmed one. Allow lists UPDATE on the INVITE, its provisional and 2xx responses, and on in-dialog requests (§4). §5.2's three refusals are three answers: 500 with a random Retry-After for a second UPDATE before the first is answered, 491 for glare, 500 with Retry-After when an answer is owed; an unusable description is 488 and the dialog survives. An early dialog is renegotiable only after the INVITE offer is answered in a reliable provisional (RFC 3262 §5), which ring_early does. |
+| [4028](https://www.rfc-editor.org/rfc/rfc4028) | Session Timers in SIP | ✅ implemented | — | Negotiated on the INVITE and its 2xx, Table 2 election, 422 with Min-SE below the floor, and a local BYE when no refresh arrives. The refresh is an UPDATE with no body when the peer's Allow lists the method and a re-INVITE otherwise (§7.4). |
 | [6026](https://www.rfc-editor.org/rfc/rfc6026) | Correct Transaction Handling for 2xx Responses to INVITE | ✅ implemented | uac, uas | The Accepted state. Without this a 2xx retransmission is absorbed by a transaction that should already have ended. |
 | [2543](https://www.rfc-editor.org/rfc/rfc2543) | SIP: Session Initiation Protocol (obsoleted by 3261) | 🟡 partial | — | Not implemented as a protocol. The transaction key falls back to 2543-style matching for a request whose branch lacks the magic cookie, because such requests still arrive. |
 | [6665](https://www.rfc-editor.org/rfc/rfc6665) | SIP-Specific Event Notification | 🟡 partial | uas | The notifier side: a subscription store keyed on dialog *and* package (§4.4.1), establish/refresh/unsubscribe with §4.2.1.1's shorten-never-lengthen rule, expiry, termination that is final — a terminated subscription produces no further notification and cannot be refreshed back to life — and 489 for an unserved package. `Subscription-State` and its reasons are typed, and the implicit subscription a REFER creates is expressed in those terms rather than beside them. Not implemented: the *subscriber* side, so sipx serves subscriptions and does not place them; and no event packages ship yet (`S-17`, `S-18`). |
-| [3311](https://www.rfc-editor.org/rfc/rfc3311) | The SIP UPDATE Method | 🔤 syntax only | — | The method is represented. Renegotiation uses re-INVITE only. |
 | [3326](https://www.rfc-editor.org/rfc/rfc3326) | The Reason Header Field for SIP | 🔤 syntax only | — | Parsed and preserved. sipx does not populate it on CANCEL or BYE. |
 | [3841](https://www.rfc-editor.org/rfc/rfc3841) | Caller Preferences for SIP | 🔤 syntax only | — | The headers parse and round-trip. Nothing acts on a preference. |
 
