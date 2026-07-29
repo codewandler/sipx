@@ -66,40 +66,27 @@ pub enum WsError {
     },
 }
 
-/// Perform the client half of the handshake, asking for the `sip` subprotocol.
+/// Perform the client half of the handshake, asking for the `sip` subprotocol at `path`.
 ///
 /// `authority` is the host and port from the URI — what goes in `Host`, and under WSS the name
-/// the certificate had to be valid for.
-pub async fn connect<S>(stream: S, authority: &str, secure: bool) -> Result<Socket<S>, WsError>
+/// the certificate had to be valid for. `path` is the resource to ask for: RFC 7118 §5 does not
+/// fix one, so where a server serves SIP is the server's business and the caller's to know.
+pub async fn connect<S>(
+    stream: S,
+    authority: &str,
+    path: &str,
+    secure: bool,
+) -> Result<Socket<S>, WsError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let scheme = if secure { "wss" } else { "ws" };
     let failed = |detail: String| WsError::Handshake {
         peer: authority.to_owned(),
         detail,
     };
 
-    // The upgrade request is written out in full rather than half-specified: the handshake
-    // takes what it is given and refuses a request missing any of these, so there is nothing
-    // gained by leaving one out and a confusing failure to be had by trying.
-    //
-    // `Sec-WebSocket-Key` is a fresh nonce whose echo proves the peer understood the upgrade
-    // rather than being an HTTP server that says yes to everything (RFC 6455 §4.1).
-    let request = tokio_tungstenite::tungstenite::http::Request::builder()
-        .method("GET")
-        .uri(format!("{scheme}://{authority}/"))
-        .header("Host", authority)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        )
-        .header(PROTOCOL_HEADER, SUBPROTOCOL)
-        .body(())
-        .map_err(|error| failed(error.to_string()))?;
+    let request =
+        upgrade_request(authority, path, secure).map_err(|error| failed(error.to_string()))?;
 
     let (socket, response) = client_async(request, stream)
         .await
@@ -119,6 +106,43 @@ where
     }
 
     Ok(socket)
+}
+
+/// The upgrade request sipx sends.
+///
+/// Written out in full rather than half-specified: the handshake takes what it is given and
+/// refuses a request missing any of these, so there is nothing gained by leaving one out and a
+/// confusing failure to be had by trying.
+///
+/// `Sec-WebSocket-Key` is a fresh nonce whose echo proves the peer understood the upgrade rather
+/// than being an HTTP server that says yes to everything (RFC 6455 §4.1).
+///
+/// The URI carries the resource and `Host` does not. They come apart precisely here: `Host` is
+/// the authority alone (RFC 7230 §5.4), while the request-target is the path the server matches
+/// its routes against — and a server serving SIP at `/ws` answers `404` to the `/` this used to
+/// send unconditionally.
+fn upgrade_request(
+    authority: &str,
+    path: &str,
+    secure: bool,
+) -> Result<
+    tokio_tungstenite::tungstenite::http::Request<()>,
+    tokio_tungstenite::tungstenite::http::Error,
+> {
+    let scheme = if secure { "wss" } else { "ws" };
+    tokio_tungstenite::tungstenite::http::Request::builder()
+        .method("GET")
+        .uri(format!("{scheme}://{authority}{path}"))
+        .header("Host", authority)
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .header(PROTOCOL_HEADER, SUBPROTOCOL)
+        .body(())
 }
 
 /// Perform the server half, refusing a peer that does not offer the `sip` subprotocol.
@@ -190,7 +214,9 @@ pub(crate) async fn dial<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let secure = key.transport == crate::target::TransportKind::Wss;
-    match connect(stream, authority, secure).await {
+    // The resource travels on the key rather than beside it, because it is part of what makes
+    // this connection this connection — see [`ConnectionKey`].
+    match connect(stream, authority, key.ws_path(), secure).await {
         Ok(socket) => pump(socket, key, outgoing, events, limits, keepalive).await,
         Err(error) => {
             tracing::warn!(%error, peer = %key.peer, "websocket handshake failed");
@@ -436,6 +462,44 @@ mod tests {
             !offers_sip(&HeaderMap::new()),
             "offering none is not offering sip"
         );
+    }
+
+    /// The line this transport used to get wrong. The request-target was `/` whatever the
+    /// caller wanted, so a server serving SIP anywhere else answered `404` and the connection
+    /// simply never existed — see `docs/specs/sip-tls.md` §6, W13.
+    #[test]
+    fn the_upgrade_asks_for_the_resource_it_was_given() {
+        let request = upgrade_request("127.0.0.1:8088", "/ws", false).expect("a request");
+        assert_eq!(request.uri().to_string(), "ws://127.0.0.1:8088/ws");
+        assert_eq!(request.uri().path(), "/ws");
+        // `Host` is the authority and nothing else (RFC 7230 §5.4). The resource belongs in the
+        // request-target, which is where a server looks for it.
+        assert_eq!(
+            request.headers().get("Host").expect("a Host"),
+            "127.0.0.1:8088"
+        );
+    }
+
+    #[test]
+    fn the_root_is_still_what_a_caller_naming_nothing_asks_for() {
+        let request = upgrade_request("127.0.0.1:5060", "/", false).expect("a request");
+        assert_eq!(request.uri().to_string(), "ws://127.0.0.1:5060/");
+    }
+
+    /// WSS changes the scheme and nothing else about where the resource goes.
+    #[test]
+    fn a_secure_upgrade_keeps_the_resource() {
+        let request = upgrade_request("sipx.test:443", "/ws", true).expect("a request");
+        assert_eq!(request.uri().to_string(), "wss://sipx.test:443/ws");
+    }
+
+    /// Servers do exist that want a token in the query, and RFC 7118 §5 no more forbids that
+    /// than it fixes the path. Whatever the caller named is what is asked for.
+    #[test]
+    fn a_query_string_survives_the_handshake() {
+        let request = upgrade_request("127.0.0.1:8088", "/ws?token=abc", false).expect("a request");
+        assert_eq!(request.uri().path(), "/ws");
+        assert_eq!(request.uri().query(), Some("token=abc"));
     }
 
     /// It must never resolve, and it must never be the same twice: RFC 7118 §5.2 asks for a

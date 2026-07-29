@@ -409,11 +409,13 @@ async fn two_names_on_one_address_are_two_connections() {
         peer,
         transport: TransportKind::Tls,
         identity: Some(std::sync::Arc::from("a.example.com")),
+        path: None,
     };
     let other = ConnectionKey {
         peer,
         transport: TransportKind::Tls,
         identity: Some(std::sync::Arc::from("b.example.com")),
+        path: None,
     };
 
     assert_ne!(

@@ -254,15 +254,37 @@ async fn a_real_server_is_refused_when_its_issuer_is_unknown() {
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
-/// SIP over WebSocket against Kamailio's own WebSocket module.
+/// Where the server serves SIP over WebSocket. RFC 7118 §5 fixes neither the port nor the
+/// resource, so both are facts about the peer, declared in its profile: one peer serves it on
+/// the SIP port at `/`, another from its own HTTP server on that server's port at `/ws`.
+/// The defaults are the SIP port and the root, so a profile that says nothing gets the
+/// arrangement every test in this file assumed before there was a choice to make.
+fn ws_server() -> std::net::SocketAddr {
+    let mut addr = server();
+    if let Some(port) = std::env::var("SIPX_INTEROP_WS_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+    {
+        addr.set_port(port);
+    }
+    addr
+}
+
+fn ws_path() -> String {
+    std::env::var("SIPX_INTEROP_WS_PATH").unwrap_or_else(|_| "/".to_owned())
+}
+
+/// SIP over WebSocket against a real server's own WebSocket module.
 ///
-/// Note the port: this is 5060, the same port the TCP test uses. Kamailio serves both there,
-/// which is the ordinary arrangement and the reason the connection pool cannot be keyed by
-/// address alone.
+/// Note the address: some peers serve WebSocket on the SIP port — the reason the connection
+/// pool cannot be keyed by address alone — and some serve it from their HTTP server on its own
+/// port, at a resource of their choosing. `T-23` is the story of the second kind.
 #[tokio::test]
 #[ignore = "needs a SIP server; see tests/interop/README.md"]
 async fn registers_against_a_real_server_over_websocket() {
-    let target = Target::new(server(), TransportKind::Ws).verifying("sipx.test");
+    let target = Target::new(ws_server(), TransportKind::Ws)
+        .verifying("sipx.test")
+        .at_path(ws_path());
     let mut ua = agent_to(target, None).await;
 
     let lease = tokio::time::timeout(Duration::from_secs(15), ua.register())

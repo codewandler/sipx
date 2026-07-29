@@ -94,6 +94,9 @@ pub struct Target {
     /// The name a TLS certificate must be valid for: the host from the URI sipx set out to
     /// reach, before any resolution. `None` outside TLS, where nothing is verified.
     pub verify_as: Option<Arc<str>>,
+    /// The resource the WebSocket handshake asks for. `None` means `/`, and `None` outside
+    /// WebSocket, where there is no handshake to ask anything of.
+    pub path: Option<Arc<str>>,
 }
 
 impl Target {
@@ -104,6 +107,7 @@ impl Target {
             addr,
             transport,
             verify_as: None,
+            path: None,
         }
     }
 
@@ -120,6 +124,28 @@ impl Target {
         self
     }
 
+    /// The same destination, with the resource its WebSocket handshake asks for.
+    ///
+    /// RFC 7118 §5 registers a subprotocol and a set of framing rules; it says nothing at all
+    /// about where on a server SIP lives. A server is therefore entitled to serve it from `/`,
+    /// from `/ws`, or from its own HTTP server on another port, and a client that can only ask
+    /// for `/` reaches the first kind and none of the others.
+    ///
+    /// A leading `/` is supplied when it is missing, because a resource name that lacks one is
+    /// not a relative path in a request-target — it runs into the authority and silently sends
+    /// the upgrade somewhere nobody meant. Anything after the path is kept as given: a server
+    /// that wants a query string gets the one it was handed.
+    #[must_use]
+    pub fn at_path(mut self, path: impl AsRef<str>) -> Self {
+        let path = path.as_ref();
+        self.path = Some(if path.starts_with('/') {
+            Arc::from(path)
+        } else {
+            Arc::from(format!("/{path}"))
+        });
+        self
+    }
+
     /// Which pooled connection carries traffic for this destination.
     #[must_use]
     pub fn connection(&self) -> ConnectionKey {
@@ -127,6 +153,7 @@ impl Target {
             peer: self.addr,
             transport: self.transport,
             identity: self.verify_as.clone(),
+            path: self.path.clone(),
         }
     }
 }
@@ -144,6 +171,11 @@ impl Target {
 /// `a.example.com` over a connection authenticated as `b.example.com`, which throws away the
 /// verification that was just performed. `None` on a connection a peer opened: sipx verified
 /// nothing about it, so there is no identity to key on.
+///
+/// **The WebSocket resource**, for the same reason one step down: a socket upgraded at `/ws` was
+/// accepted by whatever serves `/ws`, and handing it traffic that asked for `/other` ignores the
+/// only thing the target said about where it wanted to go. `None` everywhere the question does
+/// not arise — every other transport, and every connection a peer opened.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConnectionKey {
     /// The far end.
@@ -152,18 +184,30 @@ pub struct ConnectionKey {
     pub transport: TransportKind,
     /// The name whose certificate was verified, for connections sipx opened over TLS.
     pub identity: Option<Arc<str>>,
+    /// The resource the upgrade asked for, for WebSocket connections sipx opened.
+    pub path: Option<Arc<str>>,
 }
 
 impl ConnectionKey {
-    /// A connection with nothing verified about it — anything a peer opened, and every
-    /// cleartext transport.
+    /// A connection with nothing verified about it and no resource named — anything a peer
+    /// opened, and every cleartext transport.
     #[must_use]
     pub fn new(peer: SocketAddr, transport: TransportKind) -> Self {
         Self {
             peer,
             transport,
             identity: None,
+            path: None,
         }
+    }
+
+    /// The resource a WebSocket handshake for this connection asks for.
+    ///
+    /// `/` when the target named none, which is what RFC 6455 §3 requires of a request-target
+    /// that would otherwise be empty and what every server serving SIP at its root expects.
+    #[must_use]
+    pub fn ws_path(&self) -> &str {
+        self.path.as_deref().unwrap_or("/")
     }
 }
 
@@ -339,6 +383,65 @@ mod tests {
         assert_eq!(TransportKind::Tls.default_port(), 5061);
         assert_eq!(TransportKind::Ws.default_port(), 80);
         assert_eq!(TransportKind::Wss.default_port(), 443);
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:8088".parse().expect("a valid address")
+    }
+
+    /// Nothing that works today changes: a target that names no resource asks for the root,
+    /// which is where every server sipx has ever reached serves SIP.
+    #[test]
+    fn a_target_asks_for_the_root_unless_it_says_otherwise() {
+        let target = Target::new(peer(), TransportKind::Ws);
+        assert_eq!(target.path, None);
+        assert_eq!(target.connection().ws_path(), "/");
+    }
+
+    #[test]
+    fn a_target_can_name_the_resource_it_wants() {
+        let target = Target::new(peer(), TransportKind::Ws).at_path("/ws");
+        assert_eq!(target.path.as_deref(), Some("/ws"));
+        assert_eq!(target.connection().ws_path(), "/ws");
+    }
+
+    /// A resource name without a leading slash is not a relative path in a request-target — it
+    /// runs into the authority, and `ws://127.0.0.1:8088ws` is a request to somewhere nobody
+    /// meant. Supplying the slash is the difference between a typo and a silent misdirection.
+    #[test]
+    fn a_resource_name_missing_its_leading_slash_gets_one() {
+        for named in ["ws", "/ws"] {
+            assert_eq!(
+                Target::new(peer(), TransportKind::Ws)
+                    .at_path(named)
+                    .connection()
+                    .ws_path(),
+                "/ws"
+            );
+        }
+        assert_eq!(
+            Target::new(peer(), TransportKind::Ws)
+                .at_path("")
+                .connection()
+                .ws_path(),
+            "/",
+            "naming nothing is naming the root"
+        );
+    }
+
+    /// The same argument the verified identity makes, one step down: a socket upgraded at `/ws`
+    /// was accepted by whatever serves `/ws`, so handing it traffic that asked for somewhere
+    /// else throws away the only thing the target said about where it was going.
+    #[test]
+    fn two_resources_on_one_address_are_two_connections() {
+        let one = Target::new(peer(), TransportKind::Ws).at_path("/ws");
+        let other = Target::new(peer(), TransportKind::Ws).at_path("/sip");
+        assert_ne!(one.connection(), other.connection());
+        assert_ne!(
+            one.connection(),
+            Target::new(peer(), TransportKind::Ws).connection(),
+            "the root is a resource like any other"
+        );
     }
 
     #[test]
