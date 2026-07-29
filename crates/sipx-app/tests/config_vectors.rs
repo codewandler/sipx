@@ -1,10 +1,10 @@
 //! The host configuration's vector set (story `A-1`).
 //!
-//! [`specs/host-config.md`](../../../docs/specs/host-config.md) numbers its normative points `N1`
-//! … `N12` and lists a vector for each. This file is where those vectors run: a document is a
-//! `&str`, an outcome is data, and every point is covered *mechanically* — a point added to the
-//! spec with no vector fails [`the_vector_set_covers_every_normative_point`] rather than going
-//! quietly unproven.
+//! [`specs/host-config.md`](../../../docs/specs/host-config.md) numbers its normative points in §3
+//! and lists a vector for each in §8. This file is where those vectors run: a document is a `&str`,
+//! an outcome is data, and coverage is *mechanical* — the [`spec`] module reads the page, so a
+//! point added to it with no vector fails [`the_vector_set_covers_every_normative_point`] rather
+//! than going quietly unproven.
 //!
 //! Two of the cases run the `A-7` harness rather than only comparing structs, because the claim
 //! they make is about a **call**: a declared `on_5xx` has to end one, and a reload has to leave a
@@ -20,8 +20,143 @@
 use std::time::Duration;
 
 use sipx_app::config::vectors;
-use sipx_app::config::{Admission, ConfigError, Grants, HostConfig, NORMATIVE_POINTS, Running};
+use sipx_app::config::{Admission, ConfigError, Grants, HostConfig, Running};
 use sipx_app::harness::policy::{Failure, FailurePolicy, OnFailure};
+
+/// The spec, read and parsed at test time.
+///
+/// [`host-config.md`](../../../docs/specs/host-config.md) is the source of truth for what the
+/// normative points are, which vectors exist, and which vector pins which point. **Nothing in the
+/// crate transcribes any of that**, and the reason is the failure mode a transcription has: it is
+/// a second copy of a claim, and it drifts silently in the direction that matters — the page grows
+/// a point, and the check that says "every point has a vector" does not notice, because it is
+/// iterating the copy.
+///
+/// So the page is the input. Adding `N13` to §3 fails [`the_vector_set_covers_every_normative_point`]
+/// until a vector claims it; adding a row to §8 fails
+/// [`the_specs_vector_table_lists_exactly_the_vectors_that_run`] until the vector exists; moving a
+/// vector between points fails one of the two agreement tests below.
+///
+/// Each parser asserts it found a plausible number of things. A parser that has drifted from the
+/// page's formatting must fail loudly rather than find nothing and pass — a vacuous pass is the
+/// same bug in a new place.
+mod spec {
+    /// Read at test time, the way the interop fixtures are: a compile-time path, a runtime read,
+    /// and a message naming the file if it is not there.
+    const PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/specs/host-config.md"
+    );
+
+    fn text() -> String {
+        std::fs::read_to_string(PATH)
+            .unwrap_or_else(|e| panic!("{PATH}: {e}; the spec is this test's input"))
+    }
+
+    /// Everything under a `## ` heading, up to the next one.
+    fn section(heading: &str) -> String {
+        let text = text();
+        let mut body = String::new();
+        let mut inside = false;
+        for line in text.lines() {
+            if line.starts_with("## ") {
+                if inside {
+                    break;
+                }
+                inside = line.starts_with(heading);
+                continue;
+            }
+            if inside {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        assert!(!body.trim().is_empty(), "{PATH} has no section {heading:?}");
+        body
+    }
+
+    /// §3's bullets, each joined with its continuation lines.
+    fn point_bullets() -> Vec<String> {
+        let mut bullets: Vec<String> = Vec::new();
+        for line in section("## 3. Normative points").lines() {
+            if line.starts_with("- **N") {
+                bullets.push(line.to_owned());
+            } else if line.starts_with("  ") && !line.trim().is_empty() {
+                let Some(open) = bullets.last_mut() else {
+                    continue;
+                };
+                open.push(' ');
+                open.push_str(line.trim());
+            }
+        }
+        assert!(
+            bullets.len() >= 10,
+            "§3 parsed as {} points; the parser has drifted from the page",
+            bullets.len()
+        );
+        bullets
+    }
+
+    /// `- **N4 — …` → `N4`.
+    fn point_id(bullet: &str) -> String {
+        bullet
+            .trim_start_matches("- **")
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect()
+    }
+
+    /// Every `HC-<n>` mentioned in some text, in order.
+    fn cited_vectors(text: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        let mut rest = text;
+        while let Some(at) = rest.find("HC-") {
+            let tail = &rest[at + "HC-".len()..];
+            let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+            if !digits.is_empty() {
+                ids.push(format!("HC-{digits}"));
+            }
+            rest = &tail[digits.len()..];
+        }
+        ids
+    }
+
+    /// The ids of §3's normative points, in the order the page states them.
+    pub(crate) fn normative_points() -> Vec<String> {
+        point_bullets().iter().map(|b| point_id(b)).collect()
+    }
+
+    /// Each normative point, and the vectors §3 says pin it.
+    pub(crate) fn points_cite() -> Vec<(String, Vec<String>)> {
+        point_bullets()
+            .iter()
+            .map(|bullet| (point_id(bullet), cited_vectors(bullet)))
+            .collect()
+    }
+
+    /// §8's rows: a vector's id, and the points the table says it pins.
+    pub(crate) fn vector_rows() -> Vec<(String, Vec<String>)> {
+        let mut rows = Vec::new();
+        for line in section("## 8. Vectors").lines() {
+            let line = line.trim();
+            if !line.starts_with("| HC-") {
+                continue;
+            }
+            let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            assert_eq!(cells.len(), 4, "a vector row has four columns: {line}");
+            rows.push((
+                cells[0].to_owned(),
+                cells[3].split_whitespace().map(str::to_owned).collect(),
+            ));
+        }
+        assert!(
+            rows.len() >= 20,
+            "§8 parsed as {} rows; the parser has drifted from the page",
+            rows.len()
+        );
+        rows
+    }
+}
 
 /// Every vector in the spec. Each carries its own expectation, so a failure names itself.
 #[test]
@@ -33,31 +168,99 @@ fn every_host_config_vector_holds() {
     }
 }
 
-/// Acceptance point 1, mechanically: *every* normative point has at least one vector. Adding `N13`
-/// to the spec without writing a vector for it fails here.
+/// Acceptance point 1, mechanically: *every* normative point the spec states has at least one
+/// vector. The list comes from §3 of the page itself, so adding `N13` to it and writing no vector
+/// fails here.
 #[test]
 fn the_vector_set_covers_every_normative_point() {
     let vectors = vectors::all();
-    for (id, what) in NORMATIVE_POINTS {
+    let points = spec::normative_points();
+
+    for id in &points {
         assert!(
-            vectors.iter().any(|vector| vector.points.contains(&id)),
-            "no vector pins {id} ({what})"
+            vectors
+                .iter()
+                .any(|vector| vector.points.contains(&id.as_str())),
+            "§3 states {id} and no vector pins it"
         );
     }
 }
 
-/// And no vector claims a point the spec does not have — a typo in a tag would otherwise make the
+/// And no vector claims a point the spec does not state — a typo in a tag would otherwise make the
 /// coverage test above pass by covering nothing.
 #[test]
 fn no_vector_claims_a_point_the_spec_does_not_state() {
+    let points = spec::normative_points();
     for vector in vectors::all() {
         for point in vector.points {
             assert!(
-                NORMATIVE_POINTS.iter().any(|(id, _)| id == point),
-                "{} claims {point}, which is not a normative point",
+                points.iter().any(|id| id == point),
+                "{} claims {point}, which §3 does not state",
                 vector.name
             );
         }
+    }
+}
+
+/// §8's table is a claim about what runs, so it is held against what runs — in both directions. A
+/// row for a vector that was deleted, or a vector the table never learned about, fails here.
+#[test]
+fn the_specs_vector_table_lists_exactly_the_vectors_that_run() {
+    let rows = spec::vector_rows();
+    let mut tabled: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+    let mut running: Vec<&str> = vectors::all().iter().map(|vector| vector.name).collect();
+    tabled.sort_unstable();
+    running.sort_unstable();
+
+    assert_eq!(
+        tabled, running,
+        "§8's table and the vectors that run must be the same set"
+    );
+    assert_eq!(
+        running.len(),
+        vectors::all().len(),
+        "two vectors share a name, so one of them is not really covered"
+    );
+}
+
+/// And the table's `Pins` column is a claim too: it must say what the vector itself says.
+#[test]
+fn the_specs_vector_table_agrees_with_each_vector_about_what_it_pins() {
+    let vectors = vectors::all();
+    for (id, pinned) in spec::vector_rows() {
+        let vector = vectors
+            .iter()
+            .find(|vector| vector.name == id)
+            .unwrap_or_else(|| panic!("§8 lists {id}, which does not run"));
+
+        let mut claimed: Vec<&str> = vector.points.to_vec();
+        let mut tabled: Vec<&str> = pinned.iter().map(String::as_str).collect();
+        claimed.sort_unstable();
+        tabled.sort_unstable();
+        assert_eq!(claimed, tabled, "§8 and {id} disagree about what it pins");
+    }
+}
+
+/// The third copy of the same claim: §3's bullets cite the vectors that pin them. All three — the
+/// bullet, the table row, and the vector's own tag — have to agree, or the page is describing a
+/// coverage it does not have.
+#[test]
+fn each_normative_point_cites_exactly_the_vectors_that_pin_it() {
+    let vectors = vectors::all();
+    for (id, cited) in spec::points_cite() {
+        let mut pinning: Vec<&str> = vectors
+            .iter()
+            .filter(|vector| vector.points.contains(&id.as_str()))
+            .map(|vector| vector.name)
+            .collect();
+        let mut cited: Vec<&str> = cited.iter().map(String::as_str).collect();
+        pinning.sort_unstable();
+        cited.sort_unstable();
+
+        assert_eq!(
+            cited, pinning,
+            "§3's {id} cites one set of vectors and another set pins it"
+        );
     }
 }
 

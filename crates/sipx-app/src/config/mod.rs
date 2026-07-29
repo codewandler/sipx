@@ -31,37 +31,11 @@ pub mod vectors;
 
 pub use running::{Admission, AppPolicy, Running};
 
-/// The spec's normative points, by id, with what each one says.
-///
-/// Enumerable on purpose: [`vectors`] tags every vector with the points it pins, and a point with
-/// no vector fails a test rather than being a paragraph nobody checked. Adding `N13` to §3 without
-/// writing a vector for it is a failing build.
-pub const NORMATIVE_POINTS: [(&str, &str); 12] = [
-    (
-        "N1",
-        "the syntax is the stated subset, and a refusal names its line",
-    ),
-    ("N2", "unknown keys and tables are refused, not ignored"),
-    ("N3", "a key or table declared twice is refused"),
-    ("N4", "the failure knobs are the contract's §9.2 knobs"),
-    ("N5", "grants are deny-by-default"),
-    ("N6", "routing is total"),
-    ("N7", "secrets are named, never carried"),
-    (
-        "N8",
-        "a binding's fields are required at load, not at first call",
-    ),
-    ("N9", "a reload applies wholly or is refused wholly"),
-    (
-        "N10",
-        "listener topology is frozen; policy and routing are not",
-    ),
-    ("N11", "a live call keeps the policy it was admitted with"),
-    (
-        "N12",
-        "the document means the same with one app and with many",
-    ),
-];
+// The list of normative points is deliberately **not** here. §3 of the spec is the source of
+// truth for what they are and which vector pins which, and a copy of that list in this crate would
+// be a second claim that can drift from the first — silently, and in the direction that matters:
+// the page grows a point and the coverage check does not notice. `tests/config_vectors.rs` parses
+// the page instead.
 
 /// The keys of an `[app.<name>.on_failure]` table.
 ///
