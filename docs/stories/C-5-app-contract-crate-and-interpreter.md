@@ -2,8 +2,8 @@
 id: C-5
 title: The application contract crate and its sans-IO interpreter
 pillar: Application
-status: in-progress
-priority: 2
+status: done
+priority:
 design: docs/designs/app-sdk.md
 epic: app-sdk
 areas: [sipx-app-protocol]

@@ -9,6 +9,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The application contract crate and its interpreter (`C-5`)** — a new crate,
+  `sipx-app-protocol`, owning the `sipx.app.v1` types and an instruction interpreter that is a
+  pure state machine: call events and an instruction program in, typed effects out. The primitive
+  every binding drives, remote or in-process. **Experimental**, matching the spec's status.
+  - **No third-party dependency, and the library half has no mandatory dependency at all.** The
+    wire codec is the crate's own, because this workspace has no serialization framework to
+    borrow and taking one would mean two new dependencies plus a proc-macro step to serve one
+    leaf crate. The `sipx-call` adapter sits behind an off-by-default `call` feature, so a remote
+    SDK wanting only the wire format and the state machine does not inherit a runtime, a socket
+    stack and a media session to get them.
+  - **The spec's continuation rule is enforced by construction, in both halves.** `Program`'s
+    queue is private to its own module and exposes only `replace`/`abandon`/`take_next`/`len` —
+    an interpreter that tried to append to a running program would not compile. `Callback` is
+    `#[must_use]`, neither `Clone` nor `Copy`, has no public constructor and is consumed by
+    value, so answering one delivery twice is not a mistake to detect but a program that does not
+    build.
+  - The document parser is the crate's one reader of app-supplied input and is bounded as such:
+    `MAX_DEPTH` of 32 checked on every recursion, no `unwrap`/`expect`/`panic`/slice-index, and
+    strict base64 that refuses rather than repairs.
+  - The epic's end-to-end proof — the interpreter driving a real call with no host — runs in the
+    gate as step 18 rather than by hand.
+
 - **A caller can give up before sipx answers (`S-23`, RFC 3261 §9.2)** — the UAS half of CANCEL,
   which sipx never implemented. A CANCEL for an invitation still ringing is answered `200` on its
   own transaction and the INVITE it withdraws is answered `487 Request Terminated`; one matching
