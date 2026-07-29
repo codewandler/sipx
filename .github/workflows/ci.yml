@@ -95,6 +95,9 @@ jobs:
       # milliseconds and need nothing but a Python interpreter, so this is their home.
       - run: python3 scripts/test-rfc-report.py
       - run: python3 scripts/test-pool-key.py
+      # X-23: the interop harness's own suite. It stubs the container runtime, so it runs here in
+      # seconds rather than in the `interop` job that needs a peer.
+      - run: python3 scripts/test-interop-run.py
 
   # The peer list is read from the repository rather than written here, so that adding an interop
   # peer stays what `tests/interop/README.md` promises it is: adding a profile. A matrix spelled

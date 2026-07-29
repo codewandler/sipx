@@ -40,7 +40,6 @@ and a scripted app. `A-1` is ready. Then the milestones below, each argued for i
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
-- [X-23 — Find out why an interop call test times out one run in five](X-23-interop-call-test-flake.md) · Build · found by T-23 — a flake that a suite exists to be believed cannot afford
 
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
@@ -59,7 +58,6 @@ _This is the layer applications actually program against, so it is the one that 
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 
 ### Ice
-- [M-19 — Parse and serialise the ICE attributes in SDP](M-19-ice-sdp-attributes.md) · Media · ice · RFC 8839 §5 · pure parsing; nothing else can negotiate until this exists
 - [M-20 — Encode and answer a STUN connectivity check](M-20-ice-stun-checks.md) · Media · ice · RFC 5389/5769 · carries the crate-graph decision; runs solo, it moves the lockfile
 
 ### Quic
@@ -124,6 +122,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · M6 · RFC 5764 · M-14 unblocked it
 - [M-17 — Control playback — queue, stop, interrupt on digit](M-17-playback-control.md) · Media · app-sdk · after C-3 · gates the contract's gather · size S/M
 - [M-18 — Mute and unmute a call's outbound audio](M-18-mute-and-unmute.md) · Media · app-sdk · independent · size S
+- [M-19 — Parse and serialise the ICE attributes in SDP](M-19-ice-sdp-attributes.md) · Media · ice · RFC 8839 §5 · pure parsing; nothing else can negotiate until this exists
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -183,6 +182,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-20 — Let a caller take the digest primitives without taking a runtime](X-20-digest-without-a-runtime.md) · Build · sipx-ua pulls tokio unconditionally, so sans-IO code cannot use S-16's Authenticator
 - [X-21 — Make the timer queue generic over its instant](X-21-timer-queue-generic-over-its-instant.md) · Build · the queue documents clock-independence its signature contradicts · additive, breaks nothing
 - [X-22 — Put the MSRV check in the documented gate](X-22-msrv-in-the-documented-gate.md) · Build · CI has an msrv job the gate does not name, so a green local gate lied through two releases
+- [X-23 — Find out why an interop call test times out one run in five](X-23-interop-call-test-flake.md) · Build · found by T-23 — a flake that a suite exists to be believed cannot afford
 - [X-24 — Stop the specs describing a connection pool key that has moved on twice](X-24-pool-key-spec-drift.md) · Build · sip-transport.md still says the key is two fields; it has been four since T-23
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._

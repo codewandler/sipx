@@ -95,6 +95,10 @@ def gate_steps(msrv: str) -> list[Step]:
         # alternative is a test file that can rot without anybody hearing about it.
         Step("rfc report tests", "gate", ("python3", "scripts/test-rfc-report.py")),
         Step("pool key tests", "gate", ("python3", "scripts/test-pool-key.py")),
+        # The interop harness reserves machine-global things and used to let two runs share them,
+        # which `X-23` measured as both call tests timing out together. The suite stubs the
+        # container runtime, so it belongs beside the others rather than in the `interop` job.
+        Step("interop harness tests", "gate", ("python3", "scripts/test-interop-run.py")),
         Step(
             "provenance",
             "provenance",

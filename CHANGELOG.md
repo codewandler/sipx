@@ -9,6 +9,41 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **RFC 8839's ICE attributes in SDP (`M-19`)** — `sipx_sdp::ice` parses and serialises
+  `candidate`, `ice-ufrag`/`ice-pwd`, `ice-options`, `ice-lite`, `ice-mismatch`,
+  `remote-candidates` and `ice-pacing`, so the rest of ICE will negotiate over a typed description
+  rather than a substring search. Pure parsing — no runtime, socket, clock read or new dependency.
+  The first of the six stories `M-16` was cut into.
+  - **The priority range check is load-bearing, not defensive.** RFC 8839's grammar is
+    `1*10DIGIT`, so `4294967295` parses, and the RFC 8445 §6.1.2.3 pair-priority arithmetic
+    overflows `u64` on it. Checked on parse, behind a private field with no public bypass.
+  - **Lenient in the right direction**: a candidate line naming an FQDN, an unsupported address
+    family or a non-UDP transport is ignored line by line while the rest of the description
+    survives byte-identically, and unknown extensions are kept and re-emitted. A parser that
+    rejected a whole description over one unusable line would break calls with legal peers.
+  - Media-level `ice-ufrag`/`ice-pwd` win over session level and are never mixed across levels.
+  - Corrects `docs/specs/ice.md` §6.2, which stated a maximum pair priority that cannot be
+    attained and put the overflow threshold one bound too early.
+
+## [0.8.0] — 2026-07-29
+
+### Fixed
+
+- **The interop suite's flake was two runs sharing one machine (`X-23`)** — a call test failed
+  about one run in five, and the cause was neither the readiness marker everyone suspected nor a
+  timeout that was too tight. `tests/interop/run.sh` had no mutual exclusion while everything a
+  run reserves is machine-global: it removes the peer container by fixed name at start-up,
+  removes every labelled container at cleanup, and the peer runs on the host network on fixed
+  ports. A second run deleted the first run's peer mid-call, which is why *both* call tests
+  failed together on their twenty-second timeout.
+  - A run now holds an exclusive lock for its whole life and a second run waits its turn.
+  - **The timeout is untouched and no retry was added.** The bound was never the problem, and
+    widening it would have hidden the cause.
+  - Measured rather than asserted: 12 of 16 overlapping runs failed before, 0 of 16 after, and
+    0 of 10 run alone. "One run in five" was how often two runs happened to overlap.
+
+### Added
+
 - **A push notification wakes a client that holds no connection (`T-21`, RFC 8599)** — the UA half.
   Every other mechanism in the stack assumes there is something the registrar can route down;
   this is what is left when there is nothing.
@@ -904,5 +939,6 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/codewandler/sipx/compare/v0.7.0...v0.8.0
 [0.1.0]: https://github.com/codewandler/sipx/releases/tag/v0.1.0
