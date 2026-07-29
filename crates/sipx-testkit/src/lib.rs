@@ -12,3 +12,4 @@ pub mod link;
 pub mod load;
 pub mod rfc4475;
 pub mod soak;
+pub mod transaction_sequence;

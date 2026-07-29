@@ -7,10 +7,22 @@ publish = false
 [package.metadata]
 cargo-fuzz = true
 
+# Its own workspace root, stated rather than implied. The root manifest's `exclude = ["fuzz"]`
+# says the same thing only for a checkout that sits at the top of the filesystem walk; in a git
+# worktree nested inside another checkout of this repo, cargo walks past the excluding manifest,
+# finds the outer one, and refuses to build. Two words here make the fuzz crate buildable from
+# any layout, which matters because the fuzz targets are the checks nobody runs by accident.
+[workspace]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 bytes = "1"
 sipx-sip = { path = "../crates/sipx-sip" }
+# The transaction-sequence harness — its event vocabulary, decoder, driver and invariant oracle
+# — lives in the workspace's test crate rather than here, so the fuzz target and the regression
+# tests in `crates/sipx-sip/tests/` drive exactly the same code. A corpus entry that crashes the
+# fuzzer is replayed by a test byte for byte; two copies of the driver would make that a lie.
+sipx-testkit = { path = "../crates/sipx-testkit" }
 
 [[bin]]
 name = "parse_datagram"
@@ -36,6 +48,13 @@ bench = false
 [[bin]]
 name = "roundtrip"
 path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transaction_sequence"
+path = "fuzz_targets/transaction_sequence.rs"
 test = false
 doc = false
 bench = false
