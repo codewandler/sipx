@@ -2,7 +2,7 @@
 id: C-4
 title: Serve many calls from one endpoint
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 4
 design: docs/designs/app-sdk.md
 epic: app-sdk
