@@ -278,16 +278,23 @@ evidence = [
   "crates/sipx-call/src/rel.rs",
   "crates/sipx-call/tests/reliable_provisional.rs",
 ]
-note = "Offered in Supported, honoured in Require. A reliable provisional carries RSeq and is retransmitted from T1 with no T2 cap until PRACK or 64*T1; PRACK carries RAck and is answered 2xx, or 481 when it matches nothing. A peer that requires 100rel while it is off gets 420 with Unsupported. An offer arriving in the provisional is answered in the PRACK. UPDATE (RFC 3311) is not implemented, so an early-dialog renegotiation is not available."
+note = "Offered in Supported, honoured in Require. A reliable provisional carries RSeq and is retransmitted from T1 with no T2 cap until PRACK or 64*T1; PRACK carries RAck and is answered 2xx, or 481 when it matches nothing. A peer that requires 100rel while it is off gets 420 with Unsupported. An offer arriving in the provisional is answered in the PRACK, and an offer arriving in the INVITE may be answered in the provisional (ring_early), which is what makes an early-dialog renegotiation by UPDATE legal."
 
 [[rfc]]
 number = 3311
 title = "The SIP UPDATE Method"
 layer = "core"
-status = "syntax"
+status = "implemented"
 methods = ["UPDATE"]
-evidence = ["crates/sipx-sip/src/message.rs"]
-note = "The method is represented. Renegotiation uses re-INVITE only."
+headers = ["Allow", "RetryAfter"]
+evidence = [
+  "crates/sipx-sip/src/update.rs",
+  "crates/sipx-call/src/update.rs",
+  "crates/sipx-call/src/rel.rs",
+  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/tests/update.rs",
+]
+note = "Sent and received in an early dialog and a confirmed one. Allow lists UPDATE on the INVITE, its provisional and 2xx responses, and on in-dialog requests (§4). §5.2's three refusals are three answers: 500 with a random Retry-After for a second UPDATE before the first is answered, 491 for glare, 500 with Retry-After when an answer is owed; an unusable description is 488 and the dialog survives. An early dialog is renegotiable only after the INVITE offer is answered in a reliable provisional (RFC 3262 §5), which ring_early does."
 
 [[rfc]]
 number = 4028
@@ -300,7 +307,7 @@ evidence = [
   "crates/sipx-call/src/call.rs",
   "crates/sipx-call/tests/session_timer.rs",
 ]
-note = "Negotiated on the INVITE and its 2xx, Table 2 election, refresh by re-INVITE, 422 with Min-SE below the floor, and a local BYE when no refresh arrives. UPDATE is not used for the refresh."
+note = "Negotiated on the INVITE and its 2xx, Table 2 election, 422 with Min-SE below the floor, and a local BYE when no refresh arrives. The refresh is an UPDATE with no body when the peer's Allow lists the method and a re-INVITE otherwise (§7.4)."
 
 [[rfc]]
 number = 6665

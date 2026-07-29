@@ -34,6 +34,7 @@ pub mod push;
 pub mod rel;
 pub mod session;
 pub mod transaction;
+pub mod update;
 pub mod uri;
 pub mod validate;
 

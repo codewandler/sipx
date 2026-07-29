@@ -57,6 +57,20 @@ pub enum Error {
     /// The far end never refreshed the session, so it was torn down locally (RFC 4028 §10).
     #[error("the session expired without a refresh")]
     SessionExpired,
+    /// A 2xx was asked for while a reliable provisional carrying SDP is unacknowledged.
+    ///
+    /// RFC 3262 §5 makes the delay a MUST, and this is where it is enforced rather than
+    /// silently deferred: a description sent in a provisional that never arrived, followed by a
+    /// 200 that carries none, leaves the caller in a confirmed dialog with no answer at all.
+    /// Keep feeding messages to [`Ringing::on_prack`](crate::Ringing::on_prack) and try again.
+    #[error("the reliable provisional carrying the answer has not been acknowledged")]
+    UnacknowledgedProvisional,
+    /// A ringing invitation was answered as an early session when it never had one.
+    ///
+    /// Either it was rung with `ring` rather than `ring_early`, or it has already been
+    /// answered — a `Ringing` hands its media port and its dialog over exactly once.
+    #[error("this invitation has no early session to answer")]
+    NoEarlySession,
 }
 
 /// A call result.

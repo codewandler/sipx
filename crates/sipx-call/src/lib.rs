@@ -14,12 +14,16 @@ pub mod error;
 pub mod event;
 pub mod rel;
 pub mod transfer;
+// Crate-private: every item in it is `pub(crate)`, and a `pub mod` whose contents are all
+// private renders as an empty page in the API reference — a promise of surface that is not there.
+mod update;
 
 pub use call::{
-    Call, DialOptions, answer, answer_replacing, answer_ringing, dial, dial_once, serve,
+    Call, DialOptions, answer, answer_early, answer_replacing, answer_ringing, dial, dial_once,
+    serve,
 };
 pub use dialog::{Dialog, DialogId, Role};
 pub use error::{Error, Result};
 pub use event::{CallEvent, CallEvents, EndCause};
-pub use rel::{Ringing, ring};
+pub use rel::{Ringing, ring, ring_early};
 pub use transfer::{Referral, Replaces, Transfer, TransferState};

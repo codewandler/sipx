@@ -9,6 +9,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The UPDATE method (`S-19`, RFC 3311)** — renegotiate a session *before* it has been answered,
+  which is the only way to change one in an early dialog, and refresh a session with UPDATE where
+  RFC 4028 §7.4 recommends it over a re-INVITE. M9's last session-integrity gap.
+  - **Three refusals, two status codes, as §5.2 requires** — 491 for glare, and 500 with
+    `Retry-After` both for an exchange already in progress and for an offer arriving while this
+    side still owes an answer. 491 tells a peer to back off per §14.1; 500 tells it to retry.
+  - **A 488 refuses the description without killing the dialog** — the next UPDATE is accepted and
+    the call still answers on what it settled.
+  - **A session refresh prefers UPDATE when the peer's `Allow` lists it** and falls back to a
+    re-INVITE otherwise. A peer that does not advertise UPDATE sees exactly `S-11`'s behaviour.
+  - **A confirmed dialog still prefers a re-INVITE for renegotiation.** `Call::update` is opt-in;
+    `Call::reinvite` is unchanged.
+  - RFC 3311 moves off "syntax only"; RFC 3262 and RFC 4028 lose the notes recording UPDATE as
+    missing.
+
+### Fixed
+
+- **A replayed BYE could end a live call through the early dialog (`S-19`)** — found by review
+  before release. The early-dialog path applied no RFC 3261 §12.2.2 ordering check and wrote the
+  dialog's remote `CSeq` *backwards*, so a request from behind the sequence was accepted and a
+  subsequent replayed BYE tore down a running call. The confirmed-dialog path had always guarded
+  this; the ordering rule now lives on `Dialog` itself, so every in-dialog path shares one
+  chokepoint rather than each growing its own.
+
+### Changed
+
+- `sipx_call::Error` gains `UnacknowledgedProvisional` and `NoEarlySession` (`S-19`). Additive, but
+  source-breaking for a downstream exhaustive `match`, as previous variants have been.
+
 - **RFC 8839's ICE attributes in SDP (`M-19`)** — `sipx_sdp::ice` parses and serialises
   `candidate`, `ice-ufrag`/`ice-pwd`, `ice-options`, `ice-lite`, `ice-mismatch`,
   `remote-candidates` and `ice-pacing`, so the rest of ICE will negotiate over a typed description
