@@ -44,7 +44,6 @@ _None._
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
 - [C-5 — The application contract crate and its sans-IO interpreter](C-5-app-contract-crate-and-interpreter.md) · Application · app-sdk · parallel to C-3/C-4/M-17/M-18 · spec is docs/specs/app-contract.md · size M
-- [C-4 — Serve many calls from one endpoint](C-4-serve-many-calls-from-one-endpoint.md) · Signalling · app-sdk · after C-3 · size M
 
 ### Call framework
 _This is the layer applications actually program against, so it is the one that decides whether_
@@ -110,6 +109,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [A-1 — Finish the host configuration and failure-semantics schema](A-1-host-configuration-schema.md) · Application · app-host phase 1 · spec work, no dependency on the app-sdk stories
 - [A-7 — The deterministic harness — fake time, scripted bindings, scripted calls](A-7-deterministic-harness.md) · Application · app-host phase 1 · built with the host, not after it · startable against contract vectors alone
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
+- [C-4 — Serve many calls from one endpoint](C-4-serve-many-calls-from-one-endpoint.md) · Signalling · app-sdk · after C-3 · size M
 - [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media
 - [M-2 — Implement RTP and RTCP](M-2-rtp-and-rtcp.md) · Media
 - [M-3 — Implement G.711 and WAV handling](M-3-g711-and-wav.md) · Media

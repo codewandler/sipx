@@ -278,6 +278,21 @@ fn header_string(headers: &sipx_sip::Headers, name: &HeaderName) -> String {
         .unwrap_or_default()
 }
 
+/// The `From` tag: whoever sent the request, seen from the receiving end.
+///
+/// Its own function because the dispatcher (`C-4`) keys routes on it and must read it the same
+/// way [`Dialog::matches`] does — a second reading of the same header is a second chance to read
+/// it differently, and the two disagreeing is a request routed to a call that then disowns it.
+pub(crate) fn from_tag(headers: &sipx_sip::Headers) -> Option<Vec<u8>> {
+    tag_of::<FromHeader>(headers)
+}
+
+/// The `To` tag, which is also how a request says whether it is inside a dialog at all
+/// (RFC 3261 §12.2.2).
+pub(crate) fn to_tag(headers: &sipx_sip::Headers) -> Option<Vec<u8>> {
+    tag_of::<To>(headers)
+}
+
 fn tag_of<T>(headers: &sipx_sip::Headers) -> Option<Vec<u8>>
 where
     T: sipx_sip::TypedHeader,
@@ -412,7 +427,11 @@ fn push_route(routes: &mut Vec<String>, slice: Option<&[u8]>) {
     }
 }
 
-fn cseq_number(headers: &sipx_sip::Headers) -> Option<u32> {
+/// The sequence number of a request, for RFC 3261 §8.2.2.2's third merged-request term.
+///
+/// `pub(crate)` for the dispatcher, which needs to read it the same way the dialog does — two
+/// readings of one header are two chances to read it differently.
+pub(crate) fn cseq_number(headers: &sipx_sip::Headers) -> Option<u32> {
     headers
         .typed::<sipx_sip::headers::CSeq>()
         .and_then(Result::ok)

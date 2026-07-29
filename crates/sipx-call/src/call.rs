@@ -361,6 +361,16 @@ impl Call {
                 self.on_notify(incoming).await?;
                 Ok(true)
             }
+            // RFC 3261 §11.2: OPTIONS may be sent inside a dialog, where it is the cheapest
+            // keep-alive there is. Answered here rather than left to the application because
+            // `sipx_sip::update::ALLOW` — the one list this stack advertises, and the one a 405
+            // from [`serve`] carries — names OPTIONS. An advertisement that is not true is worse
+            // than a narrower one: a peer that reads the list and is then refused has been told
+            // two different things by the same endpoint.
+            Method::Options => {
+                self.on_options(incoming).await?;
+                Ok(true)
+            }
             Method::Bye => {
                 // §12.2.2 applies to every in-dialog request, not only the ones that
                 // renegotiate: a BYE from behind the current sequence number is a stale
@@ -786,6 +796,100 @@ impl Call {
                 .build();
         self.endpoint.respond(&incoming.key, response).await?;
         Ok(())
+    }
+
+    /// Answer an in-dialog OPTIONS (RFC 3261 §11.2).
+    ///
+    /// The point of OPTIONS is the capability list, so a 200 with an empty `Allow` is a wasted
+    /// exchange: the peer asked what we can do and learned nothing. No `Contact` and no session
+    /// description — §11.2 allows a description here, and sending one would be an offer nobody
+    /// asked for inside a call that already has one.
+    async fn on_options(&mut self, incoming: &Incoming) -> Result<()> {
+        // §12.2.2 applies to every in-dialog request, this one included. Going through the
+        // dialog's own guard rather than past it is the point: a path that keeps its own copy of
+        // the rule is a path the rule can be forgotten on.
+        if self.out_of_order(&incoming.request) {
+            return self.refuse(incoming, 500, "Server Internal Error").await;
+        }
+        self.record_remote_cseq(&incoming.request);
+
+        let response = ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?
+            .header(
+                HeaderName::Allow,
+                Bytes::from_static(update::ALLOW.as_bytes()),
+            )?
+            .header(HeaderName::Accept, Bytes::from_static(b"application/sdp"))?
+            .build();
+        self.endpoint.respond(&incoming.key, response).await?;
+        Ok(())
+    }
+
+    /// Answer a request that reached this call and that [`Self::handle`] did not claim.
+    ///
+    /// Three different things bring one here, and they are three different answers — collapsing
+    /// them was a real defect, not an untidiness. The first version answered 481 to everything
+    /// that failed [`Dialog::matches`](crate::Dialog::matches), and `matches` is false for any
+    /// request with no `To` tag: so a bare INVITE or CANCEL reaching a one-call [`serve`] drew
+    /// RFC 3261 §12.2.2's "the dialog you named does not exist" for a request that named no
+    /// dialog at all.
+    ///
+    /// - **It matches this dialog**, but the method is one this call does not implement:
+    ///   §8.2.1's **405**, with the `Allow` that section makes mandatory.
+    /// - **It names a dialog that is not this one** — it carries a `To` tag, or its method
+    ///   exists only inside a dialog: §12.2.2's **481**.
+    /// - **It names no dialog**, so it is a new exchange arriving where exactly one call is
+    ///   being served: **486 Busy Here** for an INVITE (§21.4.24 — "not willing or able to take
+    ///   additional calls", which is precisely the one-call contract), and 405 for anything
+    ///   else. A dispatcher is the answer to wanting more than one call here, and the 486 says
+    ///   so in the only vocabulary the peer has.
+    ///
+    /// An ACK gets nothing, because SIP has no response to one.
+    ///
+    /// Failures are logged rather than returned. This exists so nothing is discarded in silence
+    /// (`T-19`, story `C-4`), and handing the caller an error to ignore would put the silence
+    /// back one level up.
+    async fn refuse_unclaimed(&self, incoming: &Incoming) {
+        // There is no response to an ACK, and an ACK for a 2xx is a transaction of its own
+        // (RFC 3261 §17.1.1.3). Nothing to send; a stray one is still worth a line.
+        if incoming.request.method == Method::Ack {
+            tracing::debug!("an ACK reached a call that did not claim it");
+            return;
+        }
+        let request = &incoming.request;
+        let (code, reason) = if self.dialog.matches(request) {
+            (405u16, "Method Not Allowed")
+        } else if crate::dialog::to_tag(&request.headers).is_some()
+            || crate::dispatch::dialog_only(&request.method)
+        {
+            (481, "Call/Transaction Does Not Exist")
+        } else if request.method == Method::Invite {
+            (486, "Busy Here")
+        } else {
+            (405, "Method Not Allowed")
+        };
+        let Some(status) = StatusCode::new(code) else {
+            return;
+        };
+        let allow = code == 405;
+        let built =
+            ResponseBuilder::to_request(&incoming.request, status, reason).and_then(|builder| {
+                if allow {
+                    builder.header(
+                        HeaderName::Allow,
+                        Bytes::from_static(update::ALLOW.as_bytes()),
+                    )
+                } else {
+                    Ok(builder)
+                }
+            });
+        match built {
+            Ok(builder) => {
+                if let Err(error) = self.endpoint.respond(&incoming.key, builder.build()).await {
+                    tracing::warn!(%error, code, "could not refuse an unclaimed request");
+                }
+            }
+            Err(error) => tracing::warn!(%error, code, "could not build the refusal"),
+        }
     }
 
     /// Refuse a renegotiation without ending the call.
@@ -1376,9 +1480,27 @@ impl Call {
 /// every caller has to remember.
 ///
 /// Returns when the far end hangs up, or [`Error::SessionExpired`] when it stops answering.
-/// Messages for other dialogs are ignored rather than consumed silently — [`Call::handle`]
-/// reports whether it recognised one, and this passes that judgement straight through by
-/// dropping what it does not own.
+///
+/// # One call, or one of many
+///
+/// This is **the one-call convenience over [`Dispatcher`](crate::Dispatcher)** (story `C-4`), and
+/// the receiver it takes is what makes it both things at once. Handed the endpoint's own
+/// `Receiver<Incoming>` it is the single-call program it has always been; handed an inbox a
+/// dispatcher routed, it drives one call of any number on the same endpoint. There is no second
+/// loop for the many-call case, which is the point — a hand-rolled demultiplexer beside this one
+/// is a fresh chance to drop an ACK.
+///
+/// The one-call form claims the whole endpoint, so it is right only when this is the only call
+/// on it. Anything else arriving there is not this call's, and is answered as such below.
+///
+/// # Nothing is discarded
+///
+/// A request [`Call::handle`] does not claim is **answered**, not dropped: 405 with `Allow` when
+/// it belongs to this dialog but names a method this call does not implement (RFC 3261 §8.2.1),
+/// 481 when it names a dialog that is not this one (§12.2.2), 486 for a second INVITE arriving
+/// where one call is being served (§21.4.24), and nothing at all for an ACK, which SIP has no
+/// response to. This used to be a silent drop, and it is the call-layer twin of what `T-19`
+/// removed at the transport layer.
 pub async fn serve(
     call: &mut Call,
     incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
@@ -1388,7 +1510,9 @@ pub async fn serve(
         tokio::select! {
             message = incoming.recv() => match message {
                 Some(message) => {
-                    call.handle(&message).await?;
+                    if !call.handle(&message).await? {
+                        call.refuse_unclaimed(&message).await;
+                    }
                 }
                 // The endpoint has shut down. The call cannot be worked any further, and
                 // pretending otherwise would spin on a closed channel.
