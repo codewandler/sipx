@@ -229,6 +229,27 @@ impl Call {
     /// end said.
     pub async fn record_until_idle(&self, idle: Duration) -> Vec<i16> {
         let samples = self.media.record_until_idle(idle).await;
+        self.finished_recording(samples)
+    }
+
+    /// Record until `samples` samples have arrived or `within` elapses, and report the result on
+    /// the event stream.
+    ///
+    /// The counted wait, for a caller that knows how much audio the far end was given;
+    /// [`MediaSession::record_at_least`] has the reasoning, and why `within` is a bound on
+    /// failure rather than a window to measure in. Emits the same
+    /// [`CallEvent::RecordingFinished`] as [`Self::record_until_idle`], measured the same way —
+    /// from the samples, not from how long this side waited for them.
+    pub async fn record_at_least(&self, samples: usize, within: Duration) -> Vec<i16> {
+        let samples = self.media.record_at_least(samples, within).await;
+        self.finished_recording(samples)
+    }
+
+    /// Announce a finished recording and hand it back.
+    ///
+    /// Shared by both recording verbs so the duration on the event cannot come to mean one thing
+    /// for one of them and something else for the other.
+    fn finished_recording(&self, samples: Vec<i16>) -> Vec<i16> {
         let rate = u64::from(self.media.codec().clock_rate()).max(1);
         let duration = Duration::from_micros(samples.len() as u64 * 1_000_000 / rate);
         self.events.emit(CallEvent::RecordingFinished { duration });

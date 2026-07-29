@@ -469,7 +469,14 @@ async fn a_recording_reports_the_duration_of_what_it_captured() {
     let packets = 10usize;
     let spoken = Duration::from_micros((packets * per_packet) as u64 * 1_000_000 / rate);
 
-    let idle = Duration::from_millis(500);
+    // Two seconds rather than the 500 ms this used to be (`X-28`). This test is *about*
+    // `record_until_idle`, so it cannot be moved to a counted wait like the rest of that sweep
+    // was — the idle window is the subject, not the transport. What it can do is stop treating
+    // half a second of wall clock as the difference between "the far end stopped talking" and
+    // "this machine is busy": at 20 ms a packet that gap is a hundred missed intervals. Both
+    // assertions below survive the change — a duration that wrongly counted the window would be
+    // `spoken + idle`, still comfortably over it.
+    let idle = Duration::from_secs(2);
     let recorded = tokio::join!(
         async {
             caller

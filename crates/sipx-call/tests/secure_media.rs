@@ -25,6 +25,10 @@ fn loopback() -> IpAddr {
     "127.0.0.1".parse().expect("valid")
 }
 
+/// How long a test here waits for audio it played to arrive before calling it lost (`X-28`).
+/// A bound on failure, not a window to measure in — see `MediaSession::record_at_least`.
+const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
 /// A call whose signalling is encrypted must encrypt its media too — that is the whole point of
 /// the story, and the thing `sips:` on its own does not give you.
 #[tokio::test]
@@ -79,7 +83,7 @@ async fn a_call_over_secure_signalling_encrypts_its_media() {
     let tone: Vec<i16> = (0..8000).map(|_| 8000i16).collect();
     let (_played, heard) = tokio::join!(
         caller.media().play(&tone, 160),
-        callee.media().record_until_idle(Duration::from_millis(400)),
+        callee.media().record_at_least(tone.len(), DELIVERY_BOUND),
     );
     assert!(
         heard.len() > 1600,
@@ -133,7 +137,7 @@ async fn a_call_over_cleartext_signalling_does_not_pretend_to_encrypt() {
     let tone: Vec<i16> = (0..8000).map(|_| 8000i16).collect();
     let (_played, heard) = tokio::join!(
         caller.media().play(&tone, 160),
-        callee.media().record_until_idle(Duration::from_millis(400)),
+        callee.media().record_at_least(tone.len(), DELIVERY_BOUND),
     );
     assert!(heard.len() > 1600, "{} samples", heard.len());
 

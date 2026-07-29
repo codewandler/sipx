@@ -17,6 +17,17 @@ use std::time::Duration;
 
 use sipx_media::{Bridge, Codec, Config, MediaPort, MediaSession};
 
+/// How long a test here will wait for a clip it played to come out the other side before calling
+/// it lost (`X-28`).
+///
+/// A bound on failure, not a window to measure in: every clip below is under half a second, so
+/// this is more than twenty times the honest answer and nothing that arrives inside it is late
+/// in any sense a test should care about. What it buys is that a machine with four other gates
+/// compiling on it produces the same verdict as an idle one — slower, but the same. The old
+/// `record_until_idle(400ms)` spent one duration on both "has it started" and "has it finished",
+/// and under load neither was a property of the audio; see [`MediaSession::record_at_least`].
+const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
 /// A recognisable clip, so a test that recorded silence could not pass.
 fn tone(milliseconds: usize) -> Vec<i16> {
     (0..milliseconds * 8)
@@ -61,7 +72,7 @@ async fn audio_played_into_one_call_is_heard_on_the_other() {
     let clip = tone(400);
     let (_played, heard) = tokio::join!(
         alice.play(&clip, 160),
-        bob.record_until_idle(Duration::from_millis(400))
+        bob.record_at_least(clip.len(), DELIVERY_BOUND)
     );
 
     assert!(
@@ -92,7 +103,7 @@ async fn a_bridge_carries_audio_both_ways() {
     let clip = tone(300);
     let (_played, heard_by_alice) = tokio::join!(
         bob.play(&clip, 160),
-        alice.record_until_idle(Duration::from_millis(400))
+        alice.record_at_least(clip.len(), DELIVERY_BOUND)
     );
     assert!(
         heard_by_alice.len() > clip.len() / 2,
@@ -120,7 +131,7 @@ async fn differing_codecs_are_transcoded_and_the_fact_is_reported() {
     let clip = tone(400);
     let (_played, heard) = tokio::join!(
         alice.play(&clip, 160),
-        bob.record_until_idle(Duration::from_millis(400))
+        bob.record_at_least(clip.len(), DELIVERY_BOUND)
     );
     assert!(
         heard.len() > clip.len() / 2,
@@ -156,7 +167,7 @@ async fn a_pass_through_bridge_delivers_the_audio_unchanged() {
 
     let (_played, heard) = tokio::join!(
         alice.play(&clip, 160),
-        bob.record_until_idle(Duration::from_millis(400))
+        bob.record_at_least(clip.len(), DELIVERY_BOUND)
     );
 
     assert!(heard.len() >= 160, "something must have arrived");
@@ -253,6 +264,11 @@ async fn dropping_a_bridge_stops_the_forwarding() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Nothing crosses any more.
+    //
+    // Still `record_until_idle`, and deliberately (`X-28`). This one asserts the recording is
+    // *empty*, so the fixed window is a window to look in rather than a deadline to beat: a
+    // loaded machine can only make it emptier, never falsely full. Waiting for a sample count
+    // that must never arrive would be a ten-second sleep in every run.
     let clip = tone(200);
     let (_played, heard) = tokio::join!(
         alice.play(&clip, 160),

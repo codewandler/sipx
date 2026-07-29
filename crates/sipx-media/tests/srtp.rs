@@ -19,6 +19,10 @@ use bytes::Bytes;
 use sipx_media::{Codec, Config, MediaPort, MediaSession, SrtpKeys};
 use tokio::net::UdpSocket;
 
+/// How long a test here waits for a clip it played to arrive before calling it lost (`X-28`).
+/// A bound on failure rather than a window to measure in — see [`MediaSession::record_at_least`].
+const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
 /// A distinctive signal: µ-law encodes a constant amplitude to a constant byte, so a recognisable
 /// byte pattern appears verbatim in an *unencrypted* payload and cannot in an encrypted one.
 fn recognisable() -> Vec<i16> {
@@ -125,7 +129,7 @@ async fn an_encrypted_call_still_carries_the_audio() {
     let audio = recognisable();
     let (_played, heard) = tokio::join!(
         alice.play(&audio, 160),
-        bob.record_until_idle(Duration::from_millis(400)),
+        bob.record_at_least(audio.len(), DELIVERY_BOUND),
     );
 
     assert!(
@@ -277,7 +281,7 @@ async fn a_plain_call_still_works() {
     let audio = recognisable();
     let (_played, heard) = tokio::join!(
         alice.play(&audio, 160),
-        bob.record_until_idle(Duration::from_millis(400)),
+        bob.record_at_least(audio.len(), DELIVERY_BOUND),
     );
     assert!(heard.len() > audio.len() / 2, "{} samples", heard.len());
     alice.stop();

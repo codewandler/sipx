@@ -1189,12 +1189,53 @@ impl MediaSession {
     ///
     /// The idle timeout rather than a packet count, because the caller generally knows how long
     /// the far end will talk for and not how many packets that becomes.
+    ///
+    /// `idle` answers one question — *has the far end stopped talking* — and it answers it by
+    /// wall clock. A caller that already knows how many samples it expects is asking a different
+    /// question and wants [`Self::record_at_least`]; see there for what goes wrong when the two
+    /// are confused (`X-28`).
     pub async fn record_until_idle(&self, idle: Duration) -> Vec<i16> {
         let mut samples = Vec::new();
         while let Ok(Some(frame)) = tokio::time::timeout(idle, self.recv()).await {
             samples.extend_from_slice(&frame);
         }
         samples
+    }
+
+    /// Take received samples until `samples` of them have arrived, or `within` elapses.
+    ///
+    /// The wait for a caller that knows the size of what the far end was given — a test that
+    /// played a clip of its own, most often. `within` is a **bound on failure**, not a
+    /// measurement: it is how long this side is prepared to wait before concluding the audio is
+    /// not coming, so it should be far longer than the clip rather than close to it. Whatever
+    /// arrived is returned, so a caller that got fewer samples than it asked for can say so
+    /// itself.
+    ///
+    /// # Why this exists (`X-28`)
+    ///
+    /// [`Self::record_until_idle`] spends one duration on two different jobs: how long to wait
+    /// for the stream to *start*, and how long a gap means it has *ended*. Neither is a property
+    /// of the audio — both are properties of how fast the machine happens to be — so a caller
+    /// that knows the count and uses the idle window instead is racing a fixed wall clock
+    /// against a pipeline that is merely slow. On a loaded machine that pipeline is slow in
+    /// exactly the two places the single window covers: the first packet is the one that waits
+    /// out both jitter buffers filling, and a stalled scheduler opens mid-stream gaps wider than
+    /// any packet interval. The observed result is a recording of **zero** samples — not a
+    /// degraded one — because once the first frame lands the rest follow at the packet rate.
+    ///
+    /// Widening the window would not have fixed that; it would have moved the cliff.
+    pub async fn record_at_least(&self, samples: usize, within: Duration) -> Vec<i16> {
+        let deadline = tokio::time::Instant::now() + within;
+        let mut recorded = Vec::with_capacity(samples);
+        while recorded.len() < samples {
+            match tokio::time::timeout_at(deadline, self.recv()).await {
+                Ok(Some(frame)) => recorded.extend_from_slice(&frame),
+                // The session ended, or the bound elapsed. Either way this is everything there
+                // is, and it is short — which is the caller's to report, not this method's.
+                Ok(None) | Err(_) => break,
+            }
+        }
+        recorded
     }
 
     /// How many samples one packet of this session's audio carries.
@@ -2632,6 +2673,20 @@ mod tests {
         panic!("no adjacent port pair could be bound");
     }
 
+    /// How long a test here waits for audio it played to arrive before calling it lost (`X-28`).
+    ///
+    /// A bound on failure, not a window to measure in. Every clip below is well under a second,
+    /// so this is more than an order of magnitude past the honest answer, and its only job is to
+    /// stop a broken pipeline hanging the suite. The `record_until_idle(300ms)` these replaced
+    /// was a measurement, and under load it measured the machine rather than the audio — see
+    /// [`MediaSession::record_at_least`].
+    ///
+    /// The tests that still use `record_until_idle` do so deliberately: each asserts its
+    /// recording is *empty*, so the fixed window is a window to look in rather than a deadline
+    /// to beat, and a loaded machine can only make them pass. Waiting by count for samples that
+    /// must never arrive would be a ten-second sleep apiece.
+    const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
     async fn pair(codec: Codec) -> (MediaSession, MediaSession) {
         // Each side needs the other's port, so bind one first and point the second at it.
         let placeholder: SocketAddr = "127.0.0.1:1".parse().expect("valid");
@@ -2653,7 +2708,7 @@ mod tests {
         // `right` speaks; `left` listens. `left` does not know `right`'s address until a
         // packet arrives, which is exactly what symmetric RTP is for.
         right.play(&source, 160).await;
-        let recorded = left.record_until_idle(Duration::from_millis(400)).await;
+        let recorded = left.record_at_least(source.len(), DELIVERY_BOUND).await;
 
         assert_eq!(recorded.len(), source.len(), "every packet arrived");
 
@@ -2676,7 +2731,7 @@ mod tests {
 
         right.set_muted(true);
         right.play(&source, 160).await;
-        let recorded = left.record_until_idle(Duration::from_millis(400)).await;
+        let recorded = left.record_at_least(source.len(), DELIVERY_BOUND).await;
 
         assert_eq!(recorded.len(), source.len(), "the stream did not stop");
         assert!(
@@ -2699,12 +2754,17 @@ mod tests {
 
         right.set_muted(true);
         right.play(&source, 160).await;
-        let muted = left.record_until_idle(Duration::from_millis(300)).await;
+        // Drained by count, not by an idle window, and that matters more here than anywhere
+        // else in this module (`X-28`): a short first recording leaves the rest of the muted
+        // silence in the channel, where the second recording picks it up and compares it
+        // against the source. The failure then reads as "unmuting did not restore the audio",
+        // which is a lie about the code under test.
+        let muted = left.record_at_least(source.len(), DELIVERY_BOUND).await;
         assert!(muted.iter().all(|sample| *sample == 0));
 
         assert!(right.set_muted(false), "the gate was closed before this");
         right.play(&source, 160).await;
-        let after = left.record_until_idle(Duration::from_millis(300)).await;
+        let after = left.record_at_least(source.len(), DELIVERY_BOUND).await;
 
         assert_eq!(
             g711::ulaw_encode_all(&source),
@@ -2730,7 +2790,7 @@ mod tests {
                     .await
             );
         }
-        let recorded = left.record_until_idle(Duration::from_millis(400)).await;
+        let recorded = left.record_at_least(480, DELIVERY_BOUND).await;
 
         assert_eq!(recorded.len(), 480, "the stream did not stop");
         assert!(
@@ -2745,7 +2805,7 @@ mod tests {
     async fn a_muted_session_still_sends_a_keypress() {
         let (left, right) = pair(Codec::Pcmu).await;
         right.play(&tone(320), 160).await;
-        let _ = left.record_until_idle(Duration::from_millis(300)).await;
+        let _ = left.record_at_least(320, DELIVERY_BOUND).await;
 
         right.set_muted(true);
         right
@@ -2770,7 +2830,7 @@ mod tests {
 
         left.set_muted(true);
         right.play(&source, 160).await;
-        let recorded = left.record_until_idle(Duration::from_millis(300)).await;
+        let recorded = left.record_at_least(source.len(), DELIVERY_BOUND).await;
 
         assert_eq!(
             g711::ulaw_encode_all(&source),
@@ -2884,11 +2944,14 @@ mod tests {
         let (left_recorded, right_recorded) = tokio::join!(
             async {
                 left.play(&from_left, 160).await;
-                left.record_until_idle(Duration::from_millis(300)).await
+                // What `left` hears is what `right` still has to play: everything after the
+                // 160-sample primer above.
+                left.record_at_least(from_right.len() - 160, DELIVERY_BOUND)
+                    .await
             },
             async {
                 right.play(&from_right[160..], 160).await;
-                right.record_until_idle(Duration::from_millis(300)).await
+                right.record_at_least(from_left.len(), DELIVERY_BOUND).await
             }
         );
 
@@ -2901,7 +2964,7 @@ mod tests {
         let (left, right) = pair(Codec::Pcma).await;
         let source = tone(480);
         right.play(&source, 160).await;
-        let recorded = left.record_until_idle(Duration::from_millis(300)).await;
+        let recorded = left.record_at_least(source.len(), DELIVERY_BOUND).await;
         assert_eq!(
             g711::alaw_encode_all(&source),
             g711::alaw_encode_all(&recorded)
@@ -2923,7 +2986,7 @@ mod tests {
 
         let source = tone(320);
         right.play(&source, 160).await;
-        let recorded = left.record_until_idle(Duration::from_millis(300)).await;
+        let recorded = left.record_at_least(source.len(), DELIVERY_BOUND).await;
         assert_eq!(
             g711::ulaw_encode_all(&source),
             g711::ulaw_encode_all(&recorded),
@@ -2943,7 +3006,7 @@ mod tests {
 
         let reply = tone(320);
         left.play(&reply, 160).await;
-        let heard = right.record_until_idle(Duration::from_millis(300)).await;
+        let heard = right.record_at_least(reply.len(), DELIVERY_BOUND).await;
 
         assert!(
             !heard.is_empty(),
@@ -2955,7 +3018,10 @@ mod tests {
     async fn packets_are_counted_on_both_sides() {
         let (left, right) = pair(Codec::Pcmu).await;
         right.play(&tone(800), 160).await;
-        let _ = left.record_until_idle(Duration::from_millis(300)).await;
+        // Counted, not timed (`X-28`). The recording is discarded, but waiting for it is what
+        // gives all five packets time to land — so an idle window that closed early made
+        // `packets_received` short and blamed the counters.
+        let _ = left.record_at_least(800, DELIVERY_BOUND).await;
 
         assert_eq!(right.packets_sent(), 5);
         assert_eq!(left.packets_received(), 5);
@@ -2967,7 +3033,7 @@ mod tests {
     async fn a_partial_final_frame_is_padded_rather_than_sent_short() {
         let (left, right) = pair(Codec::Pcmu).await;
         right.play(&tone(400), 160).await; // 2.5 packets
-        let recorded = left.record_until_idle(Duration::from_millis(300)).await;
+        let recorded = left.record_at_least(480, DELIVERY_BOUND).await;
         assert_eq!(recorded.len(), 480, "three whole packets");
         assert_eq!(&recorded[400..], &[0i16; 80], "padded with silence");
     }
@@ -2979,12 +3045,7 @@ mod tests {
 
         // Establish the stream so `left` knows where `right` is.
         right.play(&tone(320), 160).await;
-        assert_eq!(
-            left.record_until_idle(Duration::from_millis(300))
-                .await
-                .len(),
-            320
-        );
+        assert_eq!(left.record_at_least(320, DELIVERY_BOUND).await.len(), 320);
 
         right
             .send_digit(
@@ -3017,7 +3078,7 @@ mod tests {
     async fn a_sequence_of_keypresses_arrives_in_order() {
         let (left, right) = pair(Codec::Pcmu).await;
         right.play(&tone(160), 160).await;
-        let _ = left.record_until_idle(Duration::from_millis(200)).await;
+        let _ = left.record_at_least(160, DELIVERY_BOUND).await;
 
         for c in "1234".chars() {
             right
@@ -3038,7 +3099,7 @@ mod tests {
         let (left, right) = pair(Codec::Pcmu).await;
 
         right.play(&tone(320), 160).await;
-        let audio = left.record_until_idle(Duration::from_millis(300)).await;
+        let audio = left.record_at_least(320, DELIVERY_BOUND).await;
         assert_eq!(audio.len(), 320, "audio arrived");
         assert!(
             tokio::time::timeout(Duration::from_millis(100), left.recv_digit())
@@ -3189,7 +3250,7 @@ mod tests {
 
         // Establish the stream so `left` latches on to `right`.
         right.play(&tone(320), 160).await;
-        let established = left.record_until_idle(Duration::from_millis(300)).await;
+        let established = left.record_at_least(320, DELIVERY_BOUND).await;
         assert_eq!(established.len(), 320);
 
         // Now a DTMF packet on the same stream. It must not reach the audio path.
@@ -3220,12 +3281,7 @@ mod tests {
         let (left, right) = pair(Codec::Pcmu).await;
 
         right.play(&tone(320), 160).await;
-        assert_eq!(
-            left.record_until_idle(Duration::from_millis(300))
-                .await
-                .len(),
-            320
-        );
+        assert_eq!(left.record_at_least(320, DELIVERY_BOUND).await.len(), 320);
 
         // A forged packet: valid RTP, different SSRC, sequence number far in the future.
         let forged = Packet::new(0, 60_000, 0, 0xBAD0_BAD0, Bytes::from(vec![0xFFu8; 160]));
@@ -3239,7 +3295,7 @@ mod tests {
         // The genuine stream still gets through.
         let more = tone(320);
         right.play(&more, 160).await;
-        let heard = left.record_until_idle(Duration::from_millis(300)).await;
+        let heard = left.record_at_least(more.len(), DELIVERY_BOUND).await;
         assert_eq!(
             g711::ulaw_encode_all(&more),
             g711::ulaw_encode_all(&heard),
