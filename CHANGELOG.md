@@ -9,6 +9,40 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Reachability is now asked of every *selected* capability, not just media ones (`X-33`)** — `X-30`
+  made "no claim outlives its caller" mechanical for `layer = "media"`. This widens it on the property
+  rather than the string, and each layer was measured before being admitted.
+  - `security` is in; **`transport` was measured and declined**, with the reason recorded: it mixes
+    capabilities something selects (RFC 7118, 5626, 8599) with plumbing every call runs (3263, 3581),
+    and an evidence-path check cannot separate the two.
+  - **The `roles`-versus-`status` hole is closed precisely.** `status = "implemented"` does *not* imply
+    reachability in general — RTP, SDP and the parser are implemented and selected by nobody — but it
+    does at a selection layer. So RFC **6716 and 7587 (Opus) are demoted to `partial`**: they claimed
+    `implemented` with no `roles` field at all, which is how they escaped the check entirely while no
+    call could select Opus. **The published table now reads 29 implemented / 24 partial where it read
+    31/22** — the demotion changes what the artifact says, which is the difference between a demotion
+    and a suppression list.
+  - **Both escape hatches are shut.** Evidence must now be a `.rs` file in a crate at or above
+    `sipx-call`, so `crates/sipx-call/README.md` proves nothing; and `layer` is pinned for any row
+    citing `sipx-media`, `sipx-rtp` or `sipx-audio`, so relabelling a media row no longer exits the
+    check. One residual is stated rather than hidden: a media capability implemented elsewhere could
+    still relabel.
+  - Nine rejected rows were corrected and **none suppressed** — 2617, 7616 and 8760 now cite the only
+    credential selection above the call layer; 5922 cites a whole call over TLS; 8866, 3550 and 4733
+    cite the call layer that runs them.
+  - **The four presence rows keep `uas` on a fact nobody had run**: nothing in the workspace receives a
+    SUBSCRIBE or PUBLISH off a socket, which is what makes `sipx-ua` the crate that *serves* the role.
+    That reason is now a test that goes red the moment anything dispatches on either method, instead of
+    a paragraph that would quietly expire.
+  - RFC 6665's stale *"no event packages ship yet"* sentence is replaced; `S-17` and `S-18` are done.
+  - **Five inherited "facts" failed when actually run**, across this story and its predecessor, and all
+    five are corrected in the design: the registry has **117** evidence paths of which **two** are not
+    `.rs` (recorded as "80, exactly one"), and a citation to `crates/sipx-cli/tests/cli.rs:116` as
+    exercising digest authentication was invented — that line is
+    `register_advertises_this_client_in_via_and_contact`, and the tree contains no
+    `password`/`401`/`407`/`Authorization` test at all. The conclusions survived; only the evidence was
+    fabricated.
+
 - **No test in the workspace now asserts after a fixed sleep (`X-29`, completing what `0.11.0`
   started)** — `X-28` cleared the media path; this is the rest. Twenty-two sites, and the useful
   result is that **three different cures were right**, chosen by what the wait was actually for:

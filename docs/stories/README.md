@@ -49,10 +49,14 @@ _The measure of this stack's reach is what can be built on it **without writing 
 _This is the layer applications actually program against, so it is the one that decides whether_
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
+### Cli
+- [P-6 — Make `sipx dial --password` authenticate, or reject the flag](P-6-dial-accepts-a-password-and-discards-it.md) · Application · main.rs:168 accepts --password on dial and dial.rs never reads it, so a 407-challenged call fails while the user who supplied credentials is told nothing
+
 ### Conformance
-- [X-33 — Generalise the reachability check past the media layer](X-33-generalise-the-reachability-check-beyond-media.md) · Build · alpha predicate 1 — X-30 made "no claim outlives its caller" mechanical for layer = media only, and its own review showed the reason given for stopping there was false
+- [S-27 — Refuse a `sips:` URI the CLI cannot dial securely, instead of dialling it in the clear](S-27-a-sips-uri-is-dialled-in-plaintext.md) · Signalling · found by X-33's implementor — dial.rs:231 strips `sips:` exactly as `sip:` and defaults to port 5060, and dial.rs:49 only ever chooses UDP or TCP, so `sipx dial sips:…` sends the INVITE in cleartext and says nothing
 - [X-32 — Say what v1 is, and generate the distance to it](X-32-say-what-v1-is-and-measure-the-distance.md) · Build · nothing in the repo defines v1 — the only `v1` is `sipx.app.v1`, a protocol version — so "how far are we" cannot be answered, only estimated
 - [X-36 — Pin the send ordering `respond` already promises, and drop the clock that pretends to](X-36-respond-has-no-flushed-observable.md) · Build · respond_returns_only_once_the_response_has_been_sent cannot detect the thing it is named for — the ordering can be reversed in endpoint.rs and the test still passes, so its 50 ms bound is pure flake risk
+- [X-37 — Decide reachability by resolving callers, not by matching evidence paths](X-37-bind-reachability-to-callers-not-to-paths.md) · Build · the recorded successor to X-30 and X-33 — a path check is satisfied by citing a file, so a dead branch counts as reachable, the transport layer cannot be adjudicated at all, and a relabelled layer still escapes
 - [S-25 — Give the early-dialog loop a way to fail](S-25-early-dialog-observation-has-no-error-channel.md) · Signalling · found by M-29 — adopt_early_answer returns (), so a parse failure, a negotiation failure and a refused a=crypto in a reliable provisional are all discarded identically
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
@@ -64,6 +68,7 @@ _This is the layer applications actually program against, so it is the one that 
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [M-30 — Let a call select Opus, or stop shipping a codec nothing can reach](M-30-a-call-cannot-select-opus.md) · Media · M-13 built the codec, not the selection — sipx-call hardcodes G.711 at six sites and Codec::from_payload_type deliberately never returns Opus, so X-33 demoted RFC 6716 and 7587 to partial
 - [M-28 — Offer DTLS-SRTP from a call, and stop claiming it until then](M-28-dtls-srtp-unreachable-from-a-call.md) · Media · found by X-27 — dial hardcodes SDES, so sipx cannot offer DTLS-SRTP at all, while RFC 5763 and 5764 are both marked implemented with both roles
 
 ### Quic
@@ -214,6 +219,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-28 — Make the bridge audio test deterministic under load](X-28-bridge-test-is-load-flaky.md) · Build · found by M-25 — it races play against a fixed 400ms record on real sockets and records zero samples under load, so it will be blamed on innocent diffs
 - [X-29 — Stop asserting after a sleep in sipx-call and sipx-transport](X-29-wall-clock-sleeps-outside-the-media-path.md) · Build · found by X-28's sweep, then confirmed by a real red gate — dns.rs:553 raced a 50ms TTL against the scheduler and failed a gate that had nothing to do with the diff being merged
 - [X-30 — Make the registry distinguish "implemented in a crate" from "reachable from a call"](X-30-registry-cannot-tell-reachable-from-implemented.md) · Build · fifth instance in two days — rfc-report.py --check verifies that cited files exist, never that a claimed capability has a caller, so a crate-level feature reads as a shipped one
+- [X-33 — Generalise the reachability check past the media layer](X-33-generalise-the-reachability-check-beyond-media.md) · Build · alpha predicate 1 — X-30 made "no claim outlives its caller" mechanical for layer = media only, and its own review showed the reason given for stopping there was false
 - [X-34 — Make the gate fail honestly when the disk is full](X-34-the-gate-has-no-disk-guard.md) · Build · five times on 2026-07-29 a full disk produced a red gate that read as a code defect — cargo reports ENOENT on build artifacts, and a correct merge was nearly reverted for it
 - [X-35 — Make the public capability tables measured, not hand-maintained](X-35-the-public-capability-tables-are-not-measured.md) · Build · two independent read-only sweeps found the front page advertising Opus, bridging and a DTLS-SRTP workaround that no call can reach — the same shape X-30 removed from the registry, in the four hand-maintained tables no script reads
 
