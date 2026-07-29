@@ -12,9 +12,15 @@ is the order the remaining gaps close in and why.
 
 _As of 2026-07-29:_ **M0 through M8 are complete.** `sipx-sip` is a working sans-IO SIP core:
 URIs, headers, an incremental parser for both datagram and stream transports, message validation,
-injection-proof builders, and all four transaction state machines with matching and stores. 941
-tests pass; clippy is clean at `-D warnings` on both feature sets; the whole RFC 4475 torture
-corpus is green across all four of its layers.
+injection-proof builders, and all four transaction state machines with matching and stores. Clippy
+is clean at `-D warnings` on both feature sets, and the whole RFC 4475 torture corpus is green
+across all four of its layers.
+
+**This block carries no test count on purpose.** It said "941 tests pass" through four releases
+that took the real number past 1300 — the same drift `X-22` fixed in the gate and `X-24` fixed in
+the pool-key docs, and for the same reason: a number transcribed by hand into prose has no way to
+be wrong out loud. Run `./scripts/gate.py` for the count that is true today. `X-32` generates the
+rest of what this section keeps getting wrong.
 
 sipx registers against a real Kamailio over UDP, TCP and TLS and answers `OPTIONS`. Between two
 sipx endpoints it places calls carrying G.711 audio in both directions, encrypted with SRTP when
