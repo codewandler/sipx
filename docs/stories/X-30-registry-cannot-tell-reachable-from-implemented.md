@@ -127,6 +127,19 @@ one way it has repeatedly been wrong.
   rather than to evidence paths, and which would *replace* the layer scope rather than refine it.
   The current check can be satisfied by citing a call-layer file containing a dead branch — that is
   8122's exact shape, and the selection test asserts it (`sipx-call` does render `a=fingerprint`).
+- Recorded, not fixed, and the largest hole left: **the check keys on `roles`, not on `status`.**
+  `unreachable_role_claims` returns early for a row with no `roles`, so a media row can claim
+  `status = "implemented"` for something no call can reach. RFC **6716** and **7587** do exactly
+  that — Opus is `implemented` and unreachable: `sipx-call` hardcodes `Capabilities::g711` at
+  `call.rs:606`, `:752`, `:955`, `:1728`, `:2860`, `:3161`; `Codec::from_payload_type`
+  (`crates/sipx-media/src/session.rs:115-124`) deliberately never returns Opus;
+  `Capabilities::with_opus` has no caller outside `sipx-sdp`'s tests; and no `sipx-call` entry point
+  accepts caller-supplied `Capabilities` (every mention of the type there is `pub(crate)` or
+  private). Found by the coordinator's review and verified here. Filed as `X-33`, deliberately not
+  fixed in this story: binding `status` to reachability is a different rule and needs its own
+  measurement — this story's own result is what happens when such a rule is adopted unmeasured.
+  It also corrected a sentence in the design that claimed proxy and property "agree exactly on
+  today's registry"; they agree on the media rows that *claim a role*, which is narrower.
 - Recorded, not fixed: **`layer` is author-set**, validated only against `LAYER_TITLE`, so
   relabelling a media row `security` exits the check entirely. It is the strongest argument against
   scoping by layer at all. `test_the_rule_is_scoped_to_the_media_layer` *is* that dodge — it

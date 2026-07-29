@@ -196,8 +196,8 @@ and offer/answer on the way to existing. "Can a call reach the transaction layer
 that cannot come out `no`, which is why the 15 rows above are honest and the unscoped rule rejects
 them anyway.
 
-**Selection is the rule; `layer = "media"` is a proxy for it.** They agree exactly on today's
-registry, and the agreement is checked rather than asserted —
+**Selection is the rule; `layer = "media"` is a proxy for it.** On every media row that *claims a
+role* the two agree exactly, and the agreement is checked rather than asserted —
 `RoleReachability.test_the_scope_tracks_selection_not_the_layer_string` holds both halves:
 
 - every media row that keeps `uac`/`uas` (3711, 4568) is selected by a call — `with_srtp` has
@@ -216,6 +216,21 @@ author.
 Scoped to media the rule rejects four rows: three genuine over-claims, and RFC 3711, whose SRTP
 transform *is* keyed on a live call but whose evidence had never said so. That one was corrected
 by citing the call-layer tests; the other three lost their roles.
+
+### The known limit: the gate is on `roles`, not on `status`
+
+`unreachable_role_claims` returns early for any row without a `roles` list, so a media row can say
+`status = "implemented"` about something no call can reach and the check will pass it. That is not
+hypothetical. **RFC 6716 and 7587 are both `layer = "media"`, both `status = "implemented"`, and
+neither carries `roles`** — and Opus is unreachable from a call: `sipx-call` hardcodes
+`Capabilities::g711` at `call.rs:606`, `:752`, `:955`, `:1728`, `:2860` and `:3161`,
+`Codec::from_payload_type` (`crates/sipx-media/src/session.rs:115-124`) deliberately never returns
+Opus, `Capabilities::with_opus` has no caller outside `sipx-sdp`'s own tests, and no `sipx-call`
+entry point takes caller-supplied `Capabilities` at all — every mention of the type in that crate is
+`pub(crate)` or private. So the exact failure this story exists to stop is still reachable one field
+over, by claiming a status instead of a role. Filed as `X-33`; deliberately **not** fixed here,
+because binding `status` to reachability is a different rule needing its own measurement, and this
+story's own result is that adopting such a rule unmeasured is how you get 19 false rejections.
 
 ### Why the four `sipx-ua` service rows keep their roles
 
@@ -272,6 +287,14 @@ the reason it differs from ICE.
 The scope is right and it has now twice been defended with a claim that is not. Both are written
 down because in both cases the false version made a *chosen* scope look *forced*, and a future
 author would have had no reason to re-examine it.
+
+**Twice is a pattern, and it is this story's own failure mode: reaching for a mechanically appealing
+fact to stand in for a judgement, and not checking the fact.** Both false claims were the kind of
+thing that sounds checkable — "cannot satisfy at any price", "has no integration test in any crate"
+— which is exactly why neither was checked. The judgement they were substituting for is the same
+one both times, and it is not mechanical: *which crate serves the claimed role*. A reviewer of the
+next revision of this section should treat any crisp-sounding negative claim about the workspace as
+unverified until it has been run.
 
 **One — "those rows cannot satisfy the rule at any price."** The first version of this section
 claimed seven `sipx-ua` rows could not, because `sipx-ua` is a sibling of `sipx-call`. **False.**

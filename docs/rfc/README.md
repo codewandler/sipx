@@ -84,7 +84,9 @@ rejections point at anything true of the row, and only 3 rows were over-claiming
 question the check exists to answer, the unscoped rule is wrong 19 times out of 22.
 
 `layer` is a proxy for that property, and it is set by the author — so relabelling a media row
-`security` leaves the check. That is recorded rather than fixed.
+`security` leaves the check. That is recorded rather than fixed. So is the bigger limit: **the check
+keys on `roles`, not on `status`**, so a row with no `roles` is never asked whether a call can reach
+it — RFC 6716 and 7587 claim `implemented` for Opus, which `sipx-call` cannot select. That is `X-33`.
 `docs/designs/rfc-registry-grain.md` carries the full count, the argument, the two false
 justifications this scope was given before this one, and what would widen it.
 

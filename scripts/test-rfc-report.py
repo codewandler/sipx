@@ -301,8 +301,14 @@ class RoleReachability(unittest.TestCase):
 
         A media capability is *selected*: it is carried only because something asked for it, and
         asking for nothing is the silent default. That — not the layer string — is why media rows
-        are the ones checked. `layer` is a proxy, so this test holds the two in agreement, and a
-        registry where they part company fails the gate instead of reading as measured.
+        are the ones checked. `layer` is a proxy, so this test holds the two in agreement on the
+        media rows that claim a role, and a registry where they part company fails the gate instead
+        of reading as measured.
+
+        Scope of the agreement, stated because it is narrower than it sounds: rows without `roles`
+        are outside the check entirely, so RFC 6716 and 7587 claim `implemented` for Opus, which no
+        call can select, and nothing here objects. That limit is `X-33` and is recorded in
+        `docs/designs/rfc-registry-grain.md` under "the gate is on `roles`, not on `status`".
 
         Both halves matter. The media rows that keep their roles must have a selector a call
         actually runs; the media rows whose roles `X-30` removed must not. The second half is the
