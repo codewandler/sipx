@@ -7,6 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-29
+
+**Secure media in this release does not interoperate with secure media in any earlier one.** The
+SRTP authentication key was derived at the wrong length since v0.3.0, so sipx-to-sipx calls agreed
+with each other and with nobody else. Fixing it is wire-breaking by necessity: deployments running
+sipx at both ends must upgrade both together. See `M-25` under **Fixed**.
+
 ### Added
 
 - **The caller gets a handle on its early dialog (`S-22`, RFC 3311)** — everything sipx could
@@ -1200,6 +1207,7 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/codewandler/sipx/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/codewandler/sipx/compare/v0.7.0...v0.8.0
 [0.1.0]: https://github.com/codewandler/sipx/releases/tag/v0.1.0
