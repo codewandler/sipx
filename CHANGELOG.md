@@ -9,6 +9,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A STUN connectivity check, encoded and answered (`M-20`)** — the codec ICE checks run over, in
+  `sipx_media::ice::stun`: the attributes, the credentials and the two integrity values. Second of
+  the six stories `M-16` was cut into.
+  - **Anchored to IETF-computed bytes, not to its own encoder.** RFC 5769 §2.1 and §2.2 are both
+    reproduced byte-for-byte, and §2.2 is keyed with the password §2.1's `USERNAME` resolves to —
+    so the inbound direction of the username rule is pinned by published bytes rather than by a
+    test mirroring the encoder it is checking.
+  - `MESSAGE-INTEGRITY` over the length-adjusted message then `FINGERPRINT` computed last, with a
+    constant-time tag comparison. An attribute that would smuggle in its own integrity value is
+    refused at encode.
+  - **Borrowing twenty bytes of header layout does not cost a TLS stack**: the `sipx-transport`
+    edge sets `default-features = false`, and `check-features.sh` now asserts that on the resolved
+    graph the way it already did for `sipx-ua`.
+  - Corrects `docs/specs/ice.md` §11.1, which required `USERNAME` on a success response — RFC 5389
+    §10.1.2 and RFC 8445 §7.2.2 both forbid it.
 - **The UPDATE method (`S-19`, RFC 3311)** — renegotiate a session *before* it has been answered,
   which is the only way to change one in an early dialog, and refresh a session with UPDATE where
   RFC 4028 §7.4 recommends it over a re-INVITE. M9's last session-integrity gap.

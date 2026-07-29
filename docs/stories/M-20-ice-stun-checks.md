@@ -2,8 +2,8 @@
 id: M-20
 title: Encode and answer a STUN connectivity check
 pillar: Media
-status: in-progress
-priority: 8
+status: done
+priority:
 design: docs/designs/media.md
 epic: ice
 areas: [sipx-media]
