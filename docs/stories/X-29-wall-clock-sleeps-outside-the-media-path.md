@@ -39,6 +39,11 @@ a red gate keeps meaning what `X-28` made it mean in the media path.
 - [ ] Failing-first evidence: the chosen sites failing under artificial load, quoted from a real
       run. `X-28`'s method reproduces it — pin a few hundred spinners to a **single core**, because
       saturating all cores does not starve a `current_thread` runtime and does not reproduce this.
+      **Not achieved, and the premise is wrong** — `X-28`'s method does not transfer to this family.
+      263 attempts across four sites under 600–1200 single-core spinners produced zero failures; see
+      the Progress note for the numbers and for why the load that matters here is memory and IO
+      pressure rather than CPU. `dns.rs:553`'s evidence remains the real red gate in this story's
+      `note:`.
 
 ## Progress
 
@@ -121,25 +126,35 @@ CPU it is being denied, so under 900 single-core spinners the `dns.rs` test's 13
 became 3.0 s of wall time — the window grew ~20×, and so did the work it was covering. Measured,
 base binaries, 900–1200 spinners pinned to one core:
 
-| site | runs | failures |
+| site | attempts | failures |
 |---|---|---|
+| `dns.rs::an_expired_entry_is_not_returned` (50 ms TTL) | **240** | **0** |
 | `call.rs::a_2xx_the_caller_cannot_use_is_still_acknowledged` (300 ms) | 10 | 0 |
 | `backpressure.rs::a_request_dropped_for_backpressure_is_counted` (300 ms) | 10 | 0 |
 | `quality.rs` ×3 (300 ms), from the first attempt | 3 | 0 |
 
-`dns.rs:553` is the exception, and it is the exception *structurally*: its deadline is not a sleep
-but `Instant::now()` inside `cached()` measuring a real 50 ms TTL, while the code racing that
-deadline is what gets starved. Real time does not dilate; the work does. **That asymmetry is why
-`dns.rs` is the site that actually failed a gate and the others are theoretical** — and it is a
-better predictor of the next flake than "contains a sleep". The other site with that shape is
-`udp.rs:473`, which is precisely the one left unconverted above.
+The 240 `dns.rs` attempts were 600 spinners plus 30 concurrent copies of the test, all pinned to one
+core — far heavier than the conditions under which it actually failed. **So this Acceptance item is
+left unticked: no site in this family was reproduced failing to order, including the one that has
+really failed.**
 
-So the honest position: the conversions are right — a window is doing no work the condition cannot
-do better, and eleven sites now fail with a message that says what did not happen instead of
-flaking — but only `dns.rs:553` has a failure behind it, and that failure is a *real red gate*
-recorded in this story's own `note:`, not something reproduced to order. `X-28`'s estimate of the
-risk in the `sleep`-then-assert family looks high, and a successor should not spend another day
-trying to reproduce the rest.
+That is worth stating precisely rather than dressed up, because a first guess of mine was wrong too.
+`dns.rs` looked structurally different — its deadline is `Instant::now()` against a real 50 ms TTL
+rather than a sleep, so real time does not dilate while the work racing it is starved — and that
+asymmetry is real, but it is evidently not sufficient: 240 attempts under worse CPU starvation than
+the incident produced nothing. The distinguishing feature of the incident was not CPU contention at
+all. It was **three concurrent compilations**: memory pressure, page-cache eviction and IO wait, so a
+process can stall on a major fault for tens of milliseconds without being CPU-starved at all. CPU
+spinners do not create that stall, which is why they do not reproduce this, and why `X-28`'s method —
+correct for its own story, where the starved thing was a `current_thread` runtime doing real work —
+does not transfer here.
+
+So the honest position: the conversions are right on their merits — a window is doing no work the
+condition cannot do better, and eleven sites now fail with a message naming what did not happen
+instead of flaking — but the evidence for the family is *one real red gate*, recorded in this story's
+own `note:`, not a reproduction. A successor should not spend another day on spinners. If this
+family is ever to be falsified on demand, the load to build is a memory-and-IO one — several
+concurrent `cargo build`s, or a deliberate page-cache thrash — not a busy loop.
 
 ### Two process failures a resuming agent should know about
 
