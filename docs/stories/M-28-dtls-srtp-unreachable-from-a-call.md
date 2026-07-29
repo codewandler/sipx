@@ -64,6 +64,11 @@ call — and until it is, make the compliance table say so instead of claiming b
   `sipx-sdp` and `sipx-media`". That workaround cannot be written. A determined user could implement
   `Handshake`, call `export(60)` and re-split per §4.2 by hand into `SrtpKeys`' public fields — but
   that bypasses `establish`'s RFC 8122 §6.2 fingerprint check and still cannot share the media port.
+- **2026-07-29 — the docs half above is done, by `X-35`.** `website/docs/intro.md`,
+  `whats-new.md` and `does-this-fit.md` no longer offer the workaround that cannot be written;
+  all three now say no media session can be keyed by DTLS today by any route, name both
+  boundaries, and point here. Nothing about the code changed, and the Acceptance items below are
+  untouched — this only removes the reader-facing claim that the work was already reachable.
 - Also: `capabilities.dtls()` is *read* at `crates/sipx-call/src/call.rs:3600` and **nothing anywhere
   ever sets it**. The branch exists and is dead, which is the shape RFC 8122 had before it was
   demoted — a reachability check that only follows evidence paths cannot see it.
