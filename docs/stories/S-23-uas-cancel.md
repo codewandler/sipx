@@ -2,7 +2,7 @@
 id: S-23
 title: Answer a CANCEL — the UAS half sipx never implemented
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 1
 design: docs/designs/sip-ua.md
 epic: conformance
