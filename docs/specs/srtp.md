@@ -377,7 +377,15 @@ The offerer MUST verify that one of the crypto suites it offered **and its accom
 echoed in the answer, and that the answer carries a key. "If any of the above fails, the negotiation
 MUST fail." *(Implemented by `M-26` as `Crypto::verify_answer`, which returns the offered attribute
 the answer accepted so the caller keys with the half it sent; `SrtpKeys::from_answer` is the only
-route from an answer to keys. Not yet wired into `sipx-call`; §12.3.)*
+route from an answer to keys. On the call path since `M-29`: `settle_answer` runs it for both
+places an answer can reach a caller — the 200 and the reliable provisional — and `establish`
+propagates the refusal; §12.3.)*
+
+**The check belongs to the offerer, and only to the offerer.** Answering is the other half: this
+side chose the attribute and echoed its tag (§5.3), so there is nothing there to verify and the two
+moments do not share a function. `sipx-call` keeps them apart as `srtp_keys` and
+`srtp_keys_answering`, because one that served both would have to decide at run time which side of
+the exchange it was on.
 
 **A failed check is an error, not an unkeyed call.** The verification returns
 [`SdpError`](../../crates/sipx-sdp/src/lib.rs) rather than `None`, and that choice is the whole
@@ -813,7 +821,7 @@ reception statistics, not audio, though a replayed receiver report can drive a c
 response. It is a behaviour change to a public method (`unprotect_rtcp` gains a `Replayed` return),
 so it is a story rather than something to fold into this one. **Owner: a new story.**
 
-### 12.3 The SDES tag is neither echoed nor verified — **echo fixed by `M-26`; the check is built and not yet wired**
+### 12.3 The SDES tag is neither echoed nor verified — **echo fixed by `M-26`, check wired by `M-29`; closed**
 
 RFC 4568 §5.1.2: an accepted crypto attribute in the answer "MUST contain … the tag and
 crypto-suite from the accepted crypto attribute in the offer". §5.1.3: the offerer "MUST verify that
@@ -832,18 +840,27 @@ most of them — work. Two MUSTs, one interop bug, one missing check.
 (§5.3). **Wire-visible**, and in the direction that fixes rather than breaks: a peer that offered
 tag 2 and was answered tag 1 was failing the call at its end.
 
-**§5.1.3 is built and not yet on the call path.** `Crypto::verify_answer` (§5.4) and
-`SrtpKeys::from_answer` implement the check, with tests; but `sipx-call`'s `srtp_keys`
-([`call.rs`](../../crates/sipx-call/src/call.rs)) still pairs `capabilities.crypto` with whatever
-`a=crypto` the answer carried, comparing nothing, and returns `Option` where the check returns
-`Result`. Until it is moved onto `SrtpKeys::from_answer`, a live call still accepts an answer that
-echoed a tag nobody offered.
+**§5.1.3 is closed too.** `Crypto::verify_answer` (§5.4) and `SrtpKeys::from_answer` implement the
+check; `M-29` moved `sipx-call`'s `srtp_keys` ([`call.rs`](../../crates/sipx-call/src/call.rs)) onto
+it. It now takes the offered attributes as a **slice** and the answered one as an `Option`, and
+returns `Result` — the shape the check has, rather than a pair of `Option`s that unwrapped both and
+compared nothing. `Ok(None)` survives for exactly one case, a call that offered no key at all; an
+answer to an offer that *did* carry one is refused unless its tag and suite are ours and it carries
+a key, and the refusal reaches the application as `Error::Sdp` naming the tag that came back.
 
-*(Recorded by `M-26`, 2026-07-29, which implements both halves in `sipx-sdp` and `sipx-media`. The
-wiring was left out because `M-26`'s write set did not extend to `sipx-call` — a concurrent story
-held that crate — and not because it is optional. **Owner: a new story**, in `sipx-call`: replace
-`srtp_keys`'s `Option` with `SrtpKeys::from_answer`'s `Result` and let `establish` propagate it, so
-a refused answer ends the call through `Error::Sdp` rather than placing it unencrypted.)*
+*(Recorded by `M-26`, 2026-07-29, which implemented both halves in `sipx-sdp` and `sipx-media` and
+could not reach `sipx-call`: that crate was outside its write set and held by a concurrent story.
+Closed by `M-29`, whose failing-first test is
+`an_answer_echoing_a_tag_that_was_never_offered_fails_the_call` in
+[`secure_media`](../../crates/sipx-call/tests/secure_media.rs) — a whole call over WSS, answered by
+a peer that echoes tag 9 with a perfectly well-formed key. It connected before that change, which
+is the point: nothing about that answer is malformed except that it agrees to an offer nobody made,
+and a check on the key material alone sees nothing wrong with it.)*
+
+The gap this pair of stories leaves behind is not about SDES. `M-26` shipped a check whose only
+caller was its own test suite, and `docs/compliance.md` could not tell that from a shipped one —
+which is `M-28`'s pattern, and the reason the registry note for RFC 4568 carried a **"Still
+missing"** sentence until this landed rather than claiming the MUSTs end to end.
 
 ### 12.4 The protection profile is named in OpenSSL's spelling — open
 
