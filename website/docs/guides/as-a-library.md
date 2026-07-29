@@ -100,10 +100,17 @@ object to each message that has to be rejected.
 | SDP and offer/answer | `sipx-sdp` |
 | Sockets, TLS, WebSocket, RFC 3263 resolution | `sipx-transport` |
 | Registration and digest authentication | `sipx-ua` |
-| RTP, RTCP, jitter buffer, SRTP | `sipx-rtp` |
+| RTP, RTCP, jitter buffer, quality statistics, SRTP | `sipx-rtp` |
 | G.711 (µ-law and A-law), mixing, WAV, and Opus behind the `opus` feature | `sipx-audio` |
-| RTP/RTCP sockets bound to negotiated SDP, with NAT handling | `sipx-media` |
-| Calls with playback, recording, transfer | `sipx-call` |
+| RTP/RTCP sockets bound to negotiated SDP with NAT handling, bridging, conferencing | `sipx-media` |
+| Calls with playback, recording, DTMF, transfer | `sipx-call` |
+| A phone to run rather than embed — the `sipx` binary | `sipx-cli` |
+| The `sipx.app.v1` contract: its types, wire format and interpreter | `sipx-app-protocol` |
+| The application host that runs handler programs on real calls — in development | `sipx-app` |
+
+This table is exactly the crates that publish, held to it by
+`./scripts/check-audio-claims.py --check` in CI: a published crate no table describes has no front
+door anyone can be held to.
 
 ## The API reference
 

@@ -1,6 +1,6 @@
 [package]
 name = "sipx-media"
-description = "Media sessions: RTP/RTCP sockets bound to negotiated SDP, with NAT handling"
+description = "Media sessions: RTP/RTCP sockets bound to negotiated SDP with NAT handling, bridging and conferencing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

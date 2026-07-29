@@ -6,15 +6,18 @@ description: The honest answer — sipx is a phone, not an exchange. What it doe
 # Does sipx fit?
 
 The shortest honest answer: **sipx is a phone, not an exchange.** It places and answers calls,
-registers, transfers, bridges and conferences. It does not route other people's calls.
+registers and transfers. It does not route other people's calls.
 
 ## It fits if you want to
 
 - **Place or answer calls from a program** — a dialler, an alerting system, a test harness, a
   voice application.
 - **Register against a PBX or carrier** and be reachable — including from behind NAT, down a
-  flow the client opened (RFC 5626 Outbound), with `Path` and `Service-Route` honoured.
-- **Carry real audio**: G.711 both ways, Opus behind a feature, DTMF, playback and recording.
+  flow the client opened (RFC 5626 Outbound), with `Path` and `Service-Route` honoured, with a
+  GRUU for one instance of the registration, and with a binding refreshed when a push wakes the
+  client.
+- **Carry real audio**: G.711 both ways, DTMF, playback and recording. Not Opus — it is in
+  `sipx-audio` behind a feature and no call offers it; see below.
 - **Build on the pieces**: a SIP parser and transaction machines with no async runtime at all,
   or SDP offer/answer as a pure function.
 - **Encrypt a call end to end**, signalling and media, without a way to accidentally turn the
@@ -32,11 +35,19 @@ registers, transfers, bridges and conferences. It does not route other people's 
   [migrating from Kamailio](../migrate/from-kamailio.md) for where those roles live.
 - **Media through NAT that symmetric RTP cannot solve.** `rport`, symmetric RTP and Outbound
   cover the registered-phone case; there is no ICE yet, so the paths only a relay or
-  connectivity checks would fix are not fixed. No GRUU and no push either — one instance of a
-  registration cannot be addressed individually, and a sleeping client cannot be woken.
-- **Browser interoperability.** WebSocket transport works and DTLS-SRTP keys the media, so the
-  two pieces browsers insist on are there — but ICE is not, and without it a browser and sipx
-  will agree on a session and then fail to find a media path in most networks.
+  connectivity checks would fix are not fixed.
+- **Opus on a call.** `sipx-audio` encodes and decodes it behind the `opus` feature, and nothing
+  above it can select it: every `sipx-call` entry point builds a G.711-only offer, none of them
+  accepts capabilities from you, and the payload-type reader refuses Opus deliberately rather
+  than guess a codec from a dynamic number.
+- **Bridging or conferencing two *calls*.** `sipx-media` implements both, over media sessions you
+  hold. A `Call` owns its media session outright and lends only a reference, so two calls cannot
+  be handed to a bridge — that is `C-6`, and the [migration
+  notes](../migrate/from-asterisk.md) mark it in progress rather than done.
+- **Browser interoperability.** WebSocket transport works, so one of the two pieces browsers
+  insist on is there. ICE is not, and neither is a DTLS-keyed media session — see the edges
+  below — so a browser and sipx will agree on a session and then fail to find a media path in
+  most networks.
 - **Presence or busy-lamp fields as a finished feature.** The event framework is built (RFC
   6665), and so are the `dialog`, `reg` and `presence` packages with PIDF and PUBLISH — but the
   packages produce documents, and joining them to sipx's live dialogs and registrations is
@@ -53,11 +64,14 @@ parse-only or not started, and *partial* entries say which part is missing.
 
 Two things are worth reading there before committing to sipx:
 
-**Media encryption is real but has edges.** SRTP's default transform, keyed either by SDES or by
-DTLS-SRTP. SDES puts the key in the SDP body, so an intermediary that terminates the TLS can
-read it; DTLS-SRTP keys on the media path and does not have that property, with its handshake
-behind the off-by-default `dtls` feature. What is left is one transform and no rekeying, which
-is why RFC 3711 is marked *partial* rather than *implemented*.
+**Media encryption is real but has edges.** SRTP's default transform, keyed by SDES. SDES puts the
+key in the SDP body, so an intermediary that terminates the TLS can read it. DTLS-SRTP keys on the
+media path and does not have that property, and RFC 5763 and RFC 5764 are implemented as far as
+certificates and fingerprints go — but **no media session can be keyed by DTLS today, by any
+route**: the handshake produces finished SRTP contexts while a media session is configured with
+master keys and salts, and the handshake cannot run on the media port §5.1.2 requires it to share.
+That is `M-28`, not a switch to flip. What is also left is one transform and no rekeying, which is
+why RFC 3711 is marked *partial* rather than *implemented*.
 
 **Some things parse and do nothing.** `Accept-Contact` and others survive the wire intact and
 nothing acts on them. That is deliberate — losslessness first — and it is recorded as
@@ -65,9 +79,14 @@ nothing acts on them. That is deliberate — losslessness first — and it is re
 
 ## Where it has been tested
 
-Against **Kamailio**, not only against itself: registration over UDP, TCP, TLS and WebSocket,
-plus the refusals that make the successes mean something — a wrong password, a certificate for
-another host, an issuer nobody vouches for.
+Against **two independent peers**, not only against itself — a proxy (Kamailio) and a PBX and
+back-to-back user agent on an unrelated SIP library (Asterisk). One peer is one more reading of
+the RFCs, not a consensus, which is why there are two.
+
+Every peer runs the same list: registration over UDP, TCP, TLS and WebSocket, plus the refusals
+that make the successes mean something — a wrong password, a certificate for another host, an
+issuer nobody vouches for. The peer that answers calls also places and answers them with sipx,
+with audio flowing and a BYE ending it, and does it again with SDES-keyed SRTP on the media.
 
 The whole RFC 4475 torture corpus is asserted, including the messages that must be *rejected*
 and by which layer.
