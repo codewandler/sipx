@@ -22,6 +22,11 @@ Nothing here is transcribed from anywhere. The MSRV toolchain comes from the wor
 `rust-version`, the environment from `ci.yml`'s own `env:` block, and the job list from `ci.yml`.
 The only things written down twice are checked for equality.
 
+The disk guard (X-34) is that same principle one layer over. `--check` refuses to report when the
+gate no longer matches CI; the guard refuses to report when the machine cannot hold the build. A
+gate that cannot be believed should not report — see "The disk guard" below for what it costs when
+it does.
+
 **Why a script** (X-22's recorded decision): a `just` or `make` target would be a second list in
 a second syntax with no way to read `Cargo.toml` or `ci.yml`, and a cargo alias cannot run
 anything that is not cargo — the gate is half shell scripts. A Python entry point keeps the step
@@ -543,12 +548,231 @@ def check() -> int:
 
 
 # --------------------------------------------------------------------------------------------
+# The disk guard
+# --------------------------------------------------------------------------------------------
+#
+# X-34. On one evening — 2026-07-29 — a full disk produced five red gates, and every one of them
+# read as a code defect:
+#
+#   error: failed to create file '…/target/debug/examples/canned_program.d':
+#          No such file or directory (os error 2)
+#   error: failed to write '…/target/debug/.fingerprint/rand-…/invoked.timestamp'
+#   error: extern location for autocfg does not exist: …/libautocfg-….rlib
+#
+# Not one of those sentences contains the word disk. Two integration gates were re-run and came
+# back green unchanged; one implementor run lost its `target/` and then its whole worktree; and
+# `X-28` — a correct merge — was one command away from being reverted for a failure in a crate its
+# diff never opened. The wasted minutes are not the cost. The cost is that a gate which fails at
+# random trains everyone to re-run it instead of believing it, which is the one thing this
+# project's discipline rests on not happening.
+#
+# So: measure what a run costs, refuse to start below it, and when a step dies of the disk anyway,
+# say that the run is *not a result* rather than colouring it red.
+#
+# **A shared `CARGO_TARGET_DIR` was considered and rejected** (the decision X-34 asked for, either
+# way). Pointing every worktree at one build directory would hold one copy of the dependency
+# artifacts instead of one per worktree, which is most of the ~10 GiB. It was rejected on three
+# grounds:
+#
+# 1. Cargo takes an exclusive lock on the build directory, so concurrent gates serialise —
+#    "Blocking waiting for file lock on build directory". This project routinely runs three or
+#    more implementor worktrees plus an integration gate; a full gate is minutes of cargo, so
+#    sharing converts a parallel fan-out into a queue and every implementor waits on the others.
+#    The fan-out is the thing that makes the backlog move.
+# 2. It promotes the worst failure of that evening from an accident to a design feature. One
+#    worktree's `cargo clean` — or its deletion, which is how implementor worktrees end — would
+#    take every other run's artifacts with it. That is precisely occurrence 4: a `.fingerprint`
+#    directory vanishing underneath a running cargo.
+# 3. The saving is smaller than it looks. Worktrees hold different code, so the workspace crates
+#    are re-fingerprinted and rebuilt on each switch; only the dependency artifacts are genuinely
+#    shared, and the part of the build that is already shared for free — the registry and git
+#    checkouts under `CARGO_HOME` — needs no lock and is not the part that fills the disk.
+#
+# What is adopted instead is this guard: refuse to start, name the disk, and say where the space
+# went. `cargo clean` in a worktree nobody is using buys a run's worth of space and costs nobody
+# else anything.
+
+_GIB = 1024**3
+
+#: What one gate run has been measured to cost in build artifacts, in GiB, and where the number
+#: came from. The threshold is derived from these — the story's requirement is a measurement
+#: "rather than guessed", and this is the measurement.
+#:
+#: Measured per step in a cold worktree on 2026-07-29, every step green: clippy 0.7, then
+#: `cargo test` +8.4 (the expensive one — it links every test binary), examples +0.0, msrv +0.6 (a
+#: second toolchain keeps its own artifacts), feature matrix +0.3, docs site +0.5. 10.6 in total.
+#:
+#: The second entry is the same figure taken from the other end: the integration worktree's
+#: `target/` grew from 13 GiB to 22 GiB over one evening's runs, because nothing there had
+#: previously linked the integration test binaries. Both say a run costs about ten gigabytes.
+MEASURED_GATE_TARGET_GIB = {
+    "a full gate run in a cold worktree, every step green (2026-07-29)": 10.6,
+    "one evening's runs in a warm integration worktree, 13 GiB to 22 GiB (2026-07-29)": 9.0,
+}
+
+#: Cargo's peak sits above the size it settles at: a relink writes the new artifact before dropping
+#: the old, incremental caches are rewritten in place, and rustc's temporaries live under `target/`
+#: too. A fraction rather than a round number of gigabytes, so re-measuring moves the margin with
+#: the measurement.
+LINK_PEAK_MARGIN = 0.10
+
+#: What one run costs, and what the gate refuses to start below.
+GATE_RUN_BYTES = int(max(MEASURED_GATE_TARGET_GIB.values()) * _GIB)
+REQUIRED_FREE_BYTES = int(GATE_RUN_BYTES * (1 + LINK_PEAK_MARGIN))
+
+#: Checked between steps rather than the full requirement again — the steps already run do not have
+#: to be paid for twice. This is the point below which no step can be believed at all, so a disk
+#: that another worktree fills mid-run stops the gate at the next boundary, with a sentence,
+#: instead of turning the next step red.
+FLOOR_FREE_BYTES = int(GATE_RUN_BYTES * LINK_PEAK_MARGIN)
+
+#: `0` green, `1` the tree is wrong, `2` the run is not a result. The third one is the story: a
+#: full disk and a broken diff used to leave the same exit code and print the same way, so nothing
+#: — not a human reading the summary, not a script — could tell a finding from a non-finding.
+EXIT_GREEN = 0
+EXIT_RED = 1
+EXIT_INFRASTRUCTURE = 2
+
+#: A path inside a cargo build directory. The marker is what makes the ENOENT shapes below safe to
+#: read as infrastructure: cargo saying it cannot find a file *it wrote itself* is a vanished
+#: `target/`, whereas the same message about a path under `crates/` is a real missing source.
+_BUILD_PATH = r"(?:[/\\]target[/\\]|\.fingerprint)"
+
+#: Escape sequences, stripped before matching: the gate runs steps under `ci.yml`'s `env:`, which
+#: sets `CARGO_TERM_COLOR: always`, so cargo's messages arrive with colour in them.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+#: How a step's output betrays that the machine and not the tree ended it, each with why that is
+#: not the reader's diff. Ordered: the first match is the one reported, so the unambiguous shape
+#: comes first.
+INFRASTRUCTURE_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"(?i)no space left on device|\(os error 28\)"),
+        "the device is full, so nothing this step did after that point means anything",
+    ),
+    (
+        re.compile(
+            rf"(?i)failed to (?:create|write|open|remove|link|copy|rename)\b.*{_BUILD_PATH}"
+        ),
+        "the path cargo could not write is inside the build directory, so `target/` went away "
+        "underneath it — the code is not what failed",
+    ),
+    (
+        re.compile(rf"(?i){_BUILD_PATH}.*no such file or directory"),
+        "cargo reports a file it wrote itself as missing, which is a vanished build directory and "
+        "not a missing source",
+    ),
+    (
+        re.compile(r"(?i)extern location for \S+ does not exist"),
+        "an artifact from earlier in this same run is gone, which is a disappearing build "
+        "directory and not a missing dependency",
+    ),
+)
+
+
+def human(size: int) -> str:
+    """GiB to one decimal — the unit `df` prints and the unit a full disk is argued in."""
+    return f"{size / _GIB:.1f} GiB"
+
+
+def free_bytes(path: pathlib.Path) -> int:
+    """Free space on the filesystem holding `path`, or the nearest parent that exists.
+
+    The nearest parent matters: on a cold worktree `target/` is what we are asking about and does
+    not exist yet.
+    """
+    for candidate in (path, *path.parents):
+        if candidate.exists():
+            return shutil.disk_usage(candidate).free
+    return 0
+
+
+def target_directory(environment: dict[str, str]) -> pathlib.Path:
+    """Where this run's artifacts will land.
+
+    `CARGO_TARGET_DIR` is honoured if someone set it — the decision above is that the gate does
+    not set it, not that it argues with a caller who has.
+    """
+    override = environment.get("CARGO_TARGET_DIR")
+    return pathlib.Path(override) if override else ROOT / "target"
+
+
+def disk_problem(free: int, required: int) -> str | None:
+    """Why the gate must not start, or `None` if it can — the shape of the MSRV check's answer.
+
+    Never a warning, for the same reason the missing MSRV toolchain is never a skip: a gate that
+    starts anyway on a disk that cannot hold the build reports cargo's missing-artifact messages,
+    and those read as code defects.
+
+    The threshold and the actual free space are both in the sentence, so nobody has to guess which
+    number was the problem or go and run `df` to find out.
+    """
+    if free >= required:
+        return None
+    return (
+        f"not enough disk to run the gate — refusing to start rather than report.\n"
+        f"      {human(free)} free, and a run needs {human(required)}.\n"
+        f"      That threshold is measured, not guessed: a gate run leaves about "
+        f"{human(GATE_RUN_BYTES)} of build\n"
+        f"      artifacts, plus {int(LINK_PEAK_MARGIN * 100)}% for cargo's peak while it links.\n"
+        f"      Below it cargo fails with `No such file or directory` on files it wrote itself, "
+        f"which reads as\n"
+        f"      a code defect and is not one — five gates were misread that way in one evening.\n"
+        f"      Every worktree pays for its own `target/`, so `cargo clean` in one nobody is using "
+        f"is\n"
+        f"      usually the cheapest {human(GATE_RUN_BYTES)} available."
+    )
+
+
+def infrastructure_evidence(output: str) -> tuple[str, str] | None:
+    """The first line of a step's output that proves the machine failed, and why it is not a diff.
+
+    `None` when nothing in the output says the machine, and erring that way is deliberate: reading
+    a real defect as infrastructure would tell an implementor to re-run instead of to look, which
+    is the disease rather than the cure.
+    """
+    for line in output.splitlines():
+        stripped = _ANSI.sub("", line).strip()
+        for pattern, why in INFRASTRUCTURE_SHAPES:
+            if pattern.search(stripped):
+                return stripped, why
+    return None
+
+
+def infrastructure_report(step: str, evidence: str, why: str, free: int, required: int) -> str:
+    """What to print instead of a red step, when the machine and not the tree ended the run.
+
+    The two must not read alike, and that is the whole point of the story. A red step says the
+    diff is wrong; this says the run proved nothing about the diff at all. Printing the first when
+    the truth was the second cost an evening of re-runs and nearly cost a correct merge.
+    """
+    return "\n".join(
+        (
+            "gate: NOT A RESULT — the machine stopped this run, not the tree",
+            f"  it stopped at: {step}",
+            f"  the evidence:  {evidence}",
+            f"  why that is not your diff: {why}",
+            f"  disk now:      {human(free)} free, against the {human(required)} a run needs",
+            "",
+            "This run proved nothing about the tree, and no step after this one was attempted.",
+            "Fix the machine — free space, or find what removed `target/` — and run the gate "
+            "again. Nothing above is a finding about your changes.",
+        )
+    )
+
+
+# --------------------------------------------------------------------------------------------
 # Running it
 # --------------------------------------------------------------------------------------------
 
 
 def show(steps: list[Step]) -> int:
     width = max(len(step.name) for step in steps)
+    print("  before any step:")
+    print(
+        f"  {'disk':<{width}}  refuse to start below {human(REQUIRED_FREE_BYTES)} free, and stop "
+        f"below {human(FLOOR_FREE_BYTES)} between steps\n"
+    )
     for step in steps:
         print(f"  {step.name:<{width}}  {' '.join(step.command)}   (CI: {step.ci_job})")
     print("\n  run only in CI:")
@@ -557,38 +781,118 @@ def show(steps: list[Step]) -> int:
     return 0
 
 
+def run_step(step: Step, environment: dict[str, str]) -> tuple[int, tuple[str, str] | None]:
+    """Run one step, streaming its output, and say whether the machine was what killed it.
+
+    The output goes through this process rather than straight to the terminal because classifying a
+    failure means reading what it said, and cargo's disk failures are only distinguishable from
+    code failures by their text. Colour survives the pipe for the steps that matter: they run under
+    `ci.yml`'s `env:`, which sets `CARGO_TERM_COLOR: always`. A shell step that tests for a tty
+    itself will print plainly.
+    """
+    process = subprocess.Popen(
+        list(step.command),
+        cwd=ROOT,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+    )
+    evidence: tuple[str, str] | None = None
+    if process.stdout is not None:
+        for line in process.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if evidence is None:
+                evidence = infrastructure_evidence(line)
+    return process.wait(), evidence
+
+
 def run(steps: list[Step]) -> int:
     """Run every step, then say which failed.
 
     Every step, not up to the first failure: the point of the gate is to be told everything that
     is wrong in one pass, and a gate that stops early is a gate people run once and then work
     around one command at a time.
+
+    The disk is the exception, and X-34 is why. Once the build directory is gone, every remaining
+    step fails for the same reason and none of those failures is about the tree — continuing would
+    manufacture the wall of misleading red that made a correct merge look broken. So a disk failure
+    ends the run, and says so in different words from a red step.
     """
     environment = dict(os.environ)
     for key, value in parse_workflow_env(WORKFLOW.read_text()).items():
         environment.setdefault(key, value)
+    target = target_directory(environment)
+
+    free = free_bytes(target)
+    print(
+        f"\n\033[1m=== disk\033[0m  {human(free)} free, {human(REQUIRED_FREE_BYTES)} needed",
+        flush=True,
+    )
+    problem = disk_problem(free, REQUIRED_FREE_BYTES)
+    if problem is not None:
+        print(f"  {problem}", file=sys.stderr, flush=True)
+        return EXIT_INFRASTRUCTURE
 
     failed: list[tuple[str, str]] = []
     for step in steps:
+        free = free_bytes(target)
+        if free < FLOOR_FREE_BYTES:
+            return stop_without_a_result(
+                step.name,
+                f"{human(free)} free with `{step.name}` still to run, below the "
+                f"{human(FLOOR_FREE_BYTES)} floor a run needs to keep going",
+                "the disk drained below the margin a run still needs while the gate was going, so "
+                "this step was not started rather than allowed to fail for it",
+                free,
+                failed,
+            )
         print(f"\n\033[1m=== {step.name}\033[0m  {' '.join(step.command)}", flush=True)
         if step.toolchain:
-            problem = missing_toolchain_problem(installed_toolchains(), step.toolchain)
-            if problem is not None:
-                print(f"  {problem}", file=sys.stderr, flush=True)
+            toolchain = missing_toolchain_problem(installed_toolchains(), step.toolchain)
+            if toolchain is not None:
+                print(f"  {toolchain}", file=sys.stderr, flush=True)
                 failed.append((step.name, "the toolchain it needs is not installed"))
                 continue
-        result = subprocess.run(list(step.command), cwd=ROOT, env=environment, check=False)
-        if result.returncode != 0:
-            failed.append((step.name, f"exit {result.returncode}"))
+        code, evidence = run_step(step, environment)
+        if code == 0:
+            continue
+        if evidence is not None:
+            return stop_without_a_result(step.name, *evidence, free_bytes(target), failed)
+        failed.append((step.name, f"exit {code}"))
 
     print()
     if failed:
         print(f"\033[31mgate: {len(failed)} of {len(steps)} steps failed\033[0m", file=sys.stderr)
         for name, why in failed:
             print(f"  {name}: {why}", file=sys.stderr)
-        return 1
+        return EXIT_RED
     print(f"\033[32mgate: {len(steps)} steps, all green\033[0m")
-    return 0
+    return EXIT_GREEN
+
+
+def stop_without_a_result(
+    step: str, evidence: str, why: str, free: int, failed: list[tuple[str, str]]
+) -> int:
+    """End the run as a non-result, and keep whatever real findings came before it.
+
+    Steps that were already red might be genuine, so they are not thrown away — but they are
+    reported as unfinished business under a heading that does not claim the run means anything,
+    rather than as `N of M steps failed`.
+    """
+    print()
+    print(
+        f"\033[33m{infrastructure_report(step, evidence, why, free, REQUIRED_FREE_BYTES)}\033[0m",
+        file=sys.stderr,
+    )
+    if failed:
+        print("\n  red before the disk gave out, and worth re-reading on a machine that has room:",
+              file=sys.stderr)
+        for name, reason in failed:
+            print(f"  {name}: {reason}", file=sys.stderr)
+    return EXIT_INFRASTRUCTURE
 
 
 def main() -> int:
