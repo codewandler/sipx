@@ -2,7 +2,7 @@
 id: X-33
 title: Generalise the reachability check past the media layer
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 design: docs/designs/rfc-registry-grain.md
 epic: conformance
