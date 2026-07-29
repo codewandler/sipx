@@ -20,8 +20,8 @@ pub mod transfer;
 mod update;
 
 pub use call::{
-    Call, DialOptions, answer, answer_early, answer_replacing, answer_ringing, dial, dial_once,
-    serve,
+    Call, DialOptions, Dialing, answer, answer_early, answer_replacing, answer_ringing, dial,
+    dial_early, dial_once, serve,
 };
 pub use dialog::{Dialog, DialogId, Role};
 pub use dispatch::{Calls, DispatchCounts, Dispatched, Dispatcher, Invitation};

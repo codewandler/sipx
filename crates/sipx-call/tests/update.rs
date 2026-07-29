@@ -1087,7 +1087,16 @@ async fn a_caller_renegotiates_before_the_callee_answers() {
         .update(sipx_sdp::Direction::SendOnly)
         .await
         .expect("the caller's early UPDATE is accepted");
-    let (sent, peer_endpoint, mut peer_incoming) = answering.await.expect("the peer answered");
+    // Bounded, because the failure this guards against is a `update` that sends nothing: the
+    // peer then waits forever and the test hangs rather than failing, which is the one outcome
+    // a suite cannot report.
+    let (sent, peer_endpoint, mut peer_incoming) = tokio::time::timeout(
+        Duration::from_secs(2),
+        answering,
+    )
+    .await
+    .expect("the caller's UPDATE reached the peer")
+    .expect("the peer answered");
 
     assert_eq!(sent.request.method, Method::Update);
     assert!(

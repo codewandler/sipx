@@ -13,7 +13,7 @@ use sipx_sdp::{Capabilities, Direction, SessionDescription};
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
 use sipx_sip::rel::{self, Numbering, Offered, RAck, RSeq, Reliability};
 use sipx_sip::transaction::TransactionKey;
-use sipx_sip::update::{self, Reception};
+use sipx_sip::update;
 use sipx_sip::{HeaderName, Method, Response, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
 
@@ -514,28 +514,6 @@ async fn ring_with(
         peer_allows_update: update::peer_allows(&incoming.request.headers),
         early,
     })
-}
-
-/// Send a bare final response to an in-dialog request, with any headers it must carry.
-///
-/// Its own function because the early dialog answers several of these — §12.2.2's 500, §5.2's
-/// 488 — and a response built inline at each site is a response whose headers drift between
-/// them.
-async fn respond(
-    endpoint: &Handle,
-    incoming: &Incoming,
-    code: u16,
-    reason: &'static str,
-    headers: Vec<(HeaderName, Bytes)>,
-) -> Result<()> {
-    let status =
-        StatusCode::new(code).ok_or_else(|| Error::Sdp(format!("status {code} out of range")))?;
-    let mut builder = ResponseBuilder::to_request(&incoming.request, status, reason)?;
-    for (name, value) in headers {
-        builder = builder.header(name, value)?;
-    }
-    endpoint.respond(&incoming.key, builder.build()).await?;
-    Ok(())
 }
 
 /// Refuse an invitation that requires 100rel from a side that has it switched off (§3).

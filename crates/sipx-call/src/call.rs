@@ -2120,17 +2120,30 @@ fn establish(
 ) -> Result<(Dialog, MediaSession, Target, Settled)> {
     let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    let negotiated = negotiated(&answer)?;
-    // Both halves or neither. A stream keyed at one end only is a call that connects and
-    // carries silence, which is worse than one that fails to connect.
-    let settled = Settled {
-        negotiated,
-        srtp: srtp_keys(offered, answered_crypto(&answer)),
-    };
+    let settled = settle_answer(offered, &answer)?;
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
     let media = port.start(settled.media_config());
     Ok((dialog, media, target, settled))
+}
+
+/// What the far end's answer to *our* offer settles.
+///
+/// The calling side's counterpart of [`Early::settle`], and the reason it is a function is that
+/// an answer can now reach us in two places: the 200 that [`establish`] reads, and — once
+/// [`dial_early`] exists — the reliable provisional that makes an early dialog renegotiable at
+/// all (RFC 3262 §5). There is no port to bind on either path, because ours was bound before the
+/// INVITE named it.
+fn settle_answer(
+    offered: Option<&sipx_sdp::crypto::Crypto>,
+    answer: &SessionDescription,
+) -> Result<Settled> {
+    // Both halves or neither. A stream keyed at one end only is a call that connects and
+    // carries silence, which is worse than one that fails to connect.
+    Ok(Settled {
+        negotiated: negotiated(answer)?,
+        srtp: srtp_keys(offered, answered_crypto(answer)),
+    })
 }
 
 /// Answer an incoming INVITE.
@@ -2164,6 +2177,619 @@ pub(crate) async fn answer_tagged(
         .map_err(|error| Error::Sdp(error.to_string()))?;
     // No provisional was sent on this path, so there is nothing to report as `Ringing`.
     answer_negotiated(endpoint, incoming, media_address, offer, tag, None, claim).await
+}
+
+/// The media an invitation has bound, and what the far end has said about it.
+///
+/// An enum rather than two `Option`s because exactly one is true at a time, and the difference
+/// between them is the whole of RFC 3311 §5.1's precondition: a session that has been offered
+/// and not answered may not be renegotiated, and one that has been answered may.
+#[derive(Debug)]
+enum EarlyMedia {
+    /// Bound, and named in the INVITE's offer. The far end has not answered it yet.
+    Offered(MediaPort),
+    /// Answered in a reliable provisional (RFC 3262 §5), and renegotiable from here.
+    Answered(Box<Early>),
+}
+
+/// An invitation this side has placed, which the far end has not yet answered.
+///
+/// The calling side's counterpart of [`Ringing`](crate::Ringing), and the reason it is a separate
+/// entry point is that [`dial`] cannot be both. `dial` waits for the final response inside
+/// itself, which is what almost every application wants and is why its signature is unchanged;
+/// but an application that wants to do anything *while* the far end rings has to hold the early
+/// dialog, and before this there was no moment at which it could.
+///
+/// What it holds is what the eventual [`Call`] will need: the INVITE's still-open response
+/// stream, the media port bound before the offer named it, and — once a provisional creates one —
+/// the dialog itself. [`Self::answered`] hands all three over rather than rebuilding them, which
+/// matters most for the dialog: its sequence space already carries the PRACK and any UPDATE sent
+/// while ringing, and a dialog built afresh from the 2xx would restart that space at the INVITE's
+/// own number, putting the first BYE behind a request the far end has already seen (RFC 3261
+/// §12.2.1.1).
+///
+/// **Nothing happens on its own.** A `Dialing` dropped without [`Self::answered`] or
+/// [`Self::cancel`] leaves the far end ringing, exactly as a [`Call`] dropped without
+/// [`Call::hangup`] leaves the far end in a call. The discipline is the application's: making it
+/// implicit would mean withdrawing an invitation from a destructor that cannot await the CANCEL
+/// it sends, nor the `200` that may cross it.
+#[derive(Debug)]
+pub struct Dialing {
+    endpoint: Handle,
+    /// The INVITE itself. A CANCEL must repeat its identity, and a PRACK its sequence number.
+    invite: Request,
+    /// The `Via` the INVITE went out with, which a CANCEL carries verbatim (RFC 3261 §9.1).
+    via: String,
+    /// Where the INVITE was sent, and the fallback for in-dialog requests.
+    target: Target,
+    /// Where in-dialog requests go, once a `Contact` has said somewhere better.
+    in_dialog: Target,
+    /// The INVITE transaction, still open. `None` once [`Self::answered`] has handed it to
+    /// `reack_retransmitted_2xx`, which is the only other thing entitled to read from it.
+    responses: Option<sipx_transport::Responses>,
+    /// The early dialog a provisional established (RFC 3261 §12.1.1).
+    dialog: Option<Dialog>,
+    /// Which reliable provisionals have been acknowledged (RFC 3262 §4).
+    seen: sipx_sip::rel::Sequence,
+    /// `None` only after [`Self::answered`] has handed the port to the [`Call`].
+    media: Option<EarlyMedia>,
+    /// What the INVITE offered, kept because an SRTP answer has to be paired with the offer it
+    /// answers and because a later UPDATE offers from the same starting point.
+    capabilities: Capabilities,
+    negotiation: update::Negotiation,
+    peer_allows_update: bool,
+    /// The direction the last UPDATE from this side set, carried into the [`Call`] so that an
+    /// invitation put on hold before it was answered is answered on hold.
+    hold: Direction,
+    /// Whether anything past a bare `100 Trying` arrived, and whether it was reliable — the
+    /// same thing [`Waited::Final`] carries, and for the same reason.
+    ringing: Option<bool>,
+    /// Whether the far end has answered provisionally at all, which RFC 3261 §9.1 makes the
+    /// precondition for cancelling.
+    provisional: bool,
+    /// When to stop waiting, counted from when the INVITE went out rather than from each call
+    /// to [`Self::answered`] — the far end is ringing against one deadline, not a fresh one per
+    /// method call.
+    deadline: Option<tokio::time::Instant>,
+    options: DialOptions,
+    /// A final response that arrived before the application was handed anything.
+    ///
+    /// A far end that goes straight from the INVITE to a `200` never gives its caller an early
+    /// dialog. That is not a failure — the call is perfectly good — so it is completed here and
+    /// [`Self::answered`] hands it over at once. Completed rather than parked, because a `2xx`
+    /// held while an application decides what to do with a handle is a `2xx` the far end is
+    /// retransmitting (RFC 3261 §13.2.2.4).
+    answered_already: Option<Box<Call>>,
+}
+
+/// What one read from the INVITE transaction produced.
+enum Arrived {
+    /// A provisional response.
+    Provisional(Box<Response>),
+    /// A final response.
+    Final(Box<Response>),
+    /// The deadline passed.
+    GaveUp,
+    /// The transaction ended without a final response.
+    Gone,
+}
+
+/// Place a call and get the early dialog, rather than waiting for the call itself.
+///
+/// [`dial`] and [`dial_once`] wait for the final response and hand back a [`Call`]; this hands
+/// back a [`Dialing`] as soon as the far end has established a dialog, so the application can act
+/// while it rings — renegotiate the session with an UPDATE (RFC 3311 §5.1), answer one, or read
+/// the description a provisional carried. [`Dialing::answered`] then waits for the call exactly
+/// as `dial` would have.
+///
+/// It returns as soon as *a dialog* exists, which is not the same as an answered session: a far
+/// end that rings `180` with no body has established a dialog and described nothing.
+/// [`Dialing::has_early_session`] is what distinguishes them, and it is what
+/// [`Dialing::update`] requires.
+///
+/// Unlike [`dial`] there is no retry on a `422`. The retry is a *second* INVITE, and the handle
+/// an application would be holding names the first; [`Error::IntervalTooBrief`] comes back from
+/// [`Dialing::answered`] instead, as it does from [`dial_once`].
+///
+/// # Errors
+///
+/// Fails if the INVITE cannot be built or sent, if the deadline passes before any dialog is
+/// established — in which case the invitation is withdrawn first, so the far end stops ringing —
+/// or if the transaction ends with no response at all.
+pub async fn dial_early(
+    endpoint: &Handle,
+    target: Target,
+    to: &Uri,
+    options: &DialOptions,
+) -> Result<Dialing> {
+    let (port, capabilities, via, invite) =
+        open_invitation(endpoint, &target, to, options, &Identity::fresh()).await?;
+    let responses = endpoint.send(invite.clone(), target.clone()).await?;
+
+    let mut dialing = Dialing {
+        endpoint: endpoint.clone(),
+        in_dialog: target.clone(),
+        invite,
+        via,
+        target,
+        responses: Some(responses),
+        dialog: None,
+        seen: sipx_sip::rel::Sequence::default(),
+        media: Some(EarlyMedia::Offered(port)),
+        capabilities,
+        // RFC 3264: the INVITE carried our offer, so an exchange is open until the far end
+        // answers it — which before the 200 can only happen in a reliable provisional.
+        negotiation: update::Negotiation::offering(),
+        peer_allows_update: false,
+        hold: Direction::SendRecv,
+        ringing: None,
+        provisional: false,
+        deadline: options.timeout.map(|limit| tokio::time::Instant::now() + limit),
+        options: options.clone(),
+        answered_already: None,
+    };
+    dialing.reach_early_dialog().await?;
+    Ok(dialing)
+}
+
+impl Dialing {
+    /// The early dialog, once a provisional has established one (RFC 3261 §12.1.1).
+    ///
+    /// Exposed read-only because `C-2` will want to know *which* dialog a provisional's media
+    /// belongs to — with forking, one invitation can produce several — without this handle
+    /// having to guess in advance what it will be asked.
+    #[must_use]
+    pub fn dialog(&self) -> Option<&Dialog> {
+        self.dialog.as_ref()
+    }
+
+    /// Whether the far end has answered this invitation's offer, in a reliable provisional.
+    ///
+    /// The precondition for [`Self::update`], and worth reading as the question RFC 3311 §5.1
+    /// actually asks: not "is there a dialog" but "is there an offer/answer exchange still
+    /// open". A `180` with no body establishes the first and does nothing about the second.
+    #[must_use]
+    pub fn has_early_session(&self) -> bool {
+        matches!(self.media, Some(EarlyMedia::Answered(_)))
+    }
+
+    /// Whether the far end has said it accepts UPDATE (RFC 3311 §4).
+    ///
+    /// Advisory, not enforced: §4 says a UAS "SHOULD" list it, and refusing to send on a peer
+    /// that merely omitted the header would fail calls that would have worked. Worth checking
+    /// before [`Self::update`] if a `405` would be more expensive than not trying.
+    #[must_use]
+    pub fn peer_allows_update(&self) -> bool {
+        self.peer_allows_update
+    }
+
+    /// Renegotiate the early session from this side (RFC 3311 §5.1).
+    ///
+    /// The rules are [`crate::update`]'s, shared with [`Ringing::update`](crate::Ringing::update)
+    /// — §5.1 makes UPDATE something either end may send, so there is one implementation and two
+    /// callers.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoEarlySession`] if the far end has not answered our offer yet
+    /// ([`Self::has_early_session`]); [`Error::NoDialog`] if no provisional established one; and
+    /// [`Error::Rejected`] if the far end refuses, including the `491` of an offer that crossed
+    /// one of ours.
+    pub async fn update(&mut self, direction: Direction) -> Result<()> {
+        let Some(early) = self.early_dialog() else {
+            return Err(Error::NoDialog);
+        };
+        crate::update::offer(early, direction).await?;
+        self.hold = direction;
+        Ok(())
+    }
+
+    /// Answer an UPDATE that arrived in this early dialog (RFC 3311 §5.2).
+    ///
+    /// Returns whether it was one for this dialog, so an application with one inbox can offer
+    /// everything it receives and act on what is left. The refusals are the same three the
+    /// answering side gives, because they are the same code.
+    ///
+    /// # Errors
+    ///
+    /// Fails only if the response could not be built or sent. A *refusal* is a successful call:
+    /// §5.2's 488 and 500 are responses this stack sends deliberately, not errors here.
+    pub async fn on_update(&mut self, incoming: &Incoming) -> Result<bool> {
+        let Some(early) = self.early_dialog() else {
+            return Ok(false);
+        };
+        crate::update::receive(early, incoming).await
+    }
+
+    /// Wait for the invitation to be answered, and take the call it becomes.
+    ///
+    /// Consuming, because everything it needs moves into the [`Call`]. Provisionals that arrive
+    /// while waiting are handled exactly as they were before it returned — PRACKed, and read for
+    /// the answer that makes the session renegotiable — so an application that calls this
+    /// immediately is in the same position as one that had called [`dial`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Rejected`] if the far end declined, [`Error::IntervalTooBrief`] for a `422`
+    /// (see [`dial_early`] on why it is not retried), [`Error::Cancelled`] if the deadline
+    /// passed — the invitation is withdrawn first — and [`Error::NoResponse`] if the
+    /// transaction ended without a final response.
+    pub async fn answered(mut self) -> Result<Call> {
+        if let Some(call) = self.answered_already.take() {
+            return Ok(*call);
+        }
+        loop {
+            match self.next_response().await {
+                Arrived::Provisional(response) => self.observe(&response).await,
+                Arrived::Final(response) => return self.confirm(*response).await,
+                Arrived::GaveUp => {
+                    self.give_up().await;
+                    return Err(Error::Cancelled(
+                        self.options.timeout.unwrap_or(Duration::ZERO),
+                    ));
+                }
+                Arrived::Gone => return Err(Error::NoResponse),
+            }
+        }
+    }
+
+    /// Give up on the invitation, and make sure the far end stops ringing (RFC 3261 §9.1, §15).
+    ///
+    /// The counterpart of [`Self::answered`], and the reason both consume the handle. A `200`
+    /// that crosses the CANCEL is acknowledged and then hung up, which §15 requires and a CANCEL
+    /// cannot do on its own.
+    pub async fn cancel(mut self) {
+        self.give_up().await;
+    }
+
+    /// The early dialog's mutable parts, borrowed for one UPDATE.
+    ///
+    /// `None` before any provisional has established a dialog, which is a peer there is nothing
+    /// to send an in-dialog request *to*.
+    fn early_dialog(&mut self) -> Option<crate::update::EarlyDialog<'_>> {
+        Some(crate::update::EarlyDialog {
+            endpoint: &self.endpoint,
+            dialog: self.dialog.as_mut()?,
+            target: &mut self.in_dialog,
+            negotiation: &mut self.negotiation,
+            peer_allows: &mut self.peer_allows_update,
+            early: match self.media.as_mut() {
+                Some(EarlyMedia::Answered(early)) => Some(early),
+                _ => None,
+            },
+        })
+    }
+
+    /// Read responses until a dialog exists, or the invitation is over before one did.
+    async fn reach_early_dialog(&mut self) -> Result<()> {
+        loop {
+            match self.next_response().await {
+                Arrived::Provisional(response) => {
+                    self.observe(&response).await;
+                    if self.dialog.is_some() {
+                        return Ok(());
+                    }
+                }
+                Arrived::Final(response) => {
+                    let call = self.confirm(*response).await?;
+                    self.answered_already = Some(Box::new(call));
+                    return Ok(());
+                }
+                Arrived::GaveUp => {
+                    self.give_up().await;
+                    return Err(Error::Cancelled(
+                        self.options.timeout.unwrap_or(Duration::ZERO),
+                    ));
+                }
+                Arrived::Gone => return Err(Error::NoResponse),
+            }
+        }
+    }
+
+    /// One response from the INVITE transaction, bounded by the invitation's own deadline.
+    async fn next_response(&mut self) -> Arrived {
+        let deadline = self.deadline;
+        let Some(responses) = self.responses.as_mut() else {
+            return Arrived::Gone;
+        };
+        loop {
+            let event = match deadline {
+                None => responses.next().await,
+                Some(deadline) => match tokio::time::timeout_at(deadline, responses.next()).await {
+                    Ok(event) => event,
+                    Err(_elapsed) => return Arrived::GaveUp,
+                },
+            };
+            match event {
+                Some(sipx_sip::transaction::TuEvent::Response(response)) => {
+                    return if response.status.is_final() {
+                        Arrived::Final(response)
+                    } else {
+                        Arrived::Provisional(response)
+                    };
+                }
+                Some(_) => {}
+                None => return Arrived::Gone,
+            }
+        }
+    }
+
+    /// Fold a provisional into the early dialog: the dialog it may create, the answer it may
+    /// carry, and the PRACK it may require.
+    async fn observe(&mut self, response: &Response) {
+        self.provisional = true;
+        let reliable = crate::rel::reliable_sequence(response);
+        // A bare `100 Trying` only acknowledges that the request arrived (RFC 3261 §17.2.1); it
+        // is not the far end's phone ringing, and 100rel does not apply to it (RFC 3262 §3).
+        const TRYING: u16 = 100;
+        if response.status.code() > TRYING {
+            self.ringing = Some(reliable.is_some());
+        }
+
+        if self.dialog.is_none() {
+            if let Some(dialog) = Dialog::from_response(&self.invite, response) {
+                self.in_dialog = in_dialog_target(&dialog, self.target.clone());
+                self.dialog = Some(dialog);
+            }
+        } else if !self.belongs(response) {
+            // A provisional bearing a different `To` tag is a *different* early dialog — the
+            // far end forked, and two branches are ringing. This handle names one of them, and
+            // adopting the other's description or acknowledging its `RSeq` against this one's
+            // sequence space would mix them. Ignored rather than merged; giving an application
+            // a handle per branch is `C-2`'s to design, and nothing here forecloses it.
+            return;
+        }
+
+        if update::peer_allows(&response.headers) {
+            // §4 is a statement of capability, and a capability does not lapse because a later
+            // response omitted the header.
+            self.peer_allows_update = true;
+        }
+
+        if let Some(rseq) = reliable {
+            // RFC 3262 §5: an answer may only travel in a reliable provisional, so this is the
+            // only place before the 200 where our INVITE's offer can be closed out. An
+            // unreliable provisional carrying a description is not one — §5 forbids it, and one
+            // lost leaves the two sides disagreeing about what is in force with no way to
+            // notice — so it is ignored rather than adopted.
+            self.adopt_early_answer(response);
+            if let Some(dialog) = self.dialog.as_mut() {
+                dialog.refresh_target(&response.headers);
+            }
+            // A failure is logged rather than fatal, for `await_final`'s reason: the invitation
+            // is still running, and abandoning a ringing call because one PRACK did not get
+            // through is a worse outcome than the unreliability it was fixing.
+            if let Err(error) = self.acknowledge(response, rseq).await {
+                tracing::debug!(%error, "could not acknowledge a reliable provisional");
+            }
+        }
+    }
+
+    /// Whether a response belongs to the dialog this handle holds.
+    fn belongs(&self, response: &Response) -> bool {
+        self.dialog.as_ref().is_none_or(|dialog| {
+            Dialog::from_response(&self.invite, response)
+                .is_none_or(|fresh| fresh.id.remote_tag == dialog.id.remote_tag)
+        })
+    }
+
+    /// Take the answer to our INVITE's offer out of a reliable provisional (RFC 3262 §5).
+    ///
+    /// This is what makes the early dialog renegotiable at all, and it is the calling side's
+    /// mirror of [`ring_early`](crate::ring_early). A description that cannot be read or cannot
+    /// be negotiated leaves the session where it was — still `Offered` — so the exchange stays
+    /// open and [`Self::update`] keeps refusing, which is the truthful state.
+    fn adopt_early_answer(&mut self, response: &Response) {
+        if !matches!(self.media, Some(EarlyMedia::Offered(_))) || response.body().is_empty() {
+            return;
+        }
+        // Parsed and settled *before* the port is moved out, so that a failure on either step
+        // leaves `media` exactly as it was rather than emptied.
+        let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body())) else {
+            return;
+        };
+        let Ok(settled) = settle_answer(self.capabilities.crypto.as_ref(), &answer) else {
+            return;
+        };
+        let Some(EarlyMedia::Offered(port)) = self.media.take() else {
+            return;
+        };
+        self.media = Some(EarlyMedia::Answered(Box::new(Early {
+            port,
+            capabilities: self.capabilities.clone(),
+            settled,
+            media_address: self.options.media_address,
+        })));
+        self.negotiation.received_answer();
+    }
+
+    /// PRACK a reliable provisional through the early dialog itself (RFC 3262 §4).
+    ///
+    /// Through *the* dialog, not a copy of it. The PRACK is an in-dialog request and takes the
+    /// next number in this side's own sequence space (RFC 3261 §12.2.1.1); the `dial` path
+    /// builds a throwaway `Dialog` per acknowledgement because it keeps none, which restarts
+    /// that space at the INVITE's number every time. Here an UPDATE may follow, and it would
+    /// then reuse the PRACK's number.
+    async fn acknowledge(&mut self, response: &Response, rseq: u32) -> Result<()> {
+        // §4: out of order means an earlier one is missing, and a duplicate has already been
+        // acknowledged. Neither is PRACKed.
+        if self.seen.accept(rseq) != sipx_sip::rel::Received::Acknowledge {
+            return Ok(());
+        }
+        let dialog = self.dialog.as_mut().ok_or(Error::NoDialog)?;
+        let invite_cseq = self
+            .invite
+            .headers
+            .typed::<sipx_sip::CSeq>()
+            .and_then(std::result::Result::ok)
+            .map_or(1, |cseq| cseq.sequence);
+        let body = crate::rel::prack_body(
+            !self.invite.body().is_empty(),
+            response.body(),
+            &self.capabilities,
+        );
+        crate::rel::send_prack(
+            &self.endpoint,
+            dialog,
+            &self.in_dialog,
+            rseq,
+            invite_cseq,
+            body,
+        )
+        .await
+    }
+
+    /// Turn a final response into a [`Call`], or into the error it describes.
+    async fn confirm(&mut self, response: Response) -> Result<Call> {
+        if !response.status.is_success() {
+            // A non-2xx is acknowledged by the transaction layer itself, so there is nothing to
+            // send here — only a media port to release, which happens when this is dropped.
+            const INTERVAL_TOO_SMALL: u16 = 422;
+            if response.status.code() == INTERVAL_TOO_SMALL
+                && let Some(required) = required_interval(&response)
+            {
+                return Err(Error::IntervalTooBrief(required));
+            }
+            return Err(Error::Rejected {
+                status: response.status.code(),
+                reason: String::from_utf8_lossy(&response.reason).into_owned(),
+            });
+        }
+
+        // From here the far end believes a dialog exists, so *every* path must acknowledge.
+        // Returning an error without one leaves it retransmitting its 200 for 32 seconds and
+        // then streaming media at a port we have closed.
+        match self.accept(&response) {
+            Ok((dialog, media, settled)) => {
+                let ack = build_ack(&self.endpoint, &dialog, &self.in_dialog)?;
+                self.endpoint
+                    .send_directly(ack.clone(), self.in_dialog.clone())
+                    .await?;
+                // The stream stays open rather than being dropped: a retransmitted 2xx means
+                // this ACK was lost and RFC 3261 §13.2.2.4 requires another.
+                if let Some(responses) = self.responses.take() {
+                    tokio::spawn(reack_retransmitted_2xx(
+                        self.endpoint.clone(),
+                        responses,
+                        ack,
+                        self.in_dialog.clone(),
+                    ));
+                }
+                let (events, events_rx) = EventSink::new();
+                emit_construction_events(&events, self.ringing);
+                Ok(Call {
+                    dialog,
+                    media,
+                    endpoint: self.endpoint.clone(),
+                    target: self.in_dialog.clone(),
+                    awaiting_ack: None,
+                    ended: false,
+                    media_address: self.options.media_address,
+                    current: settled.negotiated,
+                    encrypted: settled.srtp.is_some(),
+                    hold: self.hold,
+                    referral: None,
+                    transfer: None,
+                    session: session::adopt(
+                        response
+                            .headers
+                            .typed::<SessionExpires>()
+                            .and_then(std::result::Result::ok),
+                        self.options.session_expires,
+                    )
+                    .map(SessionState::armed),
+                    negotiation: self.negotiation,
+                    peer_allows_update: self.peer_allows_update
+                        || update::peer_allows(&response.headers),
+                    events,
+                    events_rx: Some(events_rx),
+                })
+            }
+            Err(error) => {
+                // RFC 3261 §15: a UAC that cannot proceed after a 2xx acknowledges it and then
+                // sends BYE. Walking away silently is what leaves the far end streaming.
+                let dialog = self
+                    .dialog
+                    .take()
+                    .or_else(|| Dialog::from_response(&self.invite, &response));
+                if let Some(dialog) = dialog {
+                    let in_dialog = in_dialog_target(&dialog, self.target.clone());
+                    let _ = send_ack(&self.endpoint, &dialog, in_dialog.clone()).await;
+                    if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
+                        let _ = self.endpoint.send(bye, in_dialog).await;
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Everything after a 2xx that can fail, kept together so [`Self::confirm`] can ACK either way.
+    ///
+    /// [`establish`] is the same step for [`dial`], and this is not it: nothing here is rebuilt.
+    /// The dialog is the one the provisional created, and when the early session was already
+    /// answered the description in force is what *it* settled — including anything an UPDATE has
+    /// changed since.
+    fn accept(&mut self, response: &Response) -> Result<(Dialog, MediaSession, Settled)> {
+        // A 2xx bearing a different `To` tag is a different dialog — a forked branch won — and
+        // the early one it did not confirm has nothing to contribute to it.
+        let confirms_early = self.belongs(response);
+        let fresh = Dialog::from_response(&self.invite, response);
+        let mut dialog = match (confirms_early, self.dialog.take(), fresh) {
+            // The usual case: the early dialog, its sequence space intact.
+            (true, Some(early), _) => early,
+            (_, _, Some(fresh)) => fresh,
+            // A 2xx with no usable `To` tag or `Contact` establishes no dialog of its own; if a
+            // provisional already did, that is still the dialog this call is in.
+            (_, Some(early), None) => early,
+            (_, None, None) => return Err(Error::NoDialog),
+        };
+        dialog.refresh_target(&response.headers);
+        self.in_dialog = in_dialog_target(&dialog, self.target.clone());
+
+        let (port, settled) = match self.media.take() {
+            // The answer arrived in a provisional, and any UPDATE since settled its own. So the
+            // 2xx's body is *not* read: at this point it can only be a repeat of the answer or,
+            // worse, a description that undoes the renegotiation. `answer_early` sends no body
+            // in this exact case, and for the same reason.
+            Some(EarlyMedia::Answered(early)) if confirms_early => (early.port, early.settled),
+            Some(EarlyMedia::Answered(early)) => {
+                (early.port, self.settle_from(response)?)
+            }
+            Some(EarlyMedia::Offered(port)) => (port, self.settle_from(response)?),
+            None => return Err(Error::NoDialog),
+        };
+        let media = port.start(settled.media_config());
+        Ok((dialog, media, settled))
+    }
+
+    /// Read the answer out of the 2xx, for the case where no provisional carried one.
+    fn settle_from(&mut self, response: &Response) -> Result<Settled> {
+        let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
+            .map_err(|error| Error::Sdp(error.to_string()))?;
+        let settled = settle_answer(self.capabilities.crypto.as_ref(), &answer)?;
+        // Our INVITE's offer is answered here rather than in a provisional, so the exchange
+        // closes now. Without this the first UPDATE on the confirmed call would be refused as
+        // glare against an offer that has in fact been answered.
+        self.negotiation.received_answer();
+        Ok(settled)
+    }
+
+    /// Take back the invitation, whatever state it is in.
+    async fn give_up(&mut self) {
+        let Some(responses) = self.responses.as_mut() else {
+            return;
+        };
+        withdraw(
+            &self.endpoint,
+            &self.invite,
+            &self.via,
+            self.target.clone(),
+            responses,
+            self.provisional,
+        )
+        .await;
+    }
 }
 
 /// A session that has been described and answered, but not yet accepted.
