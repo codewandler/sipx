@@ -9,6 +9,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`sipx peers` — who is there to call (`P-5`)** — the discovery epic's first story, and
+  deliberately the one with no protocol in it. A peer book and one command that lists it in both
+  the human and machine-readable forms `P-1` set for every other command. **A book that cannot be
+  read is an error, not an empty list**: a fresh machine with no book has not told you there is
+  nobody to call, and a script that cannot tell those apart calls nobody and reports success.
+  - **The format is one peer per line — `name`, whitespace, URI, `#` for comments** — because that
+    is the only shape a shell already has verbs for in both directions: `echo "carol sip:carol@host"
+    >> "$book"` writes it and `read -r name uri` reads it. Anything structured needs a parser to
+    append safely, and none is worth a dependency for two fields. **No dependency was added.**
+  - Looked for in `--book`, then `$SIPX_PEERS`, then `$XDG_CONFIG_HOME/sipx/peers`, then
+    `$HOME/.config/sipx/peers` — the same flag/env/default order `register` already uses.
+  - **Every entry carries which source it came from**, though there is only one source today. That
+    is what lets `S-24`'s registrar and `T-24`'s local link merge in later without breaking a
+    script that already reads the output; a list that flattened them could not be extended.
+  - Nothing here consults the network — the module is not even async.
+
 - **`record_at_least`, the counted wait for received audio (`X-28`)** — `MediaSession` and `Call`
   both gain it. `record_until_idle(idle)` spent one duration on two different jobs: how long to
   wait for the stream to *start*, and how long a gap means it has *ended*. Neither is a property of

@@ -54,10 +54,6 @@ _This is the layer applications actually program against, so it is the one that 
 - [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 
-### Endpoint discovery
-_sipx can call any endpoint you can already name, and cannot help you name one. `sipx dial` takes a_
-- [P-5 — List what can be called with `sipx peers`](P-5-peer-book-and-list.md) · Phone · the epic's first story — a peer book and one command, with no protocol work
-
 ### Ice
 - [M-27 — Offer and answer ICE from a call](M-27-ice-in-the-call-layer.md) · Media · found by M-22 — ICE works and is reachable only through sipx-media's API; no call places one with it
 
@@ -144,6 +140,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
 - [P-4 — Implement `sipx answer`](P-4-cli-answer.md) · Phone
+- [P-5 — List what can be called with `sipx peers`](P-5-peer-book-and-list.md) · Phone · the epic's first story — a peer book and one command, with no protocol work
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 - [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling

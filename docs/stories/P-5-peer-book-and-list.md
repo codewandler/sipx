@@ -2,8 +2,7 @@
 id: P-5
 title: List what can be called with `sipx peers`
 pillar: Phone
-status: in-progress
-priority: 15
+status: done
 design: docs/designs/discovery.md
 epic: discovery
 areas: [sipx-cli]
