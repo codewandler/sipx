@@ -40,9 +40,14 @@ listener schema, app/binding/grants/failure tables, reload semantics — with ve
 - Vectors execute: `crates/sipx-app/tests/config_vectors.rs` runs all thirty, and two of them
   (`HC-9`, `HC-28`) run the `A-7` harness — a policy read out of a document has to change what a
   call does, and a live call's captured policy has to survive the reload that redeclared it.
-- Two properties are checked over the set rather than by a row: every normative point is named by
-  at least one vector, and every refusal code is produced by at least one vector. Adding `N13` or a
-  fourteenth code without a vector fails the build.
+- Coverage is checked against the **spec**, not against a copy of it. The test reads
+  `docs/specs/host-config.md` and parses §3's points and §8's rows, so the page is the source of
+  truth: adding `N13` with no vector, adding a table row for a vector that does not run, or
+  drifting a row's `Pins` cell each fail a test. Three statements of the same claim — the vector's
+  own tag, the §8 row, the §3 citation — have to agree in both directions. Every refusal code in §5
+  is likewise produced by at least one vector.
+  (Round 1 of review found this: the first version iterated a hand-written const in the crate, so
+  the page could grow a point and nothing would notice.)
 - Mutation-checked while writing: dropping the topology check, ignoring leftover keys, allowing an
   unrouted listener, allowing `app` and `no_app` together, dropping referential integrity, allowing
   a duplicate key or table, clearing captured policies on reload, and each clause of the secret-name
