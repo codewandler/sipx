@@ -134,8 +134,12 @@ title = "The WebSocket Protocol as a Transport for SIP"
 layer = "transport"
 status = "implemented"
 roles = ["uac", "uas"]
-evidence = ["crates/sipx-transport/src/ws.rs", "crates/sipx-transport/tests/ws.rs"]
-note = "Subprotocol negotiation, one message per frame, and the invented sent-by. A target names the resource the handshake asks for, since RFC 7118 fixes neither that nor the port. Verified against Kamailio's WebSocket module."
+evidence = [
+  "crates/sipx-transport/src/ws.rs",
+  "crates/sipx-transport/tests/ws.rs",
+  "crates/sipx-call/tests/wss.rs",
+]
+note = "Subprotocol negotiation, one message per frame, and the invented sent-by. A target names the resource the handshake asks for, since RFC 7118 fixes neither that nor the port. Verified against Kamailio's WebSocket module. Both roles reach it on a live call: `wss.rs` runs INVITE, 200, ACK, audio and BYE with every SIP message inside a WebSocket frame inside TLS. `X-33` added that citation — the `transport` layer is outside the reachability check's scope, but the role claim is the same kind of claim, and it was resting on `sipx-transport` alone."
 
 [[rfc]]
 number = 9000
@@ -328,7 +332,7 @@ evidence = [
   "crates/sipx-ua/src/subscribe.rs",
   "crates/sipx-call/src/transfer.rs",
 ]
-note = "The notifier side: a subscription store keyed on dialog *and* package (§4.4.1), establish/refresh/unsubscribe with §4.2.1.1's shorten-never-lengthen rule, expiry, termination that is final — a terminated subscription produces no further notification and cannot be refreshed back to life — and 489 for an unserved package. `Subscription-State` and its reasons are typed, and the implicit subscription a REFER creates is expressed in those terms rather than beside them. Not implemented: the *subscriber* side, so sipx serves subscriptions and does not place them; and no event packages ship yet (`S-17`, `S-18`)."
+note = "The notifier side: a subscription store keyed on dialog *and* package (§4.4.1), establish/refresh/unsubscribe with §4.2.1.1's shorten-never-lengthen rule, expiry, termination that is final — a terminated subscription produces no further notification and cannot be refreshed back to life — and 489 for an unserved package. `Subscription-State` and its reasons are typed, and the implicit subscription a REFER creates is expressed in those terms rather than beside them. Not implemented: the *subscriber* side, so sipx serves subscriptions and does not place them. Three event packages do ship — `dialog` and `reg` (RFC 4235, 3680) and `presence` (RFC 3856) — and each has its own row; that sentence said none did until `X-33`, four rows and two closed stories after it stopped being true."
 
 [[rfc]]
 number = 3841
@@ -359,8 +363,12 @@ layer = "security"
 status = "implemented"
 roles = ["uac"]
 headers = ["Authorization", "WwwAuthenticate", "ProxyAuthenticate", "ProxyAuthorization"]
-evidence = ["crates/sipx-ua/src/auth.rs"]
-note = "Checked against the worked example the RFC publishes for itself, rather than against sipx's own idea of the answer."
+evidence = [
+  "crates/sipx-ua/src/auth.rs",
+  "crates/sipx-ua/tests/register.rs",
+  "crates/sipx-cli/src/register.rs",
+]
+note = "Checked against the worked example the RFC publishes for itself, rather than against sipx's own idea of the answer. Reachable: credentials are *selected*, and `sipx register --password` selects them — `X-33` added that citation, because until then this row claimed `uac` from `sipx-ua` alone. **Not reachable from `sipx dial`**, which accepts `--password` and discards it, so a call challenged with 407 fails rather than retrying."
 
 [[rfc]]
 number = 7616
@@ -368,8 +376,12 @@ title = "HTTP Digest Access Authentication"
 layer = "security"
 status = "implemented"
 roles = ["uac"]
-evidence = ["crates/sipx-ua/src/auth.rs"]
-note = "MD5, SHA-256 and their session variants, checked against the §3.9.1 worked example rather than against sipx's own arithmetic. See RFC 8760 for SHA-512-256."
+evidence = [
+  "crates/sipx-ua/src/auth.rs",
+  "crates/sipx-ua/tests/register.rs",
+  "crates/sipx-cli/src/register.rs",
+]
+note = "MD5, SHA-256 and their session variants, checked against the §3.9.1 worked example rather than against sipx's own arithmetic. See RFC 8760 for SHA-512-256. Reached the same way as RFC 2617 — `sipx register --password` is the selection, and it is the only one above the call layer."
 
 [[rfc]]
 number = 8760
@@ -377,8 +389,12 @@ title = "The SIP Digest Access Authentication Scheme"
 layer = "security"
 status = "implemented"
 roles = ["uac"]
-evidence = ["crates/sipx-ua/src/auth.rs"]
-note = "SHA-512-256 and SHA-512-256-sess, and multiple challenges resolved by strength rather than by the server's order — §2.4's `unless a local policy dictates otherwise`, taken because §3 names the downgrade attack that ordering enables. `topmost_supported` is the literal rule for callers that want it."
+evidence = [
+  "crates/sipx-ua/src/auth.rs",
+  "crates/sipx-ua/tests/register.rs",
+  "crates/sipx-cli/src/register.rs",
+]
+note = "SHA-512-256 and SHA-512-256-sess, and multiple challenges resolved by strength rather than by the server's order — §2.4's `unless a local policy dictates otherwise`, taken because §3 names the downgrade attack that ordering enables. `topmost_supported` is the literal rule for callers that want it. Reached the same way as RFC 2617."
 
 [[rfc]]
 number = 5922
@@ -386,8 +402,12 @@ title = "Domain Certificates in SIP"
 layer = "security"
 status = "implemented"
 roles = ["uac", "uas"]
-evidence = ["crates/sipx-transport/src/tls.rs", "docs/specs/sip-tls.md"]
-note = "The identity checked is the host from the URI, never the name resolution produced. There is no way to disable verification."
+evidence = [
+  "crates/sipx-transport/src/tls.rs",
+  "crates/sipx-call/tests/wss.rs",
+  "docs/specs/sip-tls.md",
+]
+note = "The identity checked is the host from the URI, never the name resolution produced. There is no way to disable verification. Both roles reach it on a live call: `wss.rs` places a whole call — INVITE through BYE — over a TLS-secured WebSocket, the caller trusting a fixture CA through `TrustAnchors::only()` and naming the identity with `Target::verifying`, so a verification mistake fails the call rather than passing the test. `X-33` added that citation; until then this row claimed both roles from `sipx-transport` alone. **The shipped binary cannot select TLS**: `sipx dial` and `sipx register` choose between UDP and `--tcp`, and a `sips:` URI is stripped to port 5060 over UDP rather than refused — a gap in `sipx-cli`, not in the verification."
 
 [[rfc]]
 number = 6125
@@ -447,8 +467,12 @@ number = 8866
 title = "SDP: Session Description Protocol"
 layer = "media"
 status = "implemented"
-evidence = ["crates/sipx-sdp/src/parse.rs", "crates/sipx-sdp/src/session.rs"]
-note = "A real AST with round-tripping, rather than string manipulation over the body."
+evidence = [
+  "crates/sipx-sdp/src/parse.rs",
+  "crates/sipx-sdp/src/session.rs",
+  "crates/sipx-call/src/call.rs",
+]
+note = "A real AST with round-tripping, rather than string manipulation over the body. Every call goes through it: `call.rs` builds the offer and parses and answers the peer's, on the INVITE, on a re-INVITE and on an UPDATE."
 
 [[rfc]]
 number = 4566
@@ -463,8 +487,13 @@ number = 3550
 title = "RTP: A Transport Protocol for Real-Time Applications"
 layer = "media"
 status = "implemented"
-evidence = ["crates/sipx-rtp/src/packet.rs", "crates/sipx-rtp/src/rtcp.rs"]
-note = "RTP and RTCP, including sender and receiver reports and the §A.8 interarrival jitter recurrence — which is not a variance, and is usually implemented as one."
+evidence = [
+  "crates/sipx-rtp/src/packet.rs",
+  "crates/sipx-rtp/src/rtcp.rs",
+  "crates/sipx-call/tests/call.rs",
+  "crates/sipx-call/tests/mute.rs",
+]
+note = "RTP and RTCP, including sender and receiver reports and the §A.8 interarrival jitter recurrence — which is not a variance, and is usually implemented as one. Reached by every call: `call.rs` asserts the audio one endpoint played arrives sample-for-sample at the other, and `mute.rs` asserts the sent and received packet counts agree with no loss. **The RTCP half is thinner than the row reads**, and `X-33` found it looking for that evidence: a call's `quality()` computes loss and jitter from local reception counters, and the only field that comes from a peer's report is the round trip, which no test at or above `sipx-call` asserts. The report codec itself is tested in `sipx-rtp`."
 
 [[rfc]]
 number = 3551
@@ -479,24 +508,28 @@ number = 4733
 title = "RTP Payload for DTMF Digits, Telephony Tones, and Telephony Signals"
 layer = "media"
 status = "implemented"
-evidence = ["crates/sipx-rtp/src/dtmf.rs"]
-note = "Events 0-15, with the payload type read from the negotiation rather than assumed. End retransmissions share the event's timestamp, which is the part that is usually wrong."
+evidence = [
+  "crates/sipx-rtp/src/dtmf.rs",
+  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/tests/call.rs",
+]
+note = "Events 0-15, with the payload type read from the negotiation rather than assumed. End retransmissions share the event's timestamp, which is the part that is usually wrong. Reachable from a call: `Call::send_digit`, `send_digits` and `recv_digit` are public, and `call.rs`'s tests carry `1234#` across a live call and assert the digit leaves on the payload type the answer named rather than on 101."
 
 [[rfc]]
 number = 6716
 title = "Definition of the Opus Audio Codec"
 layer = "media"
-status = "implemented"
+status = "partial"
 evidence = ["crates/sipx-audio/src/opus.rs"]
-note = "Behind the `opus` feature, off by default because it links a C library."
+note = "**Missing: a call. No call can select Opus**, which is why this row is no longer `implemented` — every offer and answer path in `sipx-call` builds `Capabilities::g711` (six sites), no `sipx-call` entry point takes caller-supplied `Capabilities`, `Capabilities::with_opus` has no caller outside `sipx-sdp`'s own tests, and `Codec::from_payload_type` deliberately never returns Opus because a dynamic payload number means whatever `a=rtpmap` said. So no INVITE sipx sends offers Opus and no offer of it is ever answered. What *is* implemented and tested, in the crate: encode and decode through the `opus` feature, off by default because it links a C library. `sipx-media` forwards the feature and nothing above turns it on: `sipx-call` and `sipx-cli` do not mention it, so the codec is absent from every default build — and present but unreachable under `--all-features`, which is how the gate builds. `X-33` lowered the status, which the reachability check had not been asking of a row that claims no role. The gap has **no story**: `M-13` is `done` and it built the codec, not the wiring."
 
 [[rfc]]
 number = 7587
 title = "RTP Payload Format for the Opus Speech and Audio Codec"
 layer = "media"
-status = "implemented"
+status = "partial"
 evidence = ["crates/sipx-audio/src/opus.rs", "crates/sipx-media/tests/opus.rs"]
-note = "The 48000 RTP clock whatever the sample rate, and negotiation by encoding name rather than by payload type number."
+note = "**Missing: a call**, for the same reason as RFC 6716 — the payload format is exercised by `sipx-media`'s own tests and by nothing above them, so no call has ever put an Opus payload on the wire. What *is* implemented and tested: the 48000 RTP clock whatever the sample rate, and negotiation by encoding name rather than by payload type number. `X-33` lowered the status."
 
 [[rfc]]
 number = 3711
@@ -573,7 +606,7 @@ title = "TCP-Based Media Transport in SDP"
 layer = "media"
 status = "partial"
 evidence = ["crates/sipx-sdp/src/fingerprint.rs"]
-note = "`a=setup` only, which is the part RFC 5763 §5 borrows to decide who opens the DTLS connection. The `a=connection` attribute and TCP media transport itself are not implemented: sipx carries media over UDP."
+note = "`a=setup` only, which is the part RFC 5763 §5 borrows to decide who opens the DTLS connection. `sipx-call` renders it, but only inside the branch guarded by `Capabilities::dtls()`, so **no call sipx places emits `a=setup`** — the same dead branch as RFC 8122's `a=fingerprint`, and the reason this row is `partial` rather than cited at the call layer. The `a=connection` attribute and TCP media transport itself are not implemented: sipx carries media over UDP."
 
 [[rfc]]
 number = 8445
@@ -674,7 +707,7 @@ status = "implemented"
 roles = ["uas"]
 methods = ["PUBLISH"]
 evidence = ["crates/sipx-ua/src/presence.rs"]
-note = "Soft state with entity tags: initial publication, refresh, modify and remove read from what is present (§4.1), a fresh `SIP-ETag` on every acceptance (§6 step 6), and 412 for a tag the compositor does not hold (§6 step 3) — including one whose state expired, which must not be accepted as a new publication. Expiry is judged on the clock rather than on whether a sweep has run, so the answer is not a race. Composition policy is deliberately absent: a second publication for one presentity replaces the first, and merging several publishers is a policy question for whoever has one."
+note = "Soft state with entity tags: initial publication, refresh, modify and remove read from what is present (§4.1), a fresh `SIP-ETag` on every acceptance (§6 step 6), and 412 for a tag the compositor does not hold (§6 step 3) — including one whose state expired, which must not be accepted as a new publication. Expiry is judged on the clock rather than on whether a sweep has run, so the answer is not a race. Composition policy is deliberately absent: a second publication for one presentity replaces the first, and merging several publishers is a policy question for whoever has one. **The role is the library's, not the binary's**: `Compositor::apply` decides what a PUBLISH means and what to answer, and an application supplies the request — nothing in this workspace receives a PUBLISH off a socket, and `sipx-call`'s dispatcher deliberately does not advertise the method on `Allow`. `X-33` resolved this row and the three other package rows individually rather than as a batch; `docs/designs/rfc-registry-grain.md` says why each keeps `uas` and what would take it away."
 
 [[rfc]]
 number = 3856
@@ -683,7 +716,7 @@ layer = "services"
 status = "partial"
 roles = ["uas"]
 evidence = ["crates/sipx-ua/src/presence.rs"]
-note = "The `presence` package serves PIDF documents published through RFC 3903. Watcher information (RFC 3857) and the `presence.winfo` template are not implemented."
+note = "The `presence` package serves PIDF documents published through RFC 3903, joined to the notifier and driven from outside the crate: `packages.rs` establishes a real subscription, publishes, and asserts the body the NOTIFY carries changes with the publication. Watcher information (RFC 3857) and the `presence.winfo` template are not implemented. Same limit as 3903: **nothing receives a SUBSCRIBE off a socket**, so the `uas` claim is about `sipx-ua`'s public API and not about the shipped binary — `X-33` verified that and left the role, with the reason and the widening trigger in `docs/designs/rfc-registry-grain.md`."
 
 [[rfc]]
 number = 3863
@@ -699,8 +732,8 @@ title = "A SIP Event Package for Registrations"
 layer = "services"
 status = "partial"
 roles = ["uas"]
-evidence = ["crates/sipx-ua/src/packages.rs"]
-note = "`reginfo` documents with per-contact state and the event that changed it — registered, refreshed, expired, unregistered, with the last two kept apart because why a contact went is what a display says. Same limit as 4235: the documents exist, the join to a live registrar does not, and sipx is not a registrar."
+evidence = ["crates/sipx-ua/src/packages.rs", "crates/sipx-ua/tests/packages.rs"]
+note = "`reginfo` documents with per-contact state and the event that changed it — registered, refreshed, expired, unregistered, with the last two kept apart because why a contact went is what a display says. Registered with the notifier under the name a subscriber asks for, and asserted from outside the crate. Same limit as 4235: the documents exist, the join to a live registrar does not, and sipx is not a registrar. And the limit shared with 3856 and 3903: **nothing receives a SUBSCRIBE off a socket**, so `uas` is a claim about `sipx-ua`'s public API — `X-33` verified it and left the role."
 
 [[rfc]]
 number = 4235
@@ -708,8 +741,8 @@ title = "An INVITE-Initiated Dialog Event Package for SIP"
 layer = "services"
 status = "partial"
 roles = ["uas"]
-evidence = ["crates/sipx-ua/src/packages.rs"]
-note = "`dialog-info` documents with the five states of §3.7.1, the full-then-partial discipline of §4.1, and a version counter scoped per subscription rather than per resource. What is not here is the join to a live dialog store — the package produces documents, and wiring them to running calls is the application's, because a package reaching into the call layer would reverse the workspace's dependency direction."
+evidence = ["crates/sipx-ua/src/packages.rs", "crates/sipx-ua/tests/packages.rs"]
+note = "`dialog-info` documents with the five states of §3.7.1, the full-then-partial discipline of §4.1, and a version counter scoped per subscription rather than per resource. What is not here is the join to a live dialog store — the package produces documents, and wiring them to running calls is the application's, because a package reaching into the call layer would reverse the workspace's dependency direction. And the limit shared with 3680, 3856 and 3903: **nothing receives a SUBSCRIBE off a socket**, so `uas` is a claim about `sipx-ua`'s public API — which `packages.rs` drives from outside the crate. `X-33` verified it and left the role."
 
 [[rfc]]
 number = 5627

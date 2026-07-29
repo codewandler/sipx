@@ -1,7 +1,7 @@
 # Design: the grain of the RFC registry
 
 **Status:** decided · **Pillar:** Build · **Epic:** `conformance` · **Stories:** X-15 (X-7 built
-the registry this decides the grain of)
+the registry this decides the grain of), X-30 and X-33 (the reachability rule the grain carries)
 
 ## The decision
 
@@ -128,7 +128,11 @@ Any one of these is enough to revisit — this is a decision about present cost,
 5. **Formal conformance reporting is required** — a certification programme or an interop matrix
    demanding per-requirement statements. External obligation beats internal cost.
 
-## X-30: reachability, and why the rule is scoped to media
+## X-30: reachability, and why the rule was scoped to media
+
+*(`X-33` widened the scope to `{media, security}` and to `status` as well as `roles`. This section is
+kept as `X-30` wrote it — including the measurement the widening was tested against — and the
+`X-33` section that follows says what changed and why. The check is now `unreachable_claims`.)*
 
 `X-30` asked whether the registry can distinguish *implemented in a crate* from *reachable from a
 call* — after the same over-claim landed five times in two days. The answer is yes, and it needs
@@ -198,7 +202,8 @@ them anyway.
 
 **Selection is the rule; `layer = "media"` is a proxy for it.** On every media row that *claims a
 role* the two agree exactly, and the agreement is checked rather than asserted —
-`RoleReachability.test_the_scope_tracks_selection_not_the_layer_string` holds both halves:
+`ClaimReachability.test_the_scope_tracks_selection_not_the_layer_string` holds both halves
+(`X-33` renamed the class when the check stopped being only about roles):
 
 - every media row that keeps `uac`/`uas` (3711, 4568) is selected by a call — `with_srtp` has
   callers in `crates/sipx-call/src/call.rs` (three of them);
@@ -219,6 +224,9 @@ by citing the call-layer tests; the other three lost their roles.
 
 ### The known limit: the gate is on `roles`, not on `status`
 
+*(Closed by `X-33`. Kept as filed, because the measurement below is what the fix was measured
+against, and because the shape of the hole is the reusable part.)*
+
 `unreachable_role_claims` returns early for any row without a `roles` list, so a media row can say
 `status = "implemented"` about something no call can reach and the check will pass it. That is not
 hypothetical. **RFC 6716 and 7587 are both `layer = "media"`, both `status = "implemented"`, and
@@ -231,6 +239,207 @@ entry point takes caller-supplied `Capabilities` at all — every mention of the
 over, by claiming a status instead of a role. Filed as `X-33`; deliberately **not** fixed here,
 because binding `status` to reachability is a different rule needing its own measurement, and this
 story's own result is that adopting such a rule unmeasured is how you get 19 false rejections.
+
+## X-33: the scope, widened along both axes it was measured to be narrow on
+
+`X-30` left a rule that was right about one layer and one field. `X-33` asked what the honest
+generalisation of it is, and the answer is **not** "every layer" — that was already measured and
+rejected — but the two specific widenings the measurement supports. Nothing about the grain decision
+changes; no key was added.
+
+### The property, restated so it can be applied
+
+A capability is in scope when it must be **selected** before a call can use it, and when selecting
+nothing is *silent*. Both halves matter. The second is what makes the over-claim survivable: the
+call still connects, and every test in the crate below still passes, so nothing goes red.
+
+`layer` remains the proxy. The question this story had to answer is which layers have the property,
+and it is answered by measurement per layer rather than by an argument about layers in general.
+
+### Axis one: `security` has the property, and three of its four rows were merely uncited
+
+| Half of the property | Media | Security |
+|---|---|---|
+| Selected by something above | `Capabilities::with_srtp`, `with_dtls_srtp`, `MediaSession::start_with_ice` | `Config::with_credentials`; a `Target` built with a secure `TransportKind` |
+| Selecting nothing is silent | the call connects unencrypted | the REGISTER succeeds unauthenticated; the call goes out in plaintext |
+
+The silence is not asserted, it is read off the code: the only `with_credentials` caller above the
+call layer is `crates/sipx-cli/src/register.rs:95`, and it sits inside `if let Some(password)` at
+`:94`. `sipx register` with no password registers, and nothing fails.
+
+All four security rows claiming a role failed the widened rule. Sorted by what is true of the code:
+
+| Rows | What the rejection meant |
+|---|---|
+| 2617, 7616, 8760 | Reachable; the row never cited the selection. Now cite `crates/sipx-cli/src/register.rs`. |
+| 5922 | Reachable; the row never cited a call. Now cites `crates/sipx-call/tests/wss.rs`. |
+
+So the security half of the widening yields four corrected citations and **zero demotions** — which
+is the shape `X-30`'s first false justification denied was possible ("those rows cannot satisfy the
+rule at any price"). The trigger it inverted had already fired, and this is it firing.
+
+Two honest residuals came out of doing it, and both are now in the rows themselves rather than only
+here:
+
+- **There is no authenticated-REGISTER test at or above the call layer.** `crates/sipx-cli/tests/`
+  contains no `401`, no `407`, no `Authorization` and no `password`; the digest test is one crate
+  below, at `crates/sipx-ua/tests/register.rs:265`. The `uac` claim rests on the *selection* being
+  reachable, which it is, and on the behaviour being tested, which it is — one crate down.
+- **`sipx dial --password` silently discards the credential.** `--password` is a registered valued
+  flag (`crates/sipx-cli/src/main.rs:168`) and `crates/sipx-cli/src/dial.rs` never reads it, so a
+  call challenged with 407 fails rather than retrying. RFC 2617's row now says so.
+- **The shipped binary cannot select TLS at all.** `dial` and `register` choose between UDP and
+  `--tcp`; `target_of` in `crates/sipx-cli/src/dial.rs` strips `sips:` exactly as it strips `sip:`
+  and defaults the port to 5060, so a `sips:` URI is dialled in plaintext rather than refused. RFC
+  5922's role claim is reachable from the *library*, proved by `crates/sipx-call/tests/wss.rs`, not
+  from `sipx`.
+
+### Axis two: `status = "implemented"` is a claim in the same table
+
+A row with no `roles` claims nothing about a role. It still says `implemented`, in a generated table
+whose heading reads "What sipx implements", and a reader seeing "RFC 6716 Opus ✅ implemented"
+concludes a call can be placed with Opus. It cannot, on four independent grounds — no `with_opus`
+caller outside `sipx-sdp`'s own tests, `Codec::from_payload_type` deliberately never returns it, no
+`sipx-call` entry point takes caller-supplied `Capabilities`, and the `opus` feature is off at every
+level from `sipx-audio` up to `sipx-cli`.
+
+Measured at the media layer, the status rule rejects 5 of the 5 `implemented` rows:
+
+| Rows | What the rejection meant |
+|---|---|
+| 8866, 3550, 4733 | Reachable; the row never cited the call. SDP is built and answered in `call.rs`; audio crosses in `tests/call.rs`; `1234#` crosses in the same file. |
+| 6716, 7587 | Unreachable. **Demoted to `partial`**, with the note naming the gap. |
+
+**Why it stops at media, and why that is a measurement rather than a preference.** Every media row
+claiming `implemented` names a capability a call either carries or does not. At the security layer
+three of the seven do not: 6125 (a non-matching SAN is refused rather than falling back to the CN),
+8446 (1.3 preferred) and 8996 (1.2 is the floor and not configurable downward) state *policies* of
+the TLS stack. A policy holds on every connection and is proved by the **absence** of an API, so
+"which call reaches it" is not the question those rows answer, and asking it would reject three
+honest rows to catch nothing. That limit is asserted, not just written:
+`test_the_status_gate_is_media_only_and_the_reason_is_measured`.
+
+**`partial` is exempt, and that is a demotion rather than an exception.** This is the sharpest
+objection to the rule and it deserves the direct answer: a suppression list leaves the claim intact
+and hides the objection somewhere only a maintainer reads. `partial` changes what the *published*
+table says — from "✅ implemented" to "🟡 partial" — and the table's own stated rule is that a
+`partial` names what is missing. Five rows already used exactly that form for exactly this fact
+(5763, 5764, 8122, 8445, 8839); Opus makes seven. The residual hole is an author writing `partial`
+without naming the gap, which is prose and unenforceable — but it is conspicuous, because the status
+column changes in a generated document.
+
+### The four package rows, resolved one at a time
+
+`X-30` gave RFCs 3680, 3856, 3903 and 4235 one collective argument, which the story filing `X-33`
+called out as the "rule fitted to the data it was tested on" risk. Taken row by row the argument
+turns out to be the same argument four times and to hold — but it rests on a fact nobody had run:
+
+**No crate in this workspace receives a SUBSCRIBE or a PUBLISH off a socket.**
+`Subscriptions::on_subscribe` and `Compositor::apply` take an already-parsed `sipx_sip::Request` and
+are handed one by `sipx-ua`'s own tests. `sipx-call`'s dispatcher routes ACK, BYE, NOTIFY, PRACK,
+REFER and UPDATE, and unit-tests that SUBSCRIBE and PUBLISH are *not* on `Allow`. `sipx-ua/src/`
+contains neither `Method::Subscribe` nor `Method::Publish` anywhere.
+
+That is precisely what makes `sipx-ua` the crate that **serves** the role rather than a crate below
+one that must select the capability. There is no `sipx-call` for subscriptions; `sipx-ua` is the top
+of that stack, and asking these rows to cite the call layer would ask them to cite a crate that does
+not and should not depend on them. Row by row:
+
+| Row | Resolution | The fact it rests on |
+|---|---|---|
+| 3903 (PUBLISH, `uas`) | Role kept | `Compositor::apply` decides what a publication means and what to answer; the application supplies the request. |
+| 3856 (presence package, `uas`) | Role kept | Joined to the notifier and driven from outside the crate: `packages.rs` publishes and asserts the NOTIFY body changes with it. |
+| 3680 (`reg` package, `uas`) | Role kept | Registered under the name a subscriber asks for, asserted from outside the crate. The missing registrar join was already in the note. |
+| 4235 (`dialog` package, `uas`) | Role kept | The same, plus the missing dialog-store join, also already in the note. |
+
+Each note now carries the limit as well as the claim, and `X-33` added the `tests/packages.rs`
+citation to 3680 and 4235, which had cited only the source.
+
+**The trigger that takes these roles away is now a test, not a paragraph.**
+`test_the_services_rows_keep_their_roles_only_while_nothing_dispatches_to_them` asserts that nothing
+dispatches on SUBSCRIBE or PUBLISH. The moment something does — a server mode, an application host,
+a request router — there *is* a crate above `sipx-ua` that must select the package, these rows
+acquire the media shape exactly, and that test goes red before anybody has to remember this section
+exists. `X-30`'s version of this said "if sipx ever grows an application layer … this section is
+wrong", which is true and which nothing would have enforced.
+
+### Why `transport` is *not* in the scope, measured rather than asserted
+
+This is the layer that could plausibly have joined, and the reason it does not is the most useful
+result of this story, because it is the proxy failing rather than the proxy being conservative.
+
+The transport layer **mixes both kinds of row**:
+
+- *Selected*: RFC 7118 (an application chooses the WebSocket transport), 5626 (outbound is opted
+  into per registration), 8599 (push parameters are supplied by the application).
+- *On the path of every call*: 3263 (every call resolves), 3581 (`rport` is always observed and
+  echoed).
+
+Widening to `transport` would reject 3263 and 3581, and **no citation could honestly fix them** —
+they are the "rule asking the wrong question" bucket, and putting them in it is the same 19-out-of-22
+error one layer along. An evidence-path check cannot separate the two kinds, because the distinction
+is about callers and not about paths.
+
+So the scope stops, and the two rows it cannot adjudicate are named rather than quietly counted as
+false positives: **RFC 5626 and 8599 may be over-claims of exactly the ICE shape** — a `uac` surface
+in `sipx-ua` that nothing above it opts into — and this check cannot tell. That question needs the
+successor below. RFC 7118 was adjudicated by hand and turned out reachable, so it now cites
+`crates/sipx-call/tests/wss.rs`, which is a whole call over the transport.
+
+### Closing the two escape hatches, and correcting the count they were recorded with
+
+**The `layer` dodge is pinned where it can be pinned.** `sipx-media`, `sipx-rtp` and `sipx-audio`
+implement nothing but media, so a row citing one of them is a media row whatever its `layer` says
+(`misdeclared_layer`). This is not a general layer classifier and does not try to be: `sipx-sdp` is
+cited by RFC 3264, which is legitimately `core`, and `sipx-transport` is cited by rows at three
+layers. What it does is make the dodge unavailable to the rows that would want it — an unreachable
+media capability lives in one of those three crates, and leaving the check would now mean not citing
+your own implementation, which the evidence-existence check already forbids. The residual: a row that
+implements a media capability somewhere else entirely could still relabel.
+
+**The non-`.rs` hatch is closed.** `reaches_the_call_layer` now requires the path to end in `.rs`, so
+`crates/sipx-call/README.md` no longer proves anything.
+
+**And the fact that hatch was recorded with was wrong in both halves.** This document said "of the
+registry's 80 evidence paths exactly one is not a `.rs` file, RFC 5922's `docs/specs/sip-tls.md`".
+Measured: **117 paths, and two are not `.rs`** — `docs/specs/sip-tls.md`, cited by 5922 *and* by
+8996. The conclusion survives (both are outside `crates/`, so nothing relied on the hatch), but this
+is the fourth crisp-sounding fact in this document's lineage to fail when run, which is why the story
+that fixed it was told to try falsifying its own sentences first. See below.
+
+### A third false justification, and the same shape again
+
+`X-30`'s replacement for its first false claim cited `crates/sipx-cli/tests/cli.rs:116` as exercising
+the credential path. **It does not.** That line is
+`register_advertises_this_client_in_via_and_contact`, which passes no password, and the whole
+`crates/sipx-cli/tests/` tree contains no `password`, `401`, `407` or `Authorization`:
+
+```
+$ grep -rn '401\|407\|WWW-Authenticate\|Authorization\|password\|Credentials' crates/sipx-cli/tests/
+(no output)
+```
+
+The claim it was supporting — that RFC 2617, 7616 and 8760 could satisfy the rule for the price of
+one honest citation — is *true*, and this story acted on it. Only the evidence offered for it was
+invented. That is now three false facts in a row, all of them the same failure: a checkable-sounding
+sentence written from memory of the codebase rather than from the codebase. The countermeasure that
+worked here was to run every negative claim before writing it, and to put the ones that survive into
+`scripts/test-rfc-report.py` so they fail the gate when they stop being true rather than being
+believed for another story.
+
+### What `X-33` deliberately did not build
+
+**The cross-crate caller check is the successor, and it is not started.** It is the only honest
+answer to the transport layer, to the dead-branch limit and to the `layer` dodge at once, because it
+binds to reachability itself instead of to evidence paths. It needs caller resolution across crates
+— reading the source, not the manifests and not the registry — which is a different check on a
+different input, and half-building it would produce exactly the unmeasured rule this file spent two
+stories arguing against. It wants a story of its own, and these three rows are its first test cases:
+RFC 5626, 8599 (possible over-claims the path check cannot adjudicate) and 8122 (a dead branch the
+path check would accept).
+
+**Wiring Opus to a call has no story either.** `M-13` is `done` and it built the codec, not the
+selection. The demotion says so.
 
 ### Why the four `sipx-ua` service rows keep their roles
 
@@ -284,6 +493,9 @@ the reason it differs from ICE.
 
 ### Two false justifications, recorded
 
+*(A third was found by `X-33` — the citation offered for the correction below. It is recorded under
+"A third false justification" in the `X-33` section.)*
+
 The scope is right and it has now twice been defended with a claim that is not. Both are written
 down because in both cases the false version made a *chosen* scope look *forced*, and a future
 author would have had no reason to re-examine it.
@@ -322,35 +534,35 @@ facts about the build drifts, and drifts silently.
 
 ### What would widen this
 
-- **A non-media over-claim.** The scope is empirical — five instances, four of them media. A
-  sixth outside the media layer is evidence the narrowing was too tight, and the check takes a
-  layer set rather than a constant so that widening it is one edit and a test.
-- **`layer` is author-chosen, and the check keys on it.** Nothing validates a row's layer beyond
-  membership of the enum, so relabelling a media row `security` exits the check entirely. This is
-  the strongest argument against scoping by layer at all, and the honest reason to accept it for
-  now is that moving a row between layers is conspicuous in the generated table, which groups by
-  layer — but it is not *checked*, and a rule that can be left by editing one field is weaker than
-  one that cannot.
+*(Written by `X-30`, and three of the five are now resolved. Struck items keep their original text
+with the outcome named, because "this was foreseen and then happened" is worth more than a tidy
+list.)*
+
+- ~~**A non-media over-claim.**~~ **Fired, and acted on by `X-33`.** The scope was empirical — five
+  instances, four of them media. It now takes a layer set of `{media, security}`, and the widening
+  cost four citations and no demotions. Two rows the path check cannot adjudicate (RFC 5626, 8599)
+  are named under `X-33` above rather than counted as false positives.
+- ~~**`layer` is author-chosen, and the check keys on it.**~~ **Pinned where it can be pinned.**
+  Nothing validated a row's layer beyond membership of the enum, so relabelling a media row
+  `security` exited the check entirely. `misdeclared_layer` now closes that for any row citing
+  `sipx-media`, `sipx-rtp` or `sipx-audio`. Residual: a media capability implemented outside those
+  three crates could still relabel, and the layer of a non-media row is still unchecked.
 - **Reachability becoming directly enumerable.** The check binds to evidence paths, which is a
   proxy: a row could satisfy it by citing a call-layer file containing a dead branch — which is
-  precisely what `sipx-call`'s `a=fingerprint` rendering is today. A cross-crate caller check, or
-  coverage data from the call-layer tests, would bind to the fact itself rather than to a path,
-  and would be strictly better. It would also replace the layer scope, since it could ask the
-  question of every row without false positives.
+  precisely what `sipx-call`'s `a=fingerprint` rendering is today, and `a=setup` with it (RFC 4145's
+  row now says so). A cross-crate caller check, or coverage data from the call-layer tests, would
+  bind to the fact itself rather than to a path, and would be strictly better. It would also replace
+  the layer scope, since it could ask the question of every row without false positives.
 - **Checking selection directly, which would replace the layer scope entirely.** The property the
   scope stands in for is "this capability is opt-in, and the opt-in has a caller a call runs".
   Resolving that means finding callers across crates, not reading evidence paths — but it would ask
-  every row the right question rather than exempting five layers by name, and it would be immune to
-  the two dodges above and below. This is the successor to this check, not a refinement of it.
-- **A path under `crates/` that is not code.** The repo-root `tests/` hatch was removed because
-  `evidence` may legitimately cite markdown (RFC 5922 cites `docs/specs/sip-tls.md`) and
-  `tests/interop/README.md` would have proved reachability. The narrower version has the same hole
-  one directory in: `crates/sipx-call/README.md` would satisfy the check. Nothing relies on it — of
-  the registry's 80 evidence paths exactly one is not a `.rs` file, RFC 5922's
-  `docs/specs/sip-tls.md`, and it is outside `crates/` — and restricting to `.rs` would close it.
-  Left open rather than fixed because it is one condition on a path and the successor check above
-  makes the whole path-based approach redundant; recorded so it is a known hole and not a
-  discovered one.
+  every row the right question rather than exempting four layers by name, and it would be immune to
+  the dodges above. **This is the successor to this check, not a refinement of it**, `X-33`
+  deliberately did not start it, and its first three test cases are named above.
+- ~~**A path under `crates/` that is not code.**~~ **Closed by `X-33`.** The narrower version had the
+  same hole one directory in: `crates/sipx-call/README.md` would have satisfied the check.
+  `reaches_the_call_layer` now requires `.rs`. The measurement this was recorded with was itself
+  wrong — 117 paths, two of them not `.rs` — and the correction is under `X-33` above.
 
 ## Consequences
 
@@ -358,6 +570,7 @@ facts about the build drifts, and drifts silently.
 - A `[[rfc.requirement]]` row is now a gate failure with a message naming this document, so the
   next person to want the grain finds the argument instead of rediscovering it.
 - `docs/rfc/README.md` documents the schema as a consumable contract, which is what a downstream
-  pins against.
+  pins against. `X-33` added the `spec` key to that table, which the script had accepted since
+  `M-25` while the document promising "these keys and no others" omitted it.
 - `scripts/test-rfc-report.py` is the first test for the report script. Wiring it into CI is a
   loose end this story leaves deliberately, since the gate's composition is not X-15's to change.
