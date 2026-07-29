@@ -158,7 +158,8 @@ check is how one of the two ends up weaker.
 
 ## 5. Connection reuse under TLS
 
-**[sipx]** The pool keys connections by `(remote address, transport, verified identity)`.
+**[sipx]** The pool keys connections by
+`(remote address, transport, verified identity, WebSocket resource)`.
 
 The *transport* is in the key because TCP, TLS and WebSocket to one address are not
 interchangeable — they can share a port, and a `sips:` request riding a cleartext socket has
@@ -169,6 +170,12 @@ connections. Reusing one for the other would mean traffic for `a.example.com` tr
 connection authenticated as `b.example.com`, which defeats the check that was just performed. A
 connection a peer opened has no identity — sipx verified nothing about it — so it can never
 stand in for a name it never checked.
+
+The *WebSocket resource* is in the key for the same reason one step down (§4): a socket upgraded
+at `/ws` was accepted by whatever serves `/ws`, and lending it to traffic that asked for
+somewhere else discards the only thing the target said about where it was going. `None`
+everywhere the question does not arise — every other transport, and every connection a peer
+opened.
 
 **[sipx] The identity is the URI host, and it survives resolution.** RFC 3263 turns one name
 into a list of addresses by way of NAPTR and SRV records that may name something else entirely;

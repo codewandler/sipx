@@ -125,19 +125,26 @@ would have hidden.
 
 ## What the second peer disagreed with
 
-One thing, and it is filed rather than fixed: `T-23`.
+One thing, and it is now fixed rather than filed: `T-23`. Both peers pass the whole shared list,
+and neither profile declares a divergence.
 
-sipx's WebSocket client requests the path `/`. The second peer serves SIP over WebSocket from
-its own HTTP server, at `/ws`, on that server's own port:
+sipx's WebSocket client used to request `/` on the SIP port, unconditionally. The second peer
+serves SIP over WebSocket from its own HTTP server, at `/ws`, on that server's own port:
 
 ```text
 GET /ws  on 127.0.0.1:8088 → upgraded, subprotocol sip
 GET /    on 127.0.0.1:8088 → HTTP/1.1 404 Not Found
 ```
 
-RFC 7118 §5 fixes neither the path nor the port, so both readings are legal — this is a gap in
-what a sipx `Target` can express, not a defect in either implementation. The first peer accepts
+RFC 7118 §5 fixes neither the path nor the port, so both readings are legal — this was a gap in
+what a sipx `Target` could express, not a defect in either implementation. The first peer accepts
 the upgrade on any path, which is precisely why one peer could not have found it.
+
+A `Target` now names both (`Target::at_path`, defaulting to `/`), and each peer declares where it
+serves SIP over WebSocket through `SIPX_INTEROP_WS_PORT` and `SIPX_INTEROP_WS_PATH` in its
+`PEER_ENV` — the defaults being the SIP port and `/`, which is why the first peer's profile says
+nothing. Where a peer puts its WebSocket is a fact about the peer, so it belongs in the profile
+and not in the test.
 
 Everything else the second peer agreed with on the first attempt, including the offer/answer
 exchange that had never met a foreign answerer.
@@ -172,10 +179,11 @@ precisely when the thing it looked for was present. The log is read into a varia
 
 ## Still to do
 
-WSS. Both peers serve it. For the first, the module wants its own TLS domain configuration; for
-the second, `T-23` blocks plain WebSocket first. The certificate policy it would exercise is the
-same code `registers_against_a_real_server_over_tls` already proves against a third party. Worth
-adding, not urgent.
+WSS. Both peers serve it, and plain WebSocket now passes against both. For the first, the module
+wants its own TLS domain configuration; for the second, the HTTP server needs its own TLS
+binding. The certificate policy it would exercise is the same code
+`registers_against_a_real_server_over_tls` already proves against a third party. Worth adding,
+not urgent.
 
 A third peer with a different implementation language would be worth more than a fourth C one.
 Both peers here are C, and a whole class of assumption — about integer widths, about what a
