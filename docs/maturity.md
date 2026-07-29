@@ -17,12 +17,12 @@ repository and are recorded when they happen rather than computed.
 | 1 | No claim outlives its caller, at any layer | open | `X-37` |
 | 2 | Adversarial input and adversarial timing are both fuzzed | open | `X-31` |
 | 3 | A red gate means a defect | met | — |
-| 4 | No known-wrong shipped path | open | `P-7` |
+| 4 | No known-wrong shipped path | met (attested) | — |
 | 5 | The public API says what it guarantees | open | `A-8` |
 | 6 | Testable from a shell for everything the CLI exposes | met (attested) | — |
 | 7 | The distance to v1 is generated, not asserted | met | — |
 
-**3 of 7 predicates met.** A predicate is met when every story named for it is `done` — the stories are the definition, so this table cannot drift from the board.
+**4 of 7 predicates met.** A predicate is met when every story named for it is `done` — the stories are the definition, so this table cannot drift from the board.
 
 - **Predicate 4 is attested, not computed.** Cannot be computed: a defect nobody has found leaves no trace in either source. What is reported is the absence of *open* stories describing one.
 - **Predicate 6 is attested, not computed.** Met at filing and not re-derived here: it is a property of the CLI's test suite, which the gate runs.
@@ -46,15 +46,15 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Signalling | 9 |
-| Application | 7 |
+| Signalling | 10 |
 | Media | 7 |
+| Application | 6 |
 | Build | 4 |
 | Phone | 1 |
 | Transport | 1 |
 | **total** | **29** |
 
-108 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+109 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
@@ -64,7 +64,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 |---|---|---|---|
 | 2026-07-28 | 95 | 58 | -37 |
 | 2026-07-29 | 43 | 47 | +4 |
-| 2026-07-30 | 0 | 1 | +1 |
+| 2026-07-30 | 0 | 2 | +2 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

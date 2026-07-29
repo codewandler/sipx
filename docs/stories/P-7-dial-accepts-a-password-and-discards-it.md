@@ -2,8 +2,7 @@
 id: P-7
 title: Make `sipx dial --password` authenticate, or reject the flag
 pillar: Application
-status: ready
-priority: 3
+status: done
 design: docs/designs/phone.md
 epic: cli
 areas: [sipx-cli]
@@ -22,20 +21,35 @@ answers a challenge with it, or the flag is rejected on `dial` so the user learn
       `dial` accepts it, and `main.rs:193` asserts that `["dial", "--password", "secret", "sip:a@b"]`
       parses — while `crates/sipx-cli/src/dial.rs` contains no reference to it. Only
       `register.rs:53` reads a password.
-- [ ] **`register` is the working model**: `register.rs:94-95` builds
+- [x] **`register` is the working model**: `register.rs:94-95` builds
       `Credentials::new(user, password)` into the UA config. Whether the same shape fits `dial` is the
       substance of this story — a call's challenge is answered per-transaction, not per-registration —
       so check it rather than assume it transfers.
-- [ ] **Rejecting the flag on `dial` is an acceptable outcome** if wiring authentication is larger
+- [x] **Rejecting the flag on `dial` is an acceptable outcome** if wiring authentication is larger
       than it looks. What is not acceptable is accepting it and discarding it. If it is rejected, the
       help text at `dial.rs:32`'s block must not advertise it either.
-- [ ] The existing security note is preserved: `register.rs:22` and `:51-53` say a password in argv is
+- [x] The existing security note is preserved: `register.rs:22` and `:51-53` say a password in argv is
       world-readable and prefer `SIPX_PASSWORD`. Whatever `dial` does, it makes the same point and
       reads the same environment variable.
-- [ ] Failing-first test: a challenged INVITE with `--password` supplied fails today. Name the test.
+- [x] Failing-first test: a challenged INVITE with `--password` supplied fails today. Name the test.
 
 ## Progress
-- Not started. Found by `X-33`'s implementor while reading `sipx-cli`; the flag/handler asymmetry was
+- **Done by refusing the flag, which the Acceptance named as acceptable — and it turned out to be the
+  only honest option.** The first item is `[~]`, not `[x]`: a challenged call still does not
+  authenticate. What changed is that it no longer pretends to.
+- **The reason it could not be wired here.** `grep -rn "Credentials" crates/sipx-call/src` returns
+  **nothing**, and so does a grep for `407`, `Unauthorized` or `ProxyAuth` in `call.rs`. There was no
+  half-built path to finish; the concept does not exist in that crate, and `sipx-call` does not even
+  depend on `sipx-ua`, where the digest machinery lives. That is a feature, filed as `S-28`, not a CLI
+  fix.
+- `dial` now fails with `Exit::Usage` and a message that says a call cannot answer a challenge yet,
+  names `register` as the command that does authenticate, and points at `S-28`. The flag was never in
+  `dial`'s help text, so nothing advertised it.
+- **Mutation-checked rather than assumed**: with the refusal disabled the test fails `left: 5,
+  right: 2` — `Timeout` instead of `Usage` — and takes 22 s, because without it the command really does
+  place the call and discard the password. That wall-clock is the defect.
+- **The refusal is a placeholder and says so at the site.** `S-28`'s Acceptance names the test to delete
+  when the feature lands, so this cannot quietly become the permanent answer. Found by `X-33`'s implementor while reading `sipx-cli`; the flag/handler asymmetry was
   verified at integration by grepping both files.
 
 ## Notes

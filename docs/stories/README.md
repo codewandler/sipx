@@ -49,9 +49,6 @@ _The measure of this stack's reach is what can be built on it **without writing 
 _This is the layer applications actually program against, so it is the one that decides whether_
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
-### Cli
-- [P-7 — Make `sipx dial --password` authenticate, or reject the flag](P-7-dial-accepts-a-password-and-discards-it.md) · Application · main.rs:168 accepts --password on dial and dial.rs never reads it, so a 407-challenged call fails while the user who supplied credentials is told nothing
-
 ### Conformance
 - [X-37 — Decide reachability by resolving callers, not by matching evidence paths](X-37-bind-reachability-to-callers-not-to-paths.md) · Build · the recorded successor to X-30 and X-33 — a path check is satisfied by citing a file, so a dead branch counts as reachable, the transport layer cannot be adjudicated at all, and a relabelled layer still escapes
 - [S-25 — Give the early-dialog loop a way to fail](S-25-early-dialog-observation-has-no-error-channel.md) · Signalling · found by M-29 — adopt_early_answer returns (), so a parse failure, a negotiation failure and a refused a=crypto in a reliable provisional are all discarded identically
@@ -73,6 +70,7 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
+- [S-28 — Answer a 401 or 407 on an outbound INVITE](S-28-a-call-cannot-answer-an-authentication-challenge.md) · Signalling · found while closing P-7 — sipx-call has no credential type and no 401/407 path at all, so a challenged call fails outright; the digest machinery exists in sipx-ua and nothing above the registration path can reach it
 - [X-31 — Close the drift holes in the transaction-sequence harness](X-31-harden-the-transaction-sequence-harness.md) · Build · found by X-19's independent review — one invariant arm is unfalsifiable by pigeonhole, the timer table is hand-maintained with a const assert that cannot catch drift, and the CI corpus check cannot see added files
 
 ### Transport layer
@@ -148,6 +146,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
 - [P-4 — Implement `sipx answer`](P-4-cli-answer.md) · Phone
 - [P-5 — List what can be called with `sipx peers`](P-5-peer-book-and-list.md) · Phone · the epic's first story — a peer book and one command, with no protocol work
+- [P-7 — Make `sipx dial --password` authenticate, or reject the flag](P-7-dial-accepts-a-password-and-discards-it.md) · Application · main.rs:168 accepts --password on dial and dial.rs never reads it, so a 407-challenged call fails while the user who supplied credentials is told nothing
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 - [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling

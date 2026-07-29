@@ -52,6 +52,21 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         return fail(format, Exit::Usage, &why);
     }
 
+    // `--password` is a global valued flag, so `dial` *parses* it. It used to then throw it away:
+    // a call challenged with 407 failed while the person who supplied credentials was told nothing
+    // (`P-7`). Answering the challenge is not a CLI change — `sipx-call` has no credential type and
+    // no 401/407 path at all — so the flag is refused rather than silently ignored. `S-28` is the
+    // feature; until it exists, saying so is the only honest option.
+    if args.value("password").is_some() {
+        return fail(
+            format,
+            Exit::Usage,
+            "--password is not supported by `dial`: a call cannot answer an authentication \
+             challenge yet, so a password here would be silently ignored. `register` does \
+             authenticate; see S-28 for the call-layer work",
+        );
+    }
+
     let transport = if args.flag("tcp") {
         TransportKind::Tcp
     } else {
@@ -409,6 +424,29 @@ mod tests {
             exit.code(),
             Exit::Usage.code(),
             "dialling a sips: URI must be refused, not connected in the clear"
+        );
+    }
+
+    /// `P-7`. `--password` is a global valued flag, so `dial` parsed it and dropped it: a 407 ended
+    /// the call while the person who supplied credentials was told nothing. Refusing is honest
+    /// because answering the challenge is a `sipx-call` feature that does not exist — that crate has
+    /// no credential type and no 401/407 path (`S-28`).
+    #[tokio::test]
+    async fn the_dial_command_refuses_a_password_it_cannot_use() {
+        let exit = run(
+            &[
+                "dial".to_owned(),
+                "--password".to_owned(),
+                "secret".to_owned(),
+                "sip:bob@192.0.2.1".to_owned(),
+            ],
+            Format::Text,
+        )
+        .await;
+        assert_eq!(
+            exit.code(),
+            Exit::Usage.code(),
+            "a password dial cannot use must be refused, not accepted and dropped"
         );
     }
 
