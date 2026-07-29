@@ -2140,10 +2140,27 @@ fn establish(
 /// *request*, but it does not resend the response. Over UDP one lost 200 means the caller
 /// gives up while this side holds an established call, so this is not optional.
 pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAddr) -> Result<Call> {
+    answer_tagged(endpoint, incoming, media_address, &token()).await
+}
+
+/// The same, with the `To` tag chosen by the caller rather than freshly minted.
+///
+/// [`Invitation::answer`](crate::Invitation::answer) uses it so that every response this stack
+/// sends about one invitation carries one tag — the `200` accepting it, and the `200` that
+/// [`Dispatcher`](crate::Dispatcher) sends for a CANCEL that arrives too late to stop it. RFC 3261
+/// §9.2 asks for exactly that agreement ("the `To` tag of the response to the CANCEL and the `To`
+/// tag in the response to the original request SHOULD be the same"), and it can only be honoured
+/// by whoever owns both, which is the invitation.
+pub(crate) async fn answer_tagged(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    tag: &str,
+) -> Result<Call> {
     let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
     // No provisional was sent on this path, so there is nothing to report as `Ringing`.
-    answer_negotiated(endpoint, incoming, media_address, offer, &token(), None).await
+    answer_negotiated(endpoint, incoming, media_address, offer, tag, None).await
 }
 
 /// A session that has been described and answered, but not yet accepted.

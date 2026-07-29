@@ -36,6 +36,15 @@ pub enum Error {
     /// Distinct from a rejection: nobody refused the call, we stopped waiting for it.
     #[error("no answer within {0:?}; the invitation was cancelled")]
     Cancelled(std::time::Duration),
+    /// An invitation was answered after the caller had already withdrawn it (RFC 3261 §9.2).
+    ///
+    /// The other side of [`Self::Cancelled`]: there, *this* stack gave up on an INVITE it sent;
+    /// here, the far end gave up on one it sent us, the invitation was answered `487 Request
+    /// Terminated`, and there is nothing left to accept. Answering anyway would put a `200` on a
+    /// transaction that has already finished and leave this side holding a call the caller does
+    /// not have.
+    #[error("the invitation was cancelled by the caller")]
+    InvitationCancelled,
     /// An INVITE asked to replace a dialog it did not name, or named one this is not.
     ///
     /// Deliberately one error for both. Telling a caller "the Call-ID matched but the tags did

@@ -399,9 +399,10 @@ async fn a_replayed_cancel_draws_the_same_answer_and_nothing_more() {
 }
 
 /// An invitation this stack never issued is not made cancellable by answering it: the CANCEL
-/// gets 481, and `answer` still works on the invitation that *is* live. Guards the route
-/// pre-filter — a CANCEL from a stranger has to get the `Call-ID`, the `From` tag *and* the
-/// branch right before it names anything of ours.
+/// gets 481, and `answer` still works on the invitation that *is* live. A CANCEL from a stranger
+/// has to get the branch, the sent-by, the `Call-ID` *and* the `From` tag right before it names
+/// anything of ours — §9.2's transaction match plus §9.1's requirement that a CANCEL carry the
+/// INVITE's own dialog identifiers.
 #[tokio::test]
 async fn a_cancel_from_a_third_party_does_not_reach_someone_elses_invitation() {
     let (callee, callee_incoming) = endpoint().await;
@@ -410,15 +411,16 @@ async fn a_cancel_from_a_third_party_does_not_reach_someone_elses_invitation() {
     let (peer, _peer_incoming) = endpoint().await;
     let (stranger, _stranger_incoming) = endpoint().await;
 
-    let invite = invite(&peer, "mine@sipx", "caller", "z9hG4bK-s23-mine");
+    let mine = invite(&peer, "mine@sipx", "caller", "z9hG4bK-s23-mine");
     let _invited = peer
-        .send(invite.clone(), Target::udp(callee_addr))
+        .send(mine.clone(), Target::udp(callee_addr))
         .await
         .expect("the INVITE goes out");
     let invitation = pumped.invitation().await;
 
-    // Same branch, but a different caller: the `From` tag is the stranger's own, so this names
-    // no route of ours however well it guessed the branch.
+    // Same branch, but a different caller: it comes from the stranger's own socket and carries
+    // the stranger's own `From` tag, so it names no transaction of ours however well it guessed
+    // the branch.
     let spoofed = invite(&stranger, "mine@sipx", "not-the-caller", "z9hG4bK-s23-mine");
     let answered = ask(&stranger, callee_addr, cancel_for(&spoofed)).await;
     assert_eq!(answered.status.code(), 481);
@@ -427,4 +429,106 @@ async fn a_cancel_from_a_third_party_does_not_reach_someone_elses_invitation() {
         "a third party must not be able to end someone else's invitation"
     );
     drop(answer(&callee, invitation.request(), loopback()).await);
+}
+
+/// The `From` tag on its own, with everything §17.2.3 matches on correct.
+///
+/// The vector above changes the sent-by as well as the caller, so it would pass on the transaction
+/// match alone. This one does not: the CANCEL leaves the same socket, on the same branch, for the
+/// same method — so §9.2's match finds the invitation — and differs only in the dialog identifiers
+/// §9.1 requires a CANCEL to copy from the INVITE. Refusing it is what makes that term
+/// load-bearing rather than decorative.
+#[tokio::test]
+async fn a_cancel_on_the_right_transaction_from_the_wrong_dialog_is_refused() {
+    let (callee, callee_incoming) = endpoint().await;
+    let callee_addr = callee.local_addr();
+    let mut pumped = pump(&callee, callee_incoming);
+    let (peer, _peer_incoming) = endpoint().await;
+
+    let mine = invite(&peer, "identifiers@sipx", "caller", "z9hG4bK-s23-ident");
+    let mut invited = peer
+        .send(mine.clone(), Target::udp(callee_addr))
+        .await
+        .expect("the INVITE goes out");
+    let invitation = pumped.invitation().await;
+
+    // Same peer, same branch, same method — and a `From` tag that belongs to no invitation here.
+    let elsewhere = invite(&peer, "identifiers@sipx", "somebody-else", "z9hG4bK-s23-ident");
+    let answered = ask(&peer, callee_addr, cancel_for(&elsewhere)).await;
+    assert_eq!(
+        answered.status.code(),
+        481,
+        "§9.1: a CANCEL carries the INVITE's own Call-ID and From, or it names nothing"
+    );
+    assert!(!invitation.is_cancelled(), "the invitation is untouched");
+
+    let call = invitation.answer(&callee, loopback()).await;
+    assert!(call.is_ok(), "and it can still be answered");
+    let accepted = tokio::time::timeout(Duration::from_secs(5), invited.final_response())
+        .await
+        .expect("the INVITE is answered")
+        .expect("a final response");
+    assert_eq!(accepted.status.code(), 200);
+}
+
+/// The application is *told*, not left to poll: a host that is ringing has to stop ringing, and
+/// nothing wakes it up unless the end of the invitation arrives on a stream it can await.
+///
+/// The vocabulary is `C-3`'s, deliberately — `CallEvent::Ended`, with a cause that says a CANCEL
+/// and not a BYE did it — rather than a second channel meaning the same thing for the half of a
+/// call's life that happens before there is a `Call`.
+#[tokio::test]
+async fn a_ringing_host_is_told_the_caller_gave_up_and_why() {
+    let (callee, callee_incoming) = endpoint().await;
+    let callee_addr = callee.local_addr();
+    let mut pumped = pump(&callee, callee_incoming);
+    let (peer, _peer_incoming) = endpoint().await;
+
+    let invite = invite(&peer, "told@sipx", "caller", "z9hG4bK-s23-told");
+    let _invited = peer
+        .send(invite.clone(), Target::udp(callee_addr))
+        .await
+        .expect("the INVITE goes out");
+
+    let mut invitation = pumped.invitation().await;
+    let mut events = invitation.events().expect("an invitation has one event stream");
+    assert!(
+        invitation.events().is_none(),
+        "the stream is handed out exactly once, as a call's is"
+    );
+
+    // The host is ringing, and is waiting on the stream rather than polling the invitation.
+    let ringing = ring(&callee, invitation.request(), 180, "Ringing", false)
+        .await
+        .expect("rings");
+    let waiting = tokio::spawn(async move { events.recv().await });
+
+    let _ = peer
+        .send(cancel_for(&invite), Target::udp(callee_addr))
+        .await
+        .expect("the CANCEL goes out");
+
+    let event = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the host is woken up rather than left waiting")
+        .expect("the waiting task finished");
+    assert!(
+        matches!(
+            event,
+            Some(sipx_call::CallEvent::Ended(
+                sipx_call::EndCause::RemoteCancel
+            ))
+        ),
+        "the invitation ends with the cause that says a CANCEL did it: {event:?}"
+    );
+
+    // Which is the host's cue to stop ringing, and it is then out of options anyway.
+    drop(ringing);
+    assert!(
+        matches!(
+            invitation.answer(&callee, loopback()).await,
+            Err(sipx_call::Error::InvitationCancelled)
+        ),
+        "an invitation that was cancelled must not be answerable afterwards"
+    );
 }
