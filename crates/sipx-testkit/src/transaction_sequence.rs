@@ -456,6 +456,12 @@ struct Driver {
     tracked: Vec<Tracked>,
     trace: Vec<String>,
     violations: Vec<Violation>,
+    /// The defects this run steps over.
+    ///
+    /// Always empty while [`Known`] is uninhabited, hence unread — kept, with the plumbing in
+    /// [`run_with`], because rebuilding it is what a campaign blocked behind a fresh defect
+    /// cannot afford to stop and do.
+    #[allow(dead_code)]
     suppressed: Vec<Known>,
 }
 
@@ -466,23 +472,18 @@ struct Driver {
 /// removes hides its whole class permanently — so each is named here, documented on its variant,
 /// and paired with an ignored regression test that fails until it is fixed. [`run_strict`]
 /// suppresses nothing, which is how those tests see the defect.
+///
+/// There are none at the moment: `LegacyClientResponseMatching` — a response to an RFC 2543
+/// client transaction matching nothing, because `TransactionKey::from_sent_request` derived the
+/// client key by §17.2.3's server rules — was the first and so far only entry, and `S-26` fixed
+/// it. The type stays because the next campaign will want it, and an empty enum is the honest
+/// way to say the campaign is currently suppressing nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Known {
-    /// A response to an RFC 2543 client transaction matches nothing.
-    ///
-    /// `TransactionKey::from_sent_request` derives a client key by §17.2.3's *server* rules, so
-    /// the legacy key carries the Request-URI and the `To` tag; `from_response` cannot, because
-    /// a response has no Request-URI. The two can never compare equal. §17.1.3's client rule is
-    /// the branch and the `CSeq` method alone, and needs its own derivation.
-    ///
-    /// Found by the first `transaction_sequence` campaign; see
-    /// `a_legacy_client_transaction_never_sees_its_response` in `crates/sipx-sip/tests/`.
-    LegacyClientResponseMatching,
-}
+pub enum Known {}
 
 /// Every defect [`run`] steps over.
-pub const KNOWN_DEFECTS: [Known; 1] = [Known::LegacyClientResponseMatching];
+pub const KNOWN_DEFECTS: [Known; 0] = [];
 
 /// Drive a program and check it, stepping over [`KNOWN_DEFECTS`].
 ///
@@ -643,15 +644,14 @@ impl Driver {
         let matched = matches!(dispatch, Dispatch::Matched { .. });
         let outcome = self.absorb(step, dispatch, Space::Client, slot, &m);
 
-        // Legacy slots are excluded under `run`, and not because the property does not hold
-        // there: it does not hold *yet*. See `Known::LegacyClientResponseMatching` — the
-        // suppression is what lets the campaign reach everything behind the defect, and
-        // `run_strict` is what stops it from hiding it.
-        let known = slot >= FIRST_LEGACY_SLOT
-            && self
-                .suppressed
-                .contains(&Known::LegacyClientResponseMatching);
-        if live && !matched && !known {
+        // The property holds on every slot, legacy ones included: §17.1.3 keys a client
+        // transaction on the branch and the `CSeq` method, which a response carries whether or
+        // not the branch has a magic cookie. Legacy slots used to be excluded here, under
+        // `Known::LegacyClientResponseMatching`, until `S-26` gave the client key its own
+        // derivation.
+        //
+        // A new suppression is consulted here: `if live && !matched && !self.suppressed.contains(…)`.
+        if live && !matched {
             self.violate(
                 step,
                 Invariant::UnroutableResponse,

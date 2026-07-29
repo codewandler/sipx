@@ -361,32 +361,32 @@ const LEGACY_CLIENT_CRASH: [u8; 8] = [0x00, 0x7f, 0x00, 0x0c, 0x41, 0x03, 0x01, 
 
 /// A response to an RFC 2543 client transaction never reaches it.
 ///
-/// **The defect the first campaign found, minimised. It is not fixed here** — `X-19` builds the
-/// instrument and the story explicitly says the fuzzer is the instrument, not the fix — so this
-/// test is `#[ignore]`d and the story that fixes it removes the attribute. Reproduce it outside
-/// the test with `cargo fuzz run transaction_sequence` and the bytes above.
+/// **The defect the first campaign found, minimised. Fixed in `S-26`** — the test keeps the name
+/// of the bug it pins. Reproduce the original outside the test with
+/// `cargo fuzz run transaction_sequence` and the bytes above, against a build from before the fix.
 ///
-/// What goes wrong: `TransactionKey::from_sent_request` derives a client transaction's key with
+/// What went wrong: `TransactionKey::from_sent_request` derived a client transaction's key with
 /// `from_request`, which implements §17.2.3 — the *server* matching rules — and therefore
 /// includes the Request-URI and the `To` tag. `TransactionKey::from_response` leaves the
-/// Request-URI empty, because a response has none. The two legacy keys can never compare equal,
-/// so every response to a pre-RFC-3261 client transaction is `Dispatch::Unmatched` and the
-/// transaction sits retransmitting until Timer F.
+/// Request-URI empty, because a response has none. The two legacy keys could never compare equal,
+/// so every response to a pre-RFC-3261 client transaction was `Dispatch::Unmatched` and the
+/// transaction sat retransmitting until Timer F.
 ///
 /// §17.1.3's legacy client rule is narrower than §17.2.3's server rule on purpose: a response
 /// matches a client transaction on the `Via` branch of the request that created it plus the
-/// `CSeq` method, and on nothing else. The client key needs its own derivation.
+/// `CSeq` method, and on nothing else. `from_sent_request` now derives that key itself, and
+/// `from_response` derives it through the same function.
 ///
-/// It is a silent failure — no panic, no error, a call that simply never completes against
-/// exactly the peers that are old enough to still be on UDP. That is the class of defect the
-/// story wanted an oracle for, and a panic-only fuzz target would have run for a week and
-/// reported nothing.
+/// It was a silent failure — no panic, no error, a call that simply never completes. **Not one a
+/// peer could provoke**: the topmost `Via` on a client transaction is always ours and always
+/// carries the magic cookie, so reaching this took an application handing the transport a `Via`
+/// it built itself. That is the class of defect the story wanted an oracle for, and a panic-only
+/// fuzz target would have run for a week and reported nothing.
 #[test]
-#[ignore = "X-19 found this; fixing TransactionKey's client derivation is its own story"]
 fn a_legacy_client_transaction_never_sees_its_response() {
     let program = Program::decode(&LEGACY_CLIENT_CRASH);
-    // `run_strict`, not `run`: the campaign steps over this defect so it can reach what lies
-    // behind it, and this is the test that keeps "stepped over" from becoming "forgotten".
+    // `run_strict`, not `run`: nothing is suppressed any more, but this test is what would notice
+    // if a suppression for this shape of defect ever came back.
     let result = sequence::run_strict(&program);
     assert!(
         result.violations.is_empty(),
@@ -441,38 +441,32 @@ fn the_minimised_legacy_crash_still_decodes_to_the_sequence_it_names() {
         trace.contains("created client c3/INVITE"),
         "the input must still create the client transaction:\n{trace}"
     );
+    // Before `S-26` this read `| unmatched`, which was the defect. The input is unchanged; what
+    // it demonstrates is now the fix, so the trace is what pins it.
     assert!(
-        trace.contains("ReceiveResponse(3/ACK 180) | unmatched"),
-        "the input must still show the response failing to match it:\n{trace}"
+        trace.contains("ReceiveResponse(3/ACK 180) | matched c3/INVITE"),
+        "the input must still show the response reaching the client transaction:\n{trace}"
     );
 }
 
-/// Every suppression the campaign carries is still load-bearing, and the campaign is clean.
+/// The campaign suppresses nothing, so `run` and `run_strict` must agree on this input.
 ///
-/// Two halves, and both matter. A suppression outlives its defect silently: once
-/// `TransactionKey` derives client keys by §17.1.3, `Known::LegacyClientResponseMatching` hides
-/// nothing and every future defect of that shape with it — so this fails the moment the fix
-/// lands, which is exactly when somebody should be deleting the suppression and the `#[ignore]`
-/// above. And `run` must be clean on the same input, or the fuzz job would report this one
-/// defect forever and never reach anything behind it.
+/// This is what `the_known_defect_suppression_is_still_needed_and_still_works` becomes now that
+/// its defect is fixed and `KNOWN_DEFECTS` is empty. That test existed to fail the moment the
+/// fix landed; it did, and deleting the suppression is what it asked for. What is worth keeping
+/// is the other half of it: the fuzz target calls `run`, the regression tests call `run_strict`,
+/// and while nothing is suppressed the two must not diverge — a divergence here means a
+/// suppression came back without a regression test to pair with it.
 #[test]
-fn the_known_defect_suppression_is_still_needed_and_still_works() {
+fn the_campaign_suppresses_nothing_and_run_agrees_with_run_strict() {
+    assert!(
+        sequence::KNOWN_DEFECTS.is_empty(),
+        "a suppression was added: pair it with a regression test that fails when it is fixed, \
+         the way `LegacyClientResponseMatching` was paired with \
+         `a_legacy_client_transaction_never_sees_its_response`"
+    );
+
     let program = Program::decode(&LEGACY_CLIENT_CRASH);
-
-    assert!(
-        sequence::run(&program).violations.is_empty(),
-        "the campaign must step over the known defect, or it reports nothing else"
-    );
-
-    let strict = sequence::run_strict(&program);
-    assert!(
-        strict
-            .violations
-            .iter()
-            .any(|v| v.invariant == Invariant::UnroutableResponse),
-        "the suppression `{:?}` no longer hides anything. If §17.1.3 client matching has been \
-         fixed, delete it from KNOWN_DEFECTS, un-ignore \
-         `a_legacy_client_transaction_never_sees_its_response`, and delete this test",
-        sequence::KNOWN_DEFECTS,
-    );
+    assert!(sequence::run(&program).violations.is_empty());
+    assert!(sequence::run_strict(&program).violations.is_empty());
 }

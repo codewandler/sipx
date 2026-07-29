@@ -10,7 +10,7 @@
 //! apart, so its absence selects the fallback rather than causing a rejection.
 
 use crate::headers::{CSeq, Via};
-use crate::message::{Method, Request, Response};
+use crate::message::{Headers, Method, Request, Response};
 use crate::name::HeaderName;
 
 /// A key identifying a transaction.
@@ -70,6 +70,42 @@ fn sent_by(via: &Via) -> Vec<u8> {
     out
 }
 
+/// The topmost `Via`, verbatim. A response echoes it back unchanged (RFC 3261 §8.2.6.2), which
+/// is what lets a client key derived from a request and one derived from its response agree.
+fn top_via(headers: &Headers) -> Vec<u8> {
+    headers
+        .value(&HeaderName::Via)
+        .map(|v| v.to_vec())
+        .unwrap_or_default()
+}
+
+/// The `From` tag, also echoed unchanged.
+fn from_tag(headers: &Headers) -> Vec<u8> {
+    headers
+        .typed::<crate::headers::From>()
+        .and_then(Result::ok)
+        .and_then(|f| f.tag().map(<[u8]>::to_vec))
+        .unwrap_or_default()
+}
+
+/// The `To` tag. Part of the *server* key only: a UAS adds a tag to the `To` of the response it
+/// sends, so the tag a request carries and the tag its response carries are different values.
+fn to_tag(headers: &Headers) -> Vec<u8> {
+    headers
+        .typed::<crate::headers::To>()
+        .and_then(Result::ok)
+        .and_then(|t| t.tag().map(<[u8]>::to_vec))
+        .unwrap_or_default()
+}
+
+/// The `Call-ID`, also echoed unchanged.
+fn call_id(headers: &Headers) -> Vec<u8> {
+    headers
+        .value(&HeaderName::CallId)
+        .map(|v| v.to_vec())
+        .unwrap_or_default()
+}
+
 impl TransactionKey {
     /// The key a received request belongs to (RFC 3261 §17.2.3).
     ///
@@ -91,28 +127,10 @@ impl TransactionKey {
         let cseq = request.headers.typed::<CSeq>()?.ok()?;
         Some(Self::Legacy {
             request_uri: request.uri.to_bytes().to_vec(),
-            top_via: request
-                .headers
-                .value(&HeaderName::Via)
-                .map(|v| v.to_vec())
-                .unwrap_or_default(),
-            from_tag: request
-                .headers
-                .typed::<crate::headers::From>()
-                .and_then(Result::ok)
-                .and_then(|f| f.tag().map(<[u8]>::to_vec))
-                .unwrap_or_default(),
-            to_tag: request
-                .headers
-                .typed::<crate::headers::To>()
-                .and_then(Result::ok)
-                .and_then(|t| t.tag().map(<[u8]>::to_vec))
-                .unwrap_or_default(),
-            call_id: request
-                .headers
-                .value(&HeaderName::CallId)
-                .map(|v| v.to_vec())
-                .unwrap_or_default(),
+            top_via: top_via(&request.headers),
+            from_tag: from_tag(&request.headers),
+            to_tag: to_tag(&request.headers),
+            call_id: call_id(&request.headers),
             cseq: cseq.sequence,
             method,
         })
@@ -120,11 +138,54 @@ impl TransactionKey {
 
     /// The key a request sent by this element belongs to (RFC 3261 §17.1.3).
     ///
-    /// The same derivation as [`Self::from_request`]: a client transaction has to be findable
-    /// by the key its responses will produce.
+    /// **Not** [`Self::from_request`]'s derivation. §17.2.3 is the *server* rule, and it keys a
+    /// legacy transaction on the Request-URI and the `To` tag; a response has no Request-URI at
+    /// all, and carries the tag the UAS added rather than the one the request was sent with. A
+    /// client keyed by the server rule therefore never matches any of its own responses — it
+    /// does not fail, it retransmits until Timer F with the answer sitting in front of it.
+    ///
+    /// §17.1.3 is narrower on purpose (`docs/specs/sip-transaction.md` §6.2): the key is the
+    /// branch and the `CSeq` method, over fields a response echoes back unchanged. This agrees
+    /// with [`Self::from_response`] field for field, which is the property that matters.
+    ///
+    /// The legacy half of this is reached by an application that supplies its own cookieless
+    /// `Via`, not by an old peer: the topmost `Via` on a client transaction is ours, and the
+    /// transport gives it a `z9hG4bK` branch. [`Self::from_request`] is the one old peers meet.
     #[must_use]
     pub fn from_sent_request(request: &Request) -> Option<Self> {
-        Self::from_request(request)
+        let via = request.headers.typed::<Via>()?.ok()?;
+        let method = match_method(&request.method);
+
+        if via.has_rfc3261_branch() {
+            return Some(Self::Rfc3261 {
+                branch: via.branch()?.to_vec(),
+                sent_by: sent_by(&via),
+                method,
+            });
+        }
+
+        let cseq = request.headers.typed::<CSeq>()?.ok()?;
+        Some(Self::legacy_client(&request.headers, cseq.sequence, method))
+    }
+
+    /// The legacy client key of §17.1.3, from the headers a request and its responses share.
+    ///
+    /// The two fields of [`Self::Legacy`] that the server rule needs and this one must not use
+    /// are left empty rather than omitted, so that a client key and a server key for the same
+    /// legacy exchange stay distinguishable.
+    fn legacy_client(headers: &Headers, cseq: u32, method: Vec<u8>) -> Self {
+        Self::Legacy {
+            // A response has none to compare.
+            request_uri: Vec::new(),
+            top_via: top_via(headers),
+            from_tag: from_tag(headers),
+            // Deliberately not the response's tag: two 200s to one forked INVITE carry two
+            // different tags and must still reach the one client transaction that sent it.
+            to_tag: Vec::new(),
+            call_id: call_id(headers),
+            cseq,
+            method,
+        }
     }
 
     /// The key a received response belongs to (RFC 3261 §17.1.3).
@@ -146,33 +207,11 @@ impl TransactionKey {
             });
         }
 
-        Some(Self::Legacy {
-            request_uri: Vec::new(),
-            top_via: response
-                .headers
-                .value(&HeaderName::Via)
-                .map(|v| v.to_vec())
-                .unwrap_or_default(),
-            from_tag: response
-                .headers
-                .typed::<crate::headers::From>()
-                .and_then(Result::ok)
-                .and_then(|f| f.tag().map(<[u8]>::to_vec))
-                .unwrap_or_default(),
-            to_tag: response
-                .headers
-                .typed::<crate::headers::To>()
-                .and_then(Result::ok)
-                .and_then(|t| t.tag().map(<[u8]>::to_vec))
-                .unwrap_or_default(),
-            call_id: response
-                .headers
-                .value(&HeaderName::CallId)
-                .map(|v| v.to_vec())
-                .unwrap_or_default(),
-            cseq: cseq.sequence,
+        Some(Self::legacy_client(
+            &response.headers,
+            cseq.sequence,
             method,
-        })
+        ))
     }
 
     /// The key of the INVITE a CANCEL refers to (RFC 3261 §9.2).
