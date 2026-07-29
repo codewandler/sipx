@@ -365,6 +365,65 @@ class ClaimReachability(unittest.TestCase):
         # And driven, not just imported: a real SUBSCRIBE goes into the notifier.
         self.assertIn("notifier.on_subscribe(", reached)
 
+    def test_the_services_rows_keep_their_roles_only_while_nothing_dispatches_to_them(self):
+        """`X-33` resolving the four rows individually, and pinning the reason so it can expire.
+
+        `X-30` gave these rows one collective argument. Taken row by row the argument is the same
+        one four times, and it holds — but only because of a fact nobody had checked: **no crate in
+        this workspace receives a SUBSCRIBE or a PUBLISH off a socket.** `Subscriptions::on_subscribe`
+        and `Compositor::apply` take a parsed `Request` and are fed one by `sipx-ua`'s own tests;
+        `sipx-call`'s dispatcher advertises neither method on `Allow` and unit-tests that it does not.
+
+        That is what makes `sipx-ua` the crate that *serves* the role rather than a crate below one
+        that must select the capability — there is no `sipx-call` for subscriptions, so asking these
+        rows to cite one would ask them to cite a crate that does not and should not depend on them.
+        The four resolutions, individually:
+
+        - **3903** (PUBLISH, `uas`): `Compositor::apply` decides what a publication means and what to
+          answer; an application supplies the request. Role kept, note says so.
+        - **3856** (presence package, `uas`): joined to the notifier and driven from outside the
+          crate — `packages.rs` publishes and asserts the NOTIFY body changes. Role kept.
+        - **3680** (`reg` package, `uas`): registered under the name a subscriber asks for, asserted
+          from outside the crate. Role kept; the missing registrar join was already in the note.
+        - **4235** (`dialog` package, `uas`): same, plus the missing dialog-store join. Role kept.
+
+        **And the trigger that takes the roles away is this assertion.** The moment something routes
+        an inbound SUBSCRIBE or PUBLISH — a dispatcher, a server mode, an application host — these
+        rows acquire the media shape exactly, because then there *is* a crate above `sipx-ua` that
+        must select the package, and a package nothing selects is unreachable. This test goes red
+        first, which is the point of writing it here instead of in prose.
+        """
+        dispatch = (ROOT / "crates" / "sipx-call" / "src" / "dispatch.rs").read_text()
+        served = re.findall(r"Method::(\w+)\s*(?:=>|\|)", dispatch)
+        # Non-vacuous: the dispatcher does route six methods, `Notify` among them — which is how
+        # RFC 6665's own `uas` claim reaches a call, through REFER's implicit subscription.
+        self.assertIn("Notify", served)
+        for method in ("Subscribe", "Publish"):
+            with self.subTest(method=method):
+                self.assertNotIn(
+                    method,
+                    served,
+                    f"something now dispatches on {method}. If an inbound one reaches a package,"
+                    " RFC 3680, 3856, 3903 and 4235 are the media over-claim shape one layer over"
+                    " and their `uas` claims need a caller above `sipx-ua` — re-read"
+                    " docs/designs/rfc-registry-grain.md before relaxing this",
+                )
+
+        # And no request-routing anywhere in the crate that serves them either. `sipx-ua` is a
+        # library: it decides what a SUBSCRIBE means and never learns one arrived.
+        for source in (ROOT / "crates" / "sipx-ua" / "src").rglob("*.rs"):
+            text = source.read_text()
+            for method in ("Method::Subscribe", "Method::Publish"):
+                with self.subTest(source=source.name, method=method):
+                    self.assertNotIn(method, text)
+
+        # Each of the four resolutions is a role that is still claimed, so a silent removal is a
+        # change to the argument above and not just to a row.
+        by_number = {e["number"]: e for e in registry_entries()}
+        for number in (3680, 3856, 3903, 4235):
+            with self.subTest(rfc=number):
+                self.assertEqual(["uas"], by_number[number]["roles"])
+
     def test_the_scope_tracks_selection_not_the_layer_string(self):
         """The property behind `ROLE_REACHABILITY_LAYERS`, held against the code.
 

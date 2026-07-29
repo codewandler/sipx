@@ -707,7 +707,7 @@ status = "implemented"
 roles = ["uas"]
 methods = ["PUBLISH"]
 evidence = ["crates/sipx-ua/src/presence.rs"]
-note = "Soft state with entity tags: initial publication, refresh, modify and remove read from what is present (§4.1), a fresh `SIP-ETag` on every acceptance (§6 step 6), and 412 for a tag the compositor does not hold (§6 step 3) — including one whose state expired, which must not be accepted as a new publication. Expiry is judged on the clock rather than on whether a sweep has run, so the answer is not a race. Composition policy is deliberately absent: a second publication for one presentity replaces the first, and merging several publishers is a policy question for whoever has one."
+note = "Soft state with entity tags: initial publication, refresh, modify and remove read from what is present (§4.1), a fresh `SIP-ETag` on every acceptance (§6 step 6), and 412 for a tag the compositor does not hold (§6 step 3) — including one whose state expired, which must not be accepted as a new publication. Expiry is judged on the clock rather than on whether a sweep has run, so the answer is not a race. Composition policy is deliberately absent: a second publication for one presentity replaces the first, and merging several publishers is a policy question for whoever has one. **The role is the library's, not the binary's**: `Compositor::apply` decides what a PUBLISH means and what to answer, and an application supplies the request — nothing in this workspace receives a PUBLISH off a socket, and `sipx-call`'s dispatcher deliberately does not advertise the method on `Allow`. `X-33` resolved this row and the three other package rows individually rather than as a batch; `docs/designs/rfc-registry-grain.md` says why each keeps `uas` and what would take it away."
 
 [[rfc]]
 number = 3856
@@ -716,7 +716,7 @@ layer = "services"
 status = "partial"
 roles = ["uas"]
 evidence = ["crates/sipx-ua/src/presence.rs"]
-note = "The `presence` package serves PIDF documents published through RFC 3903. Watcher information (RFC 3857) and the `presence.winfo` template are not implemented."
+note = "The `presence` package serves PIDF documents published through RFC 3903, joined to the notifier and driven from outside the crate: `packages.rs` establishes a real subscription, publishes, and asserts the body the NOTIFY carries changes with the publication. Watcher information (RFC 3857) and the `presence.winfo` template are not implemented. Same limit as 3903: **nothing receives a SUBSCRIBE off a socket**, so the `uas` claim is about `sipx-ua`'s public API and not about the shipped binary — `X-33` verified that and left the role, with the reason and the widening trigger in `docs/designs/rfc-registry-grain.md`."
 
 [[rfc]]
 number = 3863
@@ -732,8 +732,8 @@ title = "A SIP Event Package for Registrations"
 layer = "services"
 status = "partial"
 roles = ["uas"]
-evidence = ["crates/sipx-ua/src/packages.rs"]
-note = "`reginfo` documents with per-contact state and the event that changed it — registered, refreshed, expired, unregistered, with the last two kept apart because why a contact went is what a display says. Same limit as 4235: the documents exist, the join to a live registrar does not, and sipx is not a registrar."
+evidence = ["crates/sipx-ua/src/packages.rs", "crates/sipx-ua/tests/packages.rs"]
+note = "`reginfo` documents with per-contact state and the event that changed it — registered, refreshed, expired, unregistered, with the last two kept apart because why a contact went is what a display says. Registered with the notifier under the name a subscriber asks for, and asserted from outside the crate. Same limit as 4235: the documents exist, the join to a live registrar does not, and sipx is not a registrar. And the limit shared with 3856 and 3903: **nothing receives a SUBSCRIBE off a socket**, so `uas` is a claim about `sipx-ua`'s public API — `X-33` verified it and left the role."
 
 [[rfc]]
 number = 4235
@@ -741,8 +741,8 @@ title = "An INVITE-Initiated Dialog Event Package for SIP"
 layer = "services"
 status = "partial"
 roles = ["uas"]
-evidence = ["crates/sipx-ua/src/packages.rs"]
-note = "`dialog-info` documents with the five states of §3.7.1, the full-then-partial discipline of §4.1, and a version counter scoped per subscription rather than per resource. What is not here is the join to a live dialog store — the package produces documents, and wiring them to running calls is the application's, because a package reaching into the call layer would reverse the workspace's dependency direction."
+evidence = ["crates/sipx-ua/src/packages.rs", "crates/sipx-ua/tests/packages.rs"]
+note = "`dialog-info` documents with the five states of §3.7.1, the full-then-partial discipline of §4.1, and a version counter scoped per subscription rather than per resource. What is not here is the join to a live dialog store — the package produces documents, and wiring them to running calls is the application's, because a package reaching into the call layer would reverse the workspace's dependency direction. And the limit shared with 3680, 3856 and 3903: **nothing receives a SUBSCRIBE off a socket**, so `uas` is a claim about `sipx-ua`'s public API — which `packages.rs` drives from outside the crate. `X-33` verified it and left the role."
 
 [[rfc]]
 number = 5627

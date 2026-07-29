@@ -327,6 +327,41 @@ table says — from "✅ implemented" to "🟡 partial" — and the table's own 
 without naming the gap, which is prose and unenforceable — but it is conspicuous, because the status
 column changes in a generated document.
 
+### The four package rows, resolved one at a time
+
+`X-30` gave RFCs 3680, 3856, 3903 and 4235 one collective argument, which the story filing `X-33`
+called out as the "rule fitted to the data it was tested on" risk. Taken row by row the argument
+turns out to be the same argument four times and to hold — but it rests on a fact nobody had run:
+
+**No crate in this workspace receives a SUBSCRIBE or a PUBLISH off a socket.**
+`Subscriptions::on_subscribe` and `Compositor::apply` take an already-parsed `sipx_sip::Request` and
+are handed one by `sipx-ua`'s own tests. `sipx-call`'s dispatcher routes ACK, BYE, NOTIFY, PRACK,
+REFER and UPDATE, and unit-tests that SUBSCRIBE and PUBLISH are *not* on `Allow`. `sipx-ua/src/`
+contains neither `Method::Subscribe` nor `Method::Publish` anywhere.
+
+That is precisely what makes `sipx-ua` the crate that **serves** the role rather than a crate below
+one that must select the capability. There is no `sipx-call` for subscriptions; `sipx-ua` is the top
+of that stack, and asking these rows to cite the call layer would ask them to cite a crate that does
+not and should not depend on them. Row by row:
+
+| Row | Resolution | The fact it rests on |
+|---|---|---|
+| 3903 (PUBLISH, `uas`) | Role kept | `Compositor::apply` decides what a publication means and what to answer; the application supplies the request. |
+| 3856 (presence package, `uas`) | Role kept | Joined to the notifier and driven from outside the crate: `packages.rs` publishes and asserts the NOTIFY body changes with it. |
+| 3680 (`reg` package, `uas`) | Role kept | Registered under the name a subscriber asks for, asserted from outside the crate. The missing registrar join was already in the note. |
+| 4235 (`dialog` package, `uas`) | Role kept | The same, plus the missing dialog-store join, also already in the note. |
+
+Each note now carries the limit as well as the claim, and `X-33` added the `tests/packages.rs`
+citation to 3680 and 4235, which had cited only the source.
+
+**The trigger that takes these roles away is now a test, not a paragraph.**
+`test_the_services_rows_keep_their_roles_only_while_nothing_dispatches_to_them` asserts that nothing
+dispatches on SUBSCRIBE or PUBLISH. The moment something does — a server mode, an application host,
+a request router — there *is* a crate above `sipx-ua` that must select the package, these rows
+acquire the media shape exactly, and that test goes red before anybody has to remember this section
+exists. `X-30`'s version of this said "if sipx ever grows an application layer … this section is
+wrong", which is true and which nothing would have enforced.
+
 ### Why `transport` is *not* in the scope, measured rather than asserted
 
 This is the layer that could plausibly have joined, and the reason it does not is the most useful
