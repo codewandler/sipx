@@ -54,18 +54,69 @@ def known_methods() -> set[str]:
     return {m.upper() for m in re.findall(r'b"([A-Z]+)" =>', METHODS.read_text())}
 
 
+# The registry's grain is one row per RFC, decided in docs/designs/rfc-registry-grain.md and
+# promised to downstream registries in docs/rfc/README.md. These two sets are that decision in
+# executable form.
+#
+# The guard exists because the alternative failure is silent. `tomllib` accepts any key, and a
+# checker that only reads the keys it knows walks past the rest — so a finer-grained
+# `[[rfc.requirement]]` row, or a `role` typed for `roles`, lands in the source, never reaches
+# the generated table, and nobody is told. A registry whose claims can go missing between the
+# source and the published table is the exact failure this file was written to prevent.
+REQUIRED_KEYS = {"number", "title", "layer", "status", "evidence", "note"}
+OPTIONAL_KEYS = {"roles", "headers", "methods"}
+LIST_KEYS = {"evidence", "roles", "headers", "methods"}
+
+
+def schema_problems(entry) -> list[str]:
+    """Ways an entry departs from the per-RFC schema.
+
+    Kept separate from `check` because this asks a different question. `check` asks whether a
+    claim is true; this asks whether the entry is shaped like a claim at all — and an entry that
+    is not cannot be checked, only ignored.
+    """
+    where = f"RFC {entry.get('number', '?')}"
+    problems = []
+
+    for key in sorted(REQUIRED_KEYS - entry.keys()):
+        problems.append(f"{where} is missing the required key {key!r}")
+
+    for key in sorted(entry.keys() - REQUIRED_KEYS - OPTIONAL_KEYS):
+        hint = ""
+        if key == "requirement":
+            # Named explicitly, because this is the one somebody adds on purpose.
+            hint = (
+                " — the registry's grain is one row per RFC; see"
+                " docs/designs/rfc-registry-grain.md before changing that"
+            )
+        problems.append(f"{where} carries the unknown key {key!r}{hint}")
+
+    if "number" in entry and not isinstance(entry["number"], int):
+        problems.append(f"{where} has a non-integer number, which cannot be referenced")
+    for key in sorted(LIST_KEYS & entry.keys()):
+        value = entry[key]
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            problems.append(f"{where} has {key!r}, which must be a list of strings")
+
+    return problems
+
+
 def check(entries) -> list[str]:
     """Every claim that the code does not back up."""
     headers, methods = known_headers(), known_methods()
     problems = []
 
     for entry in entries:
-        where = f"RFC {entry['number']}"
+        # `.get` throughout: an entry can be malformed, and a checker that crashes on one reports
+        # nothing about the other sixty-eight.
+        where = f"RFC {entry.get('number', '?')}"
 
-        if entry["status"] not in STATUS_LABEL:
-            problems.append(f"{where}: unknown status {entry['status']!r}")
-        if entry["layer"] not in LAYER_TITLE:
-            problems.append(f"{where}: unknown layer {entry['layer']!r}")
+        problems.extend(schema_problems(entry))
+
+        if entry.get("status") not in STATUS_LABEL:
+            problems.append(f"{where}: unknown status {entry.get('status')!r}")
+        if entry.get("layer") not in LAYER_TITLE:
+            problems.append(f"{where}: unknown layer {entry.get('layer')!r}")
 
         for header in entry.get("headers", []):
             if header not in headers:
@@ -82,10 +133,10 @@ def check(entries) -> list[str]:
                 problems.append(f"{where} cites {path}, which does not exist")
 
         # An entry that claims to be implemented and points at nothing is an assertion.
-        if entry["status"] in {"implemented", "partial"} and not entry.get("evidence"):
-            problems.append(f"{where} claims {entry['status']} with no evidence cited")
+        if entry.get("status") in {"implemented", "partial"} and not entry.get("evidence"):
+            problems.append(f"{where} claims {entry.get('status')} with no evidence cited")
 
-    numbers = [e["number"] for e in entries]
+    numbers = [e["number"] for e in entries if "number" in e]
     for number, count in Counter(numbers).items():
         if count > 1:
             problems.append(f"RFC {number} appears {count} times")
@@ -223,6 +274,17 @@ def main() -> int:
     args = parser.parse_args()
 
     entries = tomllib.loads(REGISTRY.read_text())["rfc"]
+
+    # Shape before substance. `render` indexes entries directly, so a malformed one would crash
+    # it — and a traceback in place of "RFC 3261 carries the unknown key 'requirement'" tells
+    # whoever added the row nothing about what to do next.
+    malformed = [p for entry in entries for p in schema_problems(entry)]
+    if malformed:
+        print("The RFC registry does not match its schema:", file=sys.stderr)
+        for problem in malformed:
+            print(f"  {problem}", file=sys.stderr)
+        return 1
+
     problems = check(entries)
     rendered = render(entries)
 

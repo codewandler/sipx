@@ -11,6 +11,13 @@
 # exists. It cannot verify that behaviour is correct — the tests do that — but it can stop an
 # entry saying "implemented" about a header the code has never heard of.
 #
+# **The grain is one row per RFC, and the key set is closed.** An entry may carry only the keys
+# in `README.md`; anything else — including a finer-grained `[[rfc.requirement]]` row — fails
+# the check rather than being silently ignored. Requirement grain was considered and declined
+# in `../designs/rfc-registry-grain.md`, which also records what would reopen it.
+#
+# Format, and what a downstream registry may rely on when it inherits a row: `README.md`.
+#
 # The list is deliberately bounded. It is what sipx already touches plus what it has decided to
 # aim at; it is not every SIP-related RFC, and it never will be. Some update or obsolete others,
 # some define alternatives, some are confined to trust domains sipx does not operate in.
