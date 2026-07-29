@@ -9,6 +9,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The SDES tag is echoed and verified, as RFC 4568 requires twice (`M-26`)** — §5.1.2 and §5.1.3
+  are both MUSTs and sipx honoured neither. The answer now carries the tag and suite of the
+  attribute actually accepted, built by `Crypto::accepting`, instead of always answering tag `1` —
+  which is what `Capabilities::with_srtp` fixed it at. An endpoint that always answers `1`
+  interoperates only with peers that happened to offer `1`, and fails undiagnosed at the end that
+  is right.
+  - **§5.1.3's check is now the only route from an answer to keys.** `Crypto::verify_answer`
+    performs all three parts — an offered suite, its accompanying tag, and a key — and returns
+    *which* offer the answer accepted, so a caller keys with the half it actually sent.
+    `SrtpKeys::from_answer` returns `Result` and not `Option` on purpose: an answer that agreed to
+    nothing must be a typed failure, because the two alternatives are both worse. Placing the call
+    unencrypted gives a user who asked for secure media an insecure call with nothing said, and
+    dropping the stream ends the call with no reason anyone can act on.
+  - **Byte-level, off-stack.** RFC 4568 §6.1's published `a=crypto` line is asserted against
+    `Crypto::parse` and decodes to the documented 16-octet master key and 14-octet salt. It passed
+    on the first run — the parser was already right — which is the usual outcome of a published
+    vector and not a reason to have skipped it: nothing distinguished this case from `sipx-rtp`'s
+    `n_a` defect beforehand, and that one shipped for six releases.
+  - **A live call does not run this check yet, and the registry says so.** `srtp_keys` in
+    `sipx-call` still pairs the two halves and compares nothing; the RFC 4568 row names the missing
+    wiring under **"Still missing"** rather than claiming the MUSTs hold end to end. `M-29` is the
+    remainder.
+
 - **An interop call whose media is actually encrypted (`X-27`)** — the interop harness had never
   exchanged SRTP with a peer that did not come from this repository, which is why `M-25`'s wrong
   authentication key shipped through six releases. `crates/sipx-cli/tests/interop_srtp.rs` now

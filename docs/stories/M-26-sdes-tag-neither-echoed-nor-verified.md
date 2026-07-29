@@ -2,8 +2,7 @@
 id: M-26
 title: Echo and verify the SDES tag, which RFC 4568 requires twice
 pillar: Media
-status: in-progress
-priority: 2
+status: done
 design: docs/specs/srtp.md
 epic: media
 areas: [sipx-sdp, sipx-media]
@@ -19,11 +18,14 @@ chosen, and verify the tag that comes back rather than assuming the peer chose w
 ## Acceptance
 - [x] The answer echoes the `tag` of the accepted `a=crypto` line (RFC 4568 §5.1.2). A **MUST**
       that sipx does not honour today.
-- [x] An answer whose tag names a suite that was never offered is refused rather than used
+- [~] An answer whose tag names a suite that was never offered is refused rather than used
       (§5.1.3), and the call fails in the direction that says why instead of negotiating keys
-      nobody agreed on.
-- [x] The failure is reported to the application through the existing error vocabulary, not by a
-      silently unencrypted or silently dropped stream.
+      nobody agreed on. **True in `sipx-sdp` and `sipx-media`; not yet true of a call.**
+      `srtp_keys` in `sipx-call` still pairs the two halves and compares nothing — `M-29`.
+- [~] The failure is reported to the application through the existing error vocabulary, not by a
+      silently unencrypted or silently dropped stream. `SrtpKeys::from_answer` returns
+      `SdpError::Invalid` and `sipx-call` already maps it to `Error::Sdp`, but nothing in
+      `sipx-call` calls it yet — `M-29`.
 - [x] Byte-level: `docs/specs/srtp.md` §10.4 already restates a published `a=crypto` line ready to
       be asserted against `Crypto::parse` — assert it here, since that parser is currently tested
       only against its own output.
@@ -55,6 +57,11 @@ chosen, and verify the tag that comes back rather than assuming the peer chose w
   returns `Option`. Until it is moved onto `SrtpKeys::from_answer` and `establish` propagates the
   error, a *live* call still accepts an answer that echoed a tag nobody offered. `sipx-call` was
   outside this story's write set and held by a concurrent story.
+- **Corrected at integration:** Acceptance items 2 and 3 were ticked `[x]` and are true only below
+  `sipx-call`; the bullet above says so plainly, so the ticks contradicted the story's own Progress
+  note. They now read `[~]` and the remainder is `M-29`. Closing the story on the two MUSTs' logic
+  is right — leaving the ticks would have put a capability with no caller into `docs/compliance.md`
+  as a shipped one, which is the pattern `M-28` was filed to stop.
 
 ## Notes
 - Filed by `M-25` as `docs/specs/srtp.md` §12.3, which is where the normative statement now lives.

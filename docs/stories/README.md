@@ -62,8 +62,8 @@ _sipx can call any endpoint you can already name, and cannot help you name one. 
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-26 — Echo and verify the SDES tag, which RFC 4568 requires twice](M-26-sdes-tag-neither-echoed-nor-verified.md) · Media · found by M-25 — RFC 4568 §5.1.2 and §5.1.3 are both MUSTs and sipx honours neither
 - [M-28 — Offer DTLS-SRTP from a call, and stop claiming it until then](M-28-dtls-srtp-unreachable-from-a-call.md) · Media · found by X-27 — dial hardcodes SDES, so sipx cannot offer DTLS-SRTP at all, while RFC 5763 and 5764 are both marked implemented with both roles
+- [M-29 — Make a live call run the SDES answer check it already owns](M-29-call-layer-pairs-srtp-keys-unchecked.md) · Media · found by M-26 — verify_answer and SrtpKeys::from_answer exist and sipx-call calls neither, so a live call still keys on an answer nobody checked
 
 ### Quic
 - [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11
@@ -138,6 +138,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [M-21 — The sans-IO ICE agent](M-21-ice-agent.md) · Media · ice · RFC 8445 · after M-20 · the state machine, no socket and no clock
 - [M-22 — Drive ICE on the media port](M-22-ice-on-media-port.md) · Media · ice · after M-19 and M-21 · owns M-16's named test and the registry rows
 - [M-25 — Specify SRTP and its two keyings, after the fact](M-25-srtp-spec.md) · Media · found by X-25 — M-14 and M-15 shipped without the spec non-negotiable 4 requires
+- [M-26 — Echo and verify the SDES tag, which RFC 4568 requires twice](M-26-sdes-tag-neither-echoed-nor-verified.md) · Media · found by M-25 — RFC 4568 §5.1.2 and §5.1.3 are both MUSTs and sipx honours neither
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
