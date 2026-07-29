@@ -6,12 +6,12 @@ import Layout from '@theme/Layout';
 const CARDS = [
   {
     title: 'Calls',
-    body: 'Place and answer, hold and resume, blind and attended transfer, bridge two calls or conference several — with session timers so a vanished far end ends the call.',
+    body: 'Place and answer, hold and resume, blind and attended transfer — with session timers so a vanished far end ends the call.',
     to: '/docs/guides/place-a-call',
   },
   {
     title: 'Audio',
-    body: 'G.711 both ways and Opus behind a feature. DTMF, WAV playback and recording, an adaptive jitter buffer, and mid-call quality statistics.',
+    body: 'G.711 both ways. DTMF, WAV playback and recording, an adaptive jitter buffer, and mid-call quality statistics.',
     to: '/docs/guides/answer-a-call',
   },
   {

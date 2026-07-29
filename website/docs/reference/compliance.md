@@ -5,7 +5,7 @@ description: What sipx implements, what it only parses, and what it has not star
 
 # RFC compliance
 
-sipx tracks its own standards coverage as a **measurement, not a claim**: a registry lists 69
+sipx tracks its own standards coverage as a **measurement, not a claim**: a registry lists 70
 RFCs, each marked with one of five statuses, and CI regenerates the published table from the
 registry and fails the build when a claim does not hold — a header the table says sipx parses
 must actually be known to the parser, and a file an entry cites must exist.

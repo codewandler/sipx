@@ -33,9 +33,11 @@ Recently landed:
 - **DTLS-SRTP (RFC 5763, RFC 5764)** — the keying that never touches the signalling path: the
   handshake runs over the media path and the certificate is checked against the
   `a=fingerprint` the SDP carried, or no keys are returned. Everything the two RFCs decide is
-  compiled always; only the handshake sits behind the off-by-default `dtls` feature. It is
-  reached by building capabilities with `sipx-sdp` and `sipx-media` — `sipx-call` and the CLI
-  still offer SDES.
+  compiled always; only the handshake sits behind the off-by-default `dtls` feature. **It cannot
+  yet key a call, and there is no arrangement of the crates that makes it** — the handshake hands
+  back finished SRTP contexts while a media session is configured with master keys and salts, and
+  it cannot run on the media port §5.1.2 requires it to share. `sipx-call` and the CLI offer SDES;
+  joining the two halves is `M-28`.
 - **The event notification framework (RFC 6665)** — a notifier with a subscription store and
   packages registered by name, plus the `dialog`, `reg` and `presence` packages and PUBLISH
   behind an entity tag. The packages produce documents; joining them to sipx's live dialogs and
@@ -44,9 +46,9 @@ Recently landed:
   long it was held, playback and recording finishing, transfer progress, hold and resume, and
   ended with a cause, pushed onto a channel the call owns instead of found by polling it.
 
-Not there yet: ICE. The two pieces a browser insists on — WebSocket transport and DTLS-SRTP —
-are in place, but without connectivity checks a browser and sipx will agree on a session and
-then fail to find a media path in most networks.
+Not there yet: ICE. Of the two pieces a browser insists on, WebSocket transport is in place and a
+DTLS-keyed media session is not — see above. Without connectivity checks a browser and sipx would
+agree on a session and then fail to find a media path in most networks anyway.
 
 ## The SDK direction
 

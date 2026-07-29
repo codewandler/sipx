@@ -10,6 +10,20 @@ below — alongside `help` and `version`. Global: `--json` switches the report t
 object on stdout; `-v`/`-vv` raise log verbosity on stderr (never stdout, so JSON stays
 parseable); `-h`/`--help` on any command.
 
+:::warning The binary cannot make an encrypted call
+
+`--tcp` is the only transport flag `dial` and `register` take, so every call the CLI places runs
+over UDP or TCP. There is no way to ask it for TLS or a secure WebSocket, and SRTP is negotiated
+only when the signalling protects the key — so **nothing you can type here produces encrypted
+media.**
+
+The stack does: a call over WSS carries SDES-keyed SRTP, and that is asserted in
+`sipx-call/tests/secure_media.rs`. The claim on [the front page](../intro.md) is a claim about the
+library, and this page is where the difference is written down rather than left for you to
+discover. Reaching it from the CLI needs a transport flag that does not exist yet.
+
+:::
+
 ## `sipx dial <URI>`
 
 Place a call: `sipx dial sip:bob@192.0.2.1:5060`
