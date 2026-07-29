@@ -340,6 +340,7 @@ impl MediaDescription {
     /// the attribute is still on the description and still round-trips, and the rest of the
     /// stream is still usable. A stack that refused the description instead would fail calls with
     /// peers doing nothing wrong.
+    #[must_use]
     pub fn ice_candidates(&self) -> Vec<crate::ice::Candidate> {
         self.attributes
             .iter()
@@ -353,6 +354,7 @@ impl MediaDescription {
     ///
     /// Present only in an offer from a controlling agent for a stream that is Completed, so an
     /// empty result is the normal case rather than a sign of anything.
+    #[must_use]
     pub fn ice_remote_candidates(&self) -> Vec<crate::ice::RemoteCandidate> {
         self.attributes
             .iter()
@@ -368,11 +370,13 @@ impl MediaDescription {
     /// Read [`SessionDescription::ice_credentials_for`] instead unless the distinction matters:
     /// a stream with no fragment of its own inherits the session's, and RFC 8839 §4.4.1.1.1
     /// makes the *pair* of values, not either alone, what an ICE restart changes.
+    #[must_use]
     pub fn ice_ufrag(&self) -> Option<&str> {
         self.attribute_value("ice-ufrag")
     }
 
     /// This stream's own `a=ice-pwd` (RFC 8839 §5.4), before the session-level default.
+    #[must_use]
     pub fn ice_pwd(&self) -> Option<&str> {
         self.attribute_value("ice-pwd")
     }
@@ -392,14 +396,13 @@ impl MediaDescription {
     /// attribute, and therefore that ICE MUST NOT be used for this stream — RFC 3264 procedures
     /// apply instead. Not a failure: it is the answerer saying an intermediary rewrote the
     /// addresses, which is what ICE was going to discover the hard way.
+    #[must_use]
     pub fn ice_mismatch(&self) -> bool {
         self.has_flag("ice-mismatch")
     }
 
     fn attribute_value(&self, name: &str) -> Option<&str> {
-        self.attributes
-            .iter()
-            .find(|attribute| attribute.name == name)
+        self.attribute(name)
             .and_then(|attribute| attribute.value.as_deref())
     }
 
@@ -537,11 +540,13 @@ impl SessionDescription {
     }
 
     /// The session-level `a=ice-ufrag` (RFC 8839 §5.4), which is a default for every stream.
+    #[must_use]
     pub fn ice_ufrag(&self) -> Option<&str> {
         self.attribute_value("ice-ufrag")
     }
 
     /// The session-level `a=ice-pwd` (RFC 8839 §5.4), which is a default for every stream.
+    #[must_use]
     pub fn ice_pwd(&self) -> Option<&str> {
         self.attribute_value("ice-pwd")
     }
@@ -558,6 +563,7 @@ impl SessionDescription {
     /// `None` when the description gives no usable pair at either level, which per §5.4 means
     /// the stream is not doing ICE. Values up to 256 characters are accepted, as §5.4 requires,
     /// even though sipx will not send one longer than 32.
+    #[must_use]
     pub fn ice_credentials_for(&self, media: &MediaDescription) -> Option<crate::ice::Credentials> {
         let level = |ufrag: Option<&str>, pwd: Option<&str>| match (ufrag, pwd) {
             (Some(ufrag), Some(pwd)) => crate::ice::Credentials::received(ufrag, pwd),
@@ -594,6 +600,7 @@ impl SessionDescription {
     /// A lite peer never gathers, never sends a check and never nominates, so sipx takes the
     /// controlling role unconditionally against one (RFC 8445 §6.1.1) and must not wait for
     /// checks that will never arrive. sipx itself is always a full agent and never sends this.
+    #[must_use]
     pub fn is_ice_lite(&self) -> bool {
         self.has_flag("ice-lite")
     }
@@ -604,6 +611,7 @@ impl SessionDescription {
     /// absent case a value — 50 ms — rather than leaving it undefined.
     ///
     /// [`Pacing::DEFAULT`]: crate::ice::Pacing::DEFAULT
+    #[must_use]
     pub fn ice_pacing(&self) -> crate::ice::Pacing {
         self.attribute_value("ice-pacing")
             .and_then(crate::ice::Pacing::parse)

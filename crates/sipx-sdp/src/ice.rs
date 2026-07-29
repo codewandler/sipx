@@ -14,9 +14,12 @@
 //! the whole body on one such line refuses a call over a candidate it was never asked to use.
 //!
 //! **A `priority` is range-checked on parse.** The grammar is `1*10DIGIT`, so `4294967295` is
-//! well-formed text, but §5.1 bounds the value at 2^31 − 1 and RFC 8445 §6.1.2.3's pair priority
-//! — `2^32*MIN(G,D) + 2*MAX(G,D) + (G>D?1:0)` — only fits in a `u64` because of that bound. The
-//! check here is what makes that arithmetic safe later; see [`docs/specs/ice.md`] §4 and §6.2.
+//! well-formed text, but §5.1 bounds the value at 2^31 − 1. RFC 8445 §6.1.2.3 then combines two
+//! priorities as `2^32*MIN(G,D) + 2*MAX(G,D) + (G>D?1:0)`, and that expression leaves `u64` for
+//! operands near `u32::MAX` — `4294967295` on both sides is the case that overflows, which is
+//! exactly the value the grammar admits and the range forbids. Checking on parse is what keeps
+//! the value that would wrap from ever reaching the arithmetic; see [`Priority`] for the
+//! headroom the bound actually buys, and [`docs/specs/ice.md`] §4 and §6.2.
 //!
 //! [`docs/specs/ice.md`]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
 
@@ -129,10 +132,17 @@ impl Transport {
 /// A candidate priority: a positive integer up to 2^31 − 1 (RFC 8839 §5.1).
 ///
 /// The bound is the type's whole reason for existing. RFC 8445 §6.1.2.3 combines two priorities
-/// into a pair priority as `2^32*MIN(G,D) + 2*MAX(G,D) + (G>D?1:0)`, whose largest value with
-/// both operands at 2^31 − 1 is exactly `2^63 − 1`. Carry an unchecked `u32` from the wire into
-/// that expression instead and it overflows — in a release build silently, reordering the
-/// checklist that the arithmetic exists to order.
+/// into a pair priority as `2^32*MIN(G,D) + 2*MAX(G,D) + (G>D?1:0)`. With both operands at
+/// 2^31 − 1 that comes to `2^63 − 2`: the `G > D` term is zero when the two are equal, so the
+/// `2^63 − 1` upper bound is approached and never reached, and every in-range pair therefore has
+/// half a `u64` of headroom.
+///
+/// Carry an unchecked `u32` from the wire into the same expression and the headroom is spent.
+/// The overflow is not one step past the bound — the arithmetic is still exact at 4294967294 —
+/// but `4294967295` on both sides, the ten-digit value `1*10DIGIT` admits, comes to `2^64 + 2^32
+/// − 2` and wraps. In a release build it wraps silently, reordering the checklist that the
+/// arithmetic exists to order. `the_priority_bound_is_what_keeps_the_pair_priority_in_a_u64`
+/// asserts both halves of this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Priority(u32);
 
@@ -198,9 +208,11 @@ impl CandidateType {
     /// The type a token names, if it is one sipx knows.
     ///
     /// `candidate-types` ends in `token`, so the set is extensible and a peer may name one sipx
-    /// has never heard of. `None` here makes [`Candidate::parse`] ignore the line: a candidate
-    /// whose type is unknown cannot be given a foundation (RFC 8445 §5.1.1.3 keys foundations on
-    /// the type) and so cannot be placed in a checklist correctly.
+    /// has never heard of. `None` here makes [`Candidate::parse`] ignore the line, which is the
+    /// conservative reading rather than the only legal one: RFC 8839 §5.1 requires a document
+    /// defining a new candidate type to define how it is processed, so a type sipx does not know
+    /// is a type whose processing rules sipx does not have. Checking it as though it were a host
+    /// candidate would be guessing at those rules against a peer that published them.
     pub fn parse(token: &str) -> Option<Self> {
         match token {
             "host" => Some(Self::Host),
@@ -279,6 +291,12 @@ impl Candidate {
         // `rel-addr`, `rel-port` and every `cand-extension` are name/value pairs, so they are
         // read as pairs rather than by position. The grammar puts `raddr`/`rport` first; peers
         // that put an extension there are still understood, and a name with no value is not.
+        //
+        // `extension-att-value = *VCHAR` does admit an empty value, and this drops such a line
+        // rather than keeping the name with an empty value. That is deliberate: an empty value
+        // is only distinguishable from a missing one by a trailing space, so keeping it would
+        // make `to_value` emit a trailing space — and a round trip that adds a byte the peer did
+        // not send is a worse failure than ignoring a candidate whose extension said nothing.
         let mut related_address = None;
         let mut related_port = None;
         let mut extensions = Vec::new();
@@ -716,10 +734,19 @@ mod tests {
             " 1 UDP 2130706431 192.0.2.1 99999 typ host",
             "1 1 UDP 2130706431 192.0.2.1 8998 typ srflx raddr 192.0.2.9",
             "1 1 UDP 2130706431 192.0.2.1 8998 typ host generation",
+            // `*VCHAR` admits an empty extension value, and it is still dropped: see the note in
+            // `parse`. Keeping it would cost a trailing space on every round trip.
+            "1 1 UDP 100 192.0.2.1 9 typ host generation ",
             "th!s 1 UDP 2130706431 192.0.2.1 8998 typ host",
         ] {
             assert_eq!(Candidate::parse(line), None, "{line:?}");
         }
+
+        // A trailing space on an otherwise complete line is *not* malformed — the pair loop just
+        // ends — and it must not pick up an empty extension on the way out.
+        let padded = Candidate::parse("1 1 UDP 100 192.0.2.1 9 typ host ").expect("parses");
+        assert!(padded.extensions.is_empty());
+        assert_eq!(padded.to_value(), "1 1 UDP 100 192.0.2.1 9 typ host");
     }
 
     /// RFC 8839 §5.2's example lines, and the rule that they are read at media level only.

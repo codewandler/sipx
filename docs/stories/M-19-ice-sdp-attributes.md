@@ -53,12 +53,27 @@ a typed description rather than a substring search. Pure parsing: no clock, no s
 - **The registry rows for RFC 8839 were left to `M-22`**, as dispatched. `docs/rfc/registry.toml` is
   therefore silent about this crate's newest grammar until then, and `rfc-report.py --check` stays
   green because it verifies the claims that are made, not the ones that are missing.
-- One correction to the spec, for whoever owns it: `docs/specs/ice.md` §6.2 says the largest pair
-  priority "is `2^63 − 1`". It is a correct *bound* and not an attained value — the `(G>D?1:0)` term
-  is zero when both priorities are at the ceiling, so the maximum reached is `2^63 − 2`. The
-  overflow the section warns about is real and is asserted in
-  `the_priority_bound_is_what_keeps_the_pair_priority_in_a_u64`, but it needs a priority near
-  `u32::MAX` (the section's own `4294967295`) rather than merely one past `2^31 − 1`.
+- **`docs/specs/ice.md` §6.2 is corrected, in this branch.** It said the largest pair priority "is
+  `2^63 − 1`" and implied that anything past 2^31 − 1 overflows. Both were wrong; the warning they
+  supported was not. `2^63 − 1` is a bound approached and never reached — the `(G>D?1:0)` term is
+  zero exactly when the operands are equal, so the attained maximum is `2^63 − 2` — and the
+  overflow needs `u32::MAX` on both sides, not one step past the range. Two contexts computed this
+  independently before it was changed. The Acceptance above (the `priority` item) repeats the old
+  framing and was left as written, because the Acceptance is the contract as dispatched and the
+  check it asks for is the check that was built; this note is the record of which text was wrong.
+  Asserted by `the_priority_bound_is_what_keeps_the_pair_priority_in_a_u64`, and the module's own
+  rustdoc now says the same thing as the test.
+- **The "candidates vanish silently" risk was measured and is smaller than reported.** A peer whose
+  candidates are all ignored is *not* indistinguishable from a peer doing no ICE:
+  `ice_credentials_for()` still returns `Some`, and the raw `a=candidate` lines are still on the
+  description and still countable. That is what a consumer needs for `ice-mismatch` (§13.2) and for
+  §13.3's fallback. What is missing is a named API saying so, and it belongs to `M-21`/`M-22`
+  rather than here.
+- An empty `cand-extension` value — which `extension-att-value = *VCHAR` admits — drops the
+  candidate rather than being kept. Keeping it would put a trailing space on every round trip,
+  because an empty value is only distinguishable from a missing one by that space, and a round
+  trip that adds a byte the peer did not send is the worse failure. Pinned by
+  `a_malformed_candidate_is_ignored_rather_than_fatal`.
 
 ## Notes
 - The spec is [`docs/specs/ice.md`](../specs/ice.md), written by `M-16` before any code. Read the
