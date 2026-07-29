@@ -79,6 +79,18 @@ difference. Both mutations are recorded in the spec's §9.6. One test also had a
   CANCEL: §6's table answers a bare CANCEL 405. Every path that surfaces an `Invitation` goes
   through the dispatcher, so nothing reachable is affected.
 
+**Verified on the final commit** (`c2bf15a`): `./scripts/gate.py` — *17 steps, all green*. The
+failing-first evidence is the commit order: `57ed3c5` adds `tests/cancel.rs` alone, and there the
+suite does not compile — 10 errors, all of them the API this story owes (`Invitation::is_cancelled`
+×5, `Invitation::answer` ×3, `Error::InvitationCancelled` ×1, plus the shadowed-`invite` defect
+×1). `bc2de4e` is what makes it build and pass.
+
+One gate run failed the API-reference step before this and was **not** a code fault: rustdoc hit a
+truncated write (`invalid template: … should have a newline on the last line`) next to a "corrupt
+incremental compilation artifact" warning, with the disk at 95%. Clearing this worktree's own
+`target/debug/incremental` and `target/doc` cleared it. If that step fails again, check `df -h`
+before reading the error.
+
 ## Notes
 - Found by `C-4` while building the dispatcher: it routes a CANCEL for a routed invitation into
   that call's inbox and surfaces an unrouted one, so nothing is lost — but there is nothing on the
