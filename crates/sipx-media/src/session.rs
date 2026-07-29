@@ -3185,6 +3185,14 @@ mod tests {
         // and assuming they have (`X-29`). The counts below are exact, so a packet still in
         // flight does not degrade the answer — it changes it, and reports loss that was never
         // injected. The bound is on failure, not a window to measure in.
+        //
+        // The precondition this leans on, since it is not obvious: `packets_received()` reaching 8
+        // implies the statistics have seen all 8 only because nothing suspends between
+        // `received.fetch_add` (`:2258`) and `note_arrival`'s lock (`:2301-2313`) — an uncontended
+        // `Mutex::lock().await` on a `current_thread` runtime does not yield. Move these tests to a
+        // multi-thread runtime, or add an await in that gap, and the counter can lead the
+        // statistics: inserting a 20 ms sleep between the two fails this test with
+        // `extended_highest_sequence  left: 9  right: 10`.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while left.packets_received() != 8 {
             assert!(
@@ -3467,6 +3475,9 @@ mod tests {
         // As in `a_session_reports_the_loss_it_saw`: wait for the nine to arrive rather than
         // sleeping 100 ms and assuming they have (`X-29`). `extended_highest_sequence` and
         // `cumulative_lost` are asserted exactly, so a straggler reports loss nobody injected.
+        // Same precondition as that test, and it is the same fragility: the counter only implies
+        // the statistics because nothing suspends between `received.fetch_add` (`:2258`) and
+        // `note_arrival`'s lock (`:2301-2313`) on a `current_thread` runtime.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while session.packets_received() != 9 {
             assert!(
