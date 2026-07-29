@@ -43,6 +43,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The transaction-sequence fuzzer can no longer stop covering something silently (`X-31`,
+  alpha predicate 2)** — three of its guards could not catch the thing they were written for, and a
+  fuzzer that silently stops covering something is worse than one never written, because the green
+  campaign is read as evidence.
+  - **The timer table and the `Timer` enum now agree in both directions.** A const assert proved only
+    that the table and its count were the same *size*; a fourteenth variant would have been silently
+    never-fuzzed. `timer_row` is an exhaustive match, so adding one is now
+    `error[E0004]: non-exhaustive patterns`, and a test round-trips every row so the two cannot drift
+    on order either — the one drift exhaustiveness cannot see.
+  - **An unfalsifiable invariant arm is deleted rather than rescued.** `live > MAX_LIVE_TRANSACTIONS`
+    could never fire: the bound equals the vocabulary's key count, so pigeonhole made it decoration in
+    a file otherwise careful about exactly this. The two genuinely falsifiable arms carry it.
+  - **The corpus check sees additions, not only edits.** CI was `git diff --exit-code`, blind to
+    untracked files, so a seed added by hand would have passed. `check-corpus-untouched.sh` checks
+    both, as the RFC 4475 check always has; adding a file fails with it named.
+  - The RFC 2543 registry item needed nothing: `S-26` had already rewritten the row and deleted the
+    stale note in the same commit. Verifying that *was* the item.
+
 - **`respond`'s promise that the response is on the wire is now enforced by the compiler (`X-36`)** —
   `respond_returns_only_once_the_response_has_been_sent` could not detect the thing it was named for.
   Moving the success report ahead of the send left it passing and the whole crate green.

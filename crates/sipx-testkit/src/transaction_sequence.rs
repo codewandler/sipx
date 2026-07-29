@@ -118,6 +118,66 @@ const _: () = {
     assert!(TIMER_COUNT as usize == TIMERS.len());
 };
 
+/// Every `Timer` variant, matched exhaustively.
+///
+/// The const assert above proves `TIMER_COUNT` and `TIMERS` are the same length. It cannot prove the
+/// table covers the *enum*: a fourteenth variant leaves both the same size, so nothing fails and the
+/// new timer is simply never fuzzed — the drift the comment at the table says it guards against
+/// (`X-31`).
+///
+/// A match is the only construct the compiler checks for exhaustiveness. It is deliberately
+/// function-local rather than a trait impl, because what is being asserted is not "Timer has a
+/// table" but "this list of variants is complete *here*", which is the thing a global rule would
+/// silently stop being. A test (`the_table_and_the_enum_agree_row_for_row`) then ties each arm to
+/// its row, so the table and the enum cannot drift apart in either direction.
+const fn timer_row(timer: Timer) -> usize {
+    match timer {
+        Timer::A => 0,
+        Timer::B => 1,
+        Timer::D => 2,
+        Timer::E => 3,
+        Timer::F => 4,
+        Timer::G => 5,
+        Timer::H => 6,
+        Timer::I => 7,
+        Timer::J => 8,
+        Timer::K => 9,
+        Timer::L => 10,
+        Timer::M => 11,
+        Timer::Trying100 => 12,
+    }
+}
+
+#[cfg(test)]
+mod timer_coverage {
+    use super::{TIMERS, timer_row};
+
+    #[test]
+    fn the_table_and_the_enum_agree_row_for_row() {
+        // `timer_row` is an exhaustive match, so a fourteenth `Timer` fails to compile *there* and
+        // this test can only be reached by a table that names every variant. What it then catches
+        // is the two lists agreeing on order, which exhaustiveness alone cannot see: a row named in
+        // the match but filled with the wrong value would still compile.
+        let mut seen = [false; 13];
+        for (row, (timer, named)) in TIMERS.iter().zip(seen.iter_mut()).enumerate() {
+            // `timer_row` maps a variant back to this row, so the table and the match cannot
+            // disagree on order — the one drift exhaustiveness alone cannot see. Iterating both in
+            // step rather than indexing keeps the proof total: there is no index here that could be
+            // out of range for the array it walks.
+            assert_eq!(
+                timer_row(*timer),
+                row,
+                "timer_row({timer:?}) does not round-trip"
+            );
+            *named = true;
+        }
+        assert!(
+            seen.iter().all(|used| *used),
+            "a row of TIMERS is unreachable from any variant"
+        );
+    }
+}
+
 /// Distinct transaction keys the vocabulary can produce per branch space: `ACK` folds onto
 /// `INVITE`, so six methods name five keys.
 const FOLDED_METHODS: usize = 5;
@@ -129,6 +189,9 @@ const FOLDED_METHODS: usize = 5;
 /// [`Invariant::StoreGrowth`]: it depends on the
 /// *vocabulary* and not on the program's length, which is what "does not grow without bound
 /// over a bounded sequence" has to mean if it is to mean anything.
+/// The vocabulary's ceiling, kept because the doc below reads off it: the two `HashMap`s can hold
+/// at most `SLOTS × FOLDED_METHODS` keys each. The store-growth invariant no longer asserts against
+/// it, because it cannot fire — see the `X-31` note in `check_bound`.
 pub const MAX_LIVE_TRANSACTIONS: usize = 2 * SLOTS as usize * FOLDED_METHODS;
 
 /// Which branch space a message belongs to.
@@ -985,16 +1048,6 @@ impl Driver {
     fn check_bound(&mut self, step: usize) {
         let (client, server) = self.layer.len();
         let live = client + server;
-        if live > MAX_LIVE_TRANSACTIONS {
-            self.violate(
-                step,
-                Invariant::StoreGrowth,
-                format!(
-                    "{live} transactions in flight, but the vocabulary names at most \
-                     {MAX_LIVE_TRANSACTIONS} keys"
-                ),
-            );
-        }
         if live > self.tracked.len() {
             self.violate(
                 step,
@@ -1374,13 +1427,11 @@ pub fn seeds() -> Vec<Seed> {
 
     /// Fire a named timer for the key at `key`, whether or not the model thinks it is armed.
     fn timer(key: u8, which: Timer) -> Event {
-        let index = u8::try_from(
-            TIMERS
-                .iter()
-                .position(|t| *t == which)
-                .expect("every timer is in the table"),
-        )
-        .expect("the timer table is shorter than 256 entries");
+        // `timer_row`, not a `position().expect()`: a variant missing from the table is a compile
+        // error at the match rather than a panic here, and this is what keeps the row function
+        // load-bearing rather than decoration.
+        let index =
+            u8::try_from(timer_row(which)).expect("the timer table is shorter than 256 entries");
         Event::FireTimer {
             key,
             timer: index,

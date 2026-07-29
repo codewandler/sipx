@@ -273,7 +273,9 @@ jobs:
       - name: Verify the RFC 4475 corpus is untouched
         run: ./scripts/import-rfc4475-corpus.sh --check
       - name: Verify the transaction-sequence corpus is untouched
-        run: git diff --exit-code -- crates/sipx-testkit/corpus/transaction-sequences
+        # `git diff` is blind to untracked files, so a seed added by hand would pass. Additions and
+        # modifications are both checked (X-31), as the RFC 4475 corpus check has always done.
+        run: ./scripts/check-corpus-untouched.sh
 
   provenance:
     name: provenance
