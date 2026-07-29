@@ -4,17 +4,20 @@
 //! the half that does: sending PRACK when a numbered provisional arrives, and — on the
 //! answering side — retransmitting a `180 Ringing` until the caller says it got there.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use sipx_sdp::{Capabilities, SessionDescription};
+use sipx_sdp::{Capabilities, Direction, SessionDescription};
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
 use sipx_sip::rel::{self, Numbering, Offered, RAck, RSeq, Reliability};
 use sipx_sip::transaction::TransactionKey;
+use sipx_sip::update::{self, Reception};
 use sipx_sip::{HeaderName, Method, Response, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
 
+use crate::call::Early;
 use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
 
@@ -152,6 +155,24 @@ pub struct Ringing {
     reliable: bool,
     stop: Option<Arc<tokio::sync::Notify>>,
     acknowledged: bool,
+    /// The early dialog the provisional created (RFC 3261 §12.1.1).
+    ///
+    /// `None` only when the INVITE carried no usable `Contact`, which is a caller we could not
+    /// address anyway. It is held here rather than rebuilt at answer time because an UPDATE
+    /// arriving in the meantime numbers itself against it, and a dialog rebuilt afterwards
+    /// would have forgotten that.
+    dialog: Option<Dialog>,
+    /// Where in-dialog requests go while the invitation is still ringing.
+    target: Target,
+    /// Whose turn it is to offer and to answer (RFC 3311 §5, RFC 3264).
+    negotiation: update::Negotiation,
+    /// Whether the caller's `Allow` listed UPDATE (RFC 3311 §4).
+    peer_allows_update: bool,
+    /// The session this side answered in the provisional, when it answered one.
+    ///
+    /// Its presence is exactly the difference between a dialog whose session may be
+    /// renegotiated before it is answered and one whose may not — see [`ring_early`].
+    early: Option<Early>,
 }
 
 impl Ringing {
@@ -175,6 +196,181 @@ impl Ringing {
     #[must_use]
     pub fn is_acknowledged(&self) -> bool {
         self.acknowledged || !self.reliable
+    }
+
+    /// Whether the caller's `Allow` listed UPDATE (RFC 3311 §4).
+    #[must_use]
+    pub fn peer_allows_update(&self) -> bool {
+        self.peer_allows_update
+    }
+
+    /// Whether the session was described *and answered* before the call was accepted.
+    ///
+    /// True only after [`ring_early`]. It is what makes an offer-carrying UPDATE legal in this
+    /// dialog: RFC 3311 §5.1 will not let one out while an offer/answer exchange is open, and
+    /// before the 200 the only way to close one is RFC 3262 §5's answer in a reliable
+    /// provisional.
+    #[must_use]
+    pub fn has_early_session(&self) -> bool {
+        self.early.is_some()
+    }
+
+    /// Hand the early session over to the [`Call`](crate::Call) that is taking its place.
+    ///
+    /// Empties this ringing rather than consuming it, because it still owns the retransmission
+    /// of the provisional and must go on owning it until it is dropped.
+    pub(crate) fn take_early(&mut self) -> Result<(Early, Dialog, update::Negotiation, bool)> {
+        let early = self.early.take().ok_or(Error::NoEarlySession)?;
+        let dialog = self.dialog.take().ok_or(Error::NoDialog)?;
+        Ok((early, dialog, self.negotiation, self.peer_allows_update))
+    }
+
+    /// Answer an UPDATE that arrived in the early dialog (RFC 3311 §5.2).
+    ///
+    /// Returns whether it was one for this dialog. The three refusals are the same three a
+    /// confirmed dialog gives, and this is the case they were written for: the far end is
+    /// changing a session that has been described and not yet accepted, which is precisely what
+    /// a re-INVITE cannot do — a second INVITE inside a transaction that has no final response
+    /// is not a thing SIP has.
+    ///
+    /// An offer arriving before this side has answered the INVITE's own — that is, after
+    /// [`ring`] rather than [`ring_early`] — draws the **500** of §5.2's third rule. Not 491:
+    /// nothing of ours is outstanding, the peer is simply early, and telling it otherwise would
+    /// send it into a back-off instead of the retry that will work.
+    pub async fn on_update(&mut self, incoming: &Incoming) -> Result<bool> {
+        if incoming.request.method != Method::Update {
+            return Ok(false);
+        }
+        let Some(dialog) = self.dialog.as_mut() else {
+            return Ok(false);
+        };
+        if !dialog.matches(&incoming.request) {
+            return Ok(false);
+        }
+
+        // RFC 3311 §5.2 sends this straight to RFC 3261 §12.2.2, and an early dialog is under
+        // §12.2.2 exactly as a confirmed one is. Without it the recorded sequence number rolls
+        // *backwards* to whatever the last UPDATE claimed, and a BYE replayed from behind it is
+        // then accepted — ending a call that is still running, which is the failure
+        // `Call::handle` already refuses in as many words.
+        if dialog.is_out_of_order(&incoming.request) {
+            return respond(
+                &self.endpoint,
+                incoming,
+                500,
+                "Server Internal Error",
+                Vec::new(),
+            )
+            .await
+            .map(|()| true);
+        }
+        dialog.record_remote_cseq(&incoming.request);
+
+        let has_offer = crate::update::carries_offer(&incoming.request);
+        if let Reception::Refuse(refusal) = self.negotiation.receive(has_offer) {
+            crate::update::refuse(&self.endpoint, incoming, refusal).await?;
+            return Ok(true);
+        }
+
+        let mut builder =
+            ResponseBuilder::to_request(&incoming.request, crate::call::ok_status(), "OK")?
+                .header(
+                    HeaderName::Contact,
+                    Bytes::from(crate::call::contact_for(
+                        &self.endpoint,
+                        self.target.transport,
+                    )),
+                )?
+                .header(
+                    HeaderName::Allow,
+                    Bytes::from_static(update::ALLOW.as_bytes()),
+                )?;
+
+        if has_offer {
+            let answer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
+                .ok()
+                .and_then(|offer| self.early.as_mut().and_then(|early| early.reanswer(&offer)));
+            let Some(answer) = answer else {
+                // §5.2 and `M-8`'s rule together: the change does not happen and the dialog
+                // carries on. An early dialog refused this way still rings, and still answers.
+                self.negotiation.answered();
+                return respond(
+                    &self.endpoint,
+                    incoming,
+                    488,
+                    "Not Acceptable Here",
+                    vec![(
+                        HeaderName::Warning,
+                        Bytes::from(crate::update::warning(&self.endpoint)),
+                    )],
+                )
+                .await
+                .map(|()| true);
+            };
+            builder = builder
+                .header(
+                    HeaderName::ContentType,
+                    Bytes::from_static(b"application/sdp"),
+                )?
+                .body(Bytes::from(answer.to_string_sdp()));
+        }
+
+        // §5.1: a target refresh request, in an early dialog as much as a confirmed one. The
+        // sequence number was recorded above, with the ordering check that earns the right to.
+        dialog.refresh_target(&incoming.request.headers);
+        self.target =
+            crate::call::in_dialog_target(dialog, Target::new(incoming.source, incoming.transport));
+        self.peer_allows_update = update::peer_allows(&incoming.request.headers);
+
+        let sent = self.endpoint.respond(&incoming.key, builder.build()).await;
+        // Cleared whether or not the response got out, for the reason `Call::on_update` gives:
+        // a send that will not be retried must not leave the exchange open forever.
+        self.negotiation.answered();
+        sent?;
+        Ok(true)
+    }
+
+    /// Renegotiate the early session from this side (RFC 3311 §5.1).
+    ///
+    /// Requires [`ring_early`]: without an answer already given to the INVITE's offer this side
+    /// owes one, and RFC 3264 forbids a second offer while one is open — the far end would
+    /// answer 500 and be right to.
+    pub async fn update(&mut self, direction: Direction) -> Result<()> {
+        let (Some(early), Some(dialog)) = (self.early.as_mut(), self.dialog.as_mut()) else {
+            return Err(Error::NoDialog);
+        };
+        if !self.negotiation.may_offer() {
+            return Err(Error::Rejected {
+                status: update::Refusal::Glare.status(),
+                reason: "an offer is already outstanding on this dialog".to_owned(),
+            });
+        }
+
+        let mut capabilities = early.capabilities.clone();
+        capabilities.direction = direction;
+        capabilities.session_version = u64::from(dialog.local_cseq.saturating_add(1));
+        let offer = crate::call::offer_from(&capabilities);
+
+        let (builder, routes) =
+            crate::update::request(&self.endpoint, dialog, &self.target, Some(&offer))?;
+        let request = crate::update::finish(builder, &routes)?;
+
+        self.negotiation.sent_offer();
+        let response = crate::update::send(&self.endpoint, request, self.target.clone()).await;
+        self.negotiation.received_answer();
+        let response = response?;
+        if !response.status.is_success() {
+            return Err(crate::update::rejected(&response));
+        }
+
+        dialog.refresh_target(&response.headers);
+        self.peer_allows_update = update::peer_allows(&response.headers);
+        if let Ok(answered) = sipx_sdp::parse(&String::from_utf8_lossy(response.body())) {
+            // An answer, not an offer: it says where the far end now wants media, and nothing
+            // is owed back for it. Our own port does not move — the peer already has it.
+            early.adopt_answer(&answered);
+        }
+        Ok(())
     }
 
     /// Handle an in-dialog PRACK. Returns whether it was one for this ringing.
@@ -241,21 +437,59 @@ pub async fn ring(
     reason: &'static str,
     enabled: bool,
 ) -> Result<Ringing> {
+    ring_with(endpoint, incoming, status, reason, enabled, None).await
+}
+
+/// Ring, and answer the INVITE's offer in the provisional (RFC 3262 §5 + RFC 3311 §4).
+///
+/// This is what makes an early dialog *renegotiable*. RFC 3311 §5.1 will not let an UPDATE
+/// carry an offer while an offer/answer exchange is open, so a session described in the INVITE
+/// cannot be changed before the 200 unless its answer has already gone back — and before the
+/// 200 there is exactly one place to put an answer: a reliable provisional response.
+///
+/// 100rel is therefore not optional here and there is no flag to switch it off. RFC 3262 §5
+/// forbids an answer in an unreliable provisional outright, and one sent anyway can be lost
+/// without either side noticing, leaving them disagreeing about which description is in force.
+/// A caller that did not offer 100rel gets an error and should fall back to [`ring`].
+///
+/// The media port is bound now, and the [`Call`](crate::Call) that
+/// [`answer_early`](crate::answer_early) builds takes it over: the answer has already told the
+/// far end where to send, and binding a second port would make the 200 contradict the 183.
+pub async fn ring_early(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    status: u16,
+    reason: &'static str,
+    media_address: IpAddr,
+) -> Result<Ringing> {
+    if !Offered::in_request(&incoming.request).supported {
+        // Not a refusal of the call — the caller can still be rung the ordinary way. It is a
+        // refusal to put an answer somewhere it may be silently lost.
+        return Err(Error::Rejected {
+            status: 421,
+            reason: "the caller did not offer 100rel, so no answer may go in a provisional"
+                .to_owned(),
+        });
+    }
+    let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
+        .map_err(|error| Error::Sdp(error.to_string()))?;
+    let settled = Early::settle(media_address, incoming.transport.is_secure(), &offer).await?;
+    ring_with(endpoint, incoming, status, reason, true, Some(settled)).await
+}
+
+async fn ring_with(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    status: u16,
+    reason: &'static str,
+    enabled: bool,
+    early: Option<(Early, SessionDescription)>,
+) -> Result<Ringing> {
     let offered = Offered::in_request(&incoming.request);
     let decision = rel::reliability(offered, enabled);
 
     if decision == Reliability::Refuse {
-        const BAD_EXTENSION: u16 = 420;
-        let code = StatusCode::new(BAD_EXTENSION)
-            .ok_or_else(|| Error::Sdp("unreachable: literal status".to_owned()))?;
-        let refusal = ResponseBuilder::to_request(&incoming.request, code, "Bad Extension")?
-            .header(HeaderName::Unsupported, Bytes::from_static(b"100rel"))?
-            .build();
-        endpoint.respond(&incoming.key, refusal).await?;
-        return Err(Error::Rejected {
-            status: BAD_EXTENSION,
-            reason: "Bad Extension".to_owned(),
-        });
+        return refuse_bad_extension(endpoint, incoming).await;
     }
 
     let tag = crate::call::token();
@@ -292,6 +526,15 @@ pub async fn ring(
         .header(
             HeaderName::Contact,
             Bytes::from(crate::call::contact_for(endpoint, incoming.transport)),
+        )?
+        // RFC 3311 §4: a reliable provisional carrying SDP "SHOULD contain an Allow header
+        // field that lists the UPDATE method", which is the far end's permission to renegotiate
+        // the session this response just answered. It goes on every provisional rather than
+        // only that one, because a peer that learns it earlier can act on it earlier and
+        // nothing is claimed that is not true.
+        .header(
+            HeaderName::Allow,
+            Bytes::from_static(update::ALLOW.as_bytes()),
         )?;
 
     let reliable = decision != Reliability::Forbidden;
@@ -303,6 +546,23 @@ pub async fn ring(
             .header(HeaderName::Require, Bytes::from_static(b"100rel"))?
             .header(HeaderName::RSeq, Bytes::from(allocated.to_string()))?;
     }
+
+    // The answer, when there is one. Guarded by `reliable` because RFC 3262 §5 permits an
+    // answer only in a reliable provisional; `ring_early` has already refused the case where
+    // that cannot be met, so reaching here with an unreliable response and a description would
+    // be a bug rather than a peer's doing.
+    let early = match early {
+        Some((settled, answer)) if reliable => {
+            builder = builder
+                .header(
+                    HeaderName::ContentType,
+                    Bytes::from_static(b"application/sdp"),
+                )?
+                .body(Bytes::from(answer.to_string_sdp()));
+            Some(settled)
+        }
+        _ => None,
+    };
 
     let response = builder.build();
     endpoint.respond(&incoming.key, response.clone()).await?;
@@ -318,6 +578,24 @@ pub async fn ring(
         stop
     });
 
+    // The offer/answer state the early dialog starts in. With an answer already sent nothing is
+    // outstanding either way, so an UPDATE carrying an offer is legal; without one this side
+    // owes an answer to the INVITE, and RFC 3311 §5.2's third rule refuses such an UPDATE with
+    // a 500 until the 200 settles it.
+    let negotiation = if early.is_none() && crate::update::carries_offer(&incoming.request) {
+        update::Negotiation::owing()
+    } else {
+        update::Negotiation::idle()
+    };
+
+    let dialog = Dialog::from_request(&incoming.request, &tag);
+    let target = dialog.as_ref().map_or_else(
+        || Target::new(incoming.source, incoming.transport),
+        |dialog| {
+            crate::call::in_dialog_target(dialog, Target::new(incoming.source, incoming.transport))
+        },
+    );
+
     Ok(Ringing {
         endpoint: endpoint.clone(),
         tag,
@@ -326,6 +604,52 @@ pub async fn ring(
         reliable,
         stop,
         acknowledged: false,
+        dialog,
+        target,
+        negotiation,
+        peer_allows_update: update::peer_allows(&incoming.request.headers),
+        early,
+    })
+}
+
+/// Send a bare final response to an in-dialog request, with any headers it must carry.
+///
+/// Its own function because the early dialog answers several of these — §12.2.2's 500, §5.2's
+/// 488 — and a response built inline at each site is a response whose headers drift between
+/// them.
+async fn respond(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    code: u16,
+    reason: &'static str,
+    headers: Vec<(HeaderName, Bytes)>,
+) -> Result<()> {
+    let status =
+        StatusCode::new(code).ok_or_else(|| Error::Sdp(format!("status {code} out of range")))?;
+    let mut builder = ResponseBuilder::to_request(&incoming.request, status, reason)?;
+    for (name, value) in headers {
+        builder = builder.header(name, value)?;
+    }
+    endpoint.respond(&incoming.key, builder.build()).await?;
+    Ok(())
+}
+
+/// Refuse an invitation that requires 100rel from a side that has it switched off (§3).
+///
+/// The `Unsupported` naming the tag is what makes this actionable: without it the caller learns
+/// only that it failed, and a caller left waiting for an `RSeq` that will never come cannot tell
+/// that from a dead network.
+async fn refuse_bad_extension(endpoint: &Handle, incoming: &Incoming) -> Result<Ringing> {
+    const BAD_EXTENSION: u16 = 420;
+    let code = StatusCode::new(BAD_EXTENSION)
+        .ok_or_else(|| Error::Sdp("unreachable: literal status".to_owned()))?;
+    let refusal = ResponseBuilder::to_request(&incoming.request, code, "Bad Extension")?
+        .header(HeaderName::Unsupported, Bytes::from_static(b"100rel"))?
+        .build();
+    endpoint.respond(&incoming.key, refusal).await?;
+    Err(Error::Rejected {
+        status: BAD_EXTENSION,
+        reason: "Bad Extension".to_owned(),
     })
 }
 

@@ -572,9 +572,12 @@ impl UserAgent {
             StatusCode::new(200).ok_or(Error::NoResponse)?,
             "OK",
         )?
+        // The one list, shared with everything else that advertises what this stack answers.
+        // A second copy here would drift from the one on the INVITE, and RFC 3311 §4 makes an
+        // `Allow` that omits UPDATE a standing instruction to the peer never to send one.
         .header(
             HeaderName::Allow,
-            Bytes::from_static(b"INVITE, ACK, CANCEL, BYE, OPTIONS"),
+            Bytes::from_static(sipx_sip::update::ALLOW.as_bytes()),
         )?
         .header(HeaderName::Accept, Bytes::from_static(b"application/sdp"))?
         .header(
