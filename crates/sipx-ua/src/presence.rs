@@ -9,6 +9,9 @@
 //! publishers for one resource silently overwrite each other and neither can tell; with it, a
 //! publisher whose state has expired is told to start again rather than allowed to resurrect a
 //! document the server has already forgotten.
+//! **Experimental** (`A-8`): public and tested, with no caller above this crate — no CLI command
+//! publishes, and nothing in the workspace receives a PUBLISH off a socket.
+//!
 
 use std::fmt::Write as _;
 use std::time::Duration;

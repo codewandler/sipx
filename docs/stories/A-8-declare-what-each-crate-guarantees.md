@@ -2,8 +2,7 @@
 id: A-8
 title: Declare what each published crate guarantees
 pillar: Application
-status: ready
-priority: 3
+status: done
 design: docs/vision.md
 epic: app-sdk
 areas: [docs, sipx-app-protocol]
@@ -18,22 +17,22 @@ Give every published crate an explicit, written statement of which of its public
 rather than something that merely happened to compile.
 
 ## Acceptance
-- [ ] Each published crate states its guarantee in its crate-level documentation, where a reader on
+- [x] Each published crate states its guarantee in its crate-level documentation, where a reader on
       docs.rs meets it first — not only in a repository markdown file. Eleven crates publish;
       `sipx-testkit` is `publish = false` and needs no promise.
-- [ ] **The unit of the promise is stated.** "Stable" must say what may still change: new enum
+- [x] **The unit of the promise is stated.** "Stable" must say what may still change: new enum
       variants behind `#[non_exhaustive]`, new struct fields, new trait methods with defaults. This
       project has already shipped three additive `sipx_call::Error` variants that were
       source-breaking for an exhaustive `match`, and said so in the changelog each time — that
       practice becomes the written rule.
-- [ ] **Experimental surface is marked at the item, not only in prose.** `sipx-app-protocol` already
+- [x] **Experimental surface is marked at the item, not only in prose.** `sipx-app-protocol` already
       describes itself as experimental; the rule is that a reader looking at one type can tell
       without going up a level.
-- [ ] Anything that cannot honestly be called stable before 1.0 is named, with what would settle it.
+- [x] Anything that cannot honestly be called stable before 1.0 is named, with what would settle it.
       An empty list here is a claim, and by this project's standards claims get checked.
-- [ ] The declaration is reachable from the README's crate table, so the question "can I depend on
+- [x] The declaration is reachable from the README's crate table, so the question "can I depend on
       this" is answered where people ask it.
-- [ ] Failing-first evidence: name a crate whose public surface a reader cannot today classify as
+- [x] Failing-first evidence: name a crate whose public surface a reader cannot today classify as
       stable or experimental from its own documentation — and the assertion, test or gate step that
       makes it classifiable.
 
@@ -94,6 +93,46 @@ A sweep read all 11 publishable crates' manifests, crate-level `//!` blocks and 
   they need the front-door check or they drift back.
 
 ## Progress
+- **Done.** All eleven published crates now carry a `# Stability` section, and
+  `stability_problems` in `scripts/check-audio-claims.py` fails the gate if one loses it or stops
+  classifying anything. Five tests cover the rule, including that a heading without either word is
+  reported — a heading is not a declaration.
+- **The two words are `Supported` and `Experimental`, and both say they do not mean frozen.** `1.0.0`
+  is what freezes an API; the shared preamble points at `docs/roadmap.md` for the predicates. This
+  mattered because "stable" before 1.0 would have been the same kind of over-claim the day's other
+  stories removed.
+- **Several crates mark part of their surface experimental for one reason, stated the same way each
+  time: it is implemented and tested and nothing above it selects it, so no caller has ever
+  constrained its shape.** `sipx-media::dtls` (`M-28`), `::ice` (`M-27`), `Bridge`/`Conference`
+  (`C-6`), `sipx-ua::presence`/`subscribe`/`packages`, `sipx-sdp::with_dtls_srtp`, Opus in
+  `sipx-audio` (`M-30`). That is the project's recurring defect finally written down as an API
+  property rather than rediscovered per story.
+- **Marked at the item as well as in prose**: the seven module docs above each carry their own
+  `**Experimental** (`A-8`)` line naming the story that would settle it, so a reader on docs.rs sees
+  it on the page they land on rather than only in the crate root.
+- **`sipx-cli`'s promise is its command-line surface, not a Rust API**, and its declaration says so:
+  nothing there is `pub`, it ships no library target, and `cargo doc` renders it under the binary
+  name, so a `sipx_cli` link finds nothing. The contract is the commands, flags, environment
+  variables and exit codes in `website/docs/reference/cli.md`, asserted in `tests/cli.rs`.
+- **`[package.metadata.docs.rs] all-features = true` on all eleven.** Without it docs.rs builds
+  default features while `scripts/build-docs.sh` builds `--all-features`, so the two rendered front
+  doors documented different APIs — and the one a reader reaches from crates.io was the one missing
+  `sipx-media`'s only `Handshake` implementation.
+- **Three over-claims `X-35` assigned here are corrected.** `sipx-sip` and `sipx-ua` both advertised
+  "dialogs" and neither contains a `Dialog` — it lives in `sipx-call/src/dialog.rs`, and `sipx-ua`'s
+  own crate doc already said so one file away. `sipx-app`'s summary promised webhooks, sessions and a
+  TypeScript runtime; its first sentence now says there is no host process, which its manifest had
+  been saying honestly all along.
+- **The unit of the promise is stated, and the mechanical half is deliberately not done here.** Every
+  public error enum outside `sipx-app-protocol` is exhaustive, which promises never to add a variant —
+  a promise `sipx_call::Error` broke by going 13 variants to 16 in one release. The rule is now written
+  where a reader meets it ("carry a `_` arm"), and marking twenty enums `#[non_exhaustive]` is filed as
+  `A-9`, because it breaks cross-crate matches throughout the workspace and bundling it would have made
+  the *line* contingent on a refactor. Writing it down satisfies the alpha; it does not survive a freeze.
+- `readme` per crate is also `A-9`: ten of eleven still publish with no README, so the one-line
+  description remains the whole crates.io landing page.
+- Implemented by the coordinator rather than an implementor — delegation unavailable on an org spend
+  limit — which is why the sweep's findings were used as the specification rather than rediscovered.
 - Not started.
 
 ## Notes

@@ -3,6 +3,25 @@
 //! Scriptable by design. Every command reports its result as a line of JSON on request, uses a
 //! distinct exit code per outcome, and keeps logging off stdout — so a shell can place a call,
 //! assert on what happened, and branch on why it did not.
+//!
+//! # Stability
+//!
+//! sipx is pre-1.0, so this does not mean frozen; `1.0.0` is what freezes an interface and its
+//! predicates are in `docs/roadmap.md`.
+//!
+//! **This crate's promise is its command-line surface, not its Rust API.** Nothing here is `pub`, it
+//! ships no library target, and `cargo doc -p sipx-cli` renders under the binary name — so a reader
+//! following a `sipx_cli` link finds nothing. The contract is the commands, flags, environment
+//! variables and exit codes documented in `website/docs/reference/cli.md` and asserted in
+//! `tests/cli.rs`.
+//!
+//! **Supported**: `register`, `dial`, `answer`, `peers`, their flags, `SIPX_PASSWORD`, the `--book`
+//! lookup order and the exit codes.
+//!
+//! Refused rather than silently unsupported, because a flag that is accepted and dropped is worse than
+//! one that errors: a `sips:` URI (`S-27`, no TLS transport here) and `dial --password` (`S-28`, a call
+//! cannot answer a challenge yet).
+//!
 
 mod advertise;
 mod answer;

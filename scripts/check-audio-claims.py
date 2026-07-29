@@ -571,6 +571,49 @@ def agreement_problems(crate: Crate) -> list[str]:
     return problems
 
 
+#: The two words a crate may classify its surface with, and the heading they must sit under. Both
+#: words, not one: "Supported" alone could be satisfied by a crate that never mentions the parts of
+#: itself nothing can reach, which is the omission `A-8` was filed to close.
+STABILITY_HEADING = "# Stability"
+STABILITY_WORDS = ("Supported", "Experimental")
+
+
+def stability_problems(crate: Crate) -> list[str]:
+    """Whether a crate says what it guarantees, at all.
+
+    `A-8`, and alpha predicate 5: `1.0.0` freezes what "stable" means, so the line between supported
+    and experimental has to exist before it can be frozen. This checks only that the declaration is
+    *present* — no script can judge whether the classification is honest, and pretending otherwise
+    would be the same over-claim one level up.
+
+    The reason it is worth checking mechanically anyway: `missing_docs` already guarantees every public
+    item has *a* doc comment, so a crate can be fully documented and still never tell a reader whether
+    any of it can be depended on. That was true of ten of the eleven published crates.
+    """
+    entry = entry_point(crate.name)
+    text = entry.read_text()
+    doc = "\n".join(line for line in text.splitlines() if line.strip().startswith("//!"))
+    # Relative when it can be, so a message names `crates/sipx-sip/src/lib.rs` rather than an absolute
+    # path; but a path outside the tree must not crash the checker.
+    try:
+        where = entry.relative_to(ROOT)
+    except ValueError:
+        where = entry
+    problems = []
+    if STABILITY_HEADING not in doc:
+        problems.append(
+            f"{where} has no `{STABILITY_HEADING}` section in its crate documentation; a reader "
+            f"cannot tell whether any of {crate.name} may be depended on"
+        )
+        return problems
+    if not any(word in doc for word in STABILITY_WORDS):
+        problems.append(
+            f"{where}'s `{STABILITY_HEADING}` section names neither "
+            f"{' nor '.join(STABILITY_WORDS)}, so it classifies nothing"
+        )
+    return problems
+
+
 def main() -> int:
     if len(sys.argv) != 2 or sys.argv[1] != "--check":
         print("usage: check-audio-claims.py --check", file=sys.stderr)
@@ -587,9 +630,15 @@ def main() -> int:
 
     read_crates = [read(name, tables) for name in crates]
     for crate in read_crates:
-        problems += claim_problems(crate) + agreement_problems(crate)
+        problems += (
+            claim_problems(crate) + agreement_problems(crate) + stability_problems(crate)
+        )
     if problems:
-        print("the crate front doors advertise what the crates do not implement:", file=sys.stderr)
+        print(
+            "the crate front doors advertise what the crates do not implement, or do not say what "
+            "they guarantee:",
+            file=sys.stderr,
+        )
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         return 1

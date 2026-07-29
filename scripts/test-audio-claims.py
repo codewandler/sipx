@@ -23,6 +23,7 @@ over-claim and been switched off by whoever hit it second.
 
 import importlib.util
 import pathlib
+import tempfile
 import sys
 import unittest
 
@@ -438,6 +439,68 @@ class TheFeatureRule(unittest.TestCase):
         )
         self.assertEqual(1, len(problems))
         self.assertIn("off by default", problems[0])
+
+
+
+class TheStabilityRule(unittest.TestCase):
+    """`A-8`, alpha predicate 5. Only presence is checkable; honesty is not, and the rule says so."""
+
+    def test_every_published_crate_says_what_it_guarantees(self):
+        for name in guard.published():
+            crate = guard.read(name, self.tables())
+            self.assertEqual(
+                guard.stability_problems(crate),
+                [],
+                f"{name} does not declare its stability",
+            )
+
+    def test_a_crate_with_no_stability_section_is_reported(self):
+        """The state ten of eleven crates were in: fully documented, saying nothing about support."""
+        problems = self.problems_for("//! A crate.\n//!\n//! It does things.\n")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("no `# Stability` section", problems[0])
+
+    def test_a_stability_section_that_classifies_nothing_is_reported(self):
+        """A heading is not a declaration; the words are what a reader acts on."""
+        problems = self.problems_for(
+            "//! A crate.\n//!\n//! # Stability\n//!\n//! We take this seriously.\n"
+        )
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("classifies nothing", problems[0])
+
+    def test_a_declared_crate_passes(self):
+        self.assertEqual(
+            self.problems_for(
+                "//! A crate.\n//!\n//! # Stability\n//!\n//! **Supported.** Depend on it.\n"
+            ),
+            [],
+        )
+
+    def test_the_declaration_must_be_in_the_crate_doc_and_not_in_code(self):
+        """A `# Stability` heading inside a regular comment or a string is not documentation."""
+        problems = self.problems_for(
+            '//! A crate.\n\n// # Stability\nconst X: &str = "Supported";\n'
+        )
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("no `# Stability` section", problems[0])
+
+    # -- helpers
+
+    def tables(self):
+        return {path: guard.table(path, heading) for path, heading in (guard.README_TABLE, guard.GUIDE_TABLE)}
+
+    def problems_for(self, doc: str) -> list[str]:
+        """Run the rule against a fabricated entry point, borrowing a real crate's other fields."""
+        with tempfile.TemporaryDirectory() as directory:
+            entry = pathlib.Path(directory) / "lib.rs"
+            entry.write_text(doc)
+            crate = guard.read("sipx-sip", self.tables())
+            original = guard.entry_point
+            guard.entry_point = lambda _name: entry
+            try:
+                return guard.stability_problems(crate)
+            finally:
+                guard.entry_point = original
 
 
 if __name__ == "__main__":

@@ -108,9 +108,9 @@ Three things follow from it:
 
 | Crate | What it does |
 |---|---|
-| `sipx-sip` | Sans-IO SIP core: messages, parser, transactions, dialogs — no async runtime |
+| `sipx-sip` | Sans-IO SIP core: messages, parser, transactions — no async runtime |
 | `sipx-transport` | UDP, TCP, TLS, WS, WSS, connection reuse, RFC 3263 resolution |
-| `sipx-ua` | User agent: digest authentication, registration as a lease |
+| `sipx-ua` | User agent: digest authentication, registration as a lease, subscriptions and presence |
 | `sipx-sdp` | SDP, and offer/answer as a pure function |
 | `sipx-rtp` | RTP, RTCP, an adaptive jitter buffer, quality statistics, SRTP |
 | `sipx-audio` | G.711 (µ-law and A-law), mixing, WAV, and Opus behind the `opus` feature |
@@ -119,6 +119,13 @@ Three things follow from it:
 | `sipx-cli` | The `sipx` binary |
 | `sipx-app-protocol` | The `sipx.app.v1` contract: its types, wire format and interpreter |
 | `sipx-app` | The application host — in development |
+
+**Each crate says what it guarantees in its own crate-level documentation**, under a `# Stability`
+heading: *Supported* means meant to be depended on, with a changelog entry and a migration note if it
+breaks; *Experimental* means it may change shape or be removed without one. Neither means frozen — 1.0
+is what freezes an API, and its predicates are in [`docs/roadmap.md`](docs/roadmap.md). Several crates
+mark part of their surface experimental for the same reason: it is implemented and tested and nothing
+above it selects it yet, so no caller has ever constrained its shape.
 
 The table is exactly the crates that publish, and `./scripts/check-audio-claims.py --check` holds
 it to that: a published crate no table describes has no front door anyone can be held to. The

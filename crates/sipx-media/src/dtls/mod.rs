@@ -10,6 +10,10 @@
 //! packet on one port (§5.1.2), the protection profiles and their key sizes (§4.1.2), and turning
 //! the exported keying material into the two SRTP contexts a session needs (§4.2). The handshake
 //! itself is a DTLS implementation's job and is reached through [`Handshake`].
+//! **Experimental** (`A-8`): no `sipx-call` path selects DTLS-SRTP keying, so nothing above this
+//! crate has ever constrained this module's shape. `Config.srtp` takes `SrtpKeys` while this
+//! produces `srtp::Context`; closing that is `M-28`.
+//!
 
 #[cfg(feature = "dtls")]
 pub mod openssl;

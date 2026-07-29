@@ -7,6 +7,9 @@
 //!
 //! Together they are what a busy-lamp field on a desk phone subscribes to: `dialog` says whether a
 //! line is ringing or in a call, `reg` says whether the phone is registered at all.
+//! **Experimental** (`A-8`): the event-package documents are public and tested; nothing above this
+//! crate subscribes to one, so their shape is still free.
+//!
 
 use std::fmt::Write as _;
 
