@@ -467,13 +467,20 @@ async fn respond_returns_only_once_the_response_has_been_sent() {
         .await
         .expect("responds");
 
-    // This 50 ms bound is unjustified, and this test does not pin what its name claims — see
-    // `X-36`. Moving `sent.send(Ok(()))` ahead of the send in `endpoint.rs` leaves it passing, so
-    // the bound buys no detection power and carries only flake risk. `X-29` left it in place
-    // anyway: removing a clock is only safe alongside a test that can tell, and that pairing is
-    // `X-36`'s to make.
+    // What this test's name claims is now guaranteed by the *types*, not by this wait: `respond`
+    // reports success by consuming the `Performed` that the send hands back, so reversing the two
+    // statements in `endpoint.rs` is a compile error (`X-36`).
+    //
+    // That replaced a 50 ms bound which bought nothing. No test could see the reversal: on a
+    // `current_thread` runtime, sending on the oneshot does not yield, so the send always finished
+    // before the waiting task was polled — the datagram was out whichever order the lines were in.
+    // The bound was pure flake risk dressed as a check, and the reasoning defending it was wrong on
+    // its own arithmetic, resting on a flush "within a packet interval" of 20 ms to justify 50.
+    //
+    // The generous deadline that remains is a bound on *failure*, in `X-29`'s sense: load can only
+    // lengthen it, and if it ever expires something is genuinely broken rather than slow.
     let mut buf = vec![0u8; 4096];
-    let (len, _) = tokio::time::timeout(Duration::from_millis(50), caller.recv_from(&mut buf))
+    let (len, _) = tokio::time::timeout(Duration::from_secs(10), caller.recv_from(&mut buf))
         .await
         .expect("the response is already on the wire when respond returns")
         .expect("receives");

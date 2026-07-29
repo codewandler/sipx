@@ -981,6 +981,37 @@ struct Driver {
     >,
 }
 
+/// Proof that [`Endpoint::perform`] ran to completion.
+///
+/// It exists so that "the datagram is on the wire before the caller is told so" is a property of
+/// the *types* rather than of the order two statements happen to be written in. `respond` reports
+/// success by consuming this value, so moving the report above the send is a compile error rather
+/// than a silent regression.
+///
+/// `X-36` is why. The test named `respond_returns_only_once_the_response_has_been_sent` could not
+/// detect the reversal: on a `current_thread` runtime, sending on the oneshot does not yield, so
+/// `perform` completed before the waiting task was ever polled — the datagram was always out by
+/// the time anyone could look, whichever order the two lines were in. A test cannot observe the
+/// difference, so the guarantee is made structural instead.
+struct Performed;
+
+impl Performed {
+    /// The success `respond` reports, obtainable only from proof that the send happened.
+    ///
+    /// Clippy objects to both halves of this signature, and both are the point. `unused_self`: taking
+    /// `self` by value is the entire mechanism — it is what makes the `Ok` unobtainable without the
+    /// send. `unnecessary_wraps`: the `Result` is what goes over the oneshot, whose other arm really
+    /// can be `Err(Error::NoTransaction)`, so the wrap is the caller's type and not decoration.
+    #[allow(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "consuming self is the guarantee; the Result is the channel's type"
+    )]
+    fn into_result(self) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl Driver {
     async fn run(mut self) {
         let mut buf = vec![0u8; 65_536];
@@ -1385,10 +1416,13 @@ impl Driver {
                     return;
                 }
                 let outputs = self.layer.send_response(&key, *response);
-                self.perform(&key, outputs, None).await;
-                // After performing, so a caller that exits on return has already put the
-                // response on the wire.
-                let _ = sent.send(Ok(()));
+                // The success reported here is *produced by* the send, not written after it: the
+                // only way to obtain the `Ok` is from the `Performed` that `perform` hands back.
+                // Reversing these two statements does not compile, which is the guarantee `X-36`
+                // asked for — a test could not see the difference, because on a `current_thread`
+                // runtime the oneshot does not yield and `perform` finished either way.
+                let performed = self.perform(&key, outputs, None).await;
+                let _ = sent.send(performed.into_result());
             }
             Command::Direct {
                 request,
@@ -1431,7 +1465,7 @@ impl Driver {
         key: &TransactionKey,
         outputs: Vec<Output>,
         origin: Option<(SocketAddr, TransportKind)>,
-    ) {
+    ) -> Performed {
         for output in outputs {
             match output {
                 Output::Send(message) => {
@@ -1450,8 +1484,7 @@ impl Driver {
                     if let Err(error) = self.transmit(bytes, target, is_response, fallback).await {
                         tracing::warn!(%error, %addr, "send failed");
                         let outputs = self.layer.on_transport_error(key);
-                        Box::pin(self.perform(key, outputs, origin)).await;
-                        return;
+                        return Box::pin(self.perform(key, outputs, origin)).await;
                     }
                 }
                 // The clock is read *here*, by the driver, and handed to the queue. That is what
@@ -1473,6 +1506,7 @@ impl Driver {
                 }
             }
         }
+        Performed
     }
 
     /// Put bytes on the wire that are not a SIP message.

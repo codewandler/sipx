@@ -54,7 +54,6 @@ _This is the layer applications actually program against, so it is the one that 
 
 ### Conformance
 - [X-32 — Say what v1 is, and generate the distance to it](X-32-say-what-v1-is-and-measure-the-distance.md) · Build · nothing in the repo defines v1 — the only `v1` is `sipx.app.v1`, a protocol version — so "how far are we" cannot be answered, only estimated
-- [X-36 — Pin the send ordering `respond` already promises, and drop the clock that pretends to](X-36-respond-has-no-flushed-observable.md) · Build · respond_returns_only_once_the_response_has_been_sent cannot detect the thing it is named for — the ordering can be reversed in endpoint.rs and the test still passes, so its 50 ms bound is pure flake risk
 - [X-37 — Decide reachability by resolving callers, not by matching evidence paths](X-37-bind-reachability-to-callers-not-to-paths.md) · Build · the recorded successor to X-30 and X-33 — a path check is satisfied by citing a file, so a dead branch counts as reachable, the transport layer cannot be adjudicated at all, and a relabelled layer still escapes
 - [S-25 — Give the early-dialog loop a way to fail](S-25-early-dialog-observation-has-no-error-channel.md) · Signalling · found by M-29 — adopt_early_answer returns (), so a parse failure, a negotiation failure and a refused a=crypto in a reliable provisional are all discarded identically
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
@@ -222,6 +221,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-33 — Generalise the reachability check past the media layer](X-33-generalise-the-reachability-check-beyond-media.md) · Build · alpha predicate 1 — X-30 made "no claim outlives its caller" mechanical for layer = media only, and its own review showed the reason given for stopping there was false
 - [X-34 — Make the gate fail honestly when the disk is full](X-34-the-gate-has-no-disk-guard.md) · Build · five times on 2026-07-29 a full disk produced a red gate that read as a code defect — cargo reports ENOENT on build artifacts, and a correct merge was nearly reverted for it
 - [X-35 — Make the public capability tables measured, not hand-maintained](X-35-the-public-capability-tables-are-not-measured.md) · Build · two independent read-only sweeps found the front page advertising Opus, bridging and a DTLS-SRTP workaround that no call can reach — the same shape X-30 removed from the registry, in the four hand-maintained tables no script reads
+- [X-36 — Pin the send ordering `respond` already promises, and drop the clock that pretends to](X-36-respond-has-no-flushed-observable.md) · Build · respond_returns_only_once_the_response_has_been_sent cannot detect the thing it is named for — the ordering can be reversed in endpoint.rs and the test still passes, so its 50 ms bound is pure flake risk
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

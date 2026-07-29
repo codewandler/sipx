@@ -9,6 +9,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`respond`'s promise that the response is on the wire is now enforced by the compiler (`X-36`)** —
+  `respond_returns_only_once_the_response_has_been_sent` could not detect the thing it was named for.
+  Moving the success report ahead of the send left it passing and the whole crate green.
+  - **No test can observe that reversal**, which is why it stood. On a `current_thread` runtime,
+    sending on a oneshot does not yield, so the send always completed before the waiting task was
+    polled — the datagram was out whichever order the two lines were written in.
+  - So the guarantee is structural instead: `perform` hands back a `Performed`, and the `Ok` that
+    `respond` reports is obtainable only by consuming it. Reversing the statements is now
+    `error[E0425]: cannot find value 'performed' in this scope`, verified by doing it. A compile error
+    is a stronger pin than a red test and it cannot rot.
+  - The 50 ms bound is gone. It bought no detection power at any value, and the argument defending it
+    was wrong on its own arithmetic — it rested on a queued send being flushed "within a packet
+    interval", which is 20 ms, inside the 50 it was justifying. What remains is a 10 s deadline that
+    is a bound on *failure* in `X-29`'s sense.
+  - Recorded as a **public guarantee of `respond`** in `docs/designs/sip-transport.md`, because the
+    alternative is the failure the code already names at its `NoTransaction` branch: telling an
+    application its 200 OK went out while the caller heard nothing.
+
 - **`sips:` is refused rather than sent in the clear (`S-27`)** — `sipx dial sips:alice@host` placed
   the call over **UDP in cleartext**, and `sipx register sips:…` did the same with a digest credential.
   Both commands stripped `sips:` in the same `or_else` as `sip:`, threw the distinction away, and chose

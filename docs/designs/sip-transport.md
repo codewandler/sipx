@@ -18,6 +18,32 @@ driver owning sockets and a timer wheel, feeding `Input`s to `sipx-sip` and exec
 injectable resolver; per-transport feature flags so a UDP-only build carries no TLS or
 WebSocket code._
 
+## `respond` and the wire: a guarantee, and why it is a type
+
+**Decision: the ordering is a guarantee of `respond`, not an internal detail.** When `respond`
+returns `Ok`, the response has been handed to the kernel. An application is entitled to rely on it,
+because the alternative is the failure the code already names at the `NoTransaction` branch: telling
+an application its 200 OK went out while the caller heard nothing, so the caller times out believing
+the call failed while the callee believes it is up.
+
+**It is enforced by the type system rather than by a test, and that was forced on us.** `perform`
+hands back a `Performed`, and the `Ok` that `respond` reports is obtainable only by consuming it, so
+reversing the two statements does not compile — `error[E0425]: cannot find value 'performed'`.
+
+The reason it is not a test is worth keeping, because it is counter-intuitive: **no black-box test can
+observe the reversal.** On a `current_thread` runtime, sending on a oneshot does not yield, so the
+send always completed before the waiting task was polled — the datagram was out whichever order the
+lines were written in. `respond_returns_only_once_the_response_has_been_sent` passed with the
+ordering reversed, which is how it stood for as long as it did.
+
+The 50 ms bound that used to stand in for the check is gone. It bought no detection power at any
+value, and the argument defending it was wrong on its own arithmetic: it rested on a queued send
+being flushed "within a packet interval", which is 20 ms — inside the 50 ms it was justifying. What
+remains is a generous deadline that is a bound on *failure* in `X-29`'s sense, where load can only
+lengthen it.
+
+Filed and closed as `X-36`; the mistaken rationale it replaced came from `X-29`.
+
 ## Alternatives considered
 
 - _Pending `T-1`._

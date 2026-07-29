@@ -2,8 +2,7 @@
 id: X-36
 title: Pin the send ordering `respond` already promises, and drop the clock that pretends to
 pillar: Build
-status: ready
-priority: 4
+status: done
 design: docs/designs/sip-transport.md
 epic: conformance
 areas: [sipx-transport, tests]
@@ -19,33 +18,50 @@ true, and remove the 50 ms wall-clock bound that currently stands in for a check
 perform.
 
 ## Acceptance
-- [ ] **A test that fails when the ordering is reversed.** `crates/sipx-transport/src/endpoint.rs:1387-1391`
+- [~] **A test that fails when the ordering is reversed.** `crates/sipx-transport/src/endpoint.rs:1387-1391`
       deliberately signals success *after* `perform`, and says why at the site: *"After performing, so
       a caller that exits on return has already put the response on the wire."* Nothing pins it.
       Moving `let _ = sent.send(Ok(()));` ahead of `self.perform(...)` leaves the test **passing** and
       the whole crate green — verified, 10 test-result lines, 0 failed. Whatever this story writes must
       go red under that mutation.
-- [ ] **The 50 ms bound goes.** It buys no detection power at any value: `perform` → `transmit` runs
+- [x] **The 50 ms bound goes.** It buys no detection power at any value: `perform` → `transmit` runs
       inline in the endpoint task (`endpoint.rs:1450`), so on a `current_thread` runtime the datagram
       is always out before the test task is polled again. The bound carries only the flake risk
       `X-28`'s sweep ranked as the most likely next `dns.rs`.
-- [ ] **The comment block at `udp.rs:472-486` is deleted, not edited around it.** It is a careful
+- [x] **The comment block at `udp.rs:472-486` is deleted, not edited around it.** It is a careful
       argument that happens to be false, which is the most durable kind of wrong comment. Its central
       claim — *"a queued send would be flushed by the send loop within a packet interval. Any bound
       generous enough to survive load would therefore pass against the very defect the test exists to
       catch"* — refutes itself: a packet interval is **20 ms** (`sipx-media/src/session.rs:265`,
       *"20 ms is universal"*), which is inside 50 ms, so a 50 ms bound was never generous enough to be
       the thing the argument describes.
-- [ ] Decide and record whether the ordering is a **public guarantee of `respond`** or an internal
+- [x] Decide and record whether the ordering is a **public guarantee of `respond`** or an internal
       detail the test may reach behind. `docs/designs/sip-transport.md` is the place. The distinction
       matters: a documented guarantee is something applications may build on, and this one already has
       a reason written at the site — an application told its 200 went out when it did not leaves the
       caller timing out while the callee believes the call is up.
-- [ ] Failing-first test: reverse the two lines in `endpoint.rs:1387-1391`, run the suite, and quote it
+- [x] Failing-first test: reverse the two lines in `endpoint.rs:1387-1391`, run the suite, and quote it
       passing. That is the defect. Then name the test that catches it.
 
 ## Progress
-- Not started.
+- **Done, and the first Acceptance item is marked `[~]` because it was answered with something
+  stronger than it asked for.** It asked for a test that fails when the ordering is reversed. There
+  is no such test, and there cannot be: on a `current_thread` runtime sending on the oneshot does not
+  yield, so `perform` completed before the waiting task was ever polled and the datagram was out
+  whichever order the two lines were in. That is *why* the original test passed under mutation.
+- **So the guarantee is structural.** `perform` now returns a `Performed`, and the `Ok` that `respond`
+  reports is obtainable only by consuming it. Reversing the statements is a compile error, verified by
+  doing it: `error[E0425]: cannot find value \`performed\` in this scope`. A compile error is a
+  stronger pin than a red test, and it cannot rot.
+- The 50 ms bound is replaced by a 10 s deadline, which is a bound on *failure* in `X-29`'s sense
+  rather than a window to measure in. `respond_returns_only_once_the_response_has_been_sent` passes,
+  and its name is now true.
+- The decision that the ordering is a **public guarantee of `respond`** is recorded in
+  `docs/designs/sip-transport.md`, with the reason: the alternative is the failure the code already
+  names at its `NoTransaction` branch — telling an application its 200 went out while the caller
+  heard nothing.
+- Implemented by the coordinator rather than an implementor: all delegation was unavailable
+  (org spend limit), and this story blocks alpha predicate 3.
 - **This story was first filed with the wrong premise, by me, and the correction is the point.** The
   original text accepted `X-29`'s rationale that at this site *"the bound **is** the assertion"* and
   asked for a new `flushed` observable on `respond` so the clock could be removed. An independent
