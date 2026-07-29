@@ -64,8 +64,8 @@ PRACK, so both "we support RFC 3262" and "we reject it" would be false.
 
 A role is a claim about what a *user agent does*, and media capabilities are selected by the call
 layer rather than reached automatically — so a media row claiming `uac` or `uas` must cite at
-least one file at or above `sipx-call` (the crate, anything depending on it, or the `tests/`
-interop harness). The set is read from the workspace manifests, not listed anywhere.
+least one file in `sipx-call` or a crate depending on it. That set is read from the workspace
+manifests, not listed anywhere; only `crates/…` paths count.
 
 This exists because the same over-claim landed five times in two days: a keying or a NAT strategy
 built and tested inside one crate, claimed for both roles, with no caller above the crate — and
@@ -73,10 +73,22 @@ every other check on this list passes for such a row, since the header is known,
 and evidence was cited. To drop a role, say in the `note` what is missing, as RFC 5763, 5764,
 8122, 8445 and 8839 do.
 
-The rule applies to the `media` layer only. It was measured against every row before adoption and
-does not hold for the rest: `sipx-ua` is a sibling of `sipx-call`, so the registration and
-authentication rows could not satisfy it at any price. `docs/designs/rfc-registry-grain.md`
-records the measurement and what would widen the scope.
+**The `media` scope is a deliberate choice, not a limit of the workspace.** The property behind it
+is *selection*: a media capability is carried only because something asked for it —
+`Capabilities::with_srtp`, `with_dtls_srtp`, `MediaSession::start_with_ice` — and asking for nothing
+is both the default and silent, since the call still connects and every test in the crate below
+still passes. Nothing is *selected* in the other layers: there is no `with_transactions` and no
+`with_dns`, so "can a call reach the transaction layer" is a question that cannot come out `no`.
+Unscoped, the rule rejects 22 of the 29 role-claiming rows (measured at `57857c6`); only 7 of those
+rejections point at anything true of the row, and only 3 rows were over-claiming at all — so on the
+question the check exists to answer, the unscoped rule is wrong 19 times out of 22.
+
+`layer` is a proxy for that property, and it is set by the author — so relabelling a media row
+`security` leaves the check. That is recorded rather than fixed. So is the bigger limit: **the check
+keys on `roles`, not on `status`**, so a row with no `roles` is never asked whether a call can reach
+it — RFC 6716 and 7587 claim `implemented` for Opus, which `sipx-call` cannot select. That is `X-33`.
+`docs/designs/rfc-registry-grain.md` carries the full count, the argument, the two false
+justifications this scope was given before this one, and what would widen it.
 
 It deliberately does **not** verify behaviour. No script can read a transaction machine and decide
 whether Timer A is right — the tests do that, and each entry points at them. What it stops is the

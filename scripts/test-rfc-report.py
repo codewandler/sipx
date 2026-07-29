@@ -11,6 +11,7 @@ These tests hold the guard that makes the decision enforceable rather than merel
 
 import importlib.util
 import pathlib
+import re
 import sys
 import tomllib
 import unittest
@@ -232,15 +233,138 @@ class RoleReachability(unittest.TestCase):
     def test_the_rule_is_scoped_to_the_media_layer(self):
         """Deliberately narrow, and asserted so that widening it is a decision rather than a slip.
 
-        Measured against the whole registry, the unscoped rule rejects 22 of the 29 role-claiming
-        rows and only 3 of those are real. Seven cannot satisfy it at all: they are implemented in
-        `sipx-ua`, which is a *sibling* of `sipx-call` and not below it, so no honest evidence
-        path exists. `docs/designs/rfc-registry-grain.md` records the measurement.
+        The scope is a choice. Media is where a capability has to be *selected* before a call can
+        use it, and selecting nothing is the silent default. A security row like RFC 2617 is
+        reachable through `sipx-cli`, which depends on `sipx-ua` *and* `sipx-call`; it is out of
+        scope because the check would be asking a question that cannot come out `no`, not because
+        it could not answer it. `docs/designs/rfc-registry-grain.md` carries the count and the
+        argument.
+
+        **This test is also the dodge.** It relabels an otherwise-rejected media row `security` and
+        asserts that it passes — which is exactly what an author wanting out of the check would do,
+        since nothing validates `layer` beyond membership of `LAYER_TITLE`. That is the honest cost
+        of scoping by an author-set field, it is the second entry in the design's "what would widen
+        this", and it is written here rather than only in prose so the escape is visible to anyone
+        reading the check's own tests.
         """
         entry = self.a_media_entry(
             layer="security", evidence=["crates/sipx-ua/src/auth.rs"]
         )
         self.assertEqual([], [p for p in report.check([entry]) if "reach" in p])
+
+    def test_the_services_rows_keep_their_roles_and_why(self):
+        """RFC 3680, 3856, 3903 and 4235 are *not* the media over-claims one layer over.
+
+        They implement a `uas` surface in `sipx-ua` that nothing in `sipx-cli` calls, which is the
+        ICE shape until you ask *which crate serves the claimed role*. For a media row that is
+        `sipx-call`, a different crate sitting above the one that implements the capability, and
+        something there has to select it. For a services row it is `sipx-ua` itself: the notifier
+        is `sipx_ua::subscribe::Subscriptions`, no crate above it must select anything, and
+        `sipx-call` does not depend on `sipx-ua` at all — so asking these rows to cite the call
+        layer would ask them to cite a crate that does not and should not depend on them.
+
+        That dependency direction is the load-bearing fact and is asserted here. `packages.rs` is
+        asserted too, but only for what it shows — the surface being driven from outside its crate
+        rather than merely compiled. It is *not* what distinguishes these rows from ICE:
+        `crates/sipx-media/tests/ice.rs` calls `start_with_ice` from outside `sipx-media` in
+        exactly the same way, and an earlier version of this docstring claimed otherwise.
+
+        `docs/designs/rfc-registry-grain.md` carries the argument and both corrections.
+        """
+        by_number = {e["number"]: e for e in registry_entries()}
+        for number in (3680, 3856, 3903, 4235):
+            with self.subTest(rfc=number):
+                self.assertTrue(by_number[number].get("roles"))
+
+        # The manifest fact: `sipx-ua` is a sibling of the call layer, not a crate below it, so no
+        # call-layer citation could exist for a capability it serves.
+        self.assertNotIn("sipx-ua", report.call_layer_crates())
+        call_manifest = tomllib.loads(
+            (ROOT / "crates" / "sipx-call" / "Cargo.toml").read_text()
+        )
+        self.assertNotIn("sipx-ua", call_manifest.get("dependencies", {}))
+        # Whereas the media crates *are* below it, which is what makes selection a real question
+        # there and not here.
+        for crate in ("sipx-media", "sipx-sdp"):
+            with self.subTest(crate=crate):
+                self.assertIn(crate, call_manifest["dependencies"])
+
+        reached = (ROOT / "crates" / "sipx-ua" / "tests" / "packages.rs").read_text()
+        self.assertIn("sipx_ua::presence", reached)
+        self.assertIn("sipx_ua::packages", reached)
+        self.assertIn("sipx_ua::subscribe::{Answer, Subscriptions}", reached)
+        # And driven, not just imported: a real SUBSCRIBE goes into the notifier.
+        self.assertIn("notifier.on_subscribe(", reached)
+
+    def test_the_scope_tracks_selection_not_the_layer_string(self):
+        """The property behind `ROLE_REACHABILITY_LAYERS`, held against the code.
+
+        A media capability is *selected*: it is carried only because something asked for it, and
+        asking for nothing is the silent default. That — not the layer string — is why media rows
+        are the ones checked. `layer` is a proxy, so this test holds the two in agreement on the
+        media rows that claim a role, and a registry where they part company fails the gate instead
+        of reading as measured.
+
+        Scope of the agreement, stated because it is narrower than it sounds: rows without `roles`
+        are outside the check entirely, so RFC 6716 and 7587 claim `implemented` for Opus, which no
+        call can select, and nothing here objects. That limit is `X-33` and is recorded in
+        `docs/designs/rfc-registry-grain.md` under "the gate is on `roles`, not on `status`".
+
+        Both halves matter. The media rows that keep their roles must have a selector a call
+        actually runs; the media rows whose roles `X-30` removed must not. The second half is the
+        evidence that 8445 and 8839 were genuine over-claims and not the rule misfiring.
+        """
+        call_src = (ROOT / "crates" / "sipx-call" / "src").rglob("*.rs")
+        call_source = "\n".join(f.read_text() for f in call_src)
+
+        # RFC 3711 and 4568 keep `uac, uas`: SDES/SRTP is selected, and the selection has callers
+        # in the crate that serves the role.
+        self.assertIn(
+            ".with_srtp(",
+            call_source,
+            "nothing in sipx-call selects SRTP any more, so RFC 3711 and 4568 are now the shape"
+            " this check was written to catch — their roles are no longer supportable",
+        )
+        by_number = {e["number"]: e for e in registry_entries()}
+        for number in (3711, 4568):
+            with self.subTest(rfc=number):
+                self.assertEqual(["uac", "uas"], by_number[number]["roles"])
+
+        # RFC 8445 and 8839 claim nothing: ICE is selected through `start_with_ice`, and the crate
+        # that serves the role does not mention ICE at all — not the session, not the candidates,
+        # not the gathering. Word-boundary matched, because `alice` is all over these fixtures.
+        self.assertIsNone(
+            re.search(r"\bice\b", call_source, re.I),
+            "sipx-call now mentions ICE. If a call can select it, RFC 8445 and 8839 may claim"
+            " roles again and `M-27` is done — update those rows and this test. If it is only a"
+            " comment, this assertion is what needs relaxing, not the rows.",
+        )
+        self.assertNotIn("start_with_ice", call_source)
+
+        # RFC 8122 claims nothing for the subtler reason: `sipx-call` *does* render
+        # `a=fingerprint`, so a path-based check could be satisfied by citing it — but the branch
+        # is guarded by a capability nothing outside `sipx-sdp`'s unit tests ever sets. This is the
+        # dead-branch limit of the check, recorded in the design as what would widen it.
+        self.assertIn(
+            "fingerprint",
+            call_source,
+            "the dead `a=fingerprint` branch is gone; if DTLS-SRTP was wired rather than deleted,"
+            " RFC 8122 can claim roles again",
+        )
+        self.assertNotIn("with_dtls_srtp", call_source)
+
+    def test_only_a_crate_path_proves_reachability(self):
+        """The repository-root `tests/` tree is not a way through the check.
+
+        `evidence` may legitimately cite markdown — RFC 5922 cites a spec — so accepting the root
+        tree wholesale would have let `tests/interop/README.md` stand as proof that a role is
+        reachable. Its Rust half is in `crates/sipx-cli/tests/`, which is accepted on its own.
+        """
+        entry = self.a_media_entry(evidence=["tests/interop/README.md"])
+        self.assertTrue(
+            any("reach" in p for p in report.check([entry])),
+            "a path outside crates/ was taken as proof a call can reach the capability",
+        )
 
     def test_the_call_layer_is_read_from_the_workspace(self):
         """The reachable set is Cargo's dependency graph, not a list in this script.
