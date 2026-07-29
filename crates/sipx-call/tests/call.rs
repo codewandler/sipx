@@ -1054,8 +1054,9 @@ async fn a_cancel_is_not_sent_before_a_provisional_arrives() {
     // look in rather than a deadline to beat: load can only make it pass, and the failure mode is
     // a missed regression rather than a flake.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    // The *positive* half — that the invitation was sent at all — is an arrival, and gets a
-    // deadline loop. Under load 300 ms was not always enough for it.
+    // The *positive* half — that the invitation was sent at all — is an arrival, so it gets a
+    // deadline loop on the condition. No flake was ever observed here; the shape is the argument,
+    // not a measurement.
     until(
         SIGNALLING_BOUND,
         "the invitation never reached the silent peer",
