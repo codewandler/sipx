@@ -2,7 +2,7 @@
 id: X-18
 title: Count what the stack discards, and capture what it sends
 pillar: Build
-status: ready
+status: in-progress
 priority: 10
 design: docs/designs/sip-transport.md
 epic: sip-transport

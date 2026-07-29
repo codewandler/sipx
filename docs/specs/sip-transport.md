@@ -179,3 +179,93 @@ requests. Answering 503 is what the status code is for, and it tells the peer so
 | X8 | Loopback with 50 % loss | The request is retransmitted and the transaction still completes |
 | X9 | SRV records with weights 10 and 90, fixed seed | Selection matches RFC 2782's distribution |
 | X10 | Application channel full | New requests are answered 503, and timers keep firing |
+
+## 12. Counters
+
+**[sipx]** The endpoint keeps counters, and nothing else: no metrics library, no exposition
+format, no push. A snapshot — a plain struct — is read through the handle
+(`Handle::counters`, next to `Handle::outstanding`), and what an application does with it is
+the application's business. A stack that picks an exposition format picks it for every user of
+the library, and that is the one observability decision that cannot be undone later.
+
+The counters live in atomics shared between the driver and every handle, exactly as
+`ShedCounts` already does (§10): the loop is busy in precisely the situation the counters
+describe, so a counter that could only be read by asking the loop would be unreadable when it
+mattered.
+
+The snapshot covers, at minimum:
+
+- requests and responses, in and out, **per transport** — which transport is the first
+  question a support case asks;
+- requests shed for backpressure (§10), embedded as the existing `ShedCounts`;
+- responses that matched no client transaction (RFC 3261 §16.7), counted whether or not an
+  application is watching for them;
+- parse failures, per transport — a malformed datagram and a stream whose framing is lost are
+  the same failure on different transports;
+- retransmissions sent — a rising count with no matching traffic growth is a peer that is not
+  hearing us, and the difference between a network problem and an application one;
+- transactions timed out, per the timer that fired (B, F or H);
+- every place the stack discards something it was given: see §12.1.
+
+### 12.1 No silent discards
+
+**[sipx]** Every discard in the signalling path has a counter. A test enumerates the discard
+sites — every `tracing` line that reports dropping or ignoring, and every `let _ = …` that
+discards a result — and fails when one appears without a counter or a written reason. A silent
+drop is the failure this section exists to end; the enumeration is what keeps it ended as the
+code changes.
+
+A discard whose reason is logged but not counted is still a failure here: logs rotate, and an
+operator asking "how often" deserves an answer that is not `grep | wc -l`.
+
+## 13. Capture
+
+**[sipx]** An endpoint can record the signalling it exchanges to a file: every message sent
+and every message received, with a timestamp, the transport, and both addresses, bodies
+included. Off by default; enabling it is per endpoint (`Config::capture`) and costs an
+`Option` check per message when off.
+
+**The file contains the decrypted messages — credentials, call content, everything the peers
+exchanged.** TLS and WebSocket-over-TLS traffic is captured *before* encryption on send and
+*after* decryption on receive, because capturing ciphertext from inside the process would be
+strictly worse than capturing it from outside. Whoever enables a capture is responsible for
+the file.
+
+### 13.1 Format: pcapng
+
+The capture is written as **pcapng** (the format the IETF's pcapng draft specifies and every
+current packet-analysis tool reads: Section Header Block, one Interface Description Block,
+Enhanced Packet Blocks). Chosen over the classic pcap format for three reasons, in order of
+how much they would hurt to retrofit:
+
+1. **Per-packet metadata.** A pcapng packet block carries options; each captured message gets
+   a comment naming the transport, the direction, and whether the bytes were decrypted in
+   process. Classic pcap has nowhere to put that, and "was this TLS or TCP" is not a question
+   a bug report should leave to the port number.
+2. **Nanosecond-capable, per-interface timestamp resolution.** Classic pcap fixes the
+   resolution for the whole file in a field several tools still misread.
+3. **Self-describing structure.** Block types and lengths make a truncated capture readable up
+   to the truncation — which is the normal state of a capture taken during a crash.
+
+Packets are written with `LINKTYPE_RAW`: a synthesised IPv4 or IPv6 header, then the real
+transport header — UDP as-is, TCP with per-connection synthetic sequence numbers so analysis
+tooling can reassemble streams — then the message. The addresses and ports are the real ones;
+only the link layer is invented, because there is no link layer inside a process. Checksums
+are computed, not zeroed, so a strict tool does not flag every packet.
+
+### 13.2 Faithfulness
+
+Writing happens in the driver loop, at the point the bytes go to or come from the socket —
+not on a channel to a writer task. That is what "enabling it must not change message ordering
+or timing" means concretely: the capture observes the same ordering the wire sees, and the
+cost of observation is one buffered write per message, paid only when capture is on.
+
+UDP datagrams are captured before parsing, so a malformed message is captured malformed — the
+bytes a peer actually sent are the whole point of the exercise. On stream transports the
+framing happens in the connection's task and the raw bytes are not retained, so the message is
+captured as parsed and re-serialised; start lines and header values are preserved byte-for-byte,
+but the capture is not a byte-exact record of the stream and does not pretend to be one.
+
+A write that fails (a full disk is the usual reason) is logged once, counted in the snapshot
+(`capture_errors`), and disables the capture: a capture that is silently not happening is the
+same failure as a silent discard, one level up.
