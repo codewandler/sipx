@@ -33,17 +33,19 @@ on the media.
 
 ## The honest version
 
-Four things are worth knowing before you decide. Each of them is a capability that exists in a
-crate and cannot be reached from a call — the distinction the [compliance
-table](reference/compliance.md) draws per RFC, restated here in the words of the table above.
+Four things are worth knowing before you decide. The last three are one shape: a capability that
+is real in a crate and cannot be reached from a call, which is the distinction the [compliance
+table](reference/compliance.md) draws per RFC and this page had been blurring.
 
 **It is a phone, not an exchange.** If you need something that routes other people's calls,
 sipx is not that yet, and the [compliance table](reference/compliance.md) says so per RFC
 rather than leaving you to find out.
 
 **The encryption has edges.** Media is encrypted when the signalling is — `sips:` or WSS —
-using SRTP's default transform. A call placed by `sipx-call` or the CLI keys it with SDES, which
-puts the key in the SDP body, so any intermediary that terminates the TLS can read it. DTLS-SRTP
+using SRTP's default transform, keyed by SDES. That puts the key in the SDP body, so any
+intermediary that terminates the TLS can read it. (The `sipx` binary cannot get there at all: it
+takes no flag for a secure transport, so nothing you type at it produces encrypted media — see
+[the CLI reference](reference/cli.md).) DTLS-SRTP
 (RFC 5763 and RFC 5764) keys on the media path instead and does not have that property, and
 everything those two RFCs decide about certificates and fingerprints is implemented — but **no
 media session can be keyed by DTLS today, by any route.** The handshake returns finished SRTP
