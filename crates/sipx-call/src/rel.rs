@@ -242,10 +242,10 @@ impl Ringing {
 
     /// Answer an UPDATE that arrived in the early dialog (RFC 3311 §5.2).
     ///
-    /// Returns whether it was one for this dialog. The rules are
-    /// [`crate::update::receive`]'s, which is the same code the *calling* side runs: §5.1 makes
-    /// UPDATE something either end may send, so a second copy of §5.2 here would be a second
-    /// place for it to drift.
+    /// Returns whether it was one for this dialog. The rules are the same code the *calling*
+    /// side runs from [`Dialing::on_update`](crate::Dialing::on_update): §5.1 makes UPDATE
+    /// something either end may send, so a second copy of §5.2 here would be a second place for
+    /// it to drift.
     ///
     /// An offer arriving before this side has answered the INVITE's own — that is, after
     /// [`ring`] rather than [`ring_early`] — draws the **500** of §5.2's third rule. Not 491:

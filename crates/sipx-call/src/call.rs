@@ -2210,7 +2210,7 @@ enum EarlyMedia {
 ///
 /// **Nothing happens on its own.** A `Dialing` dropped without [`Self::answered`] or
 /// [`Self::cancel`] leaves the far end ringing, exactly as a [`Call`] dropped without
-/// [`Call::hangup`] leaves the far end in a call. The discipline is the application's: making it
+/// [`Call::hang_up`] leaves the far end in a call. The discipline is the application's: making it
 /// implicit would mean withdrawing an invitation from a destructor that cannot await the CANCEL
 /// it sends, nor the `200` that may cross it.
 #[derive(Debug)]
@@ -2365,9 +2365,9 @@ impl Dialing {
 
     /// Renegotiate the early session from this side (RFC 3311 §5.1).
     ///
-    /// The rules are [`crate::update`]'s, shared with [`Ringing::update`](crate::Ringing::update)
-    /// — §5.1 makes UPDATE something either end may send, so there is one implementation and two
-    /// callers.
+    /// One implementation of §5.1, shared with [`Ringing::update`](crate::Ringing::update): the
+    /// RFC makes UPDATE something either end may send, so there is one body of rules and two
+    /// callers rather than a copy per role.
     ///
     /// # Errors
     ///

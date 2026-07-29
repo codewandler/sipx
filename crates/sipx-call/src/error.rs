@@ -74,10 +74,16 @@ pub enum Error {
     /// Keep feeding messages to [`Ringing::on_prack`](crate::Ringing::on_prack) and try again.
     #[error("the reliable provisional carrying the answer has not been acknowledged")]
     UnacknowledgedProvisional,
-    /// A ringing invitation was answered as an early session when it never had one.
+    /// An invitation was treated as having an early session when it never had one.
     ///
-    /// Either it was rung with `ring` rather than `ring_early`, or it has already been
-    /// answered — a `Ringing` hands its media port and its dialog over exactly once.
+    /// On the answering side: either it was rung with `ring` rather than `ring_early`, or it has
+    /// already been answered — a `Ringing` hands its media port and its dialog over exactly once.
+    ///
+    /// On the calling side, from [`Dialing::update`](crate::Dialing::update): the far end has
+    /// established a dialog but has not answered our offer in a reliable provisional, so RFC
+    /// 3311 §5.1 does not yet allow an UPDATE to carry one.
+    /// [`Dialing::has_early_session`](crate::Dialing::has_early_session) is the same question
+    /// asked in advance.
     #[error("this invitation has no early session to answer")]
     NoEarlySession,
 }
