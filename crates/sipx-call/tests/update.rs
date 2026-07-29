@@ -876,7 +876,10 @@ fn early_answer(peer: &Handle, invite: &Incoming, tag: &str, body: &str) -> sipx
         "Session Progress",
     )
     .expect("builds")
-    .set_header(&HeaderName::To, bytes::Bytes::from(format!("{to};tag={tag}")))
+    .set_header(
+        &HeaderName::To,
+        bytes::Bytes::from(format!("{to};tag={tag}")),
+    )
     .expect("to")
     .header(HeaderName::Contact, contact(peer))
     .expect("contact")
@@ -1002,12 +1005,18 @@ fn from_callee(
 /// callee sends one back, and the codec the exchange settles is what the eventual call runs on —
 /// asserting that rather than merely that a `200` came back is the difference between this test
 /// and one that would also pass if the answer were built and thrown away.
-#[tokio::test]
-async fn a_caller_renegotiates_before_the_callee_answers() {
-    let (peer_endpoint, mut peer_incoming) = endpoint().await;
-    let (caller_endpoint, mut caller_incoming) = endpoint().await;
+/// Dial a raw peer that rings reliably with the answer, and hand back the early dialog.
+///
+/// Its own function because it is the *precondition*, not the subject: RFC 3311 §5.1 will not
+/// let either end renegotiate until the INVITE's offer/answer exchange has closed, and RFC 3262
+/// §5 leaves exactly one way to close it before the 200. Everything here is that one way, and
+/// the assertions in it are the ones that would otherwise make a later failure unreadable.
+async fn dialing_against(
+    peer_endpoint: &Handle,
+    peer_incoming: &mut Receiver<Incoming>,
+    caller_endpoint: &Handle,
+) -> (sipx_call::Dialing, Incoming) {
     let peer_addr = peer_endpoint.local_addr();
-
     // Spawned, because this is the whole point: it comes back while the invitation is still
     // open, and the test would deadlock against a `dial` that waited for the final response.
     let dialling = tokio::spawn({
@@ -1037,12 +1046,7 @@ async fn a_caller_renegotiates_before_the_callee_answers() {
     peer_endpoint
         .respond(
             &invite.key,
-            early_answer(
-                &peer_endpoint,
-                &invite,
-                "callee-tag",
-                &sdp(40000, 0, "PCMU"),
-            ),
+            early_answer(peer_endpoint, &invite, "callee-tag", &sdp(40000, 0, "PCMU")),
         )
         .await
         .expect("rings with an answer");
@@ -1063,58 +1067,39 @@ async fn a_caller_renegotiates_before_the_callee_answers() {
         .await
         .expect("answers the PRACK");
 
-    let mut dialing = tokio::time::timeout(Duration::from_secs(5), dialling)
+    let dialing = tokio::time::timeout(Duration::from_secs(5), dialling)
         .await
         .expect("dial_early returns while the invitation is still open")
         .expect("joins")
         .expect("an early dialog");
     assert!(
+        dialing.has_early_session(),
+        "the reliable provisional carried the answer, so the early session is renegotiable \
+         (RFC 3311 §5.1, RFC 3262 §5)"
+    );
+    assert!(
         dialing.peer_allows_update(),
         "the provisional's Allow listed UPDATE, so the caller may renegotiate (RFC 3311 §4)"
     );
+    (dialing, invite)
+}
 
-    // Send: an offer out of the caller's own early dialog. Answered PCMA, so the renegotiation
-    // is visible later as a codec the INVITE never settled on.
-    let answering = tokio::spawn(async move {
-        let update = peer_incoming.recv().await.expect("the UPDATE arrives");
-        peer_endpoint
-            .respond(&update.key, ok_to(&update, Some(&sdp(40002, 8, "PCMA"))))
-            .await
-            .expect("answers the UPDATE");
-        (update, peer_endpoint, peer_incoming)
-    });
-    dialing
-        .update(sipx_sdp::Direction::SendOnly)
-        .await
-        .expect("the caller's early UPDATE is accepted");
-    // Bounded, because the failure this guards against is a `update` that sends nothing: the
-    // peer then waits forever and the test hangs rather than failing, which is the one outcome
-    // a suite cannot report.
-    let (sent, peer_endpoint, mut peer_incoming) = tokio::time::timeout(
-        Duration::from_secs(2),
-        answering,
-    )
-    .await
-    .expect("the caller's UPDATE reached the peer")
-    .expect("the peer answered");
-
-    assert_eq!(sent.request.method, Method::Update);
-    assert!(
-        String::from_utf8_lossy(sent.request.body()).contains("a=sendonly"),
-        "the caller's UPDATE carried no offer, so it renegotiated nothing: {:?}",
-        String::from_utf8_lossy(sent.request.body())
-    );
-    assert!(
-        sipx_sip::update::peer_allows(&sent.request.headers),
-        "an UPDATE we send must itself say that we accept them (RFC 3311 §4)"
-    );
-
-    // Receive: the callee renegotiates the same early dialog, and the caller applies §5.2's
-    // rules to it — the same three the answering side already applies.
+/// The other direction: the *callee* renegotiates the caller's early dialog, and the caller
+/// answers it under §5.2 — the same three refusal rules, because it is the same code.
+///
+/// The 2xx's body is what is asserted, not merely its status. A handle that recognised the
+/// UPDATE, answered `200` and described nothing would have renegotiated nothing.
+async fn the_callee_renegotiates(
+    peer_endpoint: &Handle,
+    caller_endpoint: &Handle,
+    caller_incoming: &mut Receiver<Incoming>,
+    invite: &Incoming,
+    dialing: &mut sipx_call::Dialing,
+) {
     let mut received = peer_endpoint
         .send(
             from_callee(
-                &peer_endpoint,
+                peer_endpoint,
                 &invite.request,
                 "callee-tag",
                 &Method::Update,
@@ -1149,33 +1134,93 @@ async fn a_caller_renegotiates_before_the_callee_answers() {
         body.contains("RTP/AVP 8"),
         "the caller's 2xx carried no answer to the callee's offer: {body:?}"
     );
+}
+
+/// The `200` accepting the invitation, carrying no description.
+///
+/// Deliberately bodyless: the answer went in the reliable provisional and the UPDATEs settled
+/// everything since, so a description here would be either a second answer or an undone
+/// renegotiation. `answer_early` omits it in this exact case, from the other side.
+fn accepted(peer_endpoint: &Handle, invite: &Incoming) -> sipx_sip::Response {
+    sipx_sip::build::ResponseBuilder::to_request(
+        &invite.request,
+        sipx_sip::StatusCode::new(200).expect("a valid status"),
+        "OK",
+    )
+    .expect("builds")
+    .set_header(
+        &HeaderName::To,
+        bytes::Bytes::from("<sip:callee.example>;tag=callee-tag"),
+    )
+    .expect("to")
+    .header(HeaderName::Contact, contact(peer_endpoint))
+    .expect("contact")
+    .header(
+        HeaderName::Allow,
+        bytes::Bytes::from_static(b"INVITE, ACK, CANCEL, BYE, PRACK, UPDATE"),
+    )
+    .expect("allow")
+    .build()
+}
+
+#[tokio::test]
+async fn a_caller_renegotiates_before_the_callee_answers() {
+    let (peer_endpoint, mut peer_incoming) = endpoint().await;
+    let (caller_endpoint, mut caller_incoming) = endpoint().await;
+
+    let (mut dialing, invite) =
+        dialing_against(&peer_endpoint, &mut peer_incoming, &caller_endpoint).await;
+
+    // Send: an offer out of the caller's own early dialog. Answered PCMA, so the renegotiation
+    // is visible later as a codec the INVITE never settled on.
+    let answering = tokio::spawn(async move {
+        let update = peer_incoming.recv().await.expect("the UPDATE arrives");
+        peer_endpoint
+            .respond(&update.key, ok_to(&update, Some(&sdp(40002, 8, "PCMA"))))
+            .await
+            .expect("answers the UPDATE");
+        (update, peer_endpoint, peer_incoming)
+    });
+    dialing
+        .update(sipx_sdp::Direction::SendOnly)
+        .await
+        .expect("the caller's early UPDATE is accepted");
+    // Bounded, because the failure this guards against is a `update` that sends nothing: the
+    // peer then waits forever and the test hangs rather than failing, which is the one outcome
+    // a suite cannot report.
+    let (sent, peer_endpoint, mut peer_incoming) =
+        tokio::time::timeout(Duration::from_secs(2), answering)
+            .await
+            .expect("the caller's UPDATE reached the peer")
+            .expect("the peer answered");
+
+    assert_eq!(sent.request.method, Method::Update);
+    assert!(
+        String::from_utf8_lossy(sent.request.body()).contains("a=sendonly"),
+        "the caller's UPDATE carried no offer, so it renegotiated nothing: {:?}",
+        String::from_utf8_lossy(sent.request.body())
+    );
+    assert!(
+        sipx_sip::update::peer_allows(&sent.request.headers),
+        "an UPDATE we send must itself say that we accept them (RFC 3311 §4)"
+    );
+
+    // Receive: the callee renegotiates the same early dialog, and the caller applies §5.2's
+    // rules to it — the same three the answering side already applies.
+    the_callee_renegotiates(
+        &peer_endpoint,
+        &caller_endpoint,
+        &mut caller_incoming,
+        &invite,
+        &mut dialing,
+    )
+    .await;
 
     // And now the call is accepted. Its 200 carries no description at all: the answer went in
     // the provisional and the UPDATEs settled everything since, so a body here would be either
     // a second answer or an undone renegotiation — which is exactly what `answer_early` sends.
     peer_endpoint
-        .respond(
-            &invite.key,
-            sipx_sip::build::ResponseBuilder::to_request(
-                &invite.request,
-                sipx_sip::StatusCode::new(200).expect("a valid status"),
-                "OK",
-            )
-            .expect("builds")
-            .set_header(
-                &HeaderName::To,
-                bytes::Bytes::from("<sip:callee.example>;tag=callee-tag"),
-            )
-            .expect("to")
-            .header(HeaderName::Contact, contact(&peer_endpoint))
-            .expect("contact")
-            .header(
-                HeaderName::Allow,
-                bytes::Bytes::from_static(b"INVITE, ACK, CANCEL, BYE, PRACK, UPDATE"),
-            )
-            .expect("allow")
-            .build(),
-        )
+        .respond(&invite.key, accepted(&peer_endpoint, &invite))
         .await
         .expect("answers the invitation");
 

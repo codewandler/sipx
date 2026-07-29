@@ -2324,7 +2324,9 @@ pub async fn dial_early(
         hold: Direction::SendRecv,
         ringing: None,
         provisional: false,
-        deadline: options.timeout.map(|limit| tokio::time::Instant::now() + limit),
+        deadline: options
+            .timeout
+            .map(|limit| tokio::time::Instant::now() + limit),
         options: options.clone(),
         answered_already: None,
     };
@@ -2404,7 +2406,7 @@ impl Dialing {
     /// Wait for the invitation to be answered, and take the call it becomes.
     ///
     /// Consuming, because everything it needs moves into the [`Call`]. Provisionals that arrive
-    /// while waiting are handled exactly as they were before it returned — PRACKed, and read for
+    /// while waiting are handled exactly as they were before it returned — `PRACK`ed, and read for
     /// the answer that makes the session renegotiable — so an application that calls this
     /// immediately is in the same position as one that had called [`dial`].
     ///
@@ -2517,11 +2519,12 @@ impl Dialing {
     /// Fold a provisional into the early dialog: the dialog it may create, the answer it may
     /// carry, and the PRACK it may require.
     async fn observe(&mut self, response: &Response) {
+        /// A bare `100 Trying` only acknowledges that the request arrived (RFC 3261 §17.2.1); it
+        /// is not the far end's phone ringing, and 100rel does not apply to it (RFC 3262 §3).
+        const TRYING: u16 = 100;
+
         self.provisional = true;
         let reliable = crate::rel::reliable_sequence(response);
-        // A bare `100 Trying` only acknowledges that the request arrived (RFC 3261 §17.2.1); it
-        // is not the far end's phone ringing, and 100rel does not apply to it (RFC 3262 §3).
-        const TRYING: u16 = 100;
         if response.status.code() > TRYING {
             self.ringing = Some(reliable.is_some());
         }
@@ -2736,12 +2739,13 @@ impl Dialing {
         let confirms_early = self.belongs(response);
         let fresh = Dialog::from_response(&self.invite, response);
         let mut dialog = match (confirms_early, self.dialog.take(), fresh) {
-            // The usual case: the early dialog, its sequence space intact.
-            (true, Some(early), _) => early,
+            // The early dialog, its sequence space intact. Two ways to get here and one answer:
+            // the usual one, where the 2xx confirms what the provisional established; and a 2xx
+            // carrying no usable `To` tag or `Contact`, which establishes no dialog of its own
+            // but does not unmake the one a provisional already did.
+            (true, Some(early), _) | (_, Some(early), None) => early,
+            // A forked branch won: this 2xx names a dialog that is not the early one.
             (_, _, Some(fresh)) => fresh,
-            // A 2xx with no usable `To` tag or `Contact` establishes no dialog of its own; if a
-            // provisional already did, that is still the dialog this call is in.
-            (_, Some(early), None) => early,
             (_, None, None) => return Err(Error::NoDialog),
         };
         dialog.refresh_target(&response.headers);
@@ -2753,9 +2757,7 @@ impl Dialing {
             // worse, a description that undoes the renegotiation. `answer_early` sends no body
             // in this exact case, and for the same reason.
             Some(EarlyMedia::Answered(early)) if confirms_early => (early.port, early.settled),
-            Some(EarlyMedia::Answered(early)) => {
-                (early.port, self.settle_from(response)?)
-            }
+            Some(EarlyMedia::Answered(early)) => (early.port, self.settle_from(response)?),
             Some(EarlyMedia::Offered(port)) => (port, self.settle_from(response)?),
             None => return Err(Error::NoDialog),
         };

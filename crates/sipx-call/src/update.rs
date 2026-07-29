@@ -282,10 +282,7 @@ pub(crate) async fn receive(early: EarlyDialog<'_>, incoming: &Incoming) -> Resu
     );
     *early.peer_allows = sipx_sip::update::peer_allows(&incoming.request.headers);
 
-    let sent = early
-        .endpoint
-        .respond(&incoming.key, builder.build())
-        .await;
+    let sent = early.endpoint.respond(&incoming.key, builder.build()).await;
     // Cleared whether or not the response got out, for the reason `Call::on_update` gives: a
     // send that will not be retried must not leave the exchange open forever.
     early.negotiation.answered();
