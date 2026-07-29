@@ -59,10 +59,7 @@ fn invite(peer: &Handle, call_id: &str, from_tag: &str, branch: &str) -> Request
     sipx_sip::build::RequestBuilder::new(Method::Invite, callee_uri())
         .header(HeaderName::Via, via(peer, branch))
         .expect("via")
-        .header(
-            HeaderName::To,
-            Bytes::from_static(b"<sip:callee.example>"),
-        )
+        .header(HeaderName::To, Bytes::from_static(b"<sip:callee.example>"))
         .expect("to")
         .header(
             HeaderName::From,
@@ -109,7 +106,8 @@ fn cancel_with(request: &Request, rewrite: impl FnOnce(String) -> String) -> Req
             .value(name)
             .map(|value| Bytes::from(value.into_owned()))
     };
-    let top_via = rewrite(String::from_utf8_lossy(&copy(&HeaderName::Via).expect("via")).into_owned());
+    let top_via =
+        rewrite(String::from_utf8_lossy(&copy(&HeaderName::Via).expect("via")).into_owned());
     let sequence = request
         .headers
         .typed::<sipx_sip::headers::CSeq>()
@@ -211,10 +209,7 @@ async fn a_caller_that_gives_up_before_the_answer_ends_the_invitation() {
     let _ringing = ring(&callee, invitation.request(), 180, "Ringing", false)
         .await
         .expect("rings");
-    assert!(
-        !invitation.is_cancelled(),
-        "nothing has been cancelled yet"
-    );
+    assert!(!invitation.is_cancelled(), "nothing has been cancelled yet");
 
     // The caller gives up.
     let cancelled = ask(&peer, callee_addr, cancel_for(&invite)).await;
@@ -308,7 +303,10 @@ async fn a_cancel_on_another_branch_does_not_match_by_call_id_alone() {
 
     // And the invitation really is still live: it can still be answered.
     let call = invitation.answer(&callee, loopback()).await;
-    assert!(call.is_ok(), "the invitation survived the mismatched CANCEL");
+    assert!(
+        call.is_ok(),
+        "the invitation survived the mismatched CANCEL"
+    );
     let accepted = tokio::time::timeout(Duration::from_secs(5), invited.final_response())
         .await
         .expect("the INVITE is answered")
@@ -333,8 +331,20 @@ async fn a_cancel_after_the_answer_does_not_tear_the_dialog_down() {
         tokio::spawn(async move { ask(&peer, callee_addr, invite).await })
     };
 
-    let invitation = pumped.invitation().await;
-    let mut call = invitation.answer(&callee, loopback()).await.expect("answers");
+    let mut invitation = pumped.invitation().await;
+    // Taken before the answer, because it is the sharpest instrument this test has: the
+    // invitation's stream carries exactly one event, and it is the one a CANCEL that took effect
+    // would produce. Asserting the *absence* of it is what makes this a negative rather than a
+    // description — the `serve` loop below survives a stray 487 either way, so on its own it
+    // would pass against an implementation that let a late CANCEL through.
+    let mut events = invitation
+        .events()
+        .expect("an invitation has one event stream");
+
+    let mut call = invitation
+        .answer(&callee, loopback())
+        .await
+        .expect("answers");
     let accepted = asking.await.expect("answered");
     assert_eq!(accepted.status.code(), 200);
 
@@ -353,8 +363,14 @@ async fn a_cancel_after_the_answer_does_not_tear_the_dialog_down() {
         "the CANCEL still matched a transaction of ours, so it is answered 200"
     );
 
-    // Nothing else: no 487 chased the 2xx, and the call is still running.
+    // Nothing else: the invitation was not ended, so no 487 chased the 2xx …
     tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        events.try_recv().is_none(),
+        "a CANCEL after the final response must end nothing — BYE is the request for that"
+    );
+
+    // … and the call is still running.
     served.abort();
     let call = tokio::time::timeout(Duration::from_secs(5), served)
         .await
@@ -377,7 +393,10 @@ async fn a_replayed_cancel_draws_the_same_answer_and_nothing_more() {
         .send(invite.clone(), Target::udp(callee_addr))
         .await
         .expect("the INVITE goes out");
-    let invitation = pumped.invitation().await;
+    let mut invitation = pumped.invitation().await;
+    let mut events = invitation
+        .events()
+        .expect("an invitation has one event stream");
 
     let first = ask(&peer, callee_addr, cancel_for(&invite)).await;
     assert_eq!(first.status.code(), 200);
@@ -386,6 +405,15 @@ async fn a_replayed_cancel_draws_the_same_answer_and_nothing_more() {
         .expect("the INVITE is answered")
         .expect("a final response");
     assert_eq!(terminated.status.code(), 487);
+    assert!(
+        matches!(
+            events.recv().await,
+            Some(sipx_call::CallEvent::Ended(
+                sipx_call::EndCause::RemoteCancel
+            ))
+        ),
+        "the first CANCEL is the one that ends the invitation"
+    );
 
     // The same CANCEL again. Its own transaction is gone by now on this side only if 32 seconds
     // have passed, which they have not, so the answer is the one already sent.
@@ -396,6 +424,19 @@ async fn a_replayed_cancel_draws_the_same_answer_and_nothing_more() {
         "a replayed CANCEL is answered, not treated as a second cancellation"
     );
     assert!(invitation.is_cancelled());
+
+    // "Nothing more" is the half of the name that needs an assertion of its own: the invitation
+    // ended once, so there is one event and no second `487` behind it. Measured, so that the
+    // claim is not taken on trust: mutating the dispatcher's "already ended" guard away does not
+    // fail this test, because the copy is absorbed by the server transaction and never reaches
+    // the dispatcher at all. It fails `a_cancel_after_the_answer_does_not_tear_the_dialog_down`,
+    // which is where that guard is actually held to account. This assertion pins the layering —
+    // if the absorption below ever stops happening, the guard above has to catch the copy.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        events.try_recv().is_none(),
+        "an invitation is cancelled once, however many copies of the CANCEL arrive"
+    );
 }
 
 /// An invitation this stack never issued is not made cancellable by answering it: the CANCEL
@@ -453,7 +494,12 @@ async fn a_cancel_on_the_right_transaction_from_the_wrong_dialog_is_refused() {
     let invitation = pumped.invitation().await;
 
     // Same peer, same branch, same method — and a `From` tag that belongs to no invitation here.
-    let elsewhere = invite(&peer, "identifiers@sipx", "somebody-else", "z9hG4bK-s23-ident");
+    let elsewhere = invite(
+        &peer,
+        "identifiers@sipx",
+        "somebody-else",
+        "z9hG4bK-s23-ident",
+    );
     let answered = ask(&peer, callee_addr, cancel_for(&elsewhere)).await;
     assert_eq!(
         answered.status.code(),
@@ -491,7 +537,9 @@ async fn a_ringing_host_is_told_the_caller_gave_up_and_why() {
         .expect("the INVITE goes out");
 
     let mut invitation = pumped.invitation().await;
-    let mut events = invitation.events().expect("an invitation has one event stream");
+    let mut events = invitation
+        .events()
+        .expect("an invitation has one event stream");
     assert!(
         invitation.events().is_none(),
         "the stream is handed out exactly once, as a call's is"

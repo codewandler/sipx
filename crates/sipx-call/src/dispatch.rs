@@ -91,7 +91,7 @@ pub enum Dispatched {
 ///
 /// The inbox exists before the application has decided anything, and that is the point. The ACK
 /// to our own 2xx can arrive before `answer` has returned, so a route installed only once a
-/// [`Call`](crate::Call) existed would have nowhere to put it.
+/// [`Call`] existed would have nowhere to put it.
 ///
 /// Dropping this without answering releases the route: the next request for that dialog is
 /// answered as an unknown one rather than queued for a call that will never exist.
@@ -568,7 +568,9 @@ impl Calls {
         let (tx, rx) = mpsc::channel(self.0.queue);
         let mut routing = self.lock();
         routing.by_dialog.retain(|_, route| !route.tx.is_closed());
-        routing.invites.retain(|_, pending| !pending.route.is_closed());
+        routing
+            .invites
+            .retain(|_, pending| !pending.route.is_closed());
         routing.by_dialog.insert(
             key,
             Route {
@@ -794,8 +796,9 @@ impl Dispatcher {
     /// Both carry the invitation's `To` tag, which is §9.2's `SHOULD` that the two agree.
     ///
     /// One term is added to §9.2's own, and it is §9.1's rather than an invention: a CANCEL "MUST
-    /// have the same Call-ID, To, From and CSeq as the INVITE", so one whose dialog identifiers
-    /// disagree with the transaction its branch names cannot be a legitimate CANCEL for it. Every
+    /// have the same `Call-ID`, `To`, `From` and `CSeq` as the INVITE", so one whose dialog
+    /// identifiers disagree with the transaction its branch names cannot be a legitimate CANCEL
+    /// for it. Every
     /// well-formed CANCEL passes the check, which is what makes it free; what it costs an off-path
     /// attacker is that guessing or observing a branch is no longer enough to stop somebody else's
     /// phone ringing, since the sent-by in a `Via` is the attacker's to write.
@@ -898,8 +901,15 @@ impl Dispatcher {
         reason: &'static str,
         extra: Option<(HeaderName, Bytes)>,
     ) {
-        self.answer_request(&incoming.key, &incoming.request, status, reason, extra, None)
-            .await;
+        self.answer_request(
+            &incoming.key,
+            &incoming.request,
+            status,
+            reason,
+            extra,
+            None,
+        )
+        .await;
     }
 
     /// Answer a request on a named transaction, with a named `To` tag.

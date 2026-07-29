@@ -1,11 +1,12 @@
 # Call dispatch — one endpoint, many calls
 
-**Status:** implemented (`C-4`) · **Crate:** `sipx-call` (`crate::dispatch`) ·
+**Status:** implemented (`C-4`, `S-23`) · **Crate:** `sipx-call` (`crate::dispatch`) ·
 **Design:** [app-sdk](../designs/app-sdk.md)
 
 Normative references: RFC 3261 §8.2 (UAS behaviour and the 405), §8.2.2.2 (merged requests),
-§8.2.6.2 (the `To` tag on a response), §11.2 (OPTIONS), §12.2.2 (in-dialog requests and the 481),
-§17.1.1.3 (an ACK for a 2xx is a transaction of its own), RFC 3311 §4 (the `Allow` contract).
+§8.2.6.2 (the `To` tag on a response), §9.1 and §9.2 (CANCEL), §11.2 (OPTIONS), §12.2.2 (in-dialog
+requests and the 481), §17.1.1.3 (an ACK for a 2xx is a transaction of its own), §17.2.3
+(transaction matching), RFC 3311 §4 (the `Allow` contract).
 
 ## 1. What this is for
 
@@ -51,12 +52,13 @@ request, in this order:
 |---|---|---|
 | 1 | No `Call-ID`, or no `From` tag | `400 Bad Request` (RFC 3261 §8.1.1 makes both mandatory) |
 | 2 | INVITE with no `To` tag, **merged** (see below) | `482 Loop Detected` (§8.2.2.2) |
-| 3 | INVITE with no `To` tag, not merged | **surfaced** as `Dispatched::Invitation`, route reserved |
-| 4 | The key is routed | delivered to that call's inbox — see §5 |
-| 5 | ACK | counted, logged; **no response** (§17.1.1.3: there is none to send) |
-| 6 | Has a `To` tag, or the method exists only inside a dialog | `481 Call/Transaction Does Not Exist` (§12.2.2) |
-| 7 | The method is one `sipx_sip::update::ALLOW` advertises | **surfaced** as `Dispatched::OutOfDialog` |
-| 8 | Otherwise | `405 Method Not Allowed` with `Allow` (§8.2.1) |
+| 3 | INVITE with no `To` tag, not merged | **surfaced** as `Dispatched::Invitation`, route and INVITE transaction reserved |
+| 4 | CANCEL | placed here, never routed and never surfaced — see §9 |
+| 5 | The key is routed | delivered to that call's inbox — see §5 |
+| 6 | ACK | counted, logged; **no response** (§17.1.1.3: there is none to send) |
+| 7 | Has a `To` tag, or the method exists only inside a dialog | `481 Call/Transaction Does Not Exist` (§12.2.2) |
+| 8 | The method is one `sipx_sip::update::ALLOW` advertises | **surfaced** as `Dispatched::OutOfDialog` |
+| 9 | Otherwise | `405 Method Not Allowed` with `Allow` (§8.2.1) |
 
 **Row 2 needs all three of §8.2.2.2's terms, and getting it wrong breaks every challenged call.**
 An INVITE is merged when its `Call-ID`, its `From` tag **and its `CSeq`** all match a request this
@@ -75,25 +77,24 @@ be a copy of; treating the dead route as live would let one refused invitation p
 every later attempt by that peer. Row 3 then reserves the key afresh, replacing any route still
 there — anything holding that older inbox stops receiving, which is what it already was.
 
-The methods row 6 calls dialog-only are BYE, UPDATE, PRACK, REFER, NOTIFY and INFO: each is
+The methods row 7 calls dialog-only are BYE, UPDATE, PRACK, REFER, NOTIFY and INFO: each is
 defined only inside a dialog, so one arriving without a `To` tag is an orphan of a dialog that is
 gone, not a new transaction to offer the application.
 
-**Row 8's `Allow` is `sipx_sip::update::ALLOW`, the one constant the rest of the stack
+**Row 9's `Allow` is `sipx_sip::update::ALLOW`, the one constant the rest of the stack
 advertises.** §8.2.1 requires the 405 to list what this UAS supports, and a second copy of that
 list is a peer that is told the wrong thing on a path no test looks at (RFC 3311 §4 makes the
-header the peer's *only* permission to send an UPDATE). Because the list is that constant, row 7
-exists: OPTIONS and CANCEL are on it and the dispatcher does not place them itself, so they are
-handed to the application rather than refused with a status contradicting the list.
+header the peer's *only* permission to send an UPDATE). Because the list is that constant, row 8
+exists: OPTIONS is on it and the dispatcher does not place it itself, so it is handed to the
+application rather than refused with a status contradicting the list.
 
-Row 4 precedes rows 5–8, so a CANCEL for an invitation that *is* routed goes to that call's inbox
-rather than to row 7 — it belongs to that transaction. **Nothing then answers it.** sipx has no UAS
-half of CANCEL anywhere in the workspace: no `200` for the CANCEL, no `487` for the INVITE it
-cancels, and no way for an application holding an `Invitation` to learn it was cancelled. The
-CANCEL reaches the inbox and stops there; the caller's INVITE transaction sits in Proceeding until
-its own timer, and an application that answers afterwards leaves both ends in a call the caller
-tried to give up on. Story `S-23` is the fix. This routing is only what stops the CANCEL being
-lost as well as unanswered, and no part of this spec should be read as support for it.
+**Row 4 is CANCEL, and it is above the route lookup rather than below it.** A CANCEL does not
+belong to a *dialog*; it belongs to the INVITE transaction whose branch it carries (§9.1), which
+in the ordinary case is an invitation nobody has answered and therefore a call that does not exist
+yet. Routing it by key would put it in an inbox from which neither of the two responses §9.2 owes
+could be sent, which is exactly where it went before `S-23`. It is also the one advertised method
+row 8 does not surface: §9.2 says precisely what to answer, and both halves of that answer are the
+dispatcher's to give. §9 has the rule.
 
 ## 4. Nothing is dropped silently
 
@@ -103,9 +104,9 @@ a `DispatchCounts` — the same shape and the same reasoning as `Handle::shed` (
 | Field | What it counts | Row |
 |---|---|---|
 | `shed` | requests refused `503` because the call they belong to was not reading | §5 |
-| `acks` | ACKs that could not be delivered and cannot be refused | 5, §5 |
-| `unmatched` | in-dialog requests answered `481` | 6 |
-| `unsupported` | out-of-dialog requests answered `405` | 8 |
+| `acks` | ACKs that could not be delivered and cannot be refused | 6, §5 |
+| `unmatched` | requests answered `481`: in-dialog ones for no live call, and CANCELs for no live transaction | 4, 7 |
+| `unsupported` | out-of-dialog requests answered `405` | 9 |
 | `malformed` | requests answered `400` for naming no dialog at all | 1 |
 | `merged` | INVITEs answered `482` | 2 |
 
@@ -210,3 +211,119 @@ Both rules are covered end to end on that path
 (`an_update_arriving_while_our_own_offer_is_outstanding_is_refused_491`,
 `an_update_arriving_while_another_is_in_progress_is_refused_500`), and rule 3 keeps the wire test
 `S-19` gave it.
+
+## 9. CANCEL, the UAS half (RFC 3261 §9.2)
+
+Normative reference: RFC 3261 §9.1 (what a CANCEL carries), §9.2 (what a UAS does with one),
+§17.2.3 (transaction matching), §12.2.2 (the 481). Implemented by `S-23` in
+`Dispatcher::cancel`; the application's half is on `Invitation`.
+
+### 9.1 The matching
+
+A CANCEL names the request it withdraws by **carrying that request's topmost `Via` branch**
+(§9.1). So the match is the server transaction match of §17.2.3 — the branch, the sent-by, and
+the method of the transaction *being cancelled* — and `sipx_sip::TransactionKey::for_cancelled_invite`
+is that key: `from_request` with the method put back to INVITE. Nothing else about the CANCEL
+selects a transaction.
+
+**The `Call-ID` is not the match.** A CANCEL that shares an invitation's `Call-ID`, `From` tag and
+`CSeq` but names another branch names another transaction, and gets the 481 of §9.2 — the route
+table is not consulted at all, in either direction.
+
+One term is added to §9.2's, and it comes from §9.1 rather than from anywhere else: a CANCEL "MUST
+have the same Call-ID, To, From and CSeq" as the request it cancels, so one whose dialog
+identifiers disagree with the transaction its branch names cannot be a legitimate CANCEL for it
+and is refused 481. Every well-formed CANCEL passes it, which is what makes it free. What it costs
+is the off-path attacker: the sent-by in a `Via` is whatever the sender writes, so §17.2.3's match
+on its own means that observing or guessing a branch is enough to stop somebody else's phone
+ringing. §9.2 itself notes that CANCEL is a request a UAS may want to authenticate; this is the
+part of that which costs nothing.
+
+### 9.2 The two responses
+
+The answer is **two responses on two transactions**, and a stack that keeps only the CANCEL's key
+can only ever send one of them. That is why an `Invitation` holds the INVITE's `TransactionKey`
+rather than only its inbox.
+
+| # | On | Status | Condition |
+|---|---|---|---|
+| 1 | the CANCEL's own transaction | `200 OK` | unconditional, once it matched (§9.2 MUST) |
+| 2 | the INVITE transaction it withdraws | `487 Request Terminated` | only while that transaction has sent no final response |
+
+The first is unconditional because it means "I received your CANCEL", not "I stopped". The second
+is §9.2's "if the transaction for the original request still exists", and the two things that make
+it not exist are an answer and an earlier CANCEL.
+
+Both carry **one `To` tag** — §9.2: "the `To` tag of the response to the CANCEL and the `To` tag in
+the response to the original request SHOULD be the same". The tag is minted when the invitation is
+surfaced and belongs to the invitation, so `Invitation::answer` uses it for the `200` accepting the
+call as well.
+
+### 9.3 A CANCEL after a final response is not a teardown
+
+§9.2 is explicit that a CANCEL has no effect on a transaction that has already sent a final
+response, and **BYE is the request for ending a call that was answered**. This is the rule an
+implementation most often gets wrong in the permissive direction, so it is stated as a state
+machine rather than as a condition, with three states and no more:
+
+| Phase | A matching CANCEL does | `Invitation::answer` |
+|---|---|---|
+| `Ringing` — no final response yet | `200` + `487`, emits `Ended(RemoteCancel)` | answers, and moves to `Answered` |
+| `Answered` — a final response has gone out | `200`, and nothing else | answers (a second time, which is the caller's business) |
+| `Cancelled` — a CANCEL ended it | `200`, and nothing else | `Error::InvitationCancelled` |
+
+`Answered` is entered by `Invitation::answer` **before** the `200` is built rather than after it is
+sent. The asymmetry is deliberate: a CANCEL arriving mid-answer must not put a `487` on the wire
+behind a `200`, because that is the one ordering that leaves the two ends disagreeing about whether
+there is a call. The other way round — an answer that then fails — costs the caller a CANCEL that
+says `200` and ends nothing, which its own Timer B resolves.
+
+The free `answer()` function cannot make that transition, because it is not given the invitation.
+It still answers correctly; what it cannot do is tell the dispatcher that it did. **Prefer
+`Invitation::answer` for anything a dispatcher surfaced.**
+
+### 9.4 What the application is told
+
+An invitation that is cancelled must stop the host ringing, and a host that has to *poll* for that
+is a host that keeps ringing. So `Invitation` carries `C-3`'s own stream — one `CallEvents`, handed
+out once, exactly as `Call::events` is — and emits a single event on it:
+`CallEvent::Ended(EndCause::RemoteCancel)`.
+
+That is the existing vocabulary rather than a parallel channel, deliberately. A host that is
+ringing and a host that is talking both need to be told the thing ended and why; giving the
+pre-answer half its own type would mean two vocabularies for one question. `RemoteCancel` is
+distinct from `RemoteBye` because the two are different instructions to a host: one says stop
+ringing, the other says the call you have is over. On the wire vocabulary of `app-contract.md`
+§5.3 both are the `remote` cause.
+
+`Invitation::is_cancelled` is the same fact as a poll, for code that is not waiting on anything.
+
+### 9.5 Lifetime
+
+An INVITE transaction is remembered as long as the route it reserved, and swept with it — a CANCEL
+for an invitation that was answered still owes the `200` of row 1, and by then the `Invitation`
+handle is long gone. Retransmitted CANCELs never reach the dispatcher at all: the server
+transaction below absorbs them and replays the response it already sent.
+
+### 9.6 Test vectors
+
+`crates/sipx-call/tests/cancel.rs`.
+
+| Covers | Test |
+|---|---|
+| The story's acceptance — both responses, one `To` tag, the application told | `a_caller_that_gives_up_before_the_answer_ends_the_invitation` |
+| §9.2's 481 | `a_cancel_for_no_invitation_of_ours_is_answered_481` |
+| §9.1, the branch is the match and the `Call-ID` is not | `a_cancel_on_another_branch_does_not_match_by_call_id_alone` |
+| §9.1's added identifier term, with the transaction match satisfied | `a_cancel_on_the_right_transaction_from_the_wrong_dialog_is_refused` |
+| §9.3, the negative | `a_cancel_after_the_answer_does_not_tear_the_dialog_down` |
+| §9.5, and cancelled-once | `a_replayed_cancel_draws_the_same_answer_and_nothing_more` |
+| A third party cannot end someone else's invitation | `a_cancel_from_a_third_party_does_not_reach_someone_elses_invitation` |
+| §9.4 | `a_ringing_host_is_told_the_caller_gave_up_and_why` |
+
+Two of these are mutation-checked, because both are negatives and a negative that asserts the
+wrong thing passes against everything. Dropping §9.1's identifier term fails only
+`a_cancel_on_the_right_transaction_from_the_wrong_dialog_is_refused`; letting a CANCEL end an
+invitation that has already answered fails only `a_cancel_after_the_answer_does_not_tear_the_dialog_down`.
+That second one is why both of those tests watch the invitation's **event stream**: the `serve`
+loop survives a stray `487` and the caller's client transaction has already finished, so the only
+instrument sharp enough to see the difference is the event that a cancellation would have emitted.
