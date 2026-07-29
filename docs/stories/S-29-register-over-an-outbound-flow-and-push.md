@@ -2,7 +2,7 @@
 id: S-29
 title: Register over an Outbound flow, and let a registration wake on push
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 4
 design: docs/designs/sip-ua.md
 epic: sip-core

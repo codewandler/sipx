@@ -162,6 +162,161 @@ async fn register_advertises_this_client_in_via_and_contact() {
     );
 }
 
+/// Answer a REGISTER the way a registrar that implements RFC 5626 and RFC 8599 does: the
+/// option tag in `Require` says an outbound registration was performed (§6), the `Feature-Caps`
+/// name the push service the client asked for and assign the binding a PURR (§8.2).
+async fn answer_register(registrar: &tokio::net::UdpSocket, request: &str, source: std::net::SocketAddr) {
+    let field = |name: &str| header_line(request, name);
+    let response = format!(
+        "SIP/2.0 200 OK\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}\r\nRequire: outbound\r\nFlow-Timer: 30\r\n\
+         {};expires=60\r\nFeature-Caps: *;+sip.pns=\"webpush\";+sip.pnspurr=\"opaque-purr-1\"\r\n\
+         Content-Length: 0\r\n\r\n",
+        field("Via"),
+        field("To"),
+        field("From"),
+        field("Call-ID"),
+        field("CSeq"),
+        field("Contact"),
+    );
+    registrar
+        .send_to(response.as_bytes(), source)
+        .await
+        .expect("answers");
+}
+
+/// The acceptance test for S-29: a registration placed over an Outbound flow, and woken.
+///
+/// `--outbound` must put RFC 5626's `reg-id` and `+sip.instance` on the `Contact` and the
+/// `outbound` option tag in `Supported`; `--push-provider`/`--push-prid` must put RFC 8599's
+/// `pn-*` parameters inside the `Contact` URI's angle brackets; and `--wake` must send §4.1.3's
+/// binding-refresh REGISTER — the thing `UserAgent::woken` exists to do. Until S-29 no caller
+/// above `sipx-ua`'s own tests built this config, which is why `X-37` demoted both RFCs to no
+/// roles: this test fails on a plain REGISTER, which is all the CLI could send before.
+#[tokio::test]
+async fn register_over_a_flow_keeps_it_and_a_push_wakes_it() {
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let address = registrar.local_addr().expect("has an address");
+
+    let child = sipx()
+        .args([
+            "register",
+            "sip:alice@example.com",
+            "--target",
+            &address.to_string(),
+            "--outbound",
+            "--push-provider",
+            "webpush",
+            "--push-prid",
+            "c1a5b3e7d9f2",
+            "--wake",
+            "--json",
+            "--expires",
+            "60",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawns");
+
+    let mut buf = vec![0u8; 65_535];
+
+    // The registration itself: one flow, and the push parameters in the Contact URI.
+    let (length, source) =
+        tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut buf))
+            .await
+            .expect("a REGISTER arrives")
+            .expect("reads");
+    let first = String::from_utf8_lossy(&buf[..length]).into_owned();
+    assert!(first.starts_with("REGISTER"), "{first}");
+
+    let contact = header_line(&first, "Contact");
+    assert!(
+        contact.contains(";reg-id=1"),
+        "RFC 5626 §4.2's flow number is missing — nothing built the Outbound config: {contact}"
+    );
+    assert!(
+        contact.contains("+sip.instance=\"<urn:uuid:"),
+        "RFC 5626 §4.1's device identity: {contact}"
+    );
+    for param in ["pn-provider=webpush", "pn-prid=c1a5b3e7d9f2"] {
+        assert!(
+            contact.contains(param),
+            "RFC 8599 §4.1.2's {param} is missing: {contact}"
+        );
+    }
+    // §8.7 registers the pn-* parameters as *URI* parameters: inside the angle brackets, where a
+    // registrar's URI parser looks. Outside them a `;` starts a header parameter.
+    assert!(
+        contact.find("pn-provider=") < contact.rfind('>'),
+        "the push parameters belong inside the Contact's angle brackets: {contact}"
+    );
+    let supported = header_line(&first, "Supported");
+    assert!(
+        supported.contains("outbound"),
+        "§4.2 makes offering the option tag a MUST: {supported}"
+    );
+
+    answer_register(&registrar, &first, source).await;
+
+    // `--wake`: the push arrived, so §4.1.3's binding-refresh REGISTER must follow — same flow,
+    // same push parameters, a later CSeq.
+    let (length, source) =
+        tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut buf))
+            .await
+            .expect("a binding-refresh REGISTER arrives after the wake")
+            .expect("reads");
+    let second = String::from_utf8_lossy(&buf[..length]).into_owned();
+    assert!(
+        second.starts_with("REGISTER"),
+        "§4.1.3's answer to a push is a binding-refresh REGISTER: {second}"
+    );
+    let refreshed = header_line(&second, "Contact");
+    assert!(
+        refreshed.contains(";reg-id=1"),
+        "the refresh replaces the flow's binding rather than adding a second one: {refreshed}"
+    );
+    assert!(
+        refreshed.contains("pn-prid=c1a5b3e7d9f2"),
+        "the refresh keeps the push parameters: {refreshed}"
+    );
+    let cseq = header_line(&second, "CSeq");
+    assert!(
+        cseq.contains("2 REGISTER"),
+        "a refresh advances the sequence inside the same Call-ID: {cseq}"
+    );
+
+    answer_register(&registrar, &second, source).await;
+
+    // What a script reading stdout learns: the flow was accepted (§6), the registrar named our
+    // push service (§8.2), and the wake reported the PURR the binding was assigned.
+    let output = child.wait_with_output().await.expect("reports");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "register failed: {stdout} / {stderr}");
+    let mut lines = stdout.lines();
+    let registered = lines.next().expect("the registration report");
+    assert!(
+        registered.contains("\"status\":\"registered\""),
+        "{registered}"
+    );
+    assert!(
+        registered.contains("\"flow\":true"),
+        "§6: the registrar said it performed an outbound registration: {registered}"
+    );
+    assert!(
+        registered.contains("\"push\":true"),
+        "§8.2: the registrar named the push service this client registered: {registered}"
+    );
+    let woken = lines.next().expect("the wake report");
+    assert!(woken.contains("\"status\":\"woken\""), "{woken}");
+    assert!(
+        woken.contains("\"purr\":\"opaque-purr-1\""),
+        "the PURR the registrar assigned travels with the wake: {woken}"
+    );
+}
+
 #[tokio::test]
 async fn version_and_help_succeed() {
     let output = sipx().arg("version").output().await.expect("runs");
