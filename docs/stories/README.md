@@ -50,7 +50,7 @@ _This is the layer applications actually program against, so it is the one that 
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Cli
-- [P-6 — Make `sipx dial --password` authenticate, or reject the flag](P-6-dial-accepts-a-password-and-discards-it.md) · Application · main.rs:168 accepts --password on dial and dial.rs never reads it, so a 407-challenged call fails while the user who supplied credentials is told nothing
+- [P-7 — Make `sipx dial --password` authenticate, or reject the flag](P-7-dial-accepts-a-password-and-discards-it.md) · Application · main.rs:168 accepts --password on dial and dial.rs never reads it, so a 407-challenged call fails while the user who supplied credentials is told nothing
 
 ### Conformance
 - [S-27 — Refuse a `sips:` URI the CLI cannot dial securely, instead of dialling it in the clear](S-27-a-sips-uri-is-dialled-in-plaintext.md) · Signalling · found by X-33's implementor — dial.rs:231 strips `sips:` exactly as `sip:` and defaults to port 5060, and dial.rs:49 only ever chooses UDP or TCP, so `sipx dial sips:…` sends the INVITE in cleartext and says nothing

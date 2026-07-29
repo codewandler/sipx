@@ -1,5 +1,5 @@
 ---
-id: P-6
+id: P-7
 title: Make `sipx dial --password` authenticate, or reject the flag
 pillar: Application
 status: ready

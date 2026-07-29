@@ -63,4 +63,4 @@ it — but do not silently downgrade a URI whose entire meaning is "TLS on every
   `crates/sipx-cli/src/main.rs:168` lists `--password` among the valued flags and `main.rs:193` tests
   `["dial", "--password", "secret", "sip:a@b"]` parsing, but `crates/sipx-cli/src/dial.rs` never reads
   it — only `register.rs:53` does. So a call challenged with 407 fails instead of authenticating, and
-  the user who supplied a password is told nothing. Filed as `P-6`.
+  the user who supplied a password is told nothing. Filed as `P-7`.
