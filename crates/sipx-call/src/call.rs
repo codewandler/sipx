@@ -2320,6 +2320,12 @@ enum Arrived {
 /// Fails if the INVITE cannot be built or sent, if the deadline passes before any dialog is
 /// established — in which case the invitation is withdrawn first, so the far end stops ringing —
 /// or if the transaction ends with no response at all.
+///
+/// It also fails if a reliable provisional answers our offer with a description that cannot be
+/// used: [`Error::Sdp`] for a body that does not parse or an `a=crypto` that fails RFC 4568
+/// §5.1.3's check, [`Error::NoCommonCodec`] for one that cannot be negotiated. The invitation is
+/// withdrawn with a CANCEL first (RFC 3261 §9.1), so no handle to a dead invitation comes back. A
+/// provisional carrying *no* description is not this case and is not an error.
 pub async fn dial_early(
     endpoint: &Handle,
     target: Target,
@@ -2440,13 +2446,23 @@ impl Dialing {
     /// (see [`dial_early`] on why it is not retried), [`Error::Cancelled`] if the deadline
     /// passed — the invitation is withdrawn first — and [`Error::NoResponse`] if the
     /// transaction ended without a final response.
+    ///
+    /// And, from a *provisional* rather than from the answer: [`Error::Sdp`] or
+    /// [`Error::NoCommonCodec`] if a reliable provisional answers our offer with a description
+    /// that cannot be used (RFC 3262 §5). That one withdraws the invitation with a CANCEL (RFC
+    /// 3261 §9.1) rather than waiting for a 2xx to fail on, because a far end that answered no
+    /// offer of ours may never send one.
     pub async fn answered(mut self) -> Result<Call> {
         if let Some(call) = self.answered_already.take() {
             return Ok(*call);
         }
         loop {
             match self.next_response().await {
-                Arrived::Provisional(response) => self.observe(&response).await,
+                Arrived::Provisional(response) => {
+                    if let Err(error) = self.observe(&response).await {
+                        return Err(self.abandon(error).await);
+                    }
+                }
                 Arrived::Final(response) => return self.confirm(*response).await,
                 Arrived::GaveUp => {
                     self.give_up().await;
@@ -2491,7 +2507,9 @@ impl Dialing {
         loop {
             match self.next_response().await {
                 Arrived::Provisional(response) => {
-                    self.observe(&response).await;
+                    if let Err(error) = self.observe(&response).await {
+                        return Err(self.abandon(error).await);
+                    }
                     if self.dialog.is_some() {
                         return Ok(());
                     }
@@ -2542,7 +2560,13 @@ impl Dialing {
 
     /// Fold a provisional into the early dialog: the dialog it may create, the answer it may
     /// carry, and the PRACK it may require.
-    async fn observe(&mut self, response: &Response) {
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::adopt_early_answer`] refused. It is the only fatal thing a provisional can
+    /// do: everything else here is either optional (a dialog it did not establish, an `Allow` it
+    /// did not carry) or recoverable (a PRACK that did not get through).
+    async fn observe(&mut self, response: &Response) -> Result<()> {
         /// A bare `100 Trying` only acknowledges that the request arrived (RFC 3261 §17.2.1); it
         /// is not the far end's phone ringing, and 100rel does not apply to it (RFC 3262 §3).
         const TRYING: u16 = 100;
@@ -2564,7 +2588,11 @@ impl Dialing {
             // adopting the other's description or acknowledging its `RSeq` against this one's
             // sequence space would mix them. Ignored rather than merged; giving an application
             // a handle per branch is `C-2`'s to design, and nothing here forecloses it.
-            return;
+            //
+            // `Ok` and not an error: another branch's description is not this invitation's
+            // problem, and ending this one over it would be refusing a call on the strength of a
+            // response addressed to somebody else.
+            return Ok(());
         }
 
         if update::peer_allows(&response.headers) {
@@ -2579,7 +2607,13 @@ impl Dialing {
             // unreliable provisional carrying a description is not one — §5 forbids it, and one
             // lost leaves the two sides disagreeing about what is in force with no way to
             // notice — so it is ignored rather than adopted.
-            self.adopt_early_answer(response);
+            //
+            // Held rather than propagated on the spot: the provisional is acknowledged first even
+            // when its description is refused. RFC 3262 §4 makes the PRACK a MUST for every
+            // reliable provisional a UAC receives, and the far end retransmits until one arrives;
+            // failing a beat earlier would leave it resending a response into a CANCEL that has
+            // already gone.
+            let adopted = self.adopt_early_answer(response);
             if let Some(dialog) = self.dialog.as_mut() {
                 dialog.refresh_target(&response.headers);
             }
@@ -2589,7 +2623,9 @@ impl Dialing {
             if let Err(error) = self.acknowledge(response, rseq).await {
                 tracing::debug!(%error, "could not acknowledge a reliable provisional");
             }
+            adopted?;
         }
+        Ok(())
     }
 
     /// Whether a response belongs to the dialog this handle holds.
@@ -2603,32 +2639,38 @@ impl Dialing {
     /// Take the answer to our INVITE's offer out of a reliable provisional (RFC 3262 §5).
     ///
     /// This is what makes the early dialog renegotiable at all, and it is the calling side's
-    /// mirror of [`ring_early`](crate::ring_early). A description that cannot be read or cannot
-    /// be negotiated leaves the session where it was — still `Offered` — so the exchange stays
-    /// open and [`Self::update`] keeps refusing, which is the truthful state.
-    fn adopt_early_answer(&mut self, response: &Response) {
+    /// mirror of [`ring_early`](crate::ring_early).
+    ///
+    /// `Ok(())` covers two shapes, and the difference matters. A provisional that carries **no
+    /// description** is ordinary — a `180` establishes a dialog and answers nothing — and one that
+    /// arrives after the exchange has already closed is a repeat of an answer we took the first
+    /// time. Neither is a failure and neither is reported.
+    ///
+    /// # Errors
+    ///
+    /// A description that *is* there and cannot be used: [`Error::Sdp`] for a body that does not
+    /// parse or an `a=crypto` that fails RFC 4568 §5.1.3's check, [`Error::NoCommonCodec`] for one
+    /// that cannot be negotiated. Before `S-25` all three returned `()` and left a `debug` line,
+    /// so they were indistinguishable from each other and from the silent cases above — and for a
+    /// caller that never receives a 2xx, indistinguishable from nothing having happened.
+    ///
+    /// The session is left where it was on either path — still `Offered`, so the exchange stays
+    /// open and [`Self::update`] keeps refusing, which is the truthful state. What changes is that
+    /// the refusal now reaches [`Self::observe`], which withdraws the invitation over it.
+    fn adopt_early_answer(&mut self, response: &Response) -> Result<()> {
         if !matches!(self.media, Some(EarlyMedia::Offered(_))) || response.body().is_empty() {
-            return;
+            return Ok(());
         }
         // Parsed and settled *before* the port is moved out, so that a failure on either step
         // leaves `media` exactly as it was rather than emptied.
-        let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body())) else {
-            return;
-        };
-        let settled = match settle_answer(self.capabilities.crypto.as_slice(), &answer) {
-            Ok(settled) => settled,
-            // Logged rather than discarded in silence. The session stays `Offered`, so nothing
-            // is keyed on this answer and the 2xx settles the exchange again through
-            // `settle_from`, where the same refusal *does* end the call — but a refused
-            // `a=crypto` that left no trace at all would be indistinguishable from a
-            // provisional that carried no description.
-            Err(error) => {
-                tracing::debug!(%error, "the answer in a reliable provisional was not adopted");
-                return;
-            }
-        };
+        let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
+            .map_err(|error| Error::Sdp(error.to_string()))?;
+        // The same vocabulary the 2xx path uses: `settle_from` runs this exact function on the
+        // final response, and a refusal that arrived early is the same refusal. Naming it
+        // differently here would ask an application to match on two errors for one fault.
+        let settled = settle_answer(self.capabilities.crypto.as_slice(), &answer)?;
         let Some(EarlyMedia::Offered(port)) = self.media.take() else {
-            return;
+            return Ok(());
         };
         self.media = Some(EarlyMedia::Answered(Box::new(Early {
             port,
@@ -2637,6 +2679,27 @@ impl Dialing {
             media_address: self.options.media_address,
         })));
         self.negotiation.received_answer();
+        Ok(())
+    }
+
+    /// Withdraw the invitation because a reliable provisional's description cannot be used.
+    ///
+    /// **CANCEL, not ACK-then-BYE** — this is the failure mode `S-25` had to choose, and it is
+    /// chosen by where we are rather than by what went wrong. RFC 3261 §9.1 withdraws an
+    /// invitation that has only been answered provisionally; there is no final response here to
+    /// acknowledge, so the ACK-then-BYE that [`Self::confirm`] performs after a 2xx (§15) has
+    /// nothing to attach itself to. [`Self::give_up`] is already that request, sent through
+    /// [`withdraw`], which also covers the one case a CANCEL cannot: a `200` that crossed it is
+    /// acknowledged and hung up, because by then §15 *does* apply.
+    ///
+    /// The alternative considered and rejected was to carry on and let the 2xx fail — which is
+    /// what happened before this story. It fails safely (nothing is keyed on a refused answer,
+    /// and `settle_from` re-runs the same check) but it is not a report: a far end that answers
+    /// no offer of ours will not send a 2xx to fail on, and the caller's only outcome was
+    /// [`Error::Cancelled`] when its own deadline passed.
+    async fn abandon(&mut self, error: Error) -> Error {
+        self.give_up().await;
+        error
     }
 
     /// PRACK a reliable provisional through the early dialog itself (RFC 3262 §4).

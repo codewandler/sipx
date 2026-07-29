@@ -861,7 +861,16 @@ async fn sipx_as_uas_sends_an_update_in_an_early_dialog_and_in_a_confirmed_one()
 /// (RFC 3261 §12.1.1); `Require: 100rel` with an `RSeq` makes it the one response RFC 3262 §5
 /// allows an answer to travel in; the `Contact` is where the caller's in-dialog requests go; and
 /// the `Allow` is §4's permission to send an UPDATE at all.
-fn early_answer(peer: &Handle, invite: &Incoming, tag: &str, body: &str) -> sipx_sip::Response {
+///
+/// `body` is optional because the *absence* of a description is a case in its own right (`S-25`):
+/// a reliable provisional that describes nothing establishes the dialog, answers no offer, and is
+/// not a failure.
+fn early_answer(
+    peer: &Handle,
+    invite: &Incoming,
+    tag: &str,
+    body: Option<&str>,
+) -> sipx_sip::Response {
     let to = String::from_utf8_lossy(
         &invite
             .request
@@ -870,7 +879,7 @@ fn early_answer(peer: &Handle, invite: &Incoming, tag: &str, body: &str) -> sipx
             .expect("the INVITE carries a To"),
     )
     .into_owned();
-    sipx_sip::build::ResponseBuilder::to_request(
+    let builder = sipx_sip::build::ResponseBuilder::to_request(
         &invite.request,
         sipx_sip::StatusCode::new(183).expect("a valid status"),
         "Session Progress",
@@ -891,14 +900,18 @@ fn early_answer(peer: &Handle, invite: &Incoming, tag: &str, body: &str) -> sipx
     .header(HeaderName::Require, bytes::Bytes::from_static(b"100rel"))
     .expect("require")
     .header(HeaderName::RSeq, bytes::Bytes::from_static(b"1"))
-    .expect("rseq")
-    .header(
-        HeaderName::ContentType,
-        bytes::Bytes::from_static(b"application/sdp"),
-    )
-    .expect("content-type")
-    .body(bytes::Bytes::from(body.to_owned()))
-    .build()
+    .expect("rseq");
+    let Some(body) = body else {
+        return builder.build();
+    };
+    builder
+        .header(
+            HeaderName::ContentType,
+            bytes::Bytes::from_static(b"application/sdp"),
+        )
+        .expect("content-type")
+        .body(bytes::Bytes::from(body.to_owned()))
+        .build()
 }
 
 /// A `200` to an in-dialog request the peer received, carrying a description when it needs one.
@@ -1046,7 +1059,12 @@ async fn dialing_against(
     peer_endpoint
         .respond(
             &invite.key,
-            early_answer(peer_endpoint, &invite, "callee-tag", &sdp(40000, 0, "PCMU")),
+            early_answer(
+                peer_endpoint,
+                &invite,
+                "callee-tag",
+                Some(&sdp(40000, 0, "PCMU")),
+            ),
         )
         .await
         .expect("rings with an answer");
@@ -1136,13 +1154,15 @@ async fn the_callee_renegotiates(
     );
 }
 
-/// The `200` accepting the invitation, carrying no description.
+/// The `200` accepting the invitation.
 ///
-/// Deliberately bodyless: the answer went in the reliable provisional and the UPDATEs settled
-/// everything since, so a description here would be either a second answer or an undone
-/// renegotiation. `answer_early` omits it in this exact case, from the other side.
-fn accepted(peer_endpoint: &Handle, invite: &Incoming) -> sipx_sip::Response {
-    sipx_sip::build::ResponseBuilder::to_request(
+/// `None` is the usual case here and is deliberate: the answer went in the reliable provisional
+/// and the UPDATEs settled everything since, so a description would be either a second answer or
+/// an undone renegotiation. `answer_early` omits it in this exact case, from the other side. A
+/// body is only for the far end that rang *without* describing anything, which leaves the INVITE's
+/// offer for the 2xx to answer.
+fn accepted(peer_endpoint: &Handle, invite: &Incoming, body: Option<&str>) -> sipx_sip::Response {
+    let builder = sipx_sip::build::ResponseBuilder::to_request(
         &invite.request,
         sipx_sip::StatusCode::new(200).expect("a valid status"),
         "OK",
@@ -1159,8 +1179,18 @@ fn accepted(peer_endpoint: &Handle, invite: &Incoming) -> sipx_sip::Response {
         HeaderName::Allow,
         bytes::Bytes::from_static(b"INVITE, ACK, CANCEL, BYE, PRACK, UPDATE"),
     )
-    .expect("allow")
-    .build()
+    .expect("allow");
+    let Some(body) = body else {
+        return builder.build();
+    };
+    builder
+        .header(
+            HeaderName::ContentType,
+            bytes::Bytes::from_static(b"application/sdp"),
+        )
+        .expect("content-type")
+        .body(bytes::Bytes::from(body.to_owned()))
+        .build()
 }
 
 #[tokio::test]
@@ -1220,7 +1250,7 @@ async fn a_caller_renegotiates_before_the_callee_answers() {
     // the provisional and the UPDATEs settled everything since, so a body here would be either
     // a second answer or an undone renegotiation — which is exactly what `answer_early` sends.
     peer_endpoint
-        .respond(&invite.key, accepted(&peer_endpoint, &invite))
+        .respond(&invite.key, accepted(&peer_endpoint, &invite, None))
         .await
         .expect("answers the invitation");
 
@@ -1698,4 +1728,289 @@ async fn a_retransmitted_update_is_answered_by_the_transaction_layer_alone() {
         "a retransmitted UPDATE reached the transaction user: {:?}",
         seen_again.map(|r| r.map(|i| i.request.method.clone()))
     );
+}
+
+// ── `S-25`: what a caller learns when a reliable provisional cannot be used ───────────────────
+//
+// Here rather than in a file of their own because the machinery is this file's. An early dialog
+// reached with `dial_early` and rung reliably by a raw peer is exactly what `dialing_against`
+// builds above, and the failure under test is a step inside that same sequence — the one where
+// RFC 3262 §5's answer is read out of the provisional.
+
+/// How long these wait for a message a correct implementation sends at once.
+///
+/// A bound on failure, not a window to measure in (`X-28`): every wait below is satisfied in
+/// microseconds when the code is right, and only a *missing* message ever spends it.
+const REFUSAL_BOUND: Duration = Duration::from_secs(5);
+
+/// An answer that is well formed in every respect except the one RFC 4568 §5.1.3 checks.
+///
+/// The suite is real and the key is a published one (`docs/specs/srtp.md` §10.4), so nothing here
+/// fails to parse and nothing fails to negotiate. The tag is `9`; `Capabilities::with_srtp` fixes
+/// sipx's own at `1`, so this answers an offer nobody made and the two ends have agreed on
+/// nothing. A check on key material alone would miss it.
+const ANSWER_KEYED_TO_AN_UNOFFERED_TAG: &str = concat!(
+    "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n",
+    "m=audio 41234 RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n",
+    "a=crypto:9 AES_CM_128_HMAC_SHA1_80 ",
+    "inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR\r\n",
+    "a=sendrecv\r\n"
+);
+
+/// The key material above, which the error must not repeat back to the application.
+const PUBLISHED_KEY: &str = "PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR";
+
+/// The next request the peer receives, bounded so a message that never comes fails rather than
+/// hangs — the one outcome a suite cannot report.
+async fn next_request(incoming: &mut Receiver<Incoming>, what: &str) -> Incoming {
+    tokio::time::timeout(REFUSAL_BOUND, incoming.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{what} never arrived"))
+        .unwrap_or_else(|| panic!("{what} never arrived: the endpoint closed first"))
+}
+
+/// A caller and a raw peer that speak WSS.
+///
+/// The rest of this file runs over UDP, and the crypto test below cannot: RFC 4568 §7.1 puts the
+/// master key in the SDP body, so sipx offers one only where the signalling protects it
+/// (`offered_media`). Over UDP there is no `a=crypto` in the INVITE, an answer carrying one is
+/// ignored rather than refused, and §5.1.3's check — the subject there — never runs at all.
+struct SecurePair {
+    peer: Handle,
+    peer_incoming: Receiver<Incoming>,
+    caller: Handle,
+    /// Held only to keep the caller's endpoint alive; nothing is sent to it.
+    _caller_incoming: Receiver<Incoming>,
+    target: Target,
+}
+
+async fn secure_pair() -> SecurePair {
+    let ca = sipx_testkit::certs::Ca::new();
+    let (cert, key) = ca.issue_for("localhost");
+    let identity = sipx_transport::tls::Identity::from_pem(cert.as_bytes(), key.as_bytes())
+        .expect("an identity");
+
+    let mut peer_config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    peer_config.wss_server = Some((
+        sipx_transport::tls::ServerTls::new(identity).expect("a server"),
+        0,
+    ));
+    let (peer, peer_incoming) = bind(peer_config).await.expect("binds");
+    let wss_addr = peer.wss_addr().expect("a WSS port");
+
+    let mut anchors = sipx_transport::tls::TrustAnchors::only();
+    anchors.add_pem(ca.pem().as_bytes()).expect("a usable CA");
+    let mut caller_config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    caller_config.tls_client =
+        Some(sipx_transport::tls::ClientTls::new(&anchors).expect("a client"));
+    let (caller, caller_incoming) = bind(caller_config).await.expect("binds");
+
+    SecurePair {
+        peer,
+        peer_incoming,
+        caller,
+        _caller_incoming: caller_incoming,
+        target: Target::new(wss_addr, sipx_transport::TransportKind::Wss).verifying("localhost"),
+    }
+}
+
+/// The `487` that closes an invitation the caller withdrew (RFC 3261 §9.1).
+///
+/// Sent so the caller's own withdrawal finishes at once rather than sitting out the grace period
+/// it allows for a `200` that crossed the CANCEL. It is what a real callee sends here.
+fn terminated(invite: &Incoming) -> sipx_sip::Response {
+    sipx_sip::build::ResponseBuilder::to_request(
+        &invite.request,
+        sipx_sip::StatusCode::new(487).expect("a valid status"),
+        "Request Terminated",
+    )
+    .expect("builds")
+    .set_header(
+        &HeaderName::To,
+        bytes::Bytes::from("<sip:callee.example>;tag=callee-tag"),
+    )
+    .expect("to")
+    .build()
+}
+
+/// The story's failing-first test: the refusal reaches the caller, and it withdraws by CANCEL.
+///
+/// Three things are asserted and all three are the Acceptance. **That** the caller learns of the
+/// refusal at all, rather than waiting out a 2xx that never comes — before this story
+/// `adopt_early_answer` returned `()` and logged at `debug`, so the only outcome was
+/// `Error::Cancelled` when the deadline passed, which says nothing about why. **What** it learns:
+/// `Error::Sdp` naming the tag that came back, and not repeating the key material. And **how the
+/// invitation ends**: a CANCEL, because RFC 3261 §9.1 is what withdraws an invitation that has
+/// only been answered provisionally — there is no final response to ACK, so the ACK-then-BYE
+/// `dial` performs after a 2xx has nothing here to attach itself to.
+///
+/// The peer is hand-built rather than a second sipx because sipx's own answerer echoes the
+/// accepted tag correctly (`M-26`) and could not produce this provisional.
+#[tokio::test]
+async fn a_refused_early_answer_ends_the_invitation_with_a_cancel() {
+    let mut pair = secure_pair().await;
+
+    // Spawned: the assertions below are the peer's half of a conversation that has to be running.
+    let dialling = tokio::spawn({
+        let endpoint = pair.caller.clone();
+        let target = pair.target.clone();
+        async move {
+            sipx_call::dial_early(
+                &endpoint,
+                target,
+                &to_uri(),
+                &sipx_call::DialOptions::new("<sip:caller@localhost>", loopback())
+                    .with_timeout(Duration::from_secs(30)),
+            )
+            .await
+        }
+    });
+
+    let invite = next_request(&mut pair.peer_incoming, "the INVITE").await;
+    assert_eq!(invite.request.method, Method::Invite);
+    assert!(
+        String::from_utf8_lossy(invite.request.body()).contains("a=crypto:1 "),
+        "sipx offered no key over WSS, so there is nothing for §5.1.3 to check: {:?}",
+        String::from_utf8_lossy(invite.request.body())
+    );
+
+    pair.peer
+        .respond(
+            &invite.key,
+            early_answer(
+                &pair.peer,
+                &invite,
+                "callee-tag",
+                Some(ANSWER_KEYED_TO_AN_UNOFFERED_TAG),
+            ),
+        )
+        .await
+        .expect("rings with an answer");
+
+    // The provisional is acknowledged before it is refused, and deliberately: RFC 3262 §4 makes
+    // the PRACK a MUST for any reliable provisional a UAC receives, and the far end retransmits
+    // until one arrives. Failing a beat sooner would leave the peer resending a response into a
+    // CANCEL that had already gone.
+    let prack = next_request(&mut pair.peer_incoming, "the PRACK").await;
+    assert_eq!(
+        prack.request.method,
+        Method::Prack,
+        "a refused description must still be acknowledged (RFC 3262 §4)"
+    );
+    pair.peer
+        .respond(&prack.key, ok_to(&prack, None))
+        .await
+        .expect("answers the PRACK");
+
+    // The failure mode, on the wire. Asserting the *first* request after the PRACK also rules
+    // out the shape this story says it is not: an ACK, or a BYE in a dialog no 2xx confirmed.
+    let withdrawn = next_request(&mut pair.peer_incoming, "the withdrawal of the invitation").await;
+    assert_eq!(
+        withdrawn.request.method,
+        Method::Cancel,
+        "an invitation refused from a provisional is withdrawn with CANCEL (RFC 3261 §9.1), not \
+         with {:?}",
+        withdrawn.request.method
+    );
+    pair.peer
+        .respond(&withdrawn.key, ok_to(&withdrawn, None))
+        .await
+        .expect("answers the CANCEL");
+    pair.peer
+        .respond(&invite.key, terminated(&invite))
+        .await
+        .expect("terminates the invitation");
+
+    let outcome = tokio::time::timeout(REFUSAL_BOUND, dialling)
+        .await
+        .expect("the caller stopped waiting for a 2xx that is never coming")
+        .expect("joins");
+    let error = outcome.err().unwrap_or_else(|| {
+        panic!("an early dialog was handed back on an answer keyed to a tag nobody offered")
+    });
+    let sipx_call::Error::Sdp(reason) = &error else {
+        panic!("the refusal reached the application as {error:?}, not as Error::Sdp");
+    };
+    assert!(
+        reason.contains('9'),
+        "the error does not say which tag came back: {reason}"
+    );
+    assert!(
+        !reason.contains(PUBLISHED_KEY),
+        "the error carries key material: {reason}"
+    );
+}
+
+/// The other half of the same change: nothing is wrong, and nothing is reported.
+///
+/// A reliable provisional that describes nothing is ordinary — it establishes the early dialog
+/// and answers no offer — so it must leave the invitation running. This is the case an error
+/// channel is easiest to break: `adopt_early_answer` returns early for it, and returning early
+/// with an error rather than with success would end every call that rings before it answers.
+///
+/// The 2xx at the end is the assertion that matters. That `dial_early` returned `Ok` only says
+/// the refusal did not fire on the way *in*; that the invitation can still be answered is what
+/// says it was not withdrawn behind the application's back.
+#[tokio::test]
+async fn a_reliable_provisional_with_no_description_leaves_the_invitation_running() {
+    let (peer_endpoint, mut peer_incoming) = endpoint().await;
+    let (caller_endpoint, _caller_incoming) = endpoint().await;
+    let peer_addr = peer_endpoint.local_addr();
+
+    let dialling = tokio::spawn({
+        let endpoint = caller_endpoint.clone();
+        async move {
+            sipx_call::dial_early(
+                &endpoint,
+                Target::udp(peer_addr),
+                &to_uri(),
+                &sipx_call::DialOptions::new("<sip:caller@example.net>", loopback())
+                    .with_timeout(Duration::from_secs(30)),
+            )
+            .await
+        }
+    });
+
+    let invite = next_request(&mut peer_incoming, "the INVITE").await;
+    peer_endpoint
+        .respond(
+            &invite.key,
+            early_answer(&peer_endpoint, &invite, "callee-tag", None),
+        )
+        .await
+        .expect("rings, describing nothing");
+
+    let prack = next_request(&mut peer_incoming, "the PRACK").await;
+    assert_eq!(prack.request.method, Method::Prack);
+    peer_endpoint
+        .respond(&prack.key, ok_to(&prack, None))
+        .await
+        .expect("answers the PRACK");
+
+    let dialing = tokio::time::timeout(REFUSAL_BOUND, dialling)
+        .await
+        .expect("dial_early returns while the invitation is still open")
+        .expect("joins")
+        .expect("a provisional that describes nothing is not a refusal");
+    assert!(
+        !dialing.has_early_session(),
+        "nothing answered the INVITE's offer, so the exchange is still open (RFC 3311 §5.1)"
+    );
+
+    // Still running: the offer the INVITE carried is answered by the 2xx instead, which is the
+    // path `Dialing::accept` takes when no provisional settled one.
+    let answering = tokio::spawn(dialing.answered());
+    peer_endpoint
+        .respond(
+            &invite.key,
+            accepted(&peer_endpoint, &invite, Some(&sdp(40000, 0, "PCMU"))),
+        )
+        .await
+        .expect("answers the invitation");
+    let call = tokio::time::timeout(REFUSAL_BOUND, answering)
+        .await
+        .expect("the invitation was still open when the 2xx arrived")
+        .expect("joins")
+        .expect("a call");
+    assert!(!call.is_ended());
 }
