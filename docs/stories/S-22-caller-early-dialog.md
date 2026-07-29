@@ -2,7 +2,7 @@
 id: S-22
 title: Give the caller a handle on its early dialog
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 5
 design: docs/designs/sip-ua.md
 epic: conformance
