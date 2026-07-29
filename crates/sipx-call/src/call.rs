@@ -182,6 +182,61 @@ impl Call {
         samples
     }
 
+    /// Stop contributing audio to the far end, without telling it anything (story `M-18`).
+    ///
+    /// # Mute is not hold
+    ///
+    /// This is the distinction the whole verb exists for, and getting it wrong is how a call ends
+    /// up renegotiated when all that was wanted was a quiet microphone:
+    ///
+    /// | | `mute` | [`reinvite(Direction::SendOnly)`](Self::reinvite) |
+    /// |---|---|---|
+    /// | Signalling | none — no re-INVITE, nothing on the wire | a re-INVITE the far end must answer |
+    /// | The SDP direction | unchanged; the session is the one that was negotiated | changed, and that *is* the mechanism |
+    /// | What the far end knows | nothing; [`is_on_hold`](Self::is_on_hold) there is unaffected | that this call is on hold, and it may play its own hold music |
+    /// | The RTP stream | keeps flowing, carrying silence | governed by the new direction |
+    /// | Can fail | no | yes — the far end can refuse the renegotiation |
+    ///
+    /// Hold is a state two parties agree on. Mute is a decision one party makes about its own
+    /// microphone, and a far end that could tell the difference between a muted caller and a
+    /// silent one would be reading something it was never sent.
+    ///
+    /// # What it does and does not gate
+    ///
+    /// Outbound audio only, and it is a gate rather than a suppressor: [`Self::play`] still runs
+    /// and still resolves the same way, the packets still go out at the same pacing, and what the
+    /// far end decodes out of them is silence. Reception is untouched — [`Self::recv_digit`],
+    /// [`Self::record_until_idle`] and [`MediaSession::quality`] all keep working while muted —
+    /// and so is DTMF in the sending direction: [`Self::send_digits`] is an explicit act by this
+    /// endpoint, like a keypad tone on a handset, not something the microphone picked up.
+    ///
+    /// Emits [`CallEvent::Muted`] on the transition, and nothing when the call was already muted.
+    pub fn mute(&self) {
+        if !self.media.set_muted(true) {
+            self.events.emit(CallEvent::Muted);
+        }
+    }
+
+    /// Contribute audio to the far end again, undoing [`Self::mute`].
+    ///
+    /// Emits [`CallEvent::Unmuted`] on the transition, and nothing when the call was not muted.
+    /// Like [`Self::mute`] it sends nothing: there is no renegotiation to undo, because muting
+    /// never made one.
+    pub fn unmute(&self) {
+        if self.media.set_muted(false) {
+            self.events.emit(CallEvent::Unmuted);
+        }
+    }
+
+    /// Whether this side's outbound audio is muted.
+    ///
+    /// Local state, and a different question from [`Self::is_on_hold`], which reports what the
+    /// *far end* has signalled about the session.
+    #[must_use]
+    pub fn is_muted(&self) -> bool {
+        self.media.is_muted()
+    }
+
     /// Whether the media is encrypted (RFC 3711).
     ///
     /// Worth asking, and worth being able to answer without a packet capture. A call whose
@@ -495,6 +550,11 @@ impl Call {
                 .await
                 .map_err(Error::Io)?;
             let replacement = port.start(to.media_config());
+            // Mute is a property of the call, not of the session that happens to be carrying it
+            // (`M-18`). Without this a re-INVITE that moves the media — the far end changing
+            // address or codec, which this side did not ask for and cannot refuse — unmutes the
+            // call behind the application's back.
+            replacement.set_muted(self.media.is_muted());
             let previous = std::mem::replace(&mut self.media, replacement);
             previous.stop();
         }
