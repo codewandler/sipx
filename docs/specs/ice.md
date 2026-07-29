@@ -1,10 +1,15 @@
 # Spec: ICE
 
-**Status:** normative, and **ahead of the code** — nothing in this document is implemented yet.
+**Status:** normative, and **partly implemented**. The SDP grammar (§13) is
+[`sipx_sdp::ice`](../../crates/sipx-sdp/src/ice.rs) via `M-19`; the STUN profile (§11) is
+[`sipx_media::ice::stun`](../../crates/sipx-media/src/ice/stun.rs) via `M-20`; the agent (§2, §4 …
+§10, §14) is [`sipx_media::ice`](../../crates/sipx-media/src/ice/mod.rs) via `M-21`. Still unbuilt:
+the driver on the media port (`M-22`), restart (`M-23`) and the relayed candidate (`M-24`).
 `M-16` was cut as one story, stopped at this spec, and asked to be split; its `## Progress` records
-why and along which of these section boundaries. · **Crates:** `sipx-sdp` (grammar), `sipx-media`
-(agent and driver) · **Story:** [M-16](../stories/M-16-ice.md) · **Design:**
-[media](../designs/media.md)
+why and along which of these section boundaries. **Three sections have since been corrected by the
+stories implementing against them** — §6.2 by `M-19`, §11.1 by `M-20`, §6.5 by `M-21`; each carries
+a dated attribution. · **Crates:** `sipx-sdp` (grammar), `sipx-media` (agent and driver) ·
+**Story:** [M-16](../stories/M-16-ice.md) · **Design:** [media](../designs/media.md)
 
 ## 1. Normative references
 

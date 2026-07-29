@@ -9,6 +9,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The sans-IO ICE agent (`M-21`, RFC 8445)** — gather, prioritise, pair, order, check, resolve
+  role conflict and nominate, as a pure function of events: no socket, no clock read, time arriving
+  as a fired timer. Third of the six stories `M-16` was cut into; the driver that puts it on a real
+  port is `M-22`.
+  - §5.1.2.1's priority formula exactly, asserted against the number RFC 8839 prints in its own
+    example, and a check carries the peer-reflexive type preference rather than the candidate's own.
+  - Role conflict per §7.3.1.1, all seven rows plus the equal-tiebreaker case. **The tiebreaker
+    redrawn after a 487 is a fresh random value, not a derivation** — two agents applying the same
+    rule to the same value stay equal and oscillate roles forever.
+  - **Regular nomination only.** Aggressive nomination is deprecated by §4 and is absent with no
+    option to enable it; a controlled agent cannot encode `USE-CANDIDATE` at all.
+  - Corrects `docs/specs/ice.md` §6.5, which named only the success-driven unfreeze. Without RFC
+    8445 §6.1.4.2 step 2, a foundation whose one unfrozen pair *fails* stays frozen for the rest of
+    the session and ICE reports failure for a path it never finished checking.
 - **Many calls from one endpoint (`C-4`)** — a dispatcher owns the endpoint's receiver and routes
   each request to the call whose dialog it belongs to, so a host can hold N concurrent calls
   without writing its own demultiplexer. A new INVITE that matches no call surfaces as an
