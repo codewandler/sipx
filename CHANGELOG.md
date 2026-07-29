@@ -7,6 +7,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A client transaction now gets the key its own responses produce (`S-26`, RFC 3261 §17.1.3)** —
+  `from_sent_request` delegated to `from_request`, which is §17.2.3, the **server** rule. For a
+  cookieless `Via` that keys on the Request-URI and the `To` tag; a response has no Request-URI at
+  all and carries the tag the UAS added rather than the one the request was sent with. So the client
+  key never matched any of its own responses — and it did not fail, it retransmitted until Timer F
+  with the answer sitting in front of it.
+  - Both client derivations now run through one private `legacy_client`, so `from_sent_request` and
+    `from_response` agree **field for field by construction** rather than by inspection. The old doc
+    comment already claimed this property; now it holds.
+  - **`to_tag` is left empty for the client key, and the reason is better than symmetry**: two 200s
+    to one forked INVITE carry two different tags and must both reach the single transaction that
+    sent it, which RFC 6026's `Accepted` state requires. `from_request` is untouched, so §17.2.3's
+    use of the `To` tag to tell one legacy *server* transaction from another still holds.
+  - **Reached by an application supplying its own cookieless `Via`, not by an old peer.** A client
+    transaction's topmost `Via` is always sipx's own and the transport stamps `z9hG4bK` on it. The
+    story was first filed claiming the opposite; corrected before implementation.
+  - Found by `X-19`'s fuzzer, whose ignored regression loses its `#[ignore]` here — and the
+    campaign's suppression goes with the defect: `KNOWN_DEFECTS` is now empty, `Known` uninhabited,
+    and the slot-based masking deleted, so `UnroutableResponse` is reported on every slot. It was
+    keyed by slot rather than by cause, so removing it outright is what takes that breadth away.
+
 ### Added
 
 - **The transaction driver is fuzzed, not only the parser (`X-19`)** — four fuzz targets existed and
