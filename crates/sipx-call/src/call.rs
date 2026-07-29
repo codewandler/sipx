@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use bytes::Bytes;
-use sipx_media::{Codec, MediaPort, MediaSession};
+use sipx_media::{Codec, Interrupt, MediaPort, MediaSession, Playback};
 use sipx_sdp::{Capabilities, Direction, SessionDescription};
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
 use sipx_sip::session::{self, MinSe, SessionExpires};
@@ -146,25 +146,64 @@ impl Call {
             .map(|(digit, _duration)| digit)
     }
 
-    /// Play a clip, and report on the event stream when it stops.
+    /// Play a clip and wait for it, reporting on the event stream when it stops.
     ///
     /// Paced by the send loop, so this resolves when the audio has actually gone out rather than
     /// when it was queued. Emits [`CallEvent::PlaybackFinished`] either way, with `completed`
-    /// saying which happened: the clip ran to the end, or the call ended underneath it. A host
-    /// driving the call from its events needs that distinction — "the announcement finished" and
-    /// "the caller hung up during the announcement" lead to different next steps.
+    /// saying which happened: the clip ran to the end, or something cut it short. A host driving
+    /// the call from its events needs that distinction — "the announcement finished" and "the
+    /// caller hung up during the announcement" lead to different next steps.
     ///
     /// The packet size is the session's own, so a clip plays correctly under a codec whose clock
-    /// is not 8 kHz without the caller knowing the rate. `M-17` adds the *control* half — a queue,
-    /// stopping, and interrupting on a digit; this is the completion half those will report
-    /// through.
+    /// is not 8 kHz without the caller knowing the rate.
+    ///
+    /// This is [`Self::start_playback`] awaited, with [`Interrupt::Never`] — the clip runs to its
+    /// end whatever the far end presses. A caller that wants to stop it, or wants a keypress to,
+    /// needs the handle. Cancel-on-drop, like [`MediaSession::play`]: abandoning this future — a
+    /// `timeout` that fires, a lost `select!` — stops the clip rather than leaving it playing.
     pub async fn play(&self, samples: &[i16]) -> bool {
-        let completed = self
+        let playback = self
             .media
-            .play(samples, self.media.samples_per_packet())
-            .await;
-        self.events.emit(CallEvent::PlaybackFinished { completed });
-        completed
+            .start_playback(samples.to_vec(), Interrupt::Never);
+        let end = playback.play_out().await;
+        // Emitted from here rather than from a watcher task, so a caller that awaits this call
+        // can read the event immediately afterwards instead of racing a spawn.
+        self.events.emit(CallEvent::PlaybackFinished {
+            playback: playback.id(),
+            completed: end.completed(),
+        });
+        end.completed()
+    }
+
+    /// Start a clip and hand back a handle to it, without waiting (`M-17`).
+    ///
+    /// The primitive under "play a prompt and collect digits": the caller goes on to read digits
+    /// while the audio plays, and can reach back through the handle to stop the prompt — or ask
+    /// for [`Interrupt::OnDigit`] and have the far end's first keypress stop it. That keypress is
+    /// **not** consumed by interrupting; it arrives at [`Self::recv_digit`] like any other, which
+    /// is what makes the application contract's `gather{prompt, interruptible}`
+    /// (`docs/specs/app-contract.md` §6.2) buildable rather than a menu that eats the first digit
+    /// of every PIN.
+    ///
+    /// Clips **queue**: a second playback started while one is running begins when that one ends.
+    /// See [`MediaSession::start_playback`] for why, and for what a clip queued while another is
+    /// stopping does. The bound on stopping is [`Playback::STOP_BOUND_PACKETS`] packets.
+    ///
+    /// Reports [`CallEvent::PlaybackFinished`] for this playback however it ends, without the
+    /// caller having to await the handle — a watcher task does it, so a fire-and-forget
+    /// announcement is still observable to a host driving the call from its events.
+    pub fn start_playback(&self, samples: Vec<i16>, interrupt: Interrupt) -> Playback {
+        let playback = self.media.start_playback(samples, interrupt);
+        let watcher = playback.clone();
+        let emitter = self.events.emitter();
+        tokio::spawn(async move {
+            let end = watcher.finished().await;
+            emitter.emit(CallEvent::PlaybackFinished {
+                playback: watcher.id(),
+                completed: end.completed(),
+            });
+        });
+        playback
     }
 
     /// Record until the far end goes quiet for `idle`, and report the result on the event stream.

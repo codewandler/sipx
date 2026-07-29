@@ -21,6 +21,13 @@
 //! that gets clipped; and it makes "muted" indistinguishable on the wire from "the far end has
 //! gone away", which is the one thing a receiver most needs to be able to tell apart.
 //!
+//! **Playback is a queue with a handle on it** ([`MediaSession::start_playback`], story `M-17`).
+//! Clips are played in the order they were started, one at a time; a second clip started while
+//! one is running waits behind it rather than replacing it. Stopping is the explicit verb, and it
+//! reaches into the send path: a stopped clip's frames are dropped as the send loop takes them
+//! off the queue, so a stop costs at most [`Playback::STOP_BOUND_PACKETS`] packets on the wire
+//! rather than however many the queue happened to be holding.
+//!
 //! **The RFC 3550 §6 consequence, either way, is that the reports must stay truthful**, and that
 //! is what fixes *where* the gate goes rather than what it does. A sender report's packet and
 //! octet counts (§6.4.1) describe what this side put on the wire, and the far end's loss estimate
@@ -32,10 +39,18 @@
 //! merely quiet. Silence substitution keeps the numbers describing a stream that never stopped;
 //! had suppression been chosen, the same rule would have required the counters and the sequence
 //! number to stay put for the duration.
+//!
+//! Dropping a stopped clip's frames is not the case that rule forbids, and the difference is
+//! worth being exact about. A mute is a session that is *still talking* and must go on saying
+//! something; a stopped playback is a session with **nothing left to say**, which is the state a
+//! session is in whenever the application is not feeding it — the send loop simply parks on its
+//! queue. So the counters and the sequence number stay put, exactly as they do between clips, and
+//! what a stop leaves behind is silence in the ordinary sense: no packets, no gap, nothing for a
+//! receiver to score.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -44,7 +59,7 @@ use sipx_rtp::dtmf::{self, Digit, Event as DtmfEvent};
 use sipx_rtp::rtcp::{ReceiverReport, Rtcp, Sdes, StreamStats};
 use sipx_rtp::{JitterBuffer, Packet};
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 
 /// Which G.711 flavour a session carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,7 +328,16 @@ impl Config {
 #[derive(Debug)]
 enum Frame {
     /// One packet's worth of samples.
-    Audio(Vec<i16>),
+    ///
+    /// `playback` is the stop signal of the clip this frame belongs to, when it belongs to one
+    /// (`M-17`). The send loop reads it and drops the frame if that playback has been stopped,
+    /// which is what makes a stop cost a bounded number of packets rather than the whole depth of
+    /// this queue. `None` for a frame the application sent directly through
+    /// [`MediaSession::send`], which nothing can cancel.
+    Audio {
+        samples: Vec<i16>,
+        playback: Option<Arc<Stop>>,
+    },
     /// One telephone event, tagged with the keypress it belongs to.
     ///
     /// The tag is what holds a tone together. Every packet of one keypress must carry the same
@@ -381,6 +405,15 @@ pub struct MediaSession {
     relay: Arc<AtomicBool>,
     /// Whether this side's outbound audio is gated to silence (`M-18`).
     muted: Arc<AtomicBool>,
+    /// Clips waiting to be played, in the order they were started (`M-17`).
+    clips: mpsc::Sender<Clip>,
+    /// Names the next playback. Never reused within a session.
+    playbacks: AtomicU64,
+    /// How many started clips have not yet resolved, for [`Self::flush`].
+    outstanding: Arc<AtomicUsize>,
+    /// A counter of full keypresses received, bumped by the receive loop after the digit is on
+    /// its way to the application. What an [`Interrupt::OnDigit`] playback watches.
+    keypresses: Arc<watch::Sender<u64>>,
     codec: Codec,
     local_addr: SocketAddr,
     samples_per_packet: usize,
@@ -419,7 +452,8 @@ struct Feedback {
     received_at: Option<tokio::time::Instant>,
 }
 
-/// The stop signal for a session's tasks.
+/// A stop signal: for a session's tasks, and — the same shape, one scope down — for one
+/// playback (`M-17`).
 ///
 /// A flag *and* a notify. `Notify::notify_waiters` only wakes tasks already parked on it, so a
 /// loop that happens to be blocked on its channel when stop is called would never learn — and
@@ -446,6 +480,227 @@ impl Stop {
             return;
         }
         self.notify.notified().await;
+    }
+}
+
+/// Identifies one playback on one session.
+///
+/// Carried by [`Playback`] and by the completion event a call reports it through, so a caller
+/// that started several clips can tell which of them the report is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PlaybackId(u64);
+
+impl std::fmt::Display for PlaybackId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// How a playback ended.
+///
+/// A caller needs to be able to tell these apart: "the announcement finished", "the application
+/// cut it off", "the caller pressed a key", "the call went away underneath it" and "it never
+/// played at all" lead to different next steps. [`Self::completed`] is the one-bit answer for
+/// callers that only need to know whether the clip ran out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackEnd {
+    /// The whole clip reached the send queue.
+    Completed,
+    /// [`Playback::stop`] cut it short.
+    Stopped,
+    /// A keypress from the far end cut it short — it was started [`Interrupt::OnDigit`] and the
+    /// far end pressed a key (RFC 4733). The keypress itself is still delivered to whoever is
+    /// reading [`MediaSession::recv_digit`]; interrupting consumes nothing.
+    Interrupted,
+    /// The session stopped, or the call ended, under a playback still running.
+    SessionEnded,
+    /// The playback queue was full ([`Playback::QUEUE_DEPTH`] clips already waiting), so nothing was
+    /// played at all.
+    Refused,
+}
+
+impl PlaybackEnd {
+    /// Whether the clip ran to its end, as opposed to being cut short by anything.
+    #[must_use]
+    pub fn completed(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+}
+
+/// Whether a keypress from the far end cuts a playback short.
+///
+/// This is the switch under the application contract's `gather{prompt, interruptible}`
+/// (`docs/specs/app-contract.md` §6.2): the prompt of a gather is interruptible by definition,
+/// and a bare `play` is not unless it says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Interrupt {
+    /// The clip plays to its end whatever the far end presses.
+    #[default]
+    Never,
+    /// The first full keypress (RFC 4733) received *after this clip reaches the head of the
+    /// queue* stops it.
+    ///
+    /// After, not before: a key pressed while an earlier clip was still playing belongs to that
+    /// clip, and letting it arm this one would have a single keypress skip a whole prompt
+    /// sequence.
+    OnDigit,
+}
+
+/// A playback in progress, or one that has already ended.
+///
+/// Returned by [`MediaSession::start_playback`] without waiting for the clip: the point of the
+/// handle is that the caller goes on to do something else — collect digits, watch for a hangup —
+/// while the audio plays, and can reach back to stop it.
+///
+/// Cloneable, and deliberately so: the handle is a control surface, not ownership of a resource.
+/// A call hands one clone to the application and keeps another to report the playback's end on
+/// its event stream.
+#[derive(Debug, Clone)]
+pub struct Playback {
+    id: PlaybackId,
+    stop: Arc<Stop>,
+    end: watch::Receiver<Option<PlaybackEnd>>,
+}
+
+impl Playback {
+    /// How many packets of a stopped playback may still reach the wire after it is cut.
+    ///
+    /// **Two**, at 20 ms each by default — a number rather than "promptly", because the whole
+    /// difference between playback that can be controlled and playback that cannot is whether an
+    /// application can say how long barge-in takes.
+    ///
+    /// Where it comes from: [`MediaSession::start_playback`] runs ahead of the wire, so when a
+    /// clip is stopped the send queue is generally holding its next few dozen packets. Those are
+    /// not sent. The send loop tests each frame's playback against this signal as it takes the
+    /// frame off the queue and discards a stopped one *without spending a packet interval on it*,
+    /// so the whole backlog drains inside one tick. What can still go out is the packet the send
+    /// loop had already committed to the socket when the signal was set, and — allowing for the
+    /// stop landing between taking a frame and sending it — the one after it.
+    ///
+    /// The same bound covers [`Interrupt::OnDigit`]: an interruption sets the same signal, one
+    /// task hop after the keypress is delivered.
+    pub const STOP_BOUND_PACKETS: u64 = 2;
+
+    /// How many clips may be waiting behind the one playing before further ones are refused.
+    ///
+    /// A bound rather than an unbounded queue because the caller of
+    /// [`MediaSession::start_playback`] is not always a program somebody wrote by hand — under the
+    /// application contract it is a remote app sending instructions, and a queue that grows
+    /// without limit turns a buggy app into this process's memory problem. Deep enough that no
+    /// prompt sequence a call actually has time for will reach it.
+    pub const QUEUE_DEPTH: usize = 32;
+
+    /// Which playback this is.
+    #[must_use]
+    pub fn id(&self) -> PlaybackId {
+        self.id
+    }
+
+    /// Cut this playback short.
+    ///
+    /// Takes effect within [`Self::STOP_BOUND_PACKETS`] packets. Idempotent, and harmless on a
+    /// playback that has already ended. Does not wait: [`Self::finished`] is how a caller learns
+    /// it has landed.
+    pub fn stop(&self) {
+        self.stop.stop();
+    }
+
+    /// Whether this playback has been asked to stop — by [`Self::stop`] or by a keypress.
+    #[must_use]
+    pub fn is_stopped(&self) -> bool {
+        self.stop.is_stopped()
+    }
+
+    /// How it ended, if it has, without waiting.
+    #[must_use]
+    pub fn end(&self) -> Option<PlaybackEnd> {
+        *self.end.borrow()
+    }
+
+    /// Wait for it to end, and stop it if the wait itself is abandoned.
+    ///
+    /// The difference from [`Self::finished`] is what happens when *this future* is dropped
+    /// before the clip ends — a caller that wrapped the wait in a `timeout`, or lost a `select!`.
+    /// It stops the playback, because that is what abandoning a `play` has always meant: the
+    /// audio stops with the caller's interest in it, rather than playing on out of a task the
+    /// caller no longer holds a handle to.
+    ///
+    /// [`MediaSession::play`] is this method, which is how it keeps that property now that the
+    /// clip is fed by a task of its own rather than by the caller.
+    pub async fn play_out(&self) -> PlaybackEnd {
+        /// Stops the playback if the wait is dropped before it settles. Not on the way out of a
+        /// clip that ended on its own: the last packets of a completed clip are still in the send
+        /// queue, and stopping then would discard them and clip the tail off every announcement.
+        struct StopIfAbandoned<'a>(&'a Playback);
+        impl Drop for StopIfAbandoned<'_> {
+            fn drop(&mut self) {
+                if self.0.end().is_none() {
+                    self.0.stop();
+                }
+            }
+        }
+
+        let guard = StopIfAbandoned(self);
+        guard.0.finished().await
+    }
+
+    /// Wait for it to end, and say how. Observation only: dropping this wait does not touch the
+    /// playback, which goes on to whatever end it was going to reach.
+    ///
+    /// Resolves when the decision is made rather than when the last packet is on the wire — which
+    /// is what a caller wants of an interruption, since the next thing it does is act on the
+    /// keypress. The stopped clip's remaining audio is already guaranteed not to be sent by then.
+    ///
+    /// Takes `&self`, so several parties may await the same playback.
+    pub async fn finished(&self) -> PlaybackEnd {
+        let mut end = self.end.clone();
+        loop {
+            let settled = *end.borrow_and_update();
+            if let Some(settled) = settled {
+                return settled;
+            }
+            if end.changed().await.is_err() {
+                // The queue task is gone without having recorded an end, which only happens when
+                // the session went away underneath this clip.
+                return PlaybackEnd::SessionEnded;
+            }
+        }
+    }
+}
+
+/// One clip on its way to the send queue, as the playback task receives it.
+#[derive(Debug)]
+struct Clip {
+    samples: Vec<i16>,
+    samples_per_packet: usize,
+    interrupt: Interrupt,
+    /// Shared with every [`Frame::Audio`] this clip produces, so stopping the playback also
+    /// discards whatever of it the send queue is already holding.
+    stop: Arc<Stop>,
+    end: watch::Sender<Option<PlaybackEnd>>,
+    /// How many full keypresses the receive loop has delivered. Watched, not consumed: an
+    /// interruption must not take the digit away from the application.
+    keypresses: watch::Receiver<u64>,
+    /// How many clips the session has accepted and not yet resolved, so
+    /// [`MediaSession::flush`] can tell a queue with work left in it from an empty one.
+    /// Decremented by this clip's destructor, so it balances whether the clip played, was
+    /// refused, or was dropped with the session.
+    outstanding: Arc<AtomicUsize>,
+}
+
+impl Clip {
+    /// Record how this clip ended, for whoever is holding its [`Playback`].
+    fn finish(&self, end: PlaybackEnd) {
+        // Failure means every handle has been dropped, which is a caller that started a clip and
+        // never looked back — a legitimate thing to do with an announcement.
+        let _ = self.end.send(Some(end));
+    }
+}
+
+impl Drop for Clip {
+    fn drop(&mut self) {
+        self.outstanding.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -555,6 +810,7 @@ impl MediaSession {
         let relay = Arc::new(AtomicBool::new(false));
         let muted = Arc::new(AtomicBool::new(false));
         let (digits_tx, digits_rx) = mpsc::channel::<(Digit, Duration)>(32);
+        let keypresses = Arc::new(watch::Sender::new(0u64));
 
         let sent = Arc::new(AtomicU64::new(0));
         let received = Arc::new(AtomicU64::new(0));
@@ -593,13 +849,17 @@ impl MediaSession {
                 stop: Arc::clone(&stop),
             },
         ));
+        let clips_tx = spawn_playback_queue(&outgoing_tx, &stop);
         tokio::spawn(receive_loop(
             Arc::clone(socket),
             Inbound {
                 audio: incoming_tx,
                 encoded: encoded_tx,
                 relay: Arc::clone(&relay),
-                digits: digits_tx,
+                digits: Keypresses {
+                    to: digits_tx,
+                    arrivals: Arc::clone(&keypresses),
+                },
                 remote: Arc::clone(&remote),
                 config,
                 received: Arc::clone(&received),
@@ -643,6 +903,10 @@ impl MediaSession {
             encoded: Mutex::new(encoded_rx),
             relay,
             muted,
+            clips: clips_tx,
+            playbacks: AtomicU64::new(0),
+            outstanding: Arc::new(AtomicUsize::new(0)),
+            keypresses,
             codec: config_codec,
             local_addr,
             samples_per_packet,
@@ -666,7 +930,13 @@ impl MediaSession {
     ///
     /// Queued rather than sent: the pacing timer decides when it goes out.
     pub async fn send(&self, samples: Vec<i16>) -> bool {
-        self.outgoing.send(Frame::Audio(samples)).await.is_ok()
+        self.outgoing
+            .send(Frame::Audio {
+                samples,
+                playback: None,
+            })
+            .await
+            .is_ok()
     }
 
     /// Send a DTMF digit, held for `duration`.
@@ -805,24 +1075,94 @@ impl MediaSession {
         self.samples_per_packet
     }
 
-    /// Send a whole clip, paced by the send loop.
+    /// Send a whole clip, paced by the send loop, and wait for it.
     ///
-    /// Returns whether the clip reached the end. `false` means the send queue closed part way —
-    /// the call ended, or the session was stopped, under a playback still running. The caller
-    /// needs to be able to tell those apart: "the clip finished" and "the clip was cut off" are
-    /// different things to anything waiting on the playback, and returning `()` made them
-    /// indistinguishable.
+    /// Returns whether the clip reached the end. `false` means it did not: the send queue closed
+    /// part way — the call ended, or the session was stopped, under a playback still running — or
+    /// something cut it short. The caller needs to be able to tell those apart: "the clip
+    /// finished" and "the clip was cut off" are different things to anything waiting on the
+    /// playback, and returning `()` made them indistinguishable.
+    ///
+    /// This is [`Self::start_playback`] with the handle thrown away and the answer awaited
+    /// through [`Playback::play_out`], so it stays cancel-on-drop: a caller that wraps it in a
+    /// `timeout` still stops the audio when the timeout fires. A caller that wants to stop the
+    /// clip explicitly, or to have a keypress stop it, needs the handle.
     pub async fn play(&self, samples: &[i16], samples_per_packet: usize) -> bool {
-        for chunk in samples.chunks(samples_per_packet) {
-            let mut frame = chunk.to_vec();
-            // The last chunk may be short. Padding with silence keeps every packet the same
-            // size, which is what a far-end jitter buffer expects.
-            frame.resize(samples_per_packet, 0);
-            if !self.send(frame).await {
-                return false;
-            }
+        self.start_clip(samples.to_vec(), samples_per_packet, Interrupt::Never)
+            .play_out()
+            .await
+            .completed()
+    }
+
+    /// Start a clip and hand back a handle to it, without waiting (`M-17`).
+    ///
+    /// The clip is played at this session's own packet size, so it is right under a codec whose
+    /// clock is not 8 kHz without the caller knowing the rate.
+    ///
+    /// # Clips queue; they do not replace
+    ///
+    /// Starting a second playback while one is running puts it **behind** the one playing, and it
+    /// begins when that one ends — however that one ends. This is the choice the story left open,
+    /// and it is recorded in [`docs/designs/app-sdk.md`](../../../docs/designs/app-sdk.md). The
+    /// reasoning in short: replacement would make "stop" an implicit side effect of "play", so an
+    /// application that wanted a prompt followed by a menu would hear only the menu, and the first
+    /// clip's cancellation would be an event nobody asked for. Replacement is still available and
+    /// still says what it means — [`Playback::stop`] the one playing, then start the next.
+    ///
+    /// Queueing while a clip is stopping is the case worth naming, because it is what barge-in
+    /// does: stop the prompt, then immediately play something else. The clip being stopped
+    /// releases the queue at once and its unsent packets are discarded rather than played, so the
+    /// new clip starts within [`Playback::STOP_BOUND_PACKETS`] packets — it does not have to wait
+    /// out the backlog of the clip it replaced.
+    ///
+    /// A queue [`Playback::QUEUE_DEPTH`] deep. A clip that arrives at a full queue is not played and its
+    /// handle resolves immediately as [`PlaybackEnd::Refused`], rather than being silently
+    /// dropped or waiting for room that a live call may never have.
+    pub fn start_playback(&self, samples: Vec<i16>, interrupt: Interrupt) -> Playback {
+        self.start_clip(samples, self.samples_per_packet, interrupt)
+    }
+
+    /// Queue a clip at an explicit packet size.
+    ///
+    /// Separate from [`Self::start_playback`] only because [`Self::play`] takes the size from its
+    /// caller and has done since before this session knew its own.
+    fn start_clip(
+        &self,
+        samples: Vec<i16>,
+        samples_per_packet: usize,
+        interrupt: Interrupt,
+    ) -> Playback {
+        let id = PlaybackId(self.playbacks.fetch_add(1, Ordering::Relaxed));
+        let stop = Arc::new(Stop::default());
+        let (end_tx, end_rx) = watch::channel(None);
+        let playback = Playback {
+            id,
+            stop: Arc::clone(&stop),
+            end: end_rx,
+        };
+
+        // Counted before the hand-off, so a `flush` racing this call never sees a queue it
+        // believes is empty. The clip's destructor is what takes it back down again, on every
+        // path out including the two below.
+        self.outstanding.fetch_add(1, Ordering::SeqCst);
+        let clip = Clip {
+            samples,
+            samples_per_packet: samples_per_packet.max(1),
+            interrupt,
+            stop,
+            end: end_tx,
+            keypresses: self.keypresses.subscribe(),
+            outstanding: Arc::clone(&self.outstanding),
+        };
+
+        // `try_send` rather than an await, so starting a playback is not itself something that
+        // can park — a handle the caller cannot yet hold is a handle it cannot stop.
+        match self.clips.try_send(clip) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(clip)) => clip.finish(PlaybackEnd::Refused),
+            Err(mpsc::error::TrySendError::Closed(clip)) => clip.finish(PlaybackEnd::SessionEnded),
         }
-        true
+        playback
     }
 
     /// How many packets have been sent.
@@ -904,7 +1244,11 @@ impl MediaSession {
     /// `within` is given up on, so this cannot hold a caller open indefinitely.
     pub async fn flush(&self, within: Duration) {
         let deadline = tokio::time::Instant::now() + within;
-        while self.outgoing.capacity() < self.outgoing.max_capacity() {
+        // Both queues: a clip started but not yet fed to the send loop has nothing in the send
+        // queue to see, and a flush that only looked there would hang up over the top of it.
+        while self.outstanding.load(Ordering::SeqCst) > 0
+            || self.outgoing.capacity() < self.outgoing.max_capacity()
+        {
             if tokio::time::Instant::now() >= deadline || self.stop.is_stopped() {
                 return;
             }
@@ -953,7 +1297,7 @@ async fn flush(
     buffer: &mut JitterBuffer,
     to: &Delivery<'_>,
     decoding: &mut Decoding,
-    digits: &mpsc::Sender<(Digit, Duration)>,
+    digits: &Keypresses,
     dtmf: &mut sipx_rtp::dtmf::Receiver,
     config: &Config,
     stop: &Stop,
@@ -1174,18 +1518,9 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
             _ = tick.tick() => {}
         }
 
-        // Both awaits check the stop signal. A loop parked on its channel when the call is
-        // hung up would otherwise go on sending audio into a torn-down call.
-        let frame = tokio::select! {
-            () = stop.wait() => return,
-            received = outgoing.recv() => match received {
-                Some(frame) => frame,
-                None => return,
-            },
-        };
-        if stop.is_stopped() {
+        let Some(frame) = next_frame(&mut outgoing, &stop).await else {
             return;
-        }
+        };
 
         // The mute gate goes here — before the packet is built, and therefore before the
         // sequence number, the send counters and the sender report's octet count have been moved
@@ -1193,7 +1528,7 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         let frame = gated(frame, &muted, config.samples_per_packet());
 
         let (packet, advance) = match &frame {
-            Frame::Audio(samples) => {
+            Frame::Audio { samples, .. } => {
                 let Some(built) =
                     clock.audio(&mut encoding, config.wire_payload_type(), ssrc, samples)
                 else {
@@ -1277,6 +1612,31 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
     }
 }
 
+/// The next frame the send loop should put on the wire, or `None` when there will not be another.
+///
+/// Both awaits check the stop signal. A loop parked on its channel when the call is hung up would
+/// otherwise go on sending audio into a torn-down call.
+///
+/// Frames belonging to a stopped playback are skipped here rather than sent, and skipping one
+/// costs nothing — this takes the next frame straight away rather than returning to the caller's
+/// pacing tick. That is what bounds a stop at [`Playback::STOP_BOUND_PACKETS`]: whatever backlog
+/// the queue was holding for the stopped clip drains inside one packet interval, and none of it
+/// reaches the wire.
+async fn next_frame(outgoing: &mut mpsc::Receiver<Frame>, stop: &Stop) -> Option<Frame> {
+    loop {
+        let frame = tokio::select! {
+            () = stop.wait() => return None,
+            received = outgoing.recv() => received?,
+        };
+        if stop.is_stopped() {
+            return None;
+        }
+        if !discarded(&frame) {
+            return Some(frame);
+        }
+    }
+}
+
 /// One frame as the session actually sends it: itself, or what a muted session puts in its place
 /// (`M-18`).
 ///
@@ -1303,10 +1663,146 @@ fn gated(frame: Frame, muted: &AtomicBool, samples_per_packet: usize) -> Frame {
         return frame;
     }
     match frame {
-        Frame::Audio(samples) => Frame::Audio(vec![0; samples.len()]),
-        Frame::Encoded { .. } => Frame::Audio(vec![0; samples_per_packet]),
+        Frame::Audio { samples, playback } => Frame::Audio {
+            samples: vec![0; samples.len()],
+            playback,
+        },
+        Frame::Encoded { .. } => Frame::Audio {
+            samples: vec![0; samples_per_packet],
+            playback: None,
+        },
         event @ Frame::Dtmf { .. } => event,
     }
+}
+
+/// Whether this frame belongs to a playback that has been stopped, and so must not be sent
+/// (`M-17`).
+///
+/// Read *before* the packet is built, for the same RFC 3550 §6 reason the mute gate is
+/// ([`gated`]): the sequence number, the send counters and the sender report's octet count must
+/// describe packets that actually went out. A frame discarded here never touches any of them,
+/// which leaves the stream in exactly the state it is in whenever the application has nothing to
+/// say — no gap for the far end to score as loss, because a gap needs a sequence number that was
+/// allocated and never sent.
+fn discarded(frame: &Frame) -> bool {
+    matches!(frame, Frame::Audio { playback: Some(playback), .. } if playback.is_stopped())
+}
+
+/// Start the playback queue and hand back the end a session keeps (`M-17`).
+fn spawn_playback_queue(outgoing: &mpsc::Sender<Frame>, stop: &Arc<Stop>) -> mpsc::Sender<Clip> {
+    let (clips_tx, clips_rx) = mpsc::channel::<Clip>(Playback::QUEUE_DEPTH);
+    tokio::spawn(playback_loop(clips_rx, outgoing.clone(), Arc::clone(stop)));
+    clips_tx
+}
+
+/// The playback queue: one clip at a time, in the order they were started (`M-17`).
+///
+/// One task owns it, which is what makes "clips queue" true by construction: the order clips are
+/// handed to the channel is the order they reach the send queue, and no two of them can ever
+/// interleave their packets.
+///
+/// A task rather than a lock around the send queue. One owner is what makes the ordering a
+/// property of the type instead of something every caller has to be careful about: two clips
+/// started at once cannot interleave their packets, and the order they were started in is the
+/// order the far end hears them, whatever order the callers' tasks happened to be scheduled in.
+async fn playback_loop(
+    mut clips: mpsc::Receiver<Clip>,
+    outgoing: mpsc::Sender<Frame>,
+    stop: Arc<Stop>,
+) {
+    loop {
+        let clip = tokio::select! {
+            () = stop.wait() => return,
+            next = clips.recv() => match next {
+                Some(clip) => clip,
+                None => return,
+            },
+        };
+
+        let end = feed(&clip, &outgoing, &stop).await;
+        clip.finish(end);
+        if end == PlaybackEnd::SessionEnded {
+            // Whatever is still queued goes down with the receiver, and every handle waiting on
+            // one of those clips learns the same thing when its sender drops.
+            return;
+        }
+    }
+}
+
+/// Hand one clip to the send queue, packet by packet, until it runs out or something cuts it
+/// short.
+async fn feed(clip: &Clip, outgoing: &mpsc::Sender<Frame>, stop: &Stop) -> PlaybackEnd {
+    // Armed at the head of the queue, not when the clip was started: a key pressed while an
+    // earlier clip was still playing belongs to that clip. Reading the counter here is what marks
+    // everything before this moment as already seen.
+    let mut keypresses = match clip.interrupt {
+        Interrupt::OnDigit => {
+            let mut keypresses = clip.keypresses.clone();
+            let _seen = *keypresses.borrow_and_update();
+            Some(keypresses)
+        }
+        Interrupt::Never => None,
+    };
+
+    for chunk in clip.samples.chunks(clip.samples_per_packet) {
+        if clip.stop.is_stopped() {
+            return PlaybackEnd::Stopped;
+        }
+        let mut samples = chunk.to_vec();
+        // The last chunk may be short. Padding with silence keeps every packet the same size,
+        // which is what a far-end jitter buffer expects.
+        samples.resize(clip.samples_per_packet, 0);
+        let frame = Frame::Audio {
+            samples,
+            playback: Some(Arc::clone(&clip.stop)),
+        };
+
+        // Biased so that a stop or a keypress wins over queueing one more packet. Without it a
+        // clip whose send queue happens to have room would go on feeding it for as long as the
+        // scheduler kept picking that branch.
+        tokio::select! {
+            biased;
+            () = stop.wait() => return PlaybackEnd::SessionEnded,
+            () = clip.stop.wait() => return PlaybackEnd::Stopped,
+            () = keypress(keypresses.as_mut()) => {
+                // Set here rather than left to the caller: it is what tells the send loop to
+                // discard the packets of this clip it is already holding, and until it is set
+                // they would go out.
+                clip.stop.stop();
+                return PlaybackEnd::Interrupted;
+            }
+            queued = outgoing.send(frame) => {
+                if queued.is_err() {
+                    return PlaybackEnd::SessionEnded;
+                }
+            }
+        }
+    }
+    PlaybackEnd::Completed
+}
+
+/// Resolve when the far end presses a key, or never.
+///
+/// Never in two cases, and they are the same case to a caller: the clip was not started
+/// interruptible, or the receive loop is gone — in which case no keypress is coming and treating
+/// the channel's closure as one would cut every remaining clip short at the end of a call.
+async fn keypress(keypresses: Option<&mut watch::Receiver<u64>>) {
+    if let Some(keypresses) = keypresses
+        && keypresses.changed().await.is_ok()
+    {
+        return;
+    }
+    std::future::pending::<()>().await;
+}
+
+/// Where a keypress goes: the application's channel, and the tick an interruptible playback
+/// watches.
+///
+/// One type rather than two parameters, because the ordering between them is load-bearing — see
+/// [`deliver`].
+struct Keypresses {
+    to: mpsc::Sender<(Digit, Duration)>,
+    arrivals: Arc<watch::Sender<u64>>,
 }
 
 /// Everything the receive loop needs, grouped because eight positional arguments is a
@@ -1316,7 +1812,7 @@ struct Inbound {
     audio: mpsc::Sender<Vec<i16>>,
     encoded: mpsc::Sender<Encoded>,
     relay: Arc<AtomicBool>,
-    digits: mpsc::Sender<(Digit, Duration)>,
+    digits: Keypresses,
     remote: Arc<Mutex<SocketAddr>>,
     config: Config,
     received: Arc<AtomicU64>,
@@ -1729,7 +2225,7 @@ struct Delivery<'a> {
 async fn deliver(
     to: &Delivery<'_>,
     decoding: &mut Decoding,
-    digits: &mpsc::Sender<(Digit, Duration)>,
+    digits: &Keypresses,
     dtmf: &mut sipx_rtp::dtmf::Receiver,
     config: &Config,
     stop: &Stop,
@@ -1750,7 +2246,20 @@ async fn deliver(
             // A full channel means the application is not reading digits. Dropping is
             // right: a keypress delivered late is worse than one not delivered, since the
             // application has already moved on.
-            let _ = digits.try_send((digit, Duration::from_millis(millis)));
+            if digits
+                .to
+                .try_send((digit, Duration::from_millis(millis)))
+                .is_ok()
+            {
+                // Announced only once the digit is on its way to the application, and only when
+                // it got there (`M-17`). This is the ordering that makes interrupt-on-digit safe
+                // to build a `gather` on: a playback can only ever be cut short by a keypress
+                // that the application will go on to read, so the digit that stopped the prompt
+                // is never the one the prompt swallowed.
+                digits
+                    .arrivals
+                    .send_modify(|count| *count = count.wrapping_add(1));
+            }
         }
         return true;
     }
@@ -1979,6 +2488,98 @@ mod tests {
             g711::ulaw_encode_all(&recorded),
             "muting this side must not touch what it hears"
         );
+    }
+
+    /// A queue has to say what it does when it is full. Refusing, with the handle resolving to
+    /// say so, beats the two alternatives: silently dropping the clip leaves the caller waiting
+    /// on audio that is never coming, and waiting for room parks a call's control path on a
+    /// backlog it may never work through.
+    #[tokio::test]
+    async fn a_full_playback_queue_refuses_rather_than_dropping_or_waiting() {
+        let (left, _right) = pair(Codec::Pcmu).await;
+
+        // One clip reaches the head of the queue and starts feeding, so the queue proper only
+        // has room for `Playback::QUEUE_DEPTH` behind it.
+        let mut started = Vec::new();
+        for _ in 0..=Playback::QUEUE_DEPTH + 1 {
+            started.push(left.start_playback(tone(160 * 200), Interrupt::Never));
+        }
+
+        let refused = started
+            .iter()
+            .filter(|playback| playback.end() == Some(PlaybackEnd::Refused))
+            .count();
+        assert!(
+            refused > 0,
+            "a queue {} deep must refuse the clip past its depth rather than \
+             growing without bound",
+            Playback::QUEUE_DEPTH
+        );
+        assert!(
+            started
+                .first()
+                .is_some_and(|playback| playback.end().is_none()),
+            "and it must refuse the newest clip, not the one already playing"
+        );
+    }
+
+    /// A playback started on a session that has already stopped resolves at once rather than
+    /// hanging. The `Call` this reports through has no other way to learn it will never play.
+    #[tokio::test]
+    async fn a_playback_started_on_a_stopped_session_resolves_at_once() {
+        let (left, _right) = pair(Codec::Pcmu).await;
+        left.stop();
+        // The playback task takes the stop signal on its next poll; until then a clip is accepted
+        // and then resolved by the task itself.
+        let playback = left.start_playback(tone(320), Interrupt::Never);
+        let end = tokio::time::timeout(Duration::from_secs(2), playback.finished())
+            .await
+            .expect("a stopped session must not leave a playback hanging");
+        assert_eq!(end, PlaybackEnd::SessionEnded);
+    }
+
+    /// `play` is cancel-on-drop, and has to stay that way: callers wrap it in a `timeout` to cap
+    /// how long a clip may run, and feeding the clip from a task of its own would have quietly
+    /// turned that into a timeout that returns while the audio plays on.
+    #[tokio::test]
+    async fn abandoning_a_play_stops_the_clip_rather_than_leaving_it_running() {
+        let (left, right) = pair(Codec::Pcmu).await;
+        // Far longer than the timeout, so a clip that survives it is unmistakable.
+        let long = tone(160 * 250);
+
+        let capped = tokio::time::timeout(Duration::from_millis(60), left.play(&long, 160)).await;
+        assert!(capped.is_err(), "the timeout is what ends this play");
+
+        let before = left.packets_sent();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            left.packets_sent() - before <= Playback::STOP_BOUND_PACKETS,
+            "abandoning the play must stop the clip, not leave it going"
+        );
+        assert!(
+            right.packets_received() < 250,
+            "the far end heard the whole clip despite the timeout"
+        );
+    }
+
+    /// A frame that belongs to no playback is never discarded — [`MediaSession::send`] is the
+    /// path a bridge and a conference mixer use, and nothing there has a handle to stop.
+    #[test]
+    fn only_a_stopped_playback_s_frames_are_discarded() {
+        let stop = Arc::new(Stop::default());
+        let untagged = Frame::Audio {
+            samples: vec![0; 160],
+            playback: None,
+        };
+        let tagged = Frame::Audio {
+            samples: vec![0; 160],
+            playback: Some(Arc::clone(&stop)),
+        };
+        assert!(!discarded(&untagged));
+        assert!(!discarded(&tagged));
+        stop.stop();
+        assert!(discarded(&tagged));
+        assert!(!discarded(&untagged));
     }
 
     #[tokio::test]
