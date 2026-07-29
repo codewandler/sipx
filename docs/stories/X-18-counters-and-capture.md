@@ -2,8 +2,8 @@
 id: X-18
 title: Count what the stack discards, and capture what it sends
 pillar: Build
-status: backlog
-priority:
+status: ready
+priority: 10
 design: docs/designs/sip-transport.md
 epic: sip-transport
 areas: [sipx-transport, sipx-media, sipx-testkit]

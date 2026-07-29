@@ -2,8 +2,8 @@
 id: C-2
 title: Carry media on an early dialog
 pillar: Media
-status: backlog
-priority:
+status: ready
+priority: 6
 design: docs/designs/call.md
 epic: call
 areas: [sipx-call, sipx-media]

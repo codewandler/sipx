@@ -2,8 +2,8 @@
 id: T-22
 title: Implement overload control
 pillar: Signalling
-status: backlog
-priority:
+status: ready
+priority: 14
 design: docs/designs/sip-transport.md
 epic: conformance
 areas: [sipx-transport, sipx-sip]

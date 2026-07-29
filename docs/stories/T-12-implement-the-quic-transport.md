@@ -2,8 +2,8 @@
 id: T-12
 title: Implement the QUIC transport
 pillar: Signalling
-status: backlog
-priority: 12
+status: ready
+priority: 8
 design: docs/specs/sip-quic.md
 epic: quic
 areas: [sipx-transport]

@@ -2,8 +2,8 @@
 id: X-16
 title: Assert against the RFC 5118 IPv6 torture corpus
 pillar: Build
-status: backlog
-priority:
+status: ready
+priority: 12
 design:
 epic: conformance
 areas: [sipx-testkit, sipx-sip, sipx-sdp]

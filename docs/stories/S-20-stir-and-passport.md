@@ -2,8 +2,8 @@
 id: S-20
 title: Sign and verify caller identity with STIR
 pillar: Signalling
-status: backlog
-priority:
+status: ready
+priority: 13
 design:
 epic: conformance
 areas: [sipx-sip, sipx-ua]
