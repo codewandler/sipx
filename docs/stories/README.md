@@ -40,6 +40,7 @@ and a scripted app. `A-1` is ready. Then the milestones below, each argued for i
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
+- [X-22 — Put the MSRV check in the documented gate](X-22-msrv-in-the-documented-gate.md) · Build · CI has an msrv job the gate does not name, so a green local gate lied through two releases
 
 ### The application host
 _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
