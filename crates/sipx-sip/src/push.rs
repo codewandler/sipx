@@ -261,14 +261,26 @@ impl Indicators {
     }
 
     /// Pick the three push indicators out of a parsed indicator list.
+    ///
+    /// Two readings of a valueless indicator, because the three do not mean the same kind of
+    /// thing. `sip.pns` and `sip.pnspurr` **name** something — a push service, a binding — and a
+    /// name with no characters in it names nothing; kept, it would answer
+    /// [`crate::push::Indicators::pns`] with a service that compares equal to the empty string,
+    /// which is a service no client asked for and every client with an empty provider matches.
+    /// `sip.pnsreg` asks for something, and the asking is the whole of it: present without a
+    /// readable interval it still says the registrar wants refreshes, and dropping it would let
+    /// the binding lapse.
     fn from_params(params: &[HeaderParam]) -> Self {
-        let value = |name: &str| {
-            grammar::param(params, name).map(|found| found.value.clone().unwrap_or_default())
+        let named = |name: &str| {
+            grammar::param(params, name)
+                .and_then(|found| found.value.clone())
+                .filter(|value| !value.is_empty())
         };
         Self {
-            pns: value(SIP_PNS),
-            pnsreg: value(SIP_PNSREG),
-            pnspurr: value(SIP_PNSPURR),
+            pns: named(SIP_PNS),
+            pnsreg: grammar::param(params, SIP_PNSREG)
+                .map(|found| found.value.clone().unwrap_or_default()),
+            pnspurr: named(SIP_PNSPURR),
         }
     }
 }
@@ -549,6 +561,30 @@ mod tests {
                 .typed_all::<Indicators>()
                 .next()
                 .is_none()
+        );
+    }
+
+    /// A valueless `sip.pns` names no service, and a name of no characters must not become one:
+    /// kept, it would answer [`Indicators::pns`] with a service equal to the empty string, which
+    /// no client asked for and any client with an empty provider would match. Same for the PURR,
+    /// which names a binding. `sip.pnsreg` is the exception because its meaning is the asking.
+    #[test]
+    fn a_valueless_indicator_names_nothing_rather_than_naming_the_empty_string() {
+        let values = read("Feature-Caps: *;+sip.pns;+sip.pnspurr;+sip.pnsreg\r\n");
+        let one = values.first().expect("one value");
+        assert_eq!(one.pns(), None, "an empty service name became a service");
+        assert_eq!(one.purr(), None, "an empty PURR named a binding");
+        assert!(
+            one.refreshes_required(),
+            "sip.pnsreg asks for refreshes by being there at all"
+        );
+        assert_eq!(one.refresh_interval(), None);
+        // And an explicitly empty value is the same claim written differently.
+        assert_eq!(
+            read("Feature-Caps: *;+sip.pns=\"\"\r\n")
+                .first()
+                .and_then(Indicators::pns),
+            None
         );
     }
 

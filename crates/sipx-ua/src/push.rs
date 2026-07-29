@@ -199,9 +199,19 @@ pub struct Pending {
 /// A contact arriving without angle brackets gains them, because that form has nowhere to put a
 /// URI parameter at all; any header parameters after it stay outside, where they were.
 ///
-/// A contact whose URI does not parse is returned unchanged and logged. It is the application's
-/// own configuration rather than network input, and a REGISTER built from it will fail on its own
-/// terms; silently dropping the push parameters into a *different* URI would be worse.
+/// **A contact that cannot carry the parameters is returned byte-for-byte unchanged, and warned
+/// about.** There are two such contacts and they fail for different reasons:
+///
+/// - one whose URI does not parse — including a display name whose own quoted `<` or `>` defeats
+///   the split above, since a bracket sipx picked wrongly yields text that is not a URI;
+/// - one whose URI parses under a scheme sipx does not model — `tel:`, `http:`, `urn:` — which
+///   has no `uri-parameter` list to put them in, so setting them is a no-op.
+///
+/// Returning the contact unchanged is failure-closed, and the warning is the point: the second
+/// case is otherwise indistinguishable from success. The registration would go out looking
+/// ordinary, the registrar would answer 200, and the device would be unreachable by exactly the
+/// mechanism it was configured for. This is the application's own configuration rather than
+/// network input, so it is a fault an operator can fix once told about it.
 #[must_use]
 pub fn in_contact(contact: &str, device: &Device) -> String {
     use bytes::Bytes;
@@ -234,6 +244,19 @@ pub fn in_contact(contact: &str, device: &Device) -> String {
         return contact.to_owned();
     };
     device.set_on(&mut uri);
+    // Reading them back is the only honest check that they went in. `Uri::push_param` is a no-op
+    // on a scheme sipx does not model, because such a URI has no `uri-parameter` list at all — so
+    // without this the contact comes back looking registered for push and carrying none, which is
+    // the one failure mode this whole function exists to prevent, arrived at by another road.
+    if Device::from_uri(&uri).is_none() {
+        tracing::warn!(
+            contact,
+            "the contact's URI cannot carry a uri-parameter, so RFC 8599 §4.1.2's push \
+             parameters were left off the registration and no push notification will reach this \
+             device"
+        );
+        return contact.to_owned();
+    }
     format!(
         "{prefix}{}>{tail}",
         String::from_utf8_lossy(&uri.to_bytes())
@@ -331,6 +354,35 @@ mod tests {
     #[test]
     fn a_contact_that_is_not_a_uri_is_left_as_it_was() {
         assert_eq!(in_contact("<not a uri>", &device()), "<not a uri>");
+    }
+
+    /// A scheme sipx does not model parses perfectly well and then has nowhere to put a
+    /// `uri-parameter`. Without a check that the parameters went in, this is the one failure that
+    /// looks exactly like success: an ordinary-looking REGISTER, a 200, and a device that no push
+    /// notification can reach. Unchanged is the answer, so nothing downstream can mistake it.
+    #[test]
+    fn a_contact_whose_scheme_cannot_carry_a_uri_parameter_is_left_as_it_was() {
+        for contact in [
+            "<tel:+15551234>",
+            "tel:+15551234",
+            "<urn:service:sos>",
+            "<http://example.com/alice>",
+        ] {
+            assert_eq!(
+                in_contact(contact, &device()),
+                contact,
+                "the push parameters were silently dropped and the contact still rewritten"
+            );
+        }
+    }
+
+    /// A display name carrying its own brackets defeats the split, which yields text that is not
+    /// a URI — so it takes the failure-closed path rather than registering a contact assembled
+    /// around the wrong bracket.
+    #[test]
+    fn a_display_name_with_its_own_brackets_is_left_as_it_was() {
+        let contact = "\"Alice <at home>\" <sip:alice@192.0.2.5>";
+        assert_eq!(in_contact(contact, &device()), contact);
     }
 
     fn response(caps: &str) -> Response {

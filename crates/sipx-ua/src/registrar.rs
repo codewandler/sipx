@@ -491,7 +491,14 @@ pub fn interpret(response: &Response, registration: &Registration) -> Outcome {
 
     // §8.1, and it is checked before the challenge codes because it is not about this attempt:
     // no credential and no retry makes a push service the registrar cannot use usable.
-    if status == sipx_sip::push::NOT_SUPPORTED {
+    //
+    // Only when this registration actually named one. §8.1 defines 555 as the answer to a
+    // request whose push parameters the registrar cannot use, and every piece of advice the
+    // variant carries — retrying will not help, register without push or with a service the
+    // registrar names — is advice to a client that asked for push. To a client that sent no
+    // `pn-*` parameters the same code is a refusal this side has no reading of, and the honest
+    // report of that is the number, through the ordinary rejection below.
+    if status == sipx_sip::push::NOT_SUPPORTED && registration.push.is_some() {
         return Outcome::PushNotSupported {
             reason: String::from_utf8_lossy(&response.reason).into_owned(),
         };
@@ -1121,6 +1128,48 @@ mod tests {
                 assert_eq!(reason, "Forbidden");
             }
             other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    fn refused_555() -> Response {
+        response(
+            "SIP/2.0 555 Push Notification Service Not Supported\r\n\
+             Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bKx\r\n\
+             To: <sip:alice@example.com>;tag=r\r\n\
+             From: <sip:alice@example.com>;tag=1\r\n\
+             Call-ID: reg-1@192.0.2.5\r\n\
+             CSeq: 1 REGISTER\r\n\
+             Content-Length: 0\r\n\r\n",
+        )
+    }
+
+    /// RFC 8599 §8.1's 555, to a registration that named a push service: its own outcome, because
+    /// no credential and no retry makes that service usable at this registrar.
+    #[test]
+    fn a_555_to_a_push_registration_is_its_own_outcome_rather_than_a_number() {
+        let asking = Registration {
+            push: Some(sipx_sip::push::Device::new("webpush", "c1a5b3e7d9f2").expect("valid")),
+            ..registration()
+        };
+        match interpret(&refused_555(), &asking) {
+            Outcome::PushNotSupported { reason } => {
+                assert_eq!(reason, sipx_sip::push::NOT_SUPPORTED_REASON);
+            }
+            other => panic!("expected §8.1's own outcome, got {other:?}"),
+        }
+    }
+
+    /// The same code to a registration that named no push service at all. Every piece of advice
+    /// `PushNotSupported` carries — retrying will not help, register without push — is advice to
+    /// a client that asked for push, so to this one the honest report is the number.
+    #[test]
+    fn a_555_to_a_registration_that_asked_for_no_push_is_an_ordinary_rejection() {
+        match interpret(&refused_555(), &registration()) {
+            Outcome::Rejected { status, reason } => {
+                assert_eq!(status, 555);
+                assert_eq!(reason, sipx_sip::push::NOT_SUPPORTED_REASON);
+            }
+            other => panic!("expected an ordinary rejection, got {other:?}"),
         }
     }
 

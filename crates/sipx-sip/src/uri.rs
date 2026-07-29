@@ -1137,6 +1137,30 @@ mod tests {
         );
     }
 
+    /// The removal half of the pair. §19.1.1 forbids a repeated `uri-parameter`, so a caller
+    /// re-setting one of its own must remove it first — and a removal that missed would produce a
+    /// URI the far end cannot parse at all rather than one that merely says the wrong thing.
+    #[test]
+    fn removing_a_uri_parameter_reports_whether_there_was_one() {
+        let mut u = uri("sip:alice@example.com;transport=tcp;lr");
+        assert!(
+            u.remove_param("TRANSPORT"),
+            "§19.1.4 compares names case-insensitively"
+        );
+        assert_eq!(
+            u.to_bytes(),
+            Bytes::from_static(b"sip:alice@example.com;lr")
+        );
+        assert!(!u.remove_param("transport"), "it was already gone");
+        assert!(u.remove_param("lr"));
+        assert_eq!(u.to_bytes(), Bytes::from_static(b"sip:alice@example.com"));
+        // A scheme sipx does not model has no uri-parameter list, so there is nothing to remove
+        // and nothing is claimed — the same no-op `push_param` is on one.
+        let mut opaque = uri("tel:+15551234");
+        assert!(!opaque.remove_param("transport"));
+        assert_eq!(opaque.to_bytes(), Bytes::from_static(b"tel:+15551234"));
+    }
+
     #[test]
     fn mutating_a_parsed_uri_drops_its_verbatim_form() {
         let mut u = uri("sip:alice@Example.COM");

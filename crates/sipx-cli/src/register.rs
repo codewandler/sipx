@@ -122,6 +122,12 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 fn report_failure(format: Format, error: &sipx_ua::Error) -> Exit {
     let exit = match error {
         sipx_ua::Error::Rejected { status, .. } => Exit::for_status(*status),
+        // A 555 is a refusal by the far end (RFC 8599 §8.1), so it exits the way every other
+        // refusal does — `Exit::for_status(555)` is `Rejected` too, and a status code that
+        // changed the exit code by being modelled more precisely would be a change to this
+        // CLI's documented interface rather than a change to what happened. What the caller
+        // gains is the message, which names the refusal instead of numbering it.
+        sipx_ua::Error::PushNotSupported { .. } => Exit::Rejected,
         sipx_ua::Error::AuthenticationFailed | sipx_ua::Error::CredentialsRequired => {
             Exit::Unauthorized
         }

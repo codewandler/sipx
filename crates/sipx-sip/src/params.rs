@@ -242,6 +242,27 @@ mod tests {
         assert_eq!(p.value("b"), Some(&b"2"[..]));
     }
 
+    /// Every copy, not the first. A list that may hold duplicates and a removal that took one of
+    /// them would leave the parameter still there, having reported that it was gone — a silent
+    /// change of meaning rather than a removal.
+    #[test]
+    fn remove_takes_every_copy_and_says_whether_there_was_one() {
+        let mut p = params(&[("b", Some("2")), ("a", Some("1")), ("b", Some("3"))]);
+        assert!(p.remove("b"));
+        assert_eq!(p.len(), 1);
+        assert_eq!(p.value("b"), None);
+        assert_eq!(p.value("a"), Some(&b"1"[..]));
+        // Nothing to remove is `false`, and leaves the list alone.
+        assert!(!p.remove("b"));
+        assert_eq!(p.len(), 1);
+        // A valueless parameter is a parameter, and matching is the case-insensitive comparison
+        // `has_name` makes it (RFC 3261 §19.1.4).
+        let mut flags = params(&[("lr", None), ("Transport", Some("tcp"))]);
+        assert!(flags.remove("LR"));
+        assert!(flags.remove("transport"));
+        assert!(flags.is_empty());
+    }
+
     #[test]
     fn flag_is_not_the_same_as_absent() {
         let p = params(&[("lr", None)]);
