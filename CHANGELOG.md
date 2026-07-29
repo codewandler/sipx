@@ -9,6 +9,40 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **No test in the workspace now asserts after a fixed sleep (`X-29`, completing what `0.11.0`
+  started)** — `X-28` cleared the media path; this is the rest. Twenty-two sites, and the useful
+  result is that **three different cures were right**, chosen by what the wait was actually for:
+  - **A happens-before already existed — delete the wait.** Five `call.rs` sites, all sleeping after
+    `callee.reinvite(…).await`. `reinvite` returns only once the 200 is back, and `on_reinvite`
+    applies the direction and records the remote CSeq *before* responding, inside a `handle` call
+    across which the pump holds the call's mutex — so `caller.lock().await` on the next line **is**
+    the synchronisation. Independently reviewed and mutation-tested four ways, including moving the
+    state change 300 ms after the 200 but still inside `handle`, which keeps the test passing and so
+    confirms the mutex is what orders it.
+  - **An arrival with no ordering to lean on — deadline loop on the condition.** Eleven sites, the
+    deadline a bound on failure rather than a window to measure in.
+  - **A negative assertion, or a window that is itself the measurement — keep the window and say so
+    at the site.** Six sites. A window can only make an empty assertion pass, so the failure mode is
+    a missed regression rather than a flake.
+  - **The failing-first evidence was not obtained, and the story says so rather than arguing round
+    it.** 263 attempts across four sites under 600–1200 single-core spinners produced zero failures.
+    The finding is that `X-28`'s method cannot transfer to this family at all: a `tokio` sleep
+    **dilates with the load**, because a sleeping task is not competing for the CPU it is denied —
+    130 ms of sleeps became 3.0 s under 900 spinners, so the window grows along with the work it was
+    supposed to outrun. The original red gate's real trigger was three concurrent compilations, i.e.
+    memory and IO pressure, where a process stalls on a major fault without being CPU-starved.
+  - **One rationale in this story was false and is retracted in the same breath as shipping it.**
+    `udp.rs`'s comment argued the 50 ms bound *is* the assertion. Moving `sent.send(Ok(()))` ahead of
+    `perform` in `endpoint.rs` leaves `respond_returns_only_once_the_response_has_been_sent` passing
+    and the crate green, so the test cannot detect what its name claims and the bound buys no
+    detection power at any value. It also refuted itself on arithmetic, resting on a flush "within a
+    packet interval" — 20 ms, inside 50 ms. Filed as `X-36`; the bound stays until there is a test
+    that can tell, because removing a clock without one would be the weakening this story forbids.
+  - `session.rs`'s loops now name the precondition they lean on — nothing suspends between
+    `received.fetch_add` and `note_arrival`'s lock, and an uncontended `Mutex::lock().await` on a
+    `current_thread` runtime does not yield. Verified rather than asserted: inserting a 20 ms sleep
+    in that gap fails `a_session_reports_the_loss_it_saw` with `left: 9 / right: 10`.
+
 - **The public capability tables stop selling three capabilities no call can reach (`X-35`)** —
   `README.md` describes the compliance table as "a measurement rather than a claim"; the four
   hand-maintained capability tables above it were the opposite, and three of them were wrong.
