@@ -51,6 +51,7 @@ _This is the layer applications actually program against, so it is the one that 
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
+- [S-23 — Answer a CANCEL — the UAS half sipx never implemented](S-23-uas-cancel.md) · Signalling · found by C-4 — no 487 for the INVITE and no 200 for the CANCEL anywhere in the workspace
 - [S-22 — Give the caller a handle on its early dialog](S-22-caller-early-dialog.md) · Signalling · found by S-19 — sipx as caller can neither send nor receive an UPDATE while ringing
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
@@ -58,8 +59,12 @@ _This is the layer applications actually program against, so it is the one that 
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 
 ### Ice
-- [X-25 — Write the media design record the ICE stories keep citing](X-25-media-design-record.md) · Build · found by M-16 — six stories name docs/designs/media.md as their design, and it is a stub
 - [M-21 — The sans-IO ICE agent](M-21-ice-agent.md) · Media · ice · RFC 8445 · after M-20 · the state machine, no socket and no clock
+
+### Media
+_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [X-26 — Stop sipx-audio advertising a codec and a resampler it does not have](X-26-audio-crate-claims-codecs-it-lacks.md) · Build · found by X-25 — the published crate description promises G.722 and resampling; neither exists
+- [M-25 — Specify SRTP and its two keyings, after the fact](M-25-srtp-spec.md) · Media · found by X-25 — M-14 and M-15 shipped without the spec non-negotiable 4 requires
 
 ### Quic
 - [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11
@@ -186,6 +191,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-22 — Put the MSRV check in the documented gate](X-22-msrv-in-the-documented-gate.md) · Build · CI has an msrv job the gate does not name, so a green local gate lied through two releases
 - [X-23 — Find out why an interop call test times out one run in five](X-23-interop-call-test-flake.md) · Build · found by T-23 — a flake that a suite exists to be believed cannot afford
 - [X-24 — Stop the specs describing a connection pool key that has moved on twice](X-24-pool-key-spec-drift.md) · Build · sip-transport.md still says the key is two fields; it has been four since T-23
+- [X-25 — Write the media design record the ICE stories keep citing](X-25-media-design-record.md) · Build · found by M-16 — six stories name docs/designs/media.md as their design, and it is a stub
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
