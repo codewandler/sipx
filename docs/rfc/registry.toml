@@ -529,28 +529,26 @@ note = "`a=crypto` offered and answered, and **only over a secure signalling pat
 number = 5764
 title = "DTLS Extension to Establish Keys for SRTP"
 layer = "media"
-status = "implemented"
+status = "partial"
 spec = "docs/specs/srtp.md"
-roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-media/src/dtls/mod.rs",
   "crates/sipx-media/src/dtls/openssl.rs",
   "crates/sipx-media/tests/dtls_srtp.rs",
 ]
-note = "The `use_srtp` extension with the AES_CM_128_HMAC_SHA1_80 profile, §5.1.2's demultiplexing of DTLS from RTP and STUN on one port, and §4.2's key derivation — the exported block split client key, server key, client salt, server salt, asserted against the RFC's literal offsets rather than against the two ends agreeing with each other. The handshake is OpenSSL, behind the off-by-default `dtls` feature; everything the RFC decides is compiled either way."
+note = "**Missing: a call. No role is reachable from `sipx-call`**, which is why this row lists none — `dial` and `answer` key with SDES or with nothing, `dtls::establish` has no caller outside `sipx-media`'s own tests, and no sipx call has ever performed this handshake. What *is* implemented and tested, in the crate: the `use_srtp` extension with the AES_CM_128_HMAC_SHA1_80 profile, §5.1.2's demultiplexing of DTLS from RTP and STUN on one port, and §4.2's key derivation — the exported block split client key, server key, client salt, server salt, asserted against the RFC's literal offsets rather than against the two ends agreeing with each other. The handshake is OpenSSL, behind the off-by-default `dtls` feature; everything the RFC decides is compiled either way. The gap is `M-28`; `docs/specs/srtp.md` §12.8 states it."
 
 [[rfc]]
 number = 5763
 title = "Framework for Establishing an SRTP Security Context Using DTLS"
 layer = "media"
-status = "implemented"
+status = "partial"
 spec = "docs/specs/srtp.md"
-roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-sdp/src/answer.rs",
   "crates/sipx-media/src/dtls/mod.rs",
 ]
-note = "The SDP half: `UDP/TLS/RTP/SAVP` offered and answered, `a=fingerprint` and `a=setup` negotiated with the offerer sending `actpass` (§5) and the answerer taking `active` so its ClientHello opens the NAT it is behind. A DTLS offer with no fingerprint is declined rather than answered, since there would be nothing to authenticate the handshake against."
+note = "**Missing: a call. No role is reachable from `sipx-call`**, which is why this row lists none — every offer path calls `Capabilities::with_srtp`, which is SDES, and `Capabilities::with_dtls_srtp` has no caller outside `sipx-sdp`'s own tests. An application cannot ask for this keying, so no INVITE sipx sends carries `UDP/TLS/RTP/SAVP` and no offer of one is ever answered with a fingerprint. What *is* implemented and tested, in `sipx-sdp`: the SDP half as a pure offer/answer — `UDP/TLS/RTP/SAVP` offered and answered, `a=fingerprint` and `a=setup` negotiated with the offerer sending `actpass` (§5) and the answerer taking `active` so its ClientHello opens the NAT it is behind. A DTLS offer with no fingerprint is declined rather than answered, since there would be nothing to authenticate the handshake against. The gap is `M-28`; `docs/specs/srtp.md` §12.8 states it."
 
 [[rfc]]
 number = 8122
