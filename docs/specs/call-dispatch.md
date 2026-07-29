@@ -50,13 +50,30 @@ request, in this order:
 | # | Condition | Outcome |
 |---|---|---|
 | 1 | No `Call-ID`, or no `From` tag | `400 Bad Request` (RFC 3261 §8.1.1 makes both mandatory) |
-| 2 | INVITE with no `To` tag, key not routed | **surfaced** as `Dispatched::Invitation`, route reserved |
-| 3 | INVITE with no `To` tag, key already routed | `482 Loop Detected` (§8.2.2.2) |
+| 2 | INVITE with no `To` tag, **merged** (see below) | `482 Loop Detected` (§8.2.2.2) |
+| 3 | INVITE with no `To` tag, not merged | **surfaced** as `Dispatched::Invitation`, route reserved |
 | 4 | The key is routed | delivered to that call's inbox — see §5 |
 | 5 | ACK | counted, logged; **no response** (§17.1.1.3: there is none to send) |
 | 6 | Has a `To` tag, or the method exists only inside a dialog | `481 Call/Transaction Does Not Exist` (§12.2.2) |
 | 7 | The method is one `sipx_sip::update::ALLOW` advertises | **surfaced** as `Dispatched::OutOfDialog` |
 | 8 | Otherwise | `405 Method Not Allowed` with `Allow` (§8.2.1) |
+
+**Row 2 needs all three of §8.2.2.2's terms, and getting it wrong breaks every challenged call.**
+An INVITE is merged when its `Call-ID`, its `From` tag **and its `CSeq`** all match a request this
+dispatcher has already accepted on a live route. The `CSeq` is not decoration: §8.1.3.5's retry —
+the ordinary answer to a 401, 407, 413, 415, 420 or 484, and to RFC 4028 §7.3's 422 — keeps the
+`Call-ID` and the `From` tag and increments the `CSeq`. A check on the first two terms alone
+refuses that retry `482`, so a call that is challenged can never be placed at all; sipx's own UAC
+retries in exactly that shape, so sipx dialling a sipx dispatcher that answers 422 would be
+refused by its own stack. A *retransmission* never reaches this table — the server transaction
+absorbs it — so a match here is always a second copy that arrived by a different path, which is
+what §8.2.2.2 is about.
+
+A route whose inbox has been **dropped** is not a match either, whatever its `CSeq`. Refusing an
+invitation is exactly dropping its inbox, so there is no accepted request left for a later one to
+be a copy of; treating the dead route as live would let one refused invitation poison its key for
+every later attempt by that peer. Row 3 then reserves the key afresh, replacing any route still
+there — anything holding that older inbox stops receiving, which is what it already was.
 
 The methods row 6 calls dialog-only are BYE, UPDATE, PRACK, REFER, NOTIFY and INFO: each is
 defined only inside a dialog, so one arriving without a `To` tag is an orphan of a dialog that is
@@ -70,21 +87,31 @@ exists: OPTIONS and CANCEL are on it and the dispatcher does not place them itse
 handed to the application rather than refused with a status contradicting the list.
 
 Row 4 precedes rows 5–8, so a CANCEL for an invitation that *is* routed goes to that call's inbox
-rather than to row 7 — it belongs to that transaction, and an application that means to honour one
-reads the inbox while it decides how to answer. Answering the INVITE 487 and the CANCEL 200 is not
-something sipx does as a UAS at all, here or anywhere else; that gap predates this spec.
+rather than to row 7 — it belongs to that transaction. **Nothing then answers it.** sipx has no UAS
+half of CANCEL anywhere in the workspace: no `200` for the CANCEL, no `487` for the INVITE it
+cancels, and no way for an application holding an `Invitation` to learn it was cancelled. The
+CANCEL reaches the inbox and stops there; the caller's INVITE transaction sits in Proceeding until
+its own timer, and an application that answers afterwards leaves both ends in a call the caller
+tried to give up on. Story `S-23` is the fix. This routing is only what stops the CANCEL being
+lost as well as unanswered, and no part of this spec should be read as support for it.
 
 ## 4. Nothing is dropped silently
 
 Every outcome above is a response, a surfaced event, or a counter. `Dispatcher::counts` returns
 a `DispatchCounts` — the same shape and the same reasoning as `Handle::shed` (`T-19`):
 
-| Field | What it counts |
-|---|---|
-| `shed` | requests refused `503` because the call they belong to was not reading |
-| `acks` | ACKs that could not be delivered and cannot be refused |
-| `unmatched` | in-dialog requests answered `481` |
-| `unsupported` | out-of-dialog requests answered `405` |
+| Field | What it counts | Row |
+|---|---|---|
+| `shed` | requests refused `503` because the call they belong to was not reading | §5 |
+| `acks` | ACKs that could not be delivered and cannot be refused | 5, §5 |
+| `unmatched` | in-dialog requests answered `481` | 6 |
+| `unsupported` | out-of-dialog requests answered `405` | 8 |
+| `malformed` | requests answered `400` for naming no dialog at all | 1 |
+| `merged` | INVITEs answered `482` | 2 |
+
+`DispatchCounts::total()` is every field, and **every refusal the table makes is on one of them**.
+The last two exist because the first version of this type had four and the `400` and `482` branches
+moved no counter: two refusals invisible to the counters this whole section exists to provide.
 
 `acks` is counted apart for `T-19`'s reason, which is unchanged by moving one layer up: an ACK
 cannot be refused, nothing retransmits it once Timer H expires, and the dialog it would have
@@ -119,21 +146,50 @@ dispatcher handed out it is one call of many. That is why `Dispatcher` hands out
 `Receiver<Incoming>` rather than a wrapper — the one-call and many-call cases are the same loop.
 
 What did change is the drop the story's notes name: a request `Call::handle` does not claim is no
-longer discarded. `serve` answers it —
+longer discarded. `serve` answers it, and the three cases are three different answers:
 
-- ACK: nothing (§17.1.1.3);
-- not this dialog: `481` (§12.2.2);
-- OPTIONS: `200 OK` with `Allow` and `Accept` (§11.2), which `Call::handle` now answers because
-  the `Allow` the 405 below carries names OPTIONS and an advertisement has to be true;
-- anything else: `405` with `Allow` (§8.2.1).
+- **ACK**: nothing (§17.1.1.3).
+- **It matches this dialog** but names a method this call does not implement: `405` with `Allow`
+  (§8.2.1). An in-dialog OPTIONS is not one of those — `Call::handle` answers it `200 OK` with
+  `Allow` and `Accept` (§11.2), because the `Allow` on that 405 names OPTIONS and an
+  advertisement has to be true.
+- **It names a dialog that is not this one** — it carries a `To` tag, or its method is one of the
+  dialog-only set: `481` (§12.2.2).
+- **It names no dialog at all**: `486 Busy Here` for an INVITE (§21.4.24 — "not willing or able
+  to take additional calls", which is exactly the one-call contract), `405` for anything else.
+
+The last case is a correction rather than a refinement. The first version answered `481` to
+everything that failed `Dialog::matches`, and `matches` is false for any request without a `To`
+tag — so a bare INVITE or CANCEL reaching a one-call `serve` was told that the dialog it named did
+not exist, when it had named none. `§12.2.2`'s 481 is scoped to requests that name a dialog, and
+the distinction the dispatcher's own table draws at rows 6–8 has to be drawn here too.
 
 ## 7. Test vectors
 
-Each row of §3 and §5 has a test in `crates/sipx-call/tests/dispatch.rs`; the named ones are
-`two_calls_served_concurrently_from_one_endpoint`,
-`an_in_dialog_request_for_no_live_call_is_answered_481`,
-`an_unsupported_method_outside_a_dialog_is_refused_405` and
-`a_full_call_queue_sheds_for_that_call_only`.
+Every row of §3 and every bullet of §5 has a test in `crates/sipx-call/tests/dispatch.rs`, named
+here so the claim can be checked rather than taken:
+
+| Covers | Test |
+|---|---|
+| The story's acceptance | `two_calls_served_concurrently_from_one_endpoint` |
+| Row 1 | `a_request_naming_no_dialog_at_all_is_refused_400` |
+| Row 2 | `a_merged_invite_does_not_displace_the_call_it_duplicates` |
+| Row 2, the `CSeq` term | `a_retry_with_a_higher_cseq_is_a_new_invitation_not_a_merged_request` |
+| Row 2, the dead-route term | `a_refused_invitation_does_not_poison_its_key` |
+| Row 3 | `a_dropped_inbox_releases_its_route` |
+| Row 4, outbound registration | `a_dialled_call_is_reached_through_the_registration_handle` |
+| Row 5 | `a_stray_ack_is_counted_because_it_cannot_be_refused` |
+| Row 6 | `an_in_dialog_request_for_no_live_call_is_answered_481`, `a_dialog_only_method_outside_a_dialog_is_also_481` |
+| Row 7 | `an_advertised_method_the_dispatcher_cannot_place_is_surfaced` |
+| Row 8 | `an_unsupported_method_outside_a_dialog_is_refused_405` |
+| §5, the ordinary shed | `a_full_call_queue_sheds_for_that_call_only` |
+| §5, the ACK bullet | `an_ack_that_cannot_be_delivered_is_counted_rather_than_refused` |
+| §6, `serve`'s three answers | `a_method_a_call_does_not_implement_is_refused_405_by_serve`, `an_in_dialog_options_keepalive_is_answered`, `a_second_invite_to_a_one_call_serve_is_refused_486` |
+| The §12.2.2 guard, through dispatch | `a_replayed_bye_does_not_end_a_dispatched_call` |
+
+The two `is_merged` terms are mutation-checked against each other: dropping the `CSeq` comparison
+fails only the retry test, and dropping the closed-route comparison fails only the poisoning test,
+so neither is passing on the other's account.
 
 ## 8. RFC 3311 §5.2 through a concurrent dispatcher
 

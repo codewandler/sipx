@@ -41,7 +41,7 @@ use sipx_transport::{Handle, Incoming};
 use tokio::sync::mpsc;
 
 use crate::call::token;
-use crate::dialog::{Dialog, from_tag, to_tag};
+use crate::dialog::{Dialog, cseq_number, from_tag, to_tag};
 
 /// How many requests one call's inbox holds before the dispatcher sheds for it.
 ///
@@ -75,8 +75,16 @@ pub enum Dispatched {
     /// a user agent (`sipx_ua::Agent::answer`), which the call framework does not have.
     ///
     /// A CANCEL for an invitation that *is* routed does not come here: it belongs to that
-    /// transaction, so it goes to that call's inbox like everything else with its key. An
-    /// application that means to honour one reads the inbox while it decides how to answer.
+    /// transaction, so it goes to that call's inbox like everything else with its key.
+    ///
+    /// **Nothing then answers it, and that is worth being exact about rather than implying
+    /// otherwise.** sipx has no UAS half of CANCEL anywhere: there is no 200 for the CANCEL, no
+    /// 487 for the INVITE it cancels, and no way for an application holding an
+    /// [`Invitation`] to learn it was cancelled. The CANCEL reaches the inbox and stops there;
+    /// the caller's INVITE transaction sits in Proceeding until its own timer, and an
+    /// application that answers afterwards leaves both ends in a call the caller tried to give
+    /// up on. Story `S-23` is the fix; this routing is only what stops it being lost as well as
+    /// unanswered.
     OutOfDialog(Incoming),
 }
 
@@ -128,16 +136,28 @@ pub struct DispatchCounts {
     pub unmatched: u64,
     /// Out-of-dialog requests answered `405 Method Not Allowed` (RFC 3261 §8.2.1).
     pub unsupported: u64,
+    /// Requests answered `400 Bad Request` for naming no dialog at all — no `Call-ID`, or no
+    /// `From` tag, both of which RFC 3261 §8.1.1 makes mandatory.
+    pub malformed: u64,
+    /// INVITEs answered `482 Loop Detected` as merged requests (RFC 3261 §8.2.2.2).
+    pub merged: u64,
 }
 
 impl DispatchCounts {
     /// Everything the dispatcher did not deliver, of every kind.
+    ///
+    /// Every field above, and every refusal the dispatcher makes is on one of them. That is a
+    /// property worth stating rather than assuming: two of these fields exist because the first
+    /// version of this type had four, and the `400` and `482` branches moved no counter at all —
+    /// two refusals invisible to the counters this story added to make loss visible.
     #[must_use]
     pub fn total(self) -> u64 {
         self.shed
             .saturating_add(self.acks)
             .saturating_add(self.unmatched)
             .saturating_add(self.unsupported)
+            .saturating_add(self.malformed)
+            .saturating_add(self.merged)
     }
 }
 
@@ -174,10 +194,24 @@ impl RouteKey {
     }
 }
 
+/// One live route: where a call's requests go, and what reserved it.
+#[derive(Debug)]
+struct Route {
+    tx: mpsc::Sender<Incoming>,
+    /// The `CSeq` of the INVITE this route was reserved from, when it was reserved from one.
+    ///
+    /// Kept because RFC 3261 §8.2.2.2 makes a merged request one whose `From` tag, `Call-ID`
+    /// **and `CSeq`** all match — the third term is what tells a request arriving twice by two
+    /// paths from the ordinary retry of §8.1.3.5, which keeps the first two and increments this.
+    /// `None` for a route registered from a dialog that already exists ([`Calls::register`]),
+    /// which no out-of-dialog INVITE can be a merged copy of.
+    invite_cseq: Option<u32>,
+}
+
 /// The routing table, and the counters that describe what missed it.
 #[derive(Debug)]
 struct Table {
-    routes: Mutex<HashMap<RouteKey, mpsc::Sender<Incoming>>>,
+    routes: Mutex<HashMap<RouteKey, Route>>,
     counts: Counters,
     queue: usize,
 }
@@ -188,6 +222,8 @@ struct Counters {
     acks: AtomicU64,
     unmatched: AtomicU64,
     unsupported: AtomicU64,
+    malformed: AtomicU64,
+    merged: AtomicU64,
 }
 
 /// Which counter a request that was not delivered belongs on.
@@ -197,6 +233,8 @@ enum Kind {
     Ack,
     Unmatched,
     Unsupported,
+    Malformed,
+    Merged,
 }
 
 /// The set of calls a dispatcher routes to: a cheap, cloneable handle to its routing table.
@@ -222,14 +260,7 @@ impl Calls {
     /// Registering a dialog that already has a route replaces it, and the previous inbox stops
     /// receiving.
     pub fn register(&self, dialog: &Dialog) -> mpsc::Receiver<Incoming> {
-        let (tx, rx) = mpsc::channel(self.0.queue);
-        let mut routes = self.lock();
-        // A call that has ended dropped its inbox, so its route is dead weight until something
-        // arrives for it. Sweeping on the one operation that is already taking the lock keeps a
-        // long-lived dispatcher from accumulating them.
-        routes.retain(|_, sender| !sender.is_closed());
-        routes.insert(RouteKey::of_dialog(dialog), tx);
-        rx
+        self.install(RouteKey::of_dialog(dialog), None)
     }
 
     /// Stop routing to this dialog.
@@ -261,6 +292,8 @@ impl Calls {
             acks: counts.acks.load(Ordering::Relaxed),
             unmatched: counts.unmatched.load(Ordering::Relaxed),
             unsupported: counts.unsupported.load(Ordering::Relaxed),
+            malformed: counts.malformed.load(Ordering::Relaxed),
+            merged: counts.merged.load(Ordering::Relaxed),
         }
     }
 
@@ -276,6 +309,8 @@ impl Calls {
             Kind::Ack => &counts.acks,
             Kind::Unmatched => &counts.unmatched,
             Kind::Unsupported => &counts.unsupported,
+            Kind::Malformed => &counts.malformed,
+            Kind::Merged => &counts.merged,
         }
         .fetch_add(1, Ordering::Relaxed);
     }
@@ -286,22 +321,31 @@ impl Calls {
     /// it, so a poisoned lock cannot mean a half-updated table — and refusing to route the rest
     /// of an endpoint's calls because one unrelated task unwound would be a far worse failure
     /// than the one poisoning guards against.
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RouteKey, mpsc::Sender<Incoming>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RouteKey, Route>> {
         self.0.routes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The sender for a route, if there is one. Cloned rather than borrowed so the lock is not
     /// held across the send that follows.
     fn sender(&self, key: &RouteKey) -> Option<mpsc::Sender<Incoming>> {
-        self.lock().get(key).cloned()
+        self.lock().get(key).map(|route| route.tx.clone())
     }
 
     /// Reserve a route for a call that does not exist yet, and take its inbox.
-    fn reserve(&self, key: RouteKey) -> mpsc::Receiver<Incoming> {
+    fn reserve(&self, key: RouteKey, invite_cseq: Option<u32>) -> mpsc::Receiver<Incoming> {
+        self.install(key, invite_cseq)
+    }
+
+    /// Put a route in the table, replacing whatever was there, and sweep the dead on the way.
+    ///
+    /// A call that has ended dropped its inbox, so its route is dead weight until something
+    /// arrives for it. Sweeping on the operations that are already taking the lock keeps a
+    /// long-lived dispatcher from accumulating them.
+    fn install(&self, key: RouteKey, invite_cseq: Option<u32>) -> mpsc::Receiver<Incoming> {
         let (tx, rx) = mpsc::channel(self.0.queue);
         let mut routes = self.lock();
-        routes.retain(|_, sender| !sender.is_closed());
-        routes.insert(key, tx);
+        routes.retain(|_, route| !route.tx.is_closed());
+        routes.insert(key, Route { tx, invite_cseq });
         rx
     }
 
@@ -309,8 +353,24 @@ impl Calls {
         self.lock().remove(key);
     }
 
-    fn contains(&self, key: &RouteKey) -> bool {
-        self.lock().contains_key(key)
+    /// Whether this INVITE is a merged copy of one already accepted (RFC 3261 §8.2.2.2).
+    ///
+    /// All three of the section's terms, and no fewer. `Call-ID` and the `From` tag are the route
+    /// key; the `CSeq` is what separates the same request arriving twice by two paths — which is
+    /// what §8.2.2.2 is about — from the retry of §8.1.3.5, which keeps both of those and
+    /// increments the `CSeq`. That retry is the ordinary answer to a 401, 407, 413, 415, 420 or
+    /// 484, and RFC 4028 §7.3's 422; refusing it 482 would mean a challenged call could never be
+    /// placed at all, including by sipx's own UAC, which retries in exactly that shape.
+    ///
+    /// A **closed** route is not a match either, whatever its `CSeq`. The application dropped
+    /// that inbox, which is what refusing an invitation does, so there is no accepted request
+    /// left for a second copy to be merged with — and treating one as live would let a refused
+    /// invitation poison its key for every later attempt from the same peer.
+    fn is_merged(&self, key: &RouteKey, cseq: Option<u32>) -> bool {
+        let routes = self.lock();
+        routes.get(key).is_some_and(|route| {
+            !route.tx.is_closed() && cseq.is_some() && route.invite_cseq == cseq
+        })
     }
 }
 
@@ -388,6 +448,7 @@ impl Dispatcher {
         let Some(key) = RouteKey::of(&incoming.request) else {
             // RFC 3261 §8.1.1 makes `Call-ID` and the `From` tag mandatory on every request.
             // Without them this cannot be placed in any dialog, now or later.
+            self.calls.counted(Kind::Malformed);
             self.refuse(&incoming, 400, "Bad Request", None).await;
             return None;
         };
@@ -397,13 +458,22 @@ impl Dispatcher {
         // `Dialog::matches` would then reject it and leave nothing to answer it.
         if incoming.request.method == Method::Invite && to_tag(&incoming.request.headers).is_none()
         {
-            if self.calls.contains(&key) {
-                // RFC 3261 §8.2.2.2: a second INVITE bearing the same `Call-ID` and `From` tag
-                // as one already in flight is a merged request.
+            let cseq = cseq_number(&incoming.request.headers);
+            if self.calls.is_merged(&key, cseq) {
+                // RFC 3261 §8.2.2.2, all three of its terms: the same `Call-ID`, `From` tag *and*
+                // `CSeq` as a request already accepted here, which means this copy reached us by
+                // a second path. A retransmission never gets this far — the server transaction
+                // absorbs those — so a match here is always a different branch.
+                self.calls.counted(Kind::Merged);
                 self.refuse(&incoming, 482, "Loop Detected", None).await;
                 return None;
             }
-            let requests = self.calls.reserve(key);
+            // Anything else is a fresh call attempt, and that includes the §8.1.3.5 retry that
+            // follows a 401, 407, 413, 415, 420, 484 or RFC 4028 §7.3's 422 — same `Call-ID` and
+            // `From` tag, one higher `CSeq`. It reserves the key afresh, replacing a route whose
+            // invitation has been answered and abandoned; anything still holding that inbox stops
+            // receiving, which is what it already was.
+            let requests = self.calls.reserve(key, cseq);
             return Some(Dispatched::Invitation(Invitation { incoming, requests }));
         }
 
@@ -565,7 +635,7 @@ fn with_to_tag(
 /// new exchange, and RFC 3261 §12.2.2's 481 is the honest answer. Listing them is narrower than
 /// the alternative of treating every unrecognised out-of-dialog request as an orphan, which
 /// would answer 481 to things that are simply unsupported.
-fn dialog_only(method: &Method) -> bool {
+pub(crate) fn dialog_only(method: &Method) -> bool {
     matches!(
         method,
         Method::Bye

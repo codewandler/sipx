@@ -1019,6 +1019,10 @@ async fn a_merged_invite_does_not_displace_the_call_it_duplicates() {
     .await;
     let (_invite, mut inbox) = pumped.invitation().await;
 
+    // The same request again — same Call-ID, same From tag and **the same CSeq**, which is what
+    // §8.2.2.2 means by a merged request: one copy that reached us by a second path. A different
+    // CSeq would be the retry of §8.1.3.5, and the test below covers that it is not refused here.
+    // A retransmission never gets this far; the server transaction absorbs those.
     let refused = ask(
         &peer_endpoint,
         callee_addr,
@@ -1028,12 +1032,13 @@ async fn a_merged_invite_does_not_displace_the_call_it_duplicates() {
             "merged@sipx",
             "theirs",
             None,
-            2,
+            1,
             Some(&sdp(40002, 0, "PCMU")),
         ),
     )
     .await;
     assert_eq!(refused.status.code(), 482, "§8.2.2.2 names the merged case");
+    assert_eq!(pumped.calls.counts().merged, 1, "a 482 must be counted too");
 
     // The first call's route survived it, which is the part that matters: a replacement would
     // have left the application holding an inbox nothing routes to any more.
@@ -1101,4 +1106,399 @@ async fn a_dropped_inbox_releases_its_route() {
     .await;
     assert_eq!(refused.status.code(), 481);
     assert!(pumped.calls.is_empty(), "the stale route was released");
+}
+
+/// **Regression, review finding B1.** The merged-request check must carry all three of RFC 3261
+/// §8.2.2.2's terms. With only `Call-ID` and the `From` tag it also caught §8.1.3.5's retry —
+/// the same two headers with a `CSeq` one higher — which is the ordinary answer to a 401, 407,
+/// 413, 415, 420 or 484, and to RFC 4028 §7.3's 422. A challenged call could then never be
+/// placed at all, including by sipx's own UAC, which retries in exactly that shape.
+#[tokio::test]
+async fn a_retry_with_a_higher_cseq_is_a_new_invitation_not_a_merged_request() {
+    const CALL_ID: &str = "auth@sipx";
+    let (callee_endpoint, callee_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+    let (peer_endpoint, _peer_incoming) = endpoint().await;
+    let mut pumped = pump(&callee_endpoint, callee_incoming, 4);
+
+    tell(
+        &peer_endpoint,
+        callee_addr,
+        raw(
+            &peer_endpoint,
+            &Method::Invite,
+            CALL_ID,
+            "f1",
+            None,
+            1,
+            Some(&sdp(40000, 0, "PCMU")),
+        ),
+    )
+    .await;
+    // Held, deliberately, for the whole test. A dropped inbox would close the route and be
+    // caught by the *other* half of `is_merged`; keeping it live is what isolates the CSeq term
+    // to this test, and it is also the honest case — an application may well hold an invitation
+    // while it challenges.
+    let (first, _first_inbox) = pumped.invitation().await;
+
+    // The application challenges it — a 401, or a 422 counter-offering a longer session.
+    let challenge = sipx_sip::build::ResponseBuilder::to_request(
+        &first.request,
+        sipx_sip::StatusCode::new(401).expect("valid"),
+        "Unauthorized",
+    )
+    .expect("builds")
+    .header(
+        HeaderName::To,
+        bytes::Bytes::from_static(b"<sip:callee.example>;tag=challenged"),
+    )
+    .expect("to")
+    .build();
+    callee_endpoint
+        .respond(&first.key, challenge)
+        .await
+        .expect("challenges");
+
+    // The retry: same Call-ID, same From tag, CSeq one higher, a branch of its own.
+    tell(
+        &peer_endpoint,
+        callee_addr,
+        raw(
+            &peer_endpoint,
+            &Method::Invite,
+            CALL_ID,
+            "f1",
+            None,
+            2,
+            Some(&sdp(40000, 0, "PCMU")),
+        ),
+    )
+    .await;
+
+    let (retried, _retried_inbox) = pumped.invitation().await;
+    assert_eq!(
+        retried.request.method,
+        Method::Invite,
+        "the retry must surface as a fresh invitation the application can answer"
+    );
+    assert_eq!(
+        pumped.calls.counts().merged,
+        0,
+        "a §8.1.3.5 retry is not a §8.2.2.2 merged request"
+    );
+}
+
+/// **Regression, review finding B2.** A route whose inbox has been dropped is dead, and a dead
+/// route is not something a later request can be a merged copy *of*. Testing only `contains_key`
+/// let a refused invitation poison its key: the peer's next attempt — even a byte-identical
+/// retry, which is the natural thing to send after a 503 or a timeout — drew 482 forever.
+#[tokio::test]
+async fn a_refused_invitation_does_not_poison_its_key() {
+    const CALL_ID: &str = "reuse@sipx";
+    let (callee_endpoint, callee_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+    let (peer_endpoint, _peer_incoming) = endpoint().await;
+    let mut pumped = pump(&callee_endpoint, callee_incoming, 4);
+
+    let attempt = |cseq| {
+        raw(
+            &peer_endpoint,
+            &Method::Invite,
+            CALL_ID,
+            "f1",
+            None,
+            cseq,
+            Some(&sdp(40000, 0, "PCMU")),
+        )
+    };
+
+    tell(&peer_endpoint, callee_addr, attempt(1)).await;
+    let (_first, first_inbox) = pumped.invitation().await;
+    assert_eq!(pumped.calls.len(), 1, "the invitation reserved a route");
+    drop(first_inbox);
+
+    // The same INVITE again, CSeq and all. The route for its key is still in the table, but its
+    // inbox is gone — there is no accepted request left for this to be a second copy of.
+    tell(&peer_endpoint, callee_addr, attempt(1)).await;
+    let (again, _again_inbox) = pumped.invitation().await;
+    assert_eq!(again.request.method, Method::Invite);
+    assert_eq!(
+        pumped.calls.counts().merged,
+        0,
+        "a dropped invitation must not make its key permanently unusable"
+    );
+}
+
+/// Decision-table row 1: RFC 3261 §8.1.1 makes `Call-ID` and the `From` tag mandatory, and a
+/// request without them names no dialog now and can name none later. 400, and counted — a
+/// refusal the counters cannot see is the loss this story exists to make visible.
+#[tokio::test]
+async fn a_request_naming_no_dialog_at_all_is_refused_400() {
+    let (callee_endpoint, callee_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+    let (peer_endpoint, _peer_incoming) = endpoint().await;
+    let pumped = pump(&callee_endpoint, callee_incoming, 4);
+
+    // Well-formed enough to parse and to reach the transaction user, and still unplaceable: the
+    // `From` carries no tag at all.
+    let tagless = sipx_sip::build::RequestBuilder::new(Method::Options, callee_uri())
+        .header(HeaderName::Via, via(&peer_endpoint))
+        .expect("via")
+        .header(
+            HeaderName::To,
+            bytes::Bytes::from_static(b"<sip:callee.example>"),
+        )
+        .expect("to")
+        .header(
+            HeaderName::From,
+            bytes::Bytes::from_static(b"<sip:peer@example.net>"),
+        )
+        .expect("from")
+        .header(
+            HeaderName::CallId,
+            bytes::Bytes::from_static(b"tagless@sipx"),
+        )
+        .expect("call-id")
+        .cseq(1, &Method::Options)
+        .expect("cseq")
+        .max_forwards(70)
+        .build();
+
+    let refused = ask(&peer_endpoint, callee_addr, tagless).await;
+    assert_eq!(
+        refused.status.code(),
+        400,
+        "a request with no From tag cannot be placed in any dialog"
+    );
+    assert_eq!(pumped.calls.counts().malformed, 1);
+    assert_eq!(
+        pumped.calls.counts().total(),
+        1,
+        "total() must see every refusal, not only the ones it started with"
+    );
+}
+
+/// Decision-table row 5 and the §5 full-inbox bullet, both about the one request that cannot be
+/// refused. An ACK for a call whose inbox is full is dropped — SIP has no response to one — so
+/// the counter is the only thing that can say it happened, and `T-19` is why it is counted apart
+/// from the rest: this is the one that leaks calls.
+#[tokio::test]
+async fn an_ack_that_cannot_be_delivered_is_counted_rather_than_refused() {
+    const CALL_ID: &str = "lost-ack@sipx";
+    let (callee_endpoint, callee_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+    let (peer_endpoint, _peer_incoming) = endpoint().await;
+    // One slot, and nothing ever reads it.
+    let mut pumped = pump(&callee_endpoint, callee_incoming, 1);
+
+    tell(
+        &peer_endpoint,
+        callee_addr,
+        raw(
+            &peer_endpoint,
+            &Method::Invite,
+            CALL_ID,
+            "theirs",
+            None,
+            1,
+            Some(&sdp(40000, 0, "PCMU")),
+        ),
+    )
+    .await;
+    let (invite, _inbox) = pumped.invitation().await;
+
+    // Fill the single slot before the ACK can have it.
+    tell(
+        &peer_endpoint,
+        callee_addr,
+        raw(
+            &peer_endpoint,
+            &Method::Update,
+            CALL_ID,
+            "theirs",
+            Some("whatever"),
+            2,
+            None,
+        ),
+    )
+    .await;
+
+    let call = answer(&callee_endpoint, &invite, loopback())
+        .await
+        .expect("answers");
+    let tag = String::from_utf8_lossy(&call.dialog.id.local_tag).into_owned();
+    tell(
+        &peer_endpoint,
+        callee_addr,
+        raw(
+            &peer_endpoint,
+            &Method::Ack,
+            CALL_ID,
+            "theirs",
+            Some(&tag),
+            1,
+            None,
+        ),
+    )
+    .await;
+
+    let counted = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if pumped.calls.counts().acks > 0 {
+                return pumped.calls.counts();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("an undeliverable ACK is counted");
+    assert_eq!(counted.acks, 1);
+    assert_eq!(
+        counted.shed, 0,
+        "an ACK is not shed with a 503 — there is no response to send"
+    );
+}
+
+/// The outbound half of the routing table: a call this dispatcher never surfaced, registered
+/// through `Calls` from wherever it was dialled, and reached by the far end's BYE.
+///
+/// This is the surface `A-2`'s host needs for calls it originates, and it had no caller anywhere
+/// outside its own definition until this test.
+#[tokio::test]
+async fn a_dialled_call_is_reached_through_the_registration_handle() {
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+    let (caller_endpoint, caller_incoming) = endpoint().await;
+
+    // The caller runs the dispatcher over its own endpoint: it places calls rather than taking
+    // them, so nothing is ever surfaced and every request it sees is for a call it registered.
+    let pumped = pump(&caller_endpoint, caller_incoming, 8);
+
+    let answering = tokio::spawn(async move {
+        let incoming = callee_incoming.recv().await.expect("an INVITE arrives");
+        let call = answer(&callee_endpoint, &incoming, loopback())
+            .await
+            .expect("answers");
+        (call, callee_endpoint)
+    });
+
+    let mut caller = dial_callee(caller_endpoint, callee_addr, "<sip:out@example.net>").await;
+    let (mut callee, _callee_endpoint) = answering.await.expect("the answering side finishes");
+
+    let mut requests = pumped.calls.register(&caller.dialog);
+    assert_eq!(pumped.calls.len(), 1, "the dialled call is routed");
+    let mut events = caller.events().expect("the stream has not been taken");
+    let serving = tokio::spawn(async move {
+        let _ = serve(&mut caller, &mut requests).await;
+    });
+
+    callee.hang_up().await.expect("the far end hangs up");
+    assert_eq!(
+        next_ended(&mut events).await,
+        EndCause::RemoteBye,
+        "the BYE reached the dialled call through its registered route"
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(2), serving).await;
+
+    // And `forget` is the explicit form of what dropping the inbox does lazily.
+    assert!(pumped.calls.is_empty() || pumped.calls.len() == 1);
+    pumped.calls.forget(&callee.dialog);
+}
+
+/// A second INVITE arriving where exactly one call is being served is **486 Busy Here**
+/// (RFC 3261 §21.4.24), not 481. `serve` used to answer 481 to anything `Dialog::matches`
+/// rejected, and `matches` is false for every request without a `To` tag — so a request that
+/// named no dialog was told the dialog it named did not exist. A dispatcher is the answer to
+/// wanting more than one call here, and 486 is how that is said to a peer.
+#[tokio::test]
+async fn a_second_invite_to_a_one_call_serve_is_refused_486() {
+    const CALL_ID: &str = "one-call@sipx";
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+    let (peer_endpoint, _peer_incoming) = endpoint().await;
+
+    // No dispatcher at all: this is `serve` over the endpoint's own receiver, the one-call form.
+    let invite = raw(
+        &peer_endpoint,
+        &Method::Invite,
+        CALL_ID,
+        "theirs",
+        None,
+        1,
+        Some(&sdp(40000, 0, "PCMU")),
+    );
+    let peer = peer_endpoint.clone();
+    let asking = tokio::spawn(async move { ask(&peer, callee_addr, invite).await });
+
+    let incoming = callee_incoming.recv().await.expect("the INVITE arrives");
+    let mut call = answer(&callee_endpoint, &incoming, loopback())
+        .await
+        .expect("answers");
+    assert_eq!(asking.await.expect("answered").status.code(), 200);
+
+    tokio::spawn(async move {
+        let _ = serve(&mut call, &mut callee_incoming).await;
+    });
+
+    let refused = ask(
+        &peer_endpoint,
+        callee_addr,
+        raw(
+            &peer_endpoint,
+            &Method::Invite,
+            "a-second-call@sipx",
+            "someone-else",
+            None,
+            1,
+            Some(&sdp(40002, 0, "PCMU")),
+        ),
+    )
+    .await;
+    assert_eq!(
+        refused.status.code(),
+        486,
+        "a request naming no dialog must not be told the dialog it named is gone"
+    );
+}
+
+/// Decision-table row 5: an ACK for a call this endpoint does not have.
+///
+/// It cannot be refused — SIP has no response to an ACK, and one for a 2xx is a transaction of
+/// its own (RFC 3261 §17.1.1.3) — so a counter and a log line are the whole of what can be done.
+/// That is `T-19`'s conclusion at the transport layer, and it does not change one layer up.
+#[tokio::test]
+async fn a_stray_ack_is_counted_because_it_cannot_be_refused() {
+    let (callee_endpoint, callee_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+    let (peer_endpoint, _peer_incoming) = endpoint().await;
+    let pumped = pump(&callee_endpoint, callee_incoming, 4);
+
+    tell(
+        &peer_endpoint,
+        callee_addr,
+        raw(
+            &peer_endpoint,
+            &Method::Ack,
+            "no-such-call@sipx",
+            "theirs",
+            Some("ours"),
+            1,
+            None,
+        ),
+    )
+    .await;
+
+    let counts = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let counts = pumped.calls.counts();
+            if counts.total() > 0 {
+                return counts;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a stray ACK reaches the dispatcher and is counted");
+    assert_eq!(counts.acks, 1, "counted apart: {counts:?}");
+    assert_eq!(counts.total(), 1, "and nothing else moved");
 }

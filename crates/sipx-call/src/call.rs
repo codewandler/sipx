@@ -826,10 +826,24 @@ impl Call {
 
     /// Answer a request that reached this call and that [`Self::handle`] did not claim.
     ///
-    /// Two different things can bring one here, and they are two different answers. A request
-    /// that does not match this dialog was routed to the wrong call, so RFC 3261 §12.2.2's 481
-    /// is what it would have got had it matched nothing at all; a request that *does* match but
-    /// names a method this call does not implement is §8.2.1's 405, which must carry `Allow`.
+    /// Three different things bring one here, and they are three different answers — collapsing
+    /// them was a real defect, not an untidiness. The first version answered 481 to everything
+    /// that failed [`Dialog::matches`](crate::Dialog::matches), and `matches` is false for any
+    /// request with no `To` tag: so a bare INVITE or CANCEL reaching a one-call [`serve`] drew
+    /// RFC 3261 §12.2.2's "the dialog you named does not exist" for a request that named no
+    /// dialog at all.
+    ///
+    /// - **It matches this dialog**, but the method is one this call does not implement:
+    ///   §8.2.1's **405**, with the `Allow` that section makes mandatory.
+    /// - **It names a dialog that is not this one** — it carries a `To` tag, or its method
+    ///   exists only inside a dialog: §12.2.2's **481**.
+    /// - **It names no dialog**, so it is a new exchange arriving where exactly one call is
+    ///   being served: **486 Busy Here** for an INVITE (§21.4.24 — "not willing or able to take
+    ///   additional calls", which is precisely the one-call contract), and 405 for anything
+    ///   else. A dispatcher is the answer to wanting more than one call here, and the 486 says
+    ///   so in the only vocabulary the peer has.
+    ///
+    /// An ACK gets nothing, because SIP has no response to one.
     ///
     /// Failures are logged rather than returned. This exists so nothing is discarded in silence
     /// (`T-19`, story `C-4`), and handing the caller an error to ignore would put the silence
@@ -841,18 +855,25 @@ impl Call {
             tracing::debug!("an ACK reached a call that did not claim it");
             return;
         }
-        let matches = self.dialog.matches(&incoming.request);
-        let (code, reason) = if matches {
+        let request = &incoming.request;
+        let (code, reason) = if self.dialog.matches(request) {
             (405u16, "Method Not Allowed")
-        } else {
+        } else if crate::dialog::to_tag(&request.headers).is_some()
+            || crate::dispatch::dialog_only(&request.method)
+        {
             (481, "Call/Transaction Does Not Exist")
+        } else if request.method == Method::Invite {
+            (486, "Busy Here")
+        } else {
+            (405, "Method Not Allowed")
         };
         let Some(status) = StatusCode::new(code) else {
             return;
         };
+        let allow = code == 405;
         let built =
             ResponseBuilder::to_request(&incoming.request, status, reason).and_then(|builder| {
-                if matches {
+                if allow {
                     builder.header(
                         HeaderName::Allow,
                         Bytes::from_static(update::ALLOW.as_bytes()),
@@ -1474,9 +1495,10 @@ impl Call {
 ///
 /// # Nothing is discarded
 ///
-/// A request [`Call::handle`] does not claim is **answered**, not dropped: 481 when it does not
-/// belong to this dialog (RFC 3261 §12.2.2), 405 with `Allow` when it does but names a method
-/// this call does not implement (§8.2.1), and nothing at all for an ACK, which SIP has no
+/// A request [`Call::handle`] does not claim is **answered**, not dropped: 405 with `Allow` when
+/// it belongs to this dialog but names a method this call does not implement (RFC 3261 §8.2.1),
+/// 481 when it names a dialog that is not this one (§12.2.2), 486 for a second INVITE arriving
+/// where one call is being served (§21.4.24), and nothing at all for an ACK, which SIP has no
 /// response to. This used to be a silent drop, and it is the call-layer twin of what `T-19`
 /// removed at the transport layer.
 pub async fn serve(

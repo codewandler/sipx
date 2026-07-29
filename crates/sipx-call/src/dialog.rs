@@ -427,7 +427,11 @@ fn push_route(routes: &mut Vec<String>, slice: Option<&[u8]>) {
     }
 }
 
-fn cseq_number(headers: &sipx_sip::Headers) -> Option<u32> {
+/// The sequence number of a request, for RFC 3261 §8.2.2.2's third merged-request term.
+///
+/// `pub(crate)` for the dispatcher, which needs to read it the same way the dialog does — two
+/// readings of one header are two chances to read it differently.
+pub(crate) fn cseq_number(headers: &sipx_sip::Headers) -> Option<u32> {
     headers
         .typed::<sipx_sip::headers::CSeq>()
         .and_then(Result::ok)
