@@ -56,6 +56,17 @@ fn via(endpoint: &Handle, branch: &str) -> Bytes {
 
 /// An INVITE from a raw peer, on a branch the caller names.
 fn invite(peer: &Handle, call_id: &str, from_tag: &str, branch: &str) -> Request {
+    invite_with_body(peer, call_id, from_tag, branch, sdp())
+}
+
+/// The same, with an offer the caller chooses — including one that is not SDP at all.
+fn invite_with_body(
+    peer: &Handle,
+    call_id: &str,
+    from_tag: &str,
+    branch: &str,
+    body: String,
+) -> Request {
     sipx_sip::build::RequestBuilder::new(Method::Invite, callee_uri())
         .header(HeaderName::Via, via(peer, branch))
         .expect("via")
@@ -86,7 +97,7 @@ fn invite(peer: &Handle, call_id: &str, from_tag: &str, branch: &str) -> Request
             Bytes::from_static(b"application/sdp"),
         )
         .expect("content-type")
-        .body(Bytes::from(sdp()))
+        .body(Bytes::from(body))
         .build()
 }
 
@@ -250,6 +261,93 @@ async fn a_caller_that_gives_up_before_the_answer_ends_the_invitation() {
         ),
         "an invitation that was cancelled must not be answerable afterwards"
     );
+}
+
+/// An answer that failed before sending anything leaves the invitation cancellable.
+///
+/// `Invitation::answer` takes the invitation for itself so that a CANCEL racing an answer never
+/// puts a `487` behind a `200`. That claim is taken as late as it can be — immediately before the
+/// `200` is handed to the transport — precisely because everything ahead of it can still fail
+/// with nothing on the wire. An unparseable offer is the cheapest of those failures to reach: no
+/// hostile peer, just a body `sipx-sdp` cannot read and an application that called `answer`.
+///
+/// If the claim outlived such a failure, the INVITE would never be answered at all: the CANCEL
+/// would draw its `200`, the `487` would be suppressed as "already answered", and the caller
+/// would sit out Timer B against a transaction that had sent it nothing. That is the failure
+/// this project keeps deciding it will not ship, so it is pinned here.
+#[tokio::test]
+async fn an_invitation_whose_answer_failed_before_responding_is_still_cancellable() {
+    let (callee, callee_incoming) = endpoint().await;
+    let callee_addr = callee.local_addr();
+    let mut pumped = pump(&callee, callee_incoming);
+    let (peer, _peer_incoming) = endpoint().await;
+
+    // An INVITE whose body is not SDP at all. Everything about the transaction is well formed;
+    // it is the offer that cannot be read, which is a failure `answer` hits before it responds.
+    let invite = invite_with_body(
+        &peer,
+        "answer-failed@sipx",
+        "caller",
+        "z9hG4bK-s23-failed",
+        "this is not an SDP body".to_owned(),
+    );
+    let mut invited = peer
+        .send(invite.clone(), Target::udp(callee_addr))
+        .await
+        .expect("the INVITE goes out");
+
+    let invitation = pumped.invitation().await;
+    assert!(
+        matches!(
+            invitation.answer(&callee, loopback()).await,
+            Err(sipx_call::Error::Sdp(_))
+        ),
+        "an offer that cannot be parsed fails the answer"
+    );
+
+    // The answer sent nothing, so the invitation is exactly where it was: still ringing, and
+    // still the dispatcher's to end.
+    assert!(
+        !invitation.is_cancelled(),
+        "a failed answer must not leave the invitation looking answered"
+    );
+
+    // And the caller can still get the invitation withdrawn, which is the whole point.
+    let cancelled = ask(&peer, callee_addr, cancel_for(&invite)).await;
+    assert_eq!(cancelled.status.code(), 200);
+
+    let terminated = tokio::time::timeout(Duration::from_secs(5), invited.final_response())
+        .await
+        .expect("the INVITE is answered rather than left to time out")
+        .expect("a final response to the INVITE");
+    assert_eq!(
+        terminated.status.code(),
+        487,
+        "the INVITE a CANCEL withdraws is answered 487, even if an answer failed first"
+    );
+    assert!(invitation.is_cancelled());
+}
+
+/// `Invitation::answer`'s future is `Send`, so it can still be spawned.
+///
+/// A compile-time assertion rather than a behaviour: answering carries a `call::Claim`, which is
+/// a reference to a trait object, and `&T` is `Send` only while `T: Sync`. Dropping either bound
+/// from that alias would make this future unspawnable — a break in a public API that no
+/// behavioural test here would notice, because `#[tokio::test]` drives them on one thread.
+#[test]
+fn an_answer_future_is_spawnable() {
+    fn assert_send<T: Send>(_: T) {}
+
+    // Never polled — constructing the future is what type-checks the bound — but referenced
+    // below so that the chain is live code and the assertion is really compiled.
+    #[expect(unreachable_code, unused_variables, clippy::diverging_sub_expression)]
+    fn witness() {
+        let invitation: Invitation = unreachable!();
+        let endpoint: Handle = unreachable!();
+        assert_send(invitation.answer(&endpoint, loopback()));
+    }
+
+    let _ = witness as fn();
 }
 
 /// §9.2: "If the UAS did not find a matching transaction for the CANCEL ... it SHOULD respond

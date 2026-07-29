@@ -55,10 +55,45 @@ contract's `remote` cause on the wire.
    a CANCEL to copy them, so no well-formed CANCEL is affected. The reason is that a `Via` sent-by
    is whatever the sender writes, so §17.2.3's match alone lets anyone who can observe a branch
    stop somebody else's phone ringing.
-2. `Invitation::answer` marks the invitation answered *before* the 200 is built. A CANCEL racing an
-   answer therefore never puts a 487 behind a 200. The cost is the other order: an answer that
-   fails after claiming leaves an invitation that a CANCEL will no longer 487, and the caller's
-   Timer B resolves it.
+2. `Invitation::answer` marks the invitation answered immediately *before the 200 is handed to the
+   transport* — not before the work that builds it. A CANCEL racing an answer therefore never puts
+   a 487 behind a 200, and an answer that fails before sending leaves the invitation cancellable.
+   See below; review round 2 found the first version of this wrong.
+
+**The claim placement, which review round 2 corrected.** The first version took the claim at the
+top of `Invitation::answer`, before `answer_tagged` had done anything. That was a real defect and
+not just a theoretical one: `answer_tagged` parses the offer as its *first* action, so an INVITE
+carrying a body `sipx-sdp` cannot read took the claim, failed, and returned `Err(Error::Sdp)` with
+**no response sent at all**. The invitation was then permanently un-cancellable — a CANCEL drew its
+200, `Pending::cancel` returned `false` because the phase was no longer `Ringing`, no 487 was sent,
+and the INVITE transaction never received a final response. It needed no hostile peer, just a
+malformed offer and an application that called `answer`.
+
+The fix keeps the ordering guarantee rather than trading it away. The claim is now a hook
+(`call::Claim`, a `&(dyn Fn() -> Result<()> + Send + Sync)`) passed from `Invitation::answer` down
+through `answer_tagged` into `answer_negotiated`, and invoked at one line: directly above
+`endpoint.respond`, after `Dialog::from_request`.
+
+*The error paths proved to precede the response*, and therefore safe to leave unclaimed, are every
+fallible expression above that line — `sipx_sdp::parse` (in `answer_tagged`), `negotiated`,
+`MediaPort::bind`, the `NoCommonCodec` return, `negotiate_session`, every `ResponseBuilder` step,
+and `Dialog::from_request`'s `NoDialog`. *At or after* the response there is exactly one fallible
+expression, `endpoint.respond(...)?` itself; everything following it — the retransmit spawn, the
+`EventSink`, the `Call` construction — is infallible. That is why a blanket rollback on `Err` was
+not acceptable and was not used: `respond` failing is not proof that nothing reached the caller, as
+a stream transport can write part of a response before erroring, so that one case stays claimed
+deliberately and costs only the Timer B outcome already described.
+
+Mutation-checked in both directions, recorded in spec §9.6: moving the claim earlier fails the new
+test with the INVITE unanswered; removing it fails three of the existing ones, so the guarantee it
+exists for is still genuinely held. The free `answer` and `answer_ringing` pass no claim — they do
+not own an invitation to take.
+
+*One observable change* falls out of the later claim, and it is an improvement rather than a
+regression: a CANCEL arriving *while* `answer` is setting media up is now honoured in full — 487
+sent, `answer` returns `Error::InvitationCancelled` — where before it drew a bare `200` and the
+answer went on to succeed, leaving the caller to notice the 2xx and send a BYE (§9.1's advice for
+exactly that race). Both are defensible; the new one matches what the caller asked for.
 
 **Two vectors from the first run were strengthened, not rewritten.** Both negatives — the too-late
 CANCEL and the replay — passed against a dispatcher with its "already answered" guard removed,
@@ -81,6 +116,7 @@ and nothing here needs changing; it just wants a line rather than being discover
   ones. Harmless — a non-2xx final destroys the early dialog whatever the tag, and transaction
   matching does not use it — but §12.1.1 would rather they agreed. `Invitation::answer` does agree
   with the CANCEL's 200; `ring` cannot without a signature change this story does not own.
+  Confirmed as out of scope at review round 2; worth its own story if anyone wants it.
 - A `serve` loop driven directly off an endpoint receiver, with no `Dispatcher`, still has no UAS
   CANCEL: §6's table answers a bare CANCEL 405. Every path that surfaces an `Invitation` goes
   through the dispatcher, so nothing reachable is affected.

@@ -2140,7 +2140,7 @@ fn establish(
 /// *request*, but it does not resend the response. Over UDP one lost 200 means the caller
 /// gives up while this side holds an established call, so this is not optional.
 pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAddr) -> Result<Call> {
-    answer_tagged(endpoint, incoming, media_address, &token()).await
+    answer_tagged(endpoint, incoming, media_address, &token(), None).await
 }
 
 /// The same, with the `To` tag chosen by the caller rather than freshly minted.
@@ -2156,11 +2156,14 @@ pub(crate) async fn answer_tagged(
     incoming: &Incoming,
     media_address: IpAddr,
     tag: &str,
+    claim: Option<Claim<'_>>,
 ) -> Result<Call> {
+    // Ahead of the claim, deliberately: an offer that cannot be read fails here with nothing
+    // sent, and an invitation that was never taken is one a CANCEL can still end.
     let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
     // No provisional was sent on this path, so there is nothing to report as `Ringing`.
-    answer_negotiated(endpoint, incoming, media_address, offer, tag, None).await
+    answer_negotiated(endpoint, incoming, media_address, offer, tag, None, claim).await
 }
 
 /// A session that has been described and answered, but not yet accepted.
@@ -2286,6 +2289,7 @@ pub async fn answer_ringing(
         offer,
         ringing.tag(),
         Some(ringing.is_reliable()),
+        None,
     )
     .await
 }
@@ -2457,11 +2461,24 @@ async fn negotiate_session(
     )
 }
 
+/// Called immediately before the `200` is handed to the transport, to take the invitation.
+///
+/// The dispatcher's hook into a path that otherwise knows nothing about invitations. Returning
+/// `Err` aborts the answer with nothing sent; returning `Ok` means no later CANCEL may draw a
+/// `487`, because a `200` is about to be on the wire. [`answer_negotiated`] documents why it is
+/// invoked exactly where it is.
+///
+/// `Send + Sync` so that `&Claim` is `Send` and the futures carrying one stay spawnable, which
+/// `an_answer_future_is_spawnable` holds to.
+pub(crate) type Claim<'a> = &'a (dyn Fn() -> Result<()> + Send + Sync);
+
 /// Answer an INVITE whose offer has already been parsed.
 ///
 /// `reliable_ringing` is `Some` exactly when this side rang first (via [`crate::rel::ring`]):
 /// `Some(reliable)` reports whether that provisional was 100rel-acknowledged, and `None` (the
 /// [`answer`] path) means there is no ringing to report at all.
+///
+/// `claim` is the dispatcher's, and is invoked at one specific line below; see [`Claim`].
 async fn answer_negotiated(
     endpoint: &Handle,
     incoming: &Incoming,
@@ -2469,6 +2486,7 @@ async fn answer_negotiated(
     offer: SessionDescription,
     tag: &str,
     reliable_ringing: Option<bool>,
+    claim: Option<Claim<'_>>,
 ) -> Result<Call> {
     let negotiated = negotiated(&offer)?;
 
@@ -2548,6 +2566,28 @@ async fn answer_negotiated(
     // media at an endpoint that has forgotten it and can never send the BYE.
     let dialog = Dialog::from_request(&incoming.request, tag).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, Target::new(incoming.source, incoming.transport));
+
+    // The last thing before the `200` leaves, and that placement is the whole contract.
+    //
+    // Taking the invitation *early* would be simpler, but every fallible step above — parsing the
+    // offer, binding the port, negotiating the session, building the response, forming the dialog
+    // — can return `Err` with nothing on the wire. An invitation taken by one of those failures
+    // is one no CANCEL can ever end: the CANCEL draws its `200`, the `487` is suppressed because
+    // the invitation looks answered, and the INVITE transaction is left without a final response
+    // for the caller's Timer B to resolve.
+    //
+    // Taking it *here* keeps the guarantee the early claim was for. From this line on, the only
+    // fallible expression is `respond` itself; everything after it is infallible. So a CANCEL
+    // arriving from now on finds the invitation taken and correctly sends no `487` behind the
+    // `200` — and a CANCEL arriving a moment earlier is honoured in full, which is what it is
+    // owed, because nothing has been sent yet.
+    //
+    // `respond` failing is the one case that stays claimed. That is deliberate: a stream
+    // transport can write part of a response before erroring, so "it failed" is not proof that
+    // nothing reached the caller, and a `487` chasing a `200` is the worse of the two outcomes.
+    if let Some(claim) = claim {
+        claim()?;
+    }
 
     endpoint.respond(&incoming.key, response.clone()).await?;
 

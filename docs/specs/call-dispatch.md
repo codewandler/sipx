@@ -272,15 +272,37 @@ machine rather than as a condition, with three states and no more:
 | `Answered` — a final response has gone out | `200`, and nothing else | answers (a second time, which is the caller's business) |
 | `Cancelled` — a CANCEL ended it | `200`, and nothing else | `Error::InvitationCancelled` |
 
-`Answered` is entered by `Invitation::answer` **before** the `200` is built rather than after it is
-sent. The asymmetry is deliberate: a CANCEL arriving mid-answer must not put a `487` on the wire
-behind a `200`, because that is the one ordering that leaves the two ends disagreeing about whether
-there is a call. The other way round — an answer that then fails — costs the caller a CANCEL that
-says `200` and ends nothing, which its own Timer B resolves.
+`Answered` is entered **immediately before the `200` is handed to the transport**, and that exact
+placement is the contract. A CANCEL arriving mid-answer must not put a `487` on the wire behind a
+`200`, because that is the one ordering that leaves the two ends disagreeing about whether there is
+a call — so the transition has to precede the send. But it must not precede it by any more than
+necessary, because every fallible step that builds the response (parsing the offer, binding the
+media port, negotiating the session, building the response, forming the dialog) can return `Err`
+with **nothing on the wire**. An invitation taken by one of those failures is one no CANCEL can
+ever end: the CANCEL draws its `200`, the `487` is suppressed because the invitation looks
+answered, and the INVITE transaction is left with no final response at all for the caller's Timer B
+to resolve. That is a request that reached sipx and produced no response, which is the failure this
+project does not ship.
 
-The free `answer()` function cannot make that transition, because it is not given the invitation.
-It still answers correctly; what it cannot do is tell the dispatcher that it did. **Prefer
-`Invitation::answer` for anything a dispatcher surfaced.**
+So the claim is a hook (`call::Claim`) handed down from `Invitation::answer` and invoked at one
+line in `answer_negotiated`, directly above `endpoint.respond`. From that line on, the only
+fallible expression is `respond` itself; everything after it — the retransmit task, the event sink,
+the `Call` construction — is infallible.
+
+`respond` failing is therefore the single case that stays claimed, and it stays claimed on purpose:
+a stream transport can write part of a response before erroring, so a failure is not proof that
+nothing reached the caller, and a `487` chasing a `200` is the worse of the two outcomes. The cost
+is the one already noted — a CANCEL that says `200` and ends nothing, which Timer B resolves.
+
+`Claim` is `Send + Sync` because it is a *reference* to a trait object, and `&T` is `Send` only
+while `T: Sync`. Dropping either bound would make `Invitation::answer`'s future unspawnable, which
+is a break in a public API that no behavioural test would catch — `#[tokio::test]` drives futures
+on one thread. `an_answer_future_is_spawnable` is the compile-time assertion that holds it;
+removing `Sync` from the alias fails it with "cannot be shared between threads safely".
+
+The free `answer()` and `answer_ringing()` pass no claim and cannot make that transition, because
+they are not given the invitation. They still answer correctly; what they cannot do is tell the
+dispatcher that they did. **Prefer `Invitation::answer` for anything a dispatcher surfaced.**
 
 ### 9.4 What the application is told
 
@@ -317,6 +339,8 @@ transaction below absorbs them and replays the response it already sent.
 | §9.1's added identifier term, with the transaction match satisfied | `a_cancel_on_the_right_transaction_from_the_wrong_dialog_is_refused` |
 | §9.3, the negative | `a_cancel_after_the_answer_does_not_tear_the_dialog_down` |
 | §9.5, and cancelled-once | `a_replayed_cancel_draws_the_same_answer_and_nothing_more` |
+| §9.3's claim placement — a failed answer sent nothing, so the invitation is still cancellable | `an_invitation_whose_answer_failed_before_responding_is_still_cancellable` |
+| `Invitation::answer`'s future is still `Send`, so it can be spawned | `an_answer_future_is_spawnable` |
 | A third party cannot end someone else's invitation | `a_cancel_from_a_third_party_does_not_reach_someone_elses_invitation` |
 | §9.4 | `a_ringing_host_is_told_the_caller_gave_up_and_why` |
 
@@ -327,3 +351,12 @@ invitation that has already answered fails only `a_cancel_after_the_answer_does_
 That second one is why both of those tests watch the invitation's **event stream**: the `serve`
 loop survives a stray `487` and the caller's client transaction has already finished, so the only
 instrument sharp enough to see the difference is the event that a cancellation would have emitted.
+
+The claim's *placement* is mutation-checked from both sides, because it is a position rather than a
+condition and either direction of drift is a real bug. Moving it earlier — taking the invitation
+before the response is built, as this first did — fails
+`an_invitation_whose_answer_failed_before_responding_is_still_cancellable` with the INVITE never
+answered at all (`the INVITE is answered rather than left to time out: Elapsed(())`). Removing it
+altogether fails three: `a_cancel_after_the_answer_does_not_tear_the_dialog_down`,
+`a_caller_that_gives_up_before_the_answer_ends_the_invitation` and
+`a_ringing_host_is_told_the_caller_gave_up_and_why`.

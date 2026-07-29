@@ -162,9 +162,18 @@ impl Invitation {
     /// still works and still answers correctly — it simply cannot tell the dispatcher what it
     /// did, so a CANCEL that arrives around it is judged on the transaction's last known state.
     pub async fn answer(&self, endpoint: &Handle, media_address: IpAddr) -> Result<Call> {
-        self.pending.claim()?;
-        crate::call::answer_tagged(endpoint, &self.incoming, media_address, self.pending.tag())
-            .await
+        // Handed down rather than taken here, so that the invitation is taken immediately before
+        // the `200` leaves rather than before the work that builds it — every step of which can
+        // fail with nothing sent, and an invitation taken by one of those is one no CANCEL can
+        // end. `answer_negotiated` documents the placement.
+        crate::call::answer_tagged(
+            endpoint,
+            &self.incoming,
+            media_address,
+            self.pending.tag(),
+            Some(&|| self.pending.claim()),
+        )
+        .await
     }
 
     /// Split into the INVITE and the inbox, ready for
