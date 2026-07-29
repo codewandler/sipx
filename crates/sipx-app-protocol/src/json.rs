@@ -628,6 +628,15 @@ mod tests {
     fn nesting_is_allowed_right_up_to_the_limit() {
         let ok = "[".repeat(MAX_DEPTH) + "1" + &"]".repeat(MAX_DEPTH);
         assert!(Json::parse(&ok).is_ok(), "{MAX_DEPTH} deep must parse");
+        // The boundary itself: one past the limit is what an off-by-one in the `depth >
+        // MAX_DEPTH` check would wave through, so it is asserted rather than bracketed.
+        let boundary = "[".repeat(MAX_DEPTH + 1) + "1" + &"]".repeat(MAX_DEPTH + 1);
+        assert_eq!(
+            Json::parse(&boundary),
+            Err(JsonError::TooDeep),
+            "{} deep is one past the limit and must be refused",
+            MAX_DEPTH + 1
+        );
         let over = "[".repeat(MAX_DEPTH + 2) + "1" + &"]".repeat(MAX_DEPTH + 2);
         assert_eq!(Json::parse(&over), Err(JsonError::TooDeep));
     }

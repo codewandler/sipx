@@ -43,9 +43,9 @@ vectors. Where each Acceptance item landed:
 |---|---|---|
 | types, serialization confined | `src/{event,document,json,base64,time,tagged}.rs` | `document::tests`, `event::tests` |
 | interpreter, sans-IO | `src/interpreter.rs`, `src/call.rs` | `tests/vectors.rs` |
-| continuation rule by construction | `Callback`, `Interpreter::accept` | `ac_3`, `ac_4`, `the_interpreter_never_issues_a_second_callback…` |
+| continuation rule by construction | `Callback`, `src/program.rs` | `ac_3`, `ac_4`, `the_interpreter_never_issues_a_second_callback…`, `program::tests` |
 | every table derived | `tests/spec_tables.rs` | 7 tests, one per table plus §5.3's inline lists |
-| end-to-end proof | `examples/canned_program.rs` | `tests/canned_program.sh` |
+| end-to-end proof | `examples/canned_program.rs` | `tests/canned_program.sh`, wired into the gate as `app contract end to end` |
 | experimental | `README.md`, `src/lib.rs` | `the_spec_and_the_crate_agree_that_this_is_experimental` |
 | failing-first `AC-1` | — | `ac_1_no_program_and_an_unreachable_app_takes_the_declared_effect` |
 
@@ -78,6 +78,22 @@ crate — `sipx-call` and the rest of the workspace gain no new dependencies*. W
 The cost is roughly 760 lines of JSON, base64 and RFC 3339 arithmetic to own. They are bounded
 (`MAX_DEPTH`), total on every input, and tested against the RFCs' own vectors, which is what makes
 that cost payable.
+
+### Both halves of the continuation rule are the type system's
+
+Acceptance item 3 governs two clauses, and on review only one of them was actually *constructed*.
+
+- **At most one outstanding callback** always was. `Callback` is `#[must_use]`, is neither `Clone`
+  nor `Copy`, and has no public constructor; `Input::Response` takes it **by value**. Answering a
+  delivery twice is not a mistake the interpreter detects, it is a program that does not compile.
+  That is why `testing::forge_callback` has to exist: vector `AC-4` is otherwise inexpressible.
+- **A document replaces the pending queue** was not. It was an invariant held by `accept` being
+  the only writer and assigning wholesale — true, but true by inspection, and a later edit adding
+  a `push` would break it silently. It is now `src/program.rs`: a `Program` newtype whose
+  `VecDeque` is private *to that module*, exposing `replace` (takes a whole program), `abandon`
+  (empties it), `take_next` and `len`. There is no `push`, no `extend`, no `append`, and no
+  accessor handing out `&mut VecDeque`. No edit to `interpreter.rs` can append to a running
+  program, because the operation does not exist outside the file whose purpose is that rule.
 
 ### Two decisions the spec left open
 

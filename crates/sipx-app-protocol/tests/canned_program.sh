@@ -22,7 +22,12 @@ log="$(mktemp -t canned_program.XXXXXX)"
 trap 'rm -f "$log"' EXIT
 
 echo "running the canned program over a real call..."
-if ! timeout 120 cargo run --quiet --package sipx-app-protocol --features call \
+# `--all-features` rather than `--features call`, though `call` is the only feature there is:
+# cargo keys its build cache on the exact feature set, and the gate's `examples` step already
+# built this example with `--all-features`. Asking for the same set reuses that instead of
+# compiling the dependency tree a second time, which is the difference between this step costing
+# seconds and costing a minute and a half.
+if ! timeout 120 cargo run --quiet --package sipx-app-protocol --all-features \
     --example canned_program >"$log" 2>&1; then
     echo "FAIL: the example did not finish cleanly" >&2
     cat "$log" >&2

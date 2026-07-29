@@ -19,10 +19,12 @@
 //!   delivery twice: the token it would need is gone, and there is no second one to be had.
 //!   While one is outstanding the interpreter delivers nothing further — later events queue
 //!   (§6.3, vector AC-8) — so a driver cannot be holding two either.
-//! - **A document accepted in response to event E replaces the pending program.** The queue is
-//!   private and the only operation that writes it is a whole-program assignment; there is no
-//!   `push`, no `extend`, no `append` anywhere in this file. A second document therefore cannot
-//!   leave a stale instruction behind, because leaving one is not an operation this type has.
+//! - **A document accepted in response to event E replaces the pending program.** The queue is a
+//!   [`Program`], whose inner `VecDeque` is private to its own module and which exposes no
+//!   `push`, no `extend` and no `append` — only [`Program::replace`], which takes a whole
+//!   program, and [`Program::abandon`], which empties it. A second document therefore cannot
+//!   leave a stale instruction behind, because appending is not an operation the type has, and
+//!   no edit to *this* file can give it one.
 //!
 //! The one exception §6.3 names is spelled out where it is implemented: an **empty**
 //! `instructions` array means "keep going" and is the one document that does *not* replace.
@@ -33,6 +35,7 @@ use crate::document::{Document, DtmfMode, Gather, Instruction, Source, TransferT
 use crate::error::Error;
 use crate::event::{CallSnapshot, CallState, EndCause, Envelope, EventKind, GatherReason, Leg};
 use crate::policy::{Failure, OnFailure, Policy};
+use crate::program::Program;
 use crate::time::Timestamp;
 
 /// How many events may queue behind an outstanding callback before the queue is full.
@@ -282,9 +285,9 @@ struct Running {
 pub struct Interpreter {
     snapshot: CallSnapshot,
     policy: Policy,
-    /// §6.3's *pending program*. Private, and written only by whole-program assignment — see this
-    /// module's header for why that is the design and not an accident of style.
-    program: VecDeque<Instruction>,
+    /// §6.3's *pending program*. A [`Program`] rather than a bare queue precisely so that the
+    /// replacement rule is the type's, not this file's — see that module's header.
+    program: Program,
     running: Option<Running>,
     /// The `seq` of the outstanding callback, if one is out (§5.1, §6.3).
     outstanding: Option<u64>,
@@ -305,7 +308,7 @@ impl Interpreter {
         Self {
             snapshot,
             policy,
-            program: VecDeque::new(),
+            program: Program::default(),
             running: None,
             outstanding: None,
             next_seq: 1,
@@ -496,7 +499,7 @@ impl Interpreter {
     /// verb with a completion event blocks the queue until it resolves).
     fn advance(&mut self, out: &mut Vec<Output>) {
         while self.running.is_none() {
-            let Some(instruction) = self.program.pop_front() else {
+            let Some(instruction) = self.program.take_next() else {
                 return;
             };
             self.start(instruction, out);
@@ -765,7 +768,8 @@ impl Interpreter {
     fn accept(&mut self, document: Document, out: &mut Vec<Output>) {
         // §6.5's allowlist is host configuration, so it is checked here rather than in the parser
         // — and a document that breaks it is rejected whole like any other (§6.4). It cannot be
-        // applied in part, because `self.program` is written once, below, or not at all.
+        // applied in part, because the only way instructions reach `self.program` is the single
+        // whole-program `replace` below, which this return skips.
         if let Err(Error::BadField { .. }) = self.check_allowlist(&document) {
             self.apply_failure(self.policy.on(Failure::ServerError), out);
             return;
@@ -776,9 +780,10 @@ impl Interpreter {
         if document.instructions.is_empty() {
             return;
         }
-        // Everything below is §6.3's replacement, and it is the only write to `self.program` in
-        // this crate. Whatever was queued is discarded; running interruptible work is stopped;
-        // `bridge` state and `tag`s persist, because neither lives in the queue.
+        // Everything below is §6.3's replacement. `Program::replace` takes the whole document,
+        // so whatever was queued is discarded by construction rather than by care taken here;
+        // running interruptible work is stopped; `bridge` state and `tag`s persist, because
+        // neither lives in the queue.
         if let Some(running) = self.running.take() {
             let interruptible = match &running.instruction.verb {
                 Verb::Play { interruptible, .. } => *interruptible,
@@ -797,7 +802,7 @@ impl Interpreter {
                 out.push(Output::ClearTimer(Timer::Pause));
             }
         }
-        self.program = document.instructions.into();
+        self.program.replace(document.instructions);
         self.advance(out);
     }
 
@@ -850,7 +855,7 @@ impl Interpreter {
 
     /// End the call on the host's own initiative, discarding whatever was queued.
     fn tear_down(&mut self, cause: EndCause, reject: Option<u16>, out: &mut Vec<Output>) {
-        self.program.clear();
+        self.program.abandon();
         if let Some(running) = self.running.take()
             && running.playing
         {

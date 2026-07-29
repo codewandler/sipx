@@ -53,6 +53,9 @@ jobs:
       # The documentation guides include these files verbatim. A sample that no longer compiles
       # is worse than no sample: it is read as working code.
       - run: cargo build --workspace --all-features --examples
+      # C-5's end-to-end proof: the app contract interpreter driving a real call with no host,
+      # asserted on the trace the example prints. Not a `#[test]`, so nothing else runs it.
+      - run: bash crates/sipx-app-protocol/tests/canned_program.sh
 
   msrv:
     name: msrv

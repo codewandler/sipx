@@ -46,6 +46,7 @@ mod error;
 mod event;
 mod interpreter;
 mod policy;
+mod program;
 mod tagged;
 mod time;
 
