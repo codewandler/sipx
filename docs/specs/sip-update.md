@@ -1,6 +1,6 @@
 # Spec: the UPDATE method
 
-**Status:** normative · **Crates:** `sipx-sip`, `sipx-call` · **Stories:** S-19 · **Design:**
+**Status:** normative · **Crates:** `sipx-sip`, `sipx-call` · **Stories:** S-19, S-22 · **Design:**
 [sip-ua](../designs/sip-ua.md)
 
 ## 1. Normative references
@@ -55,6 +55,38 @@ Hence `sipx-call`'s two ringing entry points:
 `ring_early` requires 100rel from the peer and fails if the peer did not offer it: an answer in
 an unreliable provisional is forbidden outright, and sending one anyway would leave the two
 sides disagreeing about which description is in force with no way to notice.
+
+### 3.1 The same, from the calling side
+
+§5.1 says "either caller or callee", and everything above is the callee. The caller needs one
+thing more before it can act at all: **a moment at which it holds the early dialog.** `dial`
+does not give it one — it waits for the final response inside itself and hands back an answered
+`Call` — so until `S-22` this section described a capability sipx had in one role and the
+registry claimed in both.
+
+`dial_early` is that moment. It returns a `Dialing` as soon as a provisional establishes a
+dialog, and `Dialing::answered` then waits for the call exactly as `dial` would have. `dial`
+itself is unchanged, because waiting is what almost every caller wants.
+
+| Handle | Role | Renegotiable when |
+|---|---|---|
+| `Ringing` (`ring_early`) | UAS | this side has sent the answer reliably |
+| `Dialing` (`dial_early`) | UAC | the far end has sent the answer reliably |
+
+The two conditions are the same condition seen from opposite ends: the INVITE's offer/answer
+exchange has closed, and RFC 3262 §5 leaves exactly one way for that to happen before the 200.
+So `Dialing` adopts a description **only** out of a reliable provisional. One arriving in an
+unreliable provisional is ignored rather than adopted — §5 forbids it, and treating it as an
+answer would silently open a renegotiation the far end does not believe is legal.
+`Dialing::has_early_session` is that state, and `Dialing::update` requires it; without it the
+call returns `NoEarlySession` rather than putting a second offer on the wire for the far end to
+refuse.
+
+`Dialing` holds the dialog rather than a copy of it, which is what keeps the PRACK, any early
+UPDATE and the eventual BYE in one `CSeq` space (RFC 3261 §12.2.1.1). It is also inert on drop:
+an invitation that is neither `answered` nor `cancel`led goes on ringing, the same contract
+`Call::hangup` already has, because withdrawing one from a destructor would mean not awaiting
+the CANCEL it sends nor the `200` that may cross it.
 
 **And the 2xx waits for the PRACK.** RFC 3262 §5 makes that a MUST, and it is what makes the rest
 of the arrangement safe: `answer_early`'s 200 carries no session description at all — the offer
@@ -112,8 +144,10 @@ is early — the exact confusion this section exists to prevent.
 
 A corollary: `answered()` with nothing in progress is a no-op, so a caller that clears on an
 error path cannot destroy state it did not create. Both `on_update` implementations rely on
-that — they clear after a failed renegotiation and after a response that could not be sent, so a
-transaction nobody is waiting on cannot leave the dialog answering 500 forever.
+that — the confirmed dialog's on `Call`, and the early dialog's in `sipx-call`'s `update`
+module, shared by `Ringing` and `Dialing` — and they clear after a failed renegotiation and
+after a response that could not be sent, so a transaction nobody is waiting on cannot leave the
+dialog answering 500 forever.
 
 ## 6. Receiving an UPDATE (§5.2)
 
@@ -169,6 +203,11 @@ number from whatever arrived. An UPDATE from behind the sequence therefore rolle
 and a BYE replayed from between the two numbers then looked in order — ending a call that was
 still running. A new path that sidesteps an existing guard is worse than no guard, so there is
 one guard and it belongs to the thing it guards.
+
+The early path is now one implementation for both roles rather than one per role, for the same
+reason: `S-22` gave the caller an early dialog, and a mirrored copy of §5.2 for it would have
+been a second place to omit this check. `Ringing::on_update` and `Dialing::on_update` both call
+`update::receive`, so there is one ordering check on the early path and it cannot drift.
 
 Once accepted:
 
