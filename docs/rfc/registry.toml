@@ -261,7 +261,7 @@ title = "SIP: Session Initiation Protocol (obsoleted by 3261)"
 layer = "core"
 status = "partial"
 evidence = ["crates/sipx-sip/src/transaction/key.rs"]
-note = "Not implemented as a protocol. The transaction key falls back to 2543-style matching for a request whose branch lacks the magic cookie, because such requests still arrive."
+note = "Not implemented as a protocol. The transaction key falls back to 2543-style matching when a branch lacks the magic cookie. Server-side that is for requests that still arrive from such senders; client-side it is only reachable by an application that supplies its own cookieless `Via`, since the transport brands ours with `z9hG4bK`. The two fall back differently, as RFC 3261 §17.2.3 and §17.1.3 do: the client key drops the Request-URI and the `To` tag, which a response cannot reproduce, so a legacy client transaction matches its own responses instead of hanging until Timer F."
 
 [[rfc]]
 number = 3264

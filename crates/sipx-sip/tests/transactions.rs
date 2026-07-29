@@ -602,6 +602,52 @@ fn legacy_branch_matching_rfc2543_fallback() {
     assert_eq!(layer.len(), (0, 1), "still exactly one server transaction");
 }
 
+/// RFC 3261 §17.1.3: a client transaction on a pre-3261 branch matches its own responses.
+///
+/// The client rule is not the server rule. §17.2.3 keys a legacy transaction on the
+/// Request-URI and the `To` tag, and a response has neither — no Request-URI at all, and the
+/// tag the UAS added rather than the one the request went out with. Keying the client that way
+/// makes every response `Unmatched`: the call does not fail, it hangs until Timer F.
+///
+/// A peer cannot put us here — the topmost `Via` on a client transaction is ours, and the
+/// transport always gives it a `z9hG4bK` branch. An application that builds its own `Via` can.
+/// Every other test in this file uses a magic-cookie branch, which is why this one exists
+/// (`S-26`).
+#[test]
+fn a_legacy_client_transaction_matches_its_own_response() {
+    let mut layer = TransactionLayer::new(timers());
+    let req = request(&Method::Invite, "oldschoolbranch");
+
+    let (key, _) = layer
+        .send_request(req.clone(), Reliability::Unreliable)
+        .expect("a client transaction");
+    assert!(key.is_legacy(), "the fallback rules must be selected");
+
+    // The UAS tags the To header on its first response, so the tag the response carries is not
+    // the one the request was sent with. That is the difference the server rule cannot survive.
+    let ringing = response(&req, 180, Some("uastag"));
+    assert_eq!(
+        TransactionKey::from_response(&ringing).as_ref(),
+        Some(&key),
+        "the response's key must be the key the sent request was filed under"
+    );
+
+    let Dispatch::Matched { key: matched, .. } =
+        layer.receive(Message::Response(ringing), Reliability::Unreliable)
+    else {
+        panic!("the response must reach the client transaction that sent the request");
+    };
+    assert_eq!(matched, key);
+
+    // A second fork answers with a different tag; §17.1.3 keys on neither, so it lands too.
+    let other_fork = response(&req, 180, Some("anotheruastag"));
+    assert!(matches!(
+        layer.receive(Message::Response(other_fork), Reliability::Unreliable),
+        Dispatch::Matched { .. }
+    ));
+    assert_eq!(layer.len(), (1, 0), "still exactly one client transaction");
+}
+
 /// RFC 3261 §17.2.3: under the pre-3261 rules the To tag is part of what distinguishes one
 /// transaction from another. Leaving it out lets a forked INVITE retried with a different tag
 /// — or an ACK belonging to another branch's response — be absorbed by the wrong transaction.

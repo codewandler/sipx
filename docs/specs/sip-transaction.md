@@ -173,15 +173,27 @@ stray fork response the core has no business discarding silently.
 
 Note that this is **narrower than §6.1**, on purpose. The server rule needs the `Request-URI`,
 the `From` tag and the `To` tag to tell one legacy transaction from another; the client rule
-does not, and cannot — a response has no Request-URI to compare.
+does not, and cannot — a response has no Request-URI to compare, and the `To` tag it carries is
+the one the UAS added, not the one the request was sent with.
 
-> **Known deviation.** `TransactionKey::from_sent_request` derives a client key with
-> `from_request`, which is §6.1's rule, so a client transaction on a pre-RFC-3261 branch is
-> keyed with a Request-URI and a `To` tag that its responses can never carry. Those two keys
-> never compare equal, and every response to such a transaction is `Unmatched`: the call does
-> not fail, it hangs until Timer F. Found by the `transaction_sequence` fuzz target (§8) and
-> pinned by the ignored test `a_legacy_client_transaction_never_sees_its_response`. The fix is
-> a separate client derivation and belongs to its own story.
+Both derivations — the key a sent request is filed under, and the key a received response is
+looked up by — are therefore the *same* function of the top `Via` and the `CSeq`, and a client
+key is never derived by §6.1's rule. Where the branch carries the magic cookie that function is
+`(branch, sent-by, CSeq method)`. Where it does not, there may be no branch at all to key on, so
+it is the top `Via` verbatim together with the `From` tag, the `Call-ID` and the `CSeq` — every
+field of §6.1's legacy key **except** the `Request-URI` and the `To` tag, which are exactly the
+two a response cannot reproduce. Those fields are echoed back unchanged (§8.2.6.2), so the two
+derivations agree; keeping them rather than the branch alone is what stops two legacy client
+transactions that happen to share a branch — or share the absence of one — from answering each
+other's responses.
+
+**Who reaches the legacy client rule.** Not a peer. The topmost `Via` on a client transaction is
+always ours, and the transport adds one with a `z9hG4bK` branch when the request has none, so an
+old peer at the far end changes nothing here — §6.1 is the rule its requests meet. The legacy
+client key arises only when an *application* hands the transport a request carrying a `Via` it
+built itself without the cookie. That is the whole of the exposure, and it is why keying a client
+transaction by §6.1's rule was a latent contradiction of this section rather than a live interop
+failure.
 
 ### 6.3 CANCEL
 
