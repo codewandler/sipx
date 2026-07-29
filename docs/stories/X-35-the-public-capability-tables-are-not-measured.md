@@ -2,7 +2,7 @@
 id: X-35
 title: Make the public capability tables measured, not hand-maintained
 pillar: Build
-status: ready
+status: in-progress
 priority: 2
 design: docs/designs/rfc-registry-grain.md
 epic: conformance
