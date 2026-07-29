@@ -31,6 +31,10 @@ fn loopback() -> IpAddr {
     "127.0.0.1".parse().expect("valid")
 }
 
+/// How long a test here waits for audio it played to arrive before calling it lost (`X-28`).
+/// A bound on failure, not a window to measure in — see `MediaSession::record_at_least`.
+const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
 /// T-9's exit criterion.
 #[tokio::test]
 async fn a_call_establishes_over_wss() {
@@ -101,12 +105,10 @@ async fn a_call_establishes_over_wss() {
         .map(|i| ((f64::from(i) / 8000.0 * 440.0 * std::f64::consts::TAU).sin() * 12000.0) as i16)
         .collect();
     caller.media().play(&tone, 160).await;
-    let heard = tokio::time::timeout(
-        Duration::from_secs(5),
-        callee.media().record_until_idle(Duration::from_millis(300)),
-    )
-    .await
-    .expect("no timeout");
+    let heard = callee
+        .media()
+        .record_at_least(tone.len(), DELIVERY_BOUND)
+        .await;
     assert!(!heard.is_empty(), "the call must carry audio");
 
     // And the BYE arrives, which is the assertion the `Contact` would have broken: it is sent

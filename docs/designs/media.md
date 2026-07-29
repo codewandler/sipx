@@ -186,6 +186,35 @@ never reported as zero. The MOS is rendered to two decimal places on purpose —
 it has simplified impairment terms, and eight digits would invite comparing two calls on the last
 one.
 
+## Waiting for audio: two questions, two verbs
+
+Everything in this record is tested over real sockets against a real clock, so how a test *waits*
+is a design decision and not a detail. `X-28` found the media suites had one verb doing two jobs,
+and a flaky bridge test was the symptom.
+
+**`record_until_idle(idle)` answers "has the far end stopped talking".** It is a stream-end
+detector, and it is the right verb where the far end's length is genuinely unknown — the CLI's
+`dial` and `answer` record a human. Its duration is a definition of silence.
+
+**`record_at_least(samples, within)` answers "did all of it arrive".** It is the right verb for a
+caller that played the clip itself, which is nearly every test. Its duration is a **bound on
+failure** — how long before we conclude the audio is not coming — not a window to measure in, so
+it is set an order of magnitude above the honest answer rather than close to it.
+
+Confusing the two is what made `audio_played_into_one_call_is_heard_on_the_other` fail on a loaded
+machine while proving nothing about the diff under test. A caller that knows the count and waits
+on an idle window is racing a fixed wall clock against a pipeline that is merely slow — and this
+pipeline is slow in exactly the place the first window covers, because **the first packet is the
+one it delays the most**: two 20 ms send pacers in series, and behind each an adaptive jitter
+buffer entitled to grow to 240 ms precisely *because* arrivals have become jittery. The failure is
+not a degraded recording. It is an empty one, because once the first frame lands the rest follow
+at the packet rate; the recording is all-or-nothing by construction.
+
+The general rule this leaves for any future test in this crate: **a fixed wall-clock duration may
+bound a failure, or define silence. It may not stand in for a happens-before.** Where a count
+exists, wait for the count. Widening the window instead moves the cliff rather than removing it,
+and leaves a test everyone re-runs instead of reading.
+
 ## Codecs
 
 **G.711 µ-law and A-law, in pure Rust, checked against the ITU-T reference tables and not against a

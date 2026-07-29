@@ -22,6 +22,10 @@ use sipx_media::{Codec, Config, MediaPort, MediaSession};
 /// 20 ms at Opus's 48 kHz.
 const FRAME: usize = 960;
 
+/// How long this test waits for the clip it played to arrive before calling it lost (`X-28`).
+/// A bound on failure rather than a window to measure in — see [`MediaSession::record_at_least`].
+const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
 fn tone(samples: usize, hz: f64) -> Vec<i16> {
     (0..samples)
         .map(|i| {
@@ -87,7 +91,7 @@ async fn an_opus_call_carries_audio_that_survives_the_round_trip() {
     let source = tone(FRAME * 40, 440.0);
     let (_played, heard) = tokio::join!(
         alice.play(&source, FRAME),
-        bob.record_until_idle(Duration::from_millis(500)),
+        bob.record_at_least(source.len(), DELIVERY_BOUND),
     );
 
     assert!(

@@ -33,6 +33,20 @@ fn loopback() -> IpAddr {
     "127.0.0.1".parse().expect("valid")
 }
 
+/// How long a test here waits for audio it played to arrive before calling it lost (`X-28`).
+/// A bound on failure, not a window to measure in — see `MediaSession::record_at_least`.
+const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
+/// What a gap in the received stream has to reach before it means "the far end stopped talking"
+/// rather than "this machine is busy" (`X-28`).
+///
+/// Only one test here needs it, and it needs it because it is the one place in the sweep where
+/// the amount of audio genuinely cannot be known in advance — see
+/// [`a_clip_queued_while_another_is_stopping_starts_within_the_bound`]. The sender emits a packet
+/// every 20 ms, so two seconds is a hundred consecutive missed packet intervals: long past any
+/// scheduling delay, and still a fiftieth of the ten-second bound above.
+const STREAM_ENDED: Duration = Duration::from_secs(2);
+
 async fn endpoint() -> (Handle, Receiver<Incoming>) {
     bind(Config::new("127.0.0.1:0".parse().expect("valid")))
         .await
@@ -260,7 +274,7 @@ async fn clips_queue_rather_than_replacing_one_another() {
         async {
             callee
                 .media()
-                .record_until_idle(Duration::from_millis(400))
+                .record_at_least(per_packet * packets * 2, DELIVERY_BOUND)
                 .await
         }
     );
@@ -313,12 +327,12 @@ async fn a_clip_queued_while_another_is_stopping_starts_within_the_bound() {
             let at_stop = caller.media().packets_sent();
             (prompt_end, reply.finished().await, at_stop)
         },
-        async {
-            callee
-                .media()
-                .record_until_idle(Duration::from_millis(400))
-                .await
-        }
+        // The one place the X-28 sweep left on an idle window, and deliberately. How much the
+        // far end hears is not knowable in advance here — it is *the measurement*, bounded from
+        // below by the reply and from above by the stop bound — so there is no count to wait
+        // for, and "the far end stopped talking" is the only end this recording has. That is
+        // what `record_until_idle` is for; only its idea of a gap had to grow up.
+        async { callee.media().record_until_idle(STREAM_ENDED).await }
     );
 
     assert_eq!(prompt_end, PlaybackEnd::Stopped);

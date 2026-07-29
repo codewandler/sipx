@@ -89,6 +89,14 @@ fn loud(samples: usize) -> Vec<i16> {
     vec![12_000i16; samples]
 }
 
+/// How long a test here waits for audio it played to arrive before calling it lost (`X-28`).
+/// A bound on failure, not a window to measure in — see `MediaSession::record_at_least`.
+///
+/// Note that a muted call still sends: mute substitutes silence packet for packet rather than
+/// stopping the stream, which is the property half this file exists to assert. So counting
+/// samples terminates here whether the caller is muted or not.
+const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
 /// The story's failing-first test: while a call is muted, the far end must decode nothing but
 /// silence out of it, however loud what this side plays into it is.
 #[tokio::test]
@@ -102,7 +110,7 @@ async fn a_muted_call_contributes_no_audio() {
     let heard = tokio::join!(async { caller.play(&clip).await }, async {
         callee
             .media()
-            .record_until_idle(Duration::from_millis(400))
+            .record_at_least(clip.len(), DELIVERY_BOUND)
             .await
     })
     .1;
@@ -130,7 +138,7 @@ async fn muting_substitutes_silence_rather_than_stopping_the_stream() {
     let heard = tokio::join!(async { caller.play(&clip).await }, async {
         callee
             .media()
-            .record_until_idle(Duration::from_millis(400))
+            .record_at_least(clip.len(), DELIVERY_BOUND)
             .await
     })
     .1;
@@ -167,7 +175,7 @@ async fn unmuting_restores_the_audio() {
     let while_muted = tokio::join!(async { caller.play(&clip).await }, async {
         callee
             .media()
-            .record_until_idle(Duration::from_millis(300))
+            .record_at_least(clip.len(), DELIVERY_BOUND)
             .await
     })
     .1;
@@ -181,7 +189,7 @@ async fn unmuting_restores_the_audio() {
     let after = tokio::join!(async { caller.play(&clip).await }, async {
         callee
             .media()
-            .record_until_idle(Duration::from_millis(300))
+            .record_at_least(clip.len(), DELIVERY_BOUND)
             .await
     })
     .1;
@@ -232,7 +240,7 @@ async fn a_muted_call_still_receives_audio_digits_and_statistics() {
 
     let heard = tokio::join!(
         async { callee.media().play(&loud(per_packet * 3), per_packet).await },
-        async { caller.record_until_idle(Duration::from_millis(300)).await }
+        async { caller.record_at_least(per_packet * 3, DELIVERY_BOUND).await }
     )
     .1;
     assert!(

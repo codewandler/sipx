@@ -87,7 +87,8 @@ pub enum CallEvent {
     },
     /// A recording resolved.
     ///
-    /// Emitted by [`Call::record_until_idle`](crate::Call::record_until_idle).
+    /// Emitted by [`Call::record_until_idle`](crate::Call::record_until_idle) and
+    /// [`Call::record_at_least`](crate::Call::record_at_least), whichever ended the recording.
     RecordingFinished {
         /// How much was recorded — the audio itself, not counting the trailing silence that
         /// detected the end of it.

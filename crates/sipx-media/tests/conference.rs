@@ -54,22 +54,26 @@ async fn party() -> Party {
     }
 }
 
-/// Record for a fixed stretch of wall clock.
+/// How long a test here waits for a mixed stream to deliver before calling it lost (`X-28`).
+/// A bound on failure, not a window to measure in — see [`MediaSession::record_at_least`].
+const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
+/// Record a fixed number of samples of the mixed stream.
 ///
 /// Not `record_until_idle`: a conference sends *continuously*. Every participant gets a frame
 /// every 20 ms whether anyone is talking or not, because that is what a mixed stream is — so
 /// the silence a conference produces still arrives as packets, and waiting for a gap waits
 /// forever.
-async fn record_for(session: &MediaSession, how_long: Duration) -> Vec<i16> {
-    let mut samples = Vec::new();
-    let deadline = tokio::time::Instant::now() + how_long;
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout_at(deadline, session.recv()).await {
-            Ok(Some(frame)) => samples.extend_from_slice(&frame),
-            Ok(None) | Err(_) => break,
-        }
-    }
-    samples
+///
+/// Counted rather than timed, which is what makes that continuity useful (`X-28`). This used to
+/// record for a fixed 600 ms of wall clock, and a fixed window against real sockets measures
+/// how fast the machine is: under load it returned a handful of frames or none, `peak` fell to
+/// zero, and the test reported that a participant could not hear the conference. Because the
+/// mixer never stops sending, *every* participant reaches any count asked of it — the ones
+/// asserted to hear silence included — so counting terminates here for the same reason waiting
+/// for a gap does not.
+async fn record_mixed(session: &MediaSession, samples: usize) -> Vec<i16> {
+    session.record_at_least(samples, DELIVERY_BOUND).await
 }
 
 /// The peak absolute sample, which is how loud something is.
@@ -101,9 +105,9 @@ async fn no_participant_hears_their_own_audio() {
     let voice = tone(440.0, 500, 10_000.0);
     let (_played, heard_by_alice, heard_by_bob, heard_by_carol) = tokio::join!(
         alice.far.play(&voice, 160),
-        record_for(&alice.far, Duration::from_millis(600)),
-        record_for(&bob.far, Duration::from_millis(600)),
-        record_for(&carol.far, Duration::from_millis(600)),
+        record_mixed(&alice.far, voice.len()),
+        record_mixed(&bob.far, voice.len()),
+        record_mixed(&carol.far, voice.len()),
     );
 
     assert!(
@@ -146,7 +150,7 @@ async fn a_participant_hears_everyone_else_at_once() {
     let (_played, _played_other, heard_by_carol) = tokio::join!(
         alice.far.play(&voice, 160),
         bob.far.play(&other, 160),
-        record_for(&carol.far, Duration::from_millis(600)),
+        record_mixed(&carol.far, voice.len()),
     );
 
     // The sum of two 8000-amplitude tones at different frequencies exceeds either alone.
@@ -182,8 +186,8 @@ async fn participants_join_and_leave_without_disturbing_the_others() {
     };
     let (_played, heard_by_bob, heard_by_carol, _carol_id) = tokio::join!(
         alice.far.play(&voice, 160),
-        record_for(&bob.far, Duration::from_millis(600)),
-        record_for(&carol.far, Duration::from_millis(600)),
+        record_mixed(&bob.far, voice.len()),
+        record_mixed(&carol.far, voice.len()),
         joining,
     );
 
@@ -205,7 +209,7 @@ async fn participants_join_and_leave_without_disturbing_the_others() {
 
     let (_played, heard_after) = tokio::join!(
         alice.far.play(&voice, 160),
-        record_for(&carol.far, Duration::from_millis(600)),
+        record_mixed(&carol.far, voice.len()),
     );
     assert!(
         peak(&heard_after) > 3000,
@@ -231,7 +235,7 @@ async fn someone_who_has_left_is_no_longer_mixed_in() {
     let voice = tone(440.0, 400, 12_000.0);
     let (_played, heard_by_bob) = tokio::join!(
         alice.far.play(&voice, 160),
-        record_for(&bob.far, Duration::from_millis(500)),
+        record_mixed(&bob.far, voice.len()),
     );
     assert!(
         peak(&heard_by_bob) < 1000,
@@ -252,7 +256,7 @@ async fn a_lone_participant_hears_silence() {
     let voice = tone(440.0, 400, 12_000.0);
     let (_played, heard) = tokio::join!(
         alice.far.play(&voice, 160),
-        record_for(&alice.far, Duration::from_millis(500)),
+        record_mixed(&alice.far, voice.len()),
     );
     assert!(
         peak(&heard) < 1000,

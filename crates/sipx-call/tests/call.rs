@@ -30,6 +30,10 @@ fn loopback() -> IpAddr {
     "127.0.0.1".parse().expect("valid")
 }
 
+/// How long a test here waits for audio it played to arrive before calling it lost (`X-28`).
+/// A bound on failure, not a window to measure in — see `MediaSession::record_at_least`.
+const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
 async fn endpoint() -> (Handle, Receiver<Incoming>) {
     bind(Config::new("127.0.0.1:0".parse().expect("valid")))
         .await
@@ -100,7 +104,7 @@ async fn a_call_carries_audio_from_one_endpoint_to_the_other() {
         async {
             callee
                 .media()
-                .record_until_idle(Duration::from_millis(500))
+                .record_at_least(played.len(), DELIVERY_BOUND)
                 .await
         }
     )
@@ -143,7 +147,7 @@ async fn audio_flows_in_both_directions() {
             let played = from_caller.clone();
             let (_played, recorded) = tokio::join!(
                 caller.media().play(&played, 160),
-                callee.media().record_until_idle(Duration::from_millis(500))
+                callee.media().record_at_least(played.len(), DELIVERY_BOUND)
             );
             recorded
         },
@@ -151,7 +155,7 @@ async fn audio_flows_in_both_directions() {
             let played = from_callee.clone();
             let (_played, recorded) = tokio::join!(
                 callee.media().play(&played, 160),
-                caller.media().record_until_idle(Duration::from_millis(500))
+                caller.media().record_at_least(played.len(), DELIVERY_BOUND)
             );
             recorded
         }
@@ -179,10 +183,7 @@ async fn the_two_sides_agree_on_a_codec_and_a_media_port() {
 
     // A short exchange proves the ports and codec actually match, which the SDP alone does not.
     caller.media().play(&clip(60).samples, 160).await;
-    let heard = callee
-        .media()
-        .record_until_idle(Duration::from_millis(400))
-        .await;
+    let heard = callee.media().record_at_least(480, DELIVERY_BOUND).await;
     assert_eq!(heard.len(), 480, "60 ms is three packets");
 }
 
@@ -418,10 +419,7 @@ async fn a_call_carries_dtmf_digits() {
 
     // Establish the media path first: symmetric RTP has to learn where the caller is.
     caller.media().play(&clip(60).samples, 160).await;
-    let _ = callee
-        .media()
-        .record_until_idle(Duration::from_millis(300))
-        .await;
+    let _ = callee.media().record_at_least(480, DELIVERY_BOUND).await;
 
     caller.send_digits("1234#", Duration::from_millis(80)).await;
 
