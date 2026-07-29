@@ -50,6 +50,7 @@ _This is the layer applications actually program against, so it is the one that 
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
+- [X-35 — Make the public capability tables measured, not hand-maintained](X-35-the-public-capability-tables-are-not-measured.md) · Build · two independent read-only sweeps found the front page advertising Opus, bridging and a DTLS-SRTP workaround that no call can reach — the same shape X-30 removed from the registry, in the four hand-maintained tables no script reads
 - [X-29 — Stop asserting after a sleep in sipx-call and sipx-transport](X-29-wall-clock-sleeps-outside-the-media-path.md) · Build · found by X-28's sweep, then confirmed by a real red gate — dns.rs:553 raced a 50ms TTL against the scheduler and failed a gate that had nothing to do with the diff being merged
 - [X-33 — Generalise the reachability check past the media layer](X-33-generalise-the-reachability-check-beyond-media.md) · Build · alpha predicate 1 — X-30 made "no claim outlives its caller" mechanical for layer = media only, and its own review showed the reason given for stopping there was false
 - [X-34 — Make the gate fail honestly when the disk is full](X-34-the-gate-has-no-disk-guard.md) · Build · five times on 2026-07-29 a full disk produced a red gate that read as a code defect — cargo reports ENOENT on build artifacts, and a correct merge was nearly reverted for it
