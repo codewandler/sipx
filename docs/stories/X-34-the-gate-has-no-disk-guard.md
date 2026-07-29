@@ -2,7 +2,7 @@
 id: X-34
 title: Make the gate fail honestly when the disk is full
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 design: docs/designs/sip-core.md
 epic: conformance
