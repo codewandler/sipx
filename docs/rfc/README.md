@@ -73,14 +73,20 @@ every other check on this list passes for such a row, since the header is known,
 and evidence was cited. To drop a role, say in the `note` what is missing, as RFC 5763, 5764,
 8122, 8445 and 8839 do.
 
-**The `media` scope is a deliberate choice, not a limit of the workspace.** Media is where the
-crate serving a role and the crate implementing the capability come apart: an application places
-calls through `sipx-call` while the keying lives in `sipx-media`. Elsewhere there is no such gap —
-transport and core capabilities are on the path every call takes, and a services row claims a role
-for a surface `sipx-ua` itself serves. Unscoped, the rule rejects 22 of the 29 role-claiming rows
-and only 7 of those rejections point at anything real.
-`docs/designs/rfc-registry-grain.md` records the full count, the argument, and the two known ways
-to work around the scope.
+**The `media` scope is a deliberate choice, not a limit of the workspace.** The property behind it
+is *selection*: a media capability is carried only because something asked for it —
+`Capabilities::with_srtp`, `with_dtls_srtp`, `MediaSession::start_with_ice` — and asking for nothing
+is both the default and silent, since the call still connects and every test in the crate below
+still passes. Nothing is *selected* in the other layers: there is no `with_transactions` and no
+`with_dns`, so "can a call reach the transaction layer" is a question that cannot come out `no`.
+Unscoped, the rule rejects 22 of the 29 role-claiming rows (measured at `57857c6`); only 7 of those
+rejections point at anything true of the row, and only 3 rows were over-claiming at all — so on the
+question the check exists to answer, the unscoped rule is wrong 19 times out of 22.
+
+`layer` is a proxy for that property, and it is set by the author — so relabelling a media row
+`security` leaves the check. That is recorded rather than fixed.
+`docs/designs/rfc-registry-grain.md` carries the full count, the argument, the two false
+justifications this scope was given before this one, and what would widen it.
 
 It deliberately does **not** verify behaviour. No script can read a transaction machine and decide
 whether Timer A is right — the tests do that, and each entry points at them. What it stops is the

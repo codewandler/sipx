@@ -13,8 +13,9 @@ heard of, which is the failure mode a table like this actually has.
 
 The second failure mode, and the one that recurred: a capability implemented and tested inside
 one crate that nothing above it can select, reported as shipped because every check above passes
-for it. `unreachable_role_claims` is the check for that, scoped to the media layer for reasons
-measured in docs/designs/rfc-registry-grain.md.
+for it. `unreachable_role_claims` is the check for that, scoped to the media layer by choice and
+not by necessity — the argument, the measurement it rests on and the ways the scope can be walked
+around are in docs/designs/rfc-registry-grain.md.
 """
 
 import argparse
@@ -83,20 +84,28 @@ STRING_KEYS = {"spec"}
 CALL_CRATE = "sipx-call"
 CRATES = ROOT / "crates"
 
-# The rule is scoped to one layer. That is a *choice*, not something the workspace forced, and
-# the reason is that the media layer is the one place where the crate serving a role and the
-# crate implementing the capability come apart. A media row claims `uac`/`uas` — placing and
-# answering calls — which an application does through `sipx-call`, while the capability lives in
-# `sipx-media` or `sipx-sdp`. Nothing makes `sipx-call` select it, and twice it did not: ICE and
-# DTLS-SRTP were built, tested and claimed for both roles with no call able to ask for either.
-# Elsewhere that gap does not exist. Transport, core and security capabilities sit on the path
-# every call already takes, so "can a call reach the transaction layer" has no false answer; and
-# a services row like RFC 3856 claims `uas` for a surface `sipx-ua` itself serves, so the check
-# would only be asking whether a crate's public API reaches its own module.
+# The rule is scoped to one layer. That is a *choice*, not something the workspace forced.
 #
-# Measured before adoption, the unscoped rule rejects 22 of the 29 role-claiming rows, and only
-# 7 of those rejections are real. docs/designs/rfc-registry-grain.md carries the full count, the
-# argument, and what would widen this — including the two ways the scope can be worked around.
+# The property it stands in for is **selection**: a media capability is carried only because
+# something asked for it — `Capabilities::with_srtp`, `with_dtls_srtp`, `start_with_ice` — and
+# asking for nothing is both the default and silent, since the call still connects and every test
+# in the crate below still passes. That is how ICE and DTLS-SRTP came to be built, tested and
+# claimed for both roles with no call able to select either. The other layers have no such gap
+# because their capabilities are not selected at all: there is no `with_transactions` and no
+# `with_dns`, so "can a call reach the transaction layer" is a question that cannot come out `no`.
+# And a services row like RFC 3856 claims `uas` for a surface `sipx-ua` *itself* serves —
+# `sipx-call` does not depend on `sipx-ua` and no crate above it must select anything.
+#
+# `layer` is a proxy for that property, used because this check reads evidence paths and nothing
+# else; deciding selection means resolving callers across crates, which is a different check on a
+# different input. The proxy's cost is that `layer` is author-set, so relabelling a media row exits
+# the check — recorded, and asserted by `test_the_rule_is_scoped_to_the_media_layer`.
+#
+# Measured before adoption on 57857c6, the unscoped rule rejects 22 of the 29 role-claiming rows.
+# Only 7 of those rejections point at anything true of the row and only 3 rows were over-claiming
+# at all, so on the question this check exists to answer the unscoped rule is wrong 19 times out of
+# 22. docs/designs/rfc-registry-grain.md carries the full count, the argument, the two false
+# justifications this scope was given before this one, and what would widen it.
 ROLE_REACHABILITY_LAYERS = {"media"}
 
 
@@ -132,6 +141,12 @@ def reaches_the_call_layer(path: str, crates: set[str]) -> bool:
     `crates/sipx-cli/tests/`, which this already accepts. Admitting the root tree wholesale would
     have made `tests/interop/README.md` proof that a role is reachable, since `evidence` may
     legitimately cite markdown (RFC 5922 cites a spec). No row relied on it.
+
+    This is a path test and not a code test, so the same hole exists one directory in:
+    `crates/sipx-call/README.md` would satisfy it. Nothing relies on that either — of the 80
+    evidence paths in the registry exactly one is not a `.rs` file (`docs/specs/sip-tls.md`, RFC
+    5922's), and it is outside `crates/`. Recorded under "what would widen this" in the design
+    rather than closed, because the successor check named there replaces path matching altogether.
     """
     parts = pathlib.PurePosixPath(path).parts
     return len(parts) > 1 and parts[0] == "crates" and parts[1] in crates
