@@ -5,6 +5,40 @@ All notable changes to sipx are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### Added
+
+- **The distance to `1.0.0-alpha` is generated, not estimated (`X-32`)** — someone asked how far sipx
+  was from v1 and the honest answer was that the question had no denominator: the roadmap ran M0–M12
+  and never named 1.0, and the only `v1` in the tree was `sipx.app.v1`, a protocol version. So the
+  predicates were written down first, and `scripts/maturity.py` now generates `docs/maturity.md` from
+  `docs/rfc/registry.toml`, story frontmatter and git. Two new gate steps, taking the gate to **20**.
+  - **v1 is defined as five predicates** beside the alpha's seven, and they are separate because each
+    needs something this repository cannot supply — chiefly *"the public API has been used from outside
+    this repository"*, which no gate can assert and which the roadmap always gave as the reason to wait.
+    **No feature count, no RFC total, no percentage** in either list: the vision makes maximum feature
+    count a non-goal, so a coverage-based gate would contradict the document it serves.
+  - **A predicate's state comes from the board and nowhere else.** Each names the stories that close it
+    and is met only when all are `done`, so the table cannot drift. The nastiest failure mode is pinned
+    by a test: a blocker list pointing at a story that does not exist reports **unknown**, not met —
+    otherwise deleting a story would look like finishing it.
+  - **Two predicates are reported as `attested` rather than `computed`, and say why.** "No known-wrong
+    shipped path" cannot be computed, because a defect nobody has found leaves no trace in either
+    source; what is reported is the absence of *open* stories describing one. `S-27` is the proof of the
+    difference — a `sips:` URI dialled in cleartext, found by reading code, not by any report.
+  - **The most useful output is the one nobody asked for first**: stories filed versus closed per day,
+    from git. **−37 on 2026-07-28, +4 on 2026-07-29, +1 on 2026-07-30.** The report says plainly that
+    the marker is not a single winning day but the date the crossover becomes *durable*, because a
+    shrinking board means nothing while discovery still outpaces it.
+  - **No aggregate percentage exists, and a test forbids one.** `media` is 15 RFCs with 11 partial;
+    `security` is 11 with none. One number would call them alike. `partial` is counted as `partial` and
+    never as a fraction of done.
+  - It states its blind spot rather than implying precision: outside `media` and `security`,
+    `implemented` means the code exists and has not been checked against a caller. Another test ties
+    that caveat to `rfc-report.py`'s actual scope, so widening the check there fails here until the
+    caveat follows.
+  - The check earned itself on its first run: closing `X-32`'s own story changed the answer and turned
+    the gate red until the report was regenerated.
+
 ## [Unreleased]
 
 ### Fixed

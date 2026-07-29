@@ -250,6 +250,33 @@ person reading the repo, and most are already checked by the gate.
 7. **The distance to v1 is generated, not asserted** — `X-32`, so this section cannot quietly go
    stale the way the Status block above did.
 
+### `1.0.0` — the predicates
+
+The alpha is the point where a v1 *could* be cut. These are what would make it right to actually cut
+one, and they are separate because every one of them needs something this repository cannot supply on
+its own. Each is checkable, for the same reason the alpha predicates are: a prose paragraph is not a
+definition.
+
+1. **Every alpha predicate above holds**, and has held across at least one release rather than only at
+   the moment of measurement.
+2. **Reachability is bound to callers at every layer.** No layer in
+   [`maturity.md`](maturity.md) carries the "unverified against callers" caveat — that is `X-37`, and
+   until it lands `implemented` outside `media` and `security` means "the code exists".
+3. **The public API has been used from outside this repository**, by at least one application nobody
+   here wrote. This is the one the roadmap has always given as the reason to wait, and it is not
+   something a gate can assert: it is recorded when it happens, with what broke.
+4. **Every published crate's contract is stated and has survived a breaking change being refused.**
+   `A-8` states them; v1 needs at least one instance of a change being shaped by the contract rather
+   than the contract being edited to fit the change.
+5. **Interop passes against two independent implementations for every transport the README claims.**
+   Today it is two peers, and not across every transport — the count is in `tests/interop/`, not here,
+   so this is read from there rather than restated.
+
+**What is deliberately absent from that list**: any feature count, any RFC total, any percentage. The
+vision makes maximum feature count a non-goal and says a smaller stack whose every path is tested
+beats a larger one whose edges are guesswork. A v1 gate built on coverage would contradict the
+document it is supposed to serve.
+
 ### What the alpha is *not* waiting for
 
 M9–M12, the ICE and discovery epics, QUIC, and the red rows listed under "After M12". Those make

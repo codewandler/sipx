@@ -101,6 +101,10 @@ def gate_steps(msrv: str) -> list[Step]:
         Step("rfc report tests", "gate", ("python3", "scripts/test-rfc-report.py")),
         Step("pool key tests", "gate", ("python3", "scripts/test-pool-key.py")),
         Step("audio claims tests", "gate", ("python3", "scripts/test-audio-claims.py")),
+        # X-32: the maturity report is generated from the registry and the board, so its arithmetic
+        # is the kind of thing that can be quietly wrong for a long time. Milliseconds, and it also
+        # asserts that every predicate names a story that exists.
+        Step("maturity tests", "gate", ("python3", "scripts/test-maturity.py")),
         # The interop harness reserves machine-global things and used to let two runs share them,
         # which `X-23` measured as both call tests timing out together. The suite stubs the
         # container runtime, so it belongs beside the others rather than in the `interop` job.
@@ -126,6 +130,10 @@ def gate_steps(msrv: str) -> list[Step]:
         # scaffolding commit onward and the crate implements neither. The description is the
         # first string a user meets, and nothing connected it to the code.
         Step("audio claims", "docs", ("./scripts/check-audio-claims.py", "--check")),
+        # X-32: "how far is this from 1.0" is answered from the registry and the board rather than
+        # estimated. A stale answer is worse than none, because the only decision it feeds is when
+        # to cut a release.
+        Step("maturity", "docs", ("./scripts/maturity.py", "--check")),
         Step("fmt", "fmt", ("cargo", "fmt", "--all", "--check")),
         Step(
             "clippy",
