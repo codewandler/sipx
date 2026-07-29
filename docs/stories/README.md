@@ -87,9 +87,6 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
 - [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
 
-### Conformance
-- [T-21 — Be reachable through a push notification](T-21-push-notification.md) · Signalling · M10 · RFC 8599 · a client holding no connection at all
-
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
@@ -158,6 +155,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [T-18 — Surface unmatched responses to the application](T-18-surface-unmatched-responses.md) · Signalling · M7 · the endpoint drops what a forwarding element is required to forward
 - [T-19 — Stop dropping incoming requests silently](T-19-stop-dropping-incoming-requests-silently.md) · Signalling · M7 · a full channel loses requests with no counter and no log
 - [T-20 — Implement GRUU](T-20-gruu.md) · Signalling · M10 · RFC 5627 · needs T-14's Path and T-15's instance ID
+- [T-21 — Be reachable through a push notification](T-21-push-notification.md) · Signalling · M10 · RFC 8599 · a client holding no connection at all
 - [T-23 — Let a WebSocket target name its own path and port](T-23-websocket-request-path-and-port.md) · Signalling · found by X-17 — the second interop peer serves SIP over WebSocket somewhere sipx cannot ask for
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core

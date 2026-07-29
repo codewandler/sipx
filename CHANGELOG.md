@@ -9,6 +9,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A push notification wakes a client that holds no connection (`T-21`, RFC 8599)** — the UA half.
+  Every other mechanism in the stack assumes there is something the registrar can route down;
+  this is what is left when there is nothing.
+  - **`pn-provider`, `pn-param` and `pn-prid` go inside the `Contact` URI's angle brackets**,
+    where a registrar's URI parser looks. Outside them a `;` starts a header parameter, which is
+    a different field of a different grammar — a registrar would answer 200 and record a binding
+    nothing could ever wake.
+  - **The ordering RFC 8599 §4.1.3 fixes is a type, not a comment.** `UserAgent::woken` sends the
+    binding-refresh REGISTER and only then hands back the permission to expect the request the
+    push was sent for. A client that waits for the INVITE instead is waiting on a flow that does
+    not exist yet.
+  - **555 is surfaced as itself**, not folded into a generic failure — it is the one refusal no
+    credential and no retry can fix — but only to a registration that actually named a push
+    service, and it keeps the CLI exit code every other refusal uses.
+  - **`sip.pns` answers "can this registrar wake me"**, which comes apart from "did the
+    registration succeed": a registrar supporting some other push service answers 200 and records
+    a good binding that nothing will ring. `sip.pnsreg` and `sip.pnspurr` are read too.
+  - **sipx ships no push service implementation and that is deliberate** — it is a trait the
+    application adapts to whatever it already uses. A contact that cannot carry the parameters is
+    returned unchanged and warned about rather than registered as if it could.
 - **The connection pool key is generated from the type that defines it (`X-24`)** —
   `docs/specs/sip-transport.md` §8 said the pool was keyed by `(transport, remote address)`.
   `ConnectionKey` has carried four fields since `T-23`, and the sentence had already been wrong

@@ -2,7 +2,7 @@
 id: T-21
 title: Be reachable through a push notification
 pillar: Signalling
-status: in-progress
+status: done
 priority:
 design:
 epic: conformance
@@ -58,6 +58,19 @@ its push notification service and be reachable for the call that woke it.
   doc comments.
 - Registry entry for 8599 is `partial`, roles `["uac"]`; `docs/compliance.md` regenerated.
 - All four tests in `crates/sipx-ua/tests/push.rs` pass, plus unit tests in both `push.rs` files.
+- Review round 1 settled three things, none of them a change to what the story asked for.
+  **555 keeps `sipx-cli register`'s exit code at 3**: modelling it as its own error had made it
+  fall through to `Exit::Failed` = 1, and the published CLI reference documents 3 as "the far end
+  refused", which a 555 is. **`interpret` returns `PushNotSupported` only when the registration
+  named a push service** — to a client that sent no `pn-*` parameters the same code is a refusal
+  this side has no reading of, so it reports the number. **`in_contact` verifies the parameters
+  went in**: a `tel:`/`urn:`/`http:` contact parses and then has no `uri-parameter` list, so
+  setting them was a silent no-op and the device would have been unreachable by the one mechanism
+  it was configured for; the contact now comes back unchanged with a warning, which is what its
+  doc comment had always claimed. A valueless `+sip.pns`/`+sip.pnspurr` no longer names the empty
+  string. Unit tests added for each, plus direct ones for `Params::remove`/`Uri::remove_param`.
+- `main` is merged in (not rebased) and `./scripts/gate.py` — which replaced the command list in
+  `AGENTS.md` when X-22 landed — reports 12 steps all green, MSRV and docs site included.
 
 ## Notes
 - The ordering in §4.1.3 is the whole mechanism and the easiest thing to get backwards. The push is
