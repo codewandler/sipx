@@ -9,6 +9,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Playback control — queue, stop, interrupt on digit (`M-17`)** — the primitive under "play a
+  prompt and collect digits". `MediaSession::start_playback` (mirrored on `Call`) returns a
+  `Playback` handle; `Call::play` keeps its signature as the uninterruptible await of one.
+  - Stopping takes effect within a stated, tested bound — `Playback::STOP_BOUND_PACKETS`, two
+    packet intervals — for `stop` and for interrupt-on-digit alike.
+  - Clips queue rather than replace, so stopping is never an implicit side effect of starting;
+    the choice and its queue-while-stopping edge are recorded in `docs/designs/app-sdk.md`.
+  - A received DTMF digit (RFC 4733) cuts the prompt short without being swallowed: the
+    interrupt arms in the receive path only after the digit reaches the application's channel.
+  - `CallEvent::PlaybackFinished` now says which playback ended and how — completed, stopped,
+    interrupted, or the session ended under it.
 - **A second independent interop peer, and the first foreign answer (`X-17`)** — until now every
   interop test ran against one peer, and no implementation sipx did not write had ever answered a
   call it placed. Both are now false.

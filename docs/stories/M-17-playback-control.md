@@ -2,7 +2,7 @@
 id: M-17
 title: Control playback — queue, stop, interrupt on digit
 pillar: Media
-status: backlog
+status: done
 priority:
 design: docs/designs/app-sdk.md
 epic: app-sdk
@@ -17,17 +17,17 @@ Playback that can be queued, stopped, and interrupted by a DTMF digit — the pr
 "play a prompt and collect digits", which no IVR-shaped application can be built without.
 
 ## Acceptance
-- [ ] Starting playback returns a handle; the handle can stop playback, and stopping takes effect
+- [x] Starting playback returns a handle; the handle can stop playback, and stopping takes effect
       within a bounded number of packet intervals (bound stated and tested).
-- [ ] Playback can be started with interrupt-on-digit: a received DTMF event (RFC 4733) halts
+- [x] Playback can be started with interrupt-on-digit: a received DTMF event (RFC 4733) halts
       playback within the same bound, and the interrupting digit is not lost — it is delivered to
       the digit consumer.
-- [ ] Clips queue: starting a second playback while one is active either queues it or replaces the
+- [x] Clips queue: starting a second playback while one is active either queues it or replaces the
       queue — the choice is the design's to make, recorded in `docs/designs/app-sdk.md`, and both
       the chosen behaviour and its edge (queue while stopping) are tested.
-- [ ] Completion and interruption are observable as events (`C-3`), each carrying which playback
+- [x] Completion and interruption are observable as events (`C-3`), each carrying which playback
       finished and whether it ran to completion or was cut.
-- [ ] Failing-first test: `a_digit_interrupts_playback`.
+- [x] Failing-first test: `a_digit_interrupts_playback`.
 
 ## Progress
 - Implemented on `impl/M-17`. All five acceptance items satisfied; see
