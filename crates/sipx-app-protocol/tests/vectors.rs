@@ -107,7 +107,10 @@ fn ac_1_no_program_and_an_unreachable_app_takes_the_declared_effect() {
         }],
         "§9.2: the declared `on_unreachable` effect, and nothing else"
     );
-    assert!(!interpreter.awaiting_app(), "no hang: nothing is outstanding");
+    assert!(
+        !interpreter.awaiting_app(),
+        "no hang: nothing is outstanding"
+    );
     assert_eq!(interpreter.pending(), 0);
 }
 
@@ -126,7 +129,10 @@ fn ac_1_the_default_declaration_continues_without_a_program_and_without_a_panic(
             response: Response::Failed(Failure::Unreachable),
         },
     );
-    assert!(effects(&outputs).is_empty(), "`continue` keeps the program: {outputs:?}");
+    assert!(
+        effects(&outputs).is_empty(),
+        "`continue` keeps the program: {outputs:?}"
+    );
     assert!(!interpreter.awaiting_app());
 }
 
@@ -275,7 +281,11 @@ fn ac_3_a_document_replaces_the_program_rather_than_appending_to_it() {
         },
     );
     assert_eq!(interpreter.running(), Some("p1"));
-    assert_eq!(interpreter.pending(), 1, "the gather is queued behind the play");
+    assert_eq!(
+        interpreter.pending(),
+        1,
+        "the gather is queued behind the play"
+    );
 
     // A keypress during the prompt: program-level barge-in.
     let outputs = interpreter.handle(
@@ -339,10 +349,8 @@ fn ac_4_a_second_answer_to_one_delivery_is_ignored() {
             response: Response::Body(body(r#"{"id":"a1","do":"answer"}"#)),
         },
     );
-    let (_, callback) = delivery(interpreter.handle(
-        now(),
-        Input::Event(EventKind::Ringing { reliable: false }),
-    ));
+    let (_, callback) =
+        delivery(interpreter.handle(now(), Input::Event(EventKind::Ringing { reliable: false })));
     interpreter.handle(
         now(),
         Input::Response {
@@ -350,7 +358,8 @@ fn ac_4_a_second_answer_to_one_delivery_is_ignored() {
             response: Response::Body(String::new()),
         },
     );
-    let (envelope, callback) = delivery(interpreter.handle(now(), Input::Event(EventKind::Answered)));
+    let (envelope, callback) =
+        delivery(interpreter.handle(now(), Input::Event(EventKind::Answered)));
     assert_eq!(envelope.seq, 3);
     assert_eq!(callback.seq(), 3);
 
@@ -374,7 +383,10 @@ fn ac_4_a_second_answer_to_one_delivery_is_ignored() {
             response: Response::Body(body(r#"{"id":"h1","do":"hangup"}"#)),
         },
     );
-    assert!(outputs.is_empty(), "the second response does nothing: {outputs:?}");
+    assert!(
+        outputs.is_empty(),
+        "the second response does nothing: {outputs:?}"
+    );
     assert_eq!(interpreter.running(), Some("p1"), "program unchanged");
     assert_eq!(interpreter.pending(), 0);
 }
@@ -425,7 +437,11 @@ fn ac_5_an_unknown_verb_rejects_the_document_whole_and_leaves_the_program_runnin
         Some("p1"),
         "§9.2 default `on_5xx: continue` — the prior program still runs"
     );
-    assert_eq!(interpreter.pending(), 1, "and so does what was queued behind it");
+    assert_eq!(
+        interpreter.pending(),
+        1,
+        "and so does what was queued behind it"
+    );
 }
 
 /// **AC-6** — a `gather` with no digits until `timeout_ms`:
@@ -521,10 +537,7 @@ fn ac_8_an_event_during_an_outstanding_callback_waits_its_turn() {
     assert!(interpreter.awaiting_app());
 
     // A keypress arrives meanwhile. Nothing is delivered — but the snapshot moves anyway.
-    let outputs = interpreter.handle(
-        now(),
-        Input::Event(EventKind::Hold),
-    );
+    let outputs = interpreter.handle(now(), Input::Event(EventKind::Hold));
     assert!(
         !outputs.iter().any(|o| matches!(o, Output::Deliver { .. })),
         "§6.3: at most one callback outstanding: {outputs:?}"
@@ -586,16 +599,10 @@ fn ac_9_call_ended_survives_a_full_event_queue() {
     let outputs = interpreter.handle(now(), Input::TimerFired(Timer::Callback));
     let mut drained: Vec<EventKind> = Vec::new();
     let mut outputs = outputs;
-    loop {
-        let Some((envelope, callback)) = outputs
-            .into_iter()
-            .find_map(|output| match output {
-                Output::Deliver { envelope, callback } => Some((*envelope, callback)),
-                _ => None,
-            })
-        else {
-            break;
-        };
+    while let Some((envelope, callback)) = outputs.into_iter().find_map(|output| match output {
+        Output::Deliver { envelope, callback } => Some((*envelope, callback)),
+        _ => None,
+    }) {
         drained.push(envelope.event);
         outputs = interpreter.handle(
             now(),
@@ -654,7 +661,10 @@ fn a_dial_header_outside_the_host_allowlist_rejects_the_document() {
             )),
         },
     );
-    assert!(effects(&outputs).is_empty(), "no dial was issued: {outputs:?}");
+    assert!(
+        effects(&outputs).is_empty(),
+        "no dial was issued: {outputs:?}"
+    );
     assert_eq!(interpreter.pending(), 0);
 
     // With the field allowed, the same document runs.
@@ -662,10 +672,7 @@ fn a_dial_header_outside_the_host_allowlist_rejects_the_document() {
         dial_headers: vec!["X-Campaign".to_owned()],
         ..Policy::default()
     };
-    let mut allowed = Interpreter::new(
-        CallSnapshot::new("b7c1", Direction::Inbound),
-        policy,
-    );
+    let mut allowed = Interpreter::new(CallSnapshot::new("b7c1", Direction::Inbound), policy);
     let (_, callback) = delivery(allowed.handle(now(), Input::Event(EventKind::Incoming)));
     let outputs = allowed.handle(
         now(),
@@ -676,7 +683,11 @@ fn a_dial_header_outside_the_host_allowlist_rejects_the_document() {
             )),
         },
     );
-    assert_eq!(effects(&outputs).len(), 1, "the allowed field is fine: {outputs:?}");
+    assert_eq!(
+        effects(&outputs).len(),
+        1,
+        "the allowed field is fine: {outputs:?}"
+    );
 }
 
 /// AGENTS.md non-negotiable 3, at the interpreter's own boundary: an instruction document is input
@@ -729,6 +740,10 @@ fn an_empty_document_keeps_the_program_rather_than_clearing_it() {
             response: Response::Document(Document::keep_going()),
         },
     );
-    assert_eq!(interpreter.running(), Some("p1"), "the program is untouched");
+    assert_eq!(
+        interpreter.running(),
+        Some("p1"),
+        "the program is untouched"
+    );
     assert_eq!(interpreter.pending(), 1);
 }

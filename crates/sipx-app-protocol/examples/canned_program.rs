@@ -21,6 +21,12 @@
 
 // An example is read before it is run. These fire on code that is clearer written out.
 #![allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+// This is a harness, not library code: it drives two endpoints against each other and its job on
+// any failure is to die loudly so `tests/canned_program.sh` sees a non-zero exit. The workspace
+// bans `expect` because the *library* parses hostile input; nothing here does. Same for the
+// indexing, which is over `chunks_exact(2)` and cannot be short. (`sipx-testkit`'s
+// `issue-certs.rs` allows the same set, for the same reason.)
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -70,7 +76,10 @@ fn canned_app(event: &EventKind) -> Document {
         ]),
         // The digits are in. That is everything this app wanted, so end the call.
         EventKind::GatherFinished { digits, reason, .. } => {
-            println!("canned_program: gather digits={digits} reason={}", reason.as_str());
+            println!(
+                "canned_program: gather digits={digits} reason={}",
+                reason.as_str()
+            );
             Document::new(vec![Instruction::new(
                 "h1",
                 Verb::Hangup {
@@ -114,14 +123,14 @@ enum Woke {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let loopback: IpAddr = "127.0.0.1".parse()?;
-    let (callee_endpoint, mut callee_incoming) = bind(Config::new("127.0.0.1:0".parse()?)).await?;
-    let (caller_endpoint, _caller_incoming) = bind(Config::new("127.0.0.1:0".parse()?)).await?;
-    let callee_addr = callee_endpoint.local_addr();
+    let (answerer, mut inbound) = bind(Config::new("127.0.0.1:0".parse()?)).await?;
+    let (originator, _unused_inbound) = bind(Config::new("127.0.0.1:0".parse()?)).await?;
+    let callee_addr = answerer.local_addr();
 
     // The caller: dial, press 4 and 2 and then #, and wait for the far end to hang up.
     let caller = tokio::spawn(async move {
         let call = dial(
-            &caller_endpoint,
+            &originator,
             Target::udp(callee_addr),
             &Uri::sip(Host::Name(HostName::new("callee.example").expect("valid"))),
             &sipx_call::DialOptions::new("<sip:caller@example.net>", loopback),
@@ -140,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         call
     });
 
-    let incoming = callee_incoming.recv().await.ok_or("no INVITE arrived")?;
+    let incoming = inbound.recv().await.ok_or("no INVITE arrived")?;
 
     // ---- everything below is the driver ----
 
@@ -163,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for output in batch {
             match output {
                 Output::Effect(effect) => {
-                    if !perform(&effect, &mut call, &incoming, &callee_endpoint, loopback).await? {
+                    if !perform(&effect, &mut call, &incoming, &answerer, loopback).await? {
                         println!("canned_program: call ended");
                         hung_up = true;
                     }
@@ -249,7 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 match event_from_call(&event, id) {
                     Some(EventKind::Ended { cause }) => {
-                        println!("canned_program: ended cause={}", tag(&cause));
+                        println!("canned_program: ended cause={}", tag(cause));
                         break;
                     }
                     Some(contract_event) => {
@@ -321,7 +330,7 @@ async fn perform(
         }
         Effect::StopPlayback => println!("canned_program: effect stop_playback"),
         Effect::HangUp { cause } => {
-            println!("canned_program: effect hangup cause={}", tag(cause));
+            println!("canned_program: effect hangup cause={}", tag(*cause));
             if let Some(call) = call.as_mut() {
                 call.hang_up().await?;
             }
@@ -333,7 +342,7 @@ async fn perform(
 }
 
 /// An end cause's wire name, for the trace.
-fn tag(cause: &EndCause) -> String {
+fn tag(cause: EndCause) -> String {
     let json = cause.to_json();
     json.as_str()
         .map(str::to_owned)
@@ -349,7 +358,8 @@ fn tag(cause: &EndCause) -> String {
 fn now() -> Timestamp {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        });
     Timestamp::from_unix_millis(millis)
 }

@@ -73,7 +73,14 @@ impl Timestamp {
             }
             slice.parse::<i64>().ok()
         };
-        let separators = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':'), (19, b'.')];
+        let separators = [
+            (4, b'-'),
+            (7, b'-'),
+            (10, b'T'),
+            (13, b':'),
+            (16, b':'),
+            (19, b'.'),
+        ];
         for (at, expected) in separators {
             if bytes.get(at) != Some(&expected) {
                 return None;
@@ -98,7 +105,9 @@ impl Timestamp {
         }
         let days = days_from_civil(year, month, day);
         Some(Self(
-            ((days * SECONDS_PER_DAY) + hour * SECONDS_PER_HOUR + minute * SECONDS_PER_MINUTE
+            ((days * SECONDS_PER_DAY)
+                + hour * SECONDS_PER_HOUR
+                + minute * SECONDS_PER_MINUTE
                 + second)
                 * MS_PER_SECOND
                 + millis,
@@ -116,7 +125,11 @@ impl fmt::Display for Timestamp {
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
     // Shift the epoch to 0000-03-01, so the leap day is the last day of the shifted year.
     let shifted = days + 719_468;
-    let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
     let day_of_era = shifted - era * 146_097; // [0, 146096]
     let year_of_era =
         (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
@@ -139,8 +152,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year_of_era = year - era * 400; // [0, 399]
     let shifted_month = if month > 2 { month - 3 } else { month + 9 };
     let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
-    let day_of_era =
-        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
 }
 
@@ -229,7 +241,11 @@ mod tests {
             "202x-07-28T09:15:04.221Z",
             "2026-07-28T09:15:04.221z",
         ] {
-            assert_eq!(Timestamp::from_rfc3339(text), None, "{text} should be refused");
+            assert_eq!(
+                Timestamp::from_rfc3339(text),
+                None,
+                "{text} should be refused"
+            );
         }
     }
 }

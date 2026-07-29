@@ -31,9 +31,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::document::{Document, DtmfMode, Gather, Instruction, Source, TransferTarget, Verb};
 use crate::error::Error;
-use crate::event::{
-    CallSnapshot, CallState, EndCause, Envelope, EventKind, GatherReason, Leg,
-};
+use crate::event::{CallSnapshot, CallState, EndCause, Envelope, EventKind, GatherReason, Leg};
 use crate::policy::{Failure, OnFailure, Policy};
 use crate::time::Timestamp;
 
@@ -364,7 +362,9 @@ impl Interpreter {
             }
             Input::MediaGate { muted } => self.snapshot.media.muted = muted,
             Input::TimerFired(timer) => self.fire(at, timer, &mut out),
-            Input::Response { callback, response } => self.respond(at, &callback, response, &mut out),
+            Input::Response { callback, response } => {
+                self.respond(at, &callback, response, &mut out);
+            }
         }
         out
     }
@@ -443,7 +443,12 @@ impl Interpreter {
     }
 
     /// A keypress, offered to a running `gather` (§6.2).
-    fn collect(&mut self, gather: &Gather, digit: char, out: &mut Vec<Output>) -> Option<EventKind> {
+    fn collect(
+        &mut self,
+        gather: &Gather,
+        digit: char,
+        out: &mut Vec<Output>,
+    ) -> Option<EventKind> {
         let running = self.running.as_mut()?;
         // A terminator ends collection — but only once `min` digits are in hand, so that a `#`
         // typed early is a keypress rather than an empty answer.
@@ -455,7 +460,10 @@ impl Interpreter {
             return None;
         }
         running.digits.push(digit);
-        if gather.max.is_some_and(|max| running.digits.chars().count() >= max as usize) {
+        if gather
+            .max
+            .is_some_and(|max| running.digits.chars().count() >= max as usize)
+        {
             return self.resolve_gather(GatherReason::Max, out);
         }
         // Re-arm the inter-digit wait; it measures the gap between keys, so it starts over on
@@ -496,18 +504,77 @@ impl Interpreter {
     }
 
     /// Issue one instruction's effects, and record it as running if it blocks.
+    /// The verbs that are one instruction in and one effect out, with no interpreter state to
+    /// touch on the way. Split from [`Self::start`], which keeps the arms that write the snapshot,
+    /// arm a timer or record that audio is playing — those are the interesting ones, and having
+    /// them alone in `start` is the point of the split as much as the length limit is.
+    fn simple_effect(verb: &Verb, id: &str) -> Option<Effect> {
+        Some(match verb {
+            Verb::Answer => Effect::Answer,
+            Verb::Ring { reliable } => Effect::Ring {
+                reliable: *reliable,
+            },
+            Verb::Reject { status, reason } => Effect::Reject {
+                status: *status,
+                reason: reason.clone(),
+            },
+            Verb::Record {
+                max_ms,
+                idle_stop_ms,
+            } => Effect::Record {
+                instruction_id: id.to_owned(),
+                max_ms: *max_ms,
+                idle_stop_ms: *idle_stop_ms,
+            },
+            Verb::SendDtmf {
+                digits,
+                duration_ms,
+            } => Effect::SendDigits {
+                digits: digits.clone(),
+                duration_ms: *duration_ms,
+            },
+            Verb::Bridge { leg, dtmf } => Effect::Bridge {
+                leg: leg.clone(),
+                dtmf: *dtmf,
+            },
+            Verb::Unbridge => Effect::Unbridge,
+            Verb::Hold => Effect::Hold,
+            Verb::Resume => Effect::Resume,
+            Verb::Mute => Effect::Mute,
+            Verb::Unmute => Effect::Unmute,
+            Verb::Transfer { target } => Effect::Transfer {
+                target: target.clone(),
+            },
+            Verb::AcceptTransfer => Effect::AcceptTransfer,
+            Verb::RefuseTransfer { status } => Effect::RefuseTransfer { status: *status },
+            Verb::Hangup { cause } => Effect::HangUp { cause: *cause },
+            // The rest need more than an effect — a timer, a snapshot write, or a note that
+            // audio is playing — and `start` has them. Spelled out rather than left to `_` so
+            // that a verb added to §6.2 is a compile error here until someone classifies it.
+            Verb::Play { .. }
+            | Verb::GatherDigits(_)
+            | Verb::Dial { .. }
+            | Verb::Pause { .. }
+            | Verb::Tag { .. } => return None,
+        })
+    }
+
+    /// Issue one instruction's effects, and record it as running if it blocks.
     fn start(&mut self, instruction: Instruction, out: &mut Vec<Output>) {
         let id = instruction.id.clone();
         let mut playing = false;
+        if let Some(effect) = Self::simple_effect(&instruction.verb, &id) {
+            out.push(Output::Effect(effect));
+            if instruction.verb.blocks() {
+                self.running = Some(Running {
+                    instruction,
+                    digits: String::new(),
+                    playing,
+                });
+            }
+            return;
+        }
         match &instruction.verb {
-            Verb::Answer => out.push(Output::Effect(Effect::Answer)),
-            Verb::Ring { reliable } => out.push(Output::Effect(Effect::Ring {
-                reliable: *reliable,
-            })),
-            Verb::Reject { status, reason } => out.push(Output::Effect(Effect::Reject {
-                status: *status,
-                reason: reason.clone(),
-            })),
             Verb::Play {
                 source,
                 interruptible,
@@ -537,21 +604,6 @@ impl Interpreter {
                     });
                 }
             }
-            Verb::Record {
-                max_ms,
-                idle_stop_ms,
-            } => out.push(Output::Effect(Effect::Record {
-                instruction_id: id.clone(),
-                max_ms: *max_ms,
-                idle_stop_ms: *idle_stop_ms,
-            })),
-            Verb::SendDtmf {
-                digits,
-                duration_ms,
-            } => out.push(Output::Effect(Effect::SendDigits {
-                digits: digits.clone(),
-                duration_ms: *duration_ms,
-            })),
             Verb::Dial {
                 target,
                 from,
@@ -573,22 +625,6 @@ impl Interpreter {
                     headers: headers.clone(),
                 }));
             }
-            Verb::Bridge { leg, dtmf } => out.push(Output::Effect(Effect::Bridge {
-                leg: leg.clone(),
-                dtmf: *dtmf,
-            })),
-            Verb::Unbridge => out.push(Output::Effect(Effect::Unbridge)),
-            Verb::Hold => out.push(Output::Effect(Effect::Hold)),
-            Verb::Resume => out.push(Output::Effect(Effect::Resume)),
-            Verb::Mute => out.push(Output::Effect(Effect::Mute)),
-            Verb::Unmute => out.push(Output::Effect(Effect::Unmute)),
-            Verb::Transfer { target } => out.push(Output::Effect(Effect::Transfer {
-                target: target.clone(),
-            })),
-            Verb::AcceptTransfer => out.push(Output::Effect(Effect::AcceptTransfer)),
-            Verb::RefuseTransfer { status } => {
-                out.push(Output::Effect(Effect::RefuseTransfer { status: *status }));
-            }
             // §3: `pause` and `tag` are interpreter-internal. One is a timer and the other writes
             // the snapshot; neither is anything for the call framework to do.
             Verb::Pause { ms } => out.push(Output::SetTimer {
@@ -598,9 +634,9 @@ impl Interpreter {
             Verb::Tag { key, value } => {
                 self.snapshot.tags.insert(key.clone(), value.clone());
             }
-            Verb::Hangup { cause } => {
-                out.push(Output::Effect(Effect::HangUp { cause: *cause }));
-            }
+            // Everything else is `simple_effect`'s, and returned above. Reachable only if a new
+            // verb is added to that function's `return None` group without being added here.
+            _ => {}
         }
         if instruction.verb.blocks() {
             self.running = Some(Running {
@@ -668,10 +704,9 @@ impl Interpreter {
                 if matches!(
                     self.running.as_ref().map(|r| &r.instruction.verb),
                     Some(Verb::GatherDigits(_))
-                ) {
-                    if let Some(finished) = self.resolve_gather(GatherReason::Timeout, out) {
-                        self.after_internal_event(at, finished, out);
-                    }
+                ) && let Some(finished) = self.resolve_gather(GatherReason::Timeout, out)
+                {
+                    self.after_internal_event(at, finished, out);
                 }
             }
         }
@@ -816,10 +851,10 @@ impl Interpreter {
     /// End the call on the host's own initiative, discarding whatever was queued.
     fn tear_down(&mut self, cause: EndCause, reject: Option<u16>, out: &mut Vec<Output>) {
         self.program.clear();
-        if let Some(running) = self.running.take() {
-            if running.playing {
-                out.push(Output::Effect(Effect::StopPlayback));
-            }
+        if let Some(running) = self.running.take()
+            && running.playing
+        {
+            out.push(Output::Effect(Effect::StopPlayback));
         }
         match reject {
             Some(status) => out.push(Output::Effect(Effect::Reject {

@@ -182,8 +182,14 @@ impl MediaState {
 
     fn from_json(value: &Json) -> Self {
         Self {
-            encrypted: value.get("encrypted").and_then(Json::as_bool).unwrap_or(false),
-            on_hold: value.get("on_hold").and_then(Json::as_bool).unwrap_or(false),
+            encrypted: value
+                .get("encrypted")
+                .and_then(Json::as_bool)
+                .unwrap_or(false),
+            on_hold: value
+                .get("on_hold")
+                .and_then(Json::as_bool)
+                .unwrap_or(false),
             muted: value.get("muted").and_then(Json::as_bool).unwrap_or(false),
         }
     }
@@ -337,13 +343,22 @@ impl CallSnapshot {
                 .ok_or(Error::BadField { field: "state" })?,
             from: string_field(value, "from")?,
             to: string_field(value, "to")?,
-            headers: value.get("headers").map(Headers::from_json).unwrap_or_default(),
-            media: value.get("media").map(MediaState::from_json).unwrap_or_default(),
+            headers: value
+                .get("headers")
+                .map(Headers::from_json)
+                .unwrap_or_default(),
+            media: value
+                .get("media")
+                .map(MediaState::from_json)
+                .unwrap_or_default(),
             legs: match value.get("legs").and_then(Json::as_array) {
                 Some(items) => items.iter().map(Leg::from_json).collect::<Result<_>>()?,
                 None => Vec::new(),
             },
-            bridged: value.get("bridged").and_then(Json::as_bool).unwrap_or(false),
+            bridged: value
+                .get("bridged")
+                .and_then(Json::as_bool)
+                .unwrap_or(false),
             tags: value
                 .get("tags")
                 .and_then(Json::as_object)
@@ -377,7 +392,9 @@ pub enum EndCause {
 }
 
 impl EndCause {
-    /// Its spelling on the wire, per [`crate::tagged`].
+    /// Its spelling on the wire, in §5.3's tagged form: a name with no fields is the bare string
+    /// (`"busy"`), and a name with fields is an object carrying them (`{"name": "rejected",
+    /// "status": 486}`).
     #[must_use]
     pub fn to_json(self) -> Json {
         match self {
@@ -452,7 +469,9 @@ pub enum DialOutcome {
 }
 
 impl DialOutcome {
-    /// Its spelling on the wire, per [`crate::tagged`].
+    /// Its spelling on the wire, in §5.3's tagged form: a name with no fields is the bare string
+    /// (`"busy"`), and a name with fields is an object carrying them (`{"name": "rejected",
+    /// "status": 486}`).
     #[must_use]
     pub fn to_json(self) -> Json {
         match self {
@@ -493,7 +512,9 @@ pub enum TransferState {
 }
 
 impl TransferState {
-    /// Its spelling on the wire, per [`crate::tagged`].
+    /// Its spelling on the wire, in §5.3's tagged form: a name with no fields is the bare string
+    /// (`"busy"`), and a name with fields is an object carrying them (`{"name": "rejected",
+    /// "status": 486}`).
     #[must_use]
     pub fn to_json(self) -> Json {
         match self {
@@ -871,7 +892,9 @@ impl Envelope {
                 .and_then(Timestamp::from_rfc3339)
                 .ok_or(Error::BadField { field: "at" })?,
             call: CallSnapshot::from_json(
-                value.get("call").ok_or(Error::MissingField { field: "call" })?,
+                value
+                    .get("call")
+                    .ok_or(Error::MissingField { field: "call" })?,
             )?,
             event: EventKind::from_json(
                 value
@@ -938,7 +961,8 @@ mod tests {
             state: CallState::Ringing,
             to: "sip:bob@example.net".to_owned(),
         });
-        call.tags.insert("campaign".to_owned(), "renewal".to_owned());
+        call.tags
+            .insert("campaign".to_owned(), "renewal".to_owned());
         call
     }
 

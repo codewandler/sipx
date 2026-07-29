@@ -33,7 +33,7 @@ pub(crate) fn encode(bytes: &[u8]) -> String {
 /// Decode, strictly. `None` for anything that is not exactly what [`encode`] writes.
 pub(crate) fn decode(text: &str) -> Option<Vec<u8>> {
     let bytes = text.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
@@ -41,21 +41,18 @@ pub(crate) fn decode(text: &str) -> Option<Vec<u8>> {
         let mut quad = 0u32;
         let mut padding = 0usize;
         for (i, byte) in chunk.iter().enumerate() {
-            let value = match byte {
-                b'=' => {
-                    // Padding is only ever the last one or two characters of the last quad.
-                    if i < 2 {
-                        return None;
-                    }
-                    padding += 1;
-                    0
+            let value = if *byte == b'=' {
+                // Padding is only ever the last one or two characters of the last quad.
+                if i < 2 {
+                    return None;
                 }
-                _ => {
-                    if padding > 0 {
-                        return None;
-                    }
-                    u32::try_from(ALPHABET.iter().position(|c| c == byte)?).ok()?
+                padding += 1;
+                0
+            } else {
+                if padding > 0 {
+                    return None;
                 }
+                u32::try_from(ALPHABET.iter().position(|c| c == byte)?).ok()?
             };
             quad = (quad << 6) | value;
         }
@@ -102,14 +99,18 @@ mod tests {
     #[test]
     fn every_byte_value_survives_a_round_trip() {
         for length in 0..=32usize {
-            let bytes: Vec<u8> = (0..length).map(|i| u8::try_from(i * 7 % 256).unwrap_or(0)).collect();
+            let bytes: Vec<u8> = (0..length)
+                .map(|i| u8::try_from(i * 7 % 256).unwrap_or(0))
+                .collect();
             assert_eq!(decode(&encode(&bytes)).as_deref(), Some(bytes.as_slice()));
         }
     }
 
     #[test]
     fn what_is_not_strict_base64_is_refused_rather_than_repaired() {
-        for text in ["Zg", "Zg=", "Zg===", "Z g==", "Zm9v!", "=Zm8", "Z=m8", "Zm-v"] {
+        for text in [
+            "Zg", "Zg=", "Zg===", "Z g==", "Zm9v!", "=Zm8", "Z=m8", "Zm-v",
+        ] {
             assert_eq!(decode(text), None, "{text} should be refused");
         }
     }

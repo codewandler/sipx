@@ -72,8 +72,9 @@ pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventK
                 _ => EndCause::Error,
             },
         },
-        // §5.2, not §5.3: see this function's own documentation.
-        CallEvent::Muted | CallEvent::Unmuted => return None,
+        // `Muted`/`Unmuted` are §5.2, not §5.3, and `CallEvent` is `#[non_exhaustive]`, so an
+        // event C-3 adds that the contract has no spelling for is silently not an app event
+        // rather than a guess. Both cases are "nothing to deliver"; see this function's own docs.
         _ => return None,
     })
 }

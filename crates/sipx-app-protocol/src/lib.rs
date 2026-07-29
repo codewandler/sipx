@@ -55,16 +55,14 @@ pub mod testing;
 #[cfg(feature = "call")]
 mod call;
 
-pub use crate::document::{
-    Document, DtmfMode, Gather, Instruction, Source, TransferTarget, Verb,
-};
+pub use crate::document::{Document, DtmfMode, Gather, Instruction, Source, TransferTarget, Verb};
 pub use crate::error::{Error, Result};
 pub use crate::event::{
-    CallSnapshot, CallState, DialOutcome, Direction, EndCause, Envelope, EventKind, GatherReason,
-    Headers, Leg, MediaState, TransferState, CONTRACT,
+    CONTRACT, CallSnapshot, CallState, DialOutcome, Direction, EndCause, Envelope, EventKind,
+    GatherReason, Headers, Leg, MediaState, TransferState,
 };
 pub use crate::interpreter::{
-    Callback, Effect, Input, Interpreter, Output, Response, Timer, MAX_QUEUED_EVENTS,
+    Callback, Effect, Input, Interpreter, MAX_QUEUED_EVENTS, Output, Response, Timer,
 };
 pub use crate::policy::{Failure, OnFailure, Policy};
 pub use crate::time::Timestamp;

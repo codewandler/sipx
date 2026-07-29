@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use crate::base64;
 use crate::error::{Error, Result};
-use crate::event::{check_contract, string_field, EndCause, CONTRACT};
+use crate::event::{CONTRACT, EndCause, check_contract, string_field};
 use crate::json::Json;
 
 /// Where a `play` gets its audio (§6.2, §6.5).
@@ -352,10 +352,7 @@ impl Instruction {
             Verb::GatherDigits(gather) => {
                 members.push(("min", Some(Json::from(gather.min))));
                 members.push(("max", gather.max.map(Json::from)));
-                members.push((
-                    "terminators",
-                    Some(Json::Str(gather.terminators.clone())),
-                ));
+                members.push(("terminators", Some(Json::Str(gather.terminators.clone()))));
                 members.push(("digit_timeout_ms", gather.digit_timeout_ms.map(Json::from)));
                 members.push(("timeout_ms", gather.timeout_ms.map(Json::from)));
                 members.push(("prompt", gather.prompt.as_ref().map(Source::to_json)));
@@ -418,20 +415,46 @@ impl Instruction {
         Json::object(members)
     }
 
-    fn from_json(value: &Json) -> Result<Self> {
-        let name = value
-            .get("do")
-            .and_then(Json::as_str)
-            .ok_or(Error::MissingField { field: "do" })?;
-        let verb = match name {
+    /// §6.2's verbs that act on the call itself.
+    ///
+    /// One arm per §6.2 row, in four functions rather than one. The grouping is the spec's own;
+    /// the reason for splitting at all is that the whole table in a single `match` is longer than
+    /// the workspace's function-length limit. `Ok(None)` means "not one of mine, try the next".
+    fn control_verb(name: &str, value: &Json) -> Result<Option<Verb>> {
+        Ok(Some(match name {
             "answer" => Verb::Answer,
             "ring" => Verb::Ring {
-                reliable: value.get("reliable").and_then(Json::as_bool).unwrap_or(false),
+                reliable: value
+                    .get("reliable")
+                    .and_then(Json::as_bool)
+                    .unwrap_or(false),
             },
             "reject" => Verb::Reject {
                 status: status_field(value, "status")?,
-                reason: value.get("reason").and_then(Json::as_str).map(str::to_owned),
+                reason: value
+                    .get("reason")
+                    .and_then(Json::as_str)
+                    .map(str::to_owned),
             },
+            "hold" => Verb::Hold,
+            "resume" => Verb::Resume,
+            "mute" => Verb::Mute,
+            "unmute" => Verb::Unmute,
+            "hangup" => Verb::Hangup {
+                cause: match value.get("cause") {
+                    Some(cause) => {
+                        EndCause::from_json(cause).ok_or(Error::BadField { field: "cause" })?
+                    }
+                    None => EndCause::Hangup,
+                },
+            },
+            _ => return Ok(None),
+        }))
+    }
+
+    /// §6.2's verbs that move audio.
+    fn media_verb(name: &str, value: &Json) -> Result<Option<Verb>> {
+        Ok(Some(match name {
             "play" => Verb::Play {
                 source: Source::from_json(
                     value
@@ -463,6 +486,13 @@ impl Instruction {
                 digits: string_field(value, "digits")?,
                 duration_ms: optional_u32(value, "duration_ms")?,
             },
+            _ => return Ok(None),
+        }))
+    }
+
+    /// §6.2's verbs that create, join or redirect a second leg.
+    fn leg_verb(name: &str, value: &Json) -> Result<Option<Verb>> {
+        Ok(Some(match name {
             "dial" => Verb::Dial {
                 target: string_field(value, "target")?,
                 from: value.get("from").and_then(Json::as_str).map(str::to_owned),
@@ -477,10 +507,6 @@ impl Instruction {
                 },
             },
             "unbridge" => Verb::Unbridge,
-            "hold" => Verb::Hold,
-            "resume" => Verb::Resume,
-            "mute" => Verb::Mute,
-            "unmute" => Verb::Unmute,
             "transfer" => Verb::Transfer {
                 target: match (
                     value.get("target").and_then(Json::as_str),
@@ -506,6 +532,14 @@ impl Instruction {
                     None => 603,
                 },
             },
+            _ => return Ok(None),
+        }))
+    }
+
+    /// §3's interpreter-internal verbs: a timer and a snapshot write, neither of which reaches
+    /// the call framework.
+    fn internal_verb(name: &str, value: &Json) -> Result<Option<Verb>> {
+        Ok(Some(match name {
             "pause" => Verb::Pause {
                 ms: optional_u32(value, "ms")?.ok_or(Error::MissingField { field: "ms" })?,
             },
@@ -513,21 +547,29 @@ impl Instruction {
                 key: string_field(value, "key")?,
                 value: string_field(value, "value")?,
             },
-            "hangup" => Verb::Hangup {
-                cause: match value.get("cause") {
-                    Some(cause) => {
-                        EndCause::from_json(cause).ok_or(Error::BadField { field: "cause" })?
-                    }
-                    None => EndCause::Hangup,
-                },
-            },
+            _ => return Ok(None),
+        }))
+    }
+
+    fn from_json(value: &Json) -> Result<Self> {
+        let name = value
+            .get("do")
+            .and_then(Json::as_str)
+            .ok_or(Error::MissingField { field: "do" })?;
+        let verb = if let Some(verb) = Self::control_verb(name, value)? {
+            verb
+        } else if let Some(verb) = Self::media_verb(name, value)? {
+            verb
+        } else if let Some(verb) = Self::leg_verb(name, value)? {
+            verb
+        } else if let Some(verb) = Self::internal_verb(name, value)? {
+            verb
+        } else {
             // §4: an unknown verb is an error, never a skip. A host that ran the rest of the
             // document would be running a different program than the app wrote.
-            other => {
-                return Err(Error::UnknownVerb {
-                    verb: other.to_owned(),
-                });
-            }
+            return Err(Error::UnknownVerb {
+                verb: name.to_owned(),
+            });
         };
         Ok(Self {
             id: string_field(value, "id")?,
@@ -587,12 +629,13 @@ impl Document {
     pub fn parse(text: &str) -> Result<Self> {
         let value = Json::parse(text)?;
         check_contract(&value)?;
-        let items = value
-            .get("instructions")
-            .and_then(Json::as_array)
-            .ok_or(Error::MissingField {
-                field: "instructions",
-            })?;
+        let items =
+            value
+                .get("instructions")
+                .and_then(Json::as_array)
+                .ok_or(Error::MissingField {
+                    field: "instructions",
+                })?;
         let instructions = items
             .iter()
             .map(Instruction::from_json)
@@ -732,7 +775,10 @@ mod tests {
             {"id":"t","do":"transfer","target":"sip:c@e.net","via_leg":"b"}]}"#;
         let neither = r#"{"contract":"sipx.app.v1","instructions":[{"id":"t","do":"transfer"}]}"#;
         for text in [both, neither] {
-            assert_eq!(Document::parse(text), Err(Error::BadField { field: "target" }));
+            assert_eq!(
+                Document::parse(text),
+                Err(Error::BadField { field: "target" })
+            );
         }
     }
 

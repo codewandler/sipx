@@ -177,7 +177,8 @@ pub fn populated_snapshot() -> CallSnapshot {
         state: CallState::Ringing,
         to: "sip:bob@example.net".to_owned(),
     });
-    call.tags.insert("campaign".to_owned(), "renewal".to_owned());
+    call.tags
+        .insert("campaign".to_owned(), "renewal".to_owned());
     call
 }
 
@@ -188,7 +189,6 @@ pub fn populated_snapshot() -> CallSnapshot {
 /// [`Clone`] nor [`Copy`] and having no public constructor, so the only way to *demonstrate* that
 /// a second answer to one delivery is ignored is to forge the token that a correct driver can
 /// never obtain. Vector AC-4 does exactly that, and it is the reason this is not `#[cfg(test)]`.
-#[must_use]
 pub fn forge_callback(seq: u64) -> Callback {
     Callback::new(seq)
 }

@@ -495,9 +495,7 @@ impl Parser<'_> {
         let mut value = 0u32;
         for _ in 0..4 {
             let byte = self.bump().ok_or(JsonError::Truncated)?;
-            let digit = char::from(byte)
-                .to_digit(16)
-                .ok_or(JsonError::BadEscape)?;
+            let digit = char::from(byte).to_digit(16).ok_or(JsonError::BadEscape)?;
             value = value * 16 + digit;
         }
         Ok(value)
@@ -527,7 +525,9 @@ impl Parser<'_> {
         if exact {
             // An integer too large for `i64` is not rounded into one — a `seq` or a `duration_ms`
             // that does not fit is a document this contract has no reading for.
-            text.parse::<i64>().map(Json::Int).map_err(|_| JsonError::BadNumber)
+            text.parse::<i64>()
+                .map(Json::Int)
+                .map_err(|_| JsonError::BadNumber)
         } else {
             text.parse::<f64>()
                 .map(Json::Float)
@@ -572,7 +572,10 @@ mod tests {
     fn escapes_survive_both_directions() {
         let value = Json::Str("a\"b\\c\nd\u{1}e\u{1f600}".to_owned());
         let text = value.to_text();
-        assert!(text.contains("\\u0001"), "control characters are escaped: {text}");
+        assert!(
+            text.contains("\\u0001"),
+            "control characters are escaped: {text}"
+        );
         assert_eq!(Json::parse(&text).unwrap(), value);
     }
 

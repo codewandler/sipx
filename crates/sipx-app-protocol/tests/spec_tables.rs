@@ -23,8 +23,7 @@
 use std::collections::BTreeSet;
 
 use sipx_app_protocol::{
-    DialOutcome, EndCause, EventKind, Failure, GatherReason, OnFailure, Policy, TransferState,
-    Verb,
+    DialOutcome, EndCause, EventKind, Failure, GatherReason, OnFailure, Policy, TransferState, Verb,
 };
 
 const SPEC: &str = include_str!("../../../docs/specs/app-contract.md");
@@ -55,9 +54,8 @@ fn table_after(heading: &str) -> Vec<Vec<String>> {
                 .map(|cell| cell.trim().to_owned())
                 .collect();
             rows.push(cells);
-        } else if started && !line.is_empty() {
-            break;
-        } else if line.starts_with('#') {
+        } else if (started && !line.is_empty()) || line.starts_with('#') {
+            // Past the table, or into the next section: either way the table is complete.
             break;
         }
     }
@@ -93,11 +91,7 @@ fn section_3_maps_every_verb_to_an_operation() {
         for verb in backticked(&row[0]) {
             in_table.insert(verb);
         }
-        assert!(
-            !row[1].is_empty(),
-            "§3 row {:?} names no operation",
-            row[0]
-        );
+        assert!(!row[1].is_empty(), "§3 row {:?} names no operation", row[0]);
     }
     let implemented: BTreeSet<String> = Verb::names().iter().map(|n| (*n).to_owned()).collect();
     assert_eq!(
@@ -165,7 +159,11 @@ fn section_5_3_s_inline_enumerations_match_their_types() {
             }
         }
     }
-    assert_eq!(lists.len(), 4, "§5.3 should carry four inline lists: {lists:?}");
+    assert_eq!(
+        lists.len(),
+        4,
+        "§5.3 should carry four inline lists: {lists:?}"
+    );
 
     for (field, values) in lists {
         let implemented: Vec<String> = match field.as_str() {
@@ -216,7 +214,12 @@ fn tag_of(value: &sipx_app_protocol::json::Json) -> String {
     value
         .as_str()
         .map(str::to_owned)
-        .or_else(|| value.get("name").and_then(|n| n.as_str()).map(str::to_owned))
+        .or_else(|| {
+            value
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(str::to_owned)
+        })
         .expect("a tagged value is a name or an object with one")
 }
 
@@ -270,10 +273,16 @@ fn section_9_2_lists_exactly_the_knobs_the_policy_has() {
             );
         }
     }
-    let implemented: BTreeSet<String> = ["timeout_ms", "on_timeout", "on_5xx", "on_unreachable", "on_4xx"]
-        .iter()
-        .map(|n| (*n).to_owned())
-        .collect();
+    let implemented: BTreeSet<String> = [
+        "timeout_ms",
+        "on_timeout",
+        "on_5xx",
+        "on_unreachable",
+        "on_4xx",
+    ]
+    .iter()
+    .map(|n| (*n).to_owned())
+    .collect();
     assert_eq!(knobs, implemented, "§9.2's knobs and the policy's differ");
 
     let declared: BTreeSet<String> = ["continue", "hangup", "reject"]
@@ -292,7 +301,10 @@ fn section_9_2_lists_exactly_the_knobs_the_policy_has() {
         dial_headers: Vec::new(),
     };
     assert_eq!(policy.on(Failure::Timeout), OnFailure::Hangup);
-    assert_eq!(policy.on(Failure::ServerError), OnFailure::Reject { status: 500 });
+    assert_eq!(
+        policy.on(Failure::ServerError),
+        OnFailure::Reject { status: 500 }
+    );
     assert_eq!(policy.on(Failure::Unreachable), OnFailure::Continue);
     assert_eq!(policy.on(Failure::ClientError), OnFailure::Hangup);
 }
@@ -314,10 +326,7 @@ fn section_11_has_a_test_for_every_vector() {
             VECTOR_TESTS.contains(&expected),
             "§11 lists {id} and tests/vectors.rs has no `{expected}…` test"
         );
-        assert!(
-            !row[2].is_empty(),
-            "§11 row {id} asserts nothing"
-        );
+        assert!(!row[2].is_empty(), "§11 row {id} asserts nothing");
     }
 }
 
