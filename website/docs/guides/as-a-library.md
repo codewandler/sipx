@@ -101,7 +101,7 @@ object to each message that has to be rejected.
 | Sockets, TLS, WebSocket, RFC 3263 resolution | `sipx-transport` |
 | Registration and digest authentication | `sipx-ua` |
 | RTP, RTCP, jitter buffer, SRTP | `sipx-rtp` |
-| G.711 and G.722, mixing, resampling, WAV, RFC 4733 DTMF | `sipx-audio` |
+| G.711 (µ-law and A-law), mixing, WAV, and Opus behind the `opus` feature | `sipx-audio` |
 | RTP/RTCP sockets bound to negotiated SDP, with NAT handling | `sipx-media` |
 | Calls with playback, recording, transfer | `sipx-call` |
 

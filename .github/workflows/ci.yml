@@ -95,6 +95,7 @@ jobs:
       # milliseconds and need nothing but a Python interpreter, so this is their home.
       - run: python3 scripts/test-rfc-report.py
       - run: python3 scripts/test-pool-key.py
+      - run: python3 scripts/test-audio-claims.py
       # X-23: the interop harness's own suite. It stubs the container runtime, so it runs here in
       # seconds rather than in the `interop` job that needs a peer.
       - run: python3 scripts/test-interop-run.py
@@ -171,6 +172,10 @@ jobs:
       # changes to the type. The list is generated from `ConnectionKey`; this fails when a field
       # is added to the key and the spec still describes the key before it.
       - run: ./scripts/check-pool-key.py --check
+      # `sipx-audio` advertised G.722 and resampling from the scaffolding commit until X-26 and
+      # implements neither. This fails when a codec named in the crate's description, its
+      # documentation summary or the website's crate table is implemented by no module.
+      - run: ./scripts/check-audio-claims.py --check
 
   # The documentation site. Built on every push and pull request so a broken link fails review
   # rather than the deployed page; published only from `main`.
