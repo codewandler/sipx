@@ -19,4 +19,7 @@ pub mod session;
 pub use bridge::Bridge;
 pub use conference::Conference;
 pub use dtls::{Arriving, Handshake, Profile, Role};
-pub use session::{Codec, Config, Encoded, MediaPort, MediaSession, SrtpKeys};
+pub use session::{
+    Codec, Config, Encoded, Interrupt, MediaPort, MediaSession, Playback, PlaybackEnd, PlaybackId,
+    SrtpKeys,
+};

@@ -398,7 +398,13 @@ async fn playing_a_clip_to_the_end_reports_it_as_completed() {
     })
     .await;
     assert!(
-        matches!(event, CallEvent::PlaybackFinished { completed: true }),
+        matches!(
+            event,
+            CallEvent::PlaybackFinished {
+                completed: true,
+                ..
+            }
+        ),
         "a clip that ran out must not be reported as cut short: {event:?}"
     );
 }
@@ -438,7 +444,13 @@ async fn a_playback_cut_short_is_not_reported_as_completed() {
     })
     .await;
     assert!(
-        matches!(event, CallEvent::PlaybackFinished { completed: false }),
+        matches!(
+            event,
+            CallEvent::PlaybackFinished {
+                completed: false,
+                ..
+            }
+        ),
         "a clip the call cut off must say so: {event:?}"
     );
 }

@@ -24,9 +24,9 @@
 //!   exactly the kind of wire-breaking change §4 of the contract spec warns about.
 //!
 //! `PlaybackFinished` and `RecordingFinished` are emitted by [`Call::play`](crate::Call::play)
-//! and [`Call::record_until_idle`](crate::Call::record_until_idle). `M-17` adds the *control*
+//! and [`Call::record_until_idle`](crate::Call::record_until_idle). `M-17` added the *control*
 //! half of playback — a queue, stopping, interrupting on a digit — and reports completion
-//! through the same variants rather than new ones.
+//! through the same variant rather than a new one, naming the playback it is about.
 
 use std::time::Duration;
 
@@ -68,9 +68,14 @@ pub enum CallEvent {
     },
     /// A playback ran out, or was cut short.
     ///
-    /// Emitted by [`Call::play`](crate::Call::play). `M-17` adds the control half — a queue,
-    /// stopping, and interrupting on a digit — and reports through this same variant.
+    /// Emitted by [`Call::play`](crate::Call::play) and by
+    /// [`Call::start_playback`](crate::Call::start_playback) — every playback either call starts
+    /// resolves here exactly once, whether it ran out, was stopped, was interrupted by a keypress,
+    /// or was cut off by the call ending (`M-17`).
     PlaybackFinished {
+        /// Which playback. Clips queue, so a call may have several outstanding at once and
+        /// "a playback finished" on its own does not say which one to move on from.
+        playback: sipx_media::PlaybackId,
         /// Whether it ran to the end, as opposed to being stopped or interrupted.
         completed: bool,
     },
@@ -217,13 +222,20 @@ impl EventSink {
     /// Never blocks; dropped rather than queued if the consumer is behind (see the type's
     /// overflow policy above).
     pub(crate) fn emit(&self, event: CallEvent) {
-        debug_assert!(
-            !matches!(event, CallEvent::Ended(_)),
-            "Ended must go through `end`, which spends the reserved slot"
-        );
-        if self.tx.try_send(event).is_err() {
-            tracing::debug!("a call event was dropped: the consumer is behind");
-        }
+        self.emitter().emit(event);
+    }
+
+    /// A handle that can emit ordinary events from somewhere the `Call` itself is not.
+    ///
+    /// Needed by playback (`M-17`): a clip started with
+    /// [`Call::start_playback`](crate::Call::start_playback) is not awaited by the caller, so
+    /// something has to be watching it in order to report its end — and that something outlives
+    /// the borrow of the call that started it.
+    ///
+    /// It cannot emit `Ended`: the reserved slot is not clonable, and a call's last word belongs
+    /// to the call.
+    pub(crate) fn emitter(&self) -> Emitter {
+        Emitter(self.tx.clone())
     }
 
     /// Emit `Ended`, through the capacity reserved for it at construction.
@@ -243,6 +255,26 @@ impl EventSink {
             None => {
                 let _ = self.tx.try_send(CallEvent::Ended(cause));
             }
+        }
+    }
+}
+
+/// A detached emitter for ordinary events, handed out by [`EventSink::emitter`].
+///
+/// The same overflow policy as the sink it came from — `try_send`, dropped rather than awaited —
+/// which is what makes it safe to hold in a spawned task: nothing about reporting a playback can
+/// park on whether anyone is reading the call's events.
+#[derive(Debug, Clone)]
+pub(crate) struct Emitter(mpsc::Sender<CallEvent>);
+
+impl Emitter {
+    pub(crate) fn emit(&self, event: CallEvent) {
+        debug_assert!(
+            !matches!(event, CallEvent::Ended(_)),
+            "Ended must go through `EventSink::end`, which spends the reserved slot"
+        );
+        if self.0.try_send(event).is_err() {
+            tracing::debug!("a call event was dropped: the consumer is behind");
         }
     }
 }
