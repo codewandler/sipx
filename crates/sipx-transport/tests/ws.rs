@@ -54,7 +54,7 @@ async fn sipx_listening() -> (
 /// A peer that speaks the `sip` subprotocol and nothing else about SIP.
 async fn browser(addr: SocketAddr) -> WebSocketStream<TcpStream> {
     let stream = TcpStream::connect(addr).await.expect("connects");
-    sipx_transport::ws::connect(stream, &addr.to_string(), false)
+    sipx_transport::ws::connect(stream, &addr.to_string(), "/", false)
         .await
         .expect("the upgrade is accepted")
 }
@@ -159,7 +159,7 @@ async fn a_server_that_ignores_the_subprotocol_is_refused() {
     });
 
     let stream = TcpStream::connect(addr).await.expect("connects");
-    let error = sipx_transport::ws::connect(stream, &addr.to_string(), false)
+    let error = sipx_transport::ws::connect(stream, &addr.to_string(), "/", false)
         .await
         .expect_err("silence is not agreement");
     // Asserting the requirement, not the wording: what matters is that the connection is
@@ -309,6 +309,140 @@ async fn sipx_dials_out_and_invents_a_via() {
         via.contains(".invalid"),
         "a WebSocket client has no address to advertise: {via}"
     );
+}
+
+/// W13. RFC 7118 §5 fixes no resource name, so a server is entitled to serve SIP anywhere it
+/// likes — and one that serves it from its own HTTP server, at `/ws`, is not an exotic case but
+/// the arrangement a second independent implementation ships with. A target that cannot say
+/// which resource it wants can reach exactly one of those servers.
+#[tokio::test]
+async fn a_target_can_name_the_resource_the_peer_serves_sip_at() {
+    let (addr, served) = a_peer_serving_sip_only_at("/ws").await;
+
+    let (client, _rx) = bind(Config::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
+    let target = Target::new(addr, TransportKind::Ws).at_path("/ws");
+
+    let mut responses = client
+        .send(options_to("example.com"), target)
+        .await
+        .expect("sends");
+    let response = tokio::time::timeout(Duration::from_secs(5), responses.final_response())
+        .await
+        .expect("no timeout")
+        .expect("a final response from the resource the peer serves SIP at");
+    assert_eq!(response.status.code(), 200);
+
+    served
+        .await
+        .expect("the server finishes")
+        .expect("the peer received the request");
+}
+
+/// And the reason the test above is not vacuous: this peer really does refuse the root. Without
+/// this, a fixture that had quietly upgraded on any path would let the test pass whatever the
+/// handshake asked for.
+#[tokio::test]
+async fn the_default_resource_is_refused_by_a_peer_that_serves_sip_elsewhere() {
+    let (addr, _served) = a_peer_serving_sip_only_at("/ws").await;
+
+    let (client, _rx) = bind(Config::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
+
+    let mut responses = client
+        .send(
+            options_to("example.com"),
+            Target::new(addr, TransportKind::Ws),
+        )
+        .await
+        .expect("sends");
+    let outcome = tokio::time::timeout(Duration::from_secs(5), responses.final_response())
+        .await
+        .expect("the refusal is immediate, not a transaction timeout");
+    assert!(
+        outcome.is_none(),
+        "a 404 to the upgrade is a connection that never existed, not a SIP response: {outcome:?}"
+    );
+}
+
+/// A WebSocket server that upgrades at one resource and answers `404 Not Found` anywhere else.
+///
+/// The handle yields the request the peer received, so a test asserting on the reply cannot pass
+/// against a peer that was never reached.
+// The refusal type is an HTTP response and is as large as one. Not ours to box: it is the shape
+// the handshake callback must return, the same way `ws::accept`'s is.
+#[allow(clippy::result_large_err)]
+async fn a_peer_serving_sip_only_at(
+    resource: &'static str,
+) -> (SocketAddr, tokio::task::JoinHandle<Option<String>>) {
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode as HttpStatus};
+
+    fn route(
+        resource: &str,
+        request: &Request,
+        mut response: Response,
+    ) -> Result<Response, ErrorResponse> {
+        if request.uri().path() != resource {
+            let mut refusal = ErrorResponse::new(Some(format!(
+                "this server speaks SIP at {resource} and nowhere else"
+            )));
+            *refusal.status_mut() = HttpStatus::NOT_FOUND;
+            return Err(refusal);
+        }
+        response.headers_mut().insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_static(sipx_transport::ws::SUBPROTOCOL),
+        );
+        Ok(response)
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("has an address");
+
+    let served = tokio::spawn(async move {
+        // A loop rather than one `accept`: a refused upgrade is a connection that came and went,
+        // and the peer stays up for the next one exactly as a real server would.
+        loop {
+            let (stream, _) = listener.accept().await.expect("accepts");
+            let upgraded = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &Request, response: Response| route(resource, request, response),
+            )
+            .await;
+            let Ok(mut socket) = upgraded else {
+                continue;
+            };
+            let Some(received) = next_sip(&mut socket).await else {
+                continue;
+            };
+
+            // Answer, so the client's transaction completes rather than timing out.
+            let request = sipx_sip::parse_datagram(
+                Bytes::copy_from_slice(received.as_bytes()),
+                &sipx_sip::Limits::stream(),
+            )
+            .expect("parses");
+            let sipx_sip::Message::Request(request) = request else {
+                panic!("expected a request");
+            };
+            let response =
+                ResponseBuilder::to_request(&request, StatusCode::new(200).expect("valid"), "OK")
+                    .expect("builds")
+                    .build();
+            socket
+                .send(Frame::binary(
+                    sipx_sip::Message::Response(response).to_bytes(),
+                ))
+                .await
+                .expect("responds");
+            return Some(received);
+        }
+    });
+
+    (addr, served)
 }
 
 /// The whole path, between two sipx endpoints — the one that dials has no listener of its own,

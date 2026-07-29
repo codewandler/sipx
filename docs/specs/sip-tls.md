@@ -104,6 +104,19 @@ people pin are the reason deployments are still negotiating things nobody meant 
 **[RFC 7118 §4]** The handshake negotiates the `sip` subprotocol. **[sipx]** A peer that does not
 offer it is refused: without the subprotocol there is no agreement about what the frames mean.
 
+**[RFC 7118 §4] The resource name is not fixed, so a target names it.** RFC 7118 registers a
+subprotocol and a URI scheme; it says nothing about where on a server SIP lives, and both `/` and
+`/ws` are therefore conformant. **[sipx]** A `Target` carries the resource its handshake asks for,
+defaulting to `/`. A client that can only ask for `/` reaches servers that serve SIP at their root
+and no others — which is not a stricter reading of the RFC but a narrower one, and the difference
+is invisible until it meets the second kind. The resource is part of the connection's identity for
+the same reason the verified name is (§5): a socket upgraded at `/ws` was accepted by whatever
+serves `/ws`, and lending it to traffic that asked for somewhere else discards the only thing the
+target said about where it was going.
+
+The port is not fixed either, and needs nothing new: a server is entitled to serve SIP over
+WebSocket from an HTTP server on its own port, and `Target` already takes the address to send to.
+
 **[RFC 7118 §5] One SIP message per WebSocket message.** Not `Content-Length` framing — the
 frame boundary *is* the message boundary. A message split across frames is malformed, and two
 messages in one frame likewise. **[sipx]** Both close the connection rather than being patched
@@ -145,7 +158,8 @@ check is how one of the two ends up weaker.
 
 ## 5. Connection reuse under TLS
 
-**[sipx]** The pool keys connections by `(remote address, transport, verified identity)`.
+**[sipx]** The pool keys connections by
+`(remote address, transport, verified identity, WebSocket resource)`.
 
 The *transport* is in the key because TCP, TLS and WebSocket to one address are not
 interchangeable — they can share a port, and a `sips:` request riding a cleartext socket has
@@ -156,6 +170,12 @@ connections. Reusing one for the other would mean traffic for `a.example.com` tr
 connection authenticated as `b.example.com`, which defeats the check that was just performed. A
 connection a peer opened has no identity — sipx verified nothing about it — so it can never
 stand in for a name it never checked.
+
+The *WebSocket resource* is in the key for the same reason one step down (§4): a socket upgraded
+at `/ws` was accepted by whatever serves `/ws`, and lending it to traffic that asked for
+somewhere else discards the only thing the target said about where it was going. `None`
+everywhere the question does not arise — every other transport, and every connection a peer
+opened.
 
 **[sipx] The identity is the URI host, and it survives resolution.** RFC 3263 turns one name
 into a list of addresses by way of NAPTR and SRV records that may name something else entirely;
@@ -189,6 +209,7 @@ DNS deciding which certificate is acceptable.
 | W10 | Idle connection | Pinged before an intermediary would time it out |
 | W11 | WS and TCP to one address | Two connections, not one reused |
 | W12 | WSS with a certificate for another host | Refused before the upgrade; nothing crosses |
+| W13 | Server serving SIP only at `/ws` | Reached when the target names it; `404` when it does not |
 | I1 | Register over TLS against a third-party server | Accepted |
 | I2 | …presenting a certificate for another name | Refused, immediately |
 | I3 | …signed by an issuer we do not know | Refused, immediately |

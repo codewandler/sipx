@@ -149,10 +149,11 @@ takes TLS. An unratified mapping should not silently win a choice the operator d
 
 ## 6. Connections, keepalive, and failure
 
-**[sipx] The pool key is `(peer, TransportKind::Quic, verify_as)`**, exactly the shape
-[`sip-tls.md` §5](sip-tls.md) defines. The verified identity is in the key for the reason it is
-there for TLS: two hostnames on one address are two connections, because a connection verified
-for one name is not usable for the other.
+**[sipx] The pool key is `(peer, TransportKind::Quic, verify_as)`**, the shape
+[`sip-tls.md` §5](sip-tls.md) defines less the WebSocket resource, which no QUIC connection has.
+The verified identity is in the key for the reason it is there for TLS: two hostnames on one
+address are two connections, because a connection verified for one name is not usable for the
+other.
 
 **[sipx] Connection migration is the QUIC stack's business, not the transport layer's.** A
 connection survives an address change by design (RFC 9000 §9), so the pool key must **not**
