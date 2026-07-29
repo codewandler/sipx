@@ -16,24 +16,26 @@ what it does not, and why.
 
 ## Can it do what I need?
 
-**Today sipx is a user agent — a phone.** It calls, answers, registers, transfers, bridges and
-conferences. It is not a proxy or a registrar: it does not fork requests or hold other people's
-registrations.
+**Today sipx is a user agent — a phone.** It calls, answers, registers and transfers. It is not a
+proxy or a registrar: it does not fork requests or hold other people's registrations.
 
 | | |
 |---|---|
 | **Calls** | Place and answer, SDP offer/answer, hold and resume, blind and attended transfer |
-| **Audio** | G.711 µ-law and A-law, Opus behind a feature, DTMF, play and record WAV |
+| **Audio** | G.711 µ-law and A-law, DTMF, play and record WAV. Opus is in `sipx-audio` behind the `opus` feature; a call offers G.711 only |
 | **Signalling security** | TLS and secure WebSocket, with certificate verification that **cannot be turned off** |
 | **Media security** | SRTP with SDES keying, negotiated automatically when the signalling is secure |
 | **Transports** | UDP, TCP, TLS, WebSocket, secure WebSocket |
-| **Reachability** | NAT via `rport` and symmetric RTP. No Outbound, Path, GRUU or push yet. |
-| **Multi-party** | Bridge two calls, or conference several with N−1 mixing |
+| **Reachability** | NAT via `rport` and symmetric RTP; `Path` and `Service-Route` honoured; RFC 5626 Outbound down a client-opened flow, GRUU, and a binding refreshed on a push. No ICE yet. |
+| **Multi-party** | Bridging two media sessions and conferencing several with N−1 mixing live in `sipx-media`; reaching them from a `Call` is being finished (`C-6`) |
 | **Liveness** | RFC 4028 session timers, so a far end that loses power is noticed rather than billed for |
 | **Quality** | Loss, jitter, round-trip time and an estimated MOS, readable mid-call |
 
-Verified against **Kamailio**, not only against itself: registration over UDP, TCP, TLS and
-WebSocket — and the refusals that make the successes mean something.
+Verified against **two independent peers**, not only against itself — a proxy (Kamailio) and a PBX
+and back-to-back user agent on an unrelated SIP library (Asterisk). Every peer runs the same list:
+registration over UDP, TCP, TLS and WebSocket, and the refusals that make the successes mean
+something. The one that answers calls also places and answers them with sipx, with SDES-keyed
+SRTP on the media.
 
 **[→ What sipx supports, RFC by RFC](docs/compliance.md).** 70 RFCs, each marked implemented,
 partial, parse-only or not started. The table is generated from a registry and CI fails the
@@ -110,12 +112,18 @@ Three things follow from it:
 | `sipx-transport` | UDP, TCP, TLS, WS, WSS, connection reuse, RFC 3263 resolution |
 | `sipx-ua` | User agent: digest authentication, registration as a lease |
 | `sipx-sdp` | SDP, and offer/answer as a pure function |
-| `sipx-rtp` | RTP, RTCP, an adaptive jitter buffer, quality statistics |
-| `sipx-audio` | G.711, Opus, mixing, WAV, RFC 4733 DTMF |
+| `sipx-rtp` | RTP, RTCP, an adaptive jitter buffer, quality statistics, SRTP |
+| `sipx-audio` | G.711 (µ-law and A-law), mixing, WAV, and Opus behind the `opus` feature |
 | `sipx-media` | Media sessions, bridging, conferencing |
 | `sipx-call` | Calls: playback, recording, DTMF, transfer |
 | `sipx-cli` | The `sipx` binary |
-| `sipx-testkit` | Torture corpus, fixture CA, load and soak harnesses |
+| `sipx-app-protocol` | The `sipx.app.v1` contract: its types, wire format and interpreter |
+| `sipx-app` | The application host — in development |
+
+The table is exactly the crates that publish, and `./scripts/check-audio-claims.py --check` holds
+it to that: a published crate no table describes has no front door anyone can be held to. The
+workspace also contains `sipx-testkit` — the torture corpus, the fixture CA and the load and soak
+harnesses — which is `publish = false`, so it is not a dependency you can take.
 
 ---
 
