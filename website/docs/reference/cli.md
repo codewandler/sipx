@@ -5,7 +5,8 @@ description: Every sipx command, flag, exit code and JSON field — the surface 
 
 # CLI reference
 
-One binary, `sipx`, three commands. Global: `--json` switches the report to a single-line JSON
+One binary, `sipx`. Three commands do work — `dial`, `answer` and `register`, documented below —
+alongside `help` and `version`. Global: `--json` switches the report to a single-line JSON
 object on stdout; `-v`/`-vv` raise log verbosity on stderr (never stdout, so JSON stays
 parseable); `-h`/`--help` on any command.
 

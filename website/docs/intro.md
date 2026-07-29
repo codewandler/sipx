@@ -20,7 +20,7 @@ people's registrations.
 | **Calls** | Place and answer, SDP offer/answer, hold and resume, blind and attended transfer, session timers |
 | **Audio** | G.711 µ-law and A-law, Opus behind a feature, DTMF, play and record WAV |
 | **Signalling security** | TLS and secure WebSocket, with certificate verification that **cannot be turned off** |
-| **Media security** | SRTP, keyed by SDES when the signalling is secure or by DTLS-SRTP on the media path |
+| **Media security** | SRTP, keyed by SDES when the signalling is secure. DTLS-SRTP keying lives in `sipx-sdp` and `sipx-media`; a call placed by `sipx-call` or the CLI does not offer it yet |
 | **Transports** | UDP, TCP, TLS, WebSocket, secure WebSocket |
 | **Reachability** | NAT via `rport` and symmetric RTP; `Path` and `Service-Route` honoured; RFC 5626 Outbound down a client-opened flow. No GRUU, push or ICE yet. |
 | **Multi-party** | Bridge two calls, or conference several with N−1 mixing |
@@ -38,9 +38,11 @@ sipx is not that yet, and the [compliance table](reference/compliance.md) says s
 rather than leaving you to find out.
 
 **The encryption has edges.** Media is encrypted when the signalling is — `sips:` or WSS —
-using SRTP's default transform, keyed one of two ways. SDES puts the key in the SDP body, so any
-intermediary that terminates the TLS can read it. DTLS-SRTP (RFC 5763 and RFC 5764) keys on the
-media path instead and does not have that property; everything those RFCs decide is compiled
+using SRTP's default transform. A call placed by `sipx-call` or the CLI keys it with SDES, which
+puts the key in the SDP body, so any intermediary that terminates the TLS can read it. DTLS-SRTP
+(RFC 5763 and RFC 5764) keys on the media path instead and does not have that property; it is
+implemented and reachable by building your own capabilities with `sipx-sdp` and `sipx-media`,
+but `dial` and `answer` do not offer it yet. Everything those two RFCs decide is compiled
 always, and only the handshake sits behind the off-by-default `dtls` feature. What is left is
 one transform and no rekeying, which is why [the table](reference/compliance.md) marks RFC 3711
 *partial* rather than implemented.

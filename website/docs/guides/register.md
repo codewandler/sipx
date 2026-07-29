@@ -72,9 +72,16 @@ always what was asked for, and it has to be refreshed before it expires. `Lease:
 is deliberately shorter than `granted` — refreshing at the moment of expiry is a race with the
 network.
 
-**Digest is answered with the strongest algorithm offered.** sipx does MD5 and SHA-256 and
-prefers SHA-256 when the server offers it. The implementation is checked against the worked
-example RFC 2617 publishes for itself rather than against sipx's own arithmetic.
+**Digest is answered with the strongest algorithm offered.** sipx does MD5, SHA-256 and
+SHA-512/256, each with its `-sess` variant. When a challenge offers several, the strongest wins
+rather than the topmost: a challenge is not integrity-protected, so an on-path attacker who can
+reorder the header fields could otherwise put the weakest algorithm first and be obeyed
+(RFC 8760 §3). Ties go to the earlier challenge, so the server's order still decides where
+strength does not.
+
+**The digests are checked against the RFCs' own worked examples**, not against sipx's
+arithmetic: RFC 2617 §3.5, RFC 7616 §3.9.1, and §3.9.2's SHA-512/256 vector as corrected by
+errata 4897.
 
 **This is verified against Kamailio**, including the case that makes the success meaningful: a
 wrong password is refused.

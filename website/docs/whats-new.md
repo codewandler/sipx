@@ -33,7 +33,9 @@ Recently landed:
 - **DTLS-SRTP (RFC 5763, RFC 5764)** — the keying that never touches the signalling path: the
   handshake runs over the media path and the certificate is checked against the
   `a=fingerprint` the SDP carried, or no keys are returned. Everything the two RFCs decide is
-  compiled always; only the handshake sits behind the off-by-default `dtls` feature.
+  compiled always; only the handshake sits behind the off-by-default `dtls` feature. It is
+  reached by building capabilities with `sipx-sdp` and `sipx-media` — `sipx-call` and the CLI
+  still offer SDES.
 - **The event notification framework (RFC 6665)** — a notifier with a subscription store and
   packages registered by name, plus the `dialog`, `reg` and `presence` packages and PUBLISH
   behind an entity tag. The packages produce documents; joining them to sipx's live dialogs and
