@@ -40,3 +40,9 @@ tokio = { workspace = true, features = ["full"] }
 
 [lints]
 workspace = true
+
+# The end-to-end example needs the `sipx-call` adapter, which is what `call` turns on. Declared so
+# that a build with the feature off does not try to compile a driver for a call type it lacks.
+[[example]]
+name = "canned_program"
+required-features = ["call"]

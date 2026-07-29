@@ -56,9 +56,6 @@ pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventK
                 CallTransferState::Failed { status, .. } => {
                     TransferState::Failed { status: *status }
                 }
-                // `C-3`'s enum is `#[non_exhaustive]`; a state added there with no §5.3 spelling
-                // is not ours to invent a wire form for.
-                _ => return None,
             },
         },
         CallEvent::Hold => EventKind::Hold,

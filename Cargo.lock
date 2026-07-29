@@ -1621,6 +1621,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sipx-app-protocol"
+version = "0.8.0"
+dependencies = [
+ "sipx-call",
+ "sipx-media",
+ "sipx-rtp",
+ "sipx-sip",
+ "sipx-transport",
+ "tokio",
+]
+
+[[package]]
 name = "sipx-audio"
 version = "0.8.0"
 dependencies = [

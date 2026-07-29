@@ -203,8 +203,13 @@ pub enum Effect {
 }
 
 /// What the interpreter wants done.
+///
+/// Deliberately **not** `#[non_exhaustive]`, unlike [`Effect`] and [`Input`]. A driver's whole job
+/// is to carry out every output; one it silently ignored would be a call that quietly stopped
+/// working, not a driver that still compiles. So a new kind of output is a breaking change every
+/// driver is made to look at — whereas a new *verb* ([`Effect`]) or a new kind of input is
+/// something a driver can reasonably meet with a default arm.
 #[derive(Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Output {
     /// Perform this call-framework operation.
     Effect(Effect),
