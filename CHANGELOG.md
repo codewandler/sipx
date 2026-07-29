@@ -16,6 +16,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the far end was given now says so, and `within` is a bound on failure rather than a window to
   measure in.
 
+### Changed
+
+- **The compliance table stops claiming DTLS-SRTP calls sipx cannot place (`M-28`, partial)** — RFC
+  5763 and RFC 5764 were `status = "implemented"` with both roles, while `with_dtls_srtp` had no
+  caller outside `sipx-sdp`'s own tests. A reader of `docs/compliance.md` would conclude sipx places
+  DTLS-SRTP calls; it cannot. Both rows are now `partial`, list **no** roles, and each note opens by
+  naming the missing half before describing what the crates genuinely implement — which is a good
+  deal, and stays described rather than deleted.
+  - **The code half is not here, and the reason is an ordering hazard rather than an estimate.**
+    `dial_with` calls `establish()` *before* the ACK, under a stated invariant that from that point
+    every path must acknowledge or leave the far end retransmitting its 200 for 32 seconds. A DTLS
+    handshake inside `establish()` holds the ACK for the handshake's duration, and a peer that
+    starts its own handshake only after the ACK deadlocks with it until timeout — both ends
+    waiting, the SDP correct throughout. Keying has to move *after* the acknowledgement, which
+    reshapes the 2xx path rather than adding to it. `M-28` stays open for that.
+  - A partial selector was deliberately not landed: an offer carrying `UDP/TLS/RTP/SAVP` that this
+    side cannot key would connect and carry audio in the clear under a token promising otherwise —
+    a worse over-claim than the paperwork one this story exists to fix.
+
 ### Fixed
 
 - **The bridge audio test is deterministic under load (`X-28`)** — it recorded **zero of 3200

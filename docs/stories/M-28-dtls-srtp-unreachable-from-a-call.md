@@ -2,8 +2,8 @@
 id: M-28
 title: Offer DTLS-SRTP from a call, and stop claiming it until then
 pillar: Media
-status: in-progress
-priority: 2
+status: ready
+priority: 5
 design: docs/specs/srtp.md
 epic: media
 areas: [sipx-call, sipx-media, docs]
@@ -45,6 +45,15 @@ call — and until it is, make the compliance table say so instead of claiming b
       left a test asserting the gap rather than closing it.)*
 
 ## Progress
+- **Still open, and deliberately.** One of five Acceptance items is done — the registry
+  correction, which the story made unconditional. The code half remains and is the reason the
+  story keeps its file rather than closing: `M-28` is not "DTLS-SRTP paperwork", it is "offer
+  DTLS-SRTP from a call". Re-prioritised 2 → 5, because the over-claim that made it urgent is gone
+  and what is left is a feature rather than a correction.
+- **Adjacent, not done:** RFC 8122's row has the same shape — `status = "implemented"`, both roles,
+  and `a=fingerprint` is never emitted or read by any call for exactly the same reason. It was left
+  alone because the Acceptance names 5763 and 5764. Whoever closes the code half should correct it
+  in the same commit, or it becomes the fifth instance of the pattern.
 - **2026-07-29 — registry corrected, code half deliberately not attempted.** The half the story
   called non-optional is done: RFC 5763 and RFC 5764 are `partial`, list no roles, and each note
   opens with "Missing: a call. No role is reachable from `sipx-call`". `docs/compliance.md` is

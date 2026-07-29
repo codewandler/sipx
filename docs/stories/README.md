@@ -46,6 +46,7 @@ _This is the layer applications actually program against, so it is the one that 
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
+- [X-30 — Make the registry distinguish "implemented in a crate" from "reachable from a call"](X-30-registry-cannot-tell-reachable-from-implemented.md) · Build · fifth instance in two days — rfc-report.py --check verifies that cited files exist, never that a claimed capability has a caller, so a crate-level feature reads as a shipped one
 - [X-29 — Stop asserting after a sleep in sipx-call and sipx-transport](X-29-wall-clock-sleeps-outside-the-media-path.md) · Build · found by X-28's sweep, then confirmed by a real red gate — dns.rs:553 raced a 50ms TTL against the scheduler and failed a gate that had nothing to do with the diff being merged
 - [S-25 — Give the early-dialog loop a way to fail](S-25-early-dialog-observation-has-no-error-channel.md) · Signalling · found by M-29 — adopt_early_answer returns (), so a parse failure, a negotiation failure and a refused a=crypto in a reliable provisional are all discarded identically
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
