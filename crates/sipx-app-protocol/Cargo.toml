@@ -1,0 +1,45 @@
+[package]
+name = "sipx-app-protocol"
+description = "The sipx.app.v1 application contract: its types, its JSON wire format, and a sans-IO instruction interpreter (experimental)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+## The `sipx-call` adapter: `CallEvent` in, contract events out. Off by default, and that is the
+## point — the library half of this crate is the wire and the state machine, and a remote SDK or
+## a test that only wants those must not inherit a runtime, a socket stack and a media session to
+## get them. Turning it on is what a *host* does, because a host has a `Call` to adapt.
+call = ["dep:sipx-call", "dep:sipx-rtp", "dep:sipx-media"]
+
+[dependencies]
+# Optional, and the only dependencies this crate has at all. The `sipx.app.v1` types, the JSON
+# codec and the interpreter are written against `core`/`alloc`/`std` and nothing else: the wire
+# format is this crate's own (there is no serialization framework in this workspace), and a
+# state machine with no I/O has nothing to borrow.
+sipx-call = { workspace = true, optional = true }
+sipx-rtp = { workspace = true, optional = true }
+sipx-media = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The end-to-end example drives the interpreter over a real call, which needs the real stack.
+# Dev-only: nothing here reaches the library's dependency graph.
+sipx-call.workspace = true
+sipx-media.workspace = true
+sipx-rtp.workspace = true
+sipx-sip.workspace = true
+sipx-transport.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[[example]]
+name = "canned_program"
+required-features = ["call"]
+
+[lints]
+workspace = true
