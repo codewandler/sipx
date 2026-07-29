@@ -240,8 +240,8 @@ See [design](designs/sip-ua.md).
 ### Media — `media`
 
 SDP (RFC 8866) with offer/answer (RFC 3264) as a pure function; RTP and RTCP with a jitter
-buffer and reception statistics; G.711 and G.722; symmetric-RTP address learning. Done when
-two sipx endpoints exchange audio that survives a bit-exactness check.
+buffer and reception statistics; G.711, with Opus behind a feature; symmetric-RTP address
+learning. Done when two sipx endpoints exchange audio that survives a bit-exactness check.
 See [design](designs/media.md).
 
 ### Call framework — `call`
