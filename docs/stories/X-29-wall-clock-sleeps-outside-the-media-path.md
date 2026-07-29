@@ -2,7 +2,7 @@
 id: X-29
 title: Stop asserting after a sleep in sipx-call and sipx-transport
 pillar: Build
-status: in-progress
+status: ready
 priority: 3
 design: docs/designs/media.md
 epic: conformance
@@ -41,6 +41,17 @@ a red gate keeps meaning what `X-28` made it mean in the media path.
       saturating all cores does not starve a `current_thread` runtime and does not reproduce this.
 
 ## Progress
+- **Coordinator, at integration:** merged as a partial and left `ready`. The one site with a real
+  red gate against it is fixed and the gate is green at 18 steps; the remaining ~16 sites are listed
+  below. **Take `udp.rs:473` first, not the list in order** — the implementor measured the
+  `quality.rs` sites as far inside their margins, so `X-28`'s risk ranking should not be trusted as
+  a work order. A 50 ms bound on a *positive* socket read is the one plausibly near its edge.
+- **My fault, recorded so the next agent does not inherit the confusion:** `c38c381` on this branch
+  is mine, not the implementor's. I committed its half-finished `quality.rs` to preserve work after
+  an account limit killed the run, while it was in fact still resumable — which broke its isolation
+  and made its own measurements contradict each other. Preserving an interrupted agent's work is
+  right; doing it on a branch that may still have a live writer is not.
+
 **Partial. Two of the seven files are done; the `sipx-call` half is untouched.**
 
 Done:

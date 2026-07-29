@@ -9,6 +9,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The DNS TTL test stops racing the scheduler (`X-29`, partial)** — `an_expired_entry_is_not_returned`
+  stored an entry with a 50 ms TTL and read it back immediately. Under load the entry expired *before*
+  that read, so a gate for a diff that had never opened `sipx-transport` came back red — and a correct
+  merge was one command from being reverted for it. The two halves of the test wanted opposite things
+  from the clock, so it is now two stores: a TTL the precondition read cannot race, and the real 50 ms
+  one for the expiry, waited *for* in a deadline loop where load can only lengthen the wait.
+  - Three `quality.rs` drains converted the same way; one left with its fixed window because its
+    assertion is negative, where a window can only make it pass.
+  - **Roughly 16 of `X-28`'s 20 enumerated sites are untouched and the story stays open** — the
+    `sipx-call` half entirely.
+  - **A finding worth more than the conversions**: the implementor could not reproduce a flake at the
+    `quality.rs` sites — 3/3 passes under 250 spinners pinned to one core — and said so instead of
+    dressing it up. Those tests spend most of their window *asleep*, and a sleeping task is not
+    starved of a CPU it is not asking for, so they sit far inside their margins. `X-28`'s risk
+    ranking for them was too high. `udp.rs:473`, a 50 ms bound on a *positive* socket read, is the
+    one plausibly near its edge and is the next site to fix — not the next in list order.
+
 - **A client transaction now gets the key its own responses produce (`S-26`, RFC 3261 §17.1.3)** —
   `from_sent_request` delegated to `from_request`, which is §17.2.3, the **server** rule. For a
   cookieless `Via` that keys on the Request-URI and the `To` tag; a response has no Request-URI at
