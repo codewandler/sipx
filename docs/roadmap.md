@@ -210,6 +210,50 @@ holds, and therefore last by this roadmap's own rule: SIPREC (7865, 7866), MESSA
 (6086), `tel` URI normalisation (3966), caller preferences (3841), the rest of the SRTP transform
 set and rekeying (3711), RFC 5923's `alias` parameter, and the signed `Referred-By` token (3892).
 
+## The v1 gate, and the alpha before it
+
+**v1 is not a feature count.** The vision makes "maximum feature count" a non-goal and says plainly
+that *a smaller stack whose every path is tested beats a larger one whose edges are guesswork*. So
+the gate to 1.0 is not "M12 is done" and not "the compliance table is all green" — it is the north
+star, made checkable: **correct under adversarial input and adversarial timing, provably, and
+honest about what it does not do.**
+
+A stack can be short of features and still be worth depending on. It cannot be *wrong about itself*
+and be worth depending on, because every consumer's design decision rests on what the table says.
+
+### `1.0.0-alpha` — the predicates
+
+The alpha is the point at which a v1 **could** technically be cut. Each item is checkable by a
+person reading the repo, and most are already checked by the gate.
+
+1. **No claim outlives its caller.** No entry in [`docs/rfc/registry.toml`](rfc/registry.toml)
+   claims a role that nothing above the implementing crate can reach, at *any* layer — not only
+   `media`. `X-30` made this mechanical for media and deliberately went no further; `X-33`
+   generalises it. Rows that cannot be made true are demoted, not explained.
+2. **Adversarial input and adversarial timing are both fuzzed.** Four parser targets and the
+   transaction-sequence driver (`X-19`), the second with an oracle that can fail without a panic.
+   Met, subject to `X-31` closing the harness's own drift holes.
+3. **A red gate means a defect.** No test in the workspace fails because the machine was busy.
+   `X-28` cleared the media path; `X-29` is the rest. **This one is load-bearing for the others** —
+   every predicate here is asserted by the gate, so a gate that cries wolf invalidates all of them.
+4. **No known-wrong shipped path.** Every defect the suite or the fuzzer has found is fixed, or is
+   an `#[ignore]`d regression test naming the story that will fix it. No silent deviation.
+5. **The public API says what it guarantees.** Every published crate marks its surface stable or
+   experimental. v1 freezes what "stable" means, so the line has to exist before it can be frozen.
+6. **Testable from a shell** (principle 6) for everything the CLI exposes.
+7. **The distance to v1 is generated, not asserted** — `X-32`, so this section cannot quietly go
+   stale the way the Status block above did.
+
+### What the alpha is *not* waiting for
+
+M9–M12, the ICE and discovery epics, QUIC, and the red rows listed under "After M12". Those make
+sipx do **more**; the alpha is about sipx being **right**, and about the table being a measurement
+rather than a claim. They are v1's content, not its gate — and shipping an alpha is how the API
+surface gets exercised before it is frozen.
+
+**We stop at the alpha deliberately.** Cutting `1.0.0` means freezing the public API, and the API
+has not yet been used by anyone outside this repository.
+
 ## Epics
 
 An **epic** is a themed group of stories with a shared design doc. Stories join an epic via the
