@@ -225,109 +225,37 @@ impl Ringing {
         Ok((early, dialog, self.negotiation, self.peer_allows_update))
     }
 
+    /// The early dialog's mutable parts, borrowed for one UPDATE.
+    ///
+    /// `None` when the INVITE carried no usable `Contact` and no dialog was ever built, which is
+    /// a peer there is nothing to answer *to*.
+    fn early_dialog(&mut self) -> Option<crate::update::EarlyDialog<'_>> {
+        Some(crate::update::EarlyDialog {
+            endpoint: &self.endpoint,
+            dialog: self.dialog.as_mut()?,
+            target: &mut self.target,
+            negotiation: &mut self.negotiation,
+            peer_allows: &mut self.peer_allows_update,
+            early: self.early.as_mut(),
+        })
+    }
+
     /// Answer an UPDATE that arrived in the early dialog (RFC 3311 §5.2).
     ///
-    /// Returns whether it was one for this dialog. The three refusals are the same three a
-    /// confirmed dialog gives, and this is the case they were written for: the far end is
-    /// changing a session that has been described and not yet accepted, which is precisely what
-    /// a re-INVITE cannot do — a second INVITE inside a transaction that has no final response
-    /// is not a thing SIP has.
+    /// Returns whether it was one for this dialog. The rules are
+    /// [`crate::update::receive`]'s, which is the same code the *calling* side runs: §5.1 makes
+    /// UPDATE something either end may send, so a second copy of §5.2 here would be a second
+    /// place for it to drift.
     ///
     /// An offer arriving before this side has answered the INVITE's own — that is, after
     /// [`ring`] rather than [`ring_early`] — draws the **500** of §5.2's third rule. Not 491:
     /// nothing of ours is outstanding, the peer is simply early, and telling it otherwise would
     /// send it into a back-off instead of the retry that will work.
     pub async fn on_update(&mut self, incoming: &Incoming) -> Result<bool> {
-        if incoming.request.method != Method::Update {
-            return Ok(false);
-        }
-        let Some(dialog) = self.dialog.as_mut() else {
+        let Some(early) = self.early_dialog() else {
             return Ok(false);
         };
-        if !dialog.matches(&incoming.request) {
-            return Ok(false);
-        }
-
-        // RFC 3311 §5.2 sends this straight to RFC 3261 §12.2.2, and an early dialog is under
-        // §12.2.2 exactly as a confirmed one is. Without it the recorded sequence number rolls
-        // *backwards* to whatever the last UPDATE claimed, and a BYE replayed from behind it is
-        // then accepted — ending a call that is still running, which is the failure
-        // `Call::handle` already refuses in as many words.
-        if dialog.is_out_of_order(&incoming.request) {
-            return respond(
-                &self.endpoint,
-                incoming,
-                500,
-                "Server Internal Error",
-                Vec::new(),
-            )
-            .await
-            .map(|()| true);
-        }
-        dialog.record_remote_cseq(&incoming.request);
-
-        let has_offer = crate::update::carries_offer(&incoming.request);
-        if let Reception::Refuse(refusal) = self.negotiation.receive(has_offer) {
-            crate::update::refuse(&self.endpoint, incoming, refusal).await?;
-            return Ok(true);
-        }
-
-        let mut builder =
-            ResponseBuilder::to_request(&incoming.request, crate::call::ok_status(), "OK")?
-                .header(
-                    HeaderName::Contact,
-                    Bytes::from(crate::call::contact_for(
-                        &self.endpoint,
-                        self.target.transport,
-                    )),
-                )?
-                .header(
-                    HeaderName::Allow,
-                    Bytes::from_static(update::ALLOW.as_bytes()),
-                )?;
-
-        if has_offer {
-            let answer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
-                .ok()
-                .and_then(|offer| self.early.as_mut().and_then(|early| early.reanswer(&offer)));
-            let Some(answer) = answer else {
-                // §5.2 and `M-8`'s rule together: the change does not happen and the dialog
-                // carries on. An early dialog refused this way still rings, and still answers.
-                self.negotiation.answered();
-                return respond(
-                    &self.endpoint,
-                    incoming,
-                    488,
-                    "Not Acceptable Here",
-                    vec![(
-                        HeaderName::Warning,
-                        Bytes::from(crate::update::warning(&self.endpoint)),
-                    )],
-                )
-                .await
-                .map(|()| true);
-            };
-            builder = builder
-                .header(
-                    HeaderName::ContentType,
-                    Bytes::from_static(b"application/sdp"),
-                )?
-                .body(Bytes::from(answer.to_string_sdp()));
-        }
-
-        // §5.1: a target refresh request, in an early dialog as much as a confirmed one. The
-        // sequence number was recorded above, with the ordering check that earns the right to.
-        dialog.refresh_target(&incoming.request.headers);
-        self.target =
-            crate::call::in_dialog_target(dialog, Target::new(incoming.source, incoming.transport));
-        self.peer_allows_update = update::peer_allows(&incoming.request.headers);
-
-        let sent = self.endpoint.respond(&incoming.key, builder.build()).await;
-        // Cleared whether or not the response got out, for the reason `Call::on_update` gives:
-        // a send that will not be retried must not leave the exchange open forever.
-        self.negotiation.answered();
-        sent?;
-        Ok(true)
+        crate::update::receive(early, incoming).await
     }
 
     /// Renegotiate the early session from this side (RFC 3311 §5.1).
@@ -336,41 +264,17 @@ impl Ringing {
     /// owes one, and RFC 3264 forbids a second offer while one is open — the far end would
     /// answer 500 and be right to.
     pub async fn update(&mut self, direction: Direction) -> Result<()> {
-        let (Some(early), Some(dialog)) = (self.early.as_mut(), self.dialog.as_mut()) else {
+        // `NoDialog` for a missing early session as well as for a missing dialog, which is this
+        // method's existing contract. `crate::update::offer` distinguishes the two, and the
+        // caller's handle takes the sharper error; changing what an application already matches
+        // on is not something a story about the *other* role should do on its way past.
+        if self.early.is_none() {
+            return Err(Error::NoDialog);
+        }
+        let Some(early) = self.early_dialog() else {
             return Err(Error::NoDialog);
         };
-        if !self.negotiation.may_offer() {
-            return Err(Error::Rejected {
-                status: update::Refusal::Glare.status(),
-                reason: "an offer is already outstanding on this dialog".to_owned(),
-            });
-        }
-
-        let mut capabilities = early.capabilities.clone();
-        capabilities.direction = direction;
-        capabilities.session_version = u64::from(dialog.local_cseq.saturating_add(1));
-        let offer = crate::call::offer_from(&capabilities);
-
-        let (builder, routes) =
-            crate::update::request(&self.endpoint, dialog, &self.target, Some(&offer))?;
-        let request = crate::update::finish(builder, &routes)?;
-
-        self.negotiation.sent_offer();
-        let response = crate::update::send(&self.endpoint, request, self.target.clone()).await;
-        self.negotiation.received_answer();
-        let response = response?;
-        if !response.status.is_success() {
-            return Err(crate::update::rejected(&response));
-        }
-
-        dialog.refresh_target(&response.headers);
-        self.peer_allows_update = update::peer_allows(&response.headers);
-        if let Ok(answered) = sipx_sdp::parse(&String::from_utf8_lossy(response.body())) {
-            // An answer, not an offer: it says where the far end now wants media, and nothing
-            // is owed back for it. Our own port does not move — the peer already has it.
-            early.adopt_answer(&answered);
-        }
-        Ok(())
+        crate::update::offer(early, direction).await
     }
 
     /// Handle an in-dialog PRACK. Returns whether it was one for this ringing.
