@@ -82,6 +82,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The gate refuses to report when it cannot be believed (`X-34`)** — five times in one evening a
+  full disk produced a red gate that read as a code defect, and a correct merge came one command from
+  being reverted for a failure in a crate its diff never opened. Cargo's messages in that state are
+  actively misleading: `failed to create file '…/target/debug/examples/canned_program.d': No such file
+  or directory` is a vanished `target/`, not a broken build. `./scripts/gate.py` now checks free space
+  before it starts and refuses, naming disk and printing both the threshold and the actual figure.
+  - **The threshold is measured, not guessed.** A cold worktree was driven through every build step
+    with `target/` measured after each — clippy 0.7 GiB, `test` 8.4, examples 0.0, msrv 0.6, feature
+    matrix 0.3, docs site 0.5 = 10.6 GiB — plus 10% for cargo's peak while it links. The provenance
+    sits at the constant, and a test asserts the threshold covers every size ever measured.
+  - **`ENOSPC` and the ENOENT-on-artifact shape are an infrastructure failure, exit code 2, printed
+    unlike a red step**: *"NOT A RESULT — the machine stopped this run, not the tree"*, naming the step,
+    quoting the evidence, saying why it is not your diff, and stating free space now. Five real
+    non-disk failures are asserted **not** to match, because erring toward "it was disk" would hide
+    real defects.
+  - **A disk failure ends the run**, which contradicts `run()`'s "every step, not up to the first
+    failure" rule on purpose: once `target/` is gone every remaining step fails for the same reason,
+    and that wall of red is exactly what misled five readers.
+  - **A shared `CARGO_TARGET_DIR` was considered and rejected on three grounds**, the strongest being
+    that it would promote one worktree's `cargo clean` into everyone's vanished `target/` — occurrence
+    4 of that evening — from accident to design feature. An externally set one is still honoured.
+  - **The implementor killed its own first design on its own measurement.** It began by crediting an
+    existing `target/` against the threshold so a warm gate would not be refused, then found the
+    integration worktree had gone 13 GiB → 22 GiB in one evening because nothing there had ever linked
+    the integration test binaries. A warm `target/` is no evidence the expensive part is built, so the
+    credit would have let precisely that run start with 2 GiB free.
+  - Reads with `X-29`: same disease, one layer apart. `X-29` is tests that fail because the machine is
+    busy; this is the gate failing because the machine is full. A gate that fails at random trains
+    everyone to re-run it instead of believing it.
+
 - **The transaction driver is fuzzed, not only the parser (`X-19`)** — four fuzz targets existed and
   all four stopped at the parser, so the half of the north star about adversarial **timing** had
   nothing at all. A new target drives `TransactionLayer` with a sequence decoded from the fuzzer's

@@ -64,8 +64,11 @@ not here, not in the script. If that toolchain is not installed the step **fails
 The steps run under `ci.yml`'s own `env:` block, so the gate builds with the flags CI builds with
 rather than a friendlier set.
 
-Beyond a Rust toolchain the gate needs two things: that MSRV toolchain, and node >= 20 for
-`build-docs.sh`, which builds `website/` and the API reference.
+Beyond a Rust toolchain the gate needs three things: that MSRV toolchain, node >= 20 for
+`build-docs.sh`, which builds `website/` and the API reference, and **free disk** — a run leaves
+about 10.6 GiB of build artifacts, so the gate refuses to start below roughly 11.7 GiB rather than
+reporting a result it cannot stand behind (`X-34`). The number is not written here twice: it is
+measured, and `scripts/gate.py` prints the threshold and the actual free space when it refuses.
 
 `rfc-report.py` regenerates `docs/compliance.md` from `docs/rfc/registry.toml` and checks that
 its claims hold: a named header must be known to the parser, a cited file must exist, and an
