@@ -36,14 +36,36 @@ tie-breaker when a design choice is unclear.
 Before marking any story done:
 
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-./scripts/check-provenance.sh
-scripts/check-features.sh
-./scripts/rfc-report.py --check
-./scripts/build-docs.sh   # needs: node >= 20 (builds website/ and the API reference)
+./scripts/gate.py          # --list to see the steps, --check to verify the gate itself
 ```
+
+The gate is a script and not a list of commands here, because a list has to be transcribed
+correctly and once was not. CI has always run an `msrv` job that the list never named, so an
+implementor could run every documented command, see green, and tag a release that does not build
+on the Rust version it advertises — which is what happened. That job was red from v0.4.0 through
+v0.7.0, two published releases, and nobody was told for five days, because nothing anyone ran
+locally covered it (fixed in `f761878`).
+
+Two properties keep that from recurring, both enforced by `./scripts/gate.py --check`, which is
+itself a gate step and a CI job:
+
+- **The gate cannot omit a CI job.** The check reads `.github/workflows/ci.yml`: every command a
+  job runs is either mirrored by a gate step or named in the script's `NOT_RUN_LOCALLY` list with
+  a reason, and a flag CI passes that the local step drops counts as drift too — `cargo check`
+  without `--all-targets` is a green gate and a red CI one argument down. Adding a job fails the
+  check until somebody decides which it is.
+- **This section cannot fall behind the gate.** The block above may invoke the script and say
+  nothing else, so there is no second copy of the list here to drift.
+
+The **MSRV step** is the one that was missing. It builds the workspace on the toolchain named by
+the workspace `rust-version` in `Cargo.toml`, read at run time and written down nowhere else —
+not here, not in the script. If that toolchain is not installed the step **fails** and prints the
+`rustup toolchain install` line to fix it; skipping it would restore the exact hole it closes.
+The steps run under `ci.yml`'s own `env:` block, so the gate builds with the flags CI builds with
+rather than a friendlier set.
+
+Beyond a Rust toolchain the gate needs two things: that MSRV toolchain, and node >= 20 for
+`build-docs.sh`, which builds `website/` and the API reference.
 
 `rfc-report.py` regenerates `docs/compliance.md` from `docs/rfc/registry.toml` and checks that
 its claims hold: a named header must be known to the parser, a cited file must exist, and an

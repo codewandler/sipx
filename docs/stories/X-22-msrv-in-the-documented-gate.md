@@ -30,7 +30,28 @@ see green, and still break the build — which is not a hypothetical, it is what
       says so and how to install it, rather than passing.
 
 ## Progress
-- Not started.
+- The entry point is `scripts/gate.py`. **The decision, recorded:** a `just`/`make` target would be
+  a second list in a second syntax that can read neither `Cargo.toml` nor `ci.yml`, and a cargo
+  alias cannot run a shell script — half the gate is shell scripts. Python keeps the step list, the
+  drift check and the MSRV derivation in one file, which is what makes the drift check worth
+  having: there is nowhere for a step to exist unchecked.
+- `--check` is the drift check, and it reads `.github/workflows/ci.yml` rather than restating it.
+  Four claims: every command a CI job runs is a gate step or is in `NOT_RUN_LOCALLY` with a reason;
+  every gate step names a job that runs it; a flag CI passes and the step drops is drift unless the
+  step declares it with a reason (`check-provenance.sh --history` is the one real difference); and
+  the `msrv` job's `dtolnay/rust-toolchain@` pin equals the workspace `rust-version`.
+- `AGENTS.md`'s gate block may invoke the entry point and nothing else — checked, so the section
+  cannot grow its own copy of the list. The MSRV version appears in neither the block nor the
+  script; `version_literal_problems` fails if it does.
+- The MSRV toolchain is derived from `rust-version` and padded to three components. Absent
+  toolchain (or absent rustup) is a failed step printing `rustup toolchain install <version>`,
+  never a skip.
+- New CI job `gate` runs `gate.py --check`, `test-gate.py` and `test-rfc-report.py`. Judgement call
+  taken: **yes**, `test-rfc-report.py` belongs here — X-15 wrote it and nothing ran it, and it is
+  milliseconds with no dependency beyond a Python interpreter.
+- Two other omissions the check surfaced on the way: the documented gate never ran the `test` job's
+  `cargo build --examples`, and it ran without CI's `RUSTFLAGS: -D warnings`. Both are gate steps
+  now, and the environment is read from `ci.yml`'s `env:` block rather than repeated.
 
 ## Notes
 - The defect that motivated this: `BinaryHeap::<T>::new` required `T: Ord` on 1.88 and does not on
