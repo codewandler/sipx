@@ -9,6 +9,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The media design record (`X-25`)** — `docs/designs/media.md` was a 37-line outline headed
+  "Stories: _to be cut_" that named no story, no ICE, no DTLS-SRTP, no bridge and no mute, while
+  nine delivered stories and all six ICE stories cite it as their design record. It now describes
+  the stack as delivered, says up front whether a reader wants a design record or a spec, and
+  writes down the sans-IO argument that `docs/specs/ice.md` had been assuming without making.
+  Five decisions no evidence could be found for are listed as *unrecorded* rather than given an
+  invented rationale.
 - **A STUN connectivity check, encoded and answered (`M-20`)** — the codec ICE checks run over, in
   `sipx_media::ice::stun`: the attributes, the credentials and the two integrity values. Second of
   the six stories `M-16` was cut into.
