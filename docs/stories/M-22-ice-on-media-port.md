@@ -2,8 +2,8 @@
 id: M-22
 title: Drive ICE on the media port
 pillar: Media
-status: in-progress
-priority: 3
+status: done
+priority:
 design: docs/designs/media.md
 epic: ice
 areas: [sipx-media]

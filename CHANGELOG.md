@@ -9,6 +9,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ICE on the media port (`M-22`, RFC 8445 + 8839)** — the sans-IO agent `M-21` built now has the
+  socket and the clock it was written for, so a call can traverse a NAT symmetric RTP cannot.
+  Host and server-reflexive gathering off the bound media port, connectivity checks demultiplexed
+  from RTP by `dtls::classify` (RFC 5764 §5.1.2), §11 keepalives on selected pairs, and a
+  nominated pair replacing symmetric-RTP address learning for the stream that has one. Fourth and
+  last of the ICE stories that make it usable; restart is `M-23` and relayed candidates `M-24`.
+  - **A peer that offers no ICE gets exactly today's behaviour** — nothing offered, no checks, no
+    timers, symmetric RTP. Demonstrated rather than asserted: the `quality`, `srtp`, `bridge`,
+    `conference`, `opus` and `dtls_srtp` suites are byte-identical to before. A stack that
+    required ICE to place a call would have regressed.
+  - **The driver arms only timers the agent asked for.** A driver with a schedule of its own can
+    keep an agent that has stopped asking for ticks looking alive — the defect `M-21`'s review
+    caught one layer up, in a test that fired the pacing timer by hand.
+  - `ice-mismatch` (RFC 8839 §5.3) reported in the answer when the offer's default destination for
+    a component matched none of its candidates, with RFC 3264 procedures used for that stream.
+  - Corrects `docs/specs/ice.md` §2 — the fourth error found by the fourth story to implement
+    against it. `Input::DataSent` named a `PairId`, which a driver cannot produce: the media path
+    knows only that a packet went out for a component, and re-deriving the pair would reimplement
+    outside the agent the question the agent had just answered.
+
+- **A spec for SRTP and its two keyings (`M-25`)** — `docs/specs/srtp.md` covers the transform and
+  its key derivation, SDES, DTLS-SRTP, the profiles, and which keying wins when a peer offers
+  both, with byte-level vectors marked derived, reconciled or new. `M-14` and `M-15` shipped
+  without the spec AGENTS.md requires; `X-25` found the breach and this closes it. Writing it
+  against the RFC rather than against the code's apparent intent is what found the defect above —
+  see *Fixed*.
+
 - **The sans-IO ICE agent (`M-21`, RFC 8445)** — gather, prioritise, pair, order, check, resolve
   role conflict and nominate, as a pure function of events: no socket, no clock read, time arriving
   as a fired timer. Third of the six stories `M-16` was cut into; the driver that puts it on a real
@@ -76,6 +103,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     missing.
 
 ### Fixed
+
+- **SRTP authenticated with a key no conformant peer computes (`M-25`, RFC 3711)** — **this is a
+  wire-breaking fix.** A sipx built from this release cannot exchange secure media with a sipx
+  built before it, in either direction, for both SRTP and SRTCP; deployments running sipx at both
+  ends must upgrade both together. It is still the right change, because nothing else ever
+  interoperated either.
+  - The session authentication key was sized at **94 octets**. §5.2 and §8.2 fix `n_a` at 160
+    bits, and §4.3.1 derives `n = n_a` while stating no length of its own. The 94 comes from
+    §B.3, which *posits* an authentication function needing 94 octets so its worked example walks
+    the PRF through six AES blocks — a property of the appendix, not of the transform.
+  - **A different key, not a weaker one.** HMAC-SHA1's block size is 64, so RFC 2104 reduces any
+    longer key to `SHA1` of itself: sipx keyed with `SHA1(the 94-octet block)` where every
+    conformant peer keys with that block's first 160 bits. Every tag sipx produced failed
+    verification at a correct peer, and every tag a correct peer produced failed at sipx, on the
+    first packet. Entropy was capped at the 128-bit master key either way, so no key was weakened
+    and no traffic was exposed by it — sipx-to-sipx media was encrypted and authenticated exactly
+    as intended, against the wrong constant.
+  - **Shipped in v0.3.0 through v0.8.0.** Nothing caught it because nothing could: all 17 SRTP
+    tests were round-trips or tamper-negatives, which pass identically whether the key is 20
+    octets or 94, since both ends are wrong the same way. The suite was blind to it rather than
+    agreeing with it, and the interop harness has never placed a call with encrypted media at
+    all. `srtp.rs` now carries a tag vector computed off-stack.
+  - The SRTCP index was also incremented *before* each packet rather than after, so the first
+    packet carried 1 and index 0 was never emitted (§3.4, a MUST). Not interoperability-breaking
+    — the index travels in the trailer — but it selects the SRTCP keystream's counter block.
 
 - **A replayed BYE could end a live call through the early dialog (`S-19`)** — found by review
   before release. The early-dialog path applied no RFC 3261 §12.2.2 ordering check and wrote the

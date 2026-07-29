@@ -2,8 +2,8 @@
 id: M-25
 title: Specify SRTP and its two keyings, after the fact
 pillar: Media
-status: in-progress
-priority: 9
+status: done
+priority:
 design: docs/designs/media.md
 epic: media
 areas: [docs, sipx-rtp]
