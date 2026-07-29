@@ -116,6 +116,56 @@ class SchemaGuard(unittest.TestCase):
         self.assertEqual([], report.schema_problems(entry))
 
 
+class SpecCitation(unittest.TestCase):
+    """`spec` names the normative document for an RFC, and must name one that exists.
+
+    The field is the registry's half of AGENTS.md non-negotiable 4. A spec no row points at is a
+    spec nobody arrives at from the compliance table, which is the document a reader reaches for
+    when asking "what does sipx do about RFC 3711" — and a `spec` naming a file that has since been
+    moved is worse than none, because the table still reads as though the subsystem is specified.
+    Held to the same standard as `evidence`, for the same reason.
+    """
+
+    def test_spec_is_an_accepted_key(self):
+        self.assertEqual([], report.schema_problems(an_entry(spec="docs/specs/srtp.md")))
+
+    def test_spec_must_be_a_string(self):
+        problems = report.schema_problems(an_entry(spec=["docs/specs/srtp.md"]))
+        self.assertTrue(
+            any("spec" in p for p in problems),
+            f"a list-valued spec was accepted; problems={problems}",
+        )
+
+    def test_a_spec_that_does_not_exist_is_reported(self):
+        problems = report.check([an_entry(number=9999, spec="docs/specs/no-such-spec.md")])
+        self.assertTrue(
+            any("no-such-spec.md" in p for p in problems),
+            f"a dangling spec citation was accepted; problems={problems}",
+        )
+
+    def test_the_spec_reaches_the_generated_table(self):
+        """A claim that never leaves the source is the failure this checker exists to prevent.
+
+        The link is relative to `docs/compliance.md`, which is where it is clicked — not the
+        repository-relative path the registry stores, which would be dead everywhere but the root.
+        """
+        entries = [an_entry(number=9999, layer="media", spec="docs/specs/srtp.md")]
+        self.assertIn("[srtp](specs/srtp.md)", report.render(entries))
+        self.assertNotIn("(docs/specs/srtp.md)", report.render(entries))
+
+    def test_the_srtp_family_cites_its_spec(self):
+        """M-25's acceptance, in executable form.
+
+        SRTP and its two keyings shipped without a spec (`M-14`, `M-15`); `X-25` found the breach
+        and `M-25` closed it. These five rows are how a reader of the compliance table finds the
+        document, so the citation is asserted rather than left to survive the next edit.
+        """
+        by_number = {e["number"]: e for e in registry_entries()}
+        for number in (3711, 4568, 5763, 5764, 8122):
+            with self.subTest(rfc=number):
+                self.assertEqual(by_number[number].get("spec"), "docs/specs/srtp.md")
+
+
 class TheRealRegistry(unittest.TestCase):
     """The guard is only worth having if the registry it guards already satisfies it."""
 
