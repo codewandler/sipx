@@ -67,9 +67,68 @@ subscription or a network blocks multicast.
 - **Scanning a subnet for port 5060.** Rejected outright. It is indistinguishable from
   reconnaissance, it is wrong on any network with more than one broadcast domain, and mDNS is the
   answer the standards already give for the same question.
-- **A `sipx contacts` file format of our own.** Deferred inside `P-5`: the peer book should be the
-  smallest thing that works, and inventing a format before the other two sources exist risks a
-  schema that fits only the case that needed no protocol.
+- **A `sipx contacts` file format of our own.** Deferred inside `P-5`, and settled there — see
+  [Decided: the peer book](#decided-the-peer-book-p-5). The concern was that inventing a format
+  before the other two sources exist risks a schema that fits only the case that needed no
+  protocol; the answer was to make the file hold the two fields a peer cannot do without and put
+  everything a source might add — `source` today, freshness later — in the *output* rather than in
+  the file.
+
+## Decided: the peer book (`P-5`)
+
+The design left the book's location and format open on purpose; `P-5` closed it, and this is the
+record.
+
+**Format — one peer per line, `name` whitespace `uri`.** `#` starts a comment line, blank lines are
+ignored, and a line is exactly two whitespace-separated fields:
+
+```text
+# who this phone knows about
+alice   sip:alice@192.0.2.17:5060
+bob     sips:bob@example.com
+```
+
+Chosen because principle 6 requires it be usable from a shell, and this is the only shape a shell
+already has verbs for: `echo "alice sip:alice@host" >> "$book"` writes it and `while read -r name
+uri` reads it. TOML, JSON and INI were all rejected on the same ground — none is appendable or
+readable from a script without either a parser or a `sed` invocation that corrupts the file the
+second time it runs, and none is worth a third-party dependency for two fields. sipx has written
+its own codec rather than take a dependency before (`sipx-app-protocol`), and two fields is a much
+smaller thing to write than that was.
+
+A third field is refused rather than folded into the URI. A SIP URI contains no whitespace, so a
+third field is a trailing comment or a typo, and taking the rest of the line would produce an entry
+that is undiallable and says so nowhere until someone tries to call it. For the same reason a
+malformed line fails the whole listing, naming the line: skipping it prints a list that is short by
+one and never mentions it, which is the "partial list presented as complete" this design forbids.
+
+**Location — `--book <FILE>`, then `$SIPX_PEERS`, then `$XDG_CONFIG_HOME/sipx/peers`, then
+`$HOME/.config/sipx/peers`.** The flag/environment/default order is the one `sipx register` already
+uses for a password: the flag is the convenience, the environment is what a script sets once, and
+the XDG path is where a person's own book lives. With none of them available the command exits
+`usage` and says which two knobs would fix it, rather than inventing a path.
+
+**Output — one `Report` per peer, which is `P-1`'s convention applied to a list.** `--json` prints
+one object per line, extending `P-1`'s "one line per result" the way `sipx answer` already prints
+two lines for one call; the human form prints the same fields as aligned blocks separated by a
+blank line. Using the same `Report` for both is what keeps "the two carry the same facts" true by
+construction rather than by discipline — a bespoke table for the human form would be prettier and
+would be the second output convention this repo does not want.
+
+Every entry carries `status`, `name`, `uri` and `source`. `source` is `book` and is the extension
+point: `S-24` adds `registrar` and `T-24` adds `local-link` to the same stream, and `status`
+discriminates a peer line from the refusal line a registrar's "no" will need — a script selects
+entries with `select(.status == "peer")` and is not broken by either.
+
+**Not decided here: staleness.** A book entry has no age — it is as true as the last time someone
+typed it — and inventing an `age` field for it would report a number that means nothing. The
+freshness field belongs to the sources that have one, and a consumer must key it off `source`.
+
+**A book that cannot be read is a non-zero typed error, never an empty list.** A missing file, an
+unreadable one and a malformed line are all failures; only a book that exists, parses, and holds
+no peers is an empty list with exit zero. An empty list on a fresh machine reads as "there is
+nobody to call" when the truth is "you have not been told about anyone", and a script cannot tell
+those apart after the fact.
 
 ## Risks & open questions
 
@@ -88,8 +147,9 @@ subscription or a network blocks multicast.
 - **Staleness is the failure mode users will actually hit.** A discovered peer that has since gone
   away produces a call that fails at INVITE time rather than at list time. Every entry carrying its
   source and age is the mitigation; a TTL that silently expires entries mid-script is not.
-- **Where does the peer book live?** Config file, XDG path, or a flag — unsettled, and `P-5` owns
-  deciding it. Whatever it is must be scriptable, because principle 6.
+- ~~**Where does the peer book live?**~~ Settled by `P-5` — see [Decided: the peer book](#decided-the-peer-book-p-5)
+  above. `--book`, then `$SIPX_PEERS`, then `$XDG_CONFIG_HOME/sipx/peers`, then
+  `$HOME/.config/sipx/peers`, holding a line per peer.
 
 ## Acceptance / done
 

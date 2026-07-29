@@ -8,6 +8,7 @@ mod advertise;
 mod answer;
 mod dial;
 mod output;
+mod peers;
 mod register;
 
 use std::process::ExitCode;
@@ -24,6 +25,7 @@ COMMANDS:
     register    Register with a registrar
     dial        Place a call
     answer      Wait for and answer a call
+    peers       List what can be called
     help        Show this message
     version     Show the version
 
@@ -56,6 +58,9 @@ async fn main() -> ExitCode {
         Some("register") => register::run(&args, format).await,
         Some("dial") => dial::run(&args, format).await,
         Some("answer") => answer::run(&args, format).await,
+        // Not async, and deliberately so: listing what can be called reads a file and opens no
+        // socket. The registrar and local-link sources are separate stories.
+        Some("peers") => peers::run(&args, format),
         Some("version" | "--version" | "-V") => {
             println!("sipx {}", env!("CARGO_PKG_VERSION"));
             Exit::Success
@@ -171,6 +176,7 @@ const VALUED_FLAGS: &[&str] = &[
     "--expires",
     "--local",
     "--target",
+    "--book",
 ];
 
 #[cfg(test)]
@@ -218,11 +224,12 @@ mod tests {
     #[test]
     fn every_valued_flag_in_the_help_text_is_registered() {
         let help = format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             USAGE,
             crate::register::HELP,
             crate::dial::HELP,
-            crate::answer::HELP
+            crate::answer::HELP,
+            crate::peers::HELP
         );
 
         // A documented flag takes a value if its help line shows a placeholder after it.
