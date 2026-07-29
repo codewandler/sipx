@@ -659,9 +659,15 @@ note = "`dialog-info` documents with the five states of §3.7.1, the full-then-p
 number = 5627
 title = "Obtaining and Using GRUUs in SIP"
 layer = "services"
-status = "none"
-evidence = []
-note = "A URI that reaches one specific instance of a registered user. Depends on 3327 and 5626."
+status = "partial"
+roles = ["uac", "uas"]
+evidence = [
+  "crates/sipx-sip/src/gruu.rs",
+  "crates/sipx-ua/src/gruu.rs",
+  "crates/sipx-ua/src/registrar.rs",
+  "crates/sipx-ua/tests/gruu.rs",
+]
+note = "The UA side, for both roles: `Supported: gruu` and `+sip.instance` on REGISTER (§4.1) under the same instance identity RFC 5626 registers with, `pub-gruu` and `temp-gruu` read off the binding that names this instance and discarded with it (§4.2), a GRUU in the Contact of dialog-forming and target-refresh requests (§4.4), and §4.5's `gr` recognition — which is a comparison of its own because §5.4 notes a public GRUU is URI-equivalent to the AOR. The choice between public and temporary is the application's and asking for a temporary one never silently yields the public one, since §5.4's unlinkability is not something the other can stand in for. **Not the registrar role**: minting GRUUs, the temporary-GRUU construction of §5.4 and the 480 of §5.2 are §5's, and sipx is not a registrar."
 
 [[rfc]]
 number = 7044

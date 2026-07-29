@@ -40,8 +40,38 @@ registration of the same address of record.
 - [ ] Failing-first test: `a_request_to_a_gruu_reaches_the_instance_that_registered_it`.
 
 ## Progress
-- Not started. `T-14` recorded RFC 5627 as gated on `Path` and Outbound; `Path` is done and Outbound
-  is `T-15` in M6.
+- Implemented for the **UA side**, both roles: obtaining GRUUs and using them. The registrar half —
+  minting them, §5.4's temporary-GRUU construction, §5.2's 480 after a binding lapses — is not here
+  and the registry entry says so. RFC 5627 moves from `none` to `partial` for exactly that reason.
+- Split the way `T-15` split RFC 5626. `sipx-sip/src/gruu.rs` is the URI level: `gr` recognition
+  (§4.5), its opaque value, and the comparison. `sipx-ua/src/gruu.rs` is the registration level:
+  the option tag, the `pub-gruu`/`temp-gruu` pair, and which of the two to publish.
+- **§5.4 is why the comparison is its own function rather than `Uri::equivalent`.** "A public GRUU
+  will always be equivalent to the AOR based on URI equality rules", because RFC 3261 §19.1.4
+  ignores a parameter present in only one of two URIs. `gruu::addressed_to` requires `gr` on *both*
+  sides; without that, a UA answers requests aimed at the address of record — which names every
+  device the user registered — as though they had been aimed at this one. The unit test asserts the
+  RFC's own observation alongside the behaviour, so the day `Uri::equivalent` changes, it says so.
+- **One instance identity, enforced by there being one field.** `Registration` and `Config` lost
+  `outbound: Option<Flow>` and gained `instance` / `reg_id` / `gruu`. RFC 5626 §4.1 and RFC 5627
+  §4.1 name the same `+sip.instance` tag, and two fields would eventually hold two URNs — a fault
+  that surfaces at a registrar that correlates the mechanisms, not here. `Config::with_outbound` is
+  unchanged as a builder; `Config::with_gruu(instance, kind)` takes the identity explicitly.
+- **Asking for a temporary GRUU never quietly yields the public one.** `Gruus::preferred` returns
+  `None` rather than substituting, and `dialog_contact` then falls back to the contact (with `ob`
+  where RFC 5626 §4.3 wants it) and logs. §5.4's unlinkability is not something the stable
+  identifier can stand in for, and a caller told otherwise has been told the opposite of the truth
+  about the address it just published.
+- GRUUs are read off the `Contact` row whose `+sip.instance` matches ours, not the first row: RFC
+  3261 §10.3 has a 2xx list every binding for the AOR, other devices' included. They are replaced
+  wholesale on each 2xx and cleared on a rejection or a failed challenge, which is §4.2's
+  discard-on-`Call-ID`-change rule expressed as "the set is only ever as old as the binding".
+- A `pub-gruu` or `temp-gruu` arriving without `gr` is dropped rather than kept: it would be the
+  address of record, and publishing it as this instance's `Contact` fans a mid-dialog request out
+  to every device the user has.
+- `interpret` now takes the whole `&Registration` instead of `(expires, contact)`. Almost
+  everything read out of a 2xx is read relative to what this client sent, and the argument list was
+  about to grow a third such field.
 
 ## Notes
 - The temporary GRUU is the half that is usually skipped, and skipping it silently is worse than not

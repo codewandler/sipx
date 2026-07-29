@@ -17,9 +17,9 @@ compliance document usually becomes untrue.
 | | Meaning | Count |
 |---|---|---|
 | ✅ implemented | Behaviour present and tested for the roles listed | 33 |
-| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 15 |
+| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 16 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 7 |
-| ⬜ not started | Tracked as a target, not started | 13 |
+| ⬜ not started | Tracked as a target, not started | 12 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
 The list is bounded on purpose: it is what sipx already touches plus what it has decided
@@ -123,9 +123,9 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | [3856](https://www.rfc-editor.org/rfc/rfc3856) | A Presence Event Package for SIP | 🟡 partial | uas | The `presence` package serves PIDF documents published through RFC 3903. Watcher information (RFC 3857) and the `presence.winfo` template are not implemented. |
 | [3892](https://www.rfc-editor.org/rfc/rfc3892) | The SIP Referred-By Mechanism | 🟡 partial | — | Sent and surfaced to the application. The signed `Referred-By` token is not implemented, so the identity is a claim rather than a proof. |
 | [4235](https://www.rfc-editor.org/rfc/rfc4235) | An INVITE-Initiated Dialog Event Package for SIP | 🟡 partial | uas | `dialog-info` documents with the five states of §3.7.1, the full-then-partial discipline of §4.1, and a version counter scoped per subscription rather than per resource. What is not here is the join to a live dialog store — the package produces documents, and wiring them to running calls is the application's, because a package reaching into the call layer would reverse the workspace's dependency direction. |
+| [5627](https://www.rfc-editor.org/rfc/rfc5627) | Obtaining and Using GRUUs in SIP | 🟡 partial | uac, uas | The UA side, for both roles: `Supported: gruu` and `+sip.instance` on REGISTER (§4.1) under the same instance identity RFC 5626 registers with, `pub-gruu` and `temp-gruu` read off the binding that names this instance and discarded with it (§4.2), a GRUU in the Contact of dialog-forming and target-refresh requests (§4.4), and §4.5's `gr` recognition — which is a comparison of its own because §5.4 notes a public GRUU is URI-equivalent to the AOR. The choice between public and temporary is the application's and asking for a temporary one never silently yields the public one, since §5.4's unlinkability is not something the other can stand in for. **Not the registrar role**: minting GRUUs, the temporary-GRUU construction of §5.4 and the 480 of §5.2 are §5's, and sipx is not a registrar. |
 | [3428](https://www.rfc-editor.org/rfc/rfc3428) | SIP Extension for Instant Messaging | 🔤 syntax only | — | The method is represented and nothing handles it. |
 | [6086](https://www.rfc-editor.org/rfc/rfc6086) | SIP INFO Method and Package Framework | 🔤 syntax only | — | The method is represented. sipx sends DTMF as RFC 4733 rather than as INFO. |
-| [5627](https://www.rfc-editor.org/rfc/rfc5627) | Obtaining and Using GRUUs in SIP | ⬜ not started | — | A URI that reaches one specific instance of a registered user. Depends on 3327 and 5626. |
 | [7044](https://www.rfc-editor.org/rfc/rfc7044) | An Extension to SIP for Request History Information | ⬜ not started | — | `History-Info`, for a call that was forwarded and needs to say by whom. |
 | [7865](https://www.rfc-editor.org/rfc/rfc7865) | SDP Recording Metadata | ⬜ not started | — | The metadata half of SIPREC. |
 | [7866](https://www.rfc-editor.org/rfc/rfc7866) | Session Recording Protocol | ⬜ not started | — | Recording as a protocol rather than as a file written locally. |

@@ -21,6 +21,8 @@ use sipx_sip::headers::ContactValue;
 use sipx_sip::{Address, HeaderName, Method, Request, Response, Uri};
 
 use crate::auth::{Challenge, Credentials, new_cnonce, respond, strongest};
+use crate::gruu::{self, Gruus};
+use crate::outbound::{InstanceId, RegId};
 
 /// How long a registration lease has left, and when to refresh it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +81,13 @@ pub struct Registered {
     /// How long it will hold the flow open without traffic. When present it replaces the UA's own
     /// choice of keep-alive interval outright.
     pub flow_timer: Option<Duration>,
+    /// The GRUUs the registrar issued for this instance's binding (RFC 5627 §4.2).
+    ///
+    /// Empty when GRUU was not asked for, and empty when it was and the registrar issued
+    /// nothing — §4.2 makes both ordinary. They travel with the binding rather than beside it
+    /// because they expire with it: a GRUU outliving the registration that produced it is an
+    /// address a UA would keep publishing after it had stopped resolving.
+    pub gruus: Gruus,
 }
 
 /// What a registration attempt produced.
@@ -112,11 +121,27 @@ pub struct Registration {
     pub call_id: String,
     /// The `CSeq`, increasing across refreshes.
     pub cseq: u32,
-    /// Whether this registration is one Outbound flow (RFC 5626), and which.
+    /// The device identity this registration presents (RFC 5626 §4.1, RFC 5627 §4.1).
     ///
-    /// When set, the `Contact` carries `reg-id` and `+sip.instance` and the REGISTER offers the
-    /// `outbound` option tag.
-    pub outbound: Option<crate::outbound::Flow>,
+    /// **One field, and that is the point.** Outbound and GRUU both identify the instance with
+    /// the same `+sip.instance` media feature tag, and they must present the same value: a
+    /// registrar that correlates them sees one device asking to be two. Two fields would
+    /// eventually hold two values, and the resulting fault appears at the registrar rather than
+    /// here — which is the worst place to discover it.
+    ///
+    /// When set, the `Contact` carries `+sip.instance`.
+    pub instance: Option<InstanceId>,
+    /// Which Outbound flow this registration is (RFC 5626 §4.2), when Outbound is in use.
+    ///
+    /// Together with [`Registration::instance`] it makes the `Contact` an Outbound one and has
+    /// the REGISTER offer the `outbound` option tag. A `reg-id` without an instance is not an
+    /// Outbound registration — §4.2 needs both — and is ignored rather than half-offered.
+    pub reg_id: Option<RegId>,
+    /// Which GRUU this UA will use once the registrar issues them (RFC 5627 §4.4).
+    ///
+    /// `Some` asks for one: §4.1 has the REGISTER offer the `gruu` option tag alongside the
+    /// instance ID. `None` does not ask, and no registrar will volunteer.
+    pub gruu: Option<gruu::Kind>,
 }
 
 /// The proxies a registrar recorded as being on the path back to this contact (RFC 3327).
@@ -335,26 +360,46 @@ impl Registration {
         )
     }
 
-    /// The `Contact` to register: the configured one, plus the Outbound parameters when this
-    /// registration is a flow (RFC 5626 §4.1, §4.2).
+    /// The `Contact` to register: the configured one, plus whatever the instance identity adds.
+    ///
+    /// `+sip.instance` appears exactly once, however many mechanisms want it — RFC 5626 §4.1 and
+    /// RFC 5627 §4.1 name the same tag, and it is emitted from the one field that holds it.
     #[must_use]
     pub fn contact(&self) -> String {
-        match &self.outbound {
-            Some(flow) => crate::outbound::contact(&self.contact, &flow.instance, flow.reg_id),
-            None => self.contact.clone(),
+        match (&self.instance, self.reg_id) {
+            // An Outbound flow: `reg-id` and the instance, in RFC 5626 §4.2's order.
+            (Some(instance), Some(reg_id)) => {
+                crate::outbound::contact(&self.contact, instance, reg_id)
+            }
+            // An instance without a flow — a GRUU registration, or a UA that wants a registrar to
+            // recognise it across reboots without asking for Outbound.
+            (Some(instance), None) => format!("{};{}", self.contact, instance.contact_param()),
+            (None, _) => self.contact.clone(),
         }
     }
 
     /// The option tags this REGISTER offers.
     ///
-    /// `path` always (RFC 3327 §5.1), and `outbound` when this is a flow — §4.2 makes that a MUST,
-    /// and without it a registrar has no way to know the request wants flow semantics.
+    /// `path` always (RFC 3327 §5.1); `outbound` when this is a flow, which RFC 5626 §4.2 makes a
+    /// MUST because a registrar has no other way to know the request wants flow semantics; and
+    /// `gruu` when one is wanted, which RFC 5627 §4.1 likewise makes a MUST.
+    ///
+    /// Both extras are conditioned on there being an instance to name. Offering either tag while
+    /// sending no `+sip.instance` asks a registrar for a mechanism defined in terms of an
+    /// identity the request never supplies, and what comes back is a rejection that reads like
+    /// something else entirely.
     #[must_use]
     fn supported(&self) -> String {
-        match self.outbound {
-            Some(_) => format!("path, {}", crate::outbound::OPTION_TAG),
-            None => "path".to_owned(),
+        let mut tags = vec!["path"];
+        if self.instance.is_some() {
+            if self.reg_id.is_some() {
+                tags.push(crate::outbound::OPTION_TAG);
+            }
+            if self.gruu.is_some() {
+                tags.push(gruu::OPTION_TAG);
+            }
         }
+        tags.join(", ")
     }
 
     /// Advance the sequence number for the next attempt.
@@ -368,16 +413,20 @@ impl Registration {
 
 /// Read what a registrar said.
 ///
-/// `contact` is the `Contact` this client registered, needed to find its own binding among
-/// the ones the 200 lists.
+/// Takes the whole [`Registration`] rather than the two or three fields it happens to need
+/// today. A 2xx lists every binding for the address of record, so almost everything read out of
+/// one is read *relative to what this client sent* — its `Contact` to find its own row, its
+/// instance ID to find the GRUUs minted for it — and a signature that spells those out
+/// positionally grows a new argument every time the answer says something more.
 #[must_use]
-pub fn interpret(response: &Response, asked_for: Duration, contact: &str) -> Outcome {
+pub fn interpret(response: &Response, registration: &Registration) -> Outcome {
     let status = response.status.code();
+    let contact = registration.contact();
 
     if (200..300).contains(&status) {
         // The registrar's number wins. Refreshing on our own instead is how a client
         // de-registers itself on every cycle.
-        let granted = granted_expiry(response, contact).unwrap_or(asked_for);
+        let granted = granted_expiry(response, &contact).unwrap_or(registration.expires);
         // Returned even when this side never offered `path`. A registrar that adds one anyway
         // is doing something worth seeing rather than something to drop on the floor: the
         // whole security value §5.1 claims for the header is that the UA can look at it.
@@ -387,6 +436,15 @@ pub fn interpret(response: &Response, asked_for: Duration, contact: &str) -> Out
             service_route: ServiceRoute::from_response(response),
             flow_accepted: crate::outbound::accepted(response),
             flow_timer: crate::outbound::flow_timer(response),
+            // Read only when this registration named an instance. §4.2 pairs the GRUUs with the
+            // `+sip.instance` they were minted for, and with no instance to match there is no
+            // row that is ours — only other devices'.
+            gruus: registration
+                .instance
+                .as_ref()
+                .map_or_else(Gruus::default, |instance| {
+                    Gruus::from_response(response, instance)
+                }),
         }));
     }
 
@@ -496,8 +554,23 @@ mod tests {
             expires: Duration::from_secs(3600),
             call_id: "reg-1@192.0.2.5".to_owned(),
             cseq: 1,
-            outbound: None,
+            instance: None,
+            reg_id: None,
+            gruu: None,
         }
+    }
+
+    /// The same registration, presenting an instance and asking for a GRUU.
+    fn with_gruu() -> Registration {
+        Registration {
+            instance: Some(instance()),
+            gruu: Some(gruu::Kind::Public),
+            ..registration()
+        }
+    }
+
+    fn instance() -> InstanceId {
+        InstanceId::parse("urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6").expect("a urn")
     }
 
     fn response(text: &str) -> Response {
@@ -529,8 +602,7 @@ mod tests {
             &ok_with(
                 "Path: <sip:edge.example.com;lr>\r\nPath: <sip:core.example.net;lr>\r\nContact: <sip:alice@192.0.2.5:5060>;expires=600\r\n",
             ),
-            Duration::from_secs(3600),
-            CONTACT,
+            &registration(),
         );
         let Outcome::Registered(registered) = outcome else {
             panic!("expected a registration, got {outcome:?}");
@@ -553,13 +625,11 @@ mod tests {
         // order, which is the entire content of the vector.
         let joined = interpret(
             &ok_with("Path: <sip:edge.example.com;lr>, <sip:core.example.net;lr>\r\n"),
-            Duration::from_secs(3600),
-            CONTACT,
+            &registration(),
         );
         let separate = interpret(
             &ok_with("Path: <sip:edge.example.com;lr>\r\nPath: <sip:core.example.net;lr>\r\n"),
-            Duration::from_secs(3600),
-            CONTACT,
+            &registration(),
         );
         match (joined, separate) {
             (Outcome::Registered(one), Outcome::Registered(other)) => {
@@ -580,8 +650,7 @@ mod tests {
         // would parse cleanly and be quietly useless to T-15.
         let outcome = interpret(
             &ok_with("Path: <sip:edge.example.com;lr;ob>\r\n"),
-            Duration::from_secs(3600),
-            CONTACT,
+            &registration(),
         );
         let Outcome::Registered(registered) = outcome else {
             panic!("expected a registration");
@@ -613,6 +682,131 @@ mod tests {
         assert!(String::from_utf8_lossy(&supported).contains("path"));
     }
 
+    /// RFC 5627 §4.1: the option tag is a MUST, and the instance ID is what the GRUU will be
+    /// minted for. Without either, §5.2 has the registrar attach nothing and the mechanism is
+    /// simply not in play — silently, which is the part that costs an afternoon.
+    #[test]
+    fn a_register_asking_for_a_gruu_offers_the_tag_and_names_the_instance() {
+        let request = with_gruu().request().expect("builds");
+        let supported = request
+            .headers
+            .value(&HeaderName::Supported)
+            .expect("Supported is present");
+        assert!(String::from_utf8_lossy(&supported).contains("gruu"));
+        let contact = request
+            .headers
+            .value(&HeaderName::Contact)
+            .expect("a Contact");
+        assert_eq!(
+            String::from_utf8_lossy(&contact),
+            format!("{CONTACT};+sip.instance=\"<{}>\"", instance().urn())
+        );
+    }
+
+    /// The story's other half of the same rule: **two mechanisms, one instance identity.**
+    ///
+    /// RFC 5626 §4.1 and RFC 5627 §4.1 name the same `+sip.instance` tag. A `Contact` presenting
+    /// it twice — or presenting two different URNs — is a device asking a registrar that
+    /// correlates the two mechanisms to treat it as two devices, and the symptom appears at the
+    /// registrar rather than here.
+    #[test]
+    fn outbound_and_gruu_present_one_instance_identity_between_them() {
+        let both = Registration {
+            reg_id: Some(RegId::new(2).expect("valid")),
+            ..with_gruu()
+        };
+        let request = both.request().expect("builds");
+        let contact = request
+            .headers
+            .value(&HeaderName::Contact)
+            .expect("a Contact");
+        let contact = String::from_utf8_lossy(&contact);
+        assert_eq!(
+            contact.matches("+sip.instance").count(),
+            1,
+            "the instance identity appeared more than once: {contact}"
+        );
+        assert!(contact.contains(&format!("+sip.instance=\"<{}>\"", instance().urn())));
+        assert!(contact.contains(";reg-id=2"), "{contact}");
+
+        let supported = request
+            .headers
+            .value(&HeaderName::Supported)
+            .expect("a Supported");
+        let supported = String::from_utf8_lossy(&supported);
+        assert_eq!(supported, "path, outbound, gruu");
+    }
+
+    /// Offering a tag for a mechanism defined in terms of an instance ID the request never sends
+    /// asks the registrar an incoherent question, and the rejection that comes back reads like a
+    /// credentials problem.
+    #[test]
+    fn neither_mechanism_is_offered_without_an_instance_to_name() {
+        let confused = Registration {
+            instance: None,
+            reg_id: RegId::new(1),
+            gruu: Some(gruu::Kind::Public),
+            ..registration()
+        };
+        let request = confused.request().expect("builds");
+        let supported = request
+            .headers
+            .value(&HeaderName::Supported)
+            .expect("a Supported");
+        assert_eq!(String::from_utf8_lossy(&supported), "path");
+        assert_eq!(
+            request
+                .headers
+                .value(&HeaderName::Contact)
+                .expect("a Contact")
+                .as_ref(),
+            CONTACT.as_bytes()
+        );
+    }
+
+    /// The GRUUs a registrar issues travel with the binding they were minted for (§4.2).
+    #[test]
+    fn a_registration_keeps_the_gruus_the_registrar_issued() {
+        let urn = instance().urn().to_owned();
+        let outcome = interpret(
+            &ok_with(&format!(
+                "Contact: <sip:alice@192.0.2.5:5060>;+sip.instance=\"<{urn}>\"\
+                 ;pub-gruu=\"sip:alice@example.com;gr={urn}\"\
+                 ;temp-gruu=\"sip:t7k2xq9f4m@example.com;gr\";expires=600\r\n"
+            )),
+            &with_gruu(),
+        );
+        let Outcome::Registered(registered) = outcome else {
+            panic!("expected a registration");
+        };
+        assert_eq!(
+            registered.gruus.public().map(sipx_sip::Uri::to_string),
+            Some(format!("sip:alice@example.com;gr={urn}"))
+        );
+        assert_eq!(
+            registered.gruus.temporary().map(sipx_sip::Uri::to_string),
+            Some("sip:t7k2xq9f4m@example.com;gr".to_owned())
+        );
+    }
+
+    /// A registration that never named an instance has no row of its own to read GRUUs from, and
+    /// the rows that are there belong to other devices.
+    #[test]
+    fn a_registration_without_an_instance_adopts_no_gruus() {
+        let outcome = interpret(
+            &ok_with(
+                "Contact: <sip:alice@198.51.100.9:5060>\
+                 ;+sip.instance=\"<urn:uuid:00000000-0000-4000-8000-000000000000>\"\
+                 ;pub-gruu=\"sip:alice@example.com;gr=urn:uuid:00000000-0000-4000-8000-000000000000\"\r\n",
+            ),
+            &registration(),
+        );
+        let Outcome::Registered(registered) = outcome else {
+            panic!("expected a registration");
+        };
+        assert!(registered.gruus.is_empty());
+    }
+
     #[test]
     fn a_path_returned_unasked_is_still_reported() {
         // §5.1's reason for the header to reach the UA at all: "such inspection might allow
@@ -620,8 +814,7 @@ mod tests {
         // Dropping it because we did not ask would remove the only defence it offers.
         let outcome = interpret(
             &ok_with("Path: <sip:stranger.example.org;lr>\r\n"),
-            Duration::from_secs(3600),
-            CONTACT,
+            &registration(),
         );
         let Outcome::Registered(registered) = outcome else {
             panic!("expected a registration");
@@ -634,7 +827,7 @@ mod tests {
 
     #[test]
     fn no_path_is_an_empty_set_rather_than_an_absent_one() {
-        let outcome = interpret(&ok_with(""), Duration::from_secs(3600), CONTACT);
+        let outcome = interpret(&ok_with(""), &registration());
         let Outcome::Registered(registered) = outcome else {
             panic!("expected a registration");
         };
@@ -642,7 +835,7 @@ mod tests {
     }
 
     fn service_route_of(extra: &str) -> ServiceRoute {
-        let outcome = interpret(&ok_with(extra), Duration::from_secs(3600), CONTACT);
+        let outcome = interpret(&ok_with(extra), &registration());
         match outcome {
             Outcome::Registered(registered) => registered.service_route,
             other => panic!("expected a registration, got {other:?}"),
@@ -717,8 +910,7 @@ mod tests {
     fn a_path_is_not_a_service_route() {
         let outcome = interpret(
             &ok_with("Path: <sip:edge.example.com;lr>\r\n"),
-            Duration::from_secs(3600),
-            CONTACT,
+            &registration(),
         );
         let Outcome::Registered(registered) = outcome else {
             panic!("expected a registration");
@@ -751,8 +943,7 @@ mod tests {
     fn the_granted_expiry_overrides_what_was_asked_for() {
         let outcome = interpret(
             &ok_with("Contact: <sip:alice@192.0.2.5:5060>;expires=60\r\n"),
-            Duration::from_secs(3600),
-            CONTACT,
+            &registration(),
         );
         match outcome {
             Outcome::Registered(r) => assert_eq!(r.lease.granted, Duration::from_secs(60)),
@@ -765,8 +956,7 @@ mod tests {
     fn a_contact_expiry_beats_the_expires_header() {
         let outcome = interpret(
             &ok_with("Expires: 3600\r\nContact: <sip:alice@192.0.2.5:5060>;expires=120\r\n"),
-            Duration::from_secs(3600),
-            CONTACT,
+            &registration(),
         );
         match outcome {
             Outcome::Registered(r) => assert_eq!(r.lease.granted, Duration::from_secs(120)),
@@ -785,8 +975,7 @@ mod tests {
                 "Contact: <sip:alice@198.51.100.9:5060>;expires=3600\r\n\
                  Contact: <sip:alice@192.0.2.5:5060>;expires=60\r\n",
             ),
-            Duration::from_secs(3600),
-            CONTACT,
+            &registration(),
         );
         match outcome {
             Outcome::Registered(r) => assert_eq!(r.lease.granted, Duration::from_secs(60)),
@@ -796,11 +985,7 @@ mod tests {
 
     #[test]
     fn the_expires_header_is_used_when_the_contact_has_none() {
-        let outcome = interpret(
-            &ok_with("Expires: 300\r\n"),
-            Duration::from_secs(3600),
-            CONTACT,
-        );
+        let outcome = interpret(&ok_with("Expires: 300\r\n"), &registration());
         match outcome {
             Outcome::Registered(r) => assert_eq!(r.lease.granted, Duration::from_secs(300)),
             other => panic!("expected a lease, got {other:?}"),
@@ -838,7 +1023,7 @@ mod tests {
              WWW-Authenticate: Digest realm=\"example.com\", nonce=\"abc\", qop=\"auth\"\r\n\
              Content-Length: 0\r\n\r\n",
         );
-        match interpret(&challenged, Duration::from_secs(3600), CONTACT) {
+        match interpret(&challenged, &registration()) {
             Outcome::Challenged(challenge) => {
                 assert_eq!(challenge.realm, "example.com");
                 assert!(challenge.qop_auth);
@@ -860,7 +1045,7 @@ mod tests {
              Proxy-Authenticate: Digest realm=\"p\", nonce=\"n\"\r\n\
              Content-Length: 0\r\n\r\n",
         );
-        match interpret(&challenged, Duration::from_secs(3600), CONTACT) {
+        match interpret(&challenged, &registration()) {
             Outcome::Challenged(challenge) => {
                 assert!(challenge.from_proxy);
                 assert_eq!(challenge.response_header(), HeaderName::ProxyAuthorization);
@@ -880,7 +1065,7 @@ mod tests {
              CSeq: 1 REGISTER\r\n\
              Content-Length: 0\r\n\r\n",
         );
-        match interpret(&refused, Duration::from_secs(3600), CONTACT) {
+        match interpret(&refused, &registration()) {
             Outcome::Rejected { status, reason } => {
                 assert_eq!(status, 403);
                 assert_eq!(reason, "Forbidden");
@@ -904,7 +1089,7 @@ mod tests {
              Content-Length: 0\r\n\r\n",
         );
         assert!(matches!(
-            interpret(&bad, Duration::from_secs(3600), CONTACT),
+            interpret(&bad, &registration()),
             Outcome::Rejected { status: 401, .. }
         ));
     }
