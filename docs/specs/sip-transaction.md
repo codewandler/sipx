@@ -171,6 +171,18 @@ The key is `(branch, CSeq method)`, both taken from the response's top `Via` and
 response whose branch matches nothing is passed to the TU rather than dropped: it may be a
 stray fork response the core has no business discarding silently.
 
+Note that this is **narrower than §6.1**, on purpose. The server rule needs the `Request-URI`,
+the `From` tag and the `To` tag to tell one legacy transaction from another; the client rule
+does not, and cannot — a response has no Request-URI to compare.
+
+> **Known deviation.** `TransactionKey::from_sent_request` derives a client key with
+> `from_request`, which is §6.1's rule, so a client transaction on a pre-RFC-3261 branch is
+> keyed with a Request-URI and a `To` tag that its responses can never carry. Those two keys
+> never compare equal, and every response to such a transaction is `Unmatched`: the call does
+> not fail, it hangs until Timer F. Found by the `transaction_sequence` fuzz target (§8) and
+> pinned by the ignored test `a_legacy_client_transaction_never_sees_its_response`. The fix is
+> a separate client derivation and belongs to its own story.
+
 ### 6.3 CANCEL
 
 CANCEL matches the transaction of the request it cancels, not one of its own: same branch,
@@ -197,3 +209,33 @@ and no socket. Beyond that:
 | T12 | ACK for a 2xx | Delivered to the TU |
 | T13 | RFC 2543 request (no magic cookie) | Matched by the legacy key |
 | T14 | CANCEL | Matches the INVITE's transaction, not a new one |
+
+## 8. Fuzzing the driver
+
+The vectors above prove the rows somebody thought of. The `transaction_sequence` fuzz target
+covers the sequences nobody did: its input decodes into a program of events — an incoming
+message, an application request, a fired timer — driven into `TransactionLayer` in whatever
+order the decoder produces. Nothing in it parses. Messages are *built*, so the budget is spent
+in the machines rather than on bytes that never become a message; the four parser targets
+already cover that. The harness is `sipx_testkit::transaction_sequence`, seeded from §7's
+scenarios encoded as programs.
+
+This is only possible because of §2. A machine that read a clock would need one to be faked; a
+machine that owned a socket could not be driven at all. Time enters as an input, so a campaign
+needs no runtime and no sleeping, and 64·T1 costs one event.
+
+A panic-only oracle would find nothing here — the machines are total, so almost every sequence
+"succeeds" and the failures that matter are silent. These are asserted instead:
+
+| Invariant | What it rules out |
+|---|---|
+| No transaction outlives its terminal state | A machine that emits `Terminated` and stays in the store, or arms a timer in the batch that retires it |
+| No timer fires for a key that has been removed | A timer arriving after cancellation resurrecting a retired machine — the race a driver's timer wheel cannot close |
+| The store is bounded by the vocabulary | Growth as a function of sequence length rather than of key space: the slow, quiet outage |
+| No unnamed state | A state legal in the type and absent from §4's table for *that* machine — an INVITE client in `Trying`, a non-INVITE server in `Confirmed` |
+| A response reaches the transaction that sent its request | §6.2 matching failing silently, which is a call that hangs rather than one that errors |
+
+Defects the campaign has found and that are not yet fixed are listed in
+`transaction_sequence::KNOWN_DEFECTS`, each with an ignored regression test. Suppressing one is
+how the campaign reaches what is behind it; a test that fails once the defect is fixed is how
+the suppression gets removed.

@@ -252,9 +252,24 @@ jobs:
           done
           mkdir -p fuzz/corpus/parse_uri
           cargo fuzz run parse_uri fuzz/corpus/parse_uri -- -max_total_time=30 -max_len=512
-      # The corpus is committed test data: prove the fuzzer did not modify it.
+      # X-19. The parser targets above cover adversarial *input*; this one covers adversarial
+      # *timing*, which is the other half of the north star and had nothing. Its input decodes
+      # into a program of events — messages, application requests, fired timers — so the budget
+      # is spent inside the §17 state machines rather than on bytes that do not parse, and the
+      # seed corpus is the scenarios the FSM table tests already walk, exactly as the RFC 4475
+      # corpus seeds the parsers. Same time budget as one parser target; -max_len is smaller
+      # because four bytes is an event and 512 is already a 128-step program.
+      - name: Fuzz the transaction driver
+        run: |
+          mkdir -p fuzz/corpus/transaction_sequence
+          cargo fuzz run transaction_sequence \
+            fuzz/corpus/transaction_sequence crates/sipx-testkit/corpus/transaction-sequences \
+            -- -max_total_time=60 -max_len=512
+      # The corpora are committed test data: prove the fuzzer did not modify them.
       - name: Verify the RFC 4475 corpus is untouched
         run: ./scripts/import-rfc4475-corpus.sh --check
+      - name: Verify the transaction-sequence corpus is untouched
+        run: git diff --exit-code -- crates/sipx-testkit/corpus/transaction-sequences
 
   provenance:
     name: provenance
