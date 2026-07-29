@@ -44,10 +44,6 @@ def load_module():
 
 guard = load_module()
 
-#: The order `front_doors` returns them in, which the restatement rule depends on: the manifest
-#: description is the canonical door and the other three restate it.
-DESCRIPTION, SUMMARY, README_ROW, GUIDE_ROW = range(4)
-
 
 def module(name="g722", feature="", header="G.722 (ITU-T G.722).", items=("encode", "decode")):
     return guard.Module(name=name, feature=feature, header=header, items=tuple(items))
