@@ -2,8 +2,8 @@
 id: S-19
 title: Implement the UPDATE method
 pillar: Signalling
-status: in-progress
-priority: 1
+status: done
+priority:
 design: docs/specs/sip-update.md
 epic: conformance
 areas: [sipx-sip, sipx-call]
