@@ -129,6 +129,17 @@ def gate_steps(msrv: str) -> list[Step]:
         ),
         Step("test", "test", ("cargo", "test", "--workspace", "--all-features")),
         Step("examples", "test", ("cargo", "build", "--workspace", "--all-features", "--examples")),
+        # C-5: the app contract's end-to-end proof — the interpreter driving a real call, with no
+        # host, asserted from a shell. It is a `.sh` and not a `#[test]` because what it checks is
+        # the *trace the example prints*, which is the thing a reader of the docs actually sees.
+        # That also means nothing in cargo's world runs it, so it goes here or it rots. Ordered
+        # after `examples`, which builds it with the same feature set, so this is a run and not a
+        # compile.
+        Step(
+            "app contract end to end",
+            "test",
+            ("bash", "crates/sipx-app-protocol/tests/canned_program.sh"),
+        ),
         Step(
             "msrv",
             "msrv",
