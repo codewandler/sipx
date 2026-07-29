@@ -16,7 +16,7 @@ fit. The same rule orders what is left.
 
 ## Where the gaps actually are
 
-69 tracked RFCs; [the table](compliance.md) has the per-status counts, and it is generated, so it
+70 tracked RFCs; [the table](compliance.md) has the per-status counts, and it is generated, so it
 is the one place worth reading them from.
 
 The interesting status is **parse-only**: `Accept-Contact`, `Identity`, `Reason` and the rest all

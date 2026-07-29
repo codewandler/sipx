@@ -58,8 +58,11 @@ use sipx_audio::g711;
 use sipx_rtp::dtmf::{self, Digit, Event as DtmfEvent};
 use sipx_rtp::rtcp::{ReceiverReport, Rtcp, Sdes, StreamStats};
 use sipx_rtp::{JitterBuffer, Packet};
+use sipx_sdp::ice::ComponentId;
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc, watch};
+
+use crate::ice;
 
 /// Which G.711 flavour a session carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,7 +463,7 @@ struct Feedback {
 /// would go on sending audio into a call that had been hung up. The flag makes the signal
 /// durable; the notify makes it prompt.
 #[derive(Debug, Default)]
-struct Stop {
+pub(crate) struct Stop {
     stopped: AtomicBool,
     notify: tokio::sync::Notify,
 }
@@ -471,15 +474,59 @@ impl Stop {
         self.notify.notify_waiters();
     }
 
-    fn is_stopped(&self) -> bool {
+    pub(crate) fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
     }
 
-    async fn wait(&self) {
+    pub(crate) async fn wait(&self) {
         if self.is_stopped() {
             return;
         }
         self.notify.notified().await;
+    }
+}
+
+/// The state every loop in a session shares, built in one place.
+///
+/// One place because two of these must not be rolled twice: RFC 3550 §8.1 requires a
+/// participant's RTCP to carry the same SSRC as its RTP, so the send loop and the report loop
+/// cannot each choose one, and §6.5.1's CNAME has to be stable for the session.
+struct Shared {
+    sent: Arc<AtomicU64>,
+    received: Arc<AtomicU64>,
+    outbound: Arc<Outbound>,
+    feedback: Arc<Mutex<Feedback>>,
+    /// Zero until the first packet names the far end's synchronisation source.
+    stats: Arc<Mutex<StreamStats>>,
+    stop: Arc<Stop>,
+    ssrc: u32,
+    cname: String,
+    /// Whether received packets are handed on encoded rather than decoded to samples.
+    relay: Arc<AtomicBool>,
+    /// Whether this side's outbound audio is gated to silence (`M-18`).
+    muted: Arc<AtomicBool>,
+    /// A counter of full keypresses received, for an `Interrupt::OnDigit` playback to watch.
+    keypresses: Arc<watch::Sender<u64>>,
+}
+
+impl Shared {
+    fn new(local_addr: SocketAddr) -> Self {
+        Self {
+            sent: Arc::new(AtomicU64::new(0)),
+            received: Arc::new(AtomicU64::new(0)),
+            outbound: Arc::new(Outbound::default()),
+            feedback: Arc::new(Mutex::new(Feedback::default())),
+            stats: Arc::new(Mutex::new(StreamStats::new(0))),
+            stop: Arc::new(Stop::default()),
+            ssrc: rand::random(),
+            // Unique in user@host form and stable for the session: a random token distinguishes
+            // sessions on this host, the local address distinguishes hosts, and neither needs a
+            // name lookup on the media path.
+            cname: format!("{:08x}@{}", rand::random::<u32>(), local_addr),
+            relay: Arc::new(AtomicBool::new(false)),
+            muted: Arc::new(AtomicBool::new(false)),
+            keypresses: Arc::new(watch::Sender::new(0u64)),
+        }
     }
 }
 
@@ -776,10 +823,66 @@ impl MediaPort {
         self.local_addr
     }
 
+    /// Whether this port got the control port above the media one (RFC 3550 §11).
+    ///
+    /// It decides what ICE may offer: `docs/specs/ice.md` §6.1 puts component 2 in the offer
+    /// **only** when the control port was actually obtained, because a candidate for a socket
+    /// that was never bound is an address the peer will check and nothing will answer on.
+    #[must_use]
+    pub fn has_control_port(&self) -> bool {
+        self.rtcp.is_some()
+    }
+
+    /// Gather ICE candidates on this port's sockets (RFC 8445 §5.1.1).
+    ///
+    /// Called between binding and offering: the sockets are exclusively ours until
+    /// [`Self::start`] or [`Self::start_with_ice`] spawns the loops that read them, which is the
+    /// window a STUN transaction to a configured server needs.
+    ///
+    /// The result carries the `a=candidate` lines for the description
+    /// ([`ice::LocalDescription::attributes`]) and the agent that will drive them.
+    pub async fn gather(&self, gathering: &ice::Gathering) -> ice::LocalDescription {
+        let mut bases = vec![ice::gather::Base {
+            index: ice::LocalBase(0),
+            component: ComponentId::RTP,
+            socket: &self.socket,
+        }];
+        // Component 2 only when the control port was actually obtained (`ice.md` §6.1).
+        if let Some(rtcp) = &self.rtcp {
+            bases.push(ice::gather::Base {
+                index: ice::LocalBase(1),
+                component: ComponentId::RTCP,
+                socket: rtcp,
+            });
+        }
+        ice::gather::gather(&bases, gathering).await
+    }
+
     /// Start carrying media, now that negotiation has said where and in what.
     #[must_use]
     pub fn start(self, config: Config) -> MediaSession {
-        MediaSession::on_socket(&self.socket, self.rtcp, self.local_addr, config)
+        MediaSession::on_socket(&self.socket, self.rtcp, self.local_addr, config, None)
+    }
+
+    /// Start carrying media with ICE driving the path (`docs/specs/ice.md` §2, §11).
+    ///
+    /// The `local` description must already have been given the peer's half through
+    /// [`ice::LocalDescription::accept`]. If that returned `false` — the peer offered no candidates,
+    /// or RFC 8839 §5.3's `ice-mismatch` applies — no agent is driven and this is
+    /// [`Self::start`]: no check is sent, no timer runs, and the stream is carried by symmetric
+    /// RTP exactly as it is today.
+    #[must_use]
+    pub fn start_with_ice(self, config: Config, local: ice::LocalDescription) -> MediaSession {
+        if !local.running() {
+            return self.start(config);
+        }
+        MediaSession::on_socket(
+            &self.socket,
+            self.rtcp,
+            self.local_addr,
+            config,
+            Some(local),
+        )
     }
 }
 
@@ -798,6 +901,7 @@ impl MediaSession {
         rtcp: Option<Arc<UdpSocket>>,
         local_addr: SocketAddr,
         config: Config,
+        ice: Option<ice::LocalDescription>,
     ) -> Self {
         let samples_per_packet = config.samples_per_packet();
         let packet_duration = config.packet_duration;
@@ -807,26 +911,9 @@ impl MediaSession {
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(64);
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
         let (encoded_tx, encoded_rx) = mpsc::channel::<Encoded>(256);
-        let relay = Arc::new(AtomicBool::new(false));
-        let muted = Arc::new(AtomicBool::new(false));
         let (digits_tx, digits_rx) = mpsc::channel::<(Digit, Duration)>(32);
-        let keypresses = Arc::new(watch::Sender::new(0u64));
 
-        let sent = Arc::new(AtomicU64::new(0));
-        let received = Arc::new(AtomicU64::new(0));
-        let outbound = Arc::new(Outbound::default());
-        let feedback = Arc::new(Mutex::new(Feedback::default()));
-        // Zero until the first packet names the far end's synchronisation source.
-        let stats = Arc::new(Mutex::new(StreamStats::new(0)));
-        let stop = Arc::new(Stop::default());
-        // Chosen once and shared: RFC 3550 §8.1 requires a participant's RTCP to carry the
-        // same SSRC as its RTP, so the send loop and the report loop cannot each roll
-        // their own.
-        let ssrc: u32 = rand::random();
-        // RFC 3550 §6.5.1 wants the CNAME unique in user@host form and stable for the
-        // session: a random token distinguishes sessions on this host, the local address
-        // distinguishes hosts, and neither needs a name lookup on the media path.
-        let cname = format!("{:08x}@{}", rand::random::<u32>(), local_addr);
+        let shared = Shared::new(local_addr);
 
         // Where to send. Starts at the SDP address and is replaced by the first observed
         // source: behind a NAT the advertised address is private and unreachable.
@@ -836,64 +923,72 @@ impl MediaSession {
         // and cloning a pair of keys is cheaper than cloning the whole configuration twice.
         let srtp_keys = config.srtp.clone();
 
+        // See `ice::driver::Destinations::rtcp`: `None` here, and for every stream without ICE,
+        // leaves the report loop on RFC 3550 §11's convention.
+        let rtcp_remote: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+        let ice = ice.map(|local| {
+            spawn_ice(
+                local,
+                socket,
+                rtcp.as_ref(),
+                &ice::driver::Destinations {
+                    rtp: Arc::clone(&remote),
+                    rtcp: Arc::clone(&rtcp_remote),
+                },
+                &shared.stop,
+            )
+        });
+
         tokio::spawn(send_loop(
             Arc::clone(socket),
             outgoing_rx,
             Sending {
                 remote: Arc::clone(&remote),
                 config: config.clone(),
-                ssrc,
-                sent: Arc::clone(&sent),
-                outbound: Arc::clone(&outbound),
-                muted: Arc::clone(&muted),
-                stop: Arc::clone(&stop),
+                ssrc: shared.ssrc,
+                sent: Arc::clone(&shared.sent),
+                outbound: Arc::clone(&shared.outbound),
+                muted: Arc::clone(&shared.muted),
+                ice: ice.clone(),
+                stop: Arc::clone(&shared.stop),
             },
         ));
-        let clips_tx = spawn_playback_queue(&outgoing_tx, &stop);
+        let clips_tx = spawn_playback_queue(&outgoing_tx, &shared.stop);
         tokio::spawn(receive_loop(
             Arc::clone(socket),
             Inbound {
                 audio: incoming_tx,
                 encoded: encoded_tx,
-                relay: Arc::clone(&relay),
+                relay: Arc::clone(&shared.relay),
                 digits: Keypresses {
                     to: digits_tx,
-                    arrivals: Arc::clone(&keypresses),
+                    arrivals: Arc::clone(&shared.keypresses),
                 },
                 remote: Arc::clone(&remote),
                 config,
-                received: Arc::clone(&received),
-                stats: Arc::clone(&stats),
-                stop: Arc::clone(&stop),
+                received: Arc::clone(&shared.received),
+                stats: Arc::clone(&shared.stats),
+                symmetric: ice.is_none(),
+                ice: ice.clone(),
+                stop: Arc::clone(&shared.stop),
             },
         ));
 
-        if let Some(interval) = rtcp_interval {
-            tokio::spawn(rtcp_loop(
-                // Reports go out from the control port when there is one, which is what a peer
-                // expects to see them come from; from the media port otherwise, which some
-                // peers will refuse but is better than not reporting at all.
-                rtcp.clone().unwrap_or_else(|| Arc::clone(socket)),
-                Arc::clone(&remote),
-                interval,
-                ssrc,
-                cname,
-                Arc::clone(&stats),
-                Arc::clone(&outbound),
-                Arc::clone(&feedback),
-                srtp_keys.clone(),
-                Arc::clone(&stop),
-            ));
-        }
-        if let Some(control) = rtcp {
-            tokio::spawn(rtcp_receive_loop(
-                control,
-                ssrc,
-                Arc::clone(&feedback),
-                srtp_keys,
-                Arc::clone(&stop),
-            ));
-        }
+        spawn_control(Control {
+            media: Arc::clone(socket),
+            rtcp,
+            remote: Arc::clone(&remote),
+            rtcp_remote,
+            interval: rtcp_interval,
+            ssrc: shared.ssrc,
+            cname: shared.cname,
+            stats: Arc::clone(&shared.stats),
+            outbound: shared.outbound,
+            feedback: Arc::clone(&shared.feedback),
+            srtp: srtp_keys,
+            ice,
+            stop: Arc::clone(&shared.stop),
+        });
 
         Self {
             outgoing: outgoing_tx,
@@ -901,22 +996,22 @@ impl MediaSession {
             tones: AtomicU64::new(0),
             incoming: Mutex::new(incoming_rx),
             encoded: Mutex::new(encoded_rx),
-            relay,
-            muted,
+            relay: shared.relay,
+            muted: shared.muted,
             clips: clips_tx,
             playbacks: AtomicU64::new(0),
             outstanding: Arc::new(AtomicUsize::new(0)),
-            keypresses,
+            keypresses: shared.keypresses,
             codec: config_codec,
             local_addr,
             samples_per_packet,
             packet_duration,
             clock_rate,
-            sent,
-            received,
-            stats,
-            feedback,
-            stop,
+            sent: shared.sent,
+            received: shared.received,
+            stats: shared.stats,
+            feedback: shared.feedback,
+            stop: shared.stop,
         }
     }
 
@@ -1484,6 +1579,9 @@ struct Sending {
     sent: Arc<AtomicU64>,
     outbound: Arc<Outbound>,
     muted: Arc<AtomicBool>,
+    /// Where the fact that a packet went out is reported, so §11's keepalive is only sent on a
+    /// pair that has actually been quiet for Tr.
+    ice: Option<crate::ice::driver::Handle>,
     stop: Arc<Stop>,
 }
 
@@ -1495,6 +1593,7 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         sent,
         outbound,
         muted,
+        ice,
         stop,
     } = sending;
     let mut encoding = Encoding::for_codec(config.codec, config.channels);
@@ -1588,6 +1687,12 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         };
         if socket.send_to(&datagram, destination).await.is_err() {
             return;
+        }
+        // §11: a keepalive goes out only when nothing has been sent on the selected pair for Tr,
+        // so the agent has to be told that something was. Reported after the send and not before,
+        // because a packet that did not leave has not held the binding open.
+        if let Some(handle) = &ice {
+            handle.data_sent(ComponentId::RTP);
         }
         sent.fetch_add(1, Ordering::Relaxed);
         // What a sender report describes. The octet count is payload only, headers excluded
@@ -1817,7 +1922,119 @@ struct Inbound {
     config: Config,
     received: Arc<AtomicU64>,
     stats: Arc<Mutex<StreamStats>>,
+    /// Whether the first packet's source replaces the advertised address (symmetric RTP).
+    ///
+    /// False for a stream ICE is driving: RFC 8445 §8.1.1's selected pair replaces this, and it
+    /// has to *replace* it rather than race it — a stream that also learned from the first RTP
+    /// packet to arrive would let an off-path sender who guessed the port undo the one thing a
+    /// checked path bought.
+    symmetric: bool,
+    /// Where a STUN datagram goes (RFC 5764 §5.1.2), when ICE is running.
+    ice: Option<crate::ice::driver::Handle>,
     stop: Arc<Stop>,
+}
+
+/// Split a datagram arriving on a port that carries media three ways (RFC 5764 §5.1.2).
+///
+/// The first byte decides, and it decides **before anything else looks at the datagram**: a
+/// connectivity check must never reach the jitter buffer and an RTP packet must never reach the
+/// ICE agent. Returns the bytes only for the RTP path; a check goes to the agent and anything
+/// else is dropped by name rather than handed to whichever parser happens to be first.
+///
+/// A check is dropped rather than kept when no agent is running, which is what the media loops
+/// did with one before ICE existed — it would fail to parse as RTP one line later.
+fn demultiplex<'a>(
+    datagram: &'a [u8],
+    from: SocketAddr,
+    on: ice::LocalBase,
+    ice: Option<&ice::driver::Handle>,
+) -> Option<&'a [u8]> {
+    match crate::dtls::classify(datagram) {
+        crate::dtls::Arriving::Rtp => Some(datagram),
+        crate::dtls::Arriving::Stun => {
+            if let Some(handle) = ice {
+                handle.datagram(from, on, datagram.to_vec());
+            }
+            None
+        }
+        crate::dtls::Arriving::Dtls | crate::dtls::Arriving::Unknown => None,
+    }
+}
+
+/// Everything the two RTCP loops need, grouped because they share most of it.
+struct Control {
+    media: Arc<UdpSocket>,
+    rtcp: Option<Arc<UdpSocket>>,
+    remote: Arc<Mutex<SocketAddr>>,
+    rtcp_remote: Arc<Mutex<Option<SocketAddr>>>,
+    interval: Option<Duration>,
+    ssrc: u32,
+    cname: String,
+    stats: Arc<Mutex<StreamStats>>,
+    outbound: Arc<Outbound>,
+    feedback: Arc<Mutex<Feedback>>,
+    srtp: Option<SrtpKeys>,
+    ice: Option<ice::driver::Handle>,
+    stop: Arc<Stop>,
+}
+
+/// Start the report loops, as far as this session's configuration and sockets allow.
+fn spawn_control(control: Control) {
+    if let Some(interval) = control.interval {
+        tokio::spawn(rtcp_loop(
+            // Reports go out from the control port when there is one, which is what a peer
+            // expects to see them come from; from the media port otherwise, which some peers
+            // will refuse but is better than not reporting at all.
+            control.rtcp.clone().unwrap_or(control.media),
+            control.remote,
+            control.rtcp_remote,
+            interval,
+            control.ssrc,
+            control.cname,
+            control.stats,
+            control.outbound,
+            Arc::clone(&control.feedback),
+            control.srtp.clone(),
+            Arc::clone(&control.stop),
+        ));
+    }
+    if let Some(port) = control.rtcp {
+        tokio::spawn(rtcp_receive_loop(
+            port,
+            control.ssrc,
+            control.feedback,
+            control.srtp,
+            control.ice,
+            control.stop,
+        ));
+    }
+}
+
+/// Start the ICE driver for this session, over the sockets the session is running on.
+///
+/// The base numbering is the one gathering used and the only one there is: base 0 is the media
+/// socket, base 1 the control port when there is one. The agent names a socket by that index
+/// alone (`docs/specs/ice.md` §2), so the two lists have to be built the same way in both places
+/// or a check leaves the wrong port.
+fn spawn_ice(
+    local: ice::LocalDescription,
+    socket: &Arc<UdpSocket>,
+    rtcp: Option<&Arc<UdpSocket>>,
+    destinations: &ice::driver::Destinations,
+    stop: &Arc<Stop>,
+) -> ice::driver::Handle {
+    let (agent, pending) = local.into_driver_parts();
+    let mut sockets = vec![Arc::clone(socket)];
+    if let Some(control) = rtcp {
+        sockets.push(Arc::clone(control));
+    }
+    ice::driver::spawn(
+        agent,
+        pending,
+        sockets,
+        destinations.clone(),
+        Arc::clone(stop),
+    )
 }
 
 /// Decide whether a packet belongs to the stream this session is carrying.
@@ -1833,13 +2050,21 @@ async fn accept_source(
     source: SocketAddr,
     remote: &Arc<Mutex<SocketAddr>>,
     stats: &Arc<Mutex<StreamStats>>,
+    symmetric: bool,
 ) -> bool {
     match *stream {
         None => {
             // Symmetric RTP: the observed source replaces the advertised address, because
             // behind a NAT the advertised one is private and this is the only path back.
             // Deliberately after the packet parses, so a stray STUN probe cannot move it.
-            *remote.lock().await = source;
+            //
+            // Not for a stream ICE is driving. There the address is the selected pair's
+            // (RFC 8445 §8.1.1) and an unauthenticated packet must not be able to move it —
+            // `docs/specs/ice.md` §11.3. The SSRC is still learned either way, because that is
+            // what keeps a second source out of the jitter buffer.
+            if symmetric {
+                *remote.lock().await = source;
+            }
             *stream = Some(packet.ssrc);
             // The far end names itself in its first packet, and the statistics carry that name
             // into every report block (RFC 3550 §6.4.1: a block's SSRC is the source it
@@ -1872,6 +2097,8 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
         config,
         received,
         stats,
+        symmetric,
+        ice,
         stop,
     } = inbound;
     let mut buffer = match config.jitter_max_depth {
@@ -1883,11 +2110,8 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
     let mut datagram = vec![0u8; 2048];
     let mut dtmf = sipx_rtp::dtmf::Receiver::new();
     let started = tokio::time::Instant::now();
-    // The synchronisation source this session is carrying. RTP has no authentication, so this
-    // is not a security control — anyone who can guess the port can still forge a first
-    // packet. What it does buy is that once a stream is established, a *later* forged packet
-    // with a different SSRC cannot redirect our media or poison the jitter buffer, which is
-    // the difference between a race an attacker has to win and one they can win at leisure.
+    // The synchronisation source this session is carrying; see `accept_source` for why one is
+    // pinned at all, and for what it does and does not buy.
     let mut stream: Option<u32> = None;
 
     // When the far end stops, whatever the buffer is still holding has to come out. Without
@@ -1930,7 +2154,12 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
             }
         };
 
-        let bytes = Bytes::copy_from_slice(datagram.get(..len).unwrap_or(&[]));
+        let arrived = datagram.get(..len).unwrap_or(&[]);
+        let Some(media) = demultiplex(arrived, source, ice::LocalBase(0), ice.as_ref()) else {
+            continue;
+        };
+
+        let bytes = Bytes::copy_from_slice(media);
         // Authenticated before it is parsed. A packet that fails is dropped and nothing about it
         // reaches the parser, the jitter buffer or the statistics — which is the point of
         // authenticating at all: forged packets must not be able to move any state.
@@ -1944,7 +2173,7 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
             continue;
         };
 
-        if !accept_source(&mut stream, &packet, source, &remote, &stats).await {
+        if !accept_source(&mut stream, &packet, source, &remote, &stats, symmetric).await {
             continue;
         }
 
@@ -1957,18 +2186,7 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
         // buffer and the RTCP report disagree about when the same packet turned up, by however
         // long the lock took — and the whole point of both numbers is that they are comparable.
         let arrival = arrival_in_timestamp_units(started, config.clock_rate);
-        {
-            let mut stats = stats.lock().await;
-            if config.dtmf_payload_type == Some(packet.payload_type) {
-                // A telephone event's timestamp is the event's *start* (RFC 4733
-                // §2.5.1.2), not this packet's sampling instant, so its transit grows per
-                // packet by design and would fabricate jitter out of a keypress. It still
-                // counts for loss and sequence continuity.
-                stats.on_untimed_packet(packet.sequence);
-            } else {
-                stats.on_packet(packet.sequence, packet.timestamp, arrival);
-            }
-        }
+        note_arrival(&stats, &packet, &config, arrival).await;
 
         buffer.push_at(packet, arrival);
 
@@ -1997,6 +2215,25 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
 /// Hand one packet's audio to the application.
 ///
 /// Returns whether the loop should keep running.
+/// Score one arrival against the stream's statistics (RFC 3550 §6.4.1).
+///
+/// A telephone event's timestamp is the event's *start* (RFC 4733 §2.5.1.2) and not this
+/// packet's sampling instant, so its transit grows per packet by design and would fabricate
+/// jitter out of a keypress. It still counts for loss and sequence continuity.
+async fn note_arrival(
+    stats: &Arc<Mutex<StreamStats>>,
+    packet: &Packet,
+    config: &Config,
+    arrival: u32,
+) {
+    let mut stats = stats.lock().await;
+    if config.dtmf_payload_type == Some(packet.payload_type) {
+        stats.on_untimed_packet(packet.sequence);
+    } else {
+        stats.on_packet(packet.sequence, packet.timestamp, arrival);
+    }
+}
+
 /// The local clock in RTP timestamp units.
 fn arrival_in_timestamp_units(started: tokio::time::Instant, clock_rate: u32) -> u32 {
     let elapsed = started.elapsed().as_secs_f64() * f64::from(clock_rate);
@@ -2033,6 +2270,7 @@ fn randomized_rtcp_interval(base: Duration, unit: f64) -> Duration {
 async fn rtcp_loop(
     socket: Arc<UdpSocket>,
     remote: Arc<Mutex<SocketAddr>>,
+    rtcp_remote: Arc<Mutex<Option<SocketAddr>>>,
     interval: Duration,
     ssrc: u32,
     cname: String,
@@ -2118,10 +2356,16 @@ async fn rtcp_loop(
             None => datagram,
         };
 
-        // RTCP conventionally travels on the RTP port plus one (RFC 3550 §11).
-        let destination = *remote.lock().await;
-        let rtcp_port = destination.port().saturating_add(1);
-        let rtcp_to = SocketAddr::new(destination.ip(), rtcp_port);
+        // RTCP conventionally travels on the RTP port plus one (RFC 3550 §11) — unless ICE has
+        // selected a pair for component 2, in which case the checked path is where the reports
+        // go and the convention is only what got them there.
+        let selected = *rtcp_remote.lock().await;
+        let rtcp_to = if let Some(pair) = selected {
+            pair
+        } else {
+            let destination = *remote.lock().await;
+            SocketAddr::new(destination.ip(), destination.port().saturating_add(1))
+        };
         if socket.send_to(&datagram, rtcp_to).await.is_err() {
             return;
         }
@@ -2139,6 +2383,7 @@ async fn rtcp_receive_loop(
     ssrc: u32,
     feedback: Arc<Mutex<Feedback>>,
     srtp: Option<SrtpKeys>,
+    ice: Option<crate::ice::driver::Handle>,
     stop: Arc<Stop>,
 ) {
     let mut unprotect = srtp_context(srtp.as_ref().map(|keys| &keys.remote));
@@ -2151,11 +2396,18 @@ async fn rtcp_receive_loop(
         if stop.is_stopped() {
             return;
         }
-        let Ok((len, _source)) = read else {
+        let Ok((len, source)) = read else {
             return;
         };
 
-        let bytes = Bytes::copy_from_slice(datagram.get(..len).unwrap_or(&[]));
+        // The control port carries the same three protocols the media port does, because ICE
+        // checks component 2 over it.
+        let arrived = datagram.get(..len).unwrap_or(&[]);
+        let Some(control) = demultiplex(arrived, source, ice::LocalBase(1), ice.as_ref()) else {
+            continue;
+        };
+
+        let bytes = Bytes::copy_from_slice(control);
         let bytes = match unprotect.as_mut() {
             Some(context) => match context.unprotect_rtcp(&bytes) {
                 Ok(plain) => Bytes::from(plain),

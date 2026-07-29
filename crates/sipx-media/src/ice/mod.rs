@@ -13,10 +13,15 @@
 pub mod agent;
 pub mod candidate;
 pub mod checklist;
+pub(crate) mod driver;
+pub mod gather;
+pub mod negotiate;
 pub mod stun;
 pub mod timing;
 
 pub use agent::{Agent, Config, Input, Output, Timer};
 pub use candidate::{Gathered, LocalBase, LocalCandidate, RemoteCandidate};
 pub use checklist::{ChecklistState, PairState, Role};
+pub use gather::{Gathering, LocalDescription};
+pub use negotiate::{ICE_MISMATCH, Negotiation, negotiate};
 pub use timing::Timers;

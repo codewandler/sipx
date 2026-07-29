@@ -564,9 +564,32 @@ note = "`a=setup` only, which is the part RFC 5763 §5 borrows to decide who ope
 number = 8445
 title = "Interactive Connectivity Establishment (ICE)"
 layer = "media"
-status = "none"
-evidence = []
-note = "sipx uses symmetric RTP, which handles the common NAT case and not the hard one."
+status = "partial"
+roles = ["uac", "uas"]
+evidence = [
+  "crates/sipx-media/src/ice/agent.rs",
+  "crates/sipx-media/src/ice/checklist.rs",
+  "crates/sipx-media/src/ice/candidate.rs",
+  "crates/sipx-media/src/ice/stun.rs",
+  "crates/sipx-media/src/ice/gather.rs",
+  "crates/sipx-media/src/ice/driver.rs",
+  "crates/sipx-media/tests/ice.rs",
+]
+note = "A full agent, driven on the port media already uses. Host and server-reflexive gathering (§5.1.1), §5.1.2.1's priorities and §5.1.1.3's foundations, checklists with §6.1.2.6's freezing and §6.1.2.5's limit, §7's checks over a STUN profile anchored to RFC 5769's bytes, §7.3.1.1's role-conflict table row by row, regular nomination (§8.1.1), and §11's Binding Indication keepalives on selected pairs — with a nominated pair replacing symmetric RTP for the stream that has one. Not implemented: ICE restart (§9), which the agent accepts on an input but which nothing offers or detects in SDP (`M-23`); relayed candidates, which need a TURN client and RFC 8656 (`M-24`); and the lite role (§2.2, §6.2, §8.2), deferred with the reason in `docs/specs/ice.md` §12 — interoperating with a lite peer is implemented and is not deferred. Aggressive nomination is deprecated by §4 and is deliberately absent rather than optional."
+
+[[rfc]]
+number = 8839
+title = "SDP Offer/Answer Procedures for ICE"
+layer = "media"
+status = "partial"
+roles = ["uac", "uas"]
+evidence = [
+  "crates/sipx-sdp/src/ice.rs",
+  "crates/sipx-media/src/ice/negotiate.rs",
+  "crates/sipx-media/src/ice/gather.rs",
+  "crates/sipx-media/tests/ice.rs",
+]
+note = "§5's attribute grammar — `candidate`, `remote-candidates`, `ice-ufrag`, `ice-pwd`, `ice-pacing`, `ice-options`, `ice-lite`, `ice-mismatch` — with §5.1's priority range checked on parse, because the value the grammar admits and the range forbids is the one that overflows RFC 8445 §6.1.2.3's pair priority. §4.2's initial offer and answer are generated with `a=ice-options:ice2` and a default destination that is the highest-priority candidate, and §5.3's `ice-mismatch` is reported in the answer when the offer's default destination for a component matched none of its candidates, with RFC 3264's procedures used for that stream instead. A peer offering no `candidate` attribute gets symmetric RTP and no ICE at all (§6). Not implemented: §4.4.1.1.1's restart offer and answer (`M-23`), and `remote-candidates` is parsed but never generated for a Completed stream (§5.2). Trickle ICE (RFC 8838/8840) is a separate offer/answer model and is out of scope."
 
 # ---------------------------------------------------------------------------------------------
 # Services: what is built on top

@@ -12,14 +12,14 @@ compliance document usually becomes untrue.
 
 ## Where it stands
 
-**69 RFCs tracked.**
+**70 RFCs tracked.**
 
 | | Meaning | Count |
 |---|---|---|
 | ✅ implemented | Behaviour present and tested for the roles listed | 34 |
-| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 17 |
+| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 19 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 6 |
-| ⬜ not started | Tracked as a target, not started | 11 |
+| ⬜ not started | Tracked as a target, not started | 10 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
 The list is bounded on purpose: it is what sipx already touches plus what it has decided
@@ -107,7 +107,8 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | [3711](https://www.rfc-editor.org/rfc/rfc3711) | The Secure Real-time Transport Protocol (SRTP) | 🟡 partial | uac, uas | The default transform, AES_CM_128_HMAC_SHA1_80, for RTP and RTCP, with the replay window and rollover inference. Key derivation and the keystream are checked against the RFC's own Appendix B vectors. Only one transform: no AES-192/256, no f8, no null cipher, and no rekeying (the key derivation rate is fixed at zero). |
 | [4145](https://www.rfc-editor.org/rfc/rfc4145) | TCP-Based Media Transport in SDP | 🟡 partial | — | `a=setup` only, which is the part RFC 5763 §5 borrows to decide who opens the DTLS connection. The `a=connection` attribute and TCP media transport itself are not implemented: sipx carries media over UDP. |
 | [4568](https://www.rfc-editor.org/rfc/rfc4568) | SDP Security Descriptions for Media Streams (SDES) | 🟡 partial | uac, uas | `a=crypto` offered and answered, and **only over a secure signalling path** — §7.1 makes that a condition of use, and `Crypto::offer` returns nothing without it rather than leaving the check to every caller. No MKI, no key lifetimes, no session parameters. |
-| [8445](https://www.rfc-editor.org/rfc/rfc8445) | Interactive Connectivity Establishment (ICE) | ⬜ not started | — | sipx uses symmetric RTP, which handles the common NAT case and not the hard one. |
+| [8445](https://www.rfc-editor.org/rfc/rfc8445) | Interactive Connectivity Establishment (ICE) | 🟡 partial | uac, uas | A full agent, driven on the port media already uses. Host and server-reflexive gathering (§5.1.1), §5.1.2.1's priorities and §5.1.1.3's foundations, checklists with §6.1.2.6's freezing and §6.1.2.5's limit, §7's checks over a STUN profile anchored to RFC 5769's bytes, §7.3.1.1's role-conflict table row by row, regular nomination (§8.1.1), and §11's Binding Indication keepalives on selected pairs — with a nominated pair replacing symmetric RTP for the stream that has one. Not implemented: ICE restart (§9), which the agent accepts on an input but which nothing offers or detects in SDP (`M-23`); relayed candidates, which need a TURN client and RFC 8656 (`M-24`); and the lite role (§2.2, §6.2, §8.2), deferred with the reason in `docs/specs/ice.md` §12 — interoperating with a lite peer is implemented and is not deferred. Aggressive nomination is deprecated by §4 and is deliberately absent rather than optional. |
+| [8839](https://www.rfc-editor.org/rfc/rfc8839) | SDP Offer/Answer Procedures for ICE | 🟡 partial | uac, uas | §5's attribute grammar — `candidate`, `remote-candidates`, `ice-ufrag`, `ice-pwd`, `ice-pacing`, `ice-options`, `ice-lite`, `ice-mismatch` — with §5.1's priority range checked on parse, because the value the grammar admits and the range forbids is the one that overflows RFC 8445 §6.1.2.3's pair priority. §4.2's initial offer and answer are generated with `a=ice-options:ice2` and a default destination that is the highest-priority candidate, and §5.3's `ice-mismatch` is reported in the answer when the offer's default destination for a component matched none of its candidates, with RFC 3264's procedures used for that stream instead. A peer offering no `candidate` attribute gets symmetric RTP and no ICE at all (§6). Not implemented: §4.4.1.1.1's restart offer and answer (`M-23`), and `remote-candidates` is parsed but never generated for a Completed stream (§5.2). Trickle ICE (RFC 8838/8840) is a separate offer/answer model and is out of scope. |
 | [4566](https://www.rfc-editor.org/rfc/rfc4566) | SDP: Session Description Protocol (obsoleted by 8866) | — superseded | — | Superseded. Listed so a reader looking for it knows where it went. |
 
 ## Services — what is built on top
