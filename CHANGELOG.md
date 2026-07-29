@@ -9,6 +9,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A WebSocket target names its own path and port (`T-23`)** — `Target::at_path` says where on a
+  server SIP lives. RFC 7118 §5 registers a subprotocol and fixes neither the resource nor the
+  port, so a server is entitled to serve SIP at `/ws` on its own HTTP server — and sipx asked for
+  `/` on the SIP port unconditionally, which reached one kind of server and none of the others.
+  - **The default is unchanged.** A target that names no resource asks for `/`, so every
+    arrangement that worked before works identically.
+  - **The resource is part of connection identity**, for the reason the verified TLS name already
+    is: a socket upgraded at `/ws` was accepted by whatever serves `/ws`, and handing it traffic
+    meant for another resource throws away the only thing the target said about where it was
+    going. Two resources on one address are two pooled connections.
+  - **The interop peer's divergence list is empty for the first time.** The shared WebSocket test
+    reads the port and path a peer's profile declares rather than assuming the SIP port and the
+    root, and it passes live against both peers — the disagreement `X-17` found is closed, not
+    worked around.
 - **The gate is a program that checks itself against CI (`X-22`)** — `./scripts/gate.py` replaces
   the command list in `AGENTS.md`, which once omitted a job CI runs: the `msrv` job was red from
   v0.4.0 through v0.7.0 while every documented command passed.

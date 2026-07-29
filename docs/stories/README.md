@@ -74,9 +74,6 @@ _This is the layer applications actually program against, so it is the one that 
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 - [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
 
-### Depth
-- [T-23 — Let a WebSocket target name its own path and port](T-23-websocket-request-path-and-port.md) · Signalling · found by X-17 — the second interop peer serves SIP over WebSocket somewhere sipx cannot ask for
-
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
@@ -154,6 +151,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [T-18 — Surface unmatched responses to the application](T-18-surface-unmatched-responses.md) · Signalling · M7 · the endpoint drops what a forwarding element is required to forward
 - [T-19 — Stop dropping incoming requests silently](T-19-stop-dropping-incoming-requests-silently.md) · Signalling · M7 · a full channel loses requests with no counter and no log
 - [T-20 — Implement GRUU](T-20-gruu.md) · Signalling · M10 · RFC 5627 · needs T-14's Path and T-15's instance ID
+- [T-23 — Let a WebSocket target name its own path and port](T-23-websocket-request-path-and-port.md) · Signalling · found by X-17 — the second interop peer serves SIP over WebSocket somewhere sipx cannot ask for
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core

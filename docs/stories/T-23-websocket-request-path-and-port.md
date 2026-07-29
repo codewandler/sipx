@@ -2,7 +2,7 @@
 id: T-23
 title: Let a WebSocket target name its own path and port
 pillar: Signalling
-status: in-progress
+status: done
 priority:
 design: docs/designs/sip-transport.md
 epic: depth
