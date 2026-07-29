@@ -2,7 +2,7 @@
 id: M-28
 title: Offer DTLS-SRTP from a call, and stop claiming it until then
 pillar: Media
-status: ready
+status: in-progress
 priority: 2
 design: docs/specs/srtp.md
 epic: media

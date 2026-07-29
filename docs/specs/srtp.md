@@ -11,7 +11,8 @@ argument for the rule, made backwards. · **Crates:** `sipx-rtp` (the
 transform), `sipx-sdp` (SDES, the fingerprint and the offer/answer), `sipx-media` (DTLS-SRTP and the
 session) · **Stories:** [M-14](../stories/M-14-secure-media.md),
 [M-15](../stories/M-15-dtls-srtp.md), [M-25](../stories/M-25-srtp-spec.md),
-[M-26](../stories/M-26-sdes-tag-neither-echoed-nor-verified.md) · **Design:**
+[M-26](../stories/M-26-sdes-tag-neither-echoed-nor-verified.md),
+[M-28](../stories/M-28-dtls-srtp-unreachable-from-a-call.md) · **Design:**
 [media](../designs/media.md)
 
 Where this document and the code disagree, this document is right until somebody changes it
@@ -782,6 +783,9 @@ case §5's own figure uses rather than the case its rule spells. *(Not yet asser
 | The DTLS handshake | `sipx-media`, `dtls::openssl`, behind the `dtls` feature | The only part that needs a C library |
 | Keying a live session, both halves or neither (rule 6) | `sipx-call` | Where the offer and the answer meet |
 
+The last row is where the two mechanisms diverge today, and §12.8 is the divergence: SDES reaches
+`sipx-call` and DTLS-SRTP does not. Every piece above it is written and tested; nothing selects it.
+
 The split follows [vision.md](../vision.md) principle 1 and the same line ICE draws
 ([ice.md](ice.md) §15): grammar and pure transforms below, sockets and handshakes above.
 
@@ -912,3 +916,36 @@ offsets (§6.4); the `a=setup` answer table including `holdconn` (§6.2); RFC 81
 prohibition, its digest-length rule, its uppercase-hex output and its case-insensitive `hash-func`
 (§6.1); §6.2's ordering, including refusing a peer with no fingerprint before the handshake runs
 (§6.6); and all seven rules of §7 against RFC 4568 §5.1.2, §7.1 and RFC 5764 §8.
+
+### 12.8 DTLS-SRTP is implemented and no call can select it — open
+
+§6 is implemented in `sipx-sdp` and `sipx-media` and tested there, and **nothing in `sipx-call`
+reaches it**. Every offer this stack builds goes through
+`Capabilities::g711(…).with_srtp(transport.is_secure())` — three call sites in
+[`call.rs`](../../crates/sipx-call/src/call.rs), one per offer path — which is SDES or nothing.
+`Capabilities::with_dtls_srtp` has no caller outside `sipx-sdp`'s own test module, `dtls::establish`
+none outside `sipx-media`'s, and `DialOptions` has no keying selector at all. So no INVITE sipx
+sends has ever carried `UDP/TLS/RTP/SAVP`, and no offer of one has ever been answered with a
+fingerprint.
+
+**Which keying a call uses is the application's decision and cannot be inferred.** §5.2's rule 1
+makes SDES conditional on secure signalling because the master key *is* the SDP; DTLS-SRTP carries
+only a hash and is therefore the keying that survives a path sipx does not control. A stack that
+picked for the application would be picking between two different threat models on its behalf.
+
+The registry says so rather than claiming both roles: RFC 5763 and RFC 5764 are `partial` with no
+roles listed, and their notes name the missing half. That correction is deliberately independent of
+the code — `M-28` records that a crate-level capability with no caller at the call layer reads as a
+shipped feature in `docs/compliance.md`, and that this is the third instance of the pattern
+(`M-22`/`M-27` for ICE, RFC 3311 for UPDATE, and this) rather than an accident of one subsystem.
+
+What closing it needs, and why it is more than one row of wiring: an application-facing keying
+choice on `DialOptions` and on the answering side; a certificate and fingerprint minted per call
+(`dtls::openssl::Identity`, which lives behind the off-by-default `dtls` feature, so `sipx-call`
+gains a feature and a build without it must still refuse the choice rather than downgrade); and the
+handshake itself run **on the media port** before the session starts — which means the bound socket
+has to be lent to a blocking DTLS stack and taken back, for each of the six places a `MediaPort` is
+started. Until all of that lands, a selector that produced a `UDP/TLS/RTP/SAVP` offer would be worse
+than none: the call would connect and carry unkeyed audio under a protocol token that promises
+otherwise, which is rule 6 and rule 7 of §7 broken at once. **Owner: `M-28`, still open for the code
+half.**
