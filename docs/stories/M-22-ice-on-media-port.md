@@ -2,7 +2,7 @@
 id: M-22
 title: Drive ICE on the media port
 pillar: Media
-status: ready
+status: in-progress
 priority: 3
 design: docs/designs/media.md
 epic: ice
@@ -35,7 +35,14 @@ and so a peer that offers no ICE still gets symmetric RTP exactly as today.
       — the test `M-16` names, and the reason this child comes after the agent rather than beside it.
 
 ## Progress
-- Not started. Cut from `M-16`'s proposed split; the Acceptance above is that proposal verbatim.
+- The driver is in `crates/sipx-media/src/ice/`: `gather.rs` (host and server-reflexive
+  candidates off the bound `MediaPort`, and the local description the offer is written from),
+  `negotiate.rs` (RFC 8839 §5.3's `ice-mismatch` and §6's "no candidate means no ICE"), and
+  `driver.rs` (the async task that owns the sockets and the clock the agent does without).
+- `MediaPort::gather` and `MediaPort::start_with_ice` are the two new entry points;
+  `MediaPort::start` is untouched and is still the whole no-ICE path.
+- The demultiplex is `dtls::classify` inside `receive_loop` and `rtcp_receive_loop`; the
+  selected pair is written into the same `remote` cell the send loop already reads.
 
 ## Notes
 - The spec is [`docs/specs/ice.md`](../specs/ice.md), written by `M-16` before any code. Read the
