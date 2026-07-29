@@ -2,8 +2,7 @@
 id: S-22
 title: Give the caller a handle on its early dialog
 pillar: Signalling
-status: in-progress
-priority: 5
+status: done
 design: docs/designs/sip-ua.md
 epic: conformance
 areas: [sipx-call]

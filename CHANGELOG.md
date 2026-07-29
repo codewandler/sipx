@@ -9,6 +9,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The caller gets a handle on its early dialog (`S-22`, RFC 3311)** — everything sipx could
+  already do before a call is answered was reachable only from the side that *received* it, because
+  `dial_with` awaited the final response inside itself and there was no moment at which the caller
+  held anything. `dial_early` now returns a `Dialing` as soon as a provisional establishes a dialog;
+  from it a caller can send an UPDATE and receive one, and `Dialing::answered` then waits for the
+  call as `dial` would.
+  - **`dial`, `dial_once` and `DialOptions` are untouched.** A story that makes the simple case
+    harder has traded the wrong thing, so the new handle is a sibling and not a replacement.
+  - **§5.1 and §5.2 are lifted into one implementation both roles borrow**, rather than mirrored
+    onto the calling side. This is a safety property and not tidiness: RFC 3261 §12.2.2's ordering
+    check is what stops a BYE replayed from behind the sequence tearing down a live call — the
+    defect fixed in `S-19` — and a second copy of the rules is one refactor away from omitting it.
+  - **§5.1's precondition became a type.** `EarlyMedia` is `Offered` until a reliable provisional
+    answers our offer (RFC 3262 §5) and `Answered` after, so an UPDATE attempted too early fails
+    locally as `NoEarlySession` instead of drawing a 491 from the far end. `Ringing::update` still
+    returns `NoDialog`, so nothing an application already matches on changed.
+  - **The registry stops over-claiming in the passive voice.** RFC 3311's note opened *"Sent and
+    received in an early dialog and a confirmed one"* — role-neutral prose claiming for both ends
+    what only the answering end could do. It now names which handle serves which role. The test
+    `sipx_sends_an_update_in_an_early_dialog_and_in_a_confirmed_one` is renamed to say `as_uas`; it
+    never exercised the UAC path its name promised.
+  - Not done, deliberately: `Dialing` exposes no event stream, so an application polls
+    `has_early_session` rather than awaiting the answer. That is `C-2`'s to design.
+
 - **The SDES tag is echoed and verified, as RFC 4568 requires twice (`M-26`)** — §5.1.2 and §5.1.3
   are both MUSTs and sipx honoured neither. The answer now carries the tag and suite of the
   attribute actually accepted, built by `Crypto::accepting`, instead of always answering tag `1` —
