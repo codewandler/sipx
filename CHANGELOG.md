@@ -9,6 +9,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Many calls from one endpoint (`C-4`)** — a dispatcher owns the endpoint's receiver and routes
+  each request to the call whose dialog it belongs to, so a host can hold N concurrent calls
+  without writing its own demultiplexer. A new INVITE that matches no call surfaces as an
+  invitation for the application to answer, ring or reject.
+  - **Nothing ends in silence** — `481` for an in-dialog request naming no live call, `405` with
+    `Allow` outside a dialog, `482` for a genuinely merged INVITE, `400` for a request carrying no
+    `Call-ID` or `From` tag, `503` with `Retry-After` when one call's inbox is full, and a stray
+    ACK counted rather than refused. This is `T-19`'s rule carried up to the call layer.
+  - **One stalled call cannot stall its siblings**: per-call delivery is bounded and never awaited,
+    so a full inbox sheds for that call alone.
+  - The route key is `Call-ID` plus the *peer's* tag, never the local one — which is what lets a
+    route be reserved from the INVITE alone, before the application has chosen how to answer and
+    therefore before a local tag exists.
+  - A CANCEL for a routed invitation is delivered, but sipx still has no UAS-side CANCEL handling
+    at all; the spec says so plainly and `S-23` will close it.
 - **The media design record (`X-25`)** — `docs/designs/media.md` was a 37-line outline headed
   "Stories: _to be cut_" that named no story, no ICE, no DTLS-SRTP, no bridge and no mute, while
   nine delivered stories and all six ICE stories cite it as their design record. It now describes
