@@ -2045,7 +2045,7 @@ async fn dial_with(
         &response,
         target.clone(),
         port,
-        capabilities.crypto.as_ref(),
+        capabilities.crypto.as_slice(),
     ) {
         Ok((dialog, media, in_dialog, settled)) => {
             let ack = build_ack(endpoint, &dialog, &in_dialog)?;
@@ -2116,7 +2116,7 @@ fn establish(
     response: &Response,
     fallback: Target,
     port: MediaPort,
-    offered: Option<&sipx_sdp::crypto::Crypto>,
+    offered: &[sipx_sdp::crypto::Crypto],
 ) -> Result<(Dialog, MediaSession, Target, Settled)> {
     let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
@@ -2135,14 +2135,17 @@ fn establish(
 /// all (RFC 3262 §5). There is no port to bind on either path, because ours was bound before the
 /// INVITE named it.
 fn settle_answer(
-    offered: Option<&sipx_sdp::crypto::Crypto>,
+    offered: &[sipx_sdp::crypto::Crypto],
     answer: &SessionDescription,
 ) -> Result<Settled> {
-    // Both halves or neither. A stream keyed at one end only is a call that connects and
-    // carries silence, which is worse than one that fails to connect.
+    // Both halves or neither, *and* the two halves have to be the ones the two ends agreed on:
+    // a stream keyed at one end only is a call that connects and carries silence, and one keyed
+    // on an answer that echoed a tag nobody sent is a call encrypted to nothing. Neither is
+    // worth having, so both come back as `Error::Sdp` rather than as a quietly plain call.
+    let answered = answered_crypto(answer);
     Ok(Settled {
         negotiated: negotiated(answer)?,
-        srtp: srtp_keys(offered, answered_crypto(answer)),
+        srtp: srtp_keys(offered, answered.as_ref())?,
     })
 }
 
@@ -2591,8 +2594,17 @@ impl Dialing {
         let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body())) else {
             return;
         };
-        let Ok(settled) = settle_answer(self.capabilities.crypto.as_ref(), &answer) else {
-            return;
+        let settled = match settle_answer(self.capabilities.crypto.as_slice(), &answer) {
+            Ok(settled) => settled,
+            // Logged rather than discarded in silence. The session stays `Offered`, so nothing
+            // is keyed on this answer and the 2xx settles the exchange again through
+            // `settle_from`, where the same refusal *does* end the call — but a refused
+            // `a=crypto` that left no trace at all would be indistinguishable from a
+            // provisional that carried no description.
+            Err(error) => {
+                tracing::debug!(%error, "the answer in a reliable provisional was not adopted");
+                return;
+            }
         };
         let Some(EarlyMedia::Offered(port)) = self.media.take() else {
             return;
@@ -2769,7 +2781,7 @@ impl Dialing {
     fn settle_from(&mut self, response: &Response) -> Result<Settled> {
         let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
             .map_err(|error| Error::Sdp(error.to_string()))?;
-        let settled = settle_answer(self.capabilities.crypto.as_ref(), &answer)?;
+        let settled = settle_answer(self.capabilities.crypto.as_slice(), &answer)?;
         // Our INVITE's offer is answered here rather than in a provisional, so the exchange
         // closes now. Without this the first UPDATE on the confirmed call would be refused as
         // glare against an offer that has in fact been answered.
@@ -2835,7 +2847,7 @@ impl Early {
         }
         let settled = Settled {
             negotiated,
-            srtp: srtp_keys(capabilities.crypto.as_ref(), offer_crypto(offer)),
+            srtp: srtp_keys_answering(capabilities.crypto.as_ref(), offer_crypto(offer)),
         };
         Ok((
             Self {
@@ -2880,7 +2892,7 @@ impl Early {
         }
         self.settled = Settled {
             negotiated,
-            srtp: srtp_keys(self.capabilities.crypto.as_ref(), offer_crypto(offer)),
+            srtp: srtp_keys_answering(self.capabilities.crypto.as_ref(), offer_crypto(offer)),
         };
         Some(answer)
     }
@@ -3139,7 +3151,7 @@ async fn answer_negotiated(
     // Our key from the answer we just built, theirs from the offer we were sent.
     let settled = Settled {
         negotiated,
-        srtp: srtp_keys(capabilities.crypto.as_ref(), offer_crypto(&offer)),
+        srtp: srtp_keys_answering(capabilities.crypto.as_ref(), offer_crypto(&offer)),
     };
     let media = port.start(settled.media_config());
 
@@ -3622,12 +3634,51 @@ impl Settled {
     }
 }
 
-/// Pair our offered key with the far end's answered one.
+/// The keys an answer to *our* offer settles on, once it has been checked against what we sent.
+///
+/// RFC 4568 §5.1.3 makes the check a MUST on the offerer, and this is the only place a call can
+/// run it: [`sipx_media::SrtpKeys::from_answer`] is the sole route from an answer to keys, and it
+/// returns which of *our* offers the answer accepted, so the half we key with is the half we sent
+/// rather than whichever one happened to be first. `docs/specs/srtp.md` §5.4.
+///
+/// `offered` is a slice and not one attribute because that is what the check takes. sipx offers
+/// exactly one today, and a function that quietly assumed so would have to be found again the day
+/// it offers two.
+///
+/// `Ok(None)` means this side offered no key at all — a plain call, which is the only case where
+/// the absence of an `a=crypto` in the answer is not a failure. When we did offer, an answer
+/// carrying nothing usable is refused: that is the shape "a suite that was never offered" arrives
+/// in, since [`sipx_sdp::crypto::Crypto::parse`] refuses a suite sipx cannot key.
+///
+/// # Errors
+///
+/// [`Error::Sdp`] when the answer accepted a tag and suite this side never offered, or carried no
+/// key. Not `None`: dropping to an unencrypted call would hand the user an insecure call presented
+/// as a secure one, and dropping the stream would end the call with nothing anyone can act on.
+pub(crate) fn srtp_keys(
+    offered: &[sipx_sdp::crypto::Crypto],
+    answered: Option<&sipx_sdp::crypto::Crypto>,
+) -> Result<Option<sipx_media::SrtpKeys>> {
+    if offered.is_empty() {
+        // Nothing was offered, so there is nothing to verify and no local half to key with. An
+        // answer cannot introduce SDES the offer did not ask for (RFC 4568 §5.1.2).
+        return Ok(None);
+    }
+    sipx_media::SrtpKeys::from_answer(offered, answered)
+        .map(Some)
+        .map_err(|error| Error::Sdp(error.to_string()))
+}
+
+/// Pair the key we are *answering* with against the far end's offered one.
+///
+/// The other side of [`srtp_keys`], and deliberately not the same function. §5.1.3's check is the
+/// offerer's: here this side chose the attribute and echoed its tag ([`sipx_sdp::answer`], RFC
+/// 4568 §5.1.2), so there is nothing to verify — only two halves to put together.
 ///
 /// `None` unless *both* are present. One key is not a session: a stream keyed at one end only
-/// is a stream the other end cannot read, and treating a half-answer as success would produce a
+/// is a stream the other end cannot read, and treating a half-offer as success would produce a
 /// call that connects and carries silence.
-pub(crate) fn srtp_keys(
+pub(crate) fn srtp_keys_answering(
     ours: Option<&sipx_sdp::crypto::Crypto>,
     theirs: Option<sipx_sdp::crypto::Crypto>,
 ) -> Option<sipx_media::SrtpKeys> {

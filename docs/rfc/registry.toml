@@ -519,9 +519,11 @@ evidence = [
   "crates/sipx-sdp/src/crypto.rs",
   "crates/sipx-sdp/src/answer.rs",
   "crates/sipx-media/src/session.rs",
+  "crates/sipx-call/src/call.rs",
   "crates/sipx-sdp/tests/srtp_negotiation.rs",
+  "crates/sipx-call/tests/secure_media.rs",
 ]
-note = "`a=crypto` offered and answered, and **only over a secure signalling path** — §7.1 makes that a condition of use, and `Crypto::offer` returns nothing without it rather than leaving the check to every caller. §5.1.2's tag and suite are echoed from the attribute actually accepted (`M-26`), and §6.1's published `inline` parameter is asserted against `Crypto::parse` rather than against sipx's own output. §5.1.3's check — offered suite, accompanying tag, and a key — is `Crypto::verify_answer`, and `SrtpKeys::from_answer` makes it the only way an answer becomes keys, so a mismatch is a typed failure and not a stream that quietly drops to unencrypted. **Still missing:** `sipx-call` has not yet been moved onto `SrtpKeys::from_answer`, so a live call's answer is paired without the check until that wiring lands; and no MKI, no key lifetimes, no session parameters. See `docs/specs/srtp.md` §12.3."
+note = "`a=crypto` offered and answered, and **only over a secure signalling path** — §7.1 makes that a condition of use, and `Crypto::offer` returns nothing without it rather than leaving the check to every caller. §5.1.2's tag and suite are echoed from the attribute actually accepted (`M-26`), and §6.1's published `inline` parameter is asserted against `Crypto::parse` rather than against sipx's own output. §5.1.3's check — offered suite, accompanying tag, and a key — is `Crypto::verify_answer`, and `SrtpKeys::from_answer` makes it the only way an answer becomes keys. `M-29` put a live call on it: `sipx-call` verifies the answer to its own offer, and a refusal ends the call through `Error::Sdp` naming the tag that came back rather than keying media on two halves nobody agreed on. So both of §5.1's MUSTs now hold on a call and not only in the crates below it. **Partial**, and for what the RFC defines beyond that exchange: no MKI, no key lifetimes, no session parameters, and no `RTP/SAVPF`. See `docs/specs/srtp.md` §12.3."
 
 [[rfc]]
 number = 5764
