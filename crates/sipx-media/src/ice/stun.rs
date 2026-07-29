@@ -69,9 +69,7 @@ const FINGERPRINT_XOR: u32 = 0x5354_554e;
 /// the cookie itself by `the_port_key_is_the_top_half_of_the_cookie`.
 const PORT_KEY: u16 = 0x2112;
 
-/// HMAC-SHA1 is 20 octets (RFC 5389 §15.4).
-const INTEGRITY_VALUE_LEN: u16 = 20;
-/// `MESSAGE-INTEGRITY` with its 4-byte attribute header.
+/// `MESSAGE-INTEGRITY` with its 4-byte attribute header: HMAC-SHA1 is 20 octets (RFC 5389 §15.4).
 const INTEGRITY_ATTR_LEN: usize = 24;
 /// `FINGERPRINT` with its 4-byte attribute header.
 const FINGERPRINT_ATTR_LEN: usize = 8;
@@ -323,6 +321,20 @@ pub struct Message {
     class: Class,
     transaction: TransactionId,
     attributes: Vec<Attribute>,
+    integrity: Option<ReceivedIntegrity>,
+    fingerprint: bool,
+}
+
+/// A `MESSAGE-INTEGRITY` read off the wire, with the bytes it claims to cover.
+///
+/// The prefix is kept rather than the offsets into the datagram because the key is not known
+/// when the message is decoded — it depends on the `USERNAME` the message itself carries — so
+/// verification happens later, and asking the caller to hand the original datagram back at that
+/// point is an invitation to hand back a different one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReceivedIntegrity {
+    tag: [u8; 20],
+    covered: Vec<u8>,
 }
 
 impl Message {
@@ -333,6 +345,8 @@ impl Message {
             class,
             transaction,
             attributes: Vec::new(),
+            integrity: None,
+            fingerprint: false,
         }
     }
 
@@ -381,8 +395,195 @@ impl Message {
         for attribute in &self.attributes {
             attribute.encode_into(&mut out, &self.transaction)?;
         }
+        if let Some(key) = key {
+            // §15.4: the length must already count MESSAGE-INTEGRITY when the HMAC is taken.
+            set_length(&mut out, INTEGRITY_ATTR_LEN)?;
+            let tag = hmac_sha1(key.as_bytes(), &out);
+            push_attribute(&mut out, ATTR_MESSAGE_INTEGRITY, &tag)?;
+        }
+        // §15.5, and the order is the whole point: the CRC covers MESSAGE-INTEGRITY, so it is
+        // computed after it, with the length adjusted again to count FINGERPRINT itself.
         set_length(&mut out, FINGERPRINT_ATTR_LEN)?;
+        let crc = crc32(&out) ^ FINGERPRINT_XOR;
+        push_attribute(&mut out, ATTR_FINGERPRINT, &crc.to_be_bytes())?;
         Ok(out)
+    }
+
+    /// Read a datagram the media port's demultiplexer called STUN (RFC 5764 §5.1.2,
+    /// [`crate::dtls::classify`]).
+    ///
+    /// Nothing here trusts the datagram. A `FINGERPRINT` that does not match is an error, per
+    /// RFC 5389 §15.5, because a message whose CRC is wrong is not addressed to us however well
+    /// formed it is; a `MESSAGE-INTEGRITY` cannot be checked yet, because which key applies
+    /// depends on the `USERNAME` this message carries — see [`Message::verify_integrity`].
+    pub fn decode(datagram: &[u8]) -> Result<Self, Error> {
+        if !is_stun(datagram) {
+            return Err(Error::NotStun);
+        }
+        let (class, method) = split_type(read_u16(datagram, 0).ok_or(Error::Truncated)?);
+        if method != METHOD_BINDING {
+            return Err(Error::UnsupportedMethod(method));
+        }
+        let transaction: TransactionId = datagram
+            .get(8..HEADER_LEN)
+            .and_then(|bytes| <[u8; 12]>::try_from(bytes).ok())
+            .ok_or(Error::Truncated)?;
+        // The stated length is authoritative; a datagram carrying extra bytes is not licence to
+        // read them.
+        let stated = usize::from(read_u16(datagram, 2).ok_or(Error::Truncated)?);
+        let end = HEADER_LEN.checked_add(stated).ok_or(Error::Truncated)?;
+        let body = datagram.get(HEADER_LEN..end).ok_or(Error::Truncated)?;
+
+        let mut message = Self::new(class, transaction);
+        let mut offset = 0usize;
+        while offset < body.len() {
+            let kind = read_u16(body, offset).ok_or(Error::Truncated)?;
+            let length = usize::from(
+                read_u16(body, offset.checked_add(2).ok_or(Error::Truncated)?)
+                    .ok_or(Error::Truncated)?,
+            );
+            let start = offset.checked_add(4).ok_or(Error::Truncated)?;
+            let value = start
+                .checked_add(length)
+                .and_then(|end| body.get(start..end))
+                .ok_or(Error::Truncated)?;
+
+            match kind {
+                ATTR_MESSAGE_INTEGRITY if message.integrity.is_none() => {
+                    message.integrity = Some(ReceivedIntegrity {
+                        tag: <[u8; 20]>::try_from(value)
+                            .map_err(|_| Error::MalformedAttribute(kind))?,
+                        covered: covered_prefix(datagram, offset, INTEGRITY_ATTR_LEN)?,
+                    });
+                }
+                ATTR_FINGERPRINT => {
+                    if value.len() != 4 {
+                        return Err(Error::MalformedAttribute(kind));
+                    }
+                    let stated_crc = read_u32(value, 0).ok_or(Error::MalformedAttribute(kind))?;
+                    let prefix = covered_prefix(datagram, offset, FINGERPRINT_ATTR_LEN)?;
+                    if crc32(&prefix) ^ FINGERPRINT_XOR != stated_crc {
+                        return Err(Error::Fingerprint);
+                    }
+                    message.fingerprint = true;
+                    // §15.5: FINGERPRINT "MUST be the last attribute in the message". Whatever
+                    // follows it is not part of the message and is not read.
+                    break;
+                }
+                _ if message.integrity.is_some() => {
+                    // §15.4: with the exception of FINGERPRINT, "agents MUST ignore all other
+                    // attributes that follow MESSAGE-INTEGRITY". They fall outside the tag, so
+                    // anyone on the path can append them; honouring one would mean honouring an
+                    // unauthenticated instruction.
+                }
+                _ => message
+                    .attributes
+                    .push(Attribute::decode(kind, value, &transaction)?),
+            }
+
+            // §15 aligns attributes on 32-bit boundaries. Skipping without the padding walks
+            // into the middle of the next attribute.
+            let padded = length.checked_add(3).ok_or(Error::Truncated)? & !3;
+            offset = start.checked_add(padded).ok_or(Error::Truncated)?;
+        }
+        Ok(message)
+    }
+
+    /// Whether this message's `MESSAGE-INTEGRITY` was computed with `key`.
+    ///
+    /// `false` when there is none at all: an unauthenticated check is not a check that happens
+    /// to verify, and spec §11.3 requires that it move no state.
+    ///
+    /// Which key to pass is the direction rule — [`Peering::inbound_key`] for a check that
+    /// arrived, [`Peering::outbound_key`] for the response to one sipx sent.
+    #[must_use]
+    pub fn verify_integrity(&self, key: &str) -> bool {
+        let Some(integrity) = self.integrity.as_ref() else {
+            return false;
+        };
+        let computed = hmac_sha1(key.as_bytes(), &integrity.covered);
+        // Constant time. An `==` here is a byte-at-a-time oracle for the tag, offered to anyone
+        // who can reach the media port, and the tag is the only thing between an off-path
+        // attacker and a state change (spec §11.2, §11.3) — the same reason
+        // `sipx_sdp::fingerprint` and `sipx_rtp::srtp` compare this way.
+        computed.ct_eq(&integrity.tag).into()
+    }
+
+    /// Whether a `MESSAGE-INTEGRITY` was present at all.
+    #[must_use]
+    pub const fn has_integrity(&self) -> bool {
+        self.integrity.is_some()
+    }
+
+    /// Whether a `FINGERPRINT` was present. If it was, it matched — [`Message::decode`] rejects
+    /// one that does not.
+    #[must_use]
+    pub const fn has_fingerprint(&self) -> bool {
+        self.fingerprint
+    }
+
+    /// The `USERNAME`, if there is one.
+    #[must_use]
+    pub fn username(&self) -> Option<&str> {
+        self.attributes.iter().find_map(|attribute| match attribute {
+            Attribute::Username(name) => Some(name.as_str()),
+            _ => None,
+        })
+    }
+
+    /// The `PRIORITY` a check claims for the candidate the peer would learn from it (§7.1.1).
+    #[must_use]
+    pub fn priority(&self) -> Option<Priority> {
+        self.attributes.iter().find_map(|attribute| match attribute {
+            Attribute::Priority(priority) => Some(*priority),
+            _ => None,
+        })
+    }
+
+    /// Whether `USE-CANDIDATE` is set (§7.1.2).
+    #[must_use]
+    pub fn use_candidate(&self) -> bool {
+        self.attributes
+            .iter()
+            .any(|attribute| matches!(attribute, Attribute::UseCandidate))
+    }
+
+    /// The role attribute and its tiebreaker, if the peer sent one (§7.1.3).
+    ///
+    /// A peer that sends neither is not doing role signalling, which spec §7.3's last row says
+    /// is not a conflict. `nominate` reports `USE-CANDIDATE` alongside `ICE-CONTROLLING`; a
+    /// controlled peer that sets it anyway is violating §7.1.2, and the caller sees that as a
+    /// `Controlled` role with [`Message::use_candidate`] true.
+    #[must_use]
+    pub fn role(&self) -> Option<RoleAttribute> {
+        self.attributes.iter().find_map(|attribute| match attribute {
+            Attribute::IceControlling(tiebreaker) => Some(RoleAttribute::Controlling {
+                tiebreaker: *tiebreaker,
+                nominate: self.use_candidate(),
+            }),
+            Attribute::IceControlled(tiebreaker) => Some(RoleAttribute::Controlled {
+                tiebreaker: *tiebreaker,
+            }),
+            _ => None,
+        })
+    }
+
+    /// The `ERROR-CODE`, if this is an error response. 487 is the role conflict of §7.3.1.1.
+    #[must_use]
+    pub fn error_code(&self) -> Option<u16> {
+        self.attributes.iter().find_map(|attribute| match attribute {
+            Attribute::ErrorCode { code, .. } => Some(*code),
+            _ => None,
+        })
+    }
+
+    /// The `XOR-MAPPED-ADDRESS`, unobfuscated.
+    #[must_use]
+    pub fn mapped_address(&self) -> Option<SocketAddr> {
+        self.attributes.iter().find_map(|attribute| match attribute {
+            Attribute::XorMappedAddress(address) => Some(*address),
+            _ => None,
+        })
     }
 }
 
@@ -408,6 +609,167 @@ impl Attribute {
         };
         push_attribute(out, kind, &value)
     }
+
+    fn decode(kind: u16, value: &[u8], transaction: &TransactionId) -> Result<Self, Error> {
+        let malformed = || Error::MalformedAttribute(kind);
+        Ok(match kind {
+            ATTR_USERNAME => Self::Username(text(value, kind)?),
+            ATTR_SOFTWARE => Self::Software(text(value, kind)?),
+            ATTR_PRIORITY => {
+                let raw = fixed_u32(value, kind)?;
+                // §5.1 of RFC 8839 bounds a priority at 2^31 − 1, and spec §6.2 shows what an
+                // unchecked one does to the pair-priority arithmetic. A check is a place a peer
+                // can put a ten-digit number, so the bound is enforced here too.
+                Self::Priority(Priority::new(raw).ok_or_else(malformed)?)
+            }
+            ATTR_USE_CANDIDATE => {
+                if !value.is_empty() {
+                    return Err(malformed());
+                }
+                Self::UseCandidate
+            }
+            ATTR_ICE_CONTROLLED => Self::IceControlled(fixed_u64(value, kind)?),
+            ATTR_ICE_CONTROLLING => Self::IceControlling(fixed_u64(value, kind)?),
+            ATTR_ERROR_CODE => {
+                let class = u16::from(*value.get(2).ok_or_else(malformed)? & 0x07);
+                let number = u16::from(*value.get(3).ok_or_else(malformed)?);
+                let code = class
+                    .checked_mul(100)
+                    .and_then(|hundreds| hundreds.checked_add(number))
+                    .ok_or_else(malformed)?;
+                Self::ErrorCode {
+                    code,
+                    reason: text(value.get(4..).unwrap_or_default(), kind)?,
+                }
+            }
+            ATTR_XOR_MAPPED_ADDRESS => {
+                Self::XorMappedAddress(decode_xor_mapped(value, transaction).ok_or_else(malformed)?)
+            }
+            _ => Self::Unknown {
+                kind,
+                value: value.to_vec(),
+            },
+        })
+    }
+}
+
+/// A UTF-8 attribute value. RFC 5389 §15.3 and §15.10 are both `SASLprep`-able strings, so
+/// anything that is not UTF-8 is malformed rather than lossily converted.
+fn text(value: &[u8], kind: u16) -> Result<String, Error> {
+    std::str::from_utf8(value)
+        .map(str::to_owned)
+        .map_err(|_| Error::MalformedAttribute(kind))
+}
+
+/// A four-byte attribute value, rejecting one that is merely long enough.
+fn fixed_u32(value: &[u8], kind: u16) -> Result<u32, Error> {
+    <[u8; 4]>::try_from(value)
+        .map(u32::from_be_bytes)
+        .map_err(|_| Error::MalformedAttribute(kind))
+}
+
+/// An eight-byte attribute value.
+fn fixed_u64(value: &[u8], kind: u16) -> Result<u64, Error> {
+    <[u8; 8]>::try_from(value)
+        .map(u64::from_be_bytes)
+        .map_err(|_| Error::MalformedAttribute(kind))
+}
+
+/// A big-endian `u16` at `at`, or `None` if the bytes are not there.
+fn read_u16(bytes: &[u8], at: usize) -> Option<u16> {
+    let end = at.checked_add(2)?;
+    <[u8; 2]>::try_from(bytes.get(at..end)?)
+        .ok()
+        .map(u16::from_be_bytes)
+}
+
+/// A big-endian `u32` at `at`, or `None` if the bytes are not there.
+fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    let end = at.checked_add(4)?;
+    <[u8; 4]>::try_from(bytes.get(at..end)?)
+        .ok()
+        .map(u32::from_be_bytes)
+}
+
+/// The bytes an integrity value covers: the header and every attribute before the one at
+/// `offset`, with the length field rewritten as though the message ended just after it.
+///
+/// This is the receiving half of [`set_length`], and it has to make the same adjustment for the
+/// same reason (RFC 5389 §15.4, §15.5). Getting it wrong here rejects every well-formed peer.
+fn covered_prefix(datagram: &[u8], offset: usize, attr_len: usize) -> Result<Vec<u8>, Error> {
+    let end = HEADER_LEN.checked_add(offset).ok_or(Error::Truncated)?;
+    let mut prefix = datagram.get(..end).ok_or(Error::Truncated)?.to_vec();
+    let body = offset.checked_add(attr_len).ok_or(Error::Truncated)?;
+    let length = u16::try_from(body).map_err(|_| Error::Truncated)?;
+    prefix
+        .get_mut(2..4)
+        .ok_or(Error::Truncated)?
+        .copy_from_slice(&length.to_be_bytes());
+    Ok(prefix)
+}
+
+/// Undo the obfuscation §15.2 applies to an address.
+fn decode_xor_mapped(value: &[u8], transaction: &TransactionId) -> Option<SocketAddr> {
+    let family = *value.get(1)?;
+    let port = read_u16(value, 2)? ^ PORT_KEY;
+    match family {
+        FAMILY_IPV4 => {
+            let raw = read_u32(value, 4)?;
+            let address = Ipv4Addr::from(raw ^ MAGIC_COOKIE);
+            Some(SocketAddr::new(IpAddr::V4(address), port))
+        }
+        FAMILY_IPV6 => {
+            let raw = <[u8; 16]>::try_from(value.get(4..20)?).ok()?;
+            let key = xor_key(transaction);
+            let mut octets = [0u8; 16];
+            for (slot, (byte, k)) in octets.iter_mut().zip(raw.into_iter().zip(key)) {
+                *slot = byte ^ k;
+            }
+            Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(octets)), port))
+        }
+        _ => None,
+    }
+}
+
+/// HMAC-SHA1, the `MESSAGE-INTEGRITY` transform (RFC 5389 §15.4).
+///
+/// RFC 8445 cites RFC 5389 and not RFC 8489, so there is no SHA-256 variant to negotiate here.
+/// The key for short-term credentials is `SASLprep(password)`; every character RFC 8839 §5.4's
+/// `ice-char` admits is ASCII alphanumeric, `+` or `/`, all of which `SASLprep` leaves alone, so
+/// the password's own bytes are the key.
+fn hmac_sha1(key: &[u8], data: &[u8]) -> [u8; 20] {
+    let mut mac = <HmacSha1 as Mac>::new_from_slice(key)
+        .unwrap_or_else(|_| unreachable!("HMAC accepts a key of any length"));
+    mac.update(data);
+    let full = mac.finalize().into_bytes();
+    let mut tag = [0u8; 20];
+    for (slot, byte) in tag.iter_mut().zip(full) {
+        *slot = byte;
+    }
+    tag
+}
+
+/// CRC-32 as IEEE 802.3 defines it, which is the one RFC 5389 §15.5 means.
+///
+/// Bit-at-a-time rather than table-driven: a connectivity check is a hundred-odd bytes and one
+/// leaves every 50 ms (spec §9), so a lookup table would cost a kilobyte of static data to save
+/// microseconds nobody is waiting for. Pinned to the standard's own check value by
+/// `the_crc_matches_the_published_check_value`, and to the IETF's by both RFC 5769 vectors.
+fn crc32(data: &[u8]) -> u32 {
+    /// The reversed representation of the IEEE polynomial.
+    const POLYNOMIAL: u32 = 0xedb8_8320;
+    let mut crc = 0xffff_ffff_u32;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ POLYNOMIAL
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
 }
 
 /// Write one attribute, padded to a 32-bit boundary (RFC 5389 §15).
