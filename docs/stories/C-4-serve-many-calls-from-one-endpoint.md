@@ -76,6 +76,36 @@ writing its own demultiplexer.
   timeout.
 - The registry gained `dispatch.rs` under RFC 3261 and RFC 3311, with the §8.2.1/§12.2.2/§8.2.2.2
   responses named; `docs/compliance.md` regenerated.
+- **Review round 1 found two blocking defects, both of which made a call unplaceable, and each is
+  now pinned by a test that fails without its fix.**
+  - The RFC 3261 §8.2.2.2 merged-request check compared `Call-ID` and the `From` tag and not the
+    `CSeq`, so it also caught §8.1.3.5's retry — the ordinary answer to a 401, 407, 413, 415, 420
+    or 484 and to RFC 4028 §7.3's 422, which keeps the first two and increments the third. A
+    challenged call could never be placed, including one dialled by sipx's own UAC, which retries
+    in exactly that shape. A route now records the `CSeq` it was reserved from and all three of
+    the section's terms must match.
+  - A dead route still counted as one. Refusing an invitation *is* dropping its inbox, so one
+    refusal poisoned that key for every later attempt by the same peer. A closed route is no
+    longer a match, and `reserve`/`register` share one `install` that sweeps as it inserts.
+  - The two terms are mutation-checked against each other, which matters here: an earlier version
+    of the retry test dropped the invitation and so passed on the liveness term alone. It now
+    holds the inbox live, so only the `CSeq` term can carry it.
+- **Round 1 also corrected three claims that were not true**, which is the part worth remembering:
+  `serve` answered 481 to any request `Dialog::matches` rejected, and `matches` is false for
+  anything with no `To` tag — so a request that named *no* dialog was told the dialog it named did
+  not exist (now 486 Busy Here for a second INVITE, §21.4.24, which states the one-call contract
+  in the peer's own vocabulary); `DispatchCounts::total` claimed every refusal while the 400 and
+  482 branches counted nothing (two new fields); and the `OutOfDialog` doc implied an application
+  could answer a routed CANCEL, which nothing in sipx can — `S-23` is that gap, filed off this
+  story.
+- **The dispatcher's briefing about RFC 3311 §5.2 was wrong and the code is right.** A concurrent
+  dispatcher does *not* make rules 1 and 2 reachable: `serve` awaits `call.handle(..)` inside the
+  `select!` arm body rather than as a branch, so it is not cancellable by a sibling, and `handle`
+  takes `&mut Call`. Routing parallelises *across* calls, which is orthogonal to one call's
+  `Negotiation`. What does leave one non-idle across a handle boundary is an abandoned exchange,
+  and `timeout(d, serve(..))` and `select!{ _ = serve(..) => .., _ = shutdown => .. }` both
+  produce one in production while leaving the `Call` alive. Both refusals are covered on that
+  path; the reasoning is in `docs/specs/call-dispatch.md` §8.
 - **One window this does not close**, deliberately: `dial` returns only once the 2xx has arrived,
   so a BYE that overtakes the application's `Calls::register` draws a 481. Closing it needs the
   `Call-ID` known before the INVITE is sent, which is a change to `dial`'s surface this story does
