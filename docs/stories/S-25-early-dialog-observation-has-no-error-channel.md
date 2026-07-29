@@ -95,6 +95,11 @@ discovering it as a log line — or not at all, if no 2xx ever arrives.
   `status` stays `partial`, for what it was already partial for (no MKI, no key lifetimes, no
   session parameters, no `RTP/SAVPF`).
 - Gate: `./scripts/gate.py` → 18 steps, all green.
+- Re-verified after the interruption, on the same branch. The failing-first run against the
+  merge-base `call.rs` with only the tests added reproduces exactly what is recorded above —
+  `update.rs:1768:29: the withdrawal of the invitation never arrived` — and the no-description
+  guard passes there. All 16 `tests/update.rs` tests pass with the change, and the gate's 18
+  steps are green on the real run; the line above was written before one.
 
 ## Notes
 - Found by `M-29` while wiring RFC 4568 §5.1.3 into `sipx-call`. It could not fix this within its
