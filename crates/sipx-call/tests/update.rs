@@ -718,13 +718,12 @@ async fn allow_lists_update_on_the_invite_and_on_its_responses() {
     );
 
     // And the 2xx, which is where a UAC learns it.
-    const CALL_ID: &str = "update-7@sipx";
     let (callee_endpoint, mut callee_incoming) = endpoint().await;
     let (peer_endpoint, _peer_incoming) = endpoint().await;
     let callee_addr = callee_endpoint.local_addr();
     let mut responses = peer_endpoint
         .send(
-            raw_invite(&peer_endpoint, CALL_ID, &sdp(40000, 0, "PCMU")),
+            raw_invite(&peer_endpoint, "update-7@sipx", &sdp(40000, 0, "PCMU")),
             Target::udp(callee_addr),
         )
         .await

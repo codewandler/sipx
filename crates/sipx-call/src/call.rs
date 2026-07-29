@@ -417,7 +417,7 @@ impl Call {
     /// Do whatever the session timer's deadline asked for (RFC 4028 §10).
     ///
     /// For the refresher that is an UPDATE or a re-INVITE — whichever the peer's `Allow` says
-    /// it can take (§7.4, see [`Self::refresh_session`]); for the other side it is a BYE,
+    /// it can take (§7.4); for the other side it is a BYE,
     /// because nothing arrived and the far end is presumed gone. Calling this early is harmless
     /// — it re-reads the deadline and does nothing if it has not passed.
     pub async fn on_session_deadline(&mut self) -> Result<()> {
