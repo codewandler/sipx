@@ -31,17 +31,21 @@
 //! ```
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bytes::Bytes;
 use sipx_sip::build::ResponseBuilder;
+use sipx_sip::transaction::TransactionKey;
 use sipx_sip::{HeaderName, Method, Request, StatusCode};
 use sipx_transport::{Handle, Incoming};
 use tokio::sync::mpsc;
 
-use crate::call::token;
+use crate::call::{Call, token};
 use crate::dialog::{Dialog, cseq_number, from_tag, to_tag};
+use crate::error::{Error, Result};
+use crate::event::{CallEvents, EndCause, EventSink};
 
 /// How many requests one call's inbox holds before the dispatcher sheds for it.
 ///
@@ -67,24 +71,19 @@ pub enum Dispatched {
     /// decides can be missed.
     Invitation(Invitation),
     /// A request outside any dialog whose method this stack advertises but that matched no
-    /// route: an OPTIONS ping, or a CANCEL for an invitation this dispatcher never issued.
+    /// route: an OPTIONS ping.
     ///
     /// Surfaced rather than refused because the `Allow` a 405 would carry
-    /// ([`sipx_sip::update::ALLOW`]) names them, and answering 405 to a method the same message
+    /// ([`sipx_sip::update::ALLOW`]) names it, and answering 405 to a method the same message
     /// says is supported tells the peer two different things at once. What answers an OPTIONS is
     /// a user agent (`sipx_ua::Agent::answer`), which the call framework does not have.
     ///
-    /// A CANCEL for an invitation that *is* routed does not come here: it belongs to that
-    /// transaction, so it goes to that call's inbox like everything else with its key.
-    ///
-    /// **Nothing then answers it, and that is worth being exact about rather than implying
-    /// otherwise.** sipx has no UAS half of CANCEL anywhere: there is no 200 for the CANCEL, no
-    /// 487 for the INVITE it cancels, and no way for an application holding an
-    /// [`Invitation`] to learn it was cancelled. The CANCEL reaches the inbox and stops there;
-    /// the caller's INVITE transaction sits in Proceeding until its own timer, and an
-    /// application that answers afterwards leaves both ends in a call the caller tried to give
-    /// up on. Story `S-23` is the fix; this routing is only what stops it being lost as well as
-    /// unanswered.
+    /// **A CANCEL never arrives here** (`S-23`). It is the one advertised method the dispatcher
+    /// can place itself, because RFC 3261 §9.2 says exactly what to do with it and both halves of
+    /// the answer are the dispatcher's to give: the `200 OK` on the CANCEL's own transaction, and
+    /// the `487 Request Terminated` on the INVITE transaction it withdraws. One that matches no
+    /// pending INVITE transaction is answered `481` rather than handed over, because there is
+    /// nothing an application could usefully decide about a transaction this stack does not have.
     OutOfDialog(Incoming),
 }
 
@@ -92,14 +91,23 @@ pub enum Dispatched {
 ///
 /// The inbox exists before the application has decided anything, and that is the point. The ACK
 /// to our own 2xx can arrive before `answer` has returned, so a route installed only once a
-/// [`Call`](crate::Call) existed would have nowhere to put it.
+/// [`Call`] existed would have nowhere to put it.
 ///
 /// Dropping this without answering releases the route: the next request for that dialog is
 /// answered as an unknown one rather than queued for a call that will never exist.
+///
+/// It is also what a CANCEL for this INVITE ends (RFC 3261 §9.2). The dispatcher answers the
+/// CANCEL itself — [`is_cancelled`](Self::is_cancelled) and [`events`](Self::events) are how an
+/// application finds out, and [`answer`](Self::answer) is how it is stopped from accepting an
+/// invitation the caller has already withdrawn.
 #[derive(Debug)]
 pub struct Invitation {
     incoming: Incoming,
     requests: mpsc::Receiver<Incoming>,
+    /// Shared with the dispatcher's table: the INVITE server transaction a CANCEL names.
+    pending: Arc<Pending>,
+    /// Handed out once by [`Self::events`], as [`Call::events`](crate::Call::events) does.
+    events: Option<CallEvents>,
 }
 
 impl Invitation {
@@ -109,11 +117,173 @@ impl Invitation {
         &self.incoming
     }
 
+    /// Whether the caller withdrew this invitation before it was answered (RFC 3261 §9.2).
+    ///
+    /// True from the moment the dispatcher has answered a matching CANCEL, which is also the
+    /// moment it sent the `487` that ended the INVITE transaction. There is nothing left to
+    /// accept: [`Self::answer`] refuses with [`Error::InvitationCancelled`] from here on.
+    ///
+    /// This is the poll. [`Self::events`] is the push, and an application that is *ringing* wants
+    /// that one — it has to be told to stop, not remember to ask.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.pending.is_cancelled()
+    }
+
+    /// This invitation's event stream, handed out exactly once.
+    ///
+    /// Returns `None` on every call after the first, the same contract
+    /// [`Call::events`](crate::Call::events) has and for the same reason: there is one consumer
+    /// by construction rather than a value a second reader could be cloned from.
+    ///
+    /// Exactly one event is ever emitted on it —
+    /// [`CallEvent::Ended`](crate::CallEvent::Ended)`(`[`EndCause::RemoteCancel`]`)`, when the
+    /// caller gives up. An invitation that is *answered* produces no event here: it becomes a
+    /// [`Call`], which has a stream of its own that starts with `Answered`.
+    #[must_use]
+    pub fn events(&mut self) -> Option<CallEvents> {
+        self.events.take()
+    }
+
+    /// Answer this invitation, unless the caller has already withdrawn it.
+    ///
+    /// [`crate::answer`] with two things the free function cannot know, both of which come from
+    /// the invitation owning the INVITE's server transaction:
+    ///
+    /// - It fails with [`Error::InvitationCancelled`] once a CANCEL has ended the transaction,
+    ///   rather than putting a `200` on a transaction that already carried a `487`.
+    /// - It records that a final response has gone out, which is what makes a CANCEL arriving
+    ///   afterwards the no-op RFC 3261 §9.2 requires instead of a teardown.
+    ///
+    /// The `To` tag is the invitation's own, so the `200` accepting it and the `200` answering a
+    /// late CANCEL agree on one, which is §9.2's `SHOULD`.
+    ///
+    /// Prefer this to [`crate::answer`] on anything a [`Dispatcher`] surfaced. The free function
+    /// still works and still answers correctly — it simply cannot tell the dispatcher what it
+    /// did, so a CANCEL that arrives around it is judged on the transaction's last known state.
+    pub async fn answer(&self, endpoint: &Handle, media_address: IpAddr) -> Result<Call> {
+        // Handed down rather than taken here, so that the invitation is taken immediately before
+        // the `200` leaves rather than before the work that builds it — every step of which can
+        // fail with nothing sent, and an invitation taken by one of those is one no CANCEL can
+        // end. `answer_negotiated` documents the placement.
+        crate::call::answer_tagged(
+            endpoint,
+            &self.incoming,
+            media_address,
+            self.pending.tag(),
+            Some(&|| self.pending.claim()),
+        )
+        .await
+    }
+
     /// Split into the INVITE and the inbox, ready for
     /// [`answer`](crate::answer) and [`serve`](crate::serve).
+    ///
+    /// What is given up is the cancellation state: [`Self::is_cancelled`] and [`Self::answer`] go
+    /// with it. The dispatcher keeps answering CANCELs for this transaction either way — the
+    /// table owns that, not this handle — so what is lost is the application's view of it, which
+    /// is why this is the call to make *after* answering rather than instead of it.
     #[must_use]
     pub fn into_parts(self) -> (Incoming, mpsc::Receiver<Incoming>) {
         (self.incoming, self.requests)
+    }
+}
+
+/// One INVITE server transaction the dispatcher surfaced, and what RFC 3261 §9.2 needs to end it.
+///
+/// Shared between the [`Invitation`] the application holds and the dispatcher's table, because
+/// both have half the question: the dispatcher sees the CANCEL arrive, the application decides
+/// whether the invitation was answered first, and §9.2's rule is about which of those happened.
+#[derive(Debug)]
+struct Pending {
+    /// The INVITE's own server transaction — where the `487` goes.
+    ///
+    /// Not the CANCEL's. The whole difficulty of §9.2 is that the answer is two responses on two
+    /// transactions, and a stack that keeps only one key can only ever send one of them.
+    transaction: TransactionKey,
+    /// The INVITE, which the `487` is built from.
+    request: Request,
+    /// The `To` tag every response this side sends about this invitation carries (§9.2).
+    tag: String,
+    /// The route this invitation reserved, kept only so a finished one can be swept.
+    ///
+    /// A transaction whose call has dropped its inbox is gone as far as anything here is
+    /// concerned, and the table would otherwise hold its INVITE for the life of the dispatcher.
+    route: mpsc::Sender<Incoming>,
+    state: Mutex<State>,
+}
+
+/// Where an invitation is, and where its one event goes.
+///
+/// One mutex over both because they change together: the transition to `Cancelled` *is* the
+/// emission of `Ended`, and a reader that saw one without the other would see a cancelled
+/// invitation nobody was told about, or a report of an end that had not happened yet.
+#[derive(Debug)]
+struct State {
+    phase: Phase,
+    events: EventSink,
+}
+
+/// The three states RFC 3261 §9.2 distinguishes, and the only three it needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// No final response has been sent. A CANCEL ends it.
+    Ringing,
+    /// A final response has been sent. §9.2: "if it has already sent a final response ... the
+    /// CANCEL request has no effect" — BYE is what ends what was answered.
+    Answered,
+    /// A CANCEL ended it, and the `487` has gone out. It cannot be answered.
+    Cancelled,
+}
+
+impl Pending {
+    fn tag(&self) -> &str {
+        &self.tag
+    }
+
+    /// The state, whether or not a previous holder panicked.
+    ///
+    /// The same reasoning as [`Calls::lock`]: the critical section is a field write and a
+    /// non-blocking send, so a poisoned lock cannot mean a half-made transition — and refusing to
+    /// answer a CANCEL because some unrelated task unwound would be the worse failure.
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.lock().phase == Phase::Cancelled
+    }
+
+    /// Take the invitation for a final response of our own.
+    ///
+    /// Marked *before* the `200` is built rather than after it is sent, and the asymmetry is
+    /// deliberate: a CANCEL that arrives mid-answer must not draw a `487` chasing a `200` down
+    /// the wire, which is the one ordering that leaves the caller and the callee disagreeing
+    /// about whether there is a call. The other way round — an answer that then fails — costs
+    /// the caller a CANCEL that says `200` and ends nothing, which its own Timer B resolves.
+    fn claim(&self) -> Result<()> {
+        let mut state = self.lock();
+        if state.phase == Phase::Cancelled {
+            return Err(Error::InvitationCancelled);
+        }
+        state.phase = Phase::Answered;
+        Ok(())
+    }
+
+    /// End the invitation, if it has not already answered.
+    ///
+    /// Returns whether the `487` is owed — that is, whether this call was the transition. §9.2
+    /// asks for it only "if the transaction for the original request still exists", and both
+    /// things that make it not exist come through here: an answer, and an earlier CANCEL whose
+    /// retransmission this is.
+    fn cancel(&self) -> bool {
+        let mut state = self.lock();
+        if state.phase != Phase::Ringing {
+            return false;
+        }
+        state.phase = Phase::Cancelled;
+        state.events.end(EndCause::RemoteCancel);
+        true
     }
 }
 
@@ -132,7 +302,11 @@ pub struct DispatchCounts {
     /// retransmits it after Timer H and the dialog it would have completed is not reaped unless
     /// RFC 4028 session timers happen to be running. This is the one that leaks calls.
     pub acks: u64,
-    /// In-dialog requests answered `481 Call/Transaction Does Not Exist` (RFC 3261 §12.2.2).
+    /// Requests answered `481 Call/Transaction Does Not Exist`.
+    ///
+    /// Two kinds, counted together because they are one fact — something named a dialog or a
+    /// transaction this endpoint does not have: an in-dialog request for no live call (RFC 3261
+    /// §12.2.2), and a CANCEL matching no pending INVITE transaction (§9.2).
     pub unmatched: u64,
     /// Out-of-dialog requests answered `405 Method Not Allowed` (RFC 3261 §8.2.1).
     pub unsupported: u64,
@@ -211,9 +385,25 @@ struct Route {
 /// The routing table, and the counters that describe what missed it.
 #[derive(Debug)]
 struct Table {
-    routes: Mutex<HashMap<RouteKey, Route>>,
+    routes: Mutex<Routing>,
     counts: Counters,
     queue: usize,
+}
+
+/// Two indexes over the same set of calls, under one lock.
+///
+/// They answer different questions and are keyed differently on purpose. `by_dialog` answers
+/// "which call does this request belong to", which SIP keys on the dialog. `invites` answers "which
+/// transaction does this CANCEL name", which RFC 3261 §9.2 keys on the transaction and nothing
+/// else. Serving the second from the first would mean matching a CANCEL by `Call-ID`, which §9.2
+/// does not do — see [`Dispatcher::cancel`].
+#[derive(Debug, Default)]
+struct Routing {
+    /// Where each live call's in-dialog requests go.
+    by_dialog: HashMap<RouteKey, Route>,
+    /// Every INVITE server transaction this dispatcher has surfaced and not yet swept, keyed by
+    /// [`TransactionKey::for_cancelled_invite`]'s answer for the CANCEL that would name it.
+    invites: HashMap<TransactionKey, Arc<Pending>>,
 }
 
 #[derive(Debug, Default)]
@@ -260,7 +450,7 @@ impl Calls {
     /// Registering a dialog that already has a route replaces it, and the previous inbox stops
     /// receiving.
     pub fn register(&self, dialog: &Dialog) -> mpsc::Receiver<Incoming> {
-        self.install(RouteKey::of_dialog(dialog), None)
+        self.install(RouteKey::of_dialog(dialog), None).1
     }
 
     /// Stop routing to this dialog.
@@ -268,13 +458,13 @@ impl Calls {
     /// Rarely needed — dropping the inbox does the same thing lazily — but explicit when an
     /// application tears a call down without dropping the receiver it was serving from.
     pub fn forget(&self, dialog: &Dialog) {
-        self.lock().remove(&RouteKey::of_dialog(dialog));
+        self.lock().by_dialog.remove(&RouteKey::of_dialog(dialog));
     }
 
     /// How many calls are currently routed.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.lock().len()
+        self.lock().by_dialog.len()
     }
 
     /// Whether no call is routed at all.
@@ -321,19 +511,53 @@ impl Calls {
     /// it, so a poisoned lock cannot mean a half-updated table — and refusing to route the rest
     /// of an endpoint's calls because one unrelated task unwound would be a far worse failure
     /// than the one poisoning guards against.
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RouteKey, Route>> {
+    fn lock(&self) -> MutexGuard<'_, Routing> {
         self.0.routes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The sender for a route, if there is one. Cloned rather than borrowed so the lock is not
     /// held across the send that follows.
     fn sender(&self, key: &RouteKey) -> Option<mpsc::Sender<Incoming>> {
-        self.lock().get(key).map(|route| route.tx.clone())
+        self.lock().by_dialog.get(key).map(|route| route.tx.clone())
     }
 
-    /// Reserve a route for a call that does not exist yet, and take its inbox.
-    fn reserve(&self, key: RouteKey, invite_cseq: Option<u32>) -> mpsc::Receiver<Incoming> {
-        self.install(key, invite_cseq)
+    /// The INVITE transaction a CANCEL names, if this dispatcher has it (RFC 3261 §9.2).
+    ///
+    /// Cloned out of the table rather than borrowed, because answering a CANCEL takes two `await`
+    /// points and holding a `std::sync::Mutex` across one of those is how a routing table stops
+    /// routing.
+    fn pending_invite(&self, key: &TransactionKey) -> Option<Arc<Pending>> {
+        self.lock().invites.get(key).map(Arc::clone)
+    }
+
+    /// Reserve a route for an invitation that does not exist yet, and remember its INVITE
+    /// transaction so a CANCEL naming it can be answered (RFC 3261 §9.2).
+    ///
+    /// The transaction is keyed by [`TransactionKey::from_request`] over the *received* INVITE
+    /// rather than by [`Incoming::key`], so that both sides of the eventual comparison are derived
+    /// from a request the transport has already applied `received` and `rport` to. `Incoming::key`
+    /// is kept too, but for responding rather than for matching.
+    fn reserve(
+        &self,
+        key: RouteKey,
+        incoming: &Incoming,
+    ) -> (mpsc::Receiver<Incoming>, Arc<Pending>, CallEvents) {
+        let (tx, rx) = self.install(key, cseq_number(&incoming.request.headers));
+        let (events, stream) = EventSink::new();
+        let pending = Arc::new(Pending {
+            transaction: incoming.key.clone(),
+            request: incoming.request.clone(),
+            tag: token(),
+            route: tx,
+            state: Mutex::new(State {
+                phase: Phase::Ringing,
+                events,
+            }),
+        });
+        if let Some(matched) = TransactionKey::from_request(&incoming.request) {
+            self.lock().invites.insert(matched, Arc::clone(&pending));
+        }
+        (rx, pending, stream)
     }
 
     /// Put a route in the table, replacing whatever was there, and sweep the dead on the way.
@@ -341,16 +565,33 @@ impl Calls {
     /// A call that has ended dropped its inbox, so its route is dead weight until something
     /// arrives for it. Sweeping on the operations that are already taking the lock keeps a
     /// long-lived dispatcher from accumulating them.
-    fn install(&self, key: RouteKey, invite_cseq: Option<u32>) -> mpsc::Receiver<Incoming> {
+    ///
+    /// An INVITE transaction is swept with the route it reserved, and only then: a CANCEL for an
+    /// invitation that has been answered still has to draw the `200` of RFC 3261 §9.2, and that
+    /// invitation is long past being a `Dispatched::Invitation` by the time it arrives.
+    fn install(
+        &self,
+        key: RouteKey,
+        invite_cseq: Option<u32>,
+    ) -> (mpsc::Sender<Incoming>, mpsc::Receiver<Incoming>) {
         let (tx, rx) = mpsc::channel(self.0.queue);
-        let mut routes = self.lock();
-        routes.retain(|_, route| !route.tx.is_closed());
-        routes.insert(key, Route { tx, invite_cseq });
-        rx
+        let mut routing = self.lock();
+        routing.by_dialog.retain(|_, route| !route.tx.is_closed());
+        routing
+            .invites
+            .retain(|_, pending| !pending.route.is_closed());
+        routing.by_dialog.insert(
+            key,
+            Route {
+                tx: tx.clone(),
+                invite_cseq,
+            },
+        );
+        (tx, rx)
     }
 
     fn remove(&self, key: &RouteKey) {
-        self.lock().remove(key);
+        self.lock().by_dialog.remove(key);
     }
 
     /// Whether this INVITE is a merged copy of one already accepted (RFC 3261 §8.2.2.2).
@@ -367,8 +608,8 @@ impl Calls {
     /// left for a second copy to be merged with — and treating one as live would let a refused
     /// invitation poison its key for every later attempt from the same peer.
     fn is_merged(&self, key: &RouteKey, cseq: Option<u32>) -> bool {
-        let routes = self.lock();
-        routes.get(key).is_some_and(|route| {
+        let routing = self.lock();
+        routing.by_dialog.get(key).is_some_and(|route| {
             !route.tx.is_closed() && cseq.is_some() && route.invite_cseq == cseq
         })
     }
@@ -403,7 +644,7 @@ impl Dispatcher {
             endpoint,
             incoming,
             calls: Calls(Arc::new(Table {
-                routes: Mutex::new(HashMap::new()),
+                routes: Mutex::new(Routing::default()),
                 counts: Counters::default(),
                 queue: queue.max(1),
             })),
@@ -473,8 +714,22 @@ impl Dispatcher {
             // `From` tag, one higher `CSeq`. It reserves the key afresh, replacing a route whose
             // invitation has been answered and abandoned; anything still holding that inbox stops
             // receiving, which is what it already was.
-            let requests = self.calls.reserve(key, cseq);
-            return Some(Dispatched::Invitation(Invitation { incoming, requests }));
+            let (requests, pending, events) = self.calls.reserve(key, &incoming);
+            return Some(Dispatched::Invitation(Invitation {
+                incoming,
+                requests,
+                pending,
+                events: Some(events),
+            }));
+        }
+
+        // Before the route lookup, because a CANCEL does not belong to a *dialog* — it belongs to
+        // the INVITE transaction whose branch it carries (RFC 3261 §9.1), which may well be an
+        // invitation nobody has answered and so a call that does not exist yet. Routing it by key
+        // would put it in an inbox where the two responses §9.2 owes could not be sent from.
+        if incoming.request.method == Method::Cancel {
+            self.cancel(&incoming).await;
+            return None;
         }
 
         if let Some(sender) = self.calls.sender(&key) {
@@ -522,6 +777,75 @@ impl Dispatcher {
                 .await;
                 None
             }
+        }
+    }
+
+    /// Answer a CANCEL — both halves of RFC 3261 §9.2, or the 481 that says there was nothing to
+    /// cancel.
+    ///
+    /// **The matching is §9.2's and not an approximation of it.** A CANCEL names the transaction
+    /// it withdraws by carrying that request's topmost `Via` branch (§9.1), so the match is the
+    /// server transaction match of §17.2.3 — branch, sent-by, and the method of the transaction
+    /// being cancelled — which is exactly what
+    /// [`TransactionKey::for_cancelled_invite`] builds. In particular the `Call-ID` is *not* part
+    /// of it: a table keyed on that would answer a CANCEL for the wrong branch of a dialog it
+    /// happens to know, which is a stack that stops ringing when it should not have.
+    ///
+    /// The answer is two responses on two transactions, and that is the part that is easy to get
+    /// half-right:
+    ///
+    /// 1. `200 OK` on the CANCEL's own transaction — a MUST, and unconditional. It is sent even
+    ///    when the INVITE has already been answered, because it says "I got your CANCEL", not "I
+    ///    stopped".
+    /// 2. `487 Request Terminated` on the INVITE transaction it withdraws, and only "if the
+    ///    transaction for the original request still exists". A final response already sent means
+    ///    it does not, and §9.2 is explicit that the CANCEL then has no effect — BYE is the
+    ///    request for ending a call that was answered.
+    ///
+    /// Both carry the invitation's `To` tag, which is §9.2's `SHOULD` that the two agree.
+    ///
+    /// One term is added to §9.2's own, and it is §9.1's rather than an invention: a CANCEL "MUST
+    /// have the same `Call-ID`, `To`, `From` and `CSeq` as the INVITE", so one whose dialog
+    /// identifiers disagree with the transaction its branch names cannot be a legitimate CANCEL
+    /// for it. Every well-formed CANCEL passes the check, which is what makes it free; what it
+    /// costs an off-path attacker is that guessing or observing a branch is no longer enough to
+    /// stop somebody else's phone ringing, since the sent-by in a `Via` is the attacker's to
+    /// write.
+    async fn cancel(&self, incoming: &Incoming) {
+        let matched = TransactionKey::for_cancelled_invite(&incoming.request)
+            .and_then(|key| self.calls.pending_invite(&key))
+            .filter(|pending| RouteKey::of(&pending.request) == RouteKey::of(&incoming.request));
+        let Some(pending) = matched else {
+            // §9.2: "If the UAS did not find a matching transaction for the CANCEL according to
+            // the procedure above, it SHOULD respond to the CANCEL with a 481." Not dropped, and
+            // not the 405 an unadvertised method would draw — the method is fine, the transaction
+            // is the thing that is not here.
+            self.calls.counted(Kind::Unmatched);
+            self.refuse(incoming, 481, "Call/Transaction Does Not Exist", None)
+                .await;
+            return;
+        };
+
+        self.answer_request(
+            &incoming.key,
+            &incoming.request,
+            200,
+            "OK",
+            None,
+            Some(pending.tag()),
+        )
+        .await;
+
+        if pending.cancel() {
+            self.answer_request(
+                &pending.transaction,
+                &pending.request,
+                487,
+                "Request Terminated",
+                None,
+                Some(pending.tag()),
+            )
+            .await;
         }
     }
 
@@ -586,24 +910,50 @@ impl Dispatcher {
         reason: &'static str,
         extra: Option<(HeaderName, Bytes)>,
     ) {
+        self.answer_request(
+            &incoming.key,
+            &incoming.request,
+            status,
+            reason,
+            extra,
+            None,
+        )
+        .await;
+    }
+
+    /// Answer a request on a named transaction, with a named `To` tag.
+    ///
+    /// Separate from [`Self::refuse`] because RFC 3261 §9.2 needs both of the things that method
+    /// takes for granted to be chosen: the `487` goes on the *INVITE's* transaction rather than
+    /// the one the request in hand arrived on, and both of the responses it owes carry the
+    /// invitation's tag rather than a fresh one each.
+    async fn answer_request(
+        &self,
+        key: &TransactionKey,
+        request: &Request,
+        status: u16,
+        reason: &'static str,
+        extra: Option<(HeaderName, Bytes)>,
+        tag: Option<&str>,
+    ) {
         let Some(code) = StatusCode::new(status) else {
             return;
         };
-        let built = ResponseBuilder::to_request(&incoming.request, code, reason)
+        let built = ResponseBuilder::to_request(request, code, reason)
             .and_then(|builder| match extra {
                 Some((name, value)) => builder.header(name, value),
                 None => Ok(builder),
             })
-            .and_then(|builder| with_to_tag(builder, &incoming.request));
+            .and_then(|builder| with_to_tag(builder, request, tag));
         let response = match built {
             Ok(builder) => builder.build(),
             Err(error) => {
-                tracing::warn!(%error, status, "could not build the refusal for a request");
+                tracing::warn!(%error, status, "could not build the response for a request");
                 return;
             }
         };
-        if let Err(error) = self.endpoint.respond(&incoming.key, response).await {
-            tracing::warn!(%error, status, "could not send the refusal for a request");
+        if let Err(error) = self.endpoint.respond(key, response).await {
+            tracing::warn!(%error, status, "could not send the response for a request");
         }
     }
 }
@@ -613,9 +963,15 @@ impl Dispatcher {
 /// RFC 3261 §8.2.6.2: every response but a 100 must have one, and an out-of-dialog request
 /// arrives without it. A refusal with no tag is a response a peer is entitled to discard, which
 /// would turn a considered answer back into the silence this whole path exists to remove.
+///
+/// `tag` names one rather than minting one. Only §9.2's pair of responses passes it: the `200` for
+/// a CANCEL and the `487` for the INVITE it withdraws are two responses about one invitation, and
+/// the section asks that they carry the same tag. Everything else is a one-off refusal with no
+/// second response to agree with, and takes a fresh token.
 fn with_to_tag(
     builder: sipx_sip::build::ResponseBuilder,
     request: &Request,
+    tag: Option<&str>,
 ) -> std::result::Result<sipx_sip::build::ResponseBuilder, sipx_sip::error::BuildError> {
     if to_tag(&request.headers).is_some() {
         return Ok(builder);
@@ -623,9 +979,10 @@ fn with_to_tag(
     let Some(to) = request.headers.value(&HeaderName::To) else {
         return Ok(builder);
     };
+    let tag = tag.map_or_else(token, str::to_owned);
     // Appending works in both forms of the header: after `>` in a name-addr, and after a bare
     // addr-spec, where the semicolon starts a header parameter (RFC 3261 §20).
-    let value = format!("{};tag={}", String::from_utf8_lossy(&to), token());
+    let value = format!("{};tag={tag}", String::from_utf8_lossy(&to));
     builder.set_header(&HeaderName::To, Bytes::from(value))
 }
 

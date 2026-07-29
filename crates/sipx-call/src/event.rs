@@ -23,6 +23,12 @@
 //!   incoming INVITE onward and will produce it, and because adding a variant after the fact is
 //!   exactly the kind of wire-breaking change §4 of the contract spec warns about.
 //!
+//! One stream here is not a call's: [`Invitation`](crate::Invitation) hands out a [`CallEvents`]
+//! too, and its only event is `Ended(EndCause::RemoteCancel)` — an invitation that was withdrawn
+//! before it could become a call (`S-23`, RFC 3261 §9.2). It is the same type deliberately. A host
+//! that is ringing and a host that is talking both need to be told the thing ended and why, and
+//! giving the pre-answer half a channel of its own would mean two vocabularies for one question.
+//!
 //! `PlaybackFinished` and `RecordingFinished` are emitted by [`Call::play`](crate::Call::play)
 //! and [`Call::record_until_idle`](crate::Call::record_until_idle). `M-17` added the *control*
 //! half of playback — a queue, stopping, interrupting on a digit — and reports completion
@@ -128,6 +134,21 @@ pub enum EndCause {
     LocalHangup,
     /// The far end sent a BYE.
     RemoteBye,
+    /// The far end gave up before this side answered, and sent a CANCEL (RFC 3261 §9.2).
+    ///
+    /// The one cause that belongs to an invitation rather than to a [`Call`](crate::Call), and it
+    /// is why [`Invitation`](crate::Invitation) has an event stream of its own: an application
+    /// that is ringing has to be *told* to stop, and polling
+    /// [`Invitation::is_cancelled`](crate::Invitation::is_cancelled) is not being told.
+    ///
+    /// Distinct from [`Self::RemoteBye`] on purpose, even though both are the far end ending
+    /// things. A BYE ends a call that was answered and may have carried media; a CANCEL ends one
+    /// that never was, so there is no call to report duration or quality for and nothing to send
+    /// a BYE of one's own about. On the wire vocabulary of
+    /// [`docs/specs/app-contract.md`](../../../docs/specs/app-contract.md) §5.3 both are the
+    /// `remote` cause; the distinction is kept here because this enum is what a host in-process
+    /// matches on, and collapsing it would make "stop ringing" indistinguishable from "hang up".
+    RemoteCancel,
     /// The call was refused with a status, rather than answered and later ended.
     ///
     /// The direction is worth being exact about: this is the contract's `reject` *instruction*
