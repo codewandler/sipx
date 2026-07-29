@@ -120,7 +120,9 @@ impl Transport {
     /// Case-insensitive: ABNF string literals are, and RFC 5245 — which this grammar is inherited
     /// from — printed its own examples in lower case.
     pub fn parse(token: &str) -> Option<Self> {
-        token.eq_ignore_ascii_case(Self::Udp.as_str()).then_some(Self::Udp)
+        token
+            .eq_ignore_ascii_case(Self::Udp.as_str())
+            .then_some(Self::Udp)
     }
 }
 
@@ -142,7 +144,9 @@ impl Priority {
 
     /// The priority with this value, if it is in range.
     pub fn new(value: u32) -> Option<Self> {
-        (Self::MIN.0..=Self::MAX.0).contains(&value).then_some(Self(value))
+        (Self::MIN.0..=Self::MAX.0)
+            .contains(&value)
+            .then_some(Self(value))
     }
 
     /// Read a `priority` production.
@@ -472,6 +476,7 @@ impl Pacing {
     ///
     /// §5.5: "both agents will use the larger of the indicated values". The slower agent wins,
     /// because pacing exists to protect whichever end has less to spend.
+    #[must_use]
     pub fn agreed(self, other: Self) -> Self {
         Self(self.0.max(other.0))
     }
@@ -531,5 +536,397 @@ mod tests {
             })
         );
         assert!(parsed.extensions.is_empty());
+    }
+
+    /// A privacy-preserving agent writes `0.0.0.0`/`::` and port 9 rather than reveal the
+    /// address behind the NAT (RFC 8839 §5.1). It is ordinary, and it must not look malformed.
+    #[test]
+    fn a_masked_related_address_parses() {
+        for line in [
+            "1 1 UDP 1694498815 192.0.2.3 45664 typ srflx raddr 0.0.0.0 rport 9",
+            "1 1 UDP 1694498815 2001:db8::3 45664 typ relay raddr :: rport 9",
+        ] {
+            let parsed = Candidate::parse(line).expect("a masked related address is well-formed");
+            assert_eq!(parsed.to_value(), line);
+            assert_eq!(parsed.related.expect("kept").port, 9);
+        }
+    }
+
+    /// A host candidate carries no `raddr`/`rport`, and must not grow one on the way out.
+    #[test]
+    fn a_host_candidate_round_trips_without_a_related_address() {
+        let line = "1 2 UDP 2130706430 192.0.2.1 5001 typ host";
+        let parsed = Candidate::parse(line).expect("parses");
+        assert_eq!(parsed.related, None);
+        assert_eq!(parsed.component, ComponentId::RTCP);
+        assert_eq!(parsed.to_value(), line);
+    }
+
+    /// RFC 8839 §5.1 says unknown `cand-extension` pairs are ignored. Ignoring one is not the
+    /// same as deleting it: sipx re-offers descriptions, and a peer's extension has to reach the
+    /// far end intact rather than be quietly dropped by the element in the middle.
+    #[test]
+    fn an_unknown_candidate_extension_survives() {
+        let line = "3 1 UDP 2130706431 192.0.2.1 8998 typ host generation 0 network-id 4";
+        let parsed = Candidate::parse(line).expect("an unknown extension is not an error");
+        assert_eq!(
+            parsed.extensions,
+            vec![
+                ("generation".to_owned(), "0".to_owned()),
+                ("network-id".to_owned(), "4".to_owned()),
+            ]
+        );
+        assert_eq!(parsed.to_value(), line);
+    }
+
+    /// The extensions follow `raddr`/`rport` on the way out whatever order they arrived in, so
+    /// the line sipx writes matches the grammar even when the peer's did not.
+    #[test]
+    fn extensions_are_written_after_the_related_address() {
+        let parsed = Candidate::parse(
+            "1 1 UDP 100 192.0.2.1 1 typ srflx ufrag 8hhY raddr 192.0.2.9 rport 2",
+        )
+        .expect("parses");
+        assert_eq!(
+            parsed.to_value(),
+            "1 1 UDP 100 192.0.2.1 1 typ srflx raddr 192.0.2.9 rport 2 ufrag 8hhY"
+        );
+    }
+
+    /// The range check is load-bearing, not defensive. `1*10DIGIT` admits `4294967295`, and RFC
+    /// 8445 §6.1.2.3's pair priority overflows a `u64` on it — see `docs/specs/ice.md` §6.2.
+    #[test]
+    fn a_priority_the_grammar_admits_but_the_range_forbids_is_rejected() {
+        assert_eq!(
+            Priority::parse("1694498815").map(Priority::get),
+            Some(1_694_498_815)
+        );
+        assert_eq!(Priority::parse("2147483647"), Some(Priority::MAX));
+        assert_eq!(Priority::parse("1"), Some(Priority::MIN));
+
+        // Ten digits, so the grammar is satisfied; 2^31 - 1 is not.
+        assert_eq!(
+            Priority::parse("4294967295"),
+            None,
+            "u32::MAX is not a priority"
+        );
+        assert_eq!(Priority::parse("2147483648"), None, "one past 2^31 - 1");
+        assert_eq!(Priority::parse("0"), None, "§5.1 says positive");
+        assert_eq!(Priority::parse("-1"), None);
+        assert_eq!(Priority::parse(""), None);
+
+        // And the whole line goes with it, rather than the priority being clamped to something
+        // plausible: a candidate whose priority sipx invented would be ordered wrongly against
+        // the far end's copy of the same checklist.
+        assert_eq!(
+            Candidate::parse("1 1 UDP 4294967295 192.0.2.1 8998 typ host"),
+            None
+        );
+    }
+
+    /// Why the bound exists, asserted rather than asserted-in-a-comment. `docs/specs/ice.md` §6.2
+    /// bounds RFC 8445 §6.1.2.3's pair priority at `2^32*(2^31−1) + 2*(2^31−1) + 1` = `2^63 − 1`;
+    /// let the `1*10DIGIT` grammar's own worst case through unchecked instead and the identical
+    /// expression leaves `u64`. `M-21` computes it, and this is the reason it may.
+    #[test]
+    fn the_priority_bound_is_what_keeps_the_pair_priority_in_a_u64() {
+        let pair = |g: u64, d: u64| {
+            (1u64 << 32)
+                .checked_mul(g.min(d))
+                .and_then(|v| v.checked_add(2 * g.max(d)))
+                .and_then(|v| v.checked_add(u64::from(g > d)))
+        };
+        let max = u64::from(Priority::MAX.get());
+        let bound = (1u64 << 63) - 1;
+
+        // The extreme in-range pair. The `G > D` term is zero when both are at the ceiling, so
+        // the attained maximum is one below the bound §6.2 states rather than equal to it, and
+        // every in-range pair therefore has half a `u64` of headroom.
+        assert_eq!(pair(max, max), Some(bound - 1));
+        assert!(pair(max, max - 1).is_some_and(|priority| priority < bound));
+        assert!(pair(Priority::MIN.get().into(), max).is_some());
+
+        // `4294967295` — ten digits, so the grammar admits it, and `Priority::parse` does not.
+        // This is the value that reaches the arithmetic in a stack that skips the range check.
+        assert_eq!(Priority::parse("4294967295"), None);
+        assert_eq!(
+            pair(u64::from(u32::MAX), u64::from(u32::MAX)),
+            None,
+            "the value the range check keeps out is the value that overflows"
+        );
+    }
+
+    /// RFC 8839 §5.1: a candidate naming an FQDN or an address family the agent does not support
+    /// "MUST be ignored" — the line, not the description. Nor does a transport or a candidate
+    /// type sipx cannot check over take the rest of the stream down with it.
+    #[test]
+    fn a_candidate_sipx_cannot_use_is_ignored_and_the_description_survives() {
+        const OFFER: &str = concat!(
+            "v=0\r\n",
+            "o=- 1 1 IN IP4 192.0.2.1\r\n",
+            "s=-\r\n",
+            "c=IN IP4 192.0.2.1\r\n",
+            "t=0 0\r\n",
+            "m=audio 49170 RTP/AVP 0\r\n",
+            "a=ice-ufrag:8hhY\r\n",
+            "a=ice-pwd:asd88fgpdd777uzjYhagZg\r\n",
+            "a=candidate:1 1 UDP 2130706431 relay.example.com 8998 typ host\r\n",
+            "a=candidate:2 1 TCP 2130706431 192.0.2.1 8998 typ host tcptype active\r\n",
+            "a=candidate:3 1 UDP 2130706431 192.0.2.1 8998 typ mystery\r\n",
+            "a=candidate:4 1 UDP 2130706431 192.0.2.1 9000 typ host\r\n",
+        );
+
+        let offer = crate::parse(OFFER).expect("the description parses despite the four lines");
+        let stream = offer.media.first().expect("one stream");
+        let candidates = stream.ice_candidates();
+        assert_eq!(
+            candidates.len(),
+            1,
+            "only the last line is usable: {candidates:?}"
+        );
+        assert_eq!(candidates[0].foundation.as_str(), "4");
+
+        // Ignored is not deleted. Every line is still on the description and still goes out.
+        assert_eq!(offer.to_string_sdp(), OFFER);
+    }
+
+    /// The transport case in isolation: §5.1's `transport-extension` means a peer offering an
+    /// ICE-TCP candidate alongside UDP ones is offering something usable, so the TCP line is
+    /// accepted as well-formed and discarded rather than treated as a parse failure.
+    #[test]
+    fn a_transport_other_than_udp_is_discarded_and_udp_is_case_insensitive() {
+        assert_eq!(Transport::parse("UDP"), Some(Transport::Udp));
+        assert_eq!(Transport::parse("udp"), Some(Transport::Udp));
+        assert_eq!(Transport::parse("TCP"), None);
+        // Whatever case it arrived in, sipx writes the spelling the grammar prints.
+        let parsed = Candidate::parse("1 1 udp 100 192.0.2.1 8998 typ host").expect("parses");
+        assert_eq!(parsed.to_value(), "1 1 UDP 100 192.0.2.1 8998 typ host");
+    }
+
+    /// A line that is malformed rather than merely unsupported is ignored the same way — there
+    /// is no shape of `a=candidate` that costs the peer the whole description.
+    #[test]
+    fn a_malformed_candidate_is_ignored_rather_than_fatal() {
+        for line in [
+            "",
+            "1 1 UDP 2130706431 192.0.2.1 8998",
+            "1 1 UDP 2130706431 192.0.2.1 8998 host",
+            "1 0 UDP 2130706431 192.0.2.1 8998 typ host",
+            "1 257 UDP 2130706431 192.0.2.1 8998 typ host",
+            " 1 UDP 2130706431 192.0.2.1 99999 typ host",
+            "1 1 UDP 2130706431 192.0.2.1 8998 typ srflx raddr 192.0.2.9",
+            "1 1 UDP 2130706431 192.0.2.1 8998 typ host generation",
+            "th!s 1 UDP 2130706431 192.0.2.1 8998 typ host",
+        ] {
+            assert_eq!(Candidate::parse(line), None, "{line:?}");
+        }
+    }
+
+    /// RFC 8839 §5.2's example lines, and the rule that they are read at media level only.
+    #[test]
+    fn remote_candidates_name_one_address_per_component() {
+        let one = RemoteCandidate::parse_list("1 192.0.2.3 45664").expect("parses");
+        let two = RemoteCandidate::parse_list("2 192.0.2.3 45665").expect("parses");
+        assert_eq!(one[0].component, ComponentId::RTP);
+        assert_eq!(two[0].component, ComponentId::RTCP);
+        assert_eq!(RemoteCandidate::to_value(&one), "1 192.0.2.3 45664");
+
+        // Several may share one line, which is what the `0*(SP remote-candidate)` is for.
+        let both =
+            RemoteCandidate::parse_list("1 192.0.2.3 45664 2 192.0.2.3 45665").expect("parses");
+        assert_eq!(both.len(), 2);
+        assert_eq!(
+            RemoteCandidate::to_value(&both),
+            "1 192.0.2.3 45664 2 192.0.2.3 45665"
+        );
+
+        // All or nothing: §5.2 requires a value for each component, so half a line would claim a
+        // selected pair for one component and silently drop the other.
+        assert_eq!(
+            RemoteCandidate::parse_list("1 192.0.2.3 45664 2 192.0.2.3"),
+            None
+        );
+        assert_eq!(RemoteCandidate::parse_list(""), None);
+    }
+
+    /// RFC 8839 §5.4's own example values, and the length bounds — which are asymmetric on
+    /// purpose: 32 characters is what sipx may send, 256 is what it must accept.
+    #[test]
+    fn credentials_are_short_to_send_and_long_to_accept() {
+        let credentials =
+            Credentials::new("8hhY", "asd88fgpdd777uzjYhagZg").expect("§5.4's example");
+        assert_eq!(credentials.ufrag(), "8hhY");
+        assert_eq!(credentials.pwd(), "asd88fgpdd777uzjYhagZg");
+
+        let long_ufrag = "u".repeat(33);
+        let long_pwd = "p".repeat(200);
+        assert_eq!(
+            Credentials::new(&long_ufrag, "asd88fgpdd777uzjYhagZg"),
+            None,
+            "33 sent"
+        );
+        assert!(
+            Credentials::received(&long_ufrag, &long_pwd).is_some(),
+            "up to 256 must be accepted"
+        );
+        assert_eq!(Credentials::received("u".repeat(257), &long_pwd), None);
+        assert_eq!(Credentials::received(&long_ufrag, "p".repeat(257)), None);
+
+        // Below the grammar's floor, at either end.
+        assert_eq!(Credentials::received("8hh", "asd88fgpdd777uzjYhagZg"), None);
+        assert_eq!(Credentials::received("8hhY", "tooshort"), None);
+        // `ice-char` is ALPHA / DIGIT / "+" / "/" and nothing else.
+        assert_eq!(
+            Credentials::received("8h:Y", "asd88fgpdd777uzjYhagZg"),
+            None
+        );
+    }
+
+    fn description(session: &str, media: &str) -> crate::session::SessionDescription {
+        let text = format!(
+            "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n{session}m=audio 49170 RTP/AVP 0\r\n{media}"
+        );
+        crate::parse(&text).expect("parses")
+    }
+
+    /// RFC 8839 §5.4: both levels are allowed and the media level wins. The pair is taken from
+    /// one level or the other and never mixed — a fragment from the `m=` line with a password
+    /// from the session line authenticates nothing, and fails looking like a network fault.
+    #[test]
+    fn media_level_credentials_win_and_are_never_mixed_with_the_session_level() {
+        let both = description(
+            "a=ice-ufrag:sess\r\na=ice-pwd:sessionpasswordlongenough\r\n",
+            "a=ice-ufrag:8hhY\r\na=ice-pwd:asd88fgpdd777uzjYhagZg\r\n",
+        );
+        let stream = both.media.first().expect("one stream");
+        let credentials = both.ice_credentials_for(stream).expect("present");
+        assert_eq!(credentials.ufrag(), "8hhY");
+        assert_eq!(credentials.pwd(), "asd88fgpdd777uzjYhagZg");
+
+        // Session level is a default for a stream that declares nothing.
+        let inherited = description(
+            "a=ice-ufrag:sess\r\na=ice-pwd:sessionpasswordlongenough\r\n",
+            "",
+        );
+        let stream = inherited.media.first().expect("one stream");
+        let credentials = inherited.ice_credentials_for(stream).expect("inherited");
+        assert_eq!(credentials.ufrag(), "sess");
+        assert_eq!(credentials.pwd(), "sessionpasswordlongenough");
+
+        // Half a pair at the media level falls back to the session's *pair*, not to its password.
+        let half = description(
+            "a=ice-ufrag:sess\r\na=ice-pwd:sessionpasswordlongenough\r\n",
+            "a=ice-ufrag:8hhY\r\n",
+        );
+        let stream = half.media.first().expect("one stream");
+        let credentials = half.ice_credentials_for(stream).expect("falls back whole");
+        assert_eq!(credentials.ufrag(), "sess");
+        assert_eq!(credentials.pwd(), "sessionpasswordlongenough");
+
+        // No ICE credentials anywhere means the stream is not doing ICE (§5.4).
+        let none = description("", "");
+        let stream = none.media.first().expect("one stream");
+        assert_eq!(none.ice_credentials_for(stream), None);
+    }
+
+    /// Each attribute is read at the level RFC 8839 defines it at, and nowhere else. A
+    /// media-level `a=ice-lite` does not make a peer lite — §5.3 puts it at session level, and
+    /// honouring it anywhere would let one stream change how the whole agent is treated.
+    #[test]
+    fn each_attribute_is_read_only_at_the_level_that_defines_it() {
+        let right = description("a=ice-lite\r\na=ice-pacing:100\r\n", "a=ice-mismatch\r\n");
+        let stream = right.media.first().expect("one stream");
+        assert!(right.is_ice_lite());
+        assert_eq!(right.ice_pacing(), Pacing::from_millis(100));
+        assert!(stream.ice_mismatch());
+
+        let wrong = description("a=ice-mismatch\r\n", "a=ice-lite\r\na=ice-pacing:100\r\n");
+        let stream = wrong.media.first().expect("one stream");
+        assert!(!wrong.is_ice_lite(), "§5.3 puts ice-lite at session level");
+        assert!(
+            !stream.ice_mismatch(),
+            "§5.3 puts ice-mismatch at media level"
+        );
+        assert_eq!(
+            wrong.ice_pacing(),
+            Pacing::DEFAULT,
+            "§5.5 puts ice-pacing at session level"
+        );
+
+        // `candidate` and `remote-candidates` are media-level (§5.1, §5.2): a session-level copy
+        // is not a candidate for any stream.
+        let stray = description(
+            "a=candidate:1 1 UDP 2130706431 192.0.2.1 8998 typ host\r\na=remote-candidates:1 192.0.2.3 45664\r\n",
+            "",
+        );
+        let stream = stray.media.first().expect("one stream");
+        assert!(stream.ice_candidates().is_empty());
+        assert!(stream.ice_remote_candidates().is_empty());
+    }
+
+    /// §5.5: absent means 50 ms, and the two agents use the larger of what they asked for — the
+    /// slower end wins, because pacing protects whichever end has less to spend.
+    #[test]
+    fn pacing_defaults_to_50_and_the_larger_value_is_agreed() {
+        let silent = description("", "");
+        assert_eq!(silent.ice_pacing(), Pacing::DEFAULT);
+        assert_eq!(Pacing::DEFAULT.millis(), 50);
+        assert_eq!(Pacing::parse("100"), Some(Pacing::from_millis(100)));
+        assert_eq!(Pacing::parse("banana"), None);
+        assert_eq!(
+            Pacing::DEFAULT.agreed(Pacing::from_millis(200)),
+            Pacing::from_millis(200)
+        );
+        assert_eq!(
+            Pacing::from_millis(200).agreed(Pacing::DEFAULT),
+            Pacing::from_millis(200)
+        );
+        // An unreadable value takes the default rather than nothing: §5.5 gives the absent case
+        // a value, and a pacing of "unknown" has no meaning to give the checks.
+        let broken = description("a=ice-pacing:not-a-number\r\n", "");
+        assert_eq!(broken.ice_pacing(), Pacing::DEFAULT);
+    }
+
+    /// §5.6: option tags may appear at both levels, and both count. Unlike the credentials this
+    /// is a union — an agent does not stop supporting an extension because one `m=` line named a
+    /// different one.
+    #[test]
+    fn option_tags_are_read_from_both_levels() {
+        let offer = description(
+            "a=ice-options:ice2\r\n",
+            "a=ice-options:rtp+ecn trickle\r\n",
+        );
+        let stream = offer.media.first().expect("one stream");
+        assert_eq!(offer.ice_options().collect::<Vec<_>>(), vec![ICE2]);
+        assert_eq!(
+            stream.ice_options().collect::<Vec<_>>(),
+            vec!["rtp+ecn", "trickle"]
+        );
+        assert_eq!(
+            offer.ice_options_for(stream).collect::<Vec<_>>(),
+            vec![ICE2, "rtp+ecn", "trickle"]
+        );
+        // A tag outside `1*ice-char` is dropped and its neighbours are kept: the attribute is a
+        // list of independent capabilities.
+        let ragged = description("a=ice-options:ice2 b@d trickle\r\n", "");
+        assert_eq!(
+            ragged.ice_options().collect::<Vec<_>>(),
+            vec![ICE2, "trickle"]
+        );
+    }
+
+    /// A foundation is `1*32ice-char`, and the bound is kept by the type rather than by whoever
+    /// remembers to check it.
+    #[test]
+    fn a_foundation_keeps_its_bounds() {
+        assert_eq!(
+            Foundation::new("2").map(|f| f.as_str().to_owned()),
+            Some("2".to_owned())
+        );
+        assert!(Foundation::new(&"a".repeat(32)).is_some());
+        assert!(Foundation::new(&"a".repeat(33)).is_none());
+        assert!(Foundation::new("").is_none());
+        assert!(Foundation::new("a b").is_none());
+        assert!(Foundation::new("+/").is_some(), "ice-char includes + and /");
     }
 }

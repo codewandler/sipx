@@ -20,6 +20,7 @@ pub mod parse;
 pub mod session;
 
 pub use answer::{Capabilities, answer, negotiate_direction};
+pub use ice::{Candidate, CandidateType, ComponentId, Credentials, Foundation, Priority};
 pub use parse::parse;
 pub use session::{
     Address, Attribute, Connection, Direction, MediaDescription, Origin, SessionDescription, Timing,
