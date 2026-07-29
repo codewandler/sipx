@@ -9,6 +9,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The RFC registry's grain is decided, and now enforced (`X-15`)** — the registry stays at one row
+  per RFC. Requirement-grain rows were considered against the alternative and declined, with the
+  reasoning and the reopen triggers recorded in `docs/designs/rfc-registry-grain.md`.
+  - **The key set is closed.** `tomllib` accepts any key, and a checker that reads only the keys it
+    knows walks past the rest — so a finer-grained row could land in the source, never reach the
+    generated table, and go unmentioned. It now fails `rfc-report.py --check` by name.
+  - **`docs/rfc/README.md` states the schema as a contract**, so a downstream registry can inherit
+    kernel rows by reference at a pinned version instead of restating the claims.
+  - `scripts/test-rfc-report.py` covers the checker itself — previously the thing that verifies
+    every compliance claim had no tests of its own.
 - **Mute and unmute (`M-18`)** — `Call::mute`, `Call::unmute` and `Call::is_muted` stop a call
   contributing audio to the far end without renegotiating anything. Unlike hold, this is a purely
   local gate: no re-INVITE is sent, the SDP direction is unchanged, and the far end's own hold

@@ -2,7 +2,7 @@
 id: X-15
 title: Consider requirement-grain rows in the RFC registry
 pillar: Build
-status: backlog
+status: done
 priority:
 design: docs/designs/rfc-registry-grain.md
 epic: conformance
@@ -18,15 +18,17 @@ RFC — and if so, adopt the requirement-grain extension a downstream project ha
 the same schema.
 
 ## Acceptance
-- [ ] A decision is recorded either way. "Per-RFC grain is the right measurement for a kernel" is
+- [x] A decision is recorded either way. "Per-RFC grain is the right measurement for a kernel" is
       a perfectly good answer and closes this story.
-- [ ] If adopted: an entry may carry `[[rfc.requirement]]` rows — section, requirement reference,
-      applicability, status, proving tests — and `rfc-report.py --check` verifies them the way it
-      verifies the per-RFC claims today.
-- [ ] If adopted: the four coverage kinds (syntax, behavioral, role, interop) are reported
-      separately, because "parses it" and "behaves per it" are the distinction the current
-      parse-only status already half-makes.
-- [ ] Either way, the downstream registry can keep inheriting kernel rows by reference at a pinned
+- [x] *(n/a — not adopted.)* If adopted: an entry may carry `[[rfc.requirement]]` rows — section,
+      requirement reference, applicability, status, proving tests — and `rfc-report.py --check`
+      verifies them the way it verifies the per-RFC claims today. Instead the key set is closed, so
+      such a row now fails the check loudly rather than being silently ignored.
+- [x] *(n/a — not adopted.)* If adopted: the four coverage kinds (syntax, behavioral, role, interop)
+      are reported separately, because "parses it" and "behaves per it" are the distinction the
+      current parse-only status already half-makes. Three of the four already exist as `syntax` vs
+      `implemented` and `roles`; only interop is absent.
+- [x] Either way, the downstream registry can keep inheriting kernel rows by reference at a pinned
       version, so no claim is made twice.
 
 ## Progress
