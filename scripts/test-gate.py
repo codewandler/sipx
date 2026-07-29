@@ -305,7 +305,7 @@ class TheDiskGuard(unittest.TestCase):
 
     def test_a_disk_below_the_threshold_refuses_to_start(self):
         """The failing-first assertion: too little disk has to stop the gate, not colour it red."""
-        required = self.gate.required_free_bytes(0)
+        required = self.gate.REQUIRED_FREE_BYTES
         problem = self.gate.disk_problem(free=required - 1, required=required)
         self.assertIsNotNone(
             problem,
@@ -323,21 +323,21 @@ class TheDiskGuard(unittest.TestCase):
 
     def test_ample_free_space_is_not_a_problem(self):
         """The guard must cost a healthy machine nothing, or it gets deleted rather than fixed."""
-        required = self.gate.required_free_bytes(0)
+        required = self.gate.REQUIRED_FREE_BYTES
         self.assertIsNone(self.gate.disk_problem(free=required, required=required))
         self.assertIsNone(self.gate.disk_problem(free=required * 4, required=required))
 
     # -- the threshold is measured -------------------------------------------------------------
 
     def test_the_threshold_covers_every_size_ever_measured(self):
-        """Derived from measurements, not chosen. That is the story's word: "rather than guessed"."""
+        """Derived from measurements, not chosen — the story's words are "rather than guessed"."""
         self.assertTrue(self.gate.MEASURED_GATE_TARGET_GIB, "no measurement backs the threshold")
         largest = max(self.gate.MEASURED_GATE_TARGET_GIB.values())
         self.assertGreaterEqual(
-            self.gate.required_free_bytes(0),
+            self.gate.REQUIRED_FREE_BYTES,
             largest * self.GIB,
-            "the guard would let a cold run start with less disk than a cold run has actually "
-            "been measured to consume, which is the guess this story exists to remove",
+            "the guard would let a run start with less disk than a run has actually been measured "
+            "to consume, which is the guess this story exists to remove",
         )
 
     def test_every_measurement_says_where_it_came_from(self):
@@ -347,22 +347,16 @@ class TheDiskGuard(unittest.TestCase):
                 self.assertTrue(what.strip(), "a measurement has no description")
                 self.assertGreater(gib, 0)
 
-    def test_an_existing_target_reduces_what_the_run_still_needs(self):
-        """Otherwise the guard refuses runs that would have succeeded, which is its own false red.
+    def test_the_between_steps_floor_is_lower_than_the_starting_threshold(self):
+        """A run already under way has paid for the steps it has run; it must not be re-charged.
 
-        The integration gate runs on a warm `target/`. If the threshold ignored that, it would
-        refuse to start with 20 GiB free on a tree that needed 3, and a guard that cries wolf is
-        removed by the next person who is in a hurry.
+        The floor exists for the other half of that evening: a disk another worktree fills while
+        this gate is halfway through. Checking the full requirement again between steps would stop
+        runs that were about to finish, and a guard that cries wolf is removed by the next person
+        who is in a hurry.
         """
-        cold = self.gate.required_free_bytes(0)
-        warm = self.gate.required_free_bytes(self.gate.COLD_GATE_TARGET_BYTES)
-        self.assertLess(warm, cold, "an already-built target/ bought the run nothing")
-        self.assertGreater(warm, 0, "a warm target/ was treated as needing no disk at all")
-        self.assertEqual(
-            warm,
-            self.gate.required_free_bytes(self.gate.COLD_GATE_TARGET_BYTES * 4),
-            "a target/ larger than any measured cold build asked for less than the headroom",
-        )
+        self.assertLess(self.gate.FLOOR_FREE_BYTES, self.gate.REQUIRED_FREE_BYTES)
+        self.assertGreater(self.gate.FLOOR_FREE_BYTES, 0, "the floor lets a run continue at 0 free")
 
     # -- telling infrastructure from a red step ------------------------------------------------
 
