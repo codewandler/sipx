@@ -9,6 +9,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The connection pool key is generated from the type that defines it (`X-24`)** —
+  `docs/specs/sip-transport.md` §8 said the pool was keyed by `(transport, remote address)`.
+  `ConnectionKey` has carried four fields since `T-23`, and the sentence had already been wrong
+  once before that: it went stale when the verified TLS identity joined the key and stayed stale
+  when the WebSocket resource did.
+  - **§8 is now the only place the key is enumerated**, in a region rendered from the struct's
+    fields and doc comments by `scripts/check-pool-key.py` — `--check` in the gate, `--update` to
+    regenerate. `sip-tls.md` §5 and `sip-quic.md` §6 link to it instead of restating it.
+  - **§5 keeps the argument for *why* each field is in the key**, which is the half no generator
+    can write and the reason "point at one definition" was not sufficient on its own.
+  - A field added to `ConnectionKey` now fails the build before it reaches a reader, and the
+    failure names the command that fixes it.
 - **A WebSocket target names its own path and port (`T-23`)** — `Target::at_path` says where on a
   server SIP lives. RFC 7118 §5 registers a subprotocol and fixes neither the resource nor the
   port, so a server is entitled to serve SIP at `/ws` on its own HTTP server — and sipx asked for

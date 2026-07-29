@@ -2,7 +2,7 @@
 id: X-24
 title: Stop the specs describing a connection pool key that has moved on twice
 pillar: Build
-status: in-progress
+status: done
 priority: 5
 design:
 epic:

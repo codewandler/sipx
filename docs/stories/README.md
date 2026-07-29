@@ -41,7 +41,6 @@ _None._
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-23 — Find out why an interop call test times out one run in five](X-23-interop-call-test-flake.md) · Build · found by T-23 — a flake that a suite exists to be believed cannot afford
-- [X-24 — Stop the specs describing a connection pool key that has moved on twice](X-24-pool-key-spec-drift.md) · Build · sip-transport.md still says the key is two fields; it has been four since T-23
 
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
@@ -177,6 +176,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-20 — Let a caller take the digest primitives without taking a runtime](X-20-digest-without-a-runtime.md) · Build · sipx-ua pulls tokio unconditionally, so sans-IO code cannot use S-16's Authenticator
 - [X-21 — Make the timer queue generic over its instant](X-21-timer-queue-generic-over-its-instant.md) · Build · the queue documents clock-independence its signature contradicts · additive, breaks nothing
 - [X-22 — Put the MSRV check in the documented gate](X-22-msrv-in-the-documented-gate.md) · Build · CI has an msrv job the gate does not name, so a green local gate lied through two releases
+- [X-24 — Stop the specs describing a connection pool key that has moved on twice](X-24-pool-key-spec-drift.md) · Build · sip-transport.md still says the key is two fields; it has been four since T-23
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
