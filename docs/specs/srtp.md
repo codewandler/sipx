@@ -939,13 +939,32 @@ the code — `M-28` records that a crate-level capability with no caller at the 
 shipped feature in `docs/compliance.md`, and that this is the third instance of the pattern
 (`M-22`/`M-27` for ICE, RFC 3311 for UPDATE, and this) rather than an accident of one subsystem.
 
-What closing it needs, and why it is more than one row of wiring: an application-facing keying
-choice on `DialOptions` and on the answering side; a certificate and fingerprint minted per call
-(`dtls::openssl::Identity`, which lives behind the off-by-default `dtls` feature, so `sipx-call`
-gains a feature and a build without it must still refuse the choice rather than downgrade); and the
-handshake itself run **on the media port** before the session starts — which means the bound socket
-has to be lent to a blocking DTLS stack and taken back, for each of the six places a `MediaPort` is
-started. Until all of that lands, a selector that produced a `UDP/TLS/RTP/SAVP` offer would be worse
-than none: the call would connect and carry unkeyed audio under a protocol token that promises
-otherwise, which is rule 6 and rule 7 of §7 broken at once. **Owner: `M-28`, still open for the code
-half.**
+**A selector on its own would be worse than none**, which is why the code half is not half-landed.
+An offer carrying `UDP/TLS/RTP/SAVP` that this side cannot key produces a call that connects and
+carries audio in the clear under a protocol token promising otherwise — rules 6 and 7 of §7 broken
+at once, and the failure is silent at both ends. Whatever lands has to reach keys, or not offer.
+
+What reaching keys needs, none of which is a row of wiring:
+
+1. **A keying choice the application makes**, on `DialOptions` for the offerer and on the answering
+   side for the UAS, defaulting to today's behaviour.
+2. **A certificate minted per call.** `dtls::openssl::Identity::generate` is the only source of one
+   and it lives behind the off-by-default `dtls` feature, so `sipx-call` gains a feature — and the
+   build *without* it must refuse the choice rather than fall back to SDES or to nothing, because
+   falling back is the downgrade rule 4 forbids, chosen by a build flag instead of by a peer.
+3. **The handshake on the media port, before the session starts.** `MediaPort` owns its socket and
+   `openssl::Session` needs a blocking `std::net::UdpSocket` it may `connect`, so the socket has to
+   be lent out and taken back at each of the five places `sipx-call` starts one — `establish`,
+   `Early::accept`, `answer_early`, `answer_negotiated` and `Call::move_media_if_changed`. A
+   connected socket also fixes the peer address for the life of the stream, which is the same
+   address symmetric RTP exists to correct, so the two interact.
+4. **An ACK that does not wait for it.** This is the finding that decided the split. `dial_with`
+   calls `establish` *before* sending the ACK, under a stated invariant — "from here the far end
+   believes a dialog exists, so every path must acknowledge". A DTLS handshake inside `establish`
+   holds the ACK for as long as the handshake takes, and against a peer that will not start its
+   own handshake until the ACK arrives that is a deadlock resolved only by the handshake timeout:
+   both ends wait, the call fails, and the SDP was perfectly correct. Keying therefore has to move
+   after the acknowledgement, which changes the shape of the 2xx path rather than adding to it.
+
+**Owner: `M-28`, still open for the code half.** The registry correction above is done and does not
+depend on it.
