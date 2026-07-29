@@ -80,6 +80,45 @@ jobs:
       # referred to a field that only existed with its feature on. Nothing here noticed.
       - run: ./scripts/check-features.sh
 
+  # The peer list is read from the repository rather than written here, so that adding an interop
+  # peer stays what `tests/interop/README.md` promises it is: adding a profile. A matrix spelled
+  # out in this file would be a second place to remember, and the one that gets forgotten.
+  interop-peers:
+    name: interop peers
+    runs-on: ubuntu-latest
+    outputs:
+      peers: ${{ steps.list.outputs.peers }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          peers="$(./tests/interop/run.sh --list | jq -R -s -c 'split("\n")[:-1]')"
+          echo "peers=$peers" >>"$GITHUB_OUTPUT"
+          echo "interop peers: $peers"
+
+  # One job per peer, because a peer that breaks should say which peer broke. `fail-fast: false`
+  # for the same reason: the interesting result when two implementations disagree with sipx is
+  # *both* disagreements, and a cancelled sibling job hides the second one.
+  interop:
+    name: interop (${{ matrix.peer }})
+    needs: interop-peers
+    runs-on: ubuntu-latest
+    # A peer that never comes up would otherwise hold a runner for the GitHub default of six
+    # hours before anyone is told.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        peer: ${{ fromJSON(needs.interop-peers.outputs.peers) }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The tests these run are `#[ignore]`d, which is what keeps `cargo test` free of any
+      # container requirement. This job is the only thing that un-ignores them.
+      - run: ./tests/interop/run.sh --peer ${{ matrix.peer }}
+
   soak:
     name: soak
     # Scheduled only. It takes minutes, and a suite people skip is worse than one that runs.

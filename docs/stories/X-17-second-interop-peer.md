@@ -41,9 +41,30 @@ as a server — because today no independent implementation has ever answered a 
 - [ ] Failing-first test: `an_independent_user_agent_answers_a_call_sipx_placed`.
 
 ## Progress
-- Not started. `tests/interop/` has exactly one peer, and its nine tests cover registration, digest,
-  refresh, a wrong password, `OPTIONS`, three TLS cases and WebSocket framing. None of them is a
-  call, and none of them involves SDP.
+- Implemented. `tests/interop/run.sh` no longer names an image, a container or a configuration
+  directory: a peer is a directory beside it holding a `profile.sh`, and `run.sh --list` is what
+  CI's matrix is built from. Both peers were run end to end and both are green.
+- The second peer is Asterisk 20 (`andrius/asterisk:20.20.1-alpine-3.24`), chosen against the
+  criteria now recorded in `tests/interop/README.md`. Its SIP handling is PJSIP, which shares no
+  ancestry with the first peer's own parser — so a message leaving sipx is now read by two
+  parsers with no common code.
+- The eight non-WebSocket server tests passed against the second peer unchanged, first attempt.
+  `run.sh` owns the test list; a profile declares only which *roles* it can play (`server`,
+  `user-agent`), because a proxy has no dialplan and cannot answer a call.
+- `an_independent_user_agent_answers_a_call_sipx_placed` and its mirror
+  `an_independent_user_agent_places_a_call_sipx_answers` live in
+  `crates/sipx-cli/tests/interop_call.rs`. The media assertion runs in relay mode and compares
+  the µ-law bytes the peer echoed against the µ-law bytes sipx sent: the whole 600 ms clip comes
+  back byte for byte in both directions. Confirmed non-vacuous against an extension that answers
+  and stays silent — it fails on "a session was set up and nothing was heard".
+- One divergence found and filed as `T-23`: sipx's WebSocket client hardcodes the request path
+  `/`, and the second peer serves SIP over WebSocket at `/ws` on its HTTP server's own port.
+  RFC 7118 §5 fixes neither, so this is a gap in what a `Target` can express. Recorded in the
+  profile's `PEER_DIVERGES_ON` and announced on every run rather than reworded into the test.
+- Two peer defaults cost time and are written down in the README's traps: the second peer's
+  `res_pjsip` defaults to TLS 1.0, which current OpenSSL refuses outright (`openssl s_client
+  -tls1_2` fails against it too) — the same shape of trap the first peer sprang with its pinned
+  TLS 1.2 method.
 
 ## Notes
 - The interop README already states the reason this story exists better than a story can:
