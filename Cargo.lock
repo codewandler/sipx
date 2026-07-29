@@ -1673,12 +1673,16 @@ name = "sipx-media"
 version = "0.8.0"
 dependencies = [
  "bytes",
+ "hmac",
  "openssl",
  "pretty_assertions",
  "rand 0.9.5",
+ "sha1 0.10.7",
  "sipx-audio",
  "sipx-rtp",
  "sipx-sdp",
+ "sipx-transport",
+ "subtle",
  "thiserror",
  "tokio",
  "tracing",
