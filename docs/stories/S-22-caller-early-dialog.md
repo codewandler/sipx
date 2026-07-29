@@ -39,8 +39,23 @@ available to the side that placed the call and not only to the side that receive
 ## Notes
 - Found by `S-19` and confirmed by its independent review: both send-side assertions in
   `sipx_sends_an_update_in_an_early_dialog_and_in_a_confirmed_one` are UAS-role, because the UAC
-  early dialog is unreachable. `compliance.md`'s RFC 3311 row lists no roles, so nothing
-  over-claims today — but the spec prose does.
+  early dialog is unreachable. ~~`compliance.md`'s RFC 3311 row lists no roles, so nothing
+  over-claims today — but the spec prose does.~~
+- **Correction, verified twice: the registry over-claims too, and the sentence above was wrong.**
+  The RFC 3311 row is `status = "implemented"` and its note opens *"Sent and received in an early
+  dialog and a confirmed one."* An empty `roles` field does not neutralise a claim written in the
+  passive voice — that sentence reads as role-neutral and so claims for both ends something only
+  the answering end can do. Confirmed by reading the test rather than the name: the "caller" in
+  `crates/sipx-call/tests/update.rs:782` is a raw peer sending a hand-built `raw_invite`, `dial`
+  never appears in the file, and both send-side assertions go through `ring_early` and
+  `answer_early`, which are UAS handles.
+- **So the registry Acceptance item is larger than adding `uac`.** The note's first sentence has to
+  name which half works *before* the role becomes a truthful edit rather than a second over-claim
+  stacked on the first. If the caller half ever slips out of this story, the note must be corrected
+  on its own and `status: implemented` re-examined — it is not defensible for a method whose send
+  path exists in only one role.
+- The test name promises a UAC path it never exercises; it should say UAS when this story lands
+  beside it.
 - This is the natural prerequisite for the caller's half of `C-2` (early media, RFC 3960): a caller
   that cannot hold its early dialog cannot act on a session description arriving in a provisional
   either. Worth reading the two together before designing this one.
