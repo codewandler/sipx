@@ -502,24 +502,27 @@ number = 3711
 title = "The Secure Real-time Transport Protocol (SRTP)"
 layer = "media"
 status = "partial"
+spec = "docs/specs/srtp.md"
 roles = ["uac", "uas"]
 evidence = ["crates/sipx-rtp/src/srtp.rs", "crates/sipx-media/tests/srtp.rs"]
-note = "The default transform, AES_CM_128_HMAC_SHA1_80, for RTP and RTCP, with the replay window and rollover inference. Key derivation and the keystream are checked against the RFC's own Appendix B vectors. Only one transform: no AES-192/256, no f8, no null cipher, and no rekeying (the key derivation rate is fixed at zero)."
+note = "The default transform, AES_CM_128_HMAC_SHA1_80, for RTP and RTCP, with the replay window and rollover inference. Key derivation and the keystream are checked against the RFC's own Appendix B vectors, and the session authentication key against §5.2's n_a rather than against §B.3's 94-octet example — `M-25` found it keyed with the latter. Only one transform: no AES-192/256, no f8, no null cipher, and no rekeying (the key derivation rate is fixed at zero). SRTCP has no replay list, which §3.4 asks for over the SRTCP index."
 
 [[rfc]]
 number = 4568
 title = "SDP Security Descriptions for Media Streams (SDES)"
 layer = "media"
 status = "partial"
+spec = "docs/specs/srtp.md"
 roles = ["uac", "uas"]
 evidence = ["crates/sipx-sdp/src/crypto.rs", "crates/sipx-sdp/tests/srtp_negotiation.rs"]
-note = "`a=crypto` offered and answered, and **only over a secure signalling path** — §7.1 makes that a condition of use, and `Crypto::offer` returns nothing without it rather than leaving the check to every caller. No MKI, no key lifetimes, no session parameters."
+note = "`a=crypto` offered and answered, and **only over a secure signalling path** — §7.1 makes that a condition of use, and `Crypto::offer` returns nothing without it rather than leaving the check to every caller. No MKI, no key lifetimes, no session parameters. §5.1.2's tag is not echoed in the answer and §5.1.3's echo is not verified, both MUSTs; `M-25` found them and `docs/specs/srtp.md` §12.3 states what they should be."
 
 [[rfc]]
 number = 5764
 title = "DTLS Extension to Establish Keys for SRTP"
 layer = "media"
 status = "implemented"
+spec = "docs/specs/srtp.md"
 roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-media/src/dtls/mod.rs",
@@ -533,6 +536,7 @@ number = 5763
 title = "Framework for Establishing an SRTP Security Context Using DTLS"
 layer = "media"
 status = "implemented"
+spec = "docs/specs/srtp.md"
 roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-sdp/src/answer.rs",
@@ -545,6 +549,7 @@ number = 8122
 title = "Connection-Oriented Media Transport over TLS in SDP"
 layer = "media"
 status = "implemented"
+spec = "docs/specs/srtp.md"
 roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-sdp/src/fingerprint.rs",

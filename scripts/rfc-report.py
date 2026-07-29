@@ -13,6 +13,7 @@ heard of, which is the failure mode a table like this actually has.
 """
 
 import argparse
+import os.path
 import pathlib
 import re
 import sys
@@ -64,8 +65,12 @@ def known_methods() -> set[str]:
 # the generated table, and nobody is told. A registry whose claims can go missing between the
 # source and the published table is the exact failure this file was written to prevent.
 REQUIRED_KEYS = {"number", "title", "layer", "status", "evidence", "note"}
-OPTIONAL_KEYS = {"roles", "headers", "methods"}
+OPTIONAL_KEYS = {"roles", "headers", "methods", "spec"}
 LIST_KEYS = {"evidence", "roles", "headers", "methods"}
+# `spec` is the normative document for the RFC — the registry's half of AGENTS.md
+# non-negotiable 4. One path, not a list: a subsystem has one spec, and a row that named two
+# would be describing a subsystem boundary that has not been decided.
+STRING_KEYS = {"spec"}
 
 
 def schema_problems(entry) -> list[str]:
@@ -97,6 +102,9 @@ def schema_problems(entry) -> list[str]:
         value = entry[key]
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
             problems.append(f"{where} has {key!r}, which must be a list of strings")
+    for key in sorted(STRING_KEYS & entry.keys()):
+        if not isinstance(entry[key], str):
+            problems.append(f"{where} has {key!r}, which must be a single path")
 
     return problems
 
@@ -131,6 +139,13 @@ def check(entries) -> list[str]:
         for path in entry.get("evidence", []):
             if not (ROOT / path).exists():
                 problems.append(f"{where} cites {path}, which does not exist")
+
+        # Held to the same standard as evidence. A `spec` that has been moved or renamed leaves
+        # the table reading as though the subsystem is specified and the link going nowhere,
+        # which is worse than an empty cell.
+        spec = entry.get("spec")
+        if isinstance(spec, str) and not (ROOT / spec).exists():
+            problems.append(f"{where} names the spec {spec}, which does not exist")
 
         # An entry that claims to be implemented and points at nothing is an assertion.
         if entry.get("status") in {"implemented", "partial"} and not entry.get("evidence"):
@@ -185,6 +200,21 @@ def stale_counts(tracked: int) -> list[str]:
                     f"{name} says {stated} RFCs; the registry has {tracked}"
                 )
     return problems
+
+
+def spec_link(entry) -> str:
+    """The `Spec` cell: a link to the normative document, relative to the report.
+
+    The registry stores a repository-relative path so that `--check` can test it for existence
+    from anywhere; the table needs one relative to `docs/compliance.md`, which is where a reader
+    clicks it. The two are not the same string, and writing the repository-relative one into the
+    table produces a link that is dead everywhere except the repository root.
+    """
+    spec = entry.get("spec")
+    if not isinstance(spec, str) or not spec:
+        return "—"
+    href = os.path.relpath(ROOT / spec, REPORT.parent).replace(os.path.sep, "/")
+    return f"[{pathlib.PurePosixPath(spec).stem}]({href})"
 
 
 def render(entries) -> str:
@@ -243,13 +273,19 @@ def render(entries) -> str:
         if not rows:
             continue
         rows.sort(key=lambda e: (STATUS_ORDER.index(e["status"]), e["number"]))
-        out += [f"## {LAYER_TITLE[layer]}", "", "| RFC | Title | Status | Roles | Notes |", "|---|---|---|---|---|"]
+        out += [
+            f"## {LAYER_TITLE[layer]}",
+            "",
+            "| RFC | Title | Status | Roles | Spec | Notes |",
+            "|---|---|---|---|---|---|",
+        ]
         for entry in rows:
             roles = ", ".join(entry.get("roles", [])) or "—"
             link = f"[{entry['number']}](https://www.rfc-editor.org/rfc/rfc{entry['number']})"
             note = entry.get("note", "").replace("|", "\\|")
             out.append(
-                f"| {link} | {entry['title']} | {STATUS_LABEL[entry['status']]} | {roles} | {note} |"
+                f"| {link} | {entry['title']} | {STATUS_LABEL[entry['status']]} | {roles} |"
+                f" {spec_link(entry)} | {note} |"
             )
         out.append("")
 
@@ -263,6 +299,12 @@ def render(entries) -> str:
         "",
         "**Partial always says what is missing.** An entry that cannot name the gap should be",
         "`none` until somebody works out what it is.",
+        "",
+        "**The Spec column is the normative contract, not the evidence.** Where it is filled in,",
+        "that document says what sipx must do about the RFC — RFC citations, types, state, and the",
+        "byte-level vectors the tests are derived from — and the entry's status is measured against",
+        "it. An em dash means the subsystem has no spec yet, which for a non-trivial one is a gap",
+        "worth a story rather than a fact about the table.",
         "",
     ]
     return "\n".join(out) + "\n"

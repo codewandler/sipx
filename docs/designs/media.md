@@ -23,16 +23,20 @@ almost certainly want a different document as well:
 |---|---|
 | Why the media stack is built this way; what was tried and rejected | this record |
 | What ICE must do, exactly — priority formula, pair states, role conflict, timers, vectors | [`specs/ice.md`](../specs/ice.md) |
+| What SRTP and its two keyings must do, exactly — the transform, SDES, DTLS-SRTP, which keying wins, vectors | [`specs/srtp.md`](../specs/srtp.md) |
 | What playback, mute and the bridge owe an application, and why they behave as they do | [`designs/app-sdk.md`](app-sdk.md) — `M-17` and `M-18` are recorded there, not here |
 | Why the protocol core does no I/O at all | [`vision.md`](../vision.md) principle 1, [`designs/sip-core.md`](sip-core.md) |
 | What a `Call` is, and where dialogs live | [`designs/call.md`](call.md) |
 
-There is **no spec for SRTP, SDES or DTLS-SRTP.** ICE is the only media subsystem with one. The
-normative detail for `M-14` and `M-15` lives in those stories' `## Progress` and in the module
-documentation of [`sipx_rtp::srtp`](../../crates/sipx-rtp/src/srtp.rs),
-[`sipx_sdp::crypto`](../../crates/sipx-sdp/src/crypto.rs) and
-[`sipx_media::dtls`](../../crates/sipx-media/src/dtls/mod.rs). That is a departure from
-non-negotiable 4, and it is recorded as a gap below rather than explained away.
+**SRTP, SDES and DTLS-SRTP have a spec now** — [`specs/srtp.md`](../specs/srtp.md), written by
+`M-25`. It was written *after* `M-14` and `M-15` built them, which is the departure from
+non-negotiable 4 that `X-25` recorded here as a gap. The gap is closed and the departure is not
+retracted: writing the spec found five places where the code and the RFCs disagree — two fixed by
+`M-25`, three left open with an owner — and the first of them, a session authentication key derived
+to §B.3's example length rather than to `n_a`, was fatal to interoperating with anything that is not
+sipx and undetectable by any test in which both ends are. `specs/srtp.md` §12 is the list.
+Spec-first would have caught it before two releases shipped; that is the argument for the rule, made
+backwards.
 
 ## Why
 
@@ -428,10 +432,6 @@ and restarting an unchanged session would drop packets each time for nothing.
 - **Drift and pacing over a long call.** The send loop uses one `tokio::time::interval` with
   `MissedTickBehavior::Delay`, which prevents a burst of catch-up packets after a stall but does not
   correct accumulated drift. No story records that choice; see the gaps.
-- **SRTP and DTLS-SRTP have no spec in `docs/specs/`.** Non-negotiable 4 asks for one for every
-  non-trivial subsystem, and these two are the largest media subsystems that shipped without.
-  Everything normative about them lives in story `## Progress` sections and module docs, which is
-  exactly the arrangement `M-16` avoided for ICE by writing the spec first.
 - **The sans-IO boundary is enforced for two crates, not four.** [AGENTS.md](../../AGENTS.md)
   non-negotiable 2 names `sipx-sip` and `sipx-sdp`. `sipx-rtp` and `sipx-audio` are pure as a matter
   of fact rather than of rule, and nothing in the gate would notice a `tokio` line added to either.
@@ -469,6 +469,13 @@ or the code:
 *Why G.722 was dropped* was the third entry here when `X-25` wrote this list. It is no longer a
 gap: `X-26` took the decision rather than looking for one that was never made, and it is recorded
 under the codecs above.
+
+*SRTP and DTLS-SRTP having no spec* was a gap in the list above until `M-25` wrote
+[`specs/srtp.md`](../specs/srtp.md). Entry 3 here is not closed by it: `M-25` wrote the spec, it did
+not discover why the two stories skipped it, and `X-25` had already looked. What `M-25` did add is
+the cost of the omission rather than the reason for it — five code/RFC disagreements found on the
+first careful reading, listed in that spec's §12 — which is the more useful half of the answer if
+the question is ever asked again about a different subsystem.
 
 ## Acceptance / done
 
