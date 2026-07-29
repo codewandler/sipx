@@ -2,8 +2,7 @@
 id: X-28
 title: Make the bridge audio test deterministic under load
 pillar: Build
-status: in-progress
-priority: 4
+status: done
 design: docs/designs/media.md
 epic: conformance
 areas: [sipx-media, tests]

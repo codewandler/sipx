@@ -7,7 +7,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`record_at_least`, the counted wait for received audio (`X-28`)** — `MediaSession` and `Call`
+  both gain it. `record_until_idle(idle)` spent one duration on two different jobs: how long to
+  wait for the stream to *start*, and how long a gap means it has *ended*. Neither is a property of
+  the audio — both are properties of how fast the machine is. A caller that knows how much audio
+  the far end was given now says so, and `within` is a bound on failure rather than a window to
+  measure in.
+
 ### Fixed
+
+- **The bridge audio test is deterministic under load (`X-28`)** — it recorded **zero of 3200
+  samples** while other gates compiled, and zero is not a degraded count. Once the first frame
+  lands the rest follow at the packet rate, so a 400 ms idle gap is never reached again: the
+  recording is all-or-nothing by construction, and `0 of 3200` means recording never began. Time to
+  first frame measured 81 ms idle, 150–273 ms contended, and never under load — 400 ms was never a
+  large margin over 81 ms.
+  - **The assertion is unchanged, character for character; only the wait moved.** Loosening the
+    sample threshold until it passed would have left a test that no longer proves audio crossed the
+    bridge, which is the point of it.
+  - The sweep classified **46 wall-clock sites**: 30 converted to counted waits, 7 left because they
+    assert a recording is *empty* — where a fixed window can only make them pass — 2 left with
+    widened gaps, and 2 production sites that were already right. Every one left is annotated with
+    why at the site rather than silently.
+  - Reproduced by pinning 250 spinners to a **single core**: 10 of 12 failures before, 0 of 12
+    after, 0 of 10 at 600 spinners. Saturating all 20 cores did *not* reproduce it — CFS favours a
+    sleeper, so starving a `current_thread` runtime takes single-core contention. Worth knowing the
+    next time a "CPU load" theory does not reproduce.
+  - A second family — a fixed `sleep`, then assert a message arrived — is named but untouched: it
+    needs poll-until-condition rather than wait-for-count, and it is `X-29`.
 
 - **A live call now runs the SDES answer check (`M-29`, RFC 4568 §5.1.3)** — `M-26` built the check
   and could not reach `sipx-call`, which a concurrent story held. So the check existed, was tested,

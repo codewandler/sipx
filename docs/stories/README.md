@@ -46,7 +46,7 @@ _This is the layer applications actually program against, so it is the one that 
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
-- [X-28 — Make the bridge audio test deterministic under load](X-28-bridge-test-is-load-flaky.md) · Build · found by M-25 — it races play against a fixed 400ms record on real sockets and records zero samples under load, so it will be blamed on innocent diffs
+- [X-29 — Stop asserting after a sleep in sipx-call and sipx-transport](X-29-wall-clock-sleeps-outside-the-media-path.md) · Build · found by X-28's sweep, then confirmed by a real red gate — dns.rs:553 raced a 50ms TTL against the scheduler and failed a gate that had nothing to do with the diff being merged
 - [S-25 — Give the early-dialog loop a way to fail](S-25-early-dialog-observation-has-no-error-channel.md) · Signalling · found by M-29 — adopt_early_answer returns (), so a parse failure, a negotiation failure and a refused a=crypto in a reliable provisional are all discarded identically
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
@@ -206,6 +206,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-25 — Write the media design record the ICE stories keep citing](X-25-media-design-record.md) · Build · found by M-16 — six stories name docs/designs/media.md as their design, and it is a stub
 - [X-26 — Stop sipx-audio advertising a codec and a resampler it does not have](X-26-audio-crate-claims-codecs-it-lacks.md) · Build · found by X-25 — the published crate description promises G.722 and resampling; neither exists
 - [X-27 — Place an interop call with encrypted media](X-27-interop-never-encrypts-media.md) · Build · found by M-25 — the n_a defect shipped in v0.3.0 through v0.8.0 because nothing ever exchanged SRTP with a non-sipx peer
+- [X-28 — Make the bridge audio test deterministic under load](X-28-bridge-test-is-load-flaky.md) · Build · found by M-25 — it races play against a fixed 400ms record on real sockets and records zero samples under load, so it will be blamed on innocent diffs
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
