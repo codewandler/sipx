@@ -2,8 +2,8 @@
 id: M-19
 title: Parse and serialise the ICE attributes in SDP
 pillar: Media
-status: in-progress
-priority: 7
+status: done
+priority:
 design: docs/designs/media.md
 epic: ice
 areas: [sipx-sdp]

@@ -7,6 +7,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **RFC 8839's ICE attributes in SDP (`M-19`)** — `sipx_sdp::ice` parses and serialises
+  `candidate`, `ice-ufrag`/`ice-pwd`, `ice-options`, `ice-lite`, `ice-mismatch`,
+  `remote-candidates` and `ice-pacing`, so the rest of ICE will negotiate over a typed description
+  rather than a substring search. Pure parsing — no runtime, socket, clock read or new dependency.
+  The first of the six stories `M-16` was cut into.
+  - **The priority range check is load-bearing, not defensive.** RFC 8839's grammar is
+    `1*10DIGIT`, so `4294967295` parses, and the RFC 8445 §6.1.2.3 pair-priority arithmetic
+    overflows `u64` on it. Checked on parse, behind a private field with no public bypass.
+  - **Lenient in the right direction**: a candidate line naming an FQDN, an unsupported address
+    family or a non-UDP transport is ignored line by line while the rest of the description
+    survives byte-identically, and unknown extensions are kept and re-emitted. A parser that
+    rejected a whole description over one unusable line would break calls with legal peers.
+  - Media-level `ice-ufrag`/`ice-pwd` win over session level and are never mixed across levels.
+  - Corrects `docs/specs/ice.md` §6.2, which stated a maximum pair priority that cannot be
+    attained and put the overflow threshold one bound too early.
+
 ## [0.8.0] — 2026-07-29
 
 ### Fixed

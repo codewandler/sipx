@@ -58,7 +58,6 @@ _This is the layer applications actually program against, so it is the one that 
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 
 ### Ice
-- [M-19 — Parse and serialise the ICE attributes in SDP](M-19-ice-sdp-attributes.md) · Media · ice · RFC 8839 §5 · pure parsing; nothing else can negotiate until this exists
 - [M-20 — Encode and answer a STUN connectivity check](M-20-ice-stun-checks.md) · Media · ice · RFC 5389/5769 · carries the crate-graph decision; runs solo, it moves the lockfile
 
 ### Quic
@@ -123,6 +122,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [M-15 — Key SRTP with DTLS](M-15-dtls-srtp.md) · Media · M6 · RFC 5764 · M-14 unblocked it
 - [M-17 — Control playback — queue, stop, interrupt on digit](M-17-playback-control.md) · Media · app-sdk · after C-3 · gates the contract's gather · size S/M
 - [M-18 — Mute and unmute a call's outbound audio](M-18-mute-and-unmute.md) · Media · app-sdk · independent · size S
+- [M-19 — Parse and serialise the ICE attributes in SDP](M-19-ice-sdp-attributes.md) · Media · ice · RFC 8839 §5 · pure parsing; nothing else can negotiate until this exists
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
