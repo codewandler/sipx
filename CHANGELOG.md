@@ -7,6 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-29
+
+The release about the difference between *implemented* and *reachable*. RFC 4568's answer check
+existed, was tested, and no call ran it — now one does. DTLS-SRTP is implemented in the crates and
+reachable from no call at all, so the compliance table stops saying otherwise. And `sipx peers`
+answers a question the stack could not answer before: who is there to call.
+
 ### Added
 
 - **`sipx peers` — who is there to call (`P-5`)** — the discovery epic's first story, and
@@ -1296,7 +1303,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/codewandler/sipx/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/codewandler/sipx/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/codewandler/sipx/compare/v0.7.0...v0.8.0
 [0.1.0]: https://github.com/codewandler/sipx/releases/tag/v0.1.0
