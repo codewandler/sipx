@@ -2,7 +2,7 @@
 id: X-17
 title: Interoperate against a second independent implementation
 pillar: Build
-status: backlog
+status: done
 priority:
 design:
 epic: conformance
@@ -17,28 +17,28 @@ Prove sipx against more than one implementation it did not write, and against a 
 as a server — because today no independent implementation has ever answered a call sipx placed.
 
 ## Acceptance
-- [ ] `tests/interop/run.sh` is parameterised over the peer instead of hardcoding one image, one
+- [x] `tests/interop/run.sh` is parameterised over the peer instead of hardcoding one image, one
       container name and one configuration directory. Adding a peer must be adding a profile, not
       editing the script.
-- [ ] A second **server** peer runs the same test list as the first, unchanged. The test list is the
+- [x] A second **server** peer runs the same test list as the first, unchanged. The test list is the
       contract; if a test needs rewording per peer, that wording was hiding an assumption.
-- [ ] A second peer is chosen by criteria recorded in `tests/interop/README.md`, not by preference:
+- [x] A second peer is chosen by criteria recorded in `tests/interop/README.md`, not by preference:
       an independent lineage from the first, scriptable without interaction, obtainable in CI, and a
       licence that permits it. The point of a second peer is that it shares no code and no reading of
       the RFCs with the first.
-- [ ] A **user agent** peer answers a call sipx places and places one sipx answers, with SDP
+- [x] A **user agent** peer answers a call sipx places and places one sipx answers, with SDP
       negotiated, audio flowing and a BYE ending it. This is the gap that matters most: RFC 3264 is
       recorded as `implemented`, and every offer/answer test in the repo has sipx on both sides.
       `M-1`'s pure function has never met a foreign answerer.
-- [ ] The media assertion is real, not "a session was set up": audio sipx sends is received, and
+- [x] The media assertion is real, not "a session was set up": audio sipx sends is received, and
       audio the peer sends arrives with the payload type the negotiation chose. `M-3`'s bit-exactness
       check is the precedent, relaxed only as far as a foreign encoder forces.
-- [ ] The whole matrix runs in CI on the same `#[ignore]`d-by-default discipline, so `cargo test`
+- [x] The whole matrix runs in CI on the same `#[ignore]`d-by-default discipline, so `cargo test`
       still needs no containers.
-- [ ] Whatever the new peer disagrees with sipx about is filed as its own story with the RFC sentence
+- [x] Whatever the new peer disagrees with sipx about is filed as its own story with the RFC sentence
       that settles it — the way `X-6` handled the first round of conformance defects. This story is
       the measurement, not the fixing.
-- [ ] Failing-first test: `an_independent_user_agent_answers_a_call_sipx_placed`.
+- [x] Failing-first test: `an_independent_user_agent_answers_a_call_sipx_placed`.
 
 ## Progress
 - Implemented. `tests/interop/run.sh` no longer names an image, a container or a configuration

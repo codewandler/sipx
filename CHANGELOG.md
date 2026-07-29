@@ -9,6 +9,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A second independent interop peer, and the first foreign answer (`X-17`)** — until now every
+  interop test ran against one peer, and no implementation sipx did not write had ever answered a
+  call it placed. Both are now false.
+  - **A peer is a directory, not an edit.** `tests/interop/run.sh` names no image, container or
+    configuration directory; a peer is a directory holding a `profile.sh` that declares which roles
+    it can play. CI builds its matrix from `run.sh --list`, so adding a peer needs no CI change.
+  - **The same test list, unchanged.** The eight non-WebSocket server tests passed against the new
+    peer on the first attempt. A test that needed rewording per peer would have been hiding an
+    assumption.
+  - **The peer shares no ancestry with the first**, so a message leaving sipx is now read by two
+    parsers with no common code — chosen against criteria recorded in `tests/interop/README.md`
+    rather than by preference.
+  - **The media assertion is bytes, not liveness.** In relay mode the whole clip comes back byte
+    for byte in both directions, with every packet's payload type checked against the negotiated
+    one — `M-3`'s bit-exactness, with a foreign stack in the middle.
+  - **The one disagreement is filed, not papered over**: `T-23` records that sipx's WebSocket client
+    hardcodes the request path, with the RFC 7118 §5 sentence saying neither path nor port is fixed.
+  - The suite stays `#[ignore]`d by default, so `cargo test` still needs no containers.
 - **GRUU (`T-20`, RFC 5627)** — one *instance* of a registration becomes separately addressable: a
   URI that routes to this UA and to no other registration of the same address of record. The UA
   offers `Supported: gruu` with its instance ID, keeps the `pub-gruu` and `temp-gruu` the registrar
