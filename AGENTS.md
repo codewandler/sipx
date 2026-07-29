@@ -73,6 +73,13 @@ entry claiming implementation must cite something. **When a story changes what s
 update the registry in the same commit.** The table is linked from the README as a measurement,
 and a measurement that lags the code is worse than no table at all.
 
+`check-pool-key.py` holds `docs/specs/sip-transport.md` §8 against `ConnectionKey`, whose fields
+the section lists in a generated region. The list used to be prose in three specs and was wrong
+in one of them through two changes to the type — nobody was told, because nothing connected the
+sentence to the field. **When a story changes `ConnectionKey`, run `./scripts/check-pool-key.py
+--update` in the same commit**, and give any new field its paragraph in `sip-tls.md` §5: the
+script generates *which* fields are in the key, never *why*.
+
 `check-features.sh` is not optional garnish. `--all-features` hides a whole class of breakage:
 an optional transport that does not compile with its feature turned off is invisible until a
 downstream user turns it off, and that is exactly how `tls` came to be broken for a release.

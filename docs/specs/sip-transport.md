@@ -117,9 +117,27 @@ traffic routed through it. The default is off; a configuration flag turns it on 
 deployments where both ends are trusted. This is the security-relevant default `T-1` was asked
 to decide, and this is the decision.
 
-**[sipx]** Connections are pooled by `(transport, remote address)`, bounded (default 1024), and
-closed after an idle timeout (default 5 minutes). Eviction is least-recently-used, and a
-connection with a live transaction is never evicted.
+**[sipx] Connections are pooled by `ConnectionKey`, and this is the only place its fields are
+written down.** The table below is generated from the type by `scripts/check-pool-key.py`, and
+the gate fails when the two disagree. A hand-written list stood here instead and was wrong
+twice: once when the verified identity joined the key, and again when the WebSocket resource did
+in `T-23`. Both times a reader was told the key was two fields when it was three, then four.
+
+Why each field is in the key — which is an argument, not a list, and so is not generated — is in
+[`sip-tls.md` §5](sip-tls.md), where the two non-obvious ones come from.
+
+<!-- BEGIN generated:pool-key crates/sipx-transport/src/target.rs -->
+| Field | What it is |
+|---|---|
+| `peer` | The far end. |
+| `transport` | Which transport it speaks. |
+| `identity` | The name whose certificate was verified, for connections sipx opened over TLS. |
+| `path` | The resource the upgrade asked for, for WebSocket connections sipx opened. |
+<!-- END generated:pool-key -->
+
+**[sipx]** The pool is bounded (default 1024), and connections are closed after an idle timeout
+(default 5 minutes). Eviction is least-recently-used, and a connection with a live transaction
+is never evicted.
 
 **[sipx]** When a connection closes, every transaction bound to it is given a transport error
 rather than being left to time out. Waiting 32 seconds to discover something we already know
