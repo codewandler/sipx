@@ -9,6 +9,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **An interop call whose media is actually encrypted (`X-27`)** — the interop harness had never
+  exchanged SRTP with a peer that did not come from this repository, which is why `M-25`'s wrong
+  authentication key shipped through six releases. `crates/sipx-cli/tests/interop_srtp.rs` now
+  places a TLS-signalled call with `RTP/SAVP` against a real peer and asserts three things the
+  *far end* observed: that the negotiation chose SAVP (so the case cannot pass by degrading to the
+  cleartext call already covered), that the peer logged no authentication failure, and that the
+  audio it echoed back is the audio sipx sent.
+  - **The falsification was run, not reasoned about.** Reverting `M-25`'s one-line
+    `SESSION_AUTH_LEN` fix makes the case fail on the peer's own words — `SRTP unprotect failed …
+    because of authentication failure 10`, with the peer's media counters showing `Receive Count
+    0`. The defect this coverage exists to catch is one it demonstrably catches.
+  - A `media-security` role in `tests/interop/run.sh` runs it per peer, and CI picks it up with no
+    workflow change because the matrix already calls `run.sh --peer`. The keying axis reports all
+    three outcomes by name — peer cannot, sipx cannot, ran — so a gap is printed on every run
+    rather than being an absence.
+  - **Only SDES runs; DTLS-SRTP has no sipx side to test.** `dial` hardcodes `.with_srtp(…)` and
+    `DialOptions` carries no keying selector, so `sipx_media::dtls` and
+    `Capabilities::with_dtls_srtp` have no caller outside their own crate's tests. The harness is
+    already shaped for it and says so out loud; closing the gap is `M-28`, which also stops the
+    conformance registry claiming RFC 5763 and 5764 in the meantime.
+
 - **The application contract crate and its interpreter (`C-5`)** — a new crate,
   `sipx-app-protocol`, owning the `sipx.app.v1` types and an instruction interpreter that is a
   pure state machine: call events and an instruction program in, typed effects out. The primitive

@@ -46,7 +46,6 @@ _This is the layer applications actually program against, so it is the one that 
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
-- [X-27 — Place an interop call with encrypted media](X-27-interop-never-encrypts-media.md) · Build · found by M-25 — the n_a defect shipped in v0.3.0 through v0.8.0 because nothing ever exchanged SRTP with a non-sipx peer
 - [X-28 — Make the bridge audio test deterministic under load](X-28-bridge-test-is-load-flaky.md) · Build · found by M-25 — it races play against a fixed 400ms record on real sockets and records zero samples under load, so it will be blamed on innocent diffs
 - [S-22 — Give the caller a handle on its early dialog](S-22-caller-early-dialog.md) · Signalling · found by S-19 — sipx as caller can neither send nor receive an UPDATE while ringing
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
@@ -204,6 +203,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-24 — Stop the specs describing a connection pool key that has moved on twice](X-24-pool-key-spec-drift.md) · Build · sip-transport.md still says the key is two fields; it has been four since T-23
 - [X-25 — Write the media design record the ICE stories keep citing](X-25-media-design-record.md) · Build · found by M-16 — six stories name docs/designs/media.md as their design, and it is a stub
 - [X-26 — Stop sipx-audio advertising a codec and a resampler it does not have](X-26-audio-crate-claims-codecs-it-lacks.md) · Build · found by X-25 — the published crate description promises G.722 and resampling; neither exists
+- [X-27 — Place an interop call with encrypted media](X-27-interop-never-encrypts-media.md) · Build · found by M-25 — the n_a defect shipped in v0.3.0 through v0.8.0 because nothing ever exchanged SRTP with a non-sipx peer
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

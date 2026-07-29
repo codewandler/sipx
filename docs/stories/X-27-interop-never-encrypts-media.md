@@ -2,8 +2,7 @@
 id: X-27
 title: Place an interop call with encrypted media
 pillar: Build
-status: in-progress
-priority: 1
+status: done
 design: docs/designs/media.md
 epic: conformance
 areas: [tests, sipx-rtp, sipx-media]
@@ -33,6 +32,9 @@ defect that both ends of a sipx-to-sipx call agree on cannot pass for correct.
       honest measure of whether the new coverage would have caught it.
 
 ## Progress
+- **Closed with the first item at `[~]`, deliberately.** The SDES half is done and the defect this
+  story exists to catch is caught. The DTLS-SRTP half is not harness work at all — it is library
+  work in `sipx-call`, and it is tracked as `M-28` rather than held open here.
 - **SDES half done and proved.** `crates/sipx-cli/tests/interop_srtp.rs` places a TLS-signalled
   call with `RTP/SAVP` media against asterisk and makes three assertions, all of them the far
   end's: the negotiation actually chose SAVP (so the case cannot pass by degrading to the
