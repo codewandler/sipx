@@ -1,6 +1,6 @@
 //! A media session: RTP sockets, paced sending, and buffered receiving.
 //!
-//! Two decisions shape this.
+//! Three decisions shape this.
 //!
 //! **Symmetric RTP.** Media is sent back to where it arrives from, not to the address the SDP
 //! advertised. Behind a NAT the advertised address is a private one and the only path back is
@@ -11,6 +11,27 @@
 //! packetisation interval. Sending on a channel's readiness instead makes the packet rate
 //! depend on how fast the application produces samples, which is how a call ends up sending
 //! 200 packets per second to a jitter buffer expecting 50.
+//!
+//! **Mute substitutes silence; it does not stop the stream** ([`MediaSession::set_muted`], story
+//! `M-18`). A muted session sends exactly the packets it would have sent unmuted, on the same
+//! pacing, sequence numbers and timestamps, with the audio replaced by encoded silence. The
+//! alternative — suppressing the packets while muted — was rejected on three counts: it closes
+//! the NAT pinhole and invites a media-inactivity teardown on any path with an SBC in it; it
+//! leaves the far end's jitter buffer to restart on unmute, so the first word after it is the one
+//! that gets clipped; and it makes "muted" indistinguishable on the wire from "the far end has
+//! gone away", which is the one thing a receiver most needs to be able to tell apart.
+//!
+//! **The RFC 3550 §6 consequence, either way, is that the reports must stay truthful**, and that
+//! is what fixes *where* the gate goes rather than what it does. A sender report's packet and
+//! octet counts (§6.4.1) describe what this side put on the wire, and the far end's loss estimate
+//! is computed from the sequence numbers it received against the ones it expected. So the gate
+//! sits **before the packet is built**: what goes out is counted, what is counted went out, and
+//! the sequence space advances once per packet sent. A mute implemented one step later — building
+//! the packet, then discarding the datagram — would make this side's own reports overstate what
+//! it sent *and* manufacture a burst of apparent loss at the far end out of a caller who was
+//! merely quiet. Silence substitution keeps the numbers describing a stream that never stopped;
+//! had suppression been chosen, the same rule would have required the counters and the sequence
+//! number to stay put for the duration.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -358,6 +379,8 @@ pub struct MediaSession {
     encoded: Mutex<mpsc::Receiver<Encoded>>,
     /// Whether received packets are handed on encoded rather than decoded to samples.
     relay: Arc<AtomicBool>,
+    /// Whether this side's outbound audio is gated to silence (`M-18`).
+    muted: Arc<AtomicBool>,
     codec: Codec,
     local_addr: SocketAddr,
     samples_per_packet: usize,
@@ -530,6 +553,7 @@ impl MediaSession {
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
         let (encoded_tx, encoded_rx) = mpsc::channel::<Encoded>(256);
         let relay = Arc::new(AtomicBool::new(false));
+        let muted = Arc::new(AtomicBool::new(false));
         let (digits_tx, digits_rx) = mpsc::channel::<(Digit, Duration)>(32);
 
         let sent = Arc::new(AtomicU64::new(0));
@@ -565,6 +589,7 @@ impl MediaSession {
                 ssrc,
                 sent: Arc::clone(&sent),
                 outbound: Arc::clone(&outbound),
+                muted: Arc::clone(&muted),
                 stop: Arc::clone(&stop),
             },
         ));
@@ -617,6 +642,7 @@ impl MediaSession {
             incoming: Mutex::new(incoming_rx),
             encoded: Mutex::new(encoded_rx),
             relay,
+            muted,
             codec: config_codec,
             local_addr,
             samples_per_packet,
@@ -708,6 +734,31 @@ impl MediaSession {
     /// session starts.
     pub fn set_relay(&self, relay: bool) {
         self.relay.store(relay, Ordering::SeqCst);
+    }
+
+    /// Gate this session's outbound audio, or let it through again (`M-18`).
+    ///
+    /// Returns what the gate was set to before, so a caller that only wants to report real
+    /// transitions does not have to read the flag and then write it — two steps that race each
+    /// other when a call is muted from more than one place.
+    ///
+    /// **What muting does to the stream.** Every audio frame the send loop takes off the queue is
+    /// replaced by the same number of samples of silence, encoded in this session's own codec and
+    /// sent on its own payload type. The stream keeps its pacing, its sequence numbers and its
+    /// timestamps; what changes is only what the far end decodes. See the module documentation
+    /// for why this rather than suppressing the packets, and for the RFC 3550 §6 consequence.
+    ///
+    /// Reception is not affected in any way, and neither is DTMF: an RFC 4733 event is generated
+    /// by this endpoint on purpose, the way a keypad tone is on a handset, so it goes out muted
+    /// or not.
+    pub fn set_muted(&self, muted: bool) -> bool {
+        self.muted.swap(muted, Ordering::SeqCst)
+    }
+
+    /// Whether this session's outbound audio is gated to silence.
+    #[must_use]
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::SeqCst)
     }
 
     /// Take the next packet as it arrived, still encoded. Only ever yields under
@@ -1088,6 +1139,7 @@ struct Sending {
     ssrc: u32,
     sent: Arc<AtomicU64>,
     outbound: Arc<Outbound>,
+    muted: Arc<AtomicBool>,
     stop: Arc<Stop>,
 }
 
@@ -1098,6 +1150,7 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         ssrc,
         sent,
         outbound,
+        muted,
         stop,
     } = sending;
     let mut encoding = Encoding::for_codec(config.codec, config.channels);
@@ -1133,6 +1186,11 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         if stop.is_stopped() {
             return;
         }
+
+        // The mute gate goes here — before the packet is built, and therefore before the
+        // sequence number, the send counters and the sender report's octet count have been moved
+        // by it. See [`gated`].
+        let frame = gated(frame, &muted, config.samples_per_packet());
 
         let (packet, advance) = match &frame {
             Frame::Audio(samples) => {
@@ -1216,6 +1274,38 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         // timeline at the wrong rate, and the far end plays the call with a gap between every
         // packet.
         clock.advance(advance);
+    }
+}
+
+/// One frame as the session actually sends it: itself, or what a muted session puts in its place
+/// (`M-18`).
+///
+/// Applied *before* the packet is built, which is the part RFC 3550 §6 constrains: a mute that
+/// dropped the finished datagram at the socket instead would leave the sequence number, the send
+/// counters and the sender report's octet count (§6.4.1) all describing packets that never went
+/// out, and would open a sequence gap the far end scores as loss.
+///
+/// Audio becomes the same number of samples of silence, so the timestamp this frame advances the
+/// clock by is the one it would have advanced it by unmuted — the far end's timeline does not
+/// move under it.
+///
+/// A relayed payload ([`Frame::Encoded`], a bridge passing bytes across) becomes one packet's
+/// worth of silence in *this* session's codec. Its bytes cannot be silenced in place: they are an
+/// opaque payload in whatever the other leg negotiated, and there is nothing here that can look
+/// inside them. Substituting this session's own silence keeps the leg saying nothing rather than
+/// saying what the muted party said.
+///
+/// A telephone event passes through. It is not audio: it is generated by this endpoint on
+/// purpose, the way a keypad tone is on a handset, and a mute that swallowed keypresses would
+/// make a muted caller unable to answer an IVR.
+fn gated(frame: Frame, muted: &AtomicBool, samples_per_packet: usize) -> Frame {
+    if !muted.load(Ordering::SeqCst) {
+        return frame;
+    }
+    match frame {
+        Frame::Audio(samples) => Frame::Audio(vec![0; samples.len()]),
+        Frame::Encoded { .. } => Frame::Audio(vec![0; samples_per_packet]),
+        event @ Frame::Dtmf { .. } => event,
     }
 }
 
@@ -1775,6 +1865,119 @@ mod tests {
             g711::ulaw_encode_all(&source),
             g711::ulaw_encode_all(&recorded),
             "the audio that arrived is the audio that was sent"
+        );
+    }
+
+    /// Mute, from the receiving side (`M-18`): the far end gets every packet it would have got,
+    /// and decodes silence out of all of them. Asserting the count as well as the content is the
+    /// point — it is what distinguishes the decision that was made from the one that was not.
+    #[tokio::test]
+    async fn a_muted_session_sends_silence_rather_than_stopping() {
+        let (left, right) = pair(Codec::Pcmu).await;
+        let source = tone(800); // five packets
+
+        right.set_muted(true);
+        right.play(&source, 160).await;
+        let recorded = left.record_until_idle(Duration::from_millis(400)).await;
+
+        assert_eq!(recorded.len(), source.len(), "the stream did not stop");
+        assert!(
+            recorded.iter().all(|sample| *sample == 0),
+            "a muted session put audio on the wire"
+        );
+        // RFC 3550 §6.4.1: what we say we sent is what arrived, and the far end saw no gap in the
+        // sequence space to score as loss.
+        assert_eq!(right.packets_sent(), 5);
+        assert_eq!(left.packets_received(), 5);
+        assert_eq!(left.quality().await.cumulative_lost, 0);
+    }
+
+    /// The gate opens again, on the same session — no renegotiation is involved at this layer or
+    /// any other.
+    #[tokio::test]
+    async fn unmuting_a_session_restores_the_audio() {
+        let (left, right) = pair(Codec::Pcmu).await;
+        let source = tone(480);
+
+        right.set_muted(true);
+        right.play(&source, 160).await;
+        let muted = left.record_until_idle(Duration::from_millis(300)).await;
+        assert!(muted.iter().all(|sample| *sample == 0));
+
+        assert!(right.set_muted(false), "the gate was closed before this");
+        right.play(&source, 160).await;
+        let after = left.record_until_idle(Duration::from_millis(300)).await;
+
+        assert_eq!(
+            g711::ulaw_encode_all(&source),
+            g711::ulaw_encode_all(&after),
+            "the audio that arrived after unmuting is the audio that was sent"
+        );
+    }
+
+    /// A relayed payload is opaque — a bridge's bytes in whatever the other leg negotiated — so a
+    /// muted session substitutes its own silence for it rather than passing it on.
+    #[tokio::test]
+    async fn a_muted_session_does_not_relay_a_payload_either() {
+        let (left, right) = pair(Codec::Pcmu).await;
+
+        right.set_muted(true);
+        for _ in 0..3 {
+            assert!(
+                right
+                    .send_encoded(Encoded {
+                        payload_type: 0,
+                        payload: Bytes::from(g711::ulaw_encode_all(&tone(160))),
+                    })
+                    .await
+            );
+        }
+        let recorded = left.record_until_idle(Duration::from_millis(400)).await;
+
+        assert_eq!(recorded.len(), 480, "the stream did not stop");
+        assert!(
+            recorded.iter().all(|sample| *sample == 0),
+            "a muted session forwarded somebody else's audio"
+        );
+    }
+
+    /// A keypress is not audio. It is generated by this endpoint on purpose, and a mute that
+    /// swallowed it would leave a muted caller unable to answer an IVR.
+    #[tokio::test]
+    async fn a_muted_session_still_sends_a_keypress() {
+        let (left, right) = pair(Codec::Pcmu).await;
+        right.play(&tone(320), 160).await;
+        let _ = left.record_until_idle(Duration::from_millis(300)).await;
+
+        right.set_muted(true);
+        right
+            .send_digit(
+                Digit::from_char('9').expect("a digit"),
+                Duration::from_millis(100),
+            )
+            .await;
+
+        let (digit, _duration) = tokio::time::timeout(Duration::from_secs(2), left.recv_digit())
+            .await
+            .expect("no timeout")
+            .expect("a digit arrives");
+        assert_eq!(digit.as_char(), '9');
+    }
+
+    /// Reception is not part of the gate: a muted session hears everything it would have heard.
+    #[tokio::test]
+    async fn a_muted_session_still_receives() {
+        let (left, right) = pair(Codec::Pcmu).await;
+        let source = tone(480);
+
+        left.set_muted(true);
+        right.play(&source, 160).await;
+        let recorded = left.record_until_idle(Duration::from_millis(300)).await;
+
+        assert_eq!(
+            g711::ulaw_encode_all(&source),
+            g711::ulaw_encode_all(&recorded),
+            "muting this side must not touch what it hears"
         );
     }
 

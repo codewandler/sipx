@@ -8,6 +8,11 @@ Cargo.lock.orig
 /fuzz/corpus
 /fuzz/Cargo.lock
 
+# Agent worktrees. Scratch checkouts live inside the repo, each with its own multi-gigabyte
+# target/, so an `add -A` here would be both wrong and enormous. Scoped to the subdirectory rather
+# than to /.claude so that tracked settings under it stay committable.
+/.claude/worktrees/
+
 # Local research and scratch material — must never be committed.
 /notes/
 /research/

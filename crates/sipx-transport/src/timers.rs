@@ -60,7 +60,10 @@ pub struct TimerQueue<K, I = Instant> {
     generations: HashMap<K, u64>,
 }
 
-impl<K, I> Default for TimerQueue<K, I> {
+// The bounds match `Entry`'s `Ord` impl rather than `new`'s: `BinaryHeap::new` requires its element
+// to be `Ord` on our MSRV, and a queue that cannot order its entries has no empty value worth
+// naming either. Later toolchains relax the bound, which is why only the MSRV job caught this.
+impl<K: Eq, I: Ord> Default for TimerQueue<K, I> {
     fn default() -> Self {
         Self {
             heap: BinaryHeap::new(),
