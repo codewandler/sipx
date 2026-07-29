@@ -9,6 +9,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`sips:` is refused rather than sent in the clear (`S-27`)** — `sipx dial sips:alice@host` placed
+  the call over **UDP in cleartext**, and `sipx register sips:…` did the same with a digest credential.
+  Both commands stripped `sips:` in the same `or_else` as `sip:`, threw the distinction away, and chose
+  their transport from one flag (`if args.flag("tcp")`). There is no TLS transport in either path, so
+  RFC 3261 §19.1.1 — which makes TLS on every hop the URI's *meaning*, not a hint — was silently
+  ignored. Both now refuse, naming the missing capability rather than calling the URI malformed, since
+  it is not malformed.
+  - **The downgrade was invisible, which is what made it serious**: the call connects, the
+    registration succeeds, the audio flows, and only a packet capture shows the promise was broken.
+  - **It was two defects, and a fix covering only `dial` was nearly shipped.** `register` has the
+    identical shape, and `TransportKind::Tls` appears in that file only inside a *test* of
+    `resolve_target` — never in the path a command takes. The refusal now lives in `main.rs` as shared
+    policy, because putting it in one command is how the other came to be missed.
+  - **Both tests were mutation-checked**: with the call-site disabled they fail `left: 5, right: 2`
+    (`Timeout` instead of `Usage`) and take 22 s and 32 s, because the command really does attempt the
+    cleartext send. That wall-clock is the defect, not a slow test.
+  - The first behavioural test was **vacuous and the mutation caught it** — it passed the URI as the
+    only argument, but `Args::positional` skips index 0 as the subcommand, so it asserted the "a URI is
+    required" path and passed with the fix disabled. The reason is written at both sites now.
+  - Left deliberately: `target_of` still defaults a `sips:` URI to port 5060 rather than 5061. No
+    command can reach that code with a `sips:` URI any more, so the wrongness is unreachable, and
+    writing a port for a transport this CLI does not have would be inventing a fact. It belongs with
+    the `--tls` work.
+
 - **Reachability is now asked of every *selected* capability, not just media ones (`X-33`)** — `X-30`
   made "no claim outlives its caller" mechanical for `layer = "media"`. This widens it on the property
   rather than the string, and each layer was measured before being admitted.

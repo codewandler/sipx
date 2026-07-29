@@ -40,6 +40,12 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         return fail(format, Exit::Usage, "an address of record is required");
     };
 
+    // Same refusal as `dial`, and it matters more here: a registration challenged with digest
+    // sends a credential, so a silent downgrade to UDP puts it on the wire in the clear (`S-27`).
+    if let Some(why) = crate::insecure_scheme_refusal(aor) {
+        return fail(format, Exit::Usage, &why);
+    }
+
     let Some((user, domain)) = parse_aor(aor) else {
         return fail(
             format,
@@ -193,6 +199,23 @@ mod tests {
 
     /// Parameters belong to the URI, not the domain. Leaving them on makes the registrar name
     /// `example.com;transport=tcp`, which resolves to nothing.
+    /// `S-27`, the half that costs more than `dial`'s: a challenged registration sends a digest
+    /// credential, so a silent downgrade to UDP puts it on the wire in the clear. The first argument
+    /// must be the subcommand — `Args::positional` skips index 0.
+    #[tokio::test]
+    async fn a_sips_aor_is_refused_rather_than_registered_in_the_clear() {
+        let exit = run(
+            &["register".to_owned(), "sips:bob@192.0.2.1".to_owned()],
+            Format::Text,
+        )
+        .await;
+        assert_eq!(
+            exit.code(),
+            Exit::Usage.code(),
+            "registering a sips: AOR must be refused, not sent in the clear"
+        );
+    }
+
     #[test]
     fn uri_parameters_are_not_part_of_the_domain() {
         assert_eq!(

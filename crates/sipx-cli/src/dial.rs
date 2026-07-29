@@ -46,6 +46,12 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         return fail(format, Exit::Usage, "a URI to call is required");
     };
 
+    // Before anything else, and before the URI is parsed for an address: a scheme this CLI cannot
+    // honour is refused rather than quietly downgraded.
+    if let Some(why) = crate::insecure_scheme_refusal(uri) {
+        return fail(format, Exit::Usage, &why);
+    }
+
     let transport = if args.flag("tcp") {
         TransportKind::Tcp
     } else {
@@ -358,6 +364,61 @@ mod tests {
     fn a_name_is_not_a_target_this_command_can_use() {
         assert!(target_of("sip:bob@example.com").is_none());
         assert!(target_of("bob@192.0.2.1").is_none(), "no scheme");
+    }
+
+    /// `S-27`. Before this, `target_of` stripped `sips:` in the same `or_else` as `sip:`, so the
+    /// address came back looking ordinary and the INVITE went out over UDP in the clear. The
+    /// downgrade was invisible: the call connects and the audio flows.
+    #[test]
+    fn a_sips_uri_is_refused_rather_than_dialled_in_the_clear() {
+        let why = crate::insecure_scheme_refusal("sips:bob@192.0.2.1")
+            .expect("a sips: URI this CLI cannot honour must be refused");
+        assert!(
+            why.contains("TLS"),
+            "the refusal has to name the missing capability, not call the URI malformed: {why}"
+        );
+        // The proof that the old behaviour was a silent downgrade rather than a parse failure:
+        // the address still resolves perfectly well, which is exactly why nothing caught it.
+        assert_eq!(
+            target_of("sips:bob@192.0.2.1").map(|a| a.to_string()),
+            Some("192.0.2.1:5060".to_owned()),
+            "if this ever returns None, the refusal above is no longer what protects the caller"
+        );
+    }
+
+    /// The behavioural half of `S-27`, and the one that actually matters: the *command* refuses,
+    /// not just a helper. This needs no network and no peer, which is the point — the check happens
+    /// before a transport is chosen or an address parsed, so there is no window in which a cleartext
+    /// datagram could leave.
+    /// The behavioural half of `S-27`, and the one that matters: the *command* refuses, not just a
+    /// helper. It needs no network and no peer, which is the point — the refusal happens before a
+    /// transport is chosen, so there is no window in which a cleartext datagram could leave.
+    ///
+    /// **The first argument must be the subcommand.** `Args::positional` skips index 0 as the
+    /// subcommand name (`main.rs:137-139`), so a slice holding only the URI has *no* positional and
+    /// this returns `Usage` for "a URI to call is required" instead — which passes whether or not the
+    /// scheme is checked. That is how this test was first written, and it detected nothing.
+    #[tokio::test]
+    async fn the_dial_command_refuses_a_sips_uri_before_touching_the_network() {
+        let exit = run(
+            &["dial".to_owned(), "sips:bob@192.0.2.1".to_owned()],
+            Format::Text,
+        )
+        .await;
+        assert_eq!(
+            exit.code(),
+            Exit::Usage.code(),
+            "dialling a sips: URI must be refused, not connected in the clear"
+        );
+    }
+
+    #[test]
+    fn a_plain_sip_uri_is_not_refused() {
+        assert!(crate::insecure_scheme_refusal("sip:bob@192.0.2.1").is_none());
+        assert!(
+            crate::insecure_scheme_refusal("bob@192.0.2.1").is_none(),
+            "a URI with no scheme is target_of's to reject, and it says something else"
+        );
     }
 
     /// A clip at the wrong rate is refused by name. Playing 44.1 kHz samples at 8 kHz produces
