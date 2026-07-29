@@ -9,7 +9,8 @@ use sipx_transport::{Handle, Incoming, Target};
 
 use crate::auth::Credentials;
 use crate::error::{Error, Result};
-use crate::outbound;
+use crate::gruu;
+use crate::outbound::{self, InstanceId, RegId};
 use crate::registrar::{self, Lease, Outcome, Registration};
 
 /// How a user agent is configured.
@@ -29,11 +30,25 @@ pub struct Config {
     pub expires: Duration,
     /// What to put in `User-Agent`.
     pub user_agent: String,
-    /// Which flow this registration is, when Outbound is in use (RFC 5626).
+    /// The device identity this agent registers under (RFC 5626 §4.1, RFC 5627 §4.1).
     ///
-    /// `None` registers the ordinary way: a `Contact` naming an address, and a binding that is
-    /// only as durable as the NAT mapping behind it.
-    pub outbound: Option<Flow>,
+    /// One field for both mechanisms, because both name the instance with the same
+    /// `+sip.instance` media feature tag and a registrar that correlates them must see one
+    /// value. Set it with [`Config::with_outbound`] or [`Config::with_gruu`]; whichever is
+    /// called last decides, and either way there is only ever one identity to present.
+    ///
+    /// `None` registers the ordinary way: a `Contact` naming an address and nothing naming the
+    /// device behind it, so every restart looks to the registrar like a new phone.
+    pub instance: Option<InstanceId>,
+    /// Which Outbound flow this registration is, when Outbound is in use (RFC 5626 §4.2).
+    ///
+    /// `None` registers the ordinary way: a binding that is only as durable as the NAT mapping
+    /// behind it.
+    pub reg_id: Option<RegId>,
+    /// Which GRUU this agent uses, when it is asking for one (RFC 5627 §4.4).
+    ///
+    /// `None` does not ask. See [`gruu::Kind`] for why the choice is the application's.
+    pub gruu: Option<gruu::Kind>,
     /// How long a keep-alive may go unanswered before the flow is failed (RFC 5626 §4.4).
     ///
     /// Defaults to §4.4.1's ten seconds. It is configurable because the RFC gives *two* rules and
@@ -63,7 +78,9 @@ impl Config {
             credentials: None,
             expires: Duration::from_secs(3600),
             user_agent: concat!("sipx/", env!("CARGO_PKG_VERSION")).to_owned(),
-            outbound: None,
+            instance: None,
+            reg_id: None,
+            gruu: None,
             keepalive_timeout: outbound::PONG_TIMEOUT,
         }
     }
@@ -83,7 +100,29 @@ impl Config {
     /// so in `Require`, and a UA that assumes it would keep a flow alive that nothing routes down.
     #[must_use]
     pub fn with_outbound(mut self, flow: Flow) -> Self {
-        self.outbound = Some(flow);
+        self.instance = Some(flow.instance);
+        self.reg_id = Some(flow.reg_id);
+        self
+    }
+
+    /// Ask the registrar for a GRUU, and say which of the two to use (RFC 5627 §4.1, §4.4).
+    ///
+    /// The REGISTER gains the `gruu` option tag and presents `instance`; the GRUUs that come back
+    /// are readable through [`UserAgent::gruus`] and are what
+    /// [`UserAgent::dialog_contact`] then publishes.
+    ///
+    /// **`instance` is the same identity Outbound registers with**, and it is stored in the same
+    /// field: a UA using both mechanisms presents one instance ID, because a registrar
+    /// correlating them would otherwise see one device claiming to be two. Whether the registrar
+    /// actually *issues* a GRUU is its business — §4.2 requires a UA to cope with one, both or
+    /// neither, and getting neither is not an error.
+    ///
+    /// See [`gruu::Kind`] for why `Kind::Public` is the default and why asking for
+    /// `Kind::Temporary` never quietly yields the public one.
+    #[must_use]
+    pub fn with_gruu(mut self, instance: InstanceId, kind: gruu::Kind) -> Self {
+        self.instance = Some(instance);
+        self.gruu = Some(kind);
         self
     }
 
@@ -117,6 +156,14 @@ pub struct UserAgent {
     /// Kept because a *change* in it is a flow failure: the NAT has rebound, so the address the
     /// registrar has for this flow no longer reaches it, even though the socket still works.
     reflexive: Option<std::net::SocketAddr>,
+    /// The GRUUs the registrar issued for this instance (RFC 5627 §4.2).
+    ///
+    /// Replaced on every 2xx and cleared whenever an attempt does not produce one, because a
+    /// GRUU is only as valid as the binding behind it: §5.2 has a registrar stop resolving a
+    /// temporary GRUU once nothing is bound to it, and §4.2 requires a UA to discard the ones it
+    /// learned when its `Call-ID` changes. Keeping a stale one means publishing an address that
+    /// no longer reaches anything, in the header a peer will route its next request by.
+    gruus: gruu::Gruus,
 }
 
 impl UserAgent {
@@ -134,7 +181,9 @@ impl UserAgent {
             // number inside the same Call-ID is out of order, and a registrar is entitled to
             // ignore it — which looks exactly like the refresh silently not happening.
             cseq: 0,
-            outbound: config.outbound.clone(),
+            instance: config.instance.clone(),
+            reg_id: config.reg_id,
+            gruu: config.gruu,
         };
         Self {
             endpoint,
@@ -146,6 +195,7 @@ impl UserAgent {
             flow_accepted: false,
             flow_timer: None,
             reflexive: None,
+            gruus: gruu::Gruus::default(),
         }
     }
 
@@ -247,14 +297,62 @@ impl UserAgent {
         self.reflexive
     }
 
-    /// The `Contact` to put on a dialog-forming request (RFC 5626 §4.3).
+    /// The GRUUs the registrar issued for this instance (RFC 5627 §4.2).
     ///
-    /// Carries `ob` when this is an accepted flow and no GRUU is in play: §4.3 makes that a MUST,
-    /// and it is what tells the far end that mid-dialog requests belong on *this flow* rather than
-    /// at the address in the URI — which, behind a NAT, is the difference between a re-INVITE
-    /// arriving and vanishing.
+    /// Empty until a registration succeeds, empty afterwards if GRUU was not asked for, and empty
+    /// again if it was and the registrar issued nothing — §4.2 requires a UA to be ready for one,
+    /// both or neither, and a registrar that does not implement RFC 5627 answers a REGISTER
+    /// perfectly well and attaches none.
+    #[must_use]
+    pub fn gruus(&self) -> &gruu::Gruus {
+        &self.gruus
+    }
+
+    /// Whether a request that arrived was sent to one of this instance's GRUUs (RFC 5627 §4.5).
+    ///
+    /// This is the question the mechanism exists to make answerable, and it is not the question
+    /// "is this request for me": an address of record reaches every device the user registered,
+    /// and RFC 5627 §5.4 notes that a public GRUU "will always be equivalent to the AOR based on
+    /// URI equality rules". A `true` here means the sender addressed *this* instance and nothing
+    /// else — which is what a transfer target or a callback is relying on.
+    #[must_use]
+    pub fn sent_to_our_gruu(&self, request: &Request) -> bool {
+        self.gruus.sent_to(&request.uri)
+    }
+
+    /// The `Contact` to put on a dialog-forming or target-refresh request (RFC 5627 §4.4,
+    /// RFC 5626 §4.3).
+    ///
+    /// Three answers, in the order the RFCs put them:
+    ///
+    /// - **The GRUU**, when one is known. §4.4: "A UA SHOULD use a GRUU when populating the
+    ///   Contact header field of dialog-forming and target refresh requests and responses." It is
+    ///   an address that survives this flow, this NAT mapping and this registration, which is
+    ///   more than either of the others can say.
+    /// - **The contact with `ob`**, when this is an accepted flow and no GRUU is known. RFC 5626
+    ///   §4.3 makes that a MUST *in the absence of a GRUU*, and it tells the far end that
+    ///   mid-dialog requests belong on this flow rather than at the address in the URI — behind a
+    ///   NAT, the difference between a re-INVITE arriving and vanishing.
+    /// - **The plain contact**, when neither applies.
+    ///
+    /// A caller that asked for a temporary GRUU and did not get one lands in the second or third
+    /// case, never the first: the public GRUU is not a substitute for an unlinkable address, and
+    /// quietly publishing the device's permanent name to a peer that was promised otherwise is a
+    /// worse outcome than publishing the contact. It is logged, because the caller asked for
+    /// something it did not get.
     #[must_use]
     pub fn dialog_contact(&self) -> String {
+        if let Some(kind) = self.config.gruu {
+            if let Some(gruu) = self.gruus.preferred(kind) {
+                return format!("<{gruu}>");
+            }
+            if kind == gruu::Kind::Temporary {
+                tracing::warn!(
+                    "no temporary GRUU was issued; publishing the contact rather than the public \
+                     GRUU, which would not be unlinkable"
+                );
+            }
+        }
         if self.flow_accepted {
             crate::outbound::with_ob(&self.config.contact)
         } else {
@@ -307,10 +405,16 @@ impl UserAgent {
                     service_route,
                     flow_accepted,
                     flow_timer,
+                    gruus,
                 } = *registered;
                 self.flow_accepted = flow_accepted;
                 self.flow_timer = flow_timer;
                 self.path = path;
+                // Replaced, never merged — the same rule as the service route, and for a
+                // stronger reason: RFC 5627 §4.2 requires temporary GRUUs learned earlier to be
+                // discarded outright rather than kept alongside, and a set that merges cannot
+                // tell which of the two it is holding.
+                self.gruus = gruus;
                 // Replaced on every success, never merged. RFC 3608 §6.1: the stored value is
                 // "updated according to the Service-Route header field of the latest 200 class
                 // response", and a response with no such header "clears any service route ...
@@ -324,8 +428,17 @@ impl UserAgent {
                 self.service_route = service_route;
                 Ok(lease)
             }
-            Outcome::Challenged(_) => Err(Error::AuthenticationFailed),
-            Outcome::Rejected { status, reason } => Err(Error::Rejected { status, reason }),
+            // The binding did not happen, so neither did the GRUUs that hang off it. Holding
+            // them would leave the agent publishing an address for a registration it does not
+            // have (RFC 5627 §5.2).
+            Outcome::Challenged(_) => {
+                self.gruus = gruu::Gruus::default();
+                Err(Error::AuthenticationFailed)
+            }
+            Outcome::Rejected { status, reason } => {
+                self.gruus = gruu::Gruus::default();
+                Err(Error::Rejected { status, reason })
+            }
         }
     }
 
@@ -335,11 +448,7 @@ impl UserAgent {
             .send(request, self.config.target.clone())
             .await?;
         let response = responses.final_response().await.ok_or(Error::NoResponse)?;
-        Ok(registrar::interpret(
-            &response,
-            self.config.expires,
-            &self.registration.contact,
-        ))
+        Ok(registrar::interpret(&response, &self.registration))
     }
 
     /// Register and keep registering, refreshing before each lease expires.

@@ -24,6 +24,7 @@ pub mod build;
 pub mod error;
 mod escape;
 pub mod event;
+pub mod gruu;
 pub mod headers;
 pub mod message;
 pub mod name;
