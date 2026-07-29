@@ -26,6 +26,27 @@ rand.workspace = true
 sipx-sdp.workspace = true
 sipx-rtp.workspace = true
 sipx-audio.workspace = true
+# The STUN header, `is_stun` and the transaction ID ICE's connectivity checks are built on
+# (docs/specs/ice.md §11 and §15, which puts reflexive gathering here "over
+# `sipx_transport::stun`" for the same reason: one Binding client, not two).
+#
+# Spelled out rather than `workspace = true`, and that is the only reason the version is
+# repeated here: what is reused is RFC 5389's header, not a SIP transport, so this must come
+# with `default-features = false` — otherwise every user of `sipx-media` inherits rustls, a
+# WebSocket stack and a DNS client to borrow twenty bytes of header layout. Cargo refuses
+# `default-features = false` on a workspace dependency that does not set it, and setting it in
+# the workspace table would turn the transports off for the five crates that want them.
+# A release that bumps the workspace version and forgets this line fails loudly in
+# `cargo publish`, not quietly.
+sipx-transport = { path = "../sipx-transport", version = "0.8.0", default-features = false }
+# `MESSAGE-INTEGRITY` is HMAC-SHA1 (RFC 5389 §15.4; RFC 8445 cites RFC 5389, not RFC 8489, so
+# there is no SHA-256 variant), and `subtle` compares the received tag without leaking through
+# timing how far a forgery matched — the same pairing `sipx_sdp::fingerprint` and
+# `sipx_rtp::srtp` already use, and for the same reason. All three are already in this crate's
+# transitive graph through `sipx-rtp`, so naming them directly adds nothing to a build.
+hmac.workspace = true
+sha1.workspace = true
+subtle.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

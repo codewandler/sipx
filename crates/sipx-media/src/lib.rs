@@ -14,6 +14,7 @@
 pub mod bridge;
 pub mod conference;
 pub mod dtls;
+pub mod ice;
 pub mod session;
 
 pub use bridge::Bridge;
