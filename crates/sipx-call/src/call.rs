@@ -11,6 +11,7 @@ use sipx_media::{Codec, Interrupt, MediaPort, MediaSession, Playback};
 use sipx_sdp::{Capabilities, Direction, SessionDescription};
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
 use sipx_sip::session::{self, MinSe, SessionExpires};
+use sipx_sip::update::{self, Reception};
 use sipx_sip::{HeaderName, Method, Request, Response, StatusCode, Uri};
 use sipx_transport::{Handle, Incoming, Target, TransportKind};
 
@@ -27,7 +28,7 @@ use crate::transfer::{
 /// that is always in range. Threading a `Result` out of every call site for it would mean
 /// inventing an error that can never happen — and the previous attempt reported it as "no
 /// final response to the INVITE", which would have been actively misleading.
-fn ok_status() -> StatusCode {
+pub(crate) fn ok_status() -> StatusCode {
     const OK: u16 = 200;
     StatusCode::new(OK).unwrap_or_else(|| unreachable!("200 is a valid status code"))
 }
@@ -35,7 +36,7 @@ fn ok_status() -> StatusCode {
 /// Queue the events construction already knows happened: `Ringing`, if the far end rang first,
 /// then `Answered` — every `Call` gets exactly this sequence at birth, on both the caller's and
 /// the callee's side, which is why both construction sites share it rather than repeating it.
-fn emit_construction_events(events: &EventSink, ringing: Option<bool>) {
+pub(crate) fn emit_construction_events(events: &EventSink, ringing: Option<bool>) {
     if let Some(reliable) = ringing {
         events.emit(CallEvent::Ringing { reliable });
     }
@@ -79,6 +80,19 @@ pub struct Call {
     transfer: Option<Transfer>,
     /// The RFC 4028 session timer, if one was negotiated.
     session: Option<SessionState>,
+    /// Whose turn it is to offer and to answer (RFC 3311 §5, RFC 3264).
+    ///
+    /// Idle here: a `Call` exists only once the INVITE's offer/answer has completed, so nothing
+    /// is outstanding at construction on either side.
+    negotiation: update::Negotiation,
+    /// Whether the peer's `Allow` listed UPDATE (RFC 3311 §4).
+    ///
+    /// Read from the message that introduced the peer — the INVITE for a UAS, the 2xx for a
+    /// UAC — and refreshed from any later one. It is the only permission there is: RFC 4028
+    /// §7.4 turns it into the choice between UPDATE and a re-INVITE for a session refresh, and
+    /// a refresh sent by a method the far end does not implement draws a 405 and tears down a
+    /// call that was working.
+    peer_allows_update: bool,
     /// Where this call's events go (story `C-3`). Every state change below is emitted through
     /// this at the point it happens, not reconstructed afterwards from the fields above.
     events: EventSink,
@@ -326,6 +340,14 @@ impl Call {
                 self.on_reinvite(incoming).await?;
                 Ok(true)
             }
+            // RFC 3311 §5.1: an in-dialog renegotiation that does not disturb any INVITE
+            // transaction. In a confirmed dialog that is mostly a session refresh (RFC 4028
+            // §7.4), but a peer may equally use it to move the media, and either way it has to
+            // be answered promptly — §5.2 gives the UAS no window in which to ask anybody.
+            Method::Update => {
+                self.on_update(incoming).await?;
+                Ok(true)
+            }
             // A REFER is not answered here, and that is deliberate. Every other in-dialog
             // request has one correct response; a REFER asks *may I place a call on your
             // behalf*, and only the application knows whether it may. `accept_referral` and
@@ -394,9 +416,10 @@ impl Call {
 
     /// Do whatever the session timer's deadline asked for (RFC 4028 §10).
     ///
-    /// For the refresher that is a re-INVITE; for the other side it is a BYE, because nothing
-    /// arrived and the far end is presumed gone. Calling this early is harmless — it re-reads
-    /// the deadline and does nothing if it has not passed.
+    /// For the refresher that is an UPDATE or a re-INVITE — whichever the peer's `Allow` says
+    /// it can take (§7.4, see [`Self::refresh_session`]); for the other side it is a BYE,
+    /// because nothing arrived and the far end is presumed gone. Calling this early is harmless
+    /// — it re-reads the deadline and does nothing if it has not passed.
     pub async fn on_session_deadline(&mut self) -> Result<()> {
         let Some(state) = self.session else {
             return Ok(());
@@ -411,7 +434,7 @@ impl Call {
             self.end(EndCause::Timeout).await?;
             return Err(Error::SessionExpired);
         }
-        match self.reinvite(self.hold).await {
+        match self.refresh_session().await {
             Ok(()) => Ok(()),
             // §10: a refresh that times out or draws a 408 or 481 means the dialog is gone at
             // the far end, and RFC 3261 §12.2.1.2 says to BYE. Any other failure is about the
@@ -465,41 +488,9 @@ impl Call {
         }
         self.record_remote_cseq(&incoming.request);
 
-        let Ok(offer) = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body())) else {
+        let Some(answer_sdp) = self.renegotiate(incoming.request.body()).await? else {
             return self.refuse(incoming, 488, "Not Acceptable Here").await;
         };
-        let Ok(renegotiated) = negotiated(&offer) else {
-            return self.refuse(incoming, 488, "Not Acceptable Here").await;
-        };
-
-        let capabilities = Capabilities::g711(self.media_address, self.media.local_addr().port());
-        let answer_sdp = sipx_sdp::answer(&offer, &capabilities);
-        if answer_sdp
-            .media
-            .iter()
-            .all(sipx_sdp::MediaDescription::is_rejected)
-        {
-            return self.refuse(incoming, 488, "Not Acceptable Here").await;
-        }
-
-        // Hold is a direction, not a separate state: `sendonly` or `inactive` from the far end
-        // means it will not play what we send.
-        let was_on_hold = self.is_on_hold();
-        self.hold = offer
-            .media
-            .iter()
-            .find(|m| m.media == "audio" && !m.is_rejected())
-            .map_or(Direction::SendRecv, sipx_sdp::MediaDescription::direction);
-        // Emitted right where `hold` changes, not by polling it afterwards — a re-INVITE that
-        // does not change the direction (a keep-alive, say) must not report a hold that never
-        // happened.
-        match (was_on_hold, self.is_on_hold()) {
-            (false, true) => self.events.emit(CallEvent::Hold),
-            (true, false) => self.events.emit(CallEvent::Resumed),
-            _ => {}
-        }
-
-        self.move_media_if_changed(renegotiated).await?;
 
         // RFC 4028 §7.2: any re-INVITE inside the dialog refreshes the session, whether or not
         // it was sent for that reason. Only counting the ones that carry `Session-Expires`
@@ -519,6 +510,10 @@ impl Call {
             .header(
                 HeaderName::Contact,
                 Bytes::from(contact_for(&self.endpoint, self.target.transport)),
+            )?
+            .header(
+                HeaderName::Allow,
+                Bytes::from_static(update::ALLOW.as_bytes()),
             )?
             .header(
                 HeaderName::ContentType,
@@ -546,6 +541,198 @@ impl Call {
             Arc::clone(&acked),
         ));
         self.awaiting_ack = Some(acked);
+        Ok(())
+    }
+
+    /// Apply an offer that arrived in-dialog, and produce the answer to send back.
+    ///
+    /// `None` means the description is unusable and the caller must refuse — 488 for a
+    /// re-INVITE (`M-8`) and for an UPDATE (RFC 3311 §5.2), which is the same rule for the same
+    /// reason: **a renegotiation that fails leaves the call running.** Both requests try to
+    /// change something that already works, so refusing the change and keeping the session is
+    /// right; tearing the call down because the new offer was unusable would lose a call that
+    /// was fine a moment ago.
+    ///
+    /// Shared by the two paths because they ask exactly the same question of exactly the same
+    /// session and differ only in what carries the answer back.
+    async fn renegotiate(&mut self, body: &[u8]) -> Result<Option<SessionDescription>> {
+        let Ok(offer) = sipx_sdp::parse(&String::from_utf8_lossy(body)) else {
+            return Ok(None);
+        };
+        let Ok(renegotiated) = negotiated(&offer) else {
+            return Ok(None);
+        };
+
+        let capabilities = Capabilities::g711(self.media_address, self.media.local_addr().port());
+        let answer_sdp = sipx_sdp::answer(&offer, &capabilities);
+        if answer_sdp
+            .media
+            .iter()
+            .all(sipx_sdp::MediaDescription::is_rejected)
+        {
+            return Ok(None);
+        }
+
+        // Hold is a direction, not a separate state: `sendonly` or `inactive` from the far end
+        // means it will not play what we send.
+        let was_on_hold = self.is_on_hold();
+        self.hold = offer
+            .media
+            .iter()
+            .find(|m| m.media == "audio" && !m.is_rejected())
+            .map_or(Direction::SendRecv, sipx_sdp::MediaDescription::direction);
+        // Emitted right where `hold` changes, not by polling it afterwards — a renegotiation
+        // that does not change the direction (a keep-alive, say) must not report a hold that
+        // never happened.
+        match (was_on_hold, self.is_on_hold()) {
+            (false, true) => self.events.emit(CallEvent::Hold),
+            (true, false) => self.events.emit(CallEvent::Resumed),
+            _ => {}
+        }
+
+        self.move_media_if_changed(renegotiated).await?;
+        Ok(Some(answer_sdp))
+    }
+
+    /// Answer an UPDATE that arrived in this dialog (RFC 3311 §5.2).
+    ///
+    /// The three refusals are three different answers, and the difference is the point: 491
+    /// means the two sides collided and both should wait a randomised interval before trying
+    /// again; a 500 with `Retry-After` means the request was well formed and simply early. A
+    /// peer told the wrong one either backs off when it did not need to or retries straight
+    /// into the same wall.
+    ///
+    /// Whichever it is, **the dialog survives** — including the 488 for a description this side
+    /// cannot use. Every one of these is about a change that will not happen, not about the
+    /// session that is already running.
+    async fn on_update(&mut self, incoming: &Incoming) -> Result<()> {
+        if self.out_of_order(&incoming.request) {
+            return self.refuse(incoming, 500, "Server Internal Error").await;
+        }
+        self.record_remote_cseq(&incoming.request);
+
+        let has_offer = crate::update::carries_offer(&incoming.request);
+        if let Reception::Refuse(refusal) = self.negotiation.receive(has_offer) {
+            return crate::update::refuse(&self.endpoint, incoming, refusal).await;
+        }
+
+        let mut builder = ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?
+            .header(
+                HeaderName::Contact,
+                Bytes::from(contact_for(&self.endpoint, self.target.transport)),
+            )?
+            .header(
+                HeaderName::Allow,
+                Bytes::from_static(update::ALLOW.as_bytes()),
+            )?;
+
+        if has_offer {
+            // §5.2: the UAS "MUST adjust the session parameters accordingly and generate an
+            // answer in the 2xx response".
+            let Some(answer_sdp) = self.renegotiate(incoming.request.body()).await? else {
+                // The offer is dead, so nothing is owed for it any more — and this is a final
+                // response, so no UPDATE is in progress either.
+                self.negotiation.answered();
+                return self.refuse(incoming, 488, "Not Acceptable Here").await;
+            };
+            builder = builder
+                .header(
+                    HeaderName::ContentType,
+                    Bytes::from_static(b"application/sdp"),
+                )?
+                .body(Bytes::from(answer_sdp.to_string_sdp()));
+        }
+
+        // RFC 4028 §7.4: an UPDATE refreshes the session whether or not it was sent for that
+        // reason, so the 2xx names the terms in force and the deadline moves. Only counting the
+        // ones that carry `Session-Expires` would hang up on a peer that is demonstrably alive.
+        if let Some(state) = self.session {
+            let expires = SessionExpires {
+                interval: state.terms.interval,
+                refresher: Some(if state.terms.we_refresh {
+                    session::Refresher::Uas
+                } else {
+                    session::Refresher::Uac
+                }),
+            };
+            builder = builder
+                .header(HeaderName::SessionExpires, Bytes::from(expires.to_string()))?
+                .header(HeaderName::Supported, Bytes::from_static(b"timer"))?;
+        }
+
+        // §5.1: UPDATE is a target refresh request, so its `Contact` replaces the dialog's
+        // remote target — the same rule RFC 3261 §12.2.2 gives a re-INVITE, and for the same
+        // reason: without it the BYE goes to where the peer used to be.
+        self.dialog.refresh_target(&incoming.request.headers);
+        self.target = in_dialog_target(
+            &self.dialog,
+            Target::new(incoming.source, incoming.transport),
+        );
+        self.peer_allows_update = update::peer_allows(&incoming.request.headers);
+
+        self.endpoint
+            .respond(&incoming.key, builder.build())
+            .await?;
+        // Only now. Until the final response is on the wire a second UPDATE is genuinely too
+        // early, and clearing this before responding would let one through.
+        self.negotiation.answered();
+        self.rearm();
+        Ok(())
+    }
+
+    /// Renegotiate this call with an UPDATE (RFC 3311).
+    ///
+    /// [`Self::reinvite`] remains the right way to renegotiate a *confirmed* dialog — §5.1
+    /// recommends it, because an UPDATE must be answered promptly and leaves the far end no
+    /// window in which to ask a user whether the change is acceptable. This is here for the
+    /// cases where that does not apply: a peer that asked for UPDATE, or a change that nobody
+    /// would be asked about.
+    ///
+    /// Refuses locally rather than putting an illegal request on the wire when an offer of ours
+    /// is unanswered or one of theirs is unanswered by us (§5.1, RFC 3264): the far end would
+    /// answer 491 or 500 and the round trip would have told us only what we already knew.
+    pub async fn update(&mut self, direction: Direction) -> Result<()> {
+        if !self.negotiation.may_offer() {
+            return Err(Error::Rejected {
+                status: sipx_sip::update::Refusal::Glare.status(),
+                reason: "an offer is already outstanding on this dialog".to_owned(),
+            });
+        }
+
+        let mut capabilities =
+            Capabilities::g711(self.media_address, self.media.local_addr().port());
+        capabilities.direction = direction;
+        // As for a re-INVITE: the version must increase with each modified offer, so the far
+        // end can tell a changed description from a repeated one.
+        capabilities.session_version = u64::from(self.dialog.local_cseq.saturating_add(1));
+        let offer = offer_from(&capabilities);
+
+        let (builder, routes) =
+            crate::update::request(&self.endpoint, &mut self.dialog, &self.target, Some(&offer))?;
+        let request = crate::update::finish(builder, &routes)?;
+
+        self.negotiation.sent_offer();
+        let response = crate::update::send(&self.endpoint, request, self.target.clone()).await;
+        // Whatever came back closed the exchange: a 2xx carries the answer, and a failure means
+        // there will never be one. Leaving the flag set would refuse every later offer of ours.
+        self.negotiation.received_answer();
+        let response = response?;
+        if !response.status.is_success() {
+            return Err(crate::update::rejected(&response));
+        }
+
+        self.dialog.refresh_target(&response.headers);
+        self.target = in_dialog_target(&self.dialog, self.target.clone());
+        self.peer_allows_update = update::peer_allows(&response.headers);
+
+        if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
+            && let Ok(renegotiated) = negotiated(&answer)
+        {
+            self.move_media_if_changed(renegotiated).await?;
+        }
+        self.hold = direction;
+        self.adopt_session(&response);
+        self.rearm();
         Ok(())
     }
 
@@ -631,6 +818,10 @@ impl Call {
                 Bytes::from(contact_for(&self.endpoint, self.target.transport)),
             )?
             .header(
+                HeaderName::Allow,
+                Bytes::from_static(update::ALLOW.as_bytes()),
+            )?
+            .header(
                 HeaderName::ContentType,
                 Bytes::from_static(b"application/sdp"),
             )?
@@ -698,6 +889,17 @@ impl Call {
         self.hold = direction;
         // §7.2: the session expiration is measured from the 2xx, and a re-INVITE sent for any
         // other reason refreshes it just the same.
+        self.adopt_session(&response);
+        self.rearm();
+        Ok(())
+    }
+
+    /// Take the session terms from the 2xx to a refresh we sent (RFC 4028 §7.2).
+    ///
+    /// Shared by the re-INVITE and the UPDATE paths: §7.2 measures the expiration from the 2xx
+    /// and says nothing about which request drew it, so reading it in two places would be two
+    /// chances to read it differently.
+    fn adopt_session(&mut self, response: &Response) {
         if let Some(agreed) = session::adopt(
             response
                 .headers
@@ -708,6 +910,69 @@ impl Call {
         {
             state.terms = agreed;
         }
+    }
+
+    /// Refresh the session, by whichever method the peer allows (RFC 4028 §7.4).
+    ///
+    /// > "If a UAC knows that its peer supports the UPDATE method, it is RECOMMENDED that
+    /// > UPDATE be used instead of a re-INVITE."
+    ///
+    /// It is only *known* from the peer's `Allow` (RFC 3311 §4), so that is what decides.
+    /// Guessing the other way costs a working call: a refresh the far end answers 405 is a
+    /// refresh that never happens, and the deadline behind it hangs up on a peer that is alive.
+    ///
+    /// The UPDATE carries **no body**. A refresh changes nothing — the description in force
+    /// stays in force — and re-offering it would put a liveness check under §5.2's offer/answer
+    /// rules, where it could be refused 491 or 500 for a reason that has nothing to do with
+    /// whether the far end is still there.
+    async fn refresh_session(&mut self) -> Result<()> {
+        if !self.peer_allows_update {
+            return self.reinvite(self.hold).await;
+        }
+
+        let (mut builder, routes) =
+            crate::update::request(&self.endpoint, &mut self.dialog, &self.target, None)?;
+        // §7.4: a refresh names the interval and the refresher in force, so proxies on the path
+        // can see the value and object to it. `Min-SE` is this side's own floor, and it is a
+        // defence rather than a courtesy (§11.2).
+        builder = builder.header(HeaderName::Supported, Bytes::from_static(b"timer"))?;
+        if let Some(state) = self.session {
+            let expires = SessionExpires {
+                interval: state.terms.interval,
+                refresher: Some(if state.terms.we_refresh {
+                    session::Refresher::Uac
+                } else {
+                    session::Refresher::Uas
+                }),
+            };
+            builder = builder
+                .header(HeaderName::SessionExpires, Bytes::from(expires.to_string()))?
+                .header(
+                    HeaderName::MinSe,
+                    Bytes::from(session::ABSOLUTE_MIN_INTERVAL.as_secs().to_string()),
+                )?;
+        }
+
+        let request = crate::update::finish(builder, &routes)?;
+        let response = crate::update::send(&self.endpoint, request, self.target.clone()).await?;
+
+        if !response.status.is_success() {
+            const INTERVAL_TOO_SMALL: u16 = 422;
+            if response.status.code() == INTERVAL_TOO_SMALL
+                && let Some(required) = required_interval(&response)
+                && let Some(state) = self.session.as_mut()
+            {
+                // As on the re-INVITE path: only a 2xx extends the expiration, so adopting the
+                // longer interval does not buy time. The next attempt is the one that has to
+                // land, and it has to land before the deadline that is already running.
+                state.terms.interval = required.max(session::ABSOLUTE_MIN_INTERVAL);
+            }
+            return Err(crate::update::rejected(&response));
+        }
+
+        self.dialog.refresh_target(&response.headers);
+        self.target = in_dialog_target(&self.dialog, self.target.clone());
+        self.adopt_session(&response);
         self.rearm();
         Ok(())
     }
@@ -1385,6 +1650,15 @@ fn build_invite(
     // reliable provisional at all — §3 forbids it outright if we stay quiet, which means a
     // silent UAC gets unreliable ringing even from a UAS that would rather not send it.
     builder = builder.header(HeaderName::Supported, Bytes::from_static(b"timer, 100rel"))?;
+    // RFC 3311 §4: "A UAC compliant to this specification SHOULD also include an Allow header
+    // field in the INVITE request, listing the method UPDATE." It is the only way the far end
+    // is permitted to decide it may renegotiate the early session or refresh with an UPDATE
+    // rather than a re-INVITE, so leaving it off does not merely omit a courtesy — it silently
+    // forces every peer onto the heavier method for the life of the dialog.
+    builder = builder.header(
+        HeaderName::Allow,
+        Bytes::from_static(update::ALLOW.as_bytes()),
+    )?;
     if let Some(interval) = session_expires {
         // No `refresher` parameter. RFC 4028 Table 2 row 4 lets the UAS choose when the UAC
         // has not, and the UAS is the side that knows whether it is behind a NAT or a proxy
@@ -1658,6 +1932,10 @@ async fn dial_with(
                     options.session_expires,
                 )
                 .map(SessionState::armed),
+                negotiation: update::Negotiation::idle(),
+                // From the 2xx, which RFC 3311 §4 asks to carry it. A dialog that reaches here
+                // has completed one offer/answer exchange, so nothing is outstanding either way.
+                peer_allows_update: update::peer_allows(&response.headers),
                 events,
                 events_rx: Some(events_rx),
             })
@@ -1713,6 +1991,98 @@ pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAdd
     answer_negotiated(endpoint, incoming, media_address, offer, &token(), None).await
 }
 
+/// A session that has been described and answered, but not yet accepted.
+///
+/// What an early dialog needs in order to be renegotiable at all. RFC 3311 §5.1 will not let an
+/// UPDATE carry an offer while an offer/answer exchange is open, so before the 200 there is
+/// exactly one way to make one legal: the answer to the INVITE's offer travels in a reliable
+/// provisional (RFC 3262 §5), and this is what that answer settled on.
+///
+/// The media port is bound here and handed to the eventual [`Call`] rather than bound again,
+/// because the answer already told the far end which port to send to. Binding a second one
+/// would make the 200 contradict the 183 for no reason.
+#[derive(Debug)]
+pub(crate) struct Early {
+    pub(crate) port: MediaPort,
+    pub(crate) capabilities: Capabilities,
+    pub(crate) settled: Settled,
+    pub(crate) media_address: IpAddr,
+}
+
+impl Early {
+    /// Bind a port and answer `offer` with it.
+    pub(crate) async fn settle(
+        media_address: IpAddr,
+        secure: bool,
+        offer: &SessionDescription,
+    ) -> Result<(Self, SessionDescription)> {
+        let negotiated = negotiated(offer)?;
+        let port = MediaPort::bind(SocketAddr::new(media_address, 0))
+            .await
+            .map_err(Error::Io)?;
+        let capabilities =
+            Capabilities::g711(media_address, port.local_addr().port()).with_srtp(secure);
+        let answer = sipx_sdp::answer(offer, &capabilities);
+        if answer
+            .media
+            .iter()
+            .all(sipx_sdp::MediaDescription::is_rejected)
+        {
+            return Err(Error::NoCommonCodec);
+        }
+        let settled = Settled {
+            negotiated,
+            srtp: srtp_keys(capabilities.crypto.as_ref(), offer_crypto(offer)),
+        };
+        Ok((
+            Self {
+                port,
+                capabilities,
+                settled,
+                media_address,
+            },
+            answer,
+        ))
+    }
+
+    /// Take the far end's answer to an offer *we* made, which moves only where we send.
+    ///
+    /// Nothing is owed back for an answer, so unlike [`Self::reanswer`] this produces no
+    /// description. An answer that cannot be read leaves the session where it was: the far end
+    /// accepted something, and guessing which of our formats it meant is worse than keeping
+    /// what the last completed exchange settled.
+    pub(crate) fn adopt_answer(&mut self, answer: &SessionDescription) {
+        if let Ok(negotiated) = negotiated(answer) {
+            self.settled.negotiated = negotiated;
+        }
+    }
+
+    /// Answer a *later* offer — one that arrived in an UPDATE — on the port already bound.
+    ///
+    /// `None` means the description is unusable, and the caller refuses 488 while the early
+    /// dialog carries on: the same rule a re-INVITE gets in `M-8`, for the same reason.
+    ///
+    /// The port does not move. Our own receive address was published in the answer the peer
+    /// already has, and changing it because *their* description changed would ask them to
+    /// renegotiate again to learn where we went.
+    pub(crate) fn reanswer(&mut self, offer: &SessionDescription) -> Option<SessionDescription> {
+        let negotiated = negotiated(offer).ok()?;
+        let answer = sipx_sdp::answer(offer, &self.capabilities);
+        if answer
+            .media
+            .iter()
+            .all(sipx_sdp::MediaDescription::is_rejected)
+        {
+            return None;
+        }
+        self.settled = Settled {
+            negotiated,
+            srtp: srtp_keys(self.capabilities.crypto.as_ref(), offer_crypto(offer)),
+        };
+        Some(answer)
+    }
+}
+
 /// Answer an INVITE that has already been rung (RFC 3262).
 ///
 /// The tag comes from the [`Ringing`](crate::Ringing) rather than being fresh, and that is the
@@ -1744,6 +2114,104 @@ pub async fn answer_ringing(
         Some(ringing.is_reliable()),
     )
     .await
+}
+
+/// Answer an INVITE that was rung with [`crate::rel::ring_early`].
+///
+/// The counterpart of [`answer_ringing`] for a dialog whose offer/answer already completed in
+/// the provisional. Two things follow from that and neither is optional:
+///
+/// - **The 200 carries no session description.** There is nothing left to say: the offer was
+///   answered in the 183, and anything an UPDATE renegotiated afterwards was answered in its own
+///   2xx. Repeating the last answer here would be a second answer to the INVITE's offer, and
+///   repeating the *first* one would silently undo the renegotiation.
+/// - **The media port is the one the provisional named**, not a fresh one, because that is the
+///   port the far end has already been told to send to.
+///
+/// The `Ringing` is borrowed mutably and emptied rather than consumed, because it owns the
+/// retransmission of the provisional and must go on owning it until it is dropped.
+pub async fn answer_early(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    ringing: &mut crate::Ringing,
+) -> Result<Call> {
+    let (early, dialog, negotiation, peer_allows_update) = ringing.take_early()?;
+    let target = in_dialog_target(&dialog, Target::new(incoming.source, incoming.transport));
+
+    let agreed = negotiate_session(endpoint, incoming).await?;
+
+    let to_with_tag = {
+        let existing = incoming
+            .request
+            .headers
+            .value(&HeaderName::To)
+            .map(|value| String::from_utf8_lossy(&value).into_owned())
+            .unwrap_or_default();
+        format!("{};tag={}", strip_header_params(&existing), ringing.tag())
+    };
+
+    let mut response = ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?
+        .set_header(&HeaderName::To, Bytes::from(to_with_tag))?
+        .header(
+            HeaderName::Contact,
+            Bytes::from(contact_for(endpoint, incoming.transport)),
+        )?
+        .header(
+            HeaderName::Allow,
+            Bytes::from_static(update::ALLOW.as_bytes()),
+        )?;
+    if let Some(accepted) = agreed {
+        let expires = SessionExpires {
+            interval: accepted.interval,
+            refresher: Some(accepted.refresher),
+        };
+        response = response
+            .header(HeaderName::SessionExpires, Bytes::from(expires.to_string()))?
+            .header(HeaderName::Supported, Bytes::from_static(b"timer"))?;
+        if accepted.require {
+            response = response.header(HeaderName::Require, Bytes::from_static(b"timer"))?;
+        }
+    }
+    let response = response.build();
+
+    let media = early.port.start(early.settled.media_config());
+    endpoint.respond(&incoming.key, response.clone()).await?;
+
+    let acked = Arc::new(tokio::sync::Notify::new());
+    tokio::spawn(retransmit_until_acked(
+        endpoint.clone(),
+        incoming.key.clone(),
+        response,
+        Arc::clone(&acked),
+    ));
+
+    let (events, events_rx) = EventSink::new();
+    emit_construction_events(&events, Some(ringing.is_reliable()));
+
+    Ok(Call {
+        dialog,
+        media,
+        endpoint: endpoint.clone(),
+        target,
+        awaiting_ack: Some(acked),
+        ended: false,
+        media_address: early.media_address,
+        current: early.settled.negotiated,
+        hold: Direction::SendRecv,
+        encrypted: early.settled.is_encrypted(),
+        referral: None,
+        transfer: None,
+        session: agreed.map(|accepted| {
+            SessionState::armed(session::Session {
+                interval: accepted.interval,
+                we_refresh: accepted.refresher == session::Refresher::Uas,
+            })
+        }),
+        negotiation,
+        peer_allows_update,
+        events,
+        events_rx: Some(events_rx),
+    })
 }
 
 /// Settle the RFC 4028 session timer for an incoming INVITE, refusing it if it asks for too
@@ -1857,6 +2325,13 @@ async fn answer_negotiated(
             HeaderName::Contact,
             Bytes::from(contact_for(endpoint, incoming.transport)),
         )?
+        // RFC 3311 §4: the 2xx "SHOULD contain an Allow header field listing the UPDATE
+        // method". This is where a UAC learns it, and RFC 4028 §7.4 then reads it to decide
+        // whether a session refresh may be an UPDATE.
+        .header(
+            HeaderName::Allow,
+            Bytes::from_static(update::ALLOW.as_bytes()),
+        )?
         .header(
             HeaderName::ContentType,
             Bytes::from_static(b"application/sdp"),
@@ -1918,6 +2393,9 @@ async fn answer_negotiated(
                 we_refresh: accepted.refresher == session::Refresher::Uas,
             })
         }),
+        negotiation: update::Negotiation::idle(),
+        // From the INVITE, which RFC 3311 §4 asks a compliant UAC to put it on.
+        peer_allows_update: update::peer_allows(&incoming.request.headers),
         events,
         events_rx: Some(events_rx),
     })
@@ -2175,7 +2653,7 @@ fn build_ack(endpoint: &Handle, dialog: &Dialog, target: &Target) -> Result<Requ
 /// A `Contact` naming a hostname would need resolution, which this layer does not do; the
 /// address the exchange arrived from is the honest fallback, and behind a NAT it is the only
 /// one that works.
-fn in_dialog_target(dialog: &Dialog, fallback: Target) -> Target {
+pub(crate) fn in_dialog_target(dialog: &Dialog, fallback: Target) -> Target {
     // Over a WebSocket the `Contact` is not consulted at all. RFC 7118 §5.2: the peer has no
     // listening port, its `Contact` names something that will never resolve, and the connection
     // the dialog was established on is the only way to reach it. This is the RFC 5923 rule for
@@ -2200,7 +2678,7 @@ fn in_dialog_target(dialog: &Dialog, fallback: Target) -> Target {
     Target::new(SocketAddr::new(*ip, port), transport)
 }
 
-fn offer_from(capabilities: &Capabilities) -> SessionDescription {
+pub(crate) fn offer_from(capabilities: &Capabilities) -> SessionDescription {
     let mut sdp = SessionDescription::new(
         capabilities.address,
         capabilities.session_id,
@@ -2246,7 +2724,7 @@ fn offer_from(capabilities: &Capabilities) -> SessionDescription {
 
 /// What negotiation settled on.
 #[derive(Debug, Clone, Copy)]
-struct Negotiated {
+pub(crate) struct Negotiated {
     remote: SocketAddr,
     codec: Codec,
     /// The payload type the far end uses for `telephone-event`, if it offered one.
@@ -2260,8 +2738,8 @@ struct Negotiated {
 /// What negotiation settled on, plus the keys — which are not `Copy` and do not belong in a
 /// type that is.
 #[derive(Debug, Clone)]
-struct Settled {
-    negotiated: Negotiated,
+pub(crate) struct Settled {
+    pub(crate) negotiated: Negotiated,
     srtp: Option<sipx_media::SrtpKeys>,
 }
 
@@ -2274,7 +2752,12 @@ impl Negotiated {
 }
 
 impl Settled {
-    fn media_config(&self) -> sipx_media::Config {
+    /// Whether both halves of the keying are present, so the media is actually encrypted.
+    pub(crate) fn is_encrypted(&self) -> bool {
+        self.srtp.is_some()
+    }
+
+    pub(crate) fn media_config(&self) -> sipx_media::Config {
         let mut config = self.negotiated.media_config();
         config.srtp.clone_from(&self.srtp);
         config
@@ -2286,7 +2769,7 @@ impl Settled {
 /// `None` unless *both* are present. One key is not a session: a stream keyed at one end only
 /// is a stream the other end cannot read, and treating a half-answer as success would produce a
 /// call that connects and carries silence.
-fn srtp_keys(
+pub(crate) fn srtp_keys(
     ours: Option<&sipx_sdp::crypto::Crypto>,
     theirs: Option<sipx_sdp::crypto::Crypto>,
 ) -> Option<sipx_media::SrtpKeys> {
@@ -2299,7 +2782,7 @@ fn srtp_keys(
 
 /// The keying the far end offered, from its description. Same shape as the answered one; named
 /// separately because reading it from an *offer* and from an *answer* are different moments.
-fn offer_crypto(sdp: &SessionDescription) -> Option<sipx_sdp::crypto::Crypto> {
+pub(crate) fn offer_crypto(sdp: &SessionDescription) -> Option<sipx_sdp::crypto::Crypto> {
     answered_crypto(sdp)
 }
 
@@ -2324,7 +2807,7 @@ fn telephone_event_payload_type(audio: &sipx_sdp::MediaDescription) -> Option<u8
 }
 
 /// Where to send media, and in what codec, from a description.
-fn negotiated(sdp: &SessionDescription) -> Result<Negotiated> {
+pub(crate) fn negotiated(sdp: &SessionDescription) -> Result<Negotiated> {
     let audio = sdp
         .media
         .iter()

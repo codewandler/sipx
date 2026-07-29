@@ -14,12 +14,14 @@ pub mod error;
 pub mod event;
 pub mod rel;
 pub mod transfer;
+pub mod update;
 
 pub use call::{
-    Call, DialOptions, answer, answer_replacing, answer_ringing, dial, dial_once, serve,
+    Call, DialOptions, answer, answer_early, answer_replacing, answer_ringing, dial, dial_once,
+    serve,
 };
 pub use dialog::{Dialog, DialogId, Role};
 pub use error::{Error, Result};
 pub use event::{CallEvent, CallEvents, EndCause};
-pub use rel::{Ringing, ring};
+pub use rel::{Ringing, ring, ring_early};
 pub use transfer::{Referral, Replaces, Transfer, TransferState};
