@@ -14,9 +14,9 @@
 //!   the INVITE instead of refreshing is waiting on a path that does not exist yet — which is why
 //!   the ordering is a type here ([`Pending`]) rather than a comment.
 //! - **sipx ships no push service.** [`PushService`] is a trait and this repository implements it
-//!   nowhere. sipx is a stack, not a client of anybody's push transport, and the
-//!   [vision](../../../docs/vision.md)'s non-goals rule out the alternative. What sipx owes is the
-//!   SIP half: the parameters, the option negotiation, 555, and the refresh ordering.
+//!   nowhere. sipx is a stack, not a client of anybody's push transport, and the non-goals in
+//!   `docs/vision.md` rule out the alternative. What sipx owes is the SIP half: the parameters,
+//!   the option negotiation, 555, and the refresh ordering.
 //! - **The proxy half is not here.** §5.6 has a proxy hold the request in a bucket while the
 //!   client wakes, and §4.2's registrar behaviour mints the PURR. Both are roles sipx does not
 //!   play, and neither shares anything with this but the wire format.
