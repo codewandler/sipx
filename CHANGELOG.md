@@ -9,6 +9,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **GRUU (`T-20`, RFC 5627)** — one *instance* of a registration becomes separately addressable: a
+  URI that routes to this UA and to no other registration of the same address of record. The UA
+  offers `Supported: gruu` with its instance ID, keeps the `pub-gruu` and `temp-gruu` the registrar
+  issues, publishes one as the `Contact` on dialog-forming and target-refresh requests, and
+  recognises a request sent to its own GRUU.
+  - **One instance identity, enforced by structure.** Outbound (RFC 5626) and GRUU both name the
+    device with `+sip.instance`, so the configuration holds it in a single field rather than two
+    that could disagree — a registrar correlating them would otherwise see one device claiming to
+    be two.
+  - **The address of record is URI-equivalent to the public GRUU (§5.4) and still must not be taken
+    for it.** That case and another instance's GRUU are both asserted as negatives, not assumed.
+  - **A GRUU is discarded with the binding behind it.** Replaced on every 2xx and cleared when an
+    attempt yields none: a stale GRUU is an address that reaches nothing, published in the header a
+    peer routes its next request by.
+  - Registrar behaviour is deliberately out of scope and the registry says so — RFC 5627 moves to
+    *partial*, with roles `uac`/`uas` and a note naming what minting a GRUU would require.
+
 - **The host configuration schema is normative (`A-1`)** — `docs/specs/host-config.md` goes from
   draft to normative: a bounded TOML subset as the concrete syntax, the listener and app schema,
   the failure and grants tables, reload semantics, and thirty vectors `HC-1` … `HC-30`.
@@ -69,6 +86,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     what. A real HTTP client cannot answer the second half before making the call. With a clock
     that has no `now()`, that is acceptance enforced by types rather than by review — a minute of
     virtual time costs under 250 ms of real time, and there is a test that says so.
+
+### Changed
+
+- **`sipx-ua` (breaking, pre-1.0)** — `Config` and `Registration` drop the `outbound` field in
+  favour of `instance`, `reg_id` and `gruu`, so the device identity Outbound and GRUU share lives
+  in one place. `registrar::interpret` now takes the `Registration` rather than three positional
+  arguments. `Config::with_outbound` is unchanged, so existing call sites are unaffected.
 
 ## [0.7.0] — 2026-07-29
 
