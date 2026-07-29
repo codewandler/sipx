@@ -2,7 +2,7 @@
 id: T-21
 title: Be reachable through a push notification
 pillar: Signalling
-status: backlog
+status: in-progress
 priority:
 design:
 epic: conformance
@@ -17,31 +17,47 @@ Let a client that holds no connection — no socket, no keepalive, possibly not 
 its push notification service and be reachable for the call that woke it.
 
 ## Acceptance
-- [ ] A REGISTER can carry the push parameters RFC 8599 §8.7 defines on its `Contact` URI:
+- [x] A REGISTER can carry the push parameters RFC 8599 §8.7 defines on its `Contact` URI:
       `pn-provider`, `pn-param` and `pn-prid`. They are URI parameters, so they belong in the URI
       grammar rather than being pasted onto a serialized contact.
-- [ ] The `sip.pns` feature-capability indicator (§8.2) is understood, so a client can tell whether
+- [x] The `sip.pns` feature-capability indicator (§8.2) is understood, so a client can tell whether
       the registrar supports the push service it named — and `sip.pnsreg` and `sip.pnspurr` are at
       least parsed, since a registrar that offers them changes what the client should do next.
-- [ ] **555 (Push Notification Service Not Supported)** (§8.1) is a known status code and is
+- [x] **555 (Push Notification Service Not Supported)** (§8.1) is a known status code and is
       surfaced as itself, not as a generic failure. It is the one answer that tells a client its
       whole reachability plan is wrong.
-- [ ] On receiving a push, the client sends a binding-refresh REGISTER — §4.1.3: "When a UA receives
+- [x] On receiving a push, the client sends a binding-refresh REGISTER — §4.1.3: "When a UA receives
       a push notification, the UA MUST send a binding-refresh REGISTER request" — and only then
       expects the pending request. A client that waits for the INVITE without refreshing has no flow
       for it to arrive on.
-- [ ] The push service itself is behind a trait and sipx ships no implementation of one. sipx is a
+- [x] The push service itself is behind a trait and sipx ships no implementation of one. sipx is a
       stack, not a client of a particular vendor's push transport; the [vision](../vision.md)'s
       non-goals rule out anything else, and a test double is what the tests use.
-- [ ] `pn-purr` is handled or explicitly deferred with a reason recorded — it exists so a
+- [x] `pn-purr` is handled or explicitly deferred with a reason recorded — it exists so a
       mid-dialog request can be matched to a stored binding, which only matters once something
       stores them.
-- [ ] The RFC registry entry for RFC 8599 moves off "not started", with the `Roles` column saying
+- [x] The RFC registry entry for RFC 8599 moves off "not started", with the `Roles` column saying
       the UA half only.
-- [ ] Failing-first test: `a_push_wakes_a_client_that_refreshes_its_binding_before_the_invite`.
+- [x] Failing-first test: `a_push_wakes_a_client_that_refreshes_its_binding_before_the_invite`.
 
 ## Progress
-- Not started. `compliance.md` records RFC 8599 as depending on 5626, which is `T-15` in M6.
+- Implemented, UA half only, on `impl/T-21`. The syntax lives in `sipx-sip/src/push.rs` —
+  `Device` for §8.7's `pn-*` URI parameters (validated against RFC 3261 §25.1's `pvalue`, since a
+  bad token silently becomes a different URI), `Indicators` for §8.2's three feature-capability
+  indicators read out of `Feature-Caps` (RFC 6809 §4, new `HeaderName::FeatureCaps`), and 555 as
+  named constants. The behaviour lives in `sipx-ua`: `push::PushService` is the trait (no
+  implementation shipped; the tests use a stub), `push::Support` is what a REGISTER response said
+  (`supports()` answers §8.2's question), `Config::with_push` puts the parameters inside the
+  `Contact` URI's angle brackets, `registrar::interpret` returns `Outcome::PushNotSupported` for
+  555 and `UserAgent::register` surfaces it as `Error::PushNotSupported`, and
+  `UserAgent::woken` is §4.1.3's ordering as a type — it sends the binding-refresh REGISTER and
+  only then hands back a `push::Pending` that licenses expecting the pending request.
+- `pn-purr` is read (`sipx_sip::push::purr`, `Support::purr`) and carried, deliberately not
+  matched against stored bindings: matching is for the party that *stores* bindings, which is
+  §5.6's proxy role and out of scope per the story's Notes. The reason is recorded on both `purr`
+  doc comments.
+- Registry entry for 8599 is `partial`, roles `["uac"]`; `docs/compliance.md` regenerated.
+- All four tests in `crates/sipx-ua/tests/push.rs` pass, plus unit tests in both `push.rs` files.
 
 ## Notes
 - The ordering in §4.1.3 is the whole mechanism and the easiest thing to get backwards. The push is

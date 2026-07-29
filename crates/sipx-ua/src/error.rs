@@ -36,6 +36,17 @@ pub enum Error {
     /// More flows were added than `reg-id` can number (RFC 5626 §4.2 caps it at 2^31 - 1).
     #[error("too many flows: reg-id cannot number more than 2^31 - 1 of them")]
     TooManyFlows,
+    /// The registrar answered 555: it does not support the push notification service the
+    /// `Contact` named (RFC 8599 §8.1).
+    ///
+    /// Distinct from [`Error::Rejected`] because retrying cannot help. Every attempt naming this
+    /// push service will be refused the same way, and a client that treats it as a transient
+    /// failure stays unreachable while looking busy.
+    #[error("the registrar does not support the push notification service named: 555 {reason}")]
+    PushNotSupported {
+        /// The reason phrase the registrar sent.
+        reason: String,
+    },
     /// The server refused.
     #[error("rejected: {status} {reason}")]
     Rejected {

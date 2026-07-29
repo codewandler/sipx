@@ -97,6 +97,17 @@ impl Params {
         self.entries.push(param);
     }
 
+    /// Remove every parameter with this name, and say whether any was there.
+    ///
+    /// Every one, not the first: the list preserves duplicates because a message may contain them,
+    /// and leaving a second copy behind after removing the first would be a silent change of
+    /// meaning rather than a removal.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|p| !p.has_name(name));
+        self.entries.len() != before
+    }
+
     /// Every parameter, in wire order.
     pub fn iter(&self) -> impl Iterator<Item = &Param> {
         self.entries.iter()
@@ -229,6 +240,27 @@ mod tests {
         assert_eq!(names, vec![b"b".to_vec(), b"a".to_vec(), b"b".to_vec()]);
         // get() returns the first occurrence, not the last.
         assert_eq!(p.value("b"), Some(&b"2"[..]));
+    }
+
+    /// Every copy, not the first. A list that may hold duplicates and a removal that took one of
+    /// them would leave the parameter still there, having reported that it was gone — a silent
+    /// change of meaning rather than a removal.
+    #[test]
+    fn remove_takes_every_copy_and_says_whether_there_was_one() {
+        let mut p = params(&[("b", Some("2")), ("a", Some("1")), ("b", Some("3"))]);
+        assert!(p.remove("b"));
+        assert_eq!(p.len(), 1);
+        assert_eq!(p.value("b"), None);
+        assert_eq!(p.value("a"), Some(&b"1"[..]));
+        // Nothing to remove is `false`, and leaves the list alone.
+        assert!(!p.remove("b"));
+        assert_eq!(p.len(), 1);
+        // A valueless parameter is a parameter, and matching is the case-insensitive comparison
+        // `has_name` makes it (RFC 3261 §19.1.4).
+        let mut flags = params(&[("lr", None), ("Transport", Some("tcp"))]);
+        assert!(flags.remove("LR"));
+        assert!(flags.remove("transport"));
+        assert!(flags.is_empty());
     }
 
     #[test]

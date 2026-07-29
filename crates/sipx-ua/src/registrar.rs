@@ -23,6 +23,7 @@ use sipx_sip::{Address, HeaderName, Method, Request, Response, Uri};
 use crate::auth::{Challenge, Credentials, new_cnonce, respond, strongest};
 use crate::gruu::{self, Gruus};
 use crate::outbound::{InstanceId, RegId};
+use crate::push::{self, Support};
 
 /// How long a registration lease has left, and when to refresh it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +89,13 @@ pub struct Registered {
     /// because they expire with it: a GRUU outliving the registration that produced it is an
     /// address a UA would keep publishing after it had stopped resolving.
     pub gruus: Gruus,
+    /// What the registrar said about push notifications (RFC 8599 §8.2).
+    ///
+    /// Empty when push was not asked for, and empty when it was and the registrar implements
+    /// nothing of RFC 8599 — which is not a refusal. The case worth reading it for is the third
+    /// one: a registrar that answered 200 while naming a *different* push service has recorded a
+    /// binding nothing will ever wake, and this is the only place that says so.
+    pub push: Support,
 }
 
 /// What a registration attempt produced.
@@ -97,6 +105,19 @@ pub enum Outcome {
     Registered(Box<Registered>),
     /// The registrar wants credentials. Answer with [`authorize`] and send again.
     Challenged(Box<Challenge>),
+    /// 555: the registrar does not support the push notification service this `Contact` named
+    /// (RFC 8599 §8.1).
+    ///
+    /// Its own variant rather than a [`Outcome::Rejected`] with a number in it, because it is the
+    /// one refusal that is not about *this attempt*. Credentials can be corrected and a lease can
+    /// be re-asked for; a push service the registrar cannot use will not become usable on the next
+    /// try, and a client that retries into it is unreachable for as long as it keeps trying. The
+    /// answer is to register without push, or with a service the registrar names — which is what
+    /// [`Registered::push`] reports.
+    PushNotSupported {
+        /// The reason phrase, which §8.1 registers as [`push::NOT_SUPPORTED_REASON`].
+        reason: String,
+    },
     /// The registrar refused.
     Rejected {
         /// The status code.
@@ -142,6 +163,15 @@ pub struct Registration {
     /// `Some` asks for one: §4.1 has the REGISTER offer the `gruu` option tag alongside the
     /// instance ID. `None` does not ask, and no registrar will volunteer.
     pub gruu: Option<gruu::Kind>,
+    /// How a push notification service can wake this device (RFC 8599 §4.1.2).
+    ///
+    /// Beside the instance identity rather than in a story of its own, because it is the same
+    /// claim: this is the device, and *this* is how to reach it when there is no flow. When set,
+    /// the `Contact` **URI** carries `pn-provider`, `pn-param` and `pn-prid` — inside the angle
+    /// brackets, which is where a registrar's URI parser looks.
+    ///
+    /// `None` registers without push, which is every client that holds a connection of its own.
+    pub push: Option<sipx_sip::push::Device>,
 }
 
 /// The proxies a registrar recorded as being on the path back to this contact (RFC 3327).
@@ -364,17 +394,24 @@ impl Registration {
     ///
     /// `+sip.instance` appears exactly once, however many mechanisms want it — RFC 5626 §4.1 and
     /// RFC 5627 §4.1 name the same tag, and it is emitted from the one field that holds it.
+    ///
+    /// The push parameters go on first and go *inside*: RFC 8599 §8.7 registers them as URI
+    /// parameters, so they belong in the URI's own grammar, while `+sip.instance` and `reg-id` are
+    /// `contact-param`s and belong after the angle brackets. Two lists, two meanings, and putting
+    /// either in the other's place produces a `Contact` that parses and says the wrong thing.
     #[must_use]
     pub fn contact(&self) -> String {
+        let base = match &self.push {
+            Some(device) => push::in_contact(&self.contact, device),
+            None => self.contact.clone(),
+        };
         match (&self.instance, self.reg_id) {
             // An Outbound flow: `reg-id` and the instance, in RFC 5626 §4.2's order.
-            (Some(instance), Some(reg_id)) => {
-                crate::outbound::contact(&self.contact, instance, reg_id)
-            }
+            (Some(instance), Some(reg_id)) => crate::outbound::contact(&base, instance, reg_id),
             // An instance without a flow — a GRUU registration, or a UA that wants a registrar to
             // recognise it across reboots without asking for Outbound.
-            (Some(instance), None) => format!("{};{}", self.contact, instance.contact_param()),
-            (None, _) => self.contact.clone(),
+            (Some(instance), None) => format!("{};{}", base, instance.contact_param()),
+            (None, _) => base,
         }
     }
 
@@ -445,7 +482,26 @@ pub fn interpret(response: &Response, registration: &Registration) -> Outcome {
                 .map_or_else(Gruus::default, |instance| {
                     Gruus::from_response(response, instance)
                 }),
+            // Read whether or not this side asked for push, for the reason `path` is: a registrar
+            // that volunteers a `Feature-Caps` is telling us something, and §8.2's whole value is
+            // that a client can compare what it named against what the registrar can use.
+            push: Support::from_response(response),
         }));
+    }
+
+    // §8.1, and it is checked before the challenge codes because it is not about this attempt:
+    // no credential and no retry makes a push service the registrar cannot use usable.
+    //
+    // Only when this registration actually named one. §8.1 defines 555 as the answer to a
+    // request whose push parameters the registrar cannot use, and every piece of advice the
+    // variant carries — retrying will not help, register without push or with a service the
+    // registrar names — is advice to a client that asked for push. To a client that sent no
+    // `pn-*` parameters the same code is a refusal this side has no reading of, and the honest
+    // report of that is the number, through the ordinary rejection below.
+    if status == sipx_sip::push::NOT_SUPPORTED && registration.push.is_some() {
+        return Outcome::PushNotSupported {
+            reason: String::from_utf8_lossy(&response.reason).into_owned(),
+        };
     }
 
     if status == 401 || status == 407 {
@@ -557,6 +613,7 @@ mod tests {
             instance: None,
             reg_id: None,
             gruu: None,
+            push: None,
         }
     }
 
@@ -1071,6 +1128,48 @@ mod tests {
                 assert_eq!(reason, "Forbidden");
             }
             other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    fn refused_555() -> Response {
+        response(
+            "SIP/2.0 555 Push Notification Service Not Supported\r\n\
+             Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bKx\r\n\
+             To: <sip:alice@example.com>;tag=r\r\n\
+             From: <sip:alice@example.com>;tag=1\r\n\
+             Call-ID: reg-1@192.0.2.5\r\n\
+             CSeq: 1 REGISTER\r\n\
+             Content-Length: 0\r\n\r\n",
+        )
+    }
+
+    /// RFC 8599 §8.1's 555, to a registration that named a push service: its own outcome, because
+    /// no credential and no retry makes that service usable at this registrar.
+    #[test]
+    fn a_555_to_a_push_registration_is_its_own_outcome_rather_than_a_number() {
+        let asking = Registration {
+            push: Some(sipx_sip::push::Device::new("webpush", "c1a5b3e7d9f2").expect("valid")),
+            ..registration()
+        };
+        match interpret(&refused_555(), &asking) {
+            Outcome::PushNotSupported { reason } => {
+                assert_eq!(reason, sipx_sip::push::NOT_SUPPORTED_REASON);
+            }
+            other => panic!("expected §8.1's own outcome, got {other:?}"),
+        }
+    }
+
+    /// The same code to a registration that named no push service at all. Every piece of advice
+    /// `PushNotSupported` carries — retrying will not help, register without push — is advice to
+    /// a client that asked for push, so to this one the honest report is the number.
+    #[test]
+    fn a_555_to_a_registration_that_asked_for_no_push_is_an_ordinary_rejection() {
+        match interpret(&refused_555(), &registration()) {
+            Outcome::Rejected { status, reason } => {
+                assert_eq!(status, 555);
+                assert_eq!(reason, sipx_sip::push::NOT_SUPPORTED_REASON);
+            }
+            other => panic!("expected an ordinary rejection, got {other:?}"),
         }
     }
 
