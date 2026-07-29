@@ -30,9 +30,21 @@ Recently landed:
   up forever.
 - **SRTP with SDES keying (RFC 3711, RFC 4568)** — media encrypted when the signalling
   protects the key, with the [edges documented honestly](reference/compliance.md).
+- **DTLS-SRTP (RFC 5763, RFC 5764)** — the keying that never touches the signalling path: the
+  handshake runs over the media path and the certificate is checked against the
+  `a=fingerprint` the SDP carried, or no keys are returned. Everything the two RFCs decide is
+  compiled always; only the handshake sits behind the off-by-default `dtls` feature.
+- **The event notification framework (RFC 6665)** — a notifier with a subscription store and
+  packages registered by name, plus the `dialog`, `reg` and `presence` packages and PUBLISH
+  behind an entity tag. The packages produce documents; joining them to sipx's live dialogs and
+  registrations is still yours to write.
+- **A call reports itself as a typed event stream** — ringing, answered, a DTMF digit and how
+  long it was held, playback and recording finishing, transfer progress, hold and resume, and
+  ended with a cause, pushed onto a channel the call owns instead of found by polling it.
 
-In progress: DTLS-SRTP — the keying browsers require, and the one that keeps the key off the
-signalling path entirely.
+Not there yet: ICE. The two pieces a browser insists on — WebSocket transport and DTLS-SRTP —
+are in place, but without connectivity checks a browser and sipx will agree on a session and
+then fail to find a media path in most networks.
 
 ## The SDK direction
 

@@ -53,10 +53,11 @@ parse-only or not started, and *partial* entries say which part is missing.
 
 Two things are worth reading there before committing to sipx:
 
-**Media encryption is real but has edges.** SRTP's default transform, keyed by SDES. SDES puts
-the key in the SDP body, so an intermediary that terminates the TLS can read it — DTLS-SRTP,
-which does not have that property, is not built yet. One transform, no rekeying. RFC 3711 is
-marked *partial* for those reasons rather than *implemented*.
+**Media encryption is real but has edges.** SRTP's default transform, keyed either by SDES or by
+DTLS-SRTP. SDES puts the key in the SDP body, so an intermediary that terminates the TLS can
+read it; DTLS-SRTP keys on the media path and does not have that property, with its handshake
+behind the off-by-default `dtls` feature. What is left is one transform and no rekeying, which
+is why RFC 3711 is marked *partial* rather than *implemented*.
 
 **Some things parse and do nothing.** `Accept-Contact` and others survive the wire intact and
 nothing acts on them. That is deliberate — losslessness first — and it is recorded as

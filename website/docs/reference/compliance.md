@@ -5,7 +5,7 @@ description: What sipx implements, what it only parses, and what it has not star
 
 # RFC compliance
 
-sipx tracks its own standards coverage as a **measurement, not a claim**: a registry lists 65
+sipx tracks its own standards coverage as a **measurement, not a claim**: a registry lists 69
 RFCs, each marked with one of five statuses, and CI regenerates the published table from the
 registry and fails the build when a claim does not hold — a header the table says sipx parses
 must actually be known to the parser, and a file an entry cites must exist.
@@ -28,9 +28,11 @@ so a header sipx has no behaviour for survives intact and re-serializes byte for
 statuses exist to keep that honest: passing something through unharmed is not the same as
 supporting it, and the table refuses to blur the two.
 
-**Partial entries say which part.** RFC 3711 (SRTP) is *partial* because there is one transform,
-no rekeying, and SDES keying places the key where a TLS-terminating intermediary can read it.
-The point of the note is that you learn this here, not in production.
+**Partial entries say which part.** RFC 3711 (SRTP) is *partial* because there is one transform
+and no rekeying — no AES-192 or 256, no f8, no null cipher. RFC 4568 (SDES) is *partial* in its
+own right, and its note records the property that matters: SDES places the key where a
+TLS-terminating intermediary can read it, which is what DTLS-SRTP exists to avoid.
+The point of the notes is that you learn this here, not in production.
 
 The order in which the remaining gaps close — and the reasoning — is the
 [RFC roadmap](https://github.com/codewandler/sipx/blob/main/docs/rfc-roadmap.md).

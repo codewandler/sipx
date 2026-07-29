@@ -7,6 +7,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-29
+
+### Changed
+
+- **The timer queue is generic over its instant (`X-21`).** `TimerQueue` documented that "nothing
+  here has an opinion about what an instant means" while its field was a `tokio::time::Instant` —
+  a type whose only constructors are `now()`, which reads the machine clock, and `from_std`, which
+  needs a `std::time::Instant` that has no zero either. A discrete-event simulator on virtual time
+  had no instant to hand in and could not build one, so the one caller the queue was generalised
+  *for* was the one caller that could not use it.
+  - `TimerQueue<K, I = Instant>` with `I: Ord + Copy + Add<Duration, Output = I>` — the minimum the
+    queue actually uses: compare deadlines, copy them out, add a `Duration` to get one.
+  - **Additive: no existing caller changes.** The default type parameter means `TimerQueue<K>`
+    still names exactly what it named before, and a test asserts that rather than leaving it to the
+    build to notice.
+  - The ordering bounds moved from the key to the instant, because ordering is by deadline alone.
+
+### Documentation
+
+- The website catches up to what has shipped: DTLS-SRTP is keyed on the media path rather than
+  "not built yet", the event framework and its three packages are described with the join to live
+  dialogs named as the caller's, and ICE is stated as the reason browser interoperability is still
+  out of reach rather than SDES keying.
+
 ## [0.6.0] — 2026-07-29
 
 ### Added

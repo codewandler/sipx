@@ -12,7 +12,7 @@ the stories, not the generated region. New work? Copy [`_TEMPLATE.md`](_TEMPLATE
 **M0 through M8 are complete.** sipx registers against a real Kamailio over UDP, TCP and TLS,
 places calls with encrypted G.711 audio, bridges and mixes them, transfers them, authenticates the
 other side rather than only answering, and serves subscriptions to what its dialogs and
-registrations are doing — with 954 tests green and clippy clean at `-D warnings` on both feature
+registrations are doing — with 956 tests green and clippy clean at `-D warnings` on both feature
 sets.
 
 The open work is the **application SDK and its host**. `C-3`, the epic's keystone, is done: a call
@@ -166,6 +166,7 @@ _The transport layer is the only place in the signalling stack that touches the 
 - [X-13 — Publish the API documentation](X-13-publish-the-api-documentation.md) · Build · track: docs · after X-12 in the same crate-free track
 - [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
 - [X-20 — Let a caller take the digest primitives without taking a runtime](X-20-digest-without-a-runtime.md) · Build · sipx-ua pulls tokio unconditionally, so sans-IO code cannot use S-16's Authenticator
+- [X-21 — Make the timer queue generic over its instant](X-21-timer-queue-generic-over-its-instant.md) · Build · the queue documents clock-independence its signature contradicts · additive, breaks nothing
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
