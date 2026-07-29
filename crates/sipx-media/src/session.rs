@@ -351,7 +351,7 @@ pub struct Encoded {
 #[derive(Debug)]
 pub struct MediaSession {
     outgoing: mpsc::Sender<Frame>,
-    digits: Mutex<mpsc::Receiver<Digit>>,
+    digits: Mutex<mpsc::Receiver<(Digit, Duration)>>,
     /// Distinguishes one keypress from the next.
     tones: AtomicU64,
     incoming: Mutex<mpsc::Receiver<Vec<i16>>>,
@@ -530,7 +530,7 @@ impl MediaSession {
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
         let (encoded_tx, encoded_rx) = mpsc::channel::<Encoded>(256);
         let relay = Arc::new(AtomicBool::new(false));
-        let (digits_tx, digits_rx) = mpsc::channel::<Digit>(32);
+        let (digits_tx, digits_rx) = mpsc::channel::<(Digit, Duration)>(32);
 
         let sent = Arc::new(AtomicU64::new(0));
         let received = Arc::new(AtomicU64::new(0));
@@ -675,15 +675,21 @@ impl MediaSession {
         true
     }
 
-    /// Take the next DTMF digit the far end pressed.
-    pub async fn recv_digit(&self) -> Option<Digit> {
+    /// Take the next DTMF digit the far end pressed, and how long it was held.
+    ///
+    /// The duration comes from the RFC 4733 event itself (its `duration` field, converted from
+    /// the negotiated clock rate to wall-clock time), not from timing our own arrival: the event
+    /// carries the sender's own clock, and measuring anything else would make the number depend
+    /// on jitter rather than on how long the key was actually down.
+    pub async fn recv_digit(&self) -> Option<(Digit, Duration)> {
         self.digits.lock().await.recv().await
     }
 
     /// Collect digits until none arrives for `idle`.
     pub async fn collect_digits(&self, idle: Duration) -> String {
         let mut out = String::new();
-        while let Ok(Some(digit)) = tokio::time::timeout(idle, self.recv_digit()).await {
+        while let Ok(Some((digit, _duration))) = tokio::time::timeout(idle, self.recv_digit()).await
+        {
             out.push(digit.as_char());
         }
         out
@@ -879,7 +885,7 @@ async fn flush(
     buffer: &mut JitterBuffer,
     to: &Delivery<'_>,
     decoding: &mut Decoding,
-    digits: &mpsc::Sender<Digit>,
+    digits: &mpsc::Sender<(Digit, Duration)>,
     dtmf: &mut sipx_rtp::dtmf::Receiver,
     config: &Config,
     stop: &Stop,
@@ -1203,7 +1209,7 @@ struct Inbound {
     audio: mpsc::Sender<Vec<i16>>,
     encoded: mpsc::Sender<Encoded>,
     relay: Arc<AtomicBool>,
-    digits: mpsc::Sender<Digit>,
+    digits: mpsc::Sender<(Digit, Duration)>,
     remote: Arc<Mutex<SocketAddr>>,
     config: Config,
     received: Arc<AtomicU64>,
@@ -1616,7 +1622,7 @@ struct Delivery<'a> {
 async fn deliver(
     to: &Delivery<'_>,
     decoding: &mut Decoding,
-    digits: &mpsc::Sender<Digit>,
+    digits: &mpsc::Sender<(Digit, Duration)>,
     dtmf: &mut sipx_rtp::dtmf::Receiver,
     config: &Config,
     stop: &Stop,
@@ -1629,10 +1635,15 @@ async fn deliver(
         if let Some(event) = DtmfEvent::decode(&packet.payload)
             && let Some(digit) = dtmf.push(packet.timestamp, &event)
         {
+            // The event's own duration, in its own clock units (RFC 4733 §2.2 — the same
+            // clock the session negotiated for audio), converted to wall-clock time here so
+            // every consumer of the channel gets a real duration without knowing the clock
+            // rate itself.
+            let millis = u64::from(event.duration) * 1000 / u64::from(config.clock_rate.max(1));
             // A full channel means the application is not reading digits. Dropping is
             // right: a keypress delivered late is worse than one not delivered, since the
             // application has already moved on.
-            let _ = digits.try_send(digit);
+            let _ = digits.try_send((digit, Duration::from_millis(millis)));
         }
         return true;
     }
@@ -1872,11 +1883,15 @@ mod tests {
             )
             .await;
 
-        let digit = tokio::time::timeout(Duration::from_secs(2), left.recv_digit())
+        let (digit, duration) = tokio::time::timeout(Duration::from_secs(2), left.recv_digit())
             .await
             .expect("no timeout")
             .expect("a digit arrives");
         assert_eq!(digit.as_char(), '5');
+        assert!(
+            duration >= Duration::from_millis(80) && duration <= Duration::from_millis(140),
+            "the reported duration must reflect how long the digit was held: {duration:?}"
+        );
 
         // Exactly once, however many packets carried it.
         assert!(
@@ -1928,7 +1943,7 @@ mod tests {
                 Duration::from_millis(80),
             )
             .await;
-        let digit = tokio::time::timeout(Duration::from_secs(2), left.recv_digit())
+        let (digit, _duration) = tokio::time::timeout(Duration::from_secs(2), left.recv_digit())
             .await
             .expect("no timeout")
             .expect("a digit");

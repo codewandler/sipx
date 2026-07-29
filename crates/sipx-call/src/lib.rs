@@ -11,6 +11,7 @@
 pub mod call;
 pub mod dialog;
 pub mod error;
+pub mod event;
 pub mod rel;
 pub mod transfer;
 
@@ -19,5 +20,6 @@ pub use call::{
 };
 pub use dialog::{Dialog, DialogId, Role};
 pub use error::{Error, Result};
+pub use event::{CallEvent, CallEvents, EndCause};
 pub use rel::{Ringing, ring};
 pub use transfer::{Referral, Replaces, Transfer, TransferState};

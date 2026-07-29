@@ -16,6 +16,7 @@ use sipx_transport::{Handle, Incoming, Target, TransportKind};
 
 use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
+use crate::event::{CallEvent, CallEvents, EndCause, EventSink};
 use crate::transfer::{
     Referral, Replaces, Transfer, TransferState, is_terminated, parse_sipfrag, sipfrag,
 };
@@ -29,6 +30,16 @@ use crate::transfer::{
 fn ok_status() -> StatusCode {
     const OK: u16 = 200;
     StatusCode::new(OK).unwrap_or_else(|| unreachable!("200 is a valid status code"))
+}
+
+/// Queue the events construction already knows happened: `Ringing`, if the far end rang first,
+/// then `Answered` — every `Call` gets exactly this sequence at birth, on both the caller's and
+/// the callee's side, which is why both construction sites share it rather than repeating it.
+fn emit_construction_events(events: &EventSink, ringing: Option<bool>) {
+    if let Some(reliable) = ringing {
+        events.emit(CallEvent::Ringing { reliable });
+    }
+    events.emit(CallEvent::Answered);
 }
 
 /// A fresh token for a `Call-ID` or a `tag`.
@@ -68,6 +79,11 @@ pub struct Call {
     transfer: Option<Transfer>,
     /// The RFC 4028 session timer, if one was negotiated.
     session: Option<SessionState>,
+    /// Where this call's events go (story `C-3`). Every state change below is emitted through
+    /// this at the point it happens, not reconstructed afterwards from the fields above.
+    events: EventSink,
+    /// The one receiver [`Self::events`] hands out, until it does.
+    events_rx: Option<CallEvents>,
 }
 
 /// A negotiated session timer and the deadline it is currently counting down to.
@@ -120,8 +136,14 @@ impl Call {
     }
 
     /// Take the next digit the far end pressed.
+    ///
+    /// The digit only; a caller that wants how long it was held can read [`Self::media`]'s own
+    /// [`MediaSession::recv_digit`], which this delegates to.
     pub async fn recv_digit(&self) -> Option<sipx_rtp::Digit> {
-        self.media.recv_digit().await
+        self.media
+            .recv_digit()
+            .await
+            .map(|(digit, _duration)| digit)
     }
 
     /// Whether the media is encrypted (RFC 3711).
@@ -139,6 +161,15 @@ impl Call {
     #[must_use]
     pub fn is_ended(&self) -> bool {
         self.ended
+    }
+
+    /// This call's event stream (story `C-3`).
+    ///
+    /// `Some` the first time this is called, `None` every time after — there is exactly one
+    /// consumer, per the vision's "own it, don't share it" (principle 3), so the receiver is
+    /// handed out rather than cloned.
+    pub fn events(&mut self) -> Option<CallEvents> {
+        self.events_rx.take()
     }
 
     /// Feed an in-dialog request to the call.
@@ -197,6 +228,10 @@ impl Call {
                 if let Some(notify) = self.awaiting_ack.take() {
                     notify.notify_waiters();
                 }
+                // Emitted here, at the point `ended` actually flips, rather than after the 200
+                // OK below — the call is over the moment the far end's BYE is accepted, whether
+                // or not building or sending the response then succeeds.
+                self.events.end(EndCause::RemoteBye);
                 let response =
                     ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?.build();
                 self.endpoint.respond(&incoming.key, response).await?;
@@ -243,7 +278,7 @@ impl Call {
             // §10: the side that is not refreshing "SHOULD send a BYE to terminate the
             // session". The media stops with it — a half-torn-down call that keeps streaming
             // is the failure this whole mechanism exists to end, not a gentler version of it.
-            self.hang_up().await?;
+            self.end(EndCause::Timeout).await?;
             return Err(Error::SessionExpired);
         }
         match self.reinvite(self.hold).await {
@@ -253,14 +288,14 @@ impl Call {
             // refresh, not the call: a 491 glare or a 500 leaves the session running until the
             // deadline we do not move, so the next attempt is the retry.
             Err(Error::NoResponse) => {
-                self.hang_up().await?;
+                self.end(EndCause::Timeout).await?;
                 Err(Error::SessionExpired)
             }
             Err(Error::Rejected { status, reason }) => {
                 const REQUEST_TIMEOUT: u16 = 408;
                 const NO_SUCH_DIALOG: u16 = 481;
                 if status == REQUEST_TIMEOUT || status == NO_SUCH_DIALOG {
-                    self.hang_up().await?;
+                    self.end(EndCause::Timeout).await?;
                     return Err(Error::SessionExpired);
                 }
                 // Push the retry out so a peer answering 500 to every refresh is not asked
@@ -319,11 +354,20 @@ impl Call {
 
         // Hold is a direction, not a separate state: `sendonly` or `inactive` from the far end
         // means it will not play what we send.
+        let was_on_hold = self.is_on_hold();
         self.hold = offer
             .media
             .iter()
             .find(|m| m.media == "audio" && !m.is_rejected())
             .map_or(Direction::SendRecv, sipx_sdp::MediaDescription::direction);
+        // Emitted right where `hold` changes, not by polling it afterwards — a re-INVITE that
+        // does not change the direction (a keep-alive, say) must not report a hold that never
+        // happened.
+        match (was_on_hold, self.is_on_hold()) {
+            (false, true) => self.events.emit(CallEvent::Hold),
+            (true, false) => self.events.emit(CallEvent::Resumed),
+            _ => {}
+        }
 
         self.move_media_if_changed(renegotiated).await?;
 
@@ -708,8 +752,15 @@ impl Call {
             return Ok(());
         };
 
+        // An attended transfer's `Refer-To` carries a `Replaces` (RFC 3891 + 3515), built by
+        // `refer_attended` above as a URI header parameter. A substring check on the raw value
+        // rather than a full URI-header parse: `Uri` does not expose its header component, and
+        // this only has to distinguish "asks to replace a dialog" from "does not", not validate
+        // one.
+        let attended = refer_to.as_deref().is_some_and(contains_replaces);
+
         self.referral = Some(Referral {
-            target,
+            target: target.clone(),
             referred_by: incoming
                 .request
                 .headers
@@ -719,6 +770,8 @@ impl Call {
             key: incoming.key.clone(),
             request: incoming.request.clone(),
         });
+        self.events
+            .emit(CallEvent::TransferRequested { target, attended });
         Ok(())
     }
 
@@ -760,7 +813,8 @@ impl Call {
             finished: false,
         });
         if let Some(state) = state {
-            transfer.state = state;
+            transfer.state = state.clone();
+            self.events.emit(CallEvent::TransferProgress(state));
         }
         // Once terminated, always terminated: a stray notification afterwards must not reopen a
         // subscription the transferee has already closed.
@@ -836,13 +890,17 @@ impl Call {
         Ok(())
     }
 
-    /// End the call.
+    /// End the call, for `cause`, which is emitted the moment `ended` flips — before the BYE is
+    /// even built, so a call is reported over regardless of whether transmitting the BYE then
+    /// succeeds. Shared by [`Self::hang_up`] (this side decided to end it) and the session-timer
+    /// path in [`Self::on_session_deadline`] (the far end stopped answering), so both go through
+    /// exactly the same teardown and the event this emits cannot drift from which one happened.
     ///
     /// Anything still queued is sent first, then the media stops, then the BYE goes out.
     /// Stopping first would discard the tail of whatever was playing — the last word of a
     /// clip, the last digit of a PIN — because sending is paced and the queue outlives the
     /// call by however much is left in it.
-    pub async fn hang_up(&mut self) -> Result<()> {
+    async fn end(&mut self, cause: EndCause) -> Result<()> {
         if self.ended {
             return Ok(());
         }
@@ -853,6 +911,7 @@ impl Call {
         if let Some(notify) = self.awaiting_ack.take() {
             notify.notify_waiters();
         }
+        self.events.end(cause);
 
         let cseq = self.dialog.next_cseq();
         let bye = bye_request(&self.dialog, cseq)?;
@@ -861,6 +920,11 @@ impl Call {
         // that cannot be hung up because the far end has already gone.
         let _ = tokio::time::timeout(Duration::from_secs(2), responses.final_response()).await;
         Ok(())
+    }
+
+    /// End the call because this side decided to.
+    pub async fn hang_up(&mut self) -> Result<()> {
+        self.end(EndCause::LocalHangup).await
     }
 }
 
@@ -891,6 +955,16 @@ pub async fn serve(
                 None => return Ok(()),
             },
             () = sleep_until(deadline) => call.on_session_deadline().await?,
+            // DTMF arrives over RTP, not signalling, so nothing above ever sees it — this is
+            // the one place a digit becomes a `CallEvent`. Read fresh from `call.media()` on
+            // every pass rather than once outside the loop, so a re-INVITE that moves the
+            // media session (`move_media_if_changed`) is followed automatically: the next
+            // iteration's future is built against whichever session is current.
+            digit = call.media().recv_digit() => {
+                if let Some((digit, duration)) = digit {
+                    call.events.emit(CallEvent::Dtmf { digit, duration });
+                }
+            }
         }
     }
     Ok(())
@@ -927,6 +1001,17 @@ fn escape_uri_header(value: &str) -> String {
         }
     }
     out
+}
+
+/// Whether a `Refer-To` value carries a `Replaces` header parameter — RFC 3891's marker of an
+/// attended transfer, as [`Call::refer_attended`] builds it (`<target>?Replaces=...`).
+///
+/// A substring check rather than a full URI-header parse: `Uri` does not expose its header
+/// component, and telling "asks to replace a dialog" from "does not" is all this needs to do.
+fn contains_replaces(value: &[u8]) -> bool {
+    String::from_utf8_lossy(value)
+        .to_ascii_lowercase()
+        .contains("replaces=")
 }
 
 /// Strip the angle brackets a `Refer-To` almost always carries.
@@ -1355,22 +1440,23 @@ async fn dial_with(
         capabilities: &capabilities,
         seen: sipx_sip::rel::Sequence::default(),
     };
-    let response = match await_final(&mut responses, options.timeout, &mut acknowledging).await {
-        Waited::Final(response) => response,
-        Waited::Gone => return Err(Error::NoResponse),
-        Waited::GaveUp { provisional } => {
-            withdraw(
-                endpoint,
-                &invite,
-                &via,
-                target.clone(),
-                &mut responses,
-                provisional,
-            )
-            .await;
-            return Err(Error::Cancelled(options.timeout.unwrap_or(Duration::ZERO)));
-        }
-    };
+    let (response, ringing) =
+        match await_final(&mut responses, options.timeout, &mut acknowledging).await {
+            Waited::Final { response, ringing } => (response, ringing),
+            Waited::Gone => return Err(Error::NoResponse),
+            Waited::GaveUp { provisional } => {
+                withdraw(
+                    endpoint,
+                    &invite,
+                    &via,
+                    target.clone(),
+                    &mut responses,
+                    provisional,
+                )
+                .await;
+                return Err(Error::Cancelled(options.timeout.unwrap_or(Duration::ZERO)));
+            }
+        };
 
     if !response.status.is_success() {
         // A non-2xx is acknowledged by the transaction layer itself, so there is nothing to
@@ -1411,6 +1497,11 @@ async fn dial_with(
                 ack,
                 in_dialog.clone(),
             ));
+            // Emitted at construction — the earliest point this call has a stream anyone could
+            // read from — from what was actually observed while waiting for the final response,
+            // not reconstructed later from anything left lying around.
+            let (events, events_rx) = EventSink::new();
+            emit_construction_events(&events, ringing);
             Ok(Call {
                 dialog,
                 media,
@@ -1432,6 +1523,8 @@ async fn dial_with(
                     options.session_expires,
                 )
                 .map(SessionState::armed),
+                events,
+                events_rx: Some(events_rx),
             })
         }
         Err(error) => {
@@ -1481,7 +1574,8 @@ fn establish(
 pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAddr) -> Result<Call> {
     let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    answer_negotiated(endpoint, incoming, media_address, offer, &token()).await
+    // No provisional was sent on this path, so there is nothing to report as `Ringing`.
+    answer_negotiated(endpoint, incoming, media_address, offer, &token(), None).await
 }
 
 /// Answer an INVITE that has already been rung (RFC 3262).
@@ -1506,7 +1600,15 @@ pub async fn answer_ringing(
     }
     let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    answer_negotiated(endpoint, incoming, media_address, offer, ringing.tag()).await
+    answer_negotiated(
+        endpoint,
+        incoming,
+        media_address,
+        offer,
+        ringing.tag(),
+        Some(ringing.is_reliable()),
+    )
+    .await
 }
 
 /// Settle the RFC 4028 session timer for an incoming INVITE, refusing it if it asks for too
@@ -1563,12 +1665,17 @@ async fn negotiate_session(
 }
 
 /// Answer an INVITE whose offer has already been parsed.
+///
+/// `reliable_ringing` is `Some` exactly when this side rang first (via [`crate::rel::ring`]):
+/// `Some(reliable)` reports whether that provisional was 100rel-acknowledged, and `None` (the
+/// [`answer`] path) means there is no ringing to report at all.
 async fn answer_negotiated(
     endpoint: &Handle,
     incoming: &Incoming,
     media_address: IpAddr,
     offer: SessionDescription,
     tag: &str,
+    reliable_ringing: Option<bool>,
 ) -> Result<Call> {
     let negotiated = negotiated(&offer)?;
 
@@ -1652,6 +1759,11 @@ async fn answer_negotiated(
         Arc::clone(&acked),
     ));
 
+    // As in `dial_with`: emitted at construction, from what was actually observed (ringing
+    // first, if this path came through it) rather than recomputed afterwards.
+    let (events, events_rx) = EventSink::new();
+    emit_construction_events(&events, reliable_ringing);
+
     Ok(Call {
         dialog,
         media,
@@ -1671,6 +1783,8 @@ async fn answer_negotiated(
                 we_refresh: accepted.refresher == session::Refresher::Uas,
             })
         }),
+        events,
+        events_rx: Some(events_rx),
     })
 }
 
@@ -1707,7 +1821,15 @@ async fn retransmit_until_acked(
 /// What waiting for a final response ended in.
 enum Waited {
     /// A final response arrived.
-    Final(Response),
+    Final {
+        /// The response itself.
+        response: Response,
+        /// Whether a provisional counting as *ringing* — anything past a bare `100 Trying` —
+        /// was seen first, and whether it was reliable (RFC 3262). `None` when the far end
+        /// went straight to the final response, which is the one time no `CallEvent::Ringing`
+        /// belongs on the eventual call's event stream.
+        ringing: Option<bool>,
+    },
     /// The deadline passed. Whether a provisional had arrived decides what may be done about
     /// it, so it is carried out rather than discarded.
     GaveUp {
@@ -1739,6 +1861,7 @@ async fn await_final(
 ) -> Waited {
     let deadline = limit.map(|limit| tokio::time::Instant::now() + limit);
     let mut provisional = false;
+    let mut ringing = None;
     loop {
         let event = match deadline {
             None => responses.next().await,
@@ -1750,9 +1873,18 @@ async fn await_final(
         match event {
             Some(sipx_sip::transaction::TuEvent::Response(response)) => {
                 if response.status.is_final() {
-                    return Waited::Final(*response);
+                    return Waited::Final {
+                        response: *response,
+                        ringing,
+                    };
                 }
                 provisional = true;
+                // A bare `100 Trying` only acknowledges that the request arrived (RFC 3261
+                // §17.2.1); it is not the far end's phone ringing, and 100rel does not apply
+                // to it either (RFC 3262 §3), so it is excluded from what `ringing` tracks.
+                if response.status.code() > 100 {
+                    ringing = Some(crate::rel::reliable_sequence(&response).is_some());
+                }
                 // RFC 3262 §4. A failure here is logged rather than fatal: the invitation is
                 // still running, and abandoning a ringing call because one PRACK did not get
                 // through would be a worse outcome than the unreliability it was fixing.
