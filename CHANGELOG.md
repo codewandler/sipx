@@ -9,6 +9,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The sans-IO ICE agent (`M-21`, RFC 8445)** — gather, prioritise, pair, order, check, resolve
+  role conflict and nominate, as a pure function of events: no socket, no clock read, time arriving
+  as a fired timer. Third of the six stories `M-16` was cut into; the driver that puts it on a real
+  port is `M-22`.
+  - §5.1.2.1's priority formula exactly, asserted against the number RFC 8839 prints in its own
+    example, and a check carries the peer-reflexive type preference rather than the candidate's own.
+  - Role conflict per §7.3.1.1, all seven rows plus the equal-tiebreaker case. **The tiebreaker
+    redrawn after a 487 is a fresh random value, not a derivation** — two agents applying the same
+    rule to the same value stay equal and oscillate roles forever.
+  - **Regular nomination only.** Aggressive nomination is deprecated by §4 and is absent with no
+    option to enable it; a controlled agent cannot encode `USE-CANDIDATE` at all.
+  - Corrects `docs/specs/ice.md` §6.5, which named only the success-driven unfreeze. Without RFC
+    8445 §6.1.4.2 step 2, a foundation whose one unfrozen pair *fails* stays frozen for the rest of
+    the session and ICE reports failure for a path it never finished checking.
 - **Many calls from one endpoint (`C-4`)** — a dispatcher owns the endpoint's receiver and routes
   each request to the call whose dialog it belongs to, so a host can hold N concurrent calls
   without writing its own demultiplexer. A new INVITE that matches no call surfaces as an
@@ -71,6 +85,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chokepoint rather than each growing its own.
 
 ### Changed
+
+- **`sipx-audio` stops advertising what it does not have (`X-26`)** — the package description, the
+  crate documentation's summary and the website's "which crate" table all promised G.722,
+  resampling and RFC 4733 DTMF. The crate implements none of the three; DTMF lives in `sipx-rtp`,
+  and the CLI tells the user to resample the file themselves. All three strings now name what is
+  there, including Opus, which the crate *does* have and the description omitted.
+  - **The decision, recorded rather than deferred: G.722 is not coming.** `X-25` went looking for
+    why it had been dropped and found nothing — no story among twenty-five media stories, no spec,
+    no commit that implemented or cut it, only the scaffolding commit that wrote the blurb. The
+    stack is specified in the opposite direction: `Codec::from_payload_type(9)` returns `None`,
+    `sipx-sdp` answers an offer of G.722 with port 0, and `sipx-call` refuses a call offering
+    nothing else, with three tests asserting exactly that. The wideband slot it would have filled
+    is Opus's (`M-13`). Written down in `docs/designs/media.md`, closing gap 3 of the record.
+  - `scripts/check-audio-claims.py` holds the three front doors against the modules the crate
+    exposes, and against each other: a codec needs a module that both encodes and decodes it, a
+    capability needs a public item, and an optional codec must be advertised as optional. Wired
+    into the gate with its own suite beside it, per `X-22`; the gate is 17 steps.
 
 - `sipx_call::Error` gains `UnacknowledgedProvisional` and `NoEarlySession` (`S-19`). Additive, but
   source-breaking for a downstream exhaustive `match`, as previous variants have been.

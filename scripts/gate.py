@@ -95,6 +95,7 @@ def gate_steps(msrv: str) -> list[Step]:
         # alternative is a test file that can rot without anybody hearing about it.
         Step("rfc report tests", "gate", ("python3", "scripts/test-rfc-report.py")),
         Step("pool key tests", "gate", ("python3", "scripts/test-pool-key.py")),
+        Step("audio claims tests", "gate", ("python3", "scripts/test-audio-claims.py")),
         # The interop harness reserves machine-global things and used to let two runs share them,
         # which `X-23` measured as both call tests timing out together. The suite stubs the
         # container runtime, so it belongs beside the others rather than in the `interop` job.
@@ -116,6 +117,10 @@ def gate_steps(msrv: str) -> list[Step]:
         # them through two changes to the type. The list is generated from `ConnectionKey` now,
         # and this is what makes a field added to the key fail before it reaches a reader.
         Step("pool key", "docs", ("./scripts/check-pool-key.py", "--check")),
+        # X-26: `sipx-audio`'s package description promised G.722 and resampling from the
+        # scaffolding commit onward and the crate implements neither. The description is the
+        # first string a user meets, and nothing connected it to the code.
+        Step("audio claims", "docs", ("./scripts/check-audio-claims.py", "--check")),
         Step("fmt", "fmt", ("cargo", "fmt", "--all", "--check")),
         Step(
             "clippy",
