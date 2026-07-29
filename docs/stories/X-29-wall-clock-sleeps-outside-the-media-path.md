@@ -2,7 +2,7 @@
 id: X-29
 title: Stop asserting after a sleep in sipx-call and sipx-transport
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 design: docs/designs/media.md
 epic: conformance

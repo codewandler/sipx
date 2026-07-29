@@ -543,6 +543,25 @@ mod tests {
             target: "host.example".to_owned(),
         };
 
+        // Two stores, because the two halves of this test want opposite things from the clock
+        // (`X-29`). The read below is a *precondition* — it proves the entry was stored at all,
+        // so the expiry half cannot pass by having stored nothing — and it must not race the
+        // TTL. On 2026-07-29 it did: with a 50 ms TTL and three worktrees compiling, the entry
+        // expired before this immediate read, and a gate for a diff that had never opened this
+        // crate came back red. A minute is a bound on failure, not a window to measure in.
+        store(
+            &map,
+            "name",
+            std::slice::from_ref(&record),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert_eq!(cached(&map, "name").await, Some(vec![record.clone()]));
+
+        // The expiry is then a real one — the same `Instant` comparison against a TTL that
+        // genuinely elapses — but it is waited *for* rather than slept past. Load can only
+        // lengthen the wait, and the deadline turns "never expires" into a failure that says so
+        // rather than into a flake.
         store(
             &map,
             "name",
@@ -550,9 +569,15 @@ mod tests {
             Duration::from_millis(50),
         )
         .await;
-        assert_eq!(cached(&map, "name").await, Some(vec![record]));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cached(&map, "name").await.is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "an entry with a 50 ms TTL never expired"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
-        tokio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(
             cached(&map, "name").await,
             None,
