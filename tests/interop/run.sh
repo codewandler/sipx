@@ -25,13 +25,44 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # measured against, and a list a peer could edit measures the peer's opinion of itself. A peer
 # says which *roles* it can play; it does not say which tests apply to the role.
 #
-#   server      registration, digest, refresh, a wrong password, OPTIONS, TLS, WebSocket
-#   user-agent  a call answered, a call placed, SDP negotiated, audio, BYE
+#   server          registration, digest, refresh, a wrong password, OPTIONS, TLS, WebSocket
+#   user-agent      a call answered, a call placed, SDP negotiated, audio, BYE
+#   media-security  a call whose media is encrypted, keyed the way the peer declares below
 declare -A ROLE_TESTS=(
     [server]="-p sipx-ua --test interop"
     [user-agent]="-p sipx-cli --test interop_call"
+    [media-security]="-p sipx-cli --test interop_srtp"
 )
-ROLE_ORDER=(server user-agent)
+ROLE_ORDER=(server user-agent media-security)
+
+# ---------------------------------------------------------------------------- the keyings ----
+# SRTP can be keyed two ways and they share no code path: SDES carries the master key in the SDP
+# (RFC 4568), DTLS-SRTP handshakes on the media path and the SDP carries only a fingerprint
+# (RFC 5764). A peer that does one need not do the other, so the `media-security` role is run
+# per keying and a peer declares which it can do in `PEER_KEYINGS`.
+#
+# The map lives here and not in a profile for the reason the role list does: it is the contract
+# peers are measured against. A peer says which keyings it *supports*; it does not get to say
+# which test that means.
+declare -A KEYING_TESTS=(
+    [sdes]=a_real_peer_accepts_media_sipx_encrypted_with_sdes
+    [dtls]=a_real_peer_accepts_media_sipx_encrypted_with_dtls_srtp
+)
+KEYING_ORDER=(sdes dtls)
+
+# Keyings *sipx* cannot yet offer, whatever the peer supports.
+#
+# This is a different fact from a peer's `PEER_KEYINGS` and is kept apart from it deliberately.
+# Recording "asterisk does not do DTLS-SRTP" would be false — it does. What is true is that
+# nothing in `sipx-call` ever calls `Capabilities::with_dtls_srtp` or runs
+# `sipx_media::dtls::establish`: the pieces exist and no code path reaches them, so `dial` offers
+# SDES and only SDES. Until that is wired, there is no sipx side to the DTLS call and the test
+# named above cannot exist. Announced on every run rather than left as an absence, because an
+# unwritten test and a passing one look identical in a summary line.
+declare -A KEYING_UNIMPLEMENTED=(
+    [dtls]='sipx-call never offers DTLS-SRTP: dial() hardcodes with_srtp() and nothing calls
+    with_dtls_srtp(). See docs/stories/X-27-interop-never-encrypts-media.md.'
+)
 
 # ------------------------------------------------------------------------ the peer list ----
 available_peers() {
@@ -200,6 +231,25 @@ run_peer() {
             skips+=(--skip "${divergence%%:*}")
             echo "==> known divergence: ${divergence%%:*} — see ${divergence##*:}"
         done
+
+        # Which keyings this peer can be measured on, said out loud. Three different things can
+        # stop a keying's test from running and a summary that showed none of them would be the
+        # same blindness this role exists to end: the peer cannot do it, sipx cannot offer it,
+        # or it ran. Each is printed by name.
+        if [[ " $PEER_ROLES " == *" media-security "* ]]; then
+            local keying
+            for keying in "${KEYING_ORDER[@]}"; do
+                if [[ " ${PEER_KEYINGS[*]-} " != *" $keying "* ]]; then
+                    echo "==> keying $keying: not supported by $peer; ${KEYING_TESTS[$keying]} is not run"
+                    skips+=(--skip "${KEYING_TESTS[$keying]}")
+                elif [[ -n "${KEYING_UNIMPLEMENTED[$keying]-}" ]]; then
+                    echo "==> keying $keying: $peer supports it, sipx does not offer it — ${KEYING_UNIMPLEMENTED[$keying]}"
+                    skips+=(--skip "${KEYING_TESTS[$keying]}")
+                else
+                    echo "==> keying $keying: supported by $peer, exercised by ${KEYING_TESTS[$keying]}"
+                fi
+            done
+        fi
 
         local role
         for role in "${ROLE_ORDER[@]}"; do
