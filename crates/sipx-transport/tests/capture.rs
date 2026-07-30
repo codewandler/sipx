@@ -543,6 +543,7 @@ async fn no_legal_spelling_of_a_credential_reaches_the_file() {
         ),
     ];
 
+    let mut leaked: Vec<String> = Vec::new();
     for (spelling, message, secret) in cases {
         let path = capture_path(&format!("leak-{secret}"));
         let (endpoint, _incoming) = recording(&path).await;
@@ -561,20 +562,30 @@ async fn no_legal_spelling_of_a_credential_reaches_the_file() {
         )
         .await;
 
-        // The whole file, byte for byte, the way the reviewer looked at it.
+        // The whole file, byte for byte, the way the review looked at it.
         let raw = std::fs::read(&path).expect("readable");
         let whole = String::from_utf8_lossy(&raw);
+        if whole.contains(secret) {
+            leaked.push(format!(
+                "  [LEAK] {spelling}: {secret} IS PRESENT in {}",
+                path.display()
+            ));
+        }
+        // And the message really did arrive, so a pass cannot come from capturing nothing.
         assert!(
-            !whole.contains(secret),
-            "{spelling}: {secret} IS PRESENT in {}",
-            path.display()
-        );
-        // And the message really did arrive, so this is not passing by capturing nothing.
-        assert!(
-            whole.contains("sipx") || whole.contains("SIP/2.0"),
+            whole.contains("SIP/2.0"),
             "{spelling}: nothing recognisable was captured at all"
         );
     }
+
+    // Every spelling reported together rather than stopping at the first, so one run says which of
+    // them leak. A fix that closes three and leaves the fourth is the failure this test exists for.
+    assert!(
+        leaked.is_empty(),
+        "{} of the spellings put a credential in the capture:\n{}",
+        leaked.len(),
+        leaked.join("\n")
+    );
 }
 
 /// A capture's own failures are counted, and a dropped record leaves a visible gap.
