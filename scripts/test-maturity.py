@@ -89,36 +89,77 @@ class ThePredicateRule(unittest.TestCase):
     """The rule that keeps this report from becoming a second, drifting source of truth."""
 
     def test_a_predicate_is_met_only_when_every_story_is_closed(self):
-        predicate = maturity.Predicate(1, "example", "computed", ["X-1", "X-2"])
-        found = {"X-1": {"status": "done"}, "X-2": {"status": "ready"}}
-        open_blockers, missing = maturity.predicate_state(predicate, found)
-        self.assertEqual(open_blockers, ["X-2"])
-        self.assertEqual(missing, [])
+        predicate = maturity.Predicate(1, "example", "computed")
+        found = {"X-1": {"status": "done", "predicate": "1"}, "X-2": {"status": "ready", "predicate": "1"}}
+        open_stories, declared = maturity.predicate_state(predicate, found)
+        self.assertEqual(open_stories, ["X-2"])
+        self.assertEqual(declared, ["X-1", "X-2"])
+        self.assertEqual(maturity.predicate_row(predicate, found)[0], "open")
 
         found["X-2"]["status"] = "done"
-        open_blockers, missing = maturity.predicate_state(predicate, found)
-        self.assertEqual(open_blockers, [], "every story closed means the predicate is met")
+        open_stories, _ = maturity.predicate_state(predicate, found)
+        self.assertEqual(open_stories, [], "every story closed means the predicate is met")
+        self.assertEqual(maturity.predicate_row(predicate, found)[0], "met")
 
-    def test_a_story_that_does_not_exist_is_unknown_not_met(self):
+    def test_a_computed_predicate_no_story_declares_is_unknown_not_met(self):
         """Renaming or deleting a story must not silently satisfy a predicate.
 
-        This is the failure mode that would make the whole report worthless: a predicate whose
-        blocker list points at nothing would read as *met*, so deleting a story would look like
-        finishing it.
+        This is the failure mode that would make the whole report worthless. It used to be a blocker
+        list pointing at a story that no longer existed; now that the stories declare the predicate,
+        the same hole is a predicate nothing declares — deleting the last story that named one would
+        otherwise look exactly like finishing it.
         """
-        predicate = maturity.Predicate(1, "example", "computed", ["X-404"])
-        _, missing = maturity.predicate_state(predicate, {})
-        self.assertEqual(missing, ["X-404"])
+        predicate = maturity.Predicate(1, "example", "computed")
+        state, waiting = maturity.predicate_row(predicate, {"X-1": {"status": "ready"}})
+        self.assertEqual(state, "**unknown**")
+        self.assertIn("no story declares", waiting)
 
-    def test_every_declared_predicate_names_a_story_that_exists(self):
-        """The real board, not a fixture: a typo in `ALPHA` would otherwise report as progress."""
-        found = maturity.stories()
+    def test_an_attested_predicate_needs_no_story(self):
+        """Predicate 6 is the case: an attestation nothing contradicts is not an unknown."""
+        predicate = maturity.Predicate(6, "example", "attested")
+        self.assertEqual(maturity.predicate_row(predicate, {})[0], "met (attested)")
+
+    def test_a_story_declaring_a_predicate_that_does_not_exist_is_an_error(self):
+        """A typo must not be dropped, because a dropped declaration reports as progress.
+
+        The old shape of this test read `ALPHA` for stories that were not on the board. The direction
+        has reversed with the source of the association: the board now names predicates, so what can
+        be wrong is a story naming a predicate the roadmap does not have.
+        """
+        with self.assertRaises(SystemExit) as caught:
+            maturity.predicate_stories({"X-1": {"status": "ready", "predicate": "8"}})
+        self.assertIn("no alpha predicate 8", str(caught.exception))
+
+    def test_a_predicate_field_that_is_not_a_number_is_an_error(self):
+        """Malformed frontmatter gets a diagnostic and a non-zero exit, never a traceback."""
+        with self.assertRaises(SystemExit) as caught:
+            maturity.story_predicates("X-1", {"predicate": "three"})
+        self.assertIn("not a predicate number", str(caught.exception))
+
+    def test_a_story_can_declare_more_than_one_predicate(self):
+        """A defect can falsify two predicates, and forcing a filer to pick one would hide the other."""
+        self.assertEqual(maturity.story_predicates("X-1", {"predicate": "[3, 7]"}), (3, 7))
+        self.assertEqual(maturity.story_predicates("X-1", {"predicate": "3"}), (3,))
+        self.assertEqual(maturity.story_predicates("X-1", {"predicate": ""}), ())
+        self.assertEqual(maturity.story_predicates("X-1", {}), ())
+
+    def test_every_predicate_the_board_declares_exists(self):
+        """The real board, not a fixture: a `predicate:` typo would otherwise be silently dropped."""
+        maturity.predicate_stories(maturity.stories())
+
+    def test_every_computed_predicate_is_declared_by_at_least_one_story(self):
+        """The real board: a computed predicate reads **unknown** until some story claims it.
+
+        This is what makes the mechanism populated rather than merely available. Without it the
+        literal could have been deleted and every computed predicate would read `unknown` — honest,
+        but useless, and nothing would have said so.
+        """
+        declared = maturity.predicate_stories(maturity.stories())
         for predicate in maturity.ALPHA:
-            for blocker in predicate.blockers:
-                self.assertIn(
-                    blocker,
-                    found,
-                    f"predicate {predicate.number} names {blocker}, which is not on the board",
+            if predicate.kind == "computed":
+                self.assertTrue(
+                    declared.get(predicate.number),
+                    f"no story declares `predicate: {predicate.number}`, so it reports unknown",
                 )
 
     def test_an_attested_predicate_says_why_it_is_not_computed(self):
@@ -129,6 +170,36 @@ class ThePredicateRule(unittest.TestCase):
                     predicate.detail,
                     f"predicate {predicate.number} is attested and must say why",
                 )
+
+
+class APredicateSeesEveryStoryFiledAgainstIt(unittest.TestCase):
+    """`X-42`: the association is declared by the story, so filing one cannot be forgotten.
+
+    Predicate 3 read **met** while `X-39`, `X-40` and `X-41` were open and each described that
+    predicate failing — a gate step that cannot pass, a test that fails because the machine was busy,
+    and a step that prints a defect and exits 0. All three were filed in one session against a list
+    that lived in a Python literal here, which a filer had no reason to open. The list was the defect.
+    """
+
+    def test_an_open_story_that_declares_a_predicate_holds_it_open(self):
+        """The `X-42` case in miniature: two stories declare predicate 3, one of them is still open."""
+        predicate = maturity.Predicate(3, "A red gate means a defect", "computed")
+        found = {
+            "X-28": {"status": "done", "predicate": "3"},
+            "X-39": {"status": "ready", "predicate": "3"},
+            "S-27": {"status": "ready", "predicate": "4"},
+        }
+        open_stories, declared = maturity.predicate_state(predicate, found)
+        self.assertEqual(
+            open_stories,
+            ["X-39"],
+            "a story declaring predicate 3 and still open must keep predicate 3 from reading met",
+        )
+        self.assertEqual(
+            declared,
+            ["X-28", "X-39"],
+            "and a story declaring a different predicate is not this one's business",
+        )
 
 
 class TheStatusVocabulary(unittest.TestCase):

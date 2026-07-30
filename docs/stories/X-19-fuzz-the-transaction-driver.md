@@ -6,6 +6,7 @@ status: done
 design: docs/designs/sip-core.md
 epic: sip-core
 areas: [sipx-sip, sipx-testkit]
+predicate: 2
 note: M12 · four fuzz targets, all of them parsers; the timing half of the north star is untested
 ---
 

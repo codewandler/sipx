@@ -7,6 +7,7 @@ priority: 3
 design: docs/designs/media.md
 epic: conformance
 areas: [sipx-cli]
+predicate: 3
 note: alpha predicate 3, third instance after X-28 and X-29 — `dial_plays_a_file_and_records_the_far_end` waits for the call and then asserts on a real-time side effect, so under load it reads a valid WAV with zero samples; observed once, not reproducible in isolation
 ---
 

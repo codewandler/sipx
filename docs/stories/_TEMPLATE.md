@@ -7,6 +7,7 @@ priority:
 design:
 epic:
 areas:
+predicate:
 note:
 ---
 
@@ -24,3 +25,6 @@ One or two sentences: the outcome this delivers and which value/pillar it serves
 
 ## Notes
 - Links, blockers, design pointers, relevant files.
+- If this story bears on an alpha predicate (`docs/roadmap.md`), set `predicate:` in the frontmatter —
+  `3`, or `[3, 7]` for one that bears on two. That field is the **only** place the association is
+  recorded, and `docs/maturity.md` reports the predicate open until every story declaring it is `done`.

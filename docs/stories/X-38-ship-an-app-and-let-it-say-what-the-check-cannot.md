@@ -7,6 +7,7 @@ priority: 4
 design: docs/vision.md
 epic: app-sdk
 areas: [sipx-app, docs]
+predicate: 1
 note: alpha predicate 1, reconsidered at X-37 — a syntactic caller-check would be fitted to three rows, wrong in the ways macros and re-exports are wrong, and fitted to what is testable rather than what is true; the honest gate is that the reachable-from-a-call surface is exactly what one real application uses
 ---
 

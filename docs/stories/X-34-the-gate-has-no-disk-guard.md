@@ -6,6 +6,7 @@ status: done
 design: docs/designs/sip-core.md
 epic: conformance
 areas: [tests]
+predicate: 3
 note: five times on 2026-07-29 a full disk produced a red gate that read as a code defect — cargo reports ENOENT on build artifacts, and a correct merge was nearly reverted for it
 ---
 

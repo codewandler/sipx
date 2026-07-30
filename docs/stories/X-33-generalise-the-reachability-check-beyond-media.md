@@ -6,6 +6,7 @@ status: done
 design: docs/designs/rfc-registry-grain.md
 epic: conformance
 areas: [docs]
+predicate: 1
 note: alpha predicate 1 — X-30 made "no claim outlives its caller" mechanical for layer = media only, and its own review showed the reason given for stopping there was false
 ---
 

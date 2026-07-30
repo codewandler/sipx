@@ -6,6 +6,7 @@ status: done
 design: docs/designs/sip-core.md
 epic: sip-core
 areas: [sipx-testkit, docs]
+predicate: 2
 note: found by X-19's independent review — one invariant arm is unfalsifiable by pigeonhole, the timer table is hand-maintained with a const assert that cannot catch drift, and the CI corpus check cannot see added files
 ---
 

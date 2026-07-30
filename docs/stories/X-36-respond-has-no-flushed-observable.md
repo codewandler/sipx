@@ -6,6 +6,7 @@ status: done
 design: docs/designs/sip-transport.md
 epic: conformance
 areas: [sipx-transport, tests]
+predicate: 3
 note: respond_returns_only_once_the_response_has_been_sent cannot detect the thing it is named for — the ordering can be reversed in endpoint.rs and the test still passes, so its 50 ms bound is pure flake risk
 ---
 

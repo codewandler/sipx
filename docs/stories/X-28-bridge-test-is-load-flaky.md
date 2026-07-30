@@ -6,6 +6,7 @@ status: done
 design: docs/designs/media.md
 epic: conformance
 areas: [sipx-media, tests]
+predicate: 3
 note: found by M-25 — it races play against a fixed 400ms record on real sockets and records zero samples under load, so it will be blamed on innocent diffs
 ---
 

@@ -6,6 +6,7 @@ status: done
 design: docs/designs/rfc-registry-grain.md
 epic: conformance
 areas: [docs, tests]
+predicate: 1
 note: two independent read-only sweeps found the front page advertising Opus, bridging and a DTLS-SRTP workaround that no call can reach — the same shape X-30 removed from the registry, in the four hand-maintained tables no script reads
 ---
 
