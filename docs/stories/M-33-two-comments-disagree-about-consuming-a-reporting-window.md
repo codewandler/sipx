@@ -79,6 +79,15 @@ whether reading statistics is free or destructive.
   correct, since it is the one caller that is supposed to close the interval. It is there because
   Acceptance asks for the value on the wire to be asserted against the interval it claims, and it is
   what would catch a future "fix" that made `report_block` non-consuming for everyone.
+- **Reworked once, on review.** The first version of the two wire tests arranged a boundary — inject,
+  wait for a report, inject a different loss, assert an exact fraction in the second report — and
+  that is the load-flaky shape `X-28`/`X-29`/`X-40` are about: it assumes the report timer fires
+  between the two batches, which a wall-clock interval cannot buy. Review measured it failing 14 of
+  20 runs at 6x CPU oversubscription. Rebuilt so no assertion depends on when the timer fires: a
+  report *names* the window it covers, so the test derives §6.4.1's required fraction for whatever
+  window it finds and asserts it on every report the session emits. 0 failures in 12 runs at 6x and
+  20 runs at 15x. The technique is written down in `docs/designs/media.md`, under the same rule it
+  used to break.
 - A third stale comment in the same cluster, removed: `quality()` carried an orphaned doc paragraph
   ("What the receive path has seen: loss, jitter and sequence position") that describes a report block,
   so rustdoc printed it as `quality()`'s summary line.

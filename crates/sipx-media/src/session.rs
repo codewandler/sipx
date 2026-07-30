@@ -2382,13 +2382,24 @@ async fn rtcp_loop(
             return;
         }
 
-        let block = stats.lock().await.report_block();
-        let heard_anything = block.extended_highest_sequence != 0;
         let sent_packets = outbound.packets.load(Ordering::Relaxed);
-        if !heard_anything && sent_packets == 0 {
-            // Nothing has happened in either direction, so there is nothing to report on.
+        let block = {
+            let mut stats = stats.lock().await;
+            // Asked of the counters rather than of a report, because `report_block()` closes the
+            // reporting interval and RFC 3550 §6.4.1 bounds that interval by a report *packet*
+            // going out. A tick that turns out to have nothing to say must leave the window for
+            // the tick that does.
+            if stats.extended_highest_sequence() == 0 && sent_packets == 0 {
+                None
+            } else {
+                Some(stats.report_block())
+            }
+        };
+        // Nothing has happened in either direction, so there is nothing to report on.
+        let Some(block) = block else {
             continue;
-        }
+        };
+        let heard_anything = block.extended_highest_sequence != 0;
 
         // Echo the far end's last sender report and how long we have sat on it, so *it* can
         // measure the round trip. Without these two fields the exchange is one-way: we could

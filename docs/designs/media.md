@@ -198,6 +198,18 @@ interval was clean. `M-10` had found and fixed the same trap in `quality()` and 
 holding it, which is why the fix here is a signature the trap cannot survive rather than a
 corrected sentence.
 
+Asserting that on the wire needed a technique, because the obvious test cannot be written safely:
+"lose two of ten, wait for a report, lose five of twenty, assert the second report says five of
+twenty" assumes the report timer fires *between* the two batches, and no wall-clock interval buys
+that — under a 6x CPU oversubscription the paced injection stretches past any margin and the report
+describes half a batch. Measured, not supposed: the arranged version failed 14 of 20 runs there.
+Which makes it an instance of the rule below, so the fix is to stop needing a boundary. **A report
+names the window it covers** — `extended_highest_sequence` is the last sequence number in it, and the
+previous report's is where it opened — so a test that knows which sequence numbers it withheld can
+compute what §6.4.1 requires of *whatever* window the timer drew, and assert it on every report.
+Wherever the boundaries land, each report has to be right about its own interval, and one quoting
+the whole call cannot be.
+
 ## Waiting for audio: two questions, two verbs
 
 Everything in this record is tested over real sockets against a real clock, so how a test *waits*

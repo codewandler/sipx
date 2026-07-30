@@ -232,10 +232,11 @@ async fn the_control_port_sits_directly_above_an_even_media_port() {
 
 /// Reading the quality must not disturb what the far end is told.
 ///
-/// `fraction_lost` is computed by *consuming* a reporting window. An implementation that built
-/// `quality()` on `report_block()` would have an application polling once a second empty the
-/// window the next RTCP report was going to describe — and the far end would be told a lossy
-/// call was clean. The bug is invisible until someone displays a live quality meter.
+/// `fraction_lost` covers the interval since the last report went out, and it is the *sending*
+/// path that closes that interval (`M-33`). An implementation that built `quality()` on
+/// `report_block()` would have an application polling once a second close windows nobody was told
+/// about — and the far end would be told a lossy call was clean. The bug is invisible until
+/// someone displays a live quality meter.
 #[tokio::test]
 async fn polling_the_quality_does_not_empty_the_report_window() {
     // RTCP off, so the only thing that could consume the window is the polling under test.
@@ -323,52 +324,52 @@ async fn reading_the_statistics_twice_reports_the_same_window() {
 /// `fraction_lost` covers the interval since the previous report, and nothing wider.
 ///
 /// RFC 3550 §6.4.1 is normative on the window: the fraction is loss since the previous SR or RR
-/// packet was sent. The two intervals below lose *different* fractions on purpose — two in ten,
-/// then five in twenty — so a report computed over the whole call would come back 59 rather than
-/// 64 and be visibly wrong, where equal fractions would let it pass by coincidence.
+/// packet *was sent*. Asserted on every report the session emits, against the interval that report
+/// names for itself — see [`reports_hold_to_their_own_intervals`] for why it is derived rather than
+/// arranged.
 #[tokio::test]
 async fn fraction_lost_covers_only_the_interval_since_the_previous_report() {
-    let (first, second) = two_reporting_intervals(false).await;
-
-    assert_eq!(
-        first.fraction_lost, 51,
-        "two of the first interval's ten: 2 * 256 / 10 ({first:?})"
-    );
-    assert_eq!(first.cumulative_lost, 2, "{first:?}");
-    assert_eq!(
-        second.fraction_lost, 64,
-        "five of the second interval's twenty: 5 * 256 / 20. Seven of thirty — the whole call — \
-         would be 59, and two of ten would be 51 ({second:?})"
-    );
-    // The neighbouring field, to show the two cover different windows rather than the same one:
-    // cumulative loss spans the call and is the one that says seven.
-    assert_eq!(second.cumulative_lost, 7, "{second:?}");
-    assert_eq!(second.extended_highest_sequence, 30, "{second:?}");
+    reports_hold_to_their_own_intervals(Polling::None).await;
 }
 
 /// An application polling the statistics must not change what the peer is told.
 ///
-/// This is the consequence that makes `M-33` a defect rather than a comment cleanup, and the
-/// second assertion that fails while the two comments disagree. A dashboard reading `stats()`
-/// between two reports used to close the window the next report was going to describe, so the
-/// peer was told a lossy interval was clean — and nothing in sipx's own logs connected the two.
+/// This is the consequence that makes `M-33` a defect rather than a comment cleanup, and the second
+/// assertion that fails while the two comments disagree. A dashboard reading `stats()` used to close
+/// the window the next report was going to describe, so the peer was told a lossy interval was clean
+/// — and nothing in sipx's own logs connected the two. The polling here is per packet, which is
+/// heavier than any real dashboard and needs to be: it makes the corruption certain rather than
+/// dependent on a poll landing inside the right interval.
 #[tokio::test]
 async fn polling_the_statistics_does_not_disturb_the_next_report() {
-    let (first, second) = two_reporting_intervals(true).await;
-
-    assert_eq!(first.fraction_lost, 51, "{first:?}");
-    assert_eq!(
-        second.fraction_lost, 64,
-        "a poll between the two reports emptied the window the second was to describe: {second:?}"
-    );
-    assert_eq!(second.cumulative_lost, 7, "{second:?}");
+    reports_hold_to_their_own_intervals(Polling::EveryPacket).await;
 }
 
-/// The two receiver reports produced by two intervals that lost a known, *different* amount each.
+/// Whether a dashboard is reading [`MediaSession::stats`] while the stream runs.
+#[derive(Clone, Copy, PartialEq)]
+enum Polling {
+    None,
+    EveryPacket,
+}
+
+/// Every report the session sends, held against the interval it says it covers.
 ///
-/// `poll_between` reads [`MediaSession::stats`] once the second interval's traffic has arrived and
-/// before the report describing it goes out, which is what a live quality display does.
-async fn two_reporting_intervals(poll_between: bool) -> (ReportBlock, ReportBlock) {
+/// **Why the expectation is derived and not arranged.** The obvious version of this test injects a
+/// known loss, waits for a report, injects a different loss and asserts an exact fraction in the
+/// second — and it is unreliable, because it assumes the report timer fires between the two batches
+/// rather than inside one. That assumption is a happens-before dressed as a duration, which
+/// `docs/designs/media.md` forbids for exactly this reason, and lengthening the interval only buys
+/// slack: under a 6x CPU oversubscription the paced injection stretches past any margin and the
+/// report describes half a batch.
+///
+/// So nothing here waits on a boundary. The stream is injected with a known set of sequence numbers
+/// withheld, and each report is checked against the window it *names*:
+/// `extended_highest_sequence` is the last sequence number that report covers, the previous report's
+/// is where its window opened, and the test knows which numbers it withheld — so §6.4.1's required
+/// fraction is computable for whatever boundary the timer chose. Wherever the reports land, every
+/// one of them has to be right about its own interval, and a report computed over the whole call
+/// cannot be.
+async fn reports_hold_to_their_own_intervals(polling: Polling) {
     let (peer_media, peer_control) = peer_with_control_port().await;
     let peer_addr = peer_media.local_addr().expect("has an address");
 
@@ -377,47 +378,123 @@ async fn two_reporting_intervals(poll_between: bool) -> (ReportBlock, ReportBloc
         .expect("binds");
     let session_addr = port.local_addr();
     let mut config = Config::new(peer_addr, Codec::Pcmu);
-    // Two seconds, which is long rather than convenient, and the margin is the point. RFC 3550
-    // §6.3.1's randomisation puts a report no sooner than 0.41 of the interval, so the next one
-    // is at least 820 ms away, and each batch below is about 70 ms of loopback traffic — an order
-    // of magnitude of slack. A short interval would make which window a packet falls into a race,
-    // and the exact fractions asserted above would flake rather than fail.
-    config.rtcp_interval = Some(Duration::from_secs(2));
+    // Short on purpose, where the arranged version of this test needed a long one: the more
+    // boundaries the timer draws, the more intervals get checked, and a boundary landing mid-stream
+    // is now a case this test covers rather than one it loses to.
+    config.rtcp_interval = Some(Duration::from_millis(120));
     let session = port.start(config);
 
-    // First interval: ten sequence numbers, two withheld.
-    inject(
-        &peer_media,
-        session_addr,
-        &session,
-        &[1, 2, 3, 5, 6, 7, 9, 10],
-        8,
+    let injected: Vec<u16> = (1..=LAST)
+        .filter(|sequence| !WITHHELD.contains(sequence))
+        .collect();
+    for &sequence in &injected {
+        peer_media
+            .send_to(&packet(sequence), session_addr)
+            .await
+            .expect("sends");
+        if polling == Polling::EveryPacket {
+            let _ = session.stats().await;
+        }
+        // Pacing, and reports fire while it runs — which is the point rather than the hazard it
+        // used to be. Load lengthens the spacing and moves the boundaries; the assertions follow
+        // the boundaries, so it changes which intervals are checked and not whether they hold.
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    let counted = u64::try_from(injected.len()).expect("a small count");
+    until(
+        ARRIVAL_BOUND,
+        "the injected packets never reached the receive path",
+        async || session.packets_received() == counted,
     )
     .await;
-    let first = tokio::time::timeout(REPORT_BOUND, next_report(&peer_control))
-        .await
-        .expect("a first report goes out");
 
-    // Second interval: twenty more with five withheld, a heavier loss than the first.
-    let second_batch: Vec<u16> = (11..=30u16)
-        .filter(|sequence| !matches!(sequence, 12 | 14 | 16 | 18 | 20))
-        .collect();
-    inject(&peer_media, session_addr, &session, &second_batch, 23).await;
+    // Read reports until one covers an *empty* interval. Injection has finished, so a report whose
+    // highest sequence number is `LAST` and equal to its predecessor's has nothing left to describe
+    // — there is no later boundary to learn anything from, and no timing assumption in saying so.
+    let mut opened_at = 0u32;
+    let mut reports = 0usize;
+    let mut carried_loss = false;
+    loop {
+        let block = tokio::time::timeout(REPORT_BOUND, next_report(&peer_control))
+            .await
+            .expect("a report goes out");
+        reports += 1;
 
-    if poll_between {
-        let polled = session.stats().await;
+        let highest = block.extended_highest_sequence;
+        let due = fraction_over(opened_at, highest);
         assert_eq!(
-            polled.cumulative_lost, 7,
-            "the poll should see the call as it stands: {polled:?}"
+            block.fraction_lost,
+            due,
+            "report {reports} says it covers sequence numbers {} to {highest}, of which this test \
+             withheld {} of {} — RFC 3550 §6.4.1 makes that {due} in 256ths: {block:?}",
+            opened_at + 1,
+            withheld_within(opened_at, highest),
+            highest.saturating_sub(opened_at),
         );
+        carried_loss |= due > 0;
+
+        if highest == opened_at && highest == u32::from(LAST) {
+            // The sharp end, and it takes no arranging: this interval is empty, so a report that
+            // describes its interval reports no loss — while one computed over the whole call would
+            // report four of forty, which is 25 in 256ths.
+            assert_eq!(
+                block.fraction_lost, 0,
+                "an empty interval lost nothing: {block:?}"
+            );
+            assert_eq!(
+                block.cumulative_lost,
+                i32::try_from(WITHHELD.len()).expect("a small count"),
+                "and cumulative loss still remembers the whole call: {block:?}"
+            );
+            break;
+        }
+        opened_at = highest;
     }
 
-    let second = tokio::time::timeout(REPORT_BOUND, next_report(&peer_control))
-        .await
-        .expect("a second report goes out");
-
+    // Without this a run in which the timer drew no boundary over the lossy prefix would assert a
+    // row of zeroes and call it a pass.
+    assert!(
+        carried_loss,
+        "no report carried the injected loss, so nothing above was tested"
+    );
+    assert!(reports >= 2, "only {reports} report(s) were checked");
     session.stop();
-    (first, second)
+}
+
+/// The sequence numbers withheld from the stream: four packets, all inside the first ten, then a
+/// clean run to [`LAST`]. Front-loaded on purpose — the whole-call fraction stays elevated for the
+/// rest of the stream, so a report that quotes it instead of its own interval is visibly wrong
+/// wherever the boundary happens to fall.
+const WITHHELD: [u16; 4] = [2, 4, 6, 8];
+
+/// The last sequence number injected.
+const LAST: u16 = 40;
+
+/// What RFC 3550 §6.4.1 requires of a report covering the sequence numbers after `opened_at` up to
+/// and including `highest`: the packets withheld in that range over the size of the range, in
+/// 256ths, and zero for a range that is empty or lost nothing.
+///
+/// This is the receiver's own arithmetic restated from the sending side, which is what makes it a
+/// check rather than a copy: `expected` is a span of sequence numbers, and every number in the span
+/// that this test did not send is loss. It holds because the first packet injected is sequence 1 and
+/// arrives, so the receiver's base sequence number is 1 — the `cumulative_lost` assertion above
+/// fails loudly if the fixture's own loopback ever drops or reorders enough to break that.
+fn fraction_over(opened_at: u32, highest: u32) -> u8 {
+    let expected = highest.saturating_sub(opened_at);
+    let lost = withheld_within(opened_at, highest);
+    if expected == 0 || lost == 0 {
+        return 0;
+    }
+    u8::try_from((u64::from(lost) * 256) / u64::from(expected)).unwrap_or(u8::MAX)
+}
+
+/// How many withheld sequence numbers fall in `(opened_at, highest]`.
+fn withheld_within(opened_at: u32, highest: u32) -> u32 {
+    let withheld = WITHHELD
+        .iter()
+        .filter(|&&sequence| u32::from(sequence) > opened_at && u32::from(sequence) <= highest)
+        .count();
+    u32::try_from(withheld).expect("a small count")
 }
 
 /// Send `sequences` to the session and wait until the receive path has counted `total` packets.
