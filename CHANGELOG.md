@@ -81,7 +81,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **It found a conformance defect, and the defect is recorded rather than hidden.** RFC 5118 §4.10
     requires a parser to tolerate `[2001:db8:::192.0.2.1]` — the three-colon form RFC 3261's ABNF can
     produce, inherited from the obsoleted RFC 2373 — and sipx rejects it. That is an unmet normative
-    MUST, so the row is `partial` and not `implemented`, and the gap is one typed entry in
+    MUST, so the row was `partial` and not `implemented` — **`S-31`, above, closes it in this same
+    release** — and the gap was recorded as one typed entry in
     `rfc5118::DEVIATIONS` saying what the RFC requires, what sipx does, and why it stands.
   - **A new failure cannot be absorbed silently.** The converse assertion requires every message the
     RFC calls valid to parse, and is guarded by hard counts — eleven valid, one recorded deviation, ten
@@ -117,6 +118,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     each flag's value is registered so it can never be misread as the address of record.
 
 ### Fixed
+
+- **RFC 5118 §4.10's three-colon IPv6 reference is tolerated (`S-31`)** — `[2001:db8:::192.0.2.1]` was
+  rejected, and §4.10 is normative that an implementation "**must** tolerate both of the above
+  constructs". This closes the one deviation `X-16` recorded rather than fixed, so RFC 5118 moves from
+  `partial` to `implemented`.
+  - **The tolerance is exactly one derivation wide.** RFC 4291's own parser is tried first and is
+    unchanged for every input it already accepted; only on failure is a single `:::` rewritten to `::`
+    and retried through that same parser, and only when the text after it parses as an embedded IPv4
+    address. There is no second address grammar — the three-colon form is invalid under RFC 4291 and
+    valid under the ABNF RFC 3261 shipped, inherited from the obsoleted RFC 2373.
+  - **The narrowness is mechanically enforced, not reviewed once.** A property test enumerates 1764
+    references and pins the *entire* beyond-RFC-4291 accepted set as 24 enumerated addresses, so any
+    widening shows up as a diff of literal strings rather than as a changed count.
+  - The rule is in `docs/specs/sip-parser.md` §4.8 with both RFCs cited, and every row of its
+    accept/reject table is asserted against the parser at exact-variant granularity — a spec table that
+    makes claims nothing checks is worse than no table.
 
 - **A story declares its own alpha predicate, and the list that could not see its defects is gone
   (`X-42`)** — `scripts/maturity.py` hardcoded each predicate's story list. Predicate 3's read

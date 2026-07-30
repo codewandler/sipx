@@ -2,7 +2,7 @@
 id: S-31
 title: Tolerate RFC 5118 §4.10's three-colon IPv6 reference
 pillar: Signalling
-status: in-progress
+status: done
 priority: 4
 design: docs/specs/sip-parser.md
 epic: sip-core
