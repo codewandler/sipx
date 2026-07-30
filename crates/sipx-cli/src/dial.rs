@@ -188,15 +188,16 @@ async fn exchange(
         }
     };
 
-    // Recording stops when the far end goes quiet, or when the call's time is up — whichever
-    // comes first, so a peer that never stops talking cannot hold the command open.
-    let recording = media.record_until_idle(Duration::from_millis(500));
+    // Recording stops when the far end goes quiet, or when the call's time is up — whichever comes
+    // first, so a peer that never stops talking cannot hold the command open. Waiting for it to
+    // *start* is a separate bound, and conflating the two is what `X-40` was: one 500 ms window
+    // answered both questions, so audio that began later than it was not recorded at all. The cap
+    // lives inside `crate::record` now, which is also what stops a recording the cap cut short from
+    // being discarded by an `unwrap_or_default` out here.
+    let recording = crate::record(call, duration, crate::RECORD_IDLE);
 
-    let (_, recorded) = tokio::join!(
-        tokio::time::timeout(duration, playing),
-        tokio::time::timeout(duration, recording)
-    );
-    recorded.unwrap_or_default()
+    let (_, recorded) = tokio::join!(tokio::time::timeout(duration, playing), recording);
+    recorded
 }
 
 /// How long to wait for an answer.
