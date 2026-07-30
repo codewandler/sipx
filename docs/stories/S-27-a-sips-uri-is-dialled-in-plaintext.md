@@ -6,6 +6,7 @@ status: done
 design: docs/designs/sip-transport.md
 epic: conformance
 areas: [sipx-cli]
+predicate: 4
 note: found by X-33's implementor — dial.rs:231 strips `sips:` exactly as `sip:` and defaults to port 5060, and dial.rs:49 only ever chooses UDP or TCP, so `sipx dial sips:…` sends the INVITE in cleartext and says nothing
 ---
 

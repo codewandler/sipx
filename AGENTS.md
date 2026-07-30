@@ -83,6 +83,15 @@ sentence to the field. **When a story changes `ConnectionKey`, run `./scripts/ch
 --update` in the same commit**, and give any new field its paragraph in `sip-tls.md` §5: the
 script generates *which* fields are in the key, never *why*.
 
+`maturity.py` regenerates `docs/maturity.md`, and it reports the alpha predicates in
+`docs/roadmap.md` from story frontmatter: a story says which predicate it bears on with
+`predicate: 3` (or `predicate: [3, 7]`), and a predicate stays open until every story declaring it is
+`done`. **File a defect against a predicate by setting that field in the story** — there is no list
+anywhere else to update, deliberately, because the list that used to live in the script drifted:
+three defects were filed against predicate 3 in one session, none of them was added to it, and the
+report was one story away from calling the alpha complete (`X-42`). A `predicate:` naming a predicate
+the roadmap does not have fails the gate rather than being quietly dropped.
+
 `check-features.sh` is not optional garnish. `--all-features` hides a whole class of breakage:
 an optional transport that does not compile with its feature turned off is invisible until a
 downstream user turns it off, and that is exactly how `tls` came to be broken for a release.

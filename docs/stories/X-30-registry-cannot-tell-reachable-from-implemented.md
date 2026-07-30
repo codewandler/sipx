@@ -6,6 +6,7 @@ status: done
 design: docs/designs/rfc-registry-grain.md
 epic: conformance
 areas: [docs, sipx-testkit]
+predicate: 1
 note: fifth instance in two days — rfc-report.py --check verifies that cited files exist, never that a claimed capability has a caller, so a crate-level feature reads as a shipped one
 ---
 

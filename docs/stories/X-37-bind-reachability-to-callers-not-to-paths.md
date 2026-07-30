@@ -6,6 +6,7 @@ status: done
 design: docs/designs/rfc-registry-grain.md
 epic: conformance
 areas: [docs, tests]
+predicate: 1
 note: the recorded successor to X-30 and X-33 — a path check is satisfied by citing a file, so a dead branch counts as reachable, the transport layer cannot be adjudicated at all, and a relabelled layer still escapes
 ---
 

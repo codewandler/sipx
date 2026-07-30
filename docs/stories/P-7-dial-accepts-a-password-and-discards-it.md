@@ -6,6 +6,7 @@ status: done
 design: docs/designs/phone.md
 epic: cli
 areas: [sipx-cli]
+predicate: 4
 note: main.rs:168 accepts --password on dial and dial.rs never reads it, so a 407-challenged call fails while the user who supplied credentials is told nothing
 ---
 

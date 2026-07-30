@@ -89,25 +89,35 @@ class Predicate:
     mechanically checkable — "no known-wrong shipped path" cannot be computed, because a defect
     nobody has found leaves no trace — and are reported as such with the story that would falsify
     them. Reporting an attestation as a measurement is the failure this whole file exists to avoid.
+
+    **A predicate does not carry its stories.** It used to, as a literal list per predicate, and that
+    list was the defect `X-42` was filed over: three defects were filed against predicate 3 in one
+    session and none was added to it, so the predicate read `met` while all three were open. The
+    stories declare the predicate now (`PREDICATE_FIELD`), which is the file the filer is already
+    writing.
     """
 
-    def __init__(self, number, name, kind, blockers=(), detail=""):
+    def __init__(self, number, name, kind, detail=""):
         self.number = number
         self.name = name
         self.kind = kind
-        self.blockers = tuple(blockers)
         self.detail = detail
 
 
-#: The seven predicates from `docs/roadmap.md`, with the story that closes each. A predicate is met
-#: when every story named here is `done`; that is the whole rule, and it is why the stories are named
-#: rather than the state being restated.
+#: The frontmatter field a story uses to say which alpha predicate it bears on: `predicate: 3`, or
+#: `predicate: [3, 7]` for one that bears on two. **This is the only place the association is
+#: recorded.** A number no predicate carries is an error rather than a silently dropped line, because
+#: a typo that reported as progress is the whole failure mode here.
+PREDICATE_FIELD = "predicate"
+
+#: The seven predicates from `docs/roadmap.md`. A predicate is met when every story declaring it is
+#: `done`; that is the whole rule. What is written here is the predicate — its number, its name, and
+#: whether it can be computed at all — never which stories bear on it.
 ALPHA = (
     Predicate(
         1,
         "No claim outlives its caller, at any layer",
         "computed",
-        ["X-30", "X-33", "X-37", "X-38"],
         "Computed, but the thing computed is a *definition* rather than a search. `X-38` ships an "
         f"application (`{SURFACE_APPLICATION}`) and defines the reachable-from-a-call surface as what "
         f"it uses; `{SURFACE_CHECKER}` holds every crate's `Supported` claim against that "
@@ -118,26 +128,25 @@ ALPHA = (
         "What this does **not** say is that every row of a layer is individually reached: the "
         "declarations it checks are per crate, so the surface is entered per crate.",
     ),
-    Predicate(2, "Adversarial input and adversarial timing are both fuzzed", "computed", ["X-19", "X-31"]),
-    Predicate(3, "A red gate means a defect", "computed", ["X-28", "X-29", "X-34", "X-36"]),
+    Predicate(2, "Adversarial input and adversarial timing are both fuzzed", "computed"),
+    Predicate(3, "A red gate means a defect", "computed"),
     Predicate(
         4,
         "No known-wrong shipped path",
         "attested",
-        ["S-27", "P-7"],
         "Cannot be computed: a defect nobody has found leaves no trace in either source. What is "
         "reported is the absence of *open* stories describing one.",
     ),
-    Predicate(5, "The public API says what it guarantees", "computed", ["A-8"]),
+    Predicate(5, "The public API says what it guarantees", "computed"),
     Predicate(
         6,
         "Testable from a shell for everything the CLI exposes",
         "attested",
-        [],
         "Met at filing and not re-derived here: it is a property of the CLI's test suite, which the "
-        "gate runs.",
+        "gate runs. No story declares it, and an attestation nothing contradicts is the one case "
+        "where that is not a gap.",
     ),
-    Predicate(7, "The distance to v1 is generated, not asserted", "computed", ["X-32"]),
+    Predicate(7, "The distance to v1 is generated, not asserted", "computed"),
 )
 
 
@@ -256,15 +265,86 @@ def pillar_counts(found):
     return per_pillar, done
 
 
+def story_key(story_id):
+    """Board order for a story id: by prefix, then numerically.
+
+    Lexical order would print `X-19` after `X-9`, which is not how anyone reads a board.
+    """
+    prefix, _, number = story_id.partition("-")
+    return (prefix, int(number) if number.isdigit() else 0, story_id)
+
+
+def story_predicates(story_id, fields):
+    """The alpha predicates one story declares, from its `predicate:` frontmatter field.
+
+    Accepts `3` and `[3, 7]`, because a defect can falsify two predicates and forcing a filer to pick
+    one would leave the other reading `met` — the failure this field exists to remove. An empty field
+    is a story that declares nothing, which is most of them, and a trailing `#` comment is ignored.
+
+    A field that is not a list of numbers exits with a message rather than raising: a malformed
+    frontmatter line is a thing to fix, not a traceback to read.
+    """
+    raw = fields.get(PREDICATE_FIELD, "").partition("#")[0].strip()
+    if not raw:
+        return ()
+    numbers = []
+    for token in raw.strip("[]").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if not token.isdigit():
+            raise SystemExit(
+                f"maturity: {story_id} has `{PREDICATE_FIELD}: {raw}`, and `{token}` is not a "
+                f"predicate number; write `{PREDICATE_FIELD}: 3` or `{PREDICATE_FIELD}: [3, 7]`"
+            )
+        numbers.append(int(token))
+    return tuple(numbers)
+
+
+def predicate_stories(found):
+    """Every story declaring each predicate, by predicate number.
+
+    **The single source of the association.** Nothing else in this file may hold a list of which
+    stories bear on which predicate; if it did, the two would drift and the drift is `X-42`.
+    """
+    known = {predicate.number for predicate in ALPHA}
+    declared = collections.defaultdict(list)
+    for story_id in sorted(found, key=story_key):
+        for number in story_predicates(story_id, found[story_id]):
+            if number not in known:
+                raise SystemExit(
+                    f"maturity: {story_id} declares `{PREDICATE_FIELD}: {number}`, and there is no "
+                    f"alpha predicate {number} — `docs/roadmap.md` has "
+                    f"{', '.join(str(item) for item in sorted(known))}"
+                )
+            declared[number].append(story_id)
+    return declared
+
+
 def predicate_state(predicate, found):
-    """Whether a predicate's stories are all closed, and which are not."""
-    open_blockers = [
-        blocker
-        for blocker in predicate.blockers
-        if found.get(blocker, {}).get("status", "ready") in OPEN
+    """Which of a predicate's stories are still open, and every story that declares it.
+
+    Both halves are returned because the report needs to tell two different things apart: a predicate
+    whose stories are all closed, and a predicate no story claims at all. Calling the second one met
+    would mean deleting the last story that named a predicate looked like finishing it.
+    """
+    declared = predicate_stories(found).get(predicate.number, [])
+    open_stories = [
+        story_id for story_id in declared if found[story_id].get("status", "ready") in OPEN
     ]
-    missing = [blocker for blocker in predicate.blockers if blocker not in found]
-    return open_blockers, missing
+    return open_stories, declared
+
+
+def predicate_row(predicate, found):
+    """The `State` and `Waiting on` cells for one predicate."""
+    open_stories, declared = predicate_state(predicate, found)
+    if predicate.kind == "computed" and not declared:
+        # Not met: unrecorded. A computed predicate is computed over stories, and there are none to
+        # compute over — so the honest report is that nobody has said what would close it.
+        return "**unknown**", f"no story declares `{PREDICATE_FIELD}: {predicate.number}`"
+    if open_stories:
+        return "open", ", ".join(f"`{story_id}`" for story_id in open_stories)
+    return ("met" if predicate.kind == "computed" else "met (attested)"), "—"
 
 
 def render():
@@ -280,22 +360,16 @@ def render():
     lines.append("| # | Predicate | State | Waiting on |")
     lines.append("|---|---|---|---|")
     for predicate in ALPHA:
-        open_blockers, missing = predicate_state(predicate, found)
-        if missing:
-            state = "**unknown**"
-            waiting = f"story {', '.join(missing)} not in the board"
-        elif open_blockers:
-            state = "open"
-            waiting = ", ".join(f"`{blocker}`" for blocker in open_blockers)
-        else:
-            state = "met" if predicate.kind == "computed" else "met (attested)"
-            waiting = "—"
+        state, waiting = predicate_row(predicate, found)
+        if state.startswith("met"):
             met += 1
         lines.append(f"| {predicate.number} | {predicate.name} | {state} | {waiting} |")
     lines.append("")
     lines.append(
-        f"**{met} of {len(ALPHA)} predicates met.** A predicate is met when every story named for it "
-        "is `done` — the stories are the definition, so this table cannot drift from the board."
+        f"**{met} of {len(ALPHA)} predicates met.** A predicate is met when every story declaring it "
+        f"is `done`. **A story declares its predicate itself**, in its own `{PREDICATE_FIELD}:` "
+        "frontmatter field, so there is no list of predicate stories kept here to fall behind the "
+        "board — which is what happened, and is `X-42`."
     )
     lines.append("")
     # The label follows the kind. An earlier version printed "is attested, not computed" over every
@@ -413,7 +487,19 @@ def render():
         "outside this repository depends on graduates, with a `CHANGELOG.md` entry."
     )
     lines.append(
-        "- **A predicate here is only as good as its story list.** Predicate 4 in particular reports "
+        "- **A predicate's stories are whichever stories declare it, so what this cannot see is a "
+        f"story that declares nothing.** Every predicate above is read from the `{PREDICATE_FIELD}:` "
+        "field of the stories themselves; a story naming a predicate that does not exist fails the "
+        "gate rather than being dropped, and a computed predicate no story declares reads "
+        "**unknown** rather than met. What no script can decide is which predicate a story *should* "
+        "have named — so a filer who leaves the field empty is the one remaining way a predicate "
+        "reads met while a defect against it is open. That is narrower than what it replaced: the "
+        "association used to live in `scripts/maturity.py`, where three defects filed against "
+        "predicate 3 in one session went unrecorded because the filer had no reason to open the file "
+        "(`X-42`)."
+    )
+    lines.append(
+        "- **An absence of stories is not an absence of defects.** Predicate 4 in particular reports "
         "the absence of open stories describing a known-wrong path, which is not the same as there "
         "being none. `S-27` — a `sips:` URI dialled in cleartext — was found on the day it was filed, "
         "not by this report."

@@ -6,6 +6,7 @@ status: done
 design: docs/roadmap.md
 epic: conformance
 areas: [docs]
+predicate: 7
 note: nothing in the repo defines v1 — the only `v1` is `sipx.app.v1`, a protocol version — so "how far are we" cannot be answered, only estimated
 ---
 

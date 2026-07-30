@@ -6,6 +6,7 @@ status: done
 design: docs/vision.md
 epic: app-sdk
 areas: [docs, sipx-app-protocol]
+predicate: 5
 note: alpha predicate 5 — v1 freezes what "stable" means, so the line between stable and experimental has to exist before it can be frozen
 ---
 

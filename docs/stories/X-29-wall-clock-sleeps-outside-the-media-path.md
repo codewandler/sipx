@@ -6,6 +6,7 @@ status: done
 design: docs/designs/media.md
 epic: conformance
 areas: [sipx-call, sipx-transport, sipx-media, tests]
+predicate: 3
 note: found by X-28's sweep, then confirmed by a real red gate — dns.rs:553 raced a 50ms TTL against the scheduler and failed a gate that had nothing to do with the diff being merged
 ---
 

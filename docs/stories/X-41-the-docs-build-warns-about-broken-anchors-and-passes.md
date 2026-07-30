@@ -7,6 +7,7 @@ priority: 3
 design: docs/roadmap.md
 epic: conformance
 areas: [docs]
+predicate: 3
 note: alpha predicate 3 — the `docs site` step printed a broken anchor and exited 0, because Docusaurus defaults `onBrokenAnchors` to warn; found by S-30, which only caught it by reading the step's output instead of trusting its exit code
 ---
 

@@ -7,6 +7,7 @@ priority: 3
 design: docs/roadmap.md
 epic: conformance
 areas: [docs]
+predicate: 3
 note: alpha predicate 3 — `maturity.py --check` cannot pass in the commit that files or closes a story, because Filed/Closed for today come from git history and the fact does not exist until the commit does; regenerated twice on 2026-07-30 for no defect either time
 ---
 
