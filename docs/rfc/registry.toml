@@ -282,8 +282,8 @@ title = "An Offer/Answer Model with SDP"
 layer = "core"
 status = "implemented"
 roles = ["uac", "uas"]
-evidence = ["crates/sipx-sdp/src/answer.rs"]
-note = "A pure function from offer and capabilities to answer. The offerer's format order is preserved, which is what stops two endpoints transcoding for no reason."
+evidence = ["crates/sipx-sdp/src/answer.rs", "crates/sipx-call/src/call.rs"]
+note = "A pure function from offer and capabilities to answer. The offerer's format order is preserved, which is what stops two endpoints transcoding for no reason — and the set the application selected is applied *during* that walk rather than to its result, so an offer leading with a codec sipx was not asked to use settles further down the list instead of failing (`M-30`). §6.1's answered format list and the codec the media session is actually built with are held to agree by a table of offers rather than by a comment saying they must (`M-31`): the payload type negotiation settles on has to appear in the answer, and a stream negotiation refuses has to be one the answer rejected with port 0. `docs/specs/sdp-format-identity.md` §4.4 states the property."
 
 [[rfc]]
 number = 3262
@@ -479,9 +479,10 @@ status = "implemented"
 evidence = [
   "crates/sipx-sdp/src/parse.rs",
   "crates/sipx-sdp/src/session.rs",
+  "crates/sipx-sdp/src/rtpmap.rs",
   "crates/sipx-call/src/call.rs",
 ]
-note = "A real AST with round-tripping, rather than string manipulation over the body. Every call goes through it: `call.rs` builds the offer and parses and answers the peer's, on the INVITE, on a re-INVITE and on an UPDATE."
+note = "A real AST with round-tripping, rather than string manipulation over the body. Every call goes through it: `call.rs` builds the offer and parses and answers the peer's, on the INVITE, on a re-INVITE and on an UPDATE. §6.6's `a=rtpmap` is read in exactly one place (`rtpmap.rs`), which decides format identity once — the encoding name case-insensitively, the clock rate and the channel count **by value**, with an omitted channel count meaning one. It was decided twice until `M-31`, textually where the answer was built and numerically where the codec was chosen, so an offer carrying `a=rtpmap:0 PCMU/08000` was answered A-law and then played back through µ-law: audible garbage rather than silence, with nothing reporting an error. A clock rate that is empty, is not a decimal digit string, or overflows a `u32` is a typed error and a non-match, never a panic. `docs/specs/sdp-format-identity.md` is normative for the rule and lists the vectors."
 
 [[rfc]]
 number = 4566
