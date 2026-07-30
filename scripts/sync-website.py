@@ -9,8 +9,8 @@ the repository. Generated regions keep those copies mechanical:
     <!-- END generated:example -->
 
 Scalar regions (`workspace-version`, `msrv`, `release-tag`, and `rfc-count`) can sit inline.
-`release-heading`, `crate-map`, and `compliance` render complete Markdown blocks. The check also
-rejects work-item IDs and links into internal story/design records from public content.
+`release-heading`, `crate-map`, `compliance`, and `badges` render complete Markdown blocks. The
+check also rejects work-item IDs and links into internal story/design records from public content.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import tomllib
 from functools import lru_cache
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,6 +61,12 @@ CONTEXT_VERSION = re.compile(
 RUST_VERSION = re.compile(r"\bRust\s+(?P<version>\d+\.\d+)\b", re.IGNORECASE)
 RFC_COUNT = re.compile(r"\*\*(?P<count>\d+) RFCs tracked\.\*\*")
 
+AUDIO_CLAIMS = ROOT / "scripts" / "check-audio-claims.py"
+#: The codec sentence `check-audio-claims.py` prints when it passes. Parsed rather than
+#: recomputed: a badge that counted codecs its own way could disagree with the check that fails
+#: the build, and a badge disagreeing with the gate is worse than no badge.
+CODEC_SUMMARY = re.compile(r"(?P<count>\d+) codecs claimed \((?P<names>[^)]*)\)")
+
 
 class Facts(NamedTuple):
     workspace_version: str
@@ -67,6 +74,8 @@ class Facts(NamedTuple):
     release_tag: str
     release_date: str
     rfc_count: int
+    rfc_implemented: int
+    license: str
     packages: tuple[tuple[str, str], ...]
 
 
@@ -107,6 +116,7 @@ def canonical_facts() -> Facts:
     workspace_package = manifest["workspace"]["package"]
     workspace_version = workspace_package["version"]
     msrv = workspace_package["rust-version"]
+    license_name = workspace_package["license"]
 
     match = RELEASE.search(CHANGELOG.read_text(encoding="utf-8"))
     if match is None:
@@ -119,14 +129,50 @@ def canonical_facts() -> Facts:
         )
 
     registry = tomllib.loads(REGISTRY.read_text(encoding="utf-8"))
+    rows = registry.get("rfc", [])
     return Facts(
         workspace_version=workspace_version,
         msrv=msrv,
         release_tag=f"v{release_version}",
         release_date=match.group("date"),
-        rfc_count=len(registry.get("rfc", [])),
+        rfc_count=len(rows),
+        # Only `implemented` is counted. `partial` is deliberately not folded in as a fraction —
+        # `docs/maturity.md` refuses the same arithmetic, because one number would call a fully
+        # implemented row and a partial one the same thing.
+        rfc_implemented=sum(1 for row in rows if row.get("status") == "implemented"),
+        license=license_name,
         packages=workspace_packages(),
     )
+
+
+@lru_cache(maxsize=1)
+def claimed_codecs() -> tuple[str, ...]:
+    """The codecs `check-audio-claims.py` holds `sipx-audio` to, read from that check's own output.
+
+    A red check raises rather than rendering: the badge would otherwise publish a codec list that
+    nothing is currently asserting, which is precisely the unbacked public claim this whole
+    generated-region mechanism exists to make impossible.
+    """
+    done = subprocess.run(
+        [sys.executable, str(AUDIO_CLAIMS), "--check"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=False,
+    )
+    if done.returncode != 0:
+        raise ValueError("check-audio-claims is red; refusing to render a codec badge from it")
+    found = CODEC_SUMMARY.search(done.stdout)
+    if found is None:
+        raise ValueError("check-audio-claims printed no codec summary to read")
+    names = tuple(
+        name.strip()
+        for name in found.group("names").split(",")
+        if name.strip() and name.strip() != "none"
+    )
+    if len(names) != int(found.group("count")):
+        raise ValueError("check-audio-claims' codec count and codec list disagree")
+    return names
 
 
 def render_example(source_path: str) -> str:
@@ -212,7 +258,48 @@ def render_generated(kind: str, arg: str | None) -> str:
         return "\n".join(rows) + "\n"
     if kind == "compliance":
         return f"\n{public_compliance()}\n"
+    if kind == "badges":
+        return render_badges(facts)
     raise ValueError(f"unknown generated region kind {kind!r}")
+
+
+#: Shields' query form rather than the `label-message-colour` path form, because the path form
+#: escapes a hyphen by doubling it — which would render the version as `1.0.0--alpha.1` and put a
+#: string in the README that is not the version anyone can install.
+BADGE = "https://img.shields.io/static/v1?label={label}&message={message}&color={color}"
+
+
+def badge(label: str, message: str, color: str, href: str) -> str:
+    """One linked badge, as HTML so it can sit inside a centred header block."""
+    source = BADGE.format(
+        label=quote(label, safe=""), message=quote(message, safe=""), color=color
+    )
+    return f'<a href="{href}"><img alt="{label}: {message}" src="{source}"></a>'
+
+
+def render_badges(facts: Facts) -> str:
+    """The README's badge row, every number read from the source that already governs it.
+
+    Nothing here is typed by hand. The RFC figures come from the registry the compliance report is
+    generated from, the codecs from the check that fails the build when a codec claim is unbacked,
+    and the version, MSRV and licence from the workspace manifest. A badge is the most-read and
+    least-maintained line in a README, which is exactly the shape of claim `X-47` made generated.
+    """
+    codecs = claimed_codecs()
+    badges = [
+        badge("docs", "codewandler.github.io/sipx", "blue", "https://codewandler.github.io/sipx/"),
+        badge("release", facts.workspace_version, "blue", "CHANGELOG.md"),
+        badge("MSRV", f"rustc {facts.msrv}", "blue", "#try-the-cli"),
+        badge(
+            "RFCs",
+            f"{facts.rfc_implemented} implemented of {facts.rfc_count}",
+            "blue",
+            "docs/compliance.md",
+        ),
+        badge("codecs", " · ".join(codecs), "blue", "docs/compliance.md"),
+        badge("license", facts.license, "blue", "#license"),
+    ]
+    return "\n" + "\n".join(badges) + "\n"
 
 
 def render_region(match: re.Match[str]) -> str:

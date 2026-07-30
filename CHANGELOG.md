@@ -5,9 +5,34 @@ All notable changes to sipx are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0-alpha.1] — 2026-07-30
+
+**No code changed in this release.** No file under `crates/` differs from `1.0.0-alpha`; the library,
+the CLI and every published crate are byte-identical to it. What changed is how the project measures
+and reports itself, which is the alpha's own subject matter — predicate 7 exists because *the
+distance to v1 is generated, not asserted*. Skip this release if you consume the code.
 
 ### Changed
+
+- **The README states its metrics instead of asserting them, and its header stops overlapping the
+  logo** — the badge row now carries the release, the MSRV, RFC coverage, the codecs and the licence,
+  and **not one of those numbers is written by hand**. It is a `generated:badges` region, so
+  `sync-website.py --check` fails the build when any of them drifts, which is the rule `X-47`
+  established for public facts applied to the line of a README that is read most and re-checked
+  least.
+  - **The codec badge parses what `check-audio-claims.py` prints rather than recomputing the set.**
+    A badge that counted codecs its own way could disagree with the check that fails the build, and
+    a badge disagreeing with the gate is worse than no badge; if that check is red, the region
+    refuses to render rather than publishing an unbacked claim.
+  - **RFC coverage reads `32 implemented of 70`, and `partial` is not folded in.** `docs/maturity.md`
+    refuses the same arithmetic for the same reason: one number would call a fully implemented row
+    and a partial one the same thing.
+  - Shields' query form is used rather than the `label-message-colour` path form, which escapes a
+    hyphen by doubling it — that would have published `1.0.0--alpha.1`, a version string nobody can
+    install.
+  - The logo was `align="right"`, so the `h1`'s bottom rule ran underneath it. GitHub strips inline
+    styles from Markdown, so there is no layering fix available; the float is gone and the header is
+    centred instead.
 
 - **Conformance, capability and release readiness are assessed separately (`X-48`)** — the dated
   repository review measures the SIP core, endpoint library, high-level call/media framework and
@@ -2039,7 +2064,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.1...HEAD
+[1.0.0-alpha.1]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha...v1.0.0-alpha.1
 [1.0.0-alpha]: https://github.com/codewandler/sipx/compare/v0.12.0...v1.0.0-alpha
 [0.12.0]: https://github.com/codewandler/sipx/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/codewandler/sipx/compare/v0.10.0...v0.11.0

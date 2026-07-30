@@ -38,6 +38,50 @@ class GeneratedFactsTests(unittest.TestCase):
         self.assertEqual(release.group(2), facts.release_date)
         self.assertEqual(len(registry["rfc"]), facts.rfc_count)
 
+    def test_badge_numbers_come_from_the_sources_that_govern_them(self) -> None:
+        """A badge is the most-read line in a README and the least likely to be re-checked."""
+        facts = SYNC.canonical_facts()
+        registry = tomllib.loads(
+            (ROOT / "docs" / "rfc" / "registry.toml").read_text(encoding="utf-8")
+        )
+        implemented = sum(1 for row in registry["rfc"] if row.get("status") == "implemented")
+        self.assertEqual(implemented, facts.rfc_implemented)
+        # `partial` is never folded in as a fraction, for `docs/maturity.md`'s reason: one number
+        # would call a fully implemented row and a partial one the same thing.
+        self.assertLess(facts.rfc_implemented, facts.rfc_count)
+
+        rendered = SYNC.render_generated("badges", None)
+        self.assertIn(f"message={facts.workspace_version}&", rendered)
+        self.assertIn(f"{facts.rfc_implemented}%20implemented%20of%20{facts.rfc_count}", rendered)
+        # The path form escapes a hyphen by doubling it, which would publish a version string
+        # nobody can install. The query form is what keeps the badge literal.
+        self.assertNotIn("--alpha", rendered)
+        self.assertNotIn("/badge/", rendered)
+
+    def test_the_codec_badge_reports_what_the_audio_gate_asserts(self) -> None:
+        """Not a second opinion about the codecs — the same one, or no badge at all."""
+        codecs = SYNC.claimed_codecs()
+        self.assertIn("G.711", codecs)
+        rendered = SYNC.render_generated("badges", None)
+        for codec in codecs:
+            self.assertIn(codec, rendered)
+
+    def test_every_badge_link_resolves_to_a_real_readme_anchor_or_file(self) -> None:
+        """`X-41` made a dead anchor fail the build; a badge is not exempt from that."""
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        anchors = {
+            "#" + re.sub(r"[^a-z0-9 -]", "", line.lstrip("# ").lower()).replace(" ", "-")
+            for line in readme.splitlines()
+            if line.startswith("#")
+        }
+        for href in re.findall(r'<a href="([^"]+)">', SYNC.render_generated("badges", None)):
+            if href.startswith("http"):
+                continue
+            if href.startswith("#"):
+                self.assertIn(href, anchors, f"badge links to a missing anchor {href}")
+            else:
+                self.assertTrue((ROOT / href).is_file(), f"badge links to a missing file {href}")
+
     def test_crate_map_comes_from_publishable_workspace_packages(self) -> None:
         rendered = SYNC.render_generated("crate-map", None)
         self.assertIn("| `sipx-call` | Call framework:", rendered)
