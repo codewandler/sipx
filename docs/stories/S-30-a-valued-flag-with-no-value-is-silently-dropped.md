@@ -70,11 +70,17 @@ valued flag on the line was given a non-empty value, so `Args::value` still retu
 Acceptance item asked for — the check exists once, in the constructor, keyed off `VALUED_FLAGS`,
 and no call site re-checks anything. The 15-odd `value`/`number` call sites are untouched.
 
-The four subcommands each changed in the same two ways, and neither is a per-flag check: the
-`--help` branch moved ahead of construction (so `--help` still prints when another flag on the
-line is malformed), and the constructor's `Err` is rendered through the existing
-`fail(format, Exit::Usage, &message)`. That is a fallible constructor having its error turned into
-an exit code at the boundary, identical in all four files.
+The four subcommands changed by five lines each, and none of it is a per-flag check. Because all
+four needed the identical prologue, it became one function — `crate::arguments(raw, HELP, format)`
+answers `--help`, then constructs the `Args`, and hands back the exit to return if either says
+stop. Each `run` now opens with a four-line match, one line *shorter* than before this story, and
+`answer.rs` and `peers.rs` no longer name `Args` at all. Help is answered before validation, so
+`sipx dial --help --play` still documents the command.
+
+That shape was forced by the gate rather than chosen up front: adding a validation step inline
+pushed `dial::run` to 103 lines against clippy's 100-line limit, which is the duplication asking
+to be collapsed. Worth recording, because the first version of this change did touch five files
+for what is one rule.
 
 The rejected alternative was `value() -> Result<Option<&str>, String>`, which pushes the decision
 out to every caller and lets any of them write `.ok().flatten()` — the "check twice" outcome the
@@ -112,7 +118,16 @@ each command's own `--help` output, which reaches the exit code through the bina
 against over-reach: `a_valueless_flag_is_untouched_by_the_rule` and
 `an_equals_in_the_positional_is_not_a_flag` (a URI parameter is spelled with `=`).
 
-**Not done here.** A valued flag whose value is *another flag* — `--target --tcp` — still binds
-`"--tcp"` as the value. Every such case is refused downstream today by the value's own validation,
-and refusing it here would need a registry of valueless flags that does not exist, so it is left
-alone rather than half-built.
+**Not done here.** Two neighbours, both left alone deliberately:
+
+- A valued flag whose value is *another flag* — `--target --tcp` — still binds `"--tcp"` as the
+  value. Every such case is refused downstream today by the value's own validation, and refusing it
+  here would need a registry of valueless flags that does not exist, so it is left alone rather than
+  half-built.
+- An *invalid* value is still silently replaced by the default, which is this defect's sibling one
+  step over. `Args::number` returns `None` for both "absent" and "not a number", and
+  `answer.rs:65,94` and `register.rs:118` spend it through `.unwrap_or(default)`:
+  `sipx answer --local 127.0.0.1:0 --wait notanumber` exits 0 having waited the default 60 seconds.
+  `dial` already fixed this for itself in `dial::numeric` (`dial.rs:211`), so the shape of the fix
+  exists and only `answer` and `register` are missing it. Out of scope here — S-30 is about a value
+  that is *missing*, not one that is wrong — and worth its own story.
