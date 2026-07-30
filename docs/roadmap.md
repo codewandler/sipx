@@ -111,8 +111,10 @@ question of what can be built on this stack without writing Rust. **M9** waits b
 
 Four milestones, each independently demonstrable, each ordered by the same rule the
 [RFC roadmap](rfc-roadmap.md) uses: **a gap that changes what sipx can be deployed as beats a gap
-that adds a feature.** M9 to M12 are defined and their stories are cut, not started; the
-in-progress work is the [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host)
+that adds a feature.** M9 to M12 are defined and their stories are cut. M10's are nearly all done and
+it is still not declared — [where M10 stands](#m10--reachable) says which clause of its exit criterion
+is short of the demonstration it is written as — and M9, M11 and M12 are unstarted. The in-progress
+work is the [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host)
 epics below, which are not milestones because they are not RFC gaps.
 
 ### M9 — Bridgeable
@@ -153,7 +155,8 @@ M6 makes sipx registrable. It does not make one *instance* of a registration add
 
 **Done when** one of two registrations of the same address of record can be called individually, a
 push wakes a client that held no connection into an answered call, and a call passes audio between
-two endpoints that symmetric RTP alone cannot connect.
+two endpoints that symmetric RTP alone cannot connect. **That sentence is M10's only exit criterion**
+— if another part of this file appears to state a second one, this is the one that governs.
 
 `T-20` then `T-21`: both are registration work, and push builds on the same instance identity GRUU
 needs. `M-16` is in different crates and can run beside them.
@@ -161,6 +164,57 @@ needs. `M-16` is in different crates and can run beside them.
 ICE is promoted here out of the [RFC roadmap](rfc-roadmap.md)'s last group, where it sat beside
 recording. That was a mis-grouping — reaching the far end is not a feature, it is the same class of
 gap as the two rows above it.
+
+**The third clause means *some* such endpoints, not *any* of them.** Host and server-reflexive
+candidates connect many NAT pairs with no relay anywhere in the path; both ends behind symmetric NAT
+are connected by neither, and that case is the one a relay exists for. Read as *any*, the clause puts
+RFC 8656 inside M10 and the milestone cannot be reached without a TURN client. Read as *some*, M10 is
+the milestone that puts a working ICE media path in the stack and the relayed candidate belongs to
+the epic that owns it. **The second reading governs** (`X-50`), on three grounds:
+
+1. **The clause is a demonstration, and the demonstration is of a nominated pair.** `M-27`'s
+   `a_call_uses_a_nominated_pair_when_both_host_candidates_are_silent` makes each side's default,
+   highest-priority host path a silent socket, so the only usable addresses are the lower-priority
+   reflexive candidates and audio arriving proves a nominated pair carried it rather than symmetric
+   RTP rescuing the call. That is a pair symmetric RTP alone cannot connect, reached without a relay.
+2. **Both places that enumerate M10's content name RFC 8445 and 8839 and not 8656** — the table above,
+   and group 2 of the [RFC roadmap](rfc-roadmap.md). The only text that ever put 8656 in M10 was the
+   ICE epic's heading, and it got there by grouping every child of `M-16` under one milestone rather
+   than by scoping one.
+3. **This roadmap orders a deployability gap ahead of a feature.** Before ICE, sipx has no answer to
+   NAT beyond symmetric RTP at all; after it, it has one that works for the common pairs and not for
+   both-ends-symmetric. A relay widens the coverage of a capability M10 delivers rather than
+   delivering a capability M10 lacks.
+
+**So `M-24` is not an M10 story.** RFC 8656 stays in the [ICE epic](#ice--ice) and in no milestone —
+work belonging to an epic and to no milestone is a shape this file already carries, in the epics
+below and in [After M12](#after-m12) — and it lands in whichever milestone someone asks for it in.
+What it buys is exactly the case the clause above excludes: both ends behind symmetric NAT, where no
+candidate type but a relayed one reaches. Until it lands, sipx's ICE is host and server-reflexive,
+and the [compliance table](compliance.md) says so — 8445 and 8839 are `partial`.
+
+**Where M10 stands, 2026-07-30.** All three mechanisms are built, and the milestone is **not recorded
+as reached**, because two of the three clauses are held by mechanism rather than by the demonstration
+they are written as:
+
+- **GRUU** — `T-20`, done. `a_request_to_a_gruu_reaches_the_instance_that_registered_it` shows a
+  request addressed to one instance's GRUU recognised by that instance, and refused when it names the
+  address of record or another instance's GRUU. It is an `OPTIONS` against one agent and a stub
+  registrar, not two registrations of the same address of record each taking a call.
+- **Push** — `T-21`, done. `a_push_wakes_a_client_that_refreshes_its_binding_before_the_invite` shows
+  RFC 8599 §4.1.3's order: push, binding-refresh REGISTER, then the INVITE that could not have
+  arrived any earlier. It stops when the INVITE arrives; nothing answers it.
+- **ICE** — `M-19`…`M-23` and `M-27`, done; `M-24` out of scope per above. Demonstrated in full by
+  the test named in ground 1. The table's `M-16` row is the epic's tracker, and a tracker stays open
+  until its last child lands — including `M-24`. **`M-16`'s status is therefore not M10's**, and
+  reading it as M10's is the same substitution the ICE heading used to make.
+
+**The distance left is not TURN.** It is the first two clauses demonstrated as they are already
+written — nothing added to them: two registrations of one address of record where a call placed at
+one instance's GRUU is answered by that instance and not the other, and a pushed client that answers
+the call it was woken for. Recording M10 as delivered before that exists would be the defect `X-30`,
+`X-35` and `X-42` each found — a claim true of one reading of its evidence and false of the reading
+a reader would take.
 
 ### M11 — Attestable
 
@@ -401,22 +455,30 @@ deny-by-default capabilities. Four phases, each shell-demonstrable: one call one
 call placed by the CLI and the absent-app case does what its declaration says.
 See [design](designs/app-host.md).
 
-### ICE — `ice` _(six stories, M10)_
+### ICE — `ice`
 
 The media path where symmetric RTP cannot reach: candidate gathering, connectivity checks and
 nomination, so two endpoints that never see each other's real addresses still exchange audio.
 Cut from `M-16`, which was one story until it was specified and turned out to be three RFCs —
 RFC 8445, RFC 8839, and RFC 8656 hiding inside "relayed candidates". The spec
-([`specs/ice.md`](specs/ice.md)) was written first and is what the six children are measured
-against.
+([`specs/ice.md`](specs/ice.md)) was written first and is what the children are measured against.
+
+**The epic is not a milestone, and this heading no longer names one.** It read *(six stories, M10)*,
+which scoped [M10](#m10--reachable) to every child of `M-16` — including `M-24`'s relay — while M10's
+own **Done when** sentence scoped it to a media path symmetric RTP cannot provide. Two statements of
+one exit criterion, disagreeing about whether M10 costs a TURN client (`X-50`). The **Done when**
+sentence governs: M10 needs RFC 8445 and 8839, `M-24` (RFC 8656) is in this epic and in no milestone,
+and the reasoning is written out under M10 rather than summarised twice.
 
 The order is a dependency chain, not a preference. `M-19` (the RFC 8839 attributes) and `M-20`
 (the STUN check codec) are independent and can run together; `M-21` (the sans-IO agent) needs
 `M-20`; `M-22` (driving it on the media port) needs `M-19` and `M-21` and owns the test `M-16`
-named; `M-23` (restart) and `M-24` (a relayed candidate) follow. ICE-lite is deferred with its
-reason recorded — sipx is a UA behind NATs, which is the case lite does not serve — but
-*interoperating* with a lite peer is not, because an implementation that only handles a full peer
-hangs waiting for checks a lite peer is never required to send. See [design](designs/media.md).
+named; `M-23` (restart) follows it, and so does `M-27`, which offers and answers ICE from a call and
+is what made everything above it reachable from `sipx-call`. `M-24` (a relayed candidate) is last and
+unscheduled. ICE-lite is deferred with its reason recorded — sipx is a UA behind NATs, which is the
+case lite does not serve — but *interoperating* with a lite peer is not, because an implementation
+that only handles a full peer hangs waiting for checks a lite peer is never required to send.
+See [design](designs/media.md).
 
 ### Endpoint discovery — `discovery` _(four stories)_
 
