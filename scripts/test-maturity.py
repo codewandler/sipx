@@ -12,6 +12,7 @@ list of which predicates are met — is exactly the drift this generator exists 
 
 import datetime
 import importlib.util
+import json
 import os
 import pathlib
 import shutil
@@ -377,20 +378,39 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
         self.git(repo, "add", "-A")
         self.git(repo, "commit", "-q", "--no-verify", "-m", message, date=date)
 
-    def run_maturity(self, repo, *args):
+    def stage(self, repo, *paths):
+        self.git(repo, "add", "--", *paths)
+
+    def commit_staged(self, repo, message, date=None, amend=False):
+        args = ["commit", "-q", "--no-verify", "-m", message]
+        if amend:
+            args.extend(["--amend", "--no-edit"])
+        self.git(repo, *args, date=date)
+
+    def clean_checkout(self, repo):
+        checkout = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, checkout, ignore_errors=True)
+        self.git(repo.parent, "clone", "-q", "--no-local", str(repo), str(checkout))
+        return checkout
+
+    def run_maturity(self, repo, *args, source_date_epoch=None):
+        env = dict(os.environ)
+        if source_date_epoch is not None:
+            env["SOURCE_DATE_EPOCH"] = str(source_date_epoch)
         return subprocess.run(
             [sys.executable, str(repo / "scripts" / "maturity.py"), *args],
             cwd=repo,
             capture_output=True,
             text=True,
             check=False,
+            env=env,
         )
 
-    def day_row(self, repo):
-        """Today's row of the *Discovery versus closure* table, as it stands in the report."""
-        today = datetime.date.today().isoformat()
+    def day_row(self, repo, day=None):
+        """One row of the *Discovery versus closure* table, defaulting to today."""
+        day = day or datetime.date.today().isoformat()
         for line in (repo / "docs" / "maturity.md").read_text().splitlines():
-            if line.startswith(f"| {today} |"):
+            if line.startswith(f"| {day} |"):
                 return line
         return None
 
@@ -436,6 +456,8 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
         repo = self.fixture()
         self.write_story(repo, "X-3", "ready")
         self.assertEqual(self.run_maturity(repo).returncode, 0)
+        before_commit = self.run_maturity(repo, "--check")
+        self.assertEqual(before_commit.returncode, 0, before_commit.stderr)
         self.commit(repo, "file X-3, with the report")
 
         checked = self.run_maturity(repo, "--check")
@@ -457,6 +479,8 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
         repo = self.fixture()
         self.write_story(repo, "X-2", "done")
         self.assertEqual(self.run_maturity(repo).returncode, 0)
+        before_commit = self.run_maturity(repo, "--check")
+        self.assertEqual(before_commit.returncode, 0, before_commit.stderr)
         self.commit(repo, "close X-2, with the report")
 
         checked = self.run_maturity(repo, "--check")
@@ -482,12 +506,28 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
         self.assertEqual(checked.returncode, 1, "an unregenerated report is drift")
         self.assertIn("drifted", checked.stderr)
 
+    def test_a_committed_fact_missing_from_the_event_journal_is_still_red(self):
+        """Strict drift is carried by the day source itself, not only by board aggregates.
+
+        The extra closing line is outside frontmatter, so the board and predicate tables do not move.
+        Git history still contains the closing fact the discovery table measures. If reconciliation
+        with the committed journal is removed, this test is green and the missing event is silent.
+        """
+        repo = self.fixture()
+        path = repo / "docs" / "stories" / "X-1-a-story.md"
+        path.write_text(path.read_text() + "\nstatus: done\n")
+        self.commit(repo, "record a closing fact and forget the report")
+
+        checked = self.run_maturity(repo, "--check")
+        self.assertEqual(checked.returncode, 1, "an event absent from the journal is drift")
+        self.assertIn("drifted", checked.stderr)
+
     def test_an_edited_report_is_still_red(self):
         """Hand-editing the generated region must fail, day rows included.
 
-        The narrower risk of reading the working tree: if the day row were merely tolerated, a wrong
-        number in it would pass while it was today's. It is not tolerated — the source changed, and
-        the comparison is as strict as it ever was.
+        The narrower risk of reading a pre-commit snapshot: if the day row were merely tolerated, a
+        wrong number in it would pass while it was today's. It is not tolerated — the source changed,
+        and the comparison is as strict as it ever was.
         """
         repo = self.fixture()
         report = repo / "docs" / "maturity.md"
@@ -500,15 +540,15 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
         self.assertEqual(checked.returncode, 1, "a hand-edited day row is drift")
 
     def test_a_story_filed_already_closed_is_counted_by_both_halves(self):
-        """The subtle one: an untracked file is absent from `git diff HEAD`.
+        """An added file's staged diff and committed diff must count the same closing line.
 
         Committing a new file shows its whole body as `+` lines, so history counts a story filed
-        already `done` as both filed and closed. The working-tree half reads the diff for tracked
-        edits, which cannot see an untracked file at all — so this count has to come from the file's
-        content or the two halves of the union disagree and the row moves under its own commit.
+        already `done` as both filed and closed. The index half must do the same or the two halves of
+        the union disagree and the row moves under its own commit.
         """
         repo = self.fixture()
         self.write_story(repo, "X-3", "done")
+        self.stage(repo, "docs/stories/X-3-a-story.md")
         self.assertEqual(self.run_maturity(repo).returncode, 0)
         before = self.day_row(repo)
         today = datetime.date.today().isoformat()
@@ -597,6 +637,7 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
         (repo / "docs" / "stories" / "X-3-a-story.md").write_text(
             "---\nid: X-3\ntitle: X-3\npillar: Build\nstatus: done \n---\n\n# X-3\n"
         )
+        self.stage(repo, "docs/stories/X-3-a-story.md")
         self.assertEqual(self.run_maturity(repo).returncode, 0)
         before = self.day_row(repo)
         today = datetime.date.today().isoformat()
@@ -608,21 +649,12 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
         self.assertEqual(self.run_maturity(repo).returncode, 0)
         self.assertEqual(self.day_row(repo), before)
 
-    def test_the_name_rule_and_the_story_rule_agree_on_the_real_board(self):
-        """The one asymmetry left in the union, pinned instead of assumed.
+    def test_every_non_reserved_board_markdown_file_is_a_story(self):
+        """The current board has no ambiguous Markdown file outside its reserved generated files.
 
-        Committed history hands `discovery_rate` file *names* and no content, so `Filed` for a past day
-        is decided by name; the working-tree half reads `story_fields`, which is the real definition.
-        Reading content for every historical addition costs a `git show` per file — 154 of them, about
-        seven seconds — to guard a case that needs somebody to commit junk into the board directory, so
-        the asymmetry stays and this holds it safe instead.
-
-        The two rules agree on every `.md` the board has ever held: 154 additions, whose single
-        disagreement was `_TEMPLATE.md`, which both rules exclude — one by name, one because the
-        template carries an `id:` of its own. What would end that is a non-story `.md` committed under
-        `docs/stories`: it counts as filed by name and not by content, so the day it landed would go
-        red until the report was regenerated. Identically red locally and in CI, so never silent drift,
-        but this fires first and names the file.
+        History and pending snapshots now both inspect content, so this is no longer needed to paper
+        over a filename/content asymmetry. It remains a useful board-shape assertion: a committed
+        scratch note is consistently a non-story, but keeping one here would still be confusing.
         """
         for path in sorted(maturity.STORIES.glob("*.md")):
             self.assertEqual(
@@ -632,17 +664,18 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
                 f"commit that added it moves under that commit",
             )
 
-    def test_the_working_tree_half_is_what_holds_the_row_still(self):
-        """The mechanism directly: the count must not change when the tree is committed.
+    def test_the_index_half_is_what_holds_the_row_still(self):
+        """The mechanism directly: the count must not change when the index is committed.
 
         Asserted as an equality across the commit rather than only through `--check`, because that is
-        the property the fix rests on — `git commit` relocates a fact from the working tree to
+        the property the fix rests on — `git commit` relocates a fact from the index to
         history and the union is unmoved. If this drifts apart again, `--check` going red is a symptom
         and this is the cause.
         """
         repo = self.fixture()
         self.write_story(repo, "X-3", "ready")
         self.write_story(repo, "X-2", "done")
+        self.stage(repo, "docs/stories/X-3-a-story.md", "docs/stories/X-2-a-story.md")
         self.assertEqual(self.run_maturity(repo).returncode, 0)
         before = self.day_row(repo)
         self.commit(repo, "file one, close one, with the report")
@@ -655,6 +688,196 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
         )
         today = datetime.date.today().isoformat()
         self.assertEqual(before, f"| {today} | 3 | 1 | -2 |")
+
+    def test_selective_commit_ignores_unstaged_and_untracked_stories_in_both_trees(self):
+        """The report describes the index, even when the worktree contains a different board.
+
+        X-3 and the report are the selective commit. X-2's later close and untracked X-4 remain only
+        in the originating worktree. Both that dirty tree and a clean checkout of the commit must
+        accept the same report; counting either excluded story creates a local/CI disagreement.
+        """
+        repo = self.fixture()
+        self.write_story(repo, "X-3", "ready")
+        self.stage(repo, "docs/stories/X-3-a-story.md")
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        self.stage(repo, "docs/maturity.md")
+
+        self.write_story(repo, "X-3", "done")
+        self.write_story(repo, "X-2", "done")
+        self.write_story(repo, "X-4", "ready")
+        local = self.run_maturity(repo, "--check")
+        self.assertEqual(local.returncode, 0, local.stderr)
+
+        self.commit_staged(repo, "selectively file X-3 with its report")
+        self.assertTrue((repo / "docs" / "stories" / "X-4-a-story.md").exists())
+
+        checkout = self.clean_checkout(repo)
+        clean = self.run_maturity(checkout, "--check")
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+        self.assertFalse((checkout / "docs" / "stories" / "X-4-a-story.md").exists())
+
+    def test_a_staged_non_story_markdown_file_is_not_a_fact_before_or_after_commit(self):
+        """History and the staged snapshot must apply the same definition of a story."""
+        repo = self.fixture()
+        before = self.day_row(repo)
+        path = repo / "docs" / "stories" / "notes.md"
+        path.write_text("scratch, not story frontmatter\n")
+        self.stage(repo, "docs/stories/notes.md")
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        self.assertEqual(self.day_row(repo), before)
+        self.stage(repo, "docs/maturity.md")
+        self.commit_staged(repo, "commit a non-story note")
+
+        checkout = self.clean_checkout(repo)
+        checked = self.run_maturity(checkout, "--check")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(self.day_row(checkout), before)
+
+    def test_selective_story_deletion_is_stable_in_a_clean_checkout(self):
+        repo = self.fixture()
+        self.git(repo, "rm", "-q", "docs/stories/X-2-a-story.md")
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        self.stage(repo, "docs/maturity.md")
+        self.commit_staged(repo, "delete X-2 with its report")
+
+        checkout = self.clean_checkout(repo)
+        checked = self.run_maturity(checkout, "--check")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_selective_story_rename_is_not_a_new_filing(self):
+        repo = self.fixture()
+        before = self.day_row(repo)
+        self.git(
+            repo,
+            "mv",
+            "docs/stories/X-2-a-story.md",
+            "docs/stories/X-2-renamed-story.md",
+        )
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        self.assertEqual(self.day_row(repo), before)
+        self.stage(repo, "docs/maturity.md")
+        self.commit_staged(repo, "rename X-2 with its report")
+
+        checkout = self.clean_checkout(repo)
+        checked = self.run_maturity(checkout, "--check")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(self.day_row(checkout), before)
+
+    def test_staging_only_the_report_while_a_story_is_unstaged_is_an_error(self):
+        """A report-only commit cannot claim facts deliberately absent from its snapshot."""
+        repo = self.fixture()
+        self.write_story(repo, "X-3", "ready")
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        self.stage(repo, "docs/maturity.md")
+
+        checked = self.run_maturity(repo, "--check")
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn("report is staged while story changes are not", checked.stderr)
+
+    def test_staged_journal_keeps_its_generation_day_when_the_generator_crosses_midnight(self):
+        """A later generator invocation must reuse the staged journal, not re-date its facts."""
+        repo = self.fixture(date="2020-01-02T03:04:05+00:00")
+        first_day = "2030-01-02"
+        next_day = "2030-01-03"
+        first_epoch = int(datetime.datetime(2030, 1, 2, tzinfo=datetime.timezone.utc).timestamp())
+        next_epoch = int(datetime.datetime(2030, 1, 3, tzinfo=datetime.timezone.utc).timestamp())
+        self.write_story(repo, "X-3", "ready")
+        self.stage(repo, "docs/stories/X-3-a-story.md")
+        self.assertEqual(self.run_maturity(repo, source_date_epoch=first_epoch).returncode, 0)
+        before = self.day_row(repo, first_day)
+        self.assertIsNotNone(before, "SOURCE_DATE_EPOCH must control the generator's event day")
+        self.assertIsNone(self.day_row(repo, next_day))
+        self.stage(repo, "docs/maturity.md")
+
+        after_midnight = self.run_maturity(repo, "--check", source_date_epoch=next_epoch)
+        self.assertEqual(after_midnight.returncode, 0, after_midnight.stderr)
+        self.commit_staged(repo, "file X-3 after midnight", date=f"{next_day}T00:01:00+00:00")
+
+        actual_day = self.git(repo, "log", "-1", "--format=%ad", "--date=short").stdout.strip()
+        self.assertEqual(actual_day, next_day)
+        checkout = self.clean_checkout(repo)
+        checked = self.run_maturity(checkout, "--check")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(self.day_row(checkout, first_day), before)
+        self.assertIsNone(self.day_row(checkout, next_day))
+
+    def test_generation_day_survives_amend_with_the_retained_old_author_date(self):
+        """An amend keeps the old author date, but a newly staged fact keeps its generation day."""
+        old_day = "2020-01-02"
+        repo = self.fixture(date=f"{old_day}T03:04:05+00:00")
+        today = datetime.date.today().isoformat()
+        self.write_story(repo, "X-3", "ready")
+        self.stage(repo, "docs/stories/X-3-a-story.md")
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        before = self.day_row(repo, today)
+        self.stage(repo, "docs/maturity.md")
+        self.commit_staged(repo, "ignored for amend", amend=True)
+
+        actual_day = self.git(repo, "log", "-1", "--format=%ad", "--date=short").stdout.strip()
+        self.assertEqual(actual_day, old_day)
+        checkout = self.clean_checkout(repo)
+        checked = self.run_maturity(checkout, "--check")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(self.day_row(checkout, today), before)
+
+    def replace_journal(self, repo, data):
+        path = repo / "docs" / "maturity.md"
+        lines = path.read_text().splitlines()
+        current_line = next(line for line in lines if line.startswith("<!-- maturity-event-days: "))
+        current = json.loads(current_line[len("<!-- maturity-event-days: ") : -len(" -->")])
+        if "basis" not in data:
+            data = {"basis": current["basis"], **data}
+        replacement = "<!-- maturity-event-days: " + json.dumps(data) + " -->"
+        path.write_text(
+            "\n".join(
+                replacement if line.startswith("<!-- maturity-event-days: ") else line
+                for line in lines
+            )
+            + "\n"
+        )
+        self.commit(repo, "commit a malformed event journal")
+
+    def test_malformed_event_journals_are_rejected(self):
+        cases = {
+            "unexpected top-level key": {
+                "filed": {"2020-01-02": 2},
+                "closed": {},
+                "extra": {},
+            },
+            "invalid date": {"filed": {"not-a-date": 2}, "closed": {}},
+            "zero count": {"filed": {"2020-01-02": 0}, "closed": {}},
+            "negative count": {"filed": {"2020-01-02": -1}, "closed": {}},
+            "string count": {"filed": {"2020-01-02": "2"}, "closed": {}},
+        }
+        for label, data in cases.items():
+            with self.subTest(label=label):
+                repo = self.fixture(date="2020-01-02T03:04:05+00:00")
+                self.replace_journal(repo, data)
+                checked = self.run_maturity(repo, "--check")
+                self.assertNotEqual(checked.returncode, 0)
+                self.assertIn("invalid event-date journal", checked.stderr)
+
+    def test_a_journal_claiming_more_facts_than_the_snapshot_is_rejected(self):
+        repo = self.fixture(date="2020-01-02T03:04:05+00:00")
+        self.replace_journal(repo, {"filed": {"2020-01-02": 3}, "closed": {}})
+
+        checked = self.run_maturity(repo, "--check")
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn("journal records 3 filed facts", checked.stderr)
+
+    def test_rewriting_journal_and_table_dates_without_changing_totals_is_rejected(self):
+        """Date attribution is tied to fact identities, not accepted because totals happen to match."""
+        repo = self.fixture(date="2020-01-02T03:04:05+00:00")
+        path = repo / "docs" / "maturity.md"
+        text = path.read_text()
+        text = text.replace('"2020-01-02":2', '"2020-01-03":2')
+        text = text.replace("| 2020-01-02 | 2 | 0 | -2 |", "| 2020-01-03 | 2 | 0 | -2 |")
+        path.write_text(text)
+        self.commit(repo, "rewrite event attribution without changing totals")
+
+        checked = self.run_maturity(repo, "--check")
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn("event-date journal basis", checked.stderr)
 
 
 if __name__ == "__main__":

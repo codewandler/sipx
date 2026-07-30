@@ -27,6 +27,9 @@ against callers, so every count below inherits that limit and says so.
 import argparse
 import collections
 import datetime
+import hashlib
+import json
+import os
 import pathlib
 import re
 import subprocess
@@ -156,9 +159,13 @@ ALPHA = (
 #: halves are load-bearing, which is why they live together in one function.
 NOT_STORIES = {"README.md", "_TEMPLATE.md"}
 
+# Historical content is immutable. The report tests render repeatedly in one process, so retain the
+# answer instead of spawning one `git show` per story for every assertion.
+COMMITTED_STORY_CACHE = {}
 
-def story_fields(path):
-    """One story's frontmatter, or `None` when the file is not a board story.
+
+def story_fields_text(name, text):
+    """One named file's story frontmatter, or `None` when it is not a board story.
 
     **The single definition of "is a story"**, because there were briefly two. `discovery_rate` used
     to decide it from the file name alone, which made a scratch `notes.md` in `docs/stories` count as
@@ -166,9 +173,9 @@ def story_fields(path):
     direction. A name is not enough and neither is frontmatter alone: the board's template has an
     `id:` too. A story is a file this list does not name, carrying a frontmatter block with an `id`.
     """
-    if path.name in NOT_STORIES:
+    if name in NOT_STORIES:
         return None
-    match = re.match(r"---\n(.*?)\n---", path.read_text(encoding="utf-8"), re.S)
+    match = re.match(r"---\n(.*?)\n---", text, re.S)
     if not match:
         return None
     fields = {}
@@ -178,11 +185,40 @@ def story_fields(path):
     return fields if "id" in fields else None
 
 
+def story_fields(path):
+    """One worktree file's story frontmatter, for callers explicitly checking that file."""
+    return story_fields_text(path.name, path.read_text(encoding="utf-8"))
+
+
 def stories():
-    """Every story's frontmatter, by id."""
+    """Every story in the snapshot selected by `staged_story_changes`, by id.
+
+    With any staged story change the index is the concrete selective-commit snapshot. With none, the
+    complete worktree preserves the ordinary edit/generate/stage-all workflow. The mode boundary is a
+    story change in the index, never whether the generated report happens to have been staged.
+    """
     found = {}
-    for path in sorted(STORIES.glob("*.md")):
-        fields = story_fields(path)
+    mode = story_snapshot_mode()
+    if mode == "ordinary":
+        sources = [
+            (path.name, path.read_text(encoding="utf-8"))
+            for path in sorted(STORIES.glob("*.md"))
+        ]
+    else:
+        names = git_lines(["ls-files", "--cached", "--", "docs/stories"])
+        if names is None:
+            raise SystemExit("maturity: cannot read the staged story snapshot")
+        sources = []
+        for name in sorted(names):
+            path = pathlib.PurePosixPath(name.strip())
+            if path.parent != pathlib.PurePosixPath("docs/stories") or path.suffix != ".md":
+                continue
+            text = git_text(["show", f":{path.as_posix()}"])
+            if text is None:
+                raise SystemExit(f"maturity: cannot read staged story {path}")
+            sources.append((path.name, text))
+    for name, text in sources:
+        fields = story_fields_text(name, text)
         if fields is not None:
             found[fields["id"]] = fields
     return found
@@ -192,8 +228,8 @@ def registry():
     return tomllib.loads(REGISTRY.read_text())["rfc"]
 
 
-def git_lines(args):
-    """A git invocation, or `None` when git cannot answer.
+def git_text(args):
+    """A git invocation's stdout, or `None` when git cannot answer.
 
     Absent git is not a failure: the report says the rate is unavailable rather than reporting zero,
     because zero filed and zero closed would read as a converged project.
@@ -206,7 +242,70 @@ def git_lines(args):
         return None
     if done.returncode != 0:
         return None
-    return done.stdout.splitlines()
+    return done.stdout
+
+
+def git_lines(args):
+    """A git invocation's output lines, or `None` when git cannot answer."""
+    output = git_text(args)
+    return None if output is None else output.splitlines()
+
+
+def staged_story_changes():
+    """Story paths changed between `HEAD` and the index, or `None` without git.
+
+    An empty list selects ordinary all-changes mode. Any path selects the index, including a deletion
+    or a staged non-story file, because it is the presence of a selective snapshot that matters.
+    """
+    return git_lines(["diff", "--cached", "HEAD", "--name-only", "--", "docs/stories"])
+
+
+def report_is_staged():
+    """Whether the generated report differs between `HEAD` and the index."""
+    paths = git_lines(["diff", "--cached", "HEAD", "--name-only", "--", "docs/maturity.md"])
+    return None if paths is None else bool(paths)
+
+
+def worktree_story_changes():
+    """Board stories changed outside `HEAD`, using the same content rule as `stories`."""
+    tracked = git_lines(["diff", "HEAD", "--name-only", "--", "docs/stories"])
+    untracked = git_lines(["ls-files", "--others", "--exclude-standard", "--", "docs/stories"])
+    if tracked is None or untracked is None:
+        return None
+    changed = []
+    for name in [*tracked, *untracked]:
+        path = pathlib.PurePosixPath(name.strip())
+        if path.suffix != ".md" or path.name in NOT_STORIES:
+            continue
+        worktree_path = ROOT / path
+        worktree_fields = None
+        if worktree_path.is_file():
+            try:
+                worktree_fields = story_fields(worktree_path)
+            except (OSError, UnicodeDecodeError):
+                pass
+        head_text = git_text(["show", f"HEAD:{path.as_posix()}"])
+        head_fields = story_fields_text(path.name, head_text) if head_text is not None else None
+        if worktree_fields is not None or head_fields is not None:
+            changed.append(path.as_posix())
+    return changed
+
+
+def story_snapshot_mode():
+    """Choose ordinary worktree or selective index mode, rejecting an ambiguous report-only stage."""
+    staged = staged_story_changes()
+    if staged is None:
+        return "ordinary"
+    if staged:
+        return "selective"
+    report_staged = report_is_staged()
+    changed = worktree_story_changes()
+    if report_staged and changed:
+        raise SystemExit(
+            "maturity: docs/maturity.md report is staged while story changes are not; stage the "
+            "selected story changes too, or unstage the report and use the ordinary all-changes mode"
+        )
+    return "ordinary"
 
 
 #: The frontmatter line that closes a story. What is counted is the *event* of a story closing, and
@@ -232,30 +331,59 @@ def closes_a_story(line):
     return line.rstrip() == CLOSING_LINE
 
 
-def uncommitted_story_facts():
-    """Filed and closed counts that exist in the working tree and not yet in any commit.
+def staged_story_facts():
+    """Filed and closed counts in the index and not yet in `HEAD`.
 
-    **Why the working tree is a source at all** (`X-39`). `Filed` and `Closed` come from git history,
-    so the count the report must contain for the current day is created *by the commit that contains
-    the report*: regenerate then commit and the report is one short, commit then regenerate and the
-    report is uncommitted. No ordering satisfies it, and the gate's `maturity` step was therefore red
-    in every commit that filed or closed a story — most commits — and never for a defect. It was
-    regenerated twice on 2026-07-30 with nothing wrong either time.
+    **Why a pre-commit snapshot is a source at all** (`X-39`). `Filed` and `Closed` come from git
+    history, so the count the report must contain for the current day is created *by the commit that
+    contains the report*: regenerate then commit and the report is one short, commit then regenerate
+    and the report is uncommitted. No ordering satisfies it, and the gate's `maturity` step was
+    therefore red in every commit that filed or closed a story — most commits — and never for a
+    defect. It was regenerated twice on 2026-07-30 with nothing wrong either time.
 
     **The fix is the third of the three options `X-39` lists**: the day rows come from a source that
-    does not move under the commit that writes them, rather than the check tolerating the in-flight
-    day or the report marking it provisional. History *union* the working tree is that source —
-    `git commit` only relocates a fact from the second half to the first, leaving the union alone —
-    and it was chosen because the other two only move the flap. A tolerated day row is unchecked
-    while it is today and strictly checked tomorrow, so it goes red on some later commit that
-    touched nothing; a provisional row has the same problem or stops carrying numbers at all, and
-    the crossover date is the number to watch.
+    does not move under the commit that writes them. History *union* the staged snapshot is that
+    source — `git commit` relocates a fact from the second half to the first without changing the
+    total. The index matters: the worktree may contain valid stories deliberately excluded from a
+    selective commit, and counting them predicts a tree that will never exist in history.
 
-    A clean tree contributes nothing, so CI and every commit that touches no story see exactly the
-    history-only answer they saw before, and `--check` stays as strict as it was.
+    Stage story changes before generating the report, then stage the report. Unstaged and untracked
+    files contribute nothing, and a staged file is read from the index even if its worktree copy has
+    since changed.
 
     `None` when git cannot answer, matching `discovery_rate`: an unavailable rate is reported as
     unavailable and never as zero.
+    """
+    added = git_lines(
+        ["diff", "--cached", "HEAD", "--diff-filter=A", "--name-only", "--", "docs/stories"]
+    )
+    changed = git_lines(["diff", "--cached", "HEAD", "--unified=0", "--", "docs/stories"])
+    if added is None or changed is None:
+        return None
+
+    def is_story(line):
+        """A newly staged file that the board will read as a story."""
+        path = pathlib.PurePosixPath(line.strip())
+        if path.suffix != ".md":
+            return False
+        text = git_text(["show", f":{path.as_posix()}"])
+        return text is not None and story_fields_text(path.name, text) is not None
+
+    filed = [f"filed:{line.strip()}" for line in added if is_story(line)]
+
+    # This diff includes the full body of newly staged files, exactly as history will after commit.
+    closed = closing_fact_ids(
+        changed,
+        lambda path: is_story(path),
+    )
+    return filed, closed
+
+
+def worktree_story_facts():
+    """Filed and closed facts for ordinary all-changes mode.
+
+    This is used only when the index has no story change, so the worktree is the only proposed story
+    snapshot. Valid untracked stories participate because a later `git add -A` will include them.
     """
     added = git_lines(["diff", "HEAD", "--diff-filter=A", "--name-only", "--", "docs/stories"])
     untracked = git_lines(["ls-files", "--others", "--exclude-standard", "--", "docs/stories"])
@@ -264,18 +392,6 @@ def uncommitted_story_facts():
         return None
 
     def is_story(line):
-        """A new file in the working tree that the board would read as a story.
-
-        Decided by `story_fields`, the same test `stories()` applies, because the file is on disk here
-        and can simply be read. A name-only test counted a scratch `notes.md` as a story filed today,
-        which made `--check` red on a correct tree and — worse — green in the tree holding the scratch
-        file and red on a clean checkout of the same commit, since the file is never committed. Local
-        green with CI red is the `X-22` failure class, so a name is not enough.
-
-        An undecodable file is not a story rather than a crash: a stray binary somebody left in the
-        directory is not this script's business, whereas a *tracked* story that cannot be read is, and
-        `stories()` still fails loudly on that.
-        """
         path = ROOT / line.strip()
         if path.suffix != ".md" or not path.is_file():
             return False
@@ -285,21 +401,242 @@ def uncommitted_story_facts():
             return False
 
     untracked_stories = [line.strip() for line in untracked if is_story(line)]
-    filed = len([line for line in added if is_story(line)]) + len(untracked_stories)
-
-    # Tracked edits are read from the diff, which is what `git log -p` will show once committed.
-    closed = len([line for line in changed if line.startswith("+") and closes_a_story(line[1:])])
-    # An untracked file is absent from that diff, and committing it shows its whole body as `+`
-    # lines — so a story filed already closed has to be counted from its content or the two halves
-    # of the union would disagree about it.
+    filed_names = [line.strip() for line in added if is_story(line)] + untracked_stories
+    filed = [f"filed:{name}" for name in filed_names]
+    closed = closing_fact_ids(changed, lambda path: is_story(path))
     for name in untracked_stories:
         lines = (ROOT / name).read_text(encoding="utf-8").splitlines()
-        closed += len([line for line in lines if closes_a_story(line)])
+        closed.extend(
+            f"closed:{name}" for line in lines if closes_a_story(line)
+        )
     return filed, closed
 
 
+def pending_story_facts():
+    """Facts in the deterministic ordinary or selective pre-commit snapshot."""
+    mode = story_snapshot_mode()
+    return staged_story_facts() if mode == "selective" else worktree_story_facts()
+
+
+def closing_fact_ids(lines, is_story):
+    """Closing fact identities from a zero-context patch and its resulting-file story rule."""
+    path = None
+    found = []
+    for line in lines:
+        if line.startswith("+++ b/"):
+            path = line[len("+++ b/") :].strip()
+        elif line.startswith("+++ /dev/null"):
+            path = None
+        elif path and line.startswith("+") and closes_a_story(line[1:]) and is_story(path):
+            found.append(f"closed:{path}")
+    return found
+
+
+EVENT_DAYS_PREFIX = "<!-- maturity-event-days: "
+
+
+def parse_event_days(text, source):
+    """Validate and parse one generated event-date journal."""
+    if text is None:
+        return None
+    for line in text.splitlines():
+        if not line.startswith(EVENT_DAYS_PREFIX) or not line.endswith(" -->"):
+            continue
+        try:
+            data = json.loads(line[len(EVENT_DAYS_PREFIX) : -len(" -->")])
+        except json.JSONDecodeError as error:
+            raise SystemExit(f"maturity: invalid event-date journal in {source}: {error}")
+        if type(data) is not dict or set(data) != {"basis", "filed", "closed"}:
+            raise SystemExit(
+                f"maturity: invalid event-date journal in {source}: expected only basis, filed and "
+                "closed"
+            )
+        basis = data["basis"]
+        if type(basis) is not str or not re.fullmatch(r"sha256:[0-9a-f]{64}", basis):
+            raise SystemExit(
+                f"maturity: invalid event-date journal in {source}: basis must be a sha256 digest"
+            )
+        counters = []
+        for kind in ("filed", "closed"):
+            values = data[kind]
+            if type(values) is not dict:
+                raise SystemExit(
+                    f"maturity: invalid event-date journal in {source}: {kind} must be an object"
+                )
+            counter = collections.Counter()
+            for day, count in values.items():
+                try:
+                    parsed_day = datetime.date.fromisoformat(day)
+                except (TypeError, ValueError):
+                    raise SystemExit(
+                        f"maturity: invalid event-date journal in {source}: {day!r} is not an "
+                        "ISO YYYY-MM-DD date"
+                    ) from None
+                if parsed_day.isoformat() != day:
+                    raise SystemExit(
+                        f"maturity: invalid event-date journal in {source}: {day!r} is not an "
+                        "ISO YYYY-MM-DD date"
+                    )
+                if type(count) is not int or count <= 0:
+                    raise SystemExit(
+                        f"maturity: invalid event-date journal in {source}: {kind}[{day!r}] must "
+                        "be a positive integer"
+                    )
+                counter[day] = count
+            counters.append(counter)
+        return (*counters, basis)
+    return None
+
+
+def snapshot_event_days():
+    """The journal in the index, falling back to `HEAD` before the report is first staged.
+
+    Reading the index is what preserves a first-observed date when a generated report is staged and
+    checked again after midnight. In an ordinary unstaged generation the index still contains
+    `HEAD`'s report, which is the correct base journal.
+    """
+    text = git_text(["show", ":docs/maturity.md"])
+    if text is None:
+        text = git_text(["show", "HEAD:docs/maturity.md"])
+    return parse_event_days(text, "the staged docs/maturity.md")
+
+
+def event_days_basis(filed, closed, filed_facts, closed_facts):
+    """Bind attributed dates to the multiset of semantic facts in the selected snapshot."""
+    payload = {
+        "closed": dict(sorted((day, count) for day, count in closed.items() if count)),
+        "closed_facts": sorted(closed_facts),
+        "filed": dict(sorted((day, count) for day, count in filed.items() if count)),
+        "filed_facts": sorted(filed_facts),
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def event_days_line(filed, closed, basis):
+    """The deterministic generated representation of the event-date journal."""
+    data = {
+        "basis": basis,
+        "closed": dict(sorted((day, count) for day, count in closed.items() if count)),
+        "filed": dict(sorted((day, count) for day, count in filed.items() if count)),
+    }
+    return EVENT_DAYS_PREFIX + json.dumps(data, separators=(",", ":"), sort_keys=True) + " -->"
+
+
+def committed_story(commit, name, cache):
+    """Whether one path is a story in one committed snapshot."""
+    key = (commit, name)
+    if key not in cache:
+        path = pathlib.PurePosixPath(name)
+        text = git_text(["show", f"{commit}:{path.as_posix()}"])
+        cache[key] = text is not None and story_fields_text(path.name, text) is not None
+    return cache[key]
+
+
+def history_story_fact_days():
+    """Committed `(day, identity)` facts, newest first, using the board's content rule."""
+    cache = COMMITTED_STORY_CACHE
+    filed = []
+    lines = git_lines(
+        [
+            "log",
+            "--date=short",
+            "--format=C %H %ad",
+            "--diff-filter=A",
+            "--name-only",
+            "--",
+            "docs/stories",
+        ]
+    )
+    if lines is None:
+        return None
+    commit = None
+    day = None
+    for line in lines:
+        if line.startswith("C "):
+            _, commit, day = line.split(maxsplit=2)
+        elif line.strip().endswith(".md") and day and commit:
+            name = line.strip()
+            if committed_story(commit, name, cache):
+                filed.append((day, f"filed:{name}"))
+
+    closed = []
+    lines = git_lines(
+        [
+            "log",
+            "--date=short",
+            "--format=C %H %ad",
+            "-p",
+            "--unified=0",
+            "--",
+            "docs/stories",
+        ]
+    )
+    if lines is None:
+        return None
+    commit = None
+    day = None
+    path = None
+    for line in lines:
+        if line.startswith("C "):
+            _, commit, day = line.split(maxsplit=2)
+            path = None
+        elif line.startswith("+++ b/"):
+            path = line[len("+++ b/") :].strip()
+        elif line.startswith("+++ /dev/null"):
+            path = None
+        elif (
+            path
+            and line.startswith("+")
+            and closes_a_story(line[1:])
+            and day
+            and commit
+            and committed_story(commit, path, cache)
+        ):
+            closed.append((day, f"closed:{path}"))
+    return filed, closed
+
+
+def event_day():
+    """The day assigned to newly observed facts.
+
+    `SOURCE_DATE_EPOCH` makes the boundary reproducible in tests and reproducible-build environments;
+    otherwise the local calendar day is the user-facing meaning of "today" in the report.
+    """
+    source_epoch = os.environ.get("SOURCE_DATE_EPOCH")
+    if source_epoch is None:
+        return datetime.date.today().isoformat()
+    try:
+        instant = datetime.datetime.fromtimestamp(int(source_epoch), tz=datetime.timezone.utc)
+    except (OverflowError, ValueError):
+        raise SystemExit("maturity: SOURCE_DATE_EPOCH must be an integer Unix timestamp") from None
+    return instant.date().isoformat()
+
+
+def reconcile_event_days(kind, recorded, history, pending, today):
+    """Reconcile one journal counter with committed and pending fact totals."""
+    recorded_total = sum(recorded.values())
+    committed_total = len(history)
+    maximum = committed_total + pending
+    if recorded_total > maximum:
+        raise SystemExit(
+            f"maturity: event-date journal records {recorded_total} {kind} facts, but the snapshot "
+            f"has {committed_total} committed + {pending} pending"
+        )
+
+    if recorded_total <= committed_total:
+        for day in history[: committed_total - recorded_total]:
+            recorded[day] += 1
+        recorded_pending = 0
+    else:
+        recorded_pending = recorded_total - committed_total
+    for _ in range(pending - recorded_pending):
+        recorded[today] += 1
+    return recorded
+
+
 def discovery_rate():
-    """Stories filed and closed per day, from git and the working tree.
+    """Stories filed and closed per recorded day, from history and the selected snapshot.
 
     The least obvious output here and the most useful. Burn-down is not a maturity signal while
     discovery outpaces closure: a shrinking board means the authors have stopped being surprised,
@@ -309,50 +646,47 @@ def discovery_rate():
     Filed is a story file being added. Closed is a `status: done` line appearing — so a story that
     is reopened and closed again counts twice, which is the honest reading of "closed on that day".
 
-    Committed history gives every past day. Today's row adds what the working tree holds and no
-    commit does yet, so that the row does not change when that tree is committed — see
-    `uncommitted_story_facts`, and `X-39` for the gate step this repaired.
+    The generated report carries the date journal that makes the attribution stable. Existing
+    history was seeded from author dates; a pending fact gets the day the report first observes it.
+    That recorded day survives a later commit across midnight and an amend retaining an old author
+    date. See `pending_story_facts`, and `X-39` for the gate step this repaired.
     """
-    filed = collections.Counter()
-    lines = git_lines(
-        ["log", "--date=short", "--format=C %ad", "--diff-filter=A", "--name-only", "--", "docs/stories"]
-    )
-    if lines is None:
+    history = history_story_fact_days()
+    if history is None:
         return None
-    day = None
-    for line in lines:
-        if line.startswith("C "):
-            day = line[2:].strip()
-        elif line.strip().endswith(".md") and day:
-            name = pathlib.PurePosixPath(line.strip()).name
-            if name not in NOT_STORIES:
-                filed[day] += 1
-
-    closed = collections.Counter()
-    lines = git_lines(
-        ["log", "--date=short", "--format=C %ad", "-p", "--unified=0", "--", "docs/stories"]
-    )
-    if lines is None:
-        return None
-    day = None
-    for line in lines:
-        if line.startswith("C "):
-            day = line[2:].strip()
-        elif line.startswith("+") and closes_a_story(line[1:]) and day:
-            closed[day] += 1
-
-    pending = uncommitted_story_facts()
+    history_filed_facts, history_closed_facts = history
+    history_filed = [day for day, _ in history_filed_facts]
+    history_closed = [day for day, _ in history_closed_facts]
+    pending = pending_story_facts()
     if pending is None:
         return None
-    pending_filed, pending_closed = pending
-    today = datetime.date.today().isoformat()
-    # Guarded, because `Counter[key] += 0` creates the key: an unconditional bump would print a
-    # 0/0 row for today on every clean tree and give the table a day that nothing happened on.
-    if pending_filed:
-        filed[today] += pending_filed
-    if pending_closed:
-        closed[today] += pending_closed
-    return filed, closed
+    pending_filed_facts, pending_closed_facts = pending
+    pending_filed = len(pending_filed_facts)
+    pending_closed = len(pending_closed_facts)
+    journal = snapshot_event_days()
+    if journal is None:
+        filed = collections.Counter(history_filed)
+        closed = collections.Counter(history_closed)
+        recorded_basis = None
+    else:
+        filed, closed, recorded_basis = journal
+    journal_complete = (
+        sum(filed.values()) == len(history_filed) + pending_filed
+        and sum(closed.values()) == len(history_closed) + pending_closed
+    )
+    all_filed_facts = [identity for _, identity in history_filed_facts] + pending_filed_facts
+    all_closed_facts = [identity for _, identity in history_closed_facts] + pending_closed_facts
+    if journal_complete and recorded_basis is not None:
+        expected_basis = event_days_basis(filed, closed, all_filed_facts, all_closed_facts)
+        if recorded_basis != expected_basis:
+            raise SystemExit(
+                "maturity: event-date journal basis does not match the facts and attributed dates"
+            )
+    today = event_day()
+    filed = reconcile_event_days("filed", filed, history_filed, pending_filed, today)
+    closed = reconcile_event_days("closed", closed, history_closed, pending_closed, today)
+    basis = event_days_basis(filed, closed, all_filed_facts, all_closed_facts)
+    return filed, closed, basis
 
 
 def layer_counts(rows):
@@ -578,8 +912,10 @@ def render():
             "zero, because zero filed and zero closed would read as a converged project."
         )
     else:
-        filed, closed = rate
+        filed, closed, basis = rate
         days = sorted(set(filed) | set(closed))[-10:]
+        lines.append(event_days_line(filed, closed, basis))
+        lines.append("")
         lines.append(
             "Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch "
             "is not a single day where closure wins but the date that crossover becomes **durable** — "
@@ -598,15 +934,17 @@ def render():
         )
         lines.append("")
         lines.append(
-            "Both are read from committed history **union the working tree**, and that union is what "
-            "makes today's row hold still: `git commit` moves a fact from the second source to the "
-            "first without changing the count, so the commit that files or closes a story can carry a "
-            "report of itself. It could not before `X-39`, when the day rows came from history alone "
-            "and the count the report needed was created by the commit containing the report — which "
-            "made the gate's `maturity` step red in most commits and never for a defect. The row is "
-            "not tolerated or marked provisional, because either of those leaves it unchecked today "
-            "and strictly checked tomorrow; the crossover date is the number to watch, so it is the "
-            "source that changed."
+            "Both are read from committed history **union a deterministic pre-commit snapshot**. With "
+            "no staged story change that snapshot is the complete worktree, preserving the ordinary "
+            "edit → generate → stage-all workflow. Any staged story change selects the index, so a "
+            "selective commit excludes unstaged and untracked stories. The generated comment above is "
+            "the event-date journal; its basis binds the dates to the filed and closed story paths, so "
+            "unchanged totals cannot conceal rewritten attribution. Existing facts were seeded from "
+            "commit author dates; a new fact gets the day the report first observes it. Carrying that "
+            "journal in the staged report "
+            "keeps the row fixed across midnight and an amend with a retained author date. A committed "
+            "fact absent from the journal is still computed from history, so forgetting regeneration "
+            "remains strict drift."
         )
     lines.append("")
 
@@ -641,13 +979,12 @@ def render():
         "not by this report."
     )
     lines.append(
-        "- **Today's row is a working answer, not yet a historical one.** It counts uncommitted story "
-        "files as filed and uncommitted `status: done` lines as closed, which is what lets the commit "
-        "that moves the table contain the table (`X-39`). A story here means what the board means by "
-        "one — a file carrying frontmatter with an `id` — so a scratch note left in the directory is "
-        "not a story filed today. So a dirty tree reports a day git history does not show yet: the "
-        "next commit makes it true, and `--check` calls it drift if that commit does not carry the "
-        "regenerated report. Every earlier day is history alone and cannot move."
+        "- **The newest row can describe a pre-commit snapshot rather than `HEAD`.** Pending filed and "
+        "closed facts are assigned the day this report first observes them, and their event-date "
+        "journal is carried inside the generated region. This is deliberately not called the next "
+        "commit's author date: Git has no such date before that commit exists. With a selective story "
+        "snapshot, unstaged and untracked stories are excluded, so a dirty worktree can describe a "
+        "different future board without changing the report of the commit currently staged (`X-39`)."
     )
     lines.append(
         "- **Nothing here measures whether the tests are good**, only that they pass. Predicate 3 "

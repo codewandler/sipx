@@ -2,7 +2,7 @@
 id: X-39
 title: Stop the maturity report from making the gate red for something that is not a defect
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 design: docs/designs/commit-snapshot.md
 epic: commit-snapshot
