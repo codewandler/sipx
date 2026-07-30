@@ -64,7 +64,10 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    eprintln!("sipx-host: answering on {} ({})", listener.bind, listener.name);
+    eprintln!(
+        "sipx-host: answering on {} ({})",
+        listener.bind, listener.name
+    );
 
     match host.run().await {
         Ok(()) => ExitCode::SUCCESS,

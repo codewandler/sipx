@@ -156,27 +156,26 @@ impl Host {
     /// A document with no call listener, or a listener that could not be bound.
     pub async fn run(&mut self) -> Result<(), HostError> {
         let listener = self.call_listener()?;
-        let (handle, incoming) = bind(self.endpoint_config(&listener)).await?;
-        let agent = UserAgent::new(handle.clone(), self.agent_config(&listener));
+        let (handle, incoming) = bind(Self::endpoint_config(&listener)).await?;
+        let agent = UserAgent::new(handle.clone(), Self::agent_config(&listener));
         let mut dispatcher = Dispatcher::new(handle.clone(), incoming);
+        // A call runs on its own task, so the task reports its own end here and the loop forgets it
+        // on the next turn. N11 is why this exists rather than the admission simply being dropped:
+        // a live call keeps the policy it was admitted with, and `Running` can only honour that
+        // while it still knows the call is live. Ending the admission at spawn time — which is what
+        // this did first — left `live_calls` reading zero with calls up.
+        let (ended, mut endings) = mpsc::channel::<String>(ENDINGS);
 
-        // `Dispatcher::next` routes the ACKs and BYEs of every call already handed out, so a host
-        // that answered a call inline here would stall every other call it is carrying. Each
-        // admitted call is served on its own task and this loop keeps turning.
         while let Some(dispatched) = dispatcher.next().await {
+            for call in drain(&mut endings) {
+                self.running.end(&call);
+            }
             match dispatched {
                 Dispatched::Invitation(invitation) => {
-                    self.admit(&handle, &listener, invitation).await;
+                    self.admit(&handle, &listener, invitation, &ended).await;
                 }
-                // An OPTIONS or a REGISTER. RFC 3261 §11 makes OPTIONS a liveness probe, and a
-                // host that leaves it unanswered is one a carrier marks down — so this is not
-                // optional politeness. The user agent owns the `Allow` list that says what this
-                // stack answers; answering through it rather than building a 200 here is what
-                // keeps the advertised list and the real one from drifting apart.
                 Dispatched::OutOfDialog(request) => {
-                    if !matches!(agent.answer(&request).await, Ok(true)) {
-                        refuse(&handle, &request, NOT_IMPLEMENTED, "Not Implemented").await;
-                    }
+                    answer_out_of_dialog(&agent, &handle, &request).await;
                 }
                 _ => {}
             }
@@ -185,13 +184,13 @@ impl Host {
     }
 
     /// The endpoint configuration a listener asks for.
-    fn endpoint_config(&self, listener: &Listener) -> Config {
+    fn endpoint_config(listener: &Listener) -> Config {
         let mut config = Config::new(listener.bind);
         // A listener bound to `0.0.0.0` has nothing sensible to advertise, and `sipx-transport`
         // warns that letting the default stand tells the far end to reply to `0.0.0.0`. The
         // document's `advertise` is exactly the operator's answer to that.
         if let Some(advertise) = &listener.advertise {
-            config.sent_by = advertise.clone();
+            config.sent_by.clone_from(advertise);
         }
         config
     }
@@ -202,7 +201,7 @@ impl Host {
     /// half is wanted, so the registrar named here is the listener's own address and nothing ever
     /// sends to it — `register` is not called. That friction is the API's rather than this host's,
     /// and it is recorded here rather than worked around silently.
-    fn agent_config(&self, listener: &Listener) -> AgentConfig {
+    fn agent_config(listener: &Listener) -> AgentConfig {
         let contact = format!("<sip:{}>", listener.bind);
         AgentConfig::new(
             contact.clone(),
@@ -350,7 +349,10 @@ bind = \"127.0.0.1:0\"
 
     #[test]
     fn a_refused_document_names_its_line_rather_than_panicking() {
-        let error = Host::start("[listener.edge]\nprotocol = \"nonsense\"\n", "127.0.0.1".parse().unwrap());
+        let error = Host::start(
+            "[listener.edge]\nprotocol = \"nonsense\"\n",
+            "127.0.0.1".parse().unwrap(),
+        );
         assert!(matches!(error, Err(HostError::Config(_))));
     }
 }
