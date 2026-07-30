@@ -2,7 +2,7 @@
 id: X-45
 title: Make `no_capture_flag_means_no_file` able to observe the thing it is named for
 pillar: Build
-status: ready
+status: done
 priority: 4
 design: docs/roadmap.md
 epic: conformance
@@ -17,24 +17,24 @@ Make the test that proves capture stays off actually exercise the path that woul
 so it can fail when the flag stops being honoured.
 
 ## Acceptance
-- [ ] **The test cannot currently detect the defect it guards.** `no_capture_flag_means_no_file` in
+- [x] **The test cannot currently detect the defect it guards.** `no_capture_flag_means_no_file` in
       `crates/sipx-cli/tests/` kills the answerer immediately and never places a call. Capture is written
       *during* a call, so the assertion passes whether or not the flag is honoured. Demonstrate that
       first: make `sipx answer` write a capture file unconditionally and show the test still green. That
       demonstration is the story's justification, in the same way `X-36` verified its reversal by doing
       it and reading the compiler error.
-- [ ] **The rewritten test places a real call and then asserts no file exists.** Signalling has to cross
+- [x] **The rewritten test places a real call and then asserts no file exists.** Signalling has to cross
       the wire, because that is what a capture would record. Absent a call the assertion is vacuous.
-- [ ] **The positive case is asserted too, and is what makes the negative meaningful.** A test that only
+- [x] **The positive case is asserted too, and is what makes the negative meaningful.** A test that only
       proves "no file when off" passes trivially if capture is broken entirely. Pair it: with the flag on
       a file appears and contains captured signalling; with it off no file appears. `X-18` shipped the
       capture feature, so both directions are reachable.
-- [ ] **The sweep question is answered, not assumed.** `X-40` established that
+- [x] **The sweep question is answered, not assumed.** `X-40` established that
       `crates/sipx-cli/tests/` had one genuine instance of the wait-for-the-wrong-thing shape and two
       defensible ones. This is a *different* shape — a test whose subject is never exercised — so sweep
       for that one specifically: any test asserting the absence of a side effect without running the code
       that would produce it.
-- [ ] Failing-first test: this story's failing-first evidence is the sabotage above (capture written
+- [x] Failing-first test: this story's failing-first evidence is the sabotage above (capture written
       unconditionally, test still green), since a test that cannot fail has no red state to show. Record
       it as such rather than manufacturing a conventional red.
 

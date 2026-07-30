@@ -7,6 +7,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`no_capture_flag_means_no_file` can now observe the flag it is named for (`X-45`)** — the test
+  killed the answerer the moment it announced its port and then asserted one path did not exist, so
+  both halves were vacuous: a capture is written while signalling flows, so a run with no call cannot
+  see one being written, and the path it watched was one nothing would ever write to, because a
+  capture nobody asks for is given no path. Making `--capture` unconditional — the exact defect it
+  guards — left it green.
+  - It now places a **real call** and asserts the directory both processes ran in is empty, with a
+    positive control first: the same call, same machinery, `--capture` on, which must produce a
+    capture containing an INVITE. Without that control an absence is equally consistent with capture
+    being broken outright, which is the failure a test named for the flag being *off* is least able
+    to notice.
+  - A second instance of the same shape was found by the same sweep and filed as `X-53` rather than
+    folded into this diff.
+
 ### Changed
 
 - **M10's exit criterion is stated once, and it does not require TURN (`X-50`)** — `docs/roadmap.md`
