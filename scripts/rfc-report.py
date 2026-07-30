@@ -4,7 +4,8 @@
 A compliance table nobody can verify is marketing. This does two things a hand-written table
 cannot: it regenerates the document so it cannot drift from its source, and with `--check` it
 holds the source against the code — every header and method an entry names must actually be
-known to the parser, and every file it cites must exist.
+known to the parser, every file it cites must exist, and a row claiming behaviour must cite code
+rather than only prose (`prose_only_claims`, which RFC 8996 was the one row to fail).
 
 What it deliberately does *not* claim to verify is behaviour. No script can read
 `crates/sipx-sip/src/transaction/client.rs` and decide whether Timer A is right; the tests do
@@ -80,6 +81,11 @@ LIST_KEYS = {"evidence", "roles", "headers", "methods"}
 # would be describing a subsystem boundary that has not been decided.
 STRING_KEYS = {"spec"}
 
+
+# The statuses that claim behaviour, and so must point at code. `syntax` is not one of them: it
+# claims the parser represents something, which `known_headers` and `known_methods` check against
+# the name table itself rather than against a path. `none` and `n/a` claim nothing and cite nothing.
+CODE_BACKED_STATUSES = {"implemented", "partial"}
 
 # Where an application asks for a call. A media capability the call layer cannot select is one
 # no UA role can perform, however well the crate below implements and tests it.
@@ -189,6 +195,17 @@ def call_layer_crates() -> set[str]:
     return reachable
 
 
+def cites_workspace_code(path: str) -> bool:
+    """Whether an evidence path is Rust source in a workspace crate.
+
+    The weakest useful thing a citation can be: something that compiles, that tests run over, and
+    that can therefore stop being true. `crates/<name>/….rs` and nothing else — a spec, a README or
+    a manifest is prose about the code rather than the code.
+    """
+    parts = pathlib.PurePosixPath(path).parts
+    return len(parts) > 1 and parts[0] == "crates" and parts[-1].endswith(".rs")
+
+
 def reaches_the_call_layer(path: str, crates: set[str]) -> bool:
     """Whether an evidence path is a Rust source file in a crate at or above the call layer.
 
@@ -200,19 +217,15 @@ def reaches_the_call_layer(path: str, crates: set[str]) -> bool:
     and recorded the same hole one directory in: `crates/sipx-call/README.md` would have satisfied
     a rule that only asked which crate the path was in.
 
-    The `.rs` condition closes it, and costs nothing measurable: of the registry's 117 evidence
-    paths exactly two are not `.rs` files — `docs/specs/sip-tls.md`, cited by RFC 5922 and 8996 —
-    and both are outside `crates/` anyway. It remains a path test and not a code test, so a row can
-    still satisfy it by citing a call-layer file containing a dead branch; that is the limit the
-    successor check in docs/designs/rfc-registry-grain.md exists to remove.
+    The `.rs` condition closes it, and costs nothing measurable: exactly one evidence path in the
+    registry is not a `.rs` file — `docs/specs/sip-tls.md`, cited by RFC 5922 — and it is outside
+    `crates/` anyway. (X-33 recorded two, RFC 8996's citation of the same spec being the other;
+    X-43 replaced that one with code, which is what `prose_only_claims` below now requires of every
+    behaviour claim.) It remains a path test and not a code test, so a row can still satisfy it by
+    citing a call-layer file containing a dead branch; that is the limit the successor check in
+    docs/designs/rfc-registry-grain.md exists to remove.
     """
-    parts = pathlib.PurePosixPath(path).parts
-    return (
-        len(parts) > 1
-        and parts[0] == "crates"
-        and parts[1] in crates
-        and parts[-1].endswith(".rs")
-    )
+    return cites_workspace_code(path) and pathlib.PurePosixPath(path).parts[1] in crates
 
 
 def unreachable_claims(entry, crates: set[str]) -> list[str]:
@@ -281,6 +294,44 @@ def misdeclared_layer(entry) -> list[str]:
         f"RFC {entry.get('number', '?')} declares layer {layer!r} but cites"
         f" {', '.join(offending)}, which implement nothing but media — a media row relabelled is a"
         f" media row that has left the reachability check"
+    ]
+
+
+def prose_only_claims(entry) -> list[str]:
+    """A behaviour claim every one of whose citations is prose.
+
+    The existing rule is that an `implemented` or `partial` row must cite *something*, and a
+    document satisfies it. RFC 8996 was the row that showed why that is not enough: it claimed
+    `implemented` against `docs/specs/sip-tls.md`, our own sentence saying 1.2 is the floor. The
+    sentence cannot fail. Nothing connected it to a handshake, so the claim would have survived the
+    floor being lowered, and the gate would have gone on reporting "every claim backed".
+
+    **Decided by X-43, and measured before adopting**: of the registry's 70 rows, 8996 was the only
+    one of 32 `implemented` and 22 `partial` rows citing no `crates/….rs` path at all. So the rule
+    costs one row — the row that prompted it, which X-43 fixed — and the next such row is caught on
+    the way in rather than by auditing all 70 again. The six `syntax` rows would also pass it today,
+    but they are held to the same set the evidence rule already uses rather than a wider one
+    invented here: a `syntax` claim is about the parser's name table, which `known_headers` checks
+    directly and far better than a path could.
+
+    It is deliberately weaker than `reaches_the_call_layer`: any Rust file in any workspace crate
+    counts. "Is this claim about code at all" and "can a call reach that code" are different
+    questions, and the second one has a measured false-positive rate that is the reason it is scoped
+    to two layers. This one has none to scope around — a behaviour claim that points at no code is
+    not a claim anything can check.
+
+    Rows with no evidence at all are left to the existing message, which names the remedy.
+    """
+    status = entry.get("status")
+    evidence = entry.get("evidence", [])
+    if status not in CODE_BACKED_STATUSES or not evidence:
+        return []
+    if any(cites_workspace_code(p) for p in evidence):
+        return []
+    return [
+        f"RFC {entry.get('number', '?')} claims {status} but every path it cites is prose — no Rust"
+        " source under crates/. Cite the code, and the test that would fail if the behaviour"
+        " changed; a document cannot stop being true on its own"
     ]
 
 
@@ -360,9 +411,10 @@ def check(entries) -> list[str]:
             problems.append(f"{where} names the spec {spec}, which does not exist")
 
         # An entry that claims to be implemented and points at nothing is an assertion.
-        if entry.get("status") in {"implemented", "partial"} and not entry.get("evidence"):
+        if entry.get("status") in CODE_BACKED_STATUSES and not entry.get("evidence"):
             problems.append(f"{where} claims {entry.get('status')} with no evidence cited")
 
+        problems.extend(prose_only_claims(entry))
         problems.extend(misdeclared_layer(entry))
         problems.extend(unreachable_claims(entry, reachable))
 
