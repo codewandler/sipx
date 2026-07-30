@@ -39,6 +39,15 @@ const DELIVERY_BOUND: Duration = Duration::from_secs(10);
 /// idle machine, for the same reason [`DELIVERY_BOUND`] is.
 const SIGNALLING_BOUND: Duration = Duration::from_secs(10);
 
+/// How long a collection here waits for the **first** digit before calling it lost (`M-34`).
+/// A bound on failure, like [`DELIVERY_BOUND`]: when a caller presses the first key is a property
+/// of the caller, never of the digits.
+const FIRST_DIGIT_BOUND: Duration = Duration::from_secs(10);
+
+/// How long a silence means the caller has stopped dialling (`M-34`). A definition of silence, so
+/// it is set past any scheduling delay rather than close to the spacing the digits arrive with.
+const DIGIT_GAP: Duration = Duration::from_secs(1);
+
 /// Wait until something has happened, rather than sleeping and assuming it has (`X-29`).
 ///
 /// `within` is a **bound on failure** — how long before we conclude the thing is never going to
@@ -456,7 +465,7 @@ async fn a_call_carries_dtmf_digits() {
 
     let collected = callee
         .media()
-        .collect_digits(Duration::from_millis(600))
+        .collect_digits(FIRST_DIGIT_BOUND, DIGIT_GAP)
         .await;
     assert_eq!(collected, "1234#");
 }

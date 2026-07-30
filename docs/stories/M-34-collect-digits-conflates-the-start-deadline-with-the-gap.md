@@ -41,8 +41,67 @@ to send its first digit is not treated as a caller that finished sending.
       deterministic reproduction `X-40` used for the recording path is the model.
 
 ## Progress
-- Not started. Filed from `X-40`'s ADJACENT finding 2, which located the shape but was fenced from
-  `crates/sipx-media/` because `M-33` held it.
+
+Implemented on `impl/M-34`. `MediaSession::collect_digits` takes two durations instead of one.
+
+### The defect, measured
+
+`X-40`'s method, with the arrival time as the only variable, in `crates/sipx-media` over loopback
+sockets — no second process and no load needed. At the merge base (`576f0dd`), against the same
+1 s window:
+
+| case | collected |
+|---|---|
+| digits sent at once (`a_sequence_of_keypresses_arrives_in_order`) | `"1234"` |
+| the same digits sent 2 s later | **`""`** |
+
+Empty, not short — the same all-or-nothing shape as the zero-sample WAV, and for the same reason:
+the loop ends before its first iteration, so nothing that arrives afterwards is ever read.
+
+### The split
+
+`collect_digits(within, gap)`, mirroring `crate::record(call, within, idle)` — `X-40`'s cure, which
+is the precedent this follows rather than a second answer to the same question:
+
+- **`within`** bounds the wait for the first digit, and with it the whole collection. A bound on
+  failure: `sipx answer` passes the call's own duration, so a caller cannot be slower than the call.
+- **`gap`** keeps the only question a fixed window can answer — has the caller stopped dialling.
+  `answer` keeps its 800 ms, which now does that job alone.
+- The cap is enforced inside, so `answer`'s `timeout(duration, …).unwrap_or_default()` is gone with
+  it. That was `X-40`'s second defect on the same line: every digit collected, discarded at the
+  moment the cap fired.
+
+**Not `record_at_least`'s count wait**, and the reasoning is in `docs/designs/media.md`: a counted
+wait for five digits cannot see a sixth, so `assert_eq!(collected, "1234#")` would stop failing when
+a keypress is reported twice — and the production caller has no count, because a keypad's length is
+not known in advance. Where no count exists, `X-28`'s own remedy applies: keep the wall clock for
+the question it can answer, set past any scheduling delay.
+
+### The gap semantics
+
+Stated in `collect_digits`' own documentation and in the design record. A digit is delivered once,
+when the first packet carrying that tone's end bit arrives; the tone is identified by its RTP
+timestamp, constant across its packets, so RFC 4733 §2.5.1.3's end retransmissions are absorbed and
+`44` is told from one long `4`. An elapsed gap therefore means no keypress *completed* in it, never
+that a packet was lost mid-tone. A digit arriving a millisecond late is not dropped — it stays
+queued and opens the next collection — but it is in the wrong collection, and no window can fix
+that, which is why an application that knows its digit count should stop at that count with
+`recv_digit`.
+
+### Landed
+
+- `crates/sipx-media/src/session.rs` — the split, its documentation, and two tests:
+  `a_first_digit_that_arrives_late_is_still_collected` (red at the merge base, `""` against
+  `"1234"`) and `a_collection_with_no_digits_at_all_ends_empty`, which holds the other half: no
+  digits still ends, still bounded, still empty.
+- `crates/sipx-cli/src/answer.rs` and `main.rs` — `DIGIT_GAP` beside `RECORD_IDLE`, the call's
+  duration as the first-digit bound, and the `unwrap_or_default` removed.
+- `crates/sipx-call/tests/call.rs` — `a_call_carries_dtmf_digits` on the two named bounds.
+- `docs/designs/media.md` — the digit case under the two-questions rule.
+
+`digits_sent_by_the_caller_are_reported_by_the_answerer` is fixed from production, not from the
+test: it drives `sipx answer`, whose first-digit window was the cliff, and `crates/sipx-cli/tests/`
+is untouched by this diff.
 
 ## Notes
 - **`X-40` is the reference implementation of the fix and of the proof.** Read its

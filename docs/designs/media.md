@@ -239,6 +239,42 @@ bound a failure, or define silence. It may not stand in for a happens-before.** 
 exists, wait for the count. Widening the window instead moves the cliff rather than removing it,
 and leaves a test everyone re-runs instead of reading.
 
+### The same two questions, for digits
+
+`M-34` found the rule broken one call along, in production rather than in a test.
+`collect_digits(idle)` spent one window on both "how long to wait for the **first** digit" and "how
+long a gap means the digits **ended**", which is `X-40`'s defect exactly, and it fails the same way:
+not a short sequence but an **empty** one, because the loop ends before its first iteration. Measured
+in `sipx-media` with the arrival time as the only variable — digits at once, `"1234"`; the same
+digits 2 s later against the same 1 s window, `""`.
+
+`collect_digits(within, gap)` now takes the two durations separately, and each lands in one of the
+two roles the rule permits. `within` **bounds a failure**: it is how long this side waits for
+dialling that may never start, so `sipx answer` passes the call's own duration and a caller cannot
+be slower than the call. `gap` **defines silence**, which is the only question it could ever answer.
+The cap is enforced inside, so a collection cut short keeps its digits — the `timeout(…)
+.unwrap_or_default()` around the old call was `X-40`'s second defect, discarding every digit
+collected at the moment the cap fired.
+
+**Mirroring `record_at_least` — a count wait — was considered and is the wrong verb here**, which is
+worth recording because the audio path's answer does not transfer. `assert_eq!(collected, "1234#")`
+after a counted wait for five digits cannot see a sixth, so a keypress reported twice would stop
+failing the test that exists to catch it; and the production caller has no count at all, because a
+keypad's length is not known in advance. Where no count exists, `X-28`'s own remedy applies instead:
+keep the wall clock for the question it can answer and set it past any scheduling delay.
+
+**What "the digits ended" infers, and why it is safe to infer.** RFC 4733 carries keypresses, not a
+completion signal, so there is no event meaning *the caller is done* and the gap is the whole of the
+inference. What makes it sound is that its input is exact. A digit is delivered **once**, when the
+first packet carrying that tone's end bit arrives; the tone is identified by its own RTP timestamp,
+constant across every packet of the tone, so the end retransmissions of RFC 4733 §2.5.1.3 are
+absorbed rather than counted again, and `44` is told from one long `4` by the timestamp changing. An
+elapsed gap therefore means *no keypress completed in it* — never that a packet went missing
+mid-tone. A digit arriving a millisecond late is not lost either: it stays queued and opens the next
+collection. It is in the wrong collection, and no window can fix that, which is why an application
+that knows how many digits it wants should stop at that count with `recv_digit` rather than wait for
+a silence at all.
+
 ## Codecs
 
 **G.711 µ-law and A-law, in pure Rust, checked against the ITU-T reference tables and not against a
