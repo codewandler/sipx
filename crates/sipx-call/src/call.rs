@@ -4296,6 +4296,28 @@ mod tests {
         );
     }
 
+    /// An *answer* naming a codec outside the selected set is refused, so nothing keys a session
+    /// on it.
+    ///
+    /// Pinned separately from `negotiated` because of where the refusal lands rather than what it
+    /// returns. It is a failure mode `M-30` adds to `settle_answer`, which had no codec opinion
+    /// before; on this branch an early answer that trips it is swallowed by
+    /// `Dialing::adopt_early_answer`, but that function propagates on `main` after `S-25`, so once
+    /// the two are merged this same refusal ends the invitation over a CANCEL. That is a call
+    /// termination neither branch produces alone, which is why the precondition is worth holding
+    /// here rather than waiting for the merge to discover it.
+    ///
+    /// True in both feature configurations for two different reasons: with `opus` off no rtpmap can
+    /// name Opus at all, and with it on `Codecs::G711` does not carry it.
+    #[test]
+    fn an_answer_outside_the_selected_set_is_refused() {
+        let opus_only = offered("111", &["111 opus/48000/2"]);
+        assert!(matches!(
+            settle_answer(&[], &opus_only, Codecs::G711),
+            Err(Error::NoCommonCodec)
+        ));
+    }
+
     /// An offer with nothing sipx carries is refused rather than answered on a guess.
     #[test]
     fn an_offer_of_nothing_we_carry_has_no_common_codec() {

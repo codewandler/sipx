@@ -63,6 +63,10 @@ library, and the default codec set stays the G.711 pair — mandatory-to-impleme
 §4.5.14), pure Rust, and accepted by practically every endpoint. So the better codec is always a
 choice you made and never one your build made for you, and an offer that selects it still carries
 G.711 alongside: an endpoint offering only Opus would fail to call most of the telephone network.
+(The `sipx` binary cannot get there at all, the same way it cannot reach a secure transport: it
+takes no flag for a codec, and `sipx-cli` declares no features of its own to forward the one that
+would be needed, so nothing you type at it produces an Opus call — see
+[the CLI reference](reference/cli.md).)
 
 What has *not* changed is how a payload type is read. A dynamic number means whatever `a=rtpmap`
 said, so nothing guesses Opus from 111 — a format is matched by its rtpmap, and the number the

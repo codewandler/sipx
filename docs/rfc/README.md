@@ -98,7 +98,9 @@ evidence-path check cannot tell them apart.
 
 **`status = "implemented"` is held to the same rule at the media layer.** A row with no `roles`
 claims nothing about a role, but it still makes a claim in the same table: RFC 6716 and 7587 said
-`implemented` about Opus, which no call can select, and the check returned before asking. It is
+`implemented` about Opus when no call could select it, and the check returned before asking. (That
+gap is closed — `M-30` built the selection and the rows are `implemented` again on the strength of
+it — but the rule stands on the general point, not on that example.) It is
 media-only because three of the seven `implemented` security rows state *policies* of the TLS stack
 — 6125, 8446 and 8996 — which hold on every connection and are proved by the absence of an API, so
 reachability is not the question they answer.

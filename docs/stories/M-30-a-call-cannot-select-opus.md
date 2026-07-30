@@ -74,9 +74,13 @@ SDP half; nothing built the **selection**, so no call has ever carried an Opus p
   Invisible in the default build — where no rtpmap can name Opus at all — and live under
   `--all-features`, which is how the gate builds. Caught by
   `negotiation_does_not_settle_outside_the_selected_set`, added for exactly this reason.
-- **Both feature configurations are built and tested**, not just `--all-features`. `call.rs`'s test
-  module runs in both and asserts the default build's promise; `tests/opus.rs` is gated on the
-  feature.
+- **Both feature configurations are built and tested by the *gate*, not just by hand.** The first
+  version of this note claimed the former while only the latter was true: every gate step and every
+  CI job is `--all-features`, and `check-features.sh` enumerated `sipx-transport`, `sipx-media` and
+  `sipx-ua` — not `sipx-call`. Creating an optional feature on a published crate and leaving the
+  matrix alone is how `tls` broke for a release, which `AGENTS.md` names. `check-features.sh` now
+  builds `sipx-call` with the feature off and on, `--all-targets` because this crate's conditional
+  code is in its tests: the codec table in `call.rs`'s test module and all of `tests/opus.rs`.
 - **Registry**: 6716 and 7587 restored to `implemented`, citing `sipx-call/src/call.rs` and
   `sipx-call/tests/opus.rs`, and `docs/compliance.md` regenerated — implemented 29 → 31, partial
   24 → 22. Neither row claims `roles`, deliberately: they never did, and adding a role claim is a
@@ -92,20 +96,45 @@ SDP half; nothing built the **selection**, so no call has ever carried an Opus p
   (`too_many_arguments` on the eighth parameter, `too_many_lines` on `dial_with`, and
   `push_str(&format!(..))` in the new test module), `maturity`/`maturity tests` (`docs/maturity.md`
   needed regenerating for the registry move), and `rfc report tests` — see below.
-- **`X-33` left a guard that this story had to invert, and that is the intended interaction.**
-  `scripts/test-rfc-report.py` asserted RFC 6716 and 7587 were `partial` *by number*, so promoting
-  them failed the suite. It was rewritten to hold the rule instead of the verdict: the rows may say
-  `implemented` only while they cite the call layer, `sipx-call` actually calls
-  `Capabilities::with_opus`, and 7587's note still states the `a=fmtp` boundary. The guard keeps its
-  teeth — it now fails a reversal *and* a hollow promotion.
+- **`X-33` left a guard that this story had to invert, and inverting it cost a tooth that had to be
+  put back.** `scripts/test-rfc-report.py` asserted RFC 6716 and 7587 were `partial` *by number*, so
+  promoting them failed the suite. It was rewritten to hold the rule instead of the verdict: the
+  rows may say `implemented` only while they cite the call layer, `sipx-call` actually calls
+  `Capabilities::with_opus`, and 7587's note still states the `a=fmtp` boundary.
+- **The asymmetry in that inversion is the thing to understand.** `X-33` asserted the *absence* of
+  `with_opus`, and absence is conclusive — a symbol that appears nowhere is called nowhere.
+  Presence is not: the first rewrite searched raw file text, so a comment naming the symbol
+  satisfied it, and the whole pre-`M-30` `sipx-call` plus one comment passed all 31 tests. The
+  check now reads code with comments stripped and adds two facts prose cannot fake — the crate
+  declares the `opus` feature, and `Codecs` is exported — and `X-33`'s `sipx-cli` absence check is
+  restored, because a note in the 6716 row claims the binary cannot reach Opus and something has to
+  hold that. Verified by reconstructing the hollow promotion (`5363747`'s `sipx-call/src` and
+  `Cargo.toml`, this story's registry, one comment mentioning `with_opus`): the guard fails it on
+  the code assertion. It is still a proxy in the same way `reaches_the_call_layer` is — a dead call
+  behind `if false` would pass — and that limit belongs to
+  `docs/designs/rfc-registry-grain.md`'s successor check, not to this test.
 - **`main` moved while this was parked, and merging needs one hand resolution.** `S-25` landed on
   `main` and rewrote `Dialing::adopt_early_answer` to return `Result<()>`, propagating through `?`
   rather than logging and returning; this story added a third argument to `settle_answer`. Both
   intents compose, but they touch the same lines, so `git merge` reports one conflict in
-  `crates/sipx-call/src/call.rs`. **Resolution: take `main`'s body and add the argument** —
-  `settle_answer(self.capabilities.crypto.as_slice(), &answer, self.options.codecs)?`. Nothing else
-  in the file conflicts. `docs/maturity.md` also conflicts, in its generated burn-down row only;
-  run `./scripts/maturity.py` after the merge and it settles.
+  `crates/sipx-call/src/call.rs`. **It needs two edits, not one** — an earlier version of this note
+  said one, and taking `main`'s body alone is `E0063`:
+  1. `settle_answer(self.capabilities.crypto.as_slice(), &answer, self.options.codecs)?` — the
+     argument this story added.
+  2. the `Early { … }` built just below it gains a fifth field, `codecs: self.options.codecs`.
+     `main` builds it with four (`call.rs:2675-2680`); this branch with five.
+
+  `docs/maturity.md` also conflicts, in its generated burn-down row only; run
+  `./scripts/maturity.py` after the merge and it settles.
+- **The merge creates a call-termination path neither branch has alone, and it looks correct.**
+  `S-25` made `adopt_early_answer` propagate instead of logging; this story gave `settle_answer` a
+  codec opinion it did not have. Composed, an early answer naming a codec outside the selected set
+  now *ends the invitation* over `S-25`'s CANCEL, where before the merge it was either impossible
+  (no codec opinion) or swallowed (no propagation). Desirable — a provisional whose answer we cannot
+  key is not a call — but new behaviour on a protocol state machine. The half that can be pinned
+  without the merge is pinned: `an_answer_outside_the_selected_set_is_refused` holds the refusal
+  `settle_answer` now produces, in both feature configurations. The termination itself needs both
+  branches and is the integrator's to verify.
 
 ## Notes
 - **This is the sixth instance of the project's recurring defect**, after ICE (`M-27`), UPDATE
