@@ -118,6 +118,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A story declares its own alpha predicate, and the list that could not see its defects is gone
+  (`X-42`)** — `scripts/maturity.py` hardcoded each predicate's story list. Predicate 3's read
+  `["X-28","X-29","X-34","X-36"]`, all `done`, so it computed as **met** while `X-39`, `X-40` and `X-41`
+  were open and each described that predicate failing. The report was one story-close away from claiming
+  the whole alpha.
+  - **The literal is deleted, not extended.** A story names its predicate in its own `predicate:`
+    frontmatter field, so the association lives in the file the filer is already writing when they find
+    the defect. A story may declare two — `predicate: [3, 7]` — where a defect falsifies both.
+  - **A computed predicate that no story declares now reads `unknown`, never `met`**, so deleting the
+    last story naming a predicate cannot look like finishing it. A `predicate:` naming a predicate the
+    roadmap does not have, or a malformed one, exits non-zero with a diagnostic rather than being
+    silently dropped.
+  - **The audit found a second stale list.** Predicate 1's omitted `X-35`, whose own Notes open *"This is
+    alpha predicate 1 at the layer the predicate does not currently reach"* — the identical defect,
+    invisible only because that story had already closed. Predicates 2, 5 and 7 were clean.
+  - `docs/roadmap.md` now says how a predicate's state is read, and predicate 3's own prose no longer
+    names stories: that list had gone stale too, which is the same defect one document over.
+
 - **A valued flag given no value is now refused instead of read as absent (`S-30`)** —
   `sipx register sip:alice@example.com --outbound --instance` used to exit 0 having generated an
   instance URN nobody asked for. `Args::value` returned the same `None` for "the flag was last on the

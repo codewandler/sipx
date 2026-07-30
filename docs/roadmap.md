@@ -232,6 +232,14 @@ and be worth depending on, because every consumer's design decision rests on wha
 The alpha is the point at which a v1 **could** technically be cut. Each item is checkable by a
 person reading the repo, and most are already checked by the gate.
 
+**How a predicate's state is read.** A story declares the predicate it bears on in its own
+`predicate:` frontmatter field, and [`maturity.md`](maturity.md) reports a predicate as met when every
+story declaring it is `done`. **File a defect against a predicate by setting that field** — there is
+deliberately no list of predicate stories anywhere else, because the one that lived in
+`scripts/maturity.py` drifted: three defects were filed against predicate 3 in one session, none was
+added, and the report was one story from calling the alpha complete (`X-42`). A story may declare two
+(`predicate: [3, 7]`) where a defect falsifies both.
+
 1. **No claim outlives its caller.** No entry in [`docs/rfc/registry.toml`](rfc/registry.toml)
    claims a role that nothing above the implementing crate can reach, at *any* layer. `X-30` made
    this mechanical for `media`, `X-33` widened it to `security` and measured and *declined* the rest:
@@ -242,9 +250,12 @@ person reading the repo, and most are already checked by the gate.
 2. **Adversarial input and adversarial timing are both fuzzed.** Four parser targets and the
    transaction-sequence driver (`X-19`), the second with an oracle that can fail without a panic.
    Met, subject to `X-31` closing the harness's own drift holes.
-3. **A red gate means a defect.** No test in the workspace fails because the machine was busy.
-   `X-28` cleared the media path; `X-29` is the rest. **This one is load-bearing for the others** —
-   every predicate here is asserted by the gate, so a gate that cries wolf invalidates all of them.
+3. **A red gate means a defect**, and a green gate means there is none. No test in the workspace fails
+   because the machine was busy, no step is red for something that is not a defect, and no step prints
+   a defect and exits 0. **This one is load-bearing for the others** — every predicate here is asserted
+   by the gate, so a gate that cries wolf invalidates all of them. Which stories are outstanding is in
+   [`maturity.md`](maturity.md), not here: naming them in this prose is the same defect one document
+   over, and it had already gone stale.
 4. **No known-wrong shipped path.** Every defect the suite or the fuzzer has found is fixed, or is
    an `#[ignore]`d regression test naming the story that will fix it. No silent deviation.
 5. **The public API says what it guarantees.** Every published crate marks its surface stable or

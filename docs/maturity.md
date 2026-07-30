@@ -16,17 +16,17 @@ repository and are recorded when they happen rather than computed.
 |---|---|---|---|
 | 1 | No claim outlives its caller, at any layer | open | `X-38` |
 | 2 | Adversarial input and adversarial timing are both fuzzed | met | — |
-| 3 | A red gate means a defect | met | — |
+| 3 | A red gate means a defect | open | `X-39`, `X-40`, `X-41`, `X-42` |
 | 4 | No known-wrong shipped path | met (attested) | — |
 | 5 | The public API says what it guarantees | met | — |
 | 6 | Testable from a shell for everything the CLI exposes | met (attested) | — |
 | 7 | The distance to v1 is generated, not asserted | met | — |
 
-**6 of 7 predicates met.** A predicate is met when every story named for it is `done` — the stories are the definition, so this table cannot drift from the board.
+**5 of 7 predicates met.** A predicate is met when every story declaring it is `done`. **A story declares its predicate itself**, in its own `predicate:` frontmatter field, so there is no list of predicate stories kept here to fall behind the board — which is what happened, and is `X-42`.
 
 - **Predicate 1 is computed, not attested.** Computed, but the thing computed is a *definition* rather than a search. `X-38` ships an application (`sipx-app`) and defines the reachable-from-a-call surface as what it uses; `scripts/check-app-surface.py` holds every crate's `Supported` claim against that application's real dependency closure, and the gate is red when the two disagree. The three path checks before it could only find capabilities that were *mentioned* — a path is satisfied by citing a file whose relevant branch is dead — and none of them could say whether a capability was worth selecting. An application answers that by needing it or not. What this does **not** say is that every row of a layer is individually reached: the declarations it checks are per crate, so the surface is entered per crate.
 - **Predicate 4 is attested, not computed.** Cannot be computed: a defect nobody has found leaves no trace in either source. What is reported is the absence of *open* stories describing one.
-- **Predicate 6 is attested, not computed.** Met at filing and not re-derived here: it is a property of the CLI's test suite, which the gate runs.
+- **Predicate 6 is attested, not computed.** Met at filing and not re-derived here: it is a property of the CLI's test suite, which the gate runs. No story declares it, and an attestation nothing contradicts is the one case where that is not a gap.
 
 ## RFC coverage, per layer
 
@@ -72,7 +72,8 @@ Filed is a story file being added; closed is a `status: done` line appearing, so
 ## What this cannot see
 
 - **The reachable surface is one application's opinion, and it is entered per crate.** `X-38` replaced *unverified against callers* with a definition: what `sipx-app` uses is the surface. That is a real caller rather than a grep, and it is also a single one — so a supported *module* that the application's crates never name is not caught, because the declarations being checked are per crate. A second application disagreeing is the intended way this widens, and the rule for it is in `README.md`: an experimental item that something outside this repository depends on graduates, with a `CHANGELOG.md` entry.
-- **A predicate here is only as good as its story list.** Predicate 4 in particular reports the absence of open stories describing a known-wrong path, which is not the same as there being none. `S-27` — a `sips:` URI dialled in cleartext — was found on the day it was filed, not by this report.
+- **A predicate's stories are whichever stories declare it, so what this cannot see is a story that declares nothing.** Every predicate above is read from the `predicate:` field of the stories themselves; a story naming a predicate that does not exist fails the gate rather than being dropped, and a computed predicate no story declares reads **unknown** rather than met. What no script can decide is which predicate a story *should* have named — so a filer who leaves the field empty is the one remaining way a predicate reads met while a defect against it is open. That is narrower than what it replaced: the association used to live in `scripts/maturity.py`, where three defects filed against predicate 3 in one session went unrecorded because the filer had no reason to open the file (`X-42`).
+- **An absence of stories is not an absence of defects.** Predicate 4 in particular reports the absence of open stories describing a known-wrong path, which is not the same as there being none. `S-27` — a `sips:` URI dialled in cleartext — was found on the day it was filed, not by this report.
 - **Nothing here measures whether the tests are good**, only that they pass. Predicate 3 exists because a test can be green and assert nothing: `X-36` found one that could not detect the reversal of the invariant it was named for.
 
 <!-- END maturity -->

@@ -2,12 +2,12 @@
 id: X-42
 title: Stop a predicate reporting met while open stories describe it failing
 pillar: Build
-status: in-progress
+status: done
 priority: 2
 design: docs/roadmap.md
 epic: conformance
 areas: [docs]
-predicate: 3
+predicate: [3, 7]
 note: `scripts/maturity.py:100` hardcodes predicate 3's story list as X-28/X-29/X-34/X-36, all done, so it computes as met while X-39, X-40 and X-41 — all filed for that predicate — are open and invisible to it
 ---
 
