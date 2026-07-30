@@ -177,4 +177,3 @@ async fn a_call_without_a_selection_still_offers_g711_only() {
     assert_eq!(caller.media().codec(), Codec::Pcmu);
     assert_eq!(callee.media().codec(), Codec::Pcmu);
 }
-

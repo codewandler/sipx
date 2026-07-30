@@ -405,8 +405,13 @@ pub async fn ring_early_with(
     }
     let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    let settled =
-        Early::settle(media_address, incoming.transport.is_secure(), &offer, codecs).await?;
+    let settled = Early::settle(
+        media_address,
+        incoming.transport.is_secure(),
+        &offer,
+        codecs,
+    )
+    .await?;
     ring_with(endpoint, incoming, status, reason, true, Some(settled)).await
 }
 

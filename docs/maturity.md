@@ -35,7 +35,7 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 | Layer | RFCs | implemented | partial | none | other | Reachability checked |
 |---|---|---|---|---|---|---|
 | core | 9 | 5 | 2 | 0 | 2 | **no** |
-| media | 15 | 3 | 11 | 0 | 1 | yes |
+| media | 15 | 5 | 9 | 0 | 1 | yes |
 | security | 11 | 7 | 0 | 3 | 1 | yes |
 | services | 15 | 5 | 5 | 3 | 2 | **no** |
 | transport | 14 | 7 | 4 | 3 | 0 | **no** |
@@ -65,7 +65,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 |---|---|---|---|
 | 2026-07-28 | 95 | 58 | -37 |
 | 2026-07-29 | 43 | 47 | +4 |
-| 2026-07-30 | 2 | 5 | +3 |
+| 2026-07-30 | 4 | 6 | +2 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

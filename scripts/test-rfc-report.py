@@ -587,25 +587,53 @@ class ClaimReachability(unittest.TestCase):
             "the identity check is reached only by a call that chose a secure transport",
         )
 
-    def test_the_opus_rows_no_longer_claim_more_than_a_call_can_ask_for(self):
-        """`X-33`'s registry half: the two rows the widened field axis rejects.
+    def test_the_opus_rows_claim_only_what_a_call_can_ask_for(self):
+        """`X-33`'s registry half, now that `M-30` has answered it.
 
-        Demoted rather than explained. There is no suppression list, so a row that cannot be made
-        true changes what the published table says — `partial` plus a note naming the gap, which is
-        the form RFC 5763, 5764, 8122, 8445 and 8839 already use for the same fact.
+        `X-33` demoted RFC 6716 and 7587 to `partial` because nothing above `sipx-sdp`'s own tests
+        could select Opus, and this test asserted the demotion by number. `M-30` built the
+        selection, so the demotion is no longer the honest state and the assertion is inverted —
+        but it keeps the teeth it had, because what it now holds is the *rule* rather than the
+        verdict: these rows may say `implemented` only while something at or above the call layer
+        can actually ask for the codec.
+
+        Three independent things have to be true for that, and each one alone was a way to fake
+        it. Between them they are the difference between a promotion and a reversal of the
+        demotion without the code, which is the defect X-33's check exists to catch.
         """
         by_number = {e["number"]: e for e in registry_entries()}
+        crates = report.call_layer_crates()
         for number in (6716, 7587):
             with self.subTest(rfc=number):
-                self.assertEqual("partial", by_number[number]["status"])
-                self.assertIn("Missing: a call", by_number[number]["note"])
+                self.assertEqual("implemented", by_number[number]["status"])
+                # The demotion's own words must be gone, not merely outvoted by later prose.
+                self.assertNotIn("Missing: a call", by_number[number]["note"])
+                # And the row must cite the layer that does the selecting.
+                self.assertTrue(
+                    any(
+                        report.reaches_the_call_layer(path, crates)
+                        for path in by_number[number]["evidence"]
+                    ),
+                    "a promoted Opus row cites the call layer, or it is claiming reachability"
+                    " from the crate that could never provide it",
+                )
 
-        # And the reason, still true: nothing above `sipx-sdp`'s own tests asks for Opus.
-        for crate in ("sipx-call", "sipx-cli"):
-            sources = (ROOT / "crates" / crate / "src").rglob("*.rs")
-            for path in sources:
-                with self.subTest(path=path.name):
-                    self.assertNotIn("with_opus", path.read_text())
+        # The inverse of what this asserted before `M-30`: `Capabilities::with_opus` now has a
+        # caller above `sipx-sdp`, and that caller is the selector. Held as a source fact because
+        # it is the one the registry note is really claiming.
+        selectors = [
+            path
+            for path in (ROOT / "crates" / "sipx-call" / "src").rglob("*.rs")
+            if "with_opus" in path.read_text()
+        ]
+        self.assertNotEqual(
+            [], selectors, "something in sipx-call asks for Opus, or no call can carry it"
+        )
+
+        # What has *not* changed, and must not be quietly dropped: RFC 7587 §7.1's optional
+        # parameters are neither offered nor read, so the row states that boundary. An
+        # `implemented` row whose note stopped saying so would be over-claiming again.
+        self.assertIn("fmtp", by_number[7587]["note"])
 
     def test_no_row_declares_a_layer_its_evidence_contradicts(self):
         """The registry satisfies the layer-consistency rule the check now enforces."""

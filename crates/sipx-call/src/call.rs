@@ -1795,14 +1795,18 @@ impl DialOptions {
 ///
 /// A key is offered only when the transport protects it: SDES puts the master key in the SDP
 /// body, so offering one over cleartext SIP publishes it (RFC 4568 §7.1).
+///
+/// Both the receive address and the codec set come from the caller's [`DialOptions`], so they are
+/// taken as one rather than passed apart: they are two halves of the same decision about what this
+/// side is offering, and splitting them invites a call site that reads the set from somewhere else.
 fn offered_media(
-    media_address: IpAddr,
+    options: &DialOptions,
     port: &MediaPort,
     transport: TransportKind,
-    codecs: Codecs,
 ) -> (Capabilities, SessionDescription) {
-    let capabilities = codecs
-        .capabilities(media_address, port.local_addr().port())
+    let capabilities = options
+        .codecs
+        .capabilities(options.media_address, port.local_addr().port())
         .with_srtp(transport.is_secure());
     let offer = offer_from(&capabilities);
     (capabilities, offer)
@@ -1998,8 +2002,7 @@ async fn open_invitation(
         .await
         .map_err(Error::Io)?;
 
-    let (capabilities, offer) =
-        offered_media(options.media_address, &port, target.transport, options.codecs);
+    let (capabilities, offer) = offered_media(options, &port, target.transport);
 
     // The `Via` is built here rather than left to the transport, because a CANCEL has to carry
     // the *same* branch as the INVITE it cancels — that identity is what matches the two at the
@@ -2139,14 +2142,9 @@ async fn dial_with(
     // From here the far end believes a dialog exists, so *every* path must acknowledge.
     // Returning an error without one leaves it retransmitting its 200 for 32 seconds and then
     // streaming media at a port we have closed.
-    match establish(
-        &invite,
-        &response,
-        target.clone(),
-        port,
-        capabilities.crypto.as_slice(),
-        options.codecs,
-    ) {
+    // Where in-dialog requests go if the 2xx carries no `Contact` to refresh the target with.
+    let fallback = target.clone();
+    match establish(&invite, &response, fallback, port, &capabilities, options) {
         Ok((dialog, media, in_dialog, settled)) => {
             let ack = build_ack(endpoint, &dialog, &in_dialog)?;
             endpoint
@@ -2212,17 +2210,21 @@ async fn dial_with(
 }
 
 /// Everything after a 2xx that can fail, kept together so the caller can ACK on either path.
+///
+/// `offered` and `options` are taken whole rather than as the two fields read out of them, because
+/// both are the same question asked twice — what this side put in the offer — and a call site that
+/// passed a crypto list from one place and a codec set from another could pass two that disagree.
 fn establish(
     invite: &Request,
     response: &Response,
     fallback: Target,
     port: MediaPort,
-    offered: &[sipx_sdp::crypto::Crypto],
-    codecs: Codecs,
+    offered: &Capabilities,
+    options: &DialOptions,
 ) -> Result<(Dialog, MediaSession, Target, Settled)> {
     let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    let settled = settle_answer(offered, &answer, codecs)?;
+    let settled = settle_answer(offered.crypto.as_slice(), &answer, options.codecs)?;
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
     let media = port.start(settled.media_config());
@@ -3072,7 +3074,14 @@ pub async fn answer_ringing(
     media_address: IpAddr,
     ringing: &crate::Ringing,
 ) -> Result<Call> {
-    answer_ringing_with(endpoint, incoming, media_address, ringing, Codecs::default()).await
+    answer_ringing_with(
+        endpoint,
+        incoming,
+        media_address,
+        ringing,
+        Codecs::default(),
+    )
+    .await
 }
 
 /// [`answer_ringing`], from a chosen codec set rather than the default one (`M-30`).
@@ -3302,6 +3311,10 @@ pub(crate) type Claim<'a> = &'a (dyn Fn() -> Result<()> + Send + Sync);
 /// `codecs` is what this side is willing to carry. It bounds the answer at both ends of the one
 /// exchange: [`negotiated`] may not settle outside it, and [`Codecs::capabilities`] builds the
 /// answer from it — so the codec the session starts on is always one the answer named.
+// Eight, and every one of them is a distinct fact about *this* answer that the caller holds and
+// this does not. Bundling them into a struct would be a struct with one construction site per
+// caller and no behaviour, which moves the argument list rather than shortening it.
+#[allow(clippy::too_many_arguments)]
 async fn answer_negotiated(
     endpoint: &Handle,
     incoming: &Incoming,
@@ -3979,10 +3992,7 @@ fn codec_named(rtpmap: &str) -> Option<Codec> {
     let name = parts.next()?;
     let clock = parts.next()?.parse::<u32>().ok()?;
     // RFC 8866 §6.6: an omitted channel count means one channel.
-    let channels = parts
-        .next()
-        .map_or(Ok(1), str::parse::<u32>)
-        .ok()?;
+    let channels = parts.next().map_or(Ok(1), str::parse::<u32>).ok()?;
     if clock == 8_000 && channels == 1 {
         if name.eq_ignore_ascii_case("pcmu") {
             return Some(Codec::Pcmu);
@@ -4124,6 +4134,8 @@ async fn refuse_request(
     clippy::indexing_slicing
 )]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     /// An audio description with the given formats and rtpmaps, as a peer would send it.
@@ -4137,7 +4149,7 @@ mod tests {
              m=audio 40000 RTP/AVP {formats}\r\n"
         );
         for rtpmap in rtpmaps {
-            body.push_str(&format!("a=rtpmap:{rtpmap}\r\n"));
+            let _ = write!(body, "a=rtpmap:{rtpmap}\r\n");
         }
         sipx_sdp::parse(&body).expect("a description this test wrote")
     }
