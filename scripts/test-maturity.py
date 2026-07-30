@@ -10,16 +10,21 @@ predicate's state must come from the board and nowhere else, because the alterna
 list of which predicates are met — is exactly the drift this generator exists to remove.
 """
 
+import datetime
 import importlib.util
+import os
 import pathlib
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.dont_write_bytecode = True
 
-_SPEC = importlib.util.spec_from_file_location(
-    "maturity", pathlib.Path(__file__).resolve().parent / "maturity.py"
-)
+SCRIPT = pathlib.Path(__file__).resolve().parent / "maturity.py"
+
+_SPEC = importlib.util.spec_from_file_location("maturity", SCRIPT)
 maturity = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(maturity)
 
@@ -312,6 +317,344 @@ class TheReport(unittest.TestCase):
                 checker,
                 f"maturity.py claims {layer} is reachability-checked and rfc-report.py does not",
             )
+
+
+class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
+    """`X-39`: the gate's `maturity` step must be able to pass in the commit that moves the board.
+
+    Asserted against a miniature repository and not this one, because the subject is what git history
+    says at a particular commit and the real history cannot be arranged. The fixture holds the three
+    sources `render()` reads — the registry, the status schema and the board — plus a copy of
+    `maturity.py`, so this is the real generator over data whose answers are written down here.
+
+    Before the fix, both `..._is_gate_green_without_a_second_commit` tests failed the same way and for
+    the reason the story describes: `maturity.py` runs before `git commit`, so the day row it wrote was
+    one short of the count that the commit carrying it created, and `--check` reported drift in a tree
+    where nothing was wrong. That made the step red in most commits and never for a defect.
+    """
+
+    STORY = "---\nid: {id}\ntitle: {id}\npillar: Build\nstatus: {status}\npredicate: 3\n---\n\n# {id}\n"
+
+    REGISTRY = '[[rfc]]\nnumber = 3261\nlayer = "core"\nstatus = "implemented"\n'
+
+    #: Only the row `status_definition` reads. The real schema table carries more prose; what the
+    #: reader needs is a two-cell row whose first cell is the status word in backticks.
+    SCHEMA = (
+        "| Status | Meaning |\n|---|---|\n"
+        "| `implemented` | Behaviour present and tested for the roles listed. |\n"
+    )
+
+    def git(self, repo, *args, date=None):
+        """A git command in the fixture, with an identity so `commit` works on any machine.
+
+        `date` back-dates both the author and the committer date. The day rows are read from `%ad`, so
+        a fixture that needs a history *not* dated today — the only way to observe a day with no story
+        activity — sets it.
+        """
+        env = dict(os.environ)
+        if date:
+            env["GIT_AUTHOR_DATE"] = date
+            env["GIT_COMMITTER_DATE"] = date
+        return subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=maturity test",
+                "-c",
+                "user.email=maturity@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                *args,
+            ],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+
+    def commit(self, repo, message, date=None):
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "-q", "--no-verify", "-m", message, date=date)
+
+    def run_maturity(self, repo, *args):
+        return subprocess.run(
+            [sys.executable, str(repo / "scripts" / "maturity.py"), *args],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def day_row(self, repo):
+        """Today's row of the *Discovery versus closure* table, as it stands in the report."""
+        today = datetime.date.today().isoformat()
+        for line in (repo / "docs" / "maturity.md").read_text().splitlines():
+            if line.startswith(f"| {today} |"):
+                return line
+        return None
+
+    def fixture(self, date=None):
+        """A repository whose report is committed, current, and green — the state before the defect.
+
+        `date` back-dates the whole history, which is how a test arranges a today with nothing in it.
+        """
+        repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        (repo / "scripts").mkdir()
+        (repo / "docs" / "rfc").mkdir(parents=True)
+        (repo / "docs" / "stories").mkdir(parents=True)
+        shutil.copy(SCRIPT, repo / "scripts" / "maturity.py")
+        (repo / "docs" / "rfc" / "registry.toml").write_text(self.REGISTRY)
+        (repo / "docs" / "rfc" / "README.md").write_text(self.SCHEMA)
+        for story in ("X-1", "X-2"):
+            self.write_story(repo, story, "ready")
+
+        self.git(repo, "init", "-q")
+        self.commit(repo, "seed the board", date=date)
+        self.assertEqual(self.run_maturity(repo).returncode, 0, "the fixture must generate")
+        self.commit(repo, "the report of that board", date=date)
+        green = self.run_maturity(repo, "--check")
+        self.assertEqual(
+            green.returncode,
+            0,
+            f"the fixture must start green or these tests prove nothing: {green.stderr}",
+        )
+        return repo
+
+    def write_story(self, repo, story_id, status):
+        (repo / "docs" / "stories" / f"{story_id}-a-story.md").write_text(
+            self.STORY.format(id=story_id, status=status)
+        )
+
+    def test_a_commit_that_files_a_story_is_gate_green_without_a_second_commit(self):
+        """The reproduction from the story's Acceptance, as a test.
+
+        File a story, regenerate, commit both, check. `Filed` for today is created by the very commit
+        that carries the report, so before the fix no ordering of the two could satisfy `--check`.
+        """
+        repo = self.fixture()
+        self.write_story(repo, "X-3", "ready")
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        self.commit(repo, "file X-3, with the report")
+
+        checked = self.run_maturity(repo, "--check")
+        self.assertEqual(
+            checked.returncode,
+            0,
+            "a commit that files a story must be able to carry a report of itself: "
+            f"{checked.stderr}{self.day_row(repo)}",
+        )
+
+    def test_a_commit_that_closes_a_story_is_gate_green_without_a_second_commit(self):
+        """The other half, and the one that bit `main` twice on 2026-07-30.
+
+        `Closed` is a `status: done` line appearing in a committed diff, which is the same
+        unobtainable shape as `Filed`. Closing a story also moves the pillar totals and predicate 3's
+        state, and those come from the story files rather than from history — so this test is green on
+        those counts either way, and what it isolates is the day row.
+        """
+        repo = self.fixture()
+        self.write_story(repo, "X-2", "done")
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        self.commit(repo, "close X-2, with the report")
+
+        checked = self.run_maturity(repo, "--check")
+        self.assertEqual(
+            checked.returncode,
+            0,
+            "a commit that closes a story must be able to carry a report of itself: "
+            f"{checked.stderr}{self.day_row(repo)}",
+        )
+
+    def test_a_report_that_was_not_regenerated_is_still_red(self):
+        """The drift `--check` was built to catch, which the fix must not trade away.
+
+        This is the 2026-07-30 case where `main` was red for real: `S-25` closed, the aggregates
+        moved, nothing re-ran the script. A fix tolerant enough to miss it would be worse than the
+        flapping, because the report is linked as a measurement.
+        """
+        repo = self.fixture()
+        self.write_story(repo, "X-1", "done")
+        self.commit(repo, "close X-1 and forget the report")
+
+        checked = self.run_maturity(repo, "--check")
+        self.assertEqual(checked.returncode, 1, "an unregenerated report is drift")
+        self.assertIn("drifted", checked.stderr)
+
+    def test_an_edited_report_is_still_red(self):
+        """Hand-editing the generated region must fail, day rows included.
+
+        The narrower risk of reading the working tree: if the day row were merely tolerated, a wrong
+        number in it would pass while it was today's. It is not tolerated — the source changed, and
+        the comparison is as strict as it ever was.
+        """
+        repo = self.fixture()
+        report = repo / "docs" / "maturity.md"
+        row = self.day_row(repo)
+        self.assertIsNotNone(row, "the fixture files its stories today, so today has a row")
+        report.write_text(report.read_text().replace(row, row.replace("| 2 |", "| 9 |", 1)))
+        self.commit(repo, "edit the table by hand")
+
+        checked = self.run_maturity(repo, "--check")
+        self.assertEqual(checked.returncode, 1, "a hand-edited day row is drift")
+
+    def test_a_story_filed_already_closed_is_counted_by_both_halves(self):
+        """The subtle one: an untracked file is absent from `git diff HEAD`.
+
+        Committing a new file shows its whole body as `+` lines, so history counts a story filed
+        already `done` as both filed and closed. The working-tree half reads the diff for tracked
+        edits, which cannot see an untracked file at all — so this count has to come from the file's
+        content or the two halves of the union disagree and the row moves under its own commit.
+        """
+        repo = self.fixture()
+        self.write_story(repo, "X-3", "done")
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        before = self.day_row(repo)
+        today = datetime.date.today().isoformat()
+        self.assertEqual(before, f"| {today} | 3 | 1 | -2 |", "filed and closed by the same file")
+
+        self.commit(repo, "file X-3 already closed, with the report")
+        self.assertEqual(self.run_maturity(repo, "--check").returncode, 0)
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        self.assertEqual(self.day_row(repo), before)
+
+    def test_a_clean_tree_reports_committed_history_alone(self):
+        """The arithmetic of today's row, pinned on a clean tree."""
+        repo = self.fixture()
+        today = datetime.date.today().isoformat()
+        self.assertEqual(
+            self.day_row(repo),
+            f"| {today} | 2 | 0 | -2 |",
+            "two stories filed today, none closed",
+        )
+
+    def test_a_day_with_no_story_activity_gets_no_row_at_all(self):
+        """The zero-guard, which nothing else here can observe.
+
+        `days` is the union of the two counters' keys and `Counter[key] += 0` *creates* the key, so an
+        unguarded bump for today prints a phantom `| today | 0 | 0 | +0 |` row on every clean tree —
+        a day the table says nothing happened on, in a table whose whole subject is what happened per
+        day, and a fresh red gate every midnight. That is the failure class this story exists to
+        remove, reintroduced by the fix that removes it.
+
+        **Every other test in this class files or closes something today**, so today is already a key
+        in `filed` and the phantom row is invisible to all of them — including the earlier version of
+        this test, whose `assertNotIn` could not fire and whose docstring claimed this property
+        anyway. That is the `X-36` shape: a test that cannot detect the reversal of the invariant it is
+        named for. This one back-dates the entire history instead, so today is genuinely empty, and it
+        goes red the moment the guard in `discovery_rate` is deleted.
+        """
+        repo = self.fixture(date="2020-01-02T03:04:05")
+        report = (repo / "docs" / "maturity.md").read_text()
+
+        self.assertIsNone(
+            self.day_row(repo),
+            "nothing was filed or closed today, so the table must not invent a row for it",
+        )
+        self.assertIn("| 2020-01-02 | 2 | 0 | -2 |", report, "the day that did have activity")
+        self.assertNotIn("| 0 | 0 | +0 |", report, "and no day with nothing in it")
+        self.assertEqual(self.run_maturity(repo, "--check").returncode, 0)
+
+    def test_a_file_with_no_story_frontmatter_is_not_a_filed_story(self):
+        """A scratch note in the story directory is not a story filed that day.
+
+        Decided deliberately, because the alternative is worse than merely noisy. Counting it by name
+        made `--check` red on a tree whose report was correct — this story's own failure mode from a
+        new direction — and it also made the report *green in the tree holding the scratch file and
+        red on a clean checkout of the same commit*, because the file is never committed. Local green
+        with CI red is the `X-22` failure class, which is the one this repository's gate section exists
+        to prevent, so the name rule had to go.
+
+        `story_fields` decides it now, the same test `stories()` applies, and the frontmatter half of
+        that test is not sufficient on its own: the board's `_TEMPLATE.md` carries an `id:` too.
+        """
+        repo = self.fixture()
+        before = self.day_row(repo)
+        (repo / "docs" / "stories" / "notes.md").write_text("scratch, not a story\n")
+
+        checked = self.run_maturity(repo, "--check")
+        self.assertEqual(
+            checked.returncode,
+            0,
+            f"a scratch file must not make a correct report look drifted: {checked.stderr}",
+        )
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        self.assertEqual(self.day_row(repo), before, "and must not move the count")
+
+    def test_a_closing_line_with_a_trailing_space_is_read_the_same_by_both_halves(self):
+        """One reader for the closing line, asserted on the permutation that broke.
+
+        The halves used to disagree: history matched `startswith`, the working tree matched equality.
+        A story filed already `done` with a trailing space on that line was therefore closed according
+        to history and open according to the working tree, so the row moved across its own commit and
+        the flap survived on malformed frontmatter. `M-31`'s shape, and `M-31`'s fix.
+
+        The board agrees the story is closed — `story_fields` strips values — so counting it is also
+        the right answer and not merely the consistent one.
+        """
+        repo = self.fixture()
+        (repo / "docs" / "stories" / "X-3-a-story.md").write_text(
+            "---\nid: X-3\ntitle: X-3\npillar: Build\nstatus: done \n---\n\n# X-3\n"
+        )
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        before = self.day_row(repo)
+        today = datetime.date.today().isoformat()
+        self.assertEqual(before, f"| {today} | 3 | 1 | -2 |", "a trailing space still closes a story")
+
+        self.commit(repo, "file X-3 closed, with a trailing space, with the report")
+        checked = self.run_maturity(repo, "--check")
+        self.assertEqual(checked.returncode, 0, f"the row must not move: {checked.stderr}")
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        self.assertEqual(self.day_row(repo), before)
+
+    def test_the_name_rule_and_the_story_rule_agree_on_the_real_board(self):
+        """The one asymmetry left in the union, pinned instead of assumed.
+
+        Committed history hands `discovery_rate` file *names* and no content, so `Filed` for a past day
+        is decided by name; the working-tree half reads `story_fields`, which is the real definition.
+        Reading content for every historical addition costs a `git show` per file — 154 of them, about
+        seven seconds — to guard a case that needs somebody to commit junk into the board directory, so
+        the asymmetry stays and this holds it safe instead.
+
+        The two rules agree on every `.md` the board has ever held: 154 additions, whose single
+        disagreement was `_TEMPLATE.md`, which both rules exclude — one by name, one because the
+        template carries an `id:` of its own. What would end that is a non-story `.md` committed under
+        `docs/stories`: it counts as filed by name and not by content, so the day it landed would go
+        red until the report was regenerated. Identically red locally and in CI, so never silent drift,
+        but this fires first and names the file.
+        """
+        for path in sorted(maturity.STORIES.glob("*.md")):
+            self.assertEqual(
+                path.name not in maturity.NOT_STORIES,
+                maturity.story_fields(path) is not None,
+                f"{path.name} is a story by one rule and not the other, so the day row for the "
+                f"commit that added it moves under that commit",
+            )
+
+    def test_the_working_tree_half_is_what_holds_the_row_still(self):
+        """The mechanism directly: the count must not change when the tree is committed.
+
+        Asserted as an equality across the commit rather than only through `--check`, because that is
+        the property the fix rests on — `git commit` relocates a fact from the working tree to
+        history and the union is unmoved. If this drifts apart again, `--check` going red is a symptom
+        and this is the cause.
+        """
+        repo = self.fixture()
+        self.write_story(repo, "X-3", "ready")
+        self.write_story(repo, "X-2", "done")
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+        before = self.day_row(repo)
+        self.commit(repo, "file one, close one, with the report")
+        self.assertEqual(self.run_maturity(repo).returncode, 0)
+
+        self.assertEqual(
+            self.day_row(repo),
+            before,
+            "committing the change must not move the day row it belongs to",
+        )
+        today = datetime.date.today().isoformat()
+        self.assertEqual(before, f"| {today} | 3 | 1 | -2 |")
 
 
 if __name__ == "__main__":
