@@ -1,15 +1,24 @@
-<img src="docs/assets/logo.svg" alt="" width="132" align="right">
+<div align="center">
+
+<img src="docs/assets/logo.svg" alt="" width="132">
 
 # sipx
 
 **A SIP and VoIP stack in Rust for programmable endpoints.** Place and answer calls, register,
 transfer, and carry real audio from a Rust library or a shell command.
 
-[![docs](https://img.shields.io/badge/docs-codewandler.github.io%2Fsipx-blue)](https://codewandler.github.io/sipx/)
-[![RFC compliance](https://img.shields.io/badge/RFC-compliance-blue)](docs/compliance.md)
-[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+<!-- BEGIN generated:badges -->
+<a href="https://codewandler.github.io/sipx/"><img alt="docs: codewandler.github.io/sipx" src="https://img.shields.io/static/v1?label=docs&message=codewandler.github.io%2Fsipx&color=blue"></a>
+<a href="CHANGELOG.md"><img alt="release: 1.0.0-alpha.1" src="https://img.shields.io/static/v1?label=release&message=1.0.0-alpha.1&color=blue"></a>
+<a href="#try-the-cli"><img alt="MSRV: rustc 1.88" src="https://img.shields.io/static/v1?label=MSRV&message=rustc%201.88&color=blue"></a>
+<a href="docs/compliance.md"><img alt="RFCs: 32 implemented of 70" src="https://img.shields.io/static/v1?label=RFCs&message=32%20implemented%20of%2070&color=blue"></a>
+<a href="docs/compliance.md"><img alt="codecs: G.711 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20Opus&color=blue"></a>
+<a href="#license"><img alt="license: MIT OR Apache-2.0" src="https://img.shields.io/static/v1?label=license&message=MIT%20OR%20Apache-2.0&color=blue"></a>
+<!-- END generated:badges -->
 
-> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-alpha<!-- END generated:workspace-version -->.** The public site documents `main`, which can move ahead of the latest
+</div>
+
+> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-alpha.1<!-- END generated:workspace-version -->.** The public site documents `main`, which can move ahead of the latest
 > tag. Public APIs are not frozen. Start with the tagged install below when reproducibility matters.
 
 ## Does it fit?
@@ -35,11 +44,11 @@ deployment shape.
 
 ## Try the CLI
 
-The <!-- BEGIN generated:release-tag -->v1.0.0-alpha<!-- END generated:release-tag --> release needs
+The <!-- BEGIN generated:release-tag -->v1.0.0-alpha.1<!-- END generated:release-tag --> release needs
 Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```sh
-cargo install --locked --git https://github.com/codewandler/sipx --tag v1.0.0-alpha sipx-cli
+cargo install --locked --git https://github.com/codewandler/sipx --tag v1.0.0-alpha.1 sipx-cli
 sipx version
 ```
 
@@ -66,8 +75,8 @@ Until the crates are published, pin Git dependencies to the same tag:
 
 ```toml
 [dependencies]
-sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha" }
-sipx-transport = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha" }
+sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.1" }
+sipx-transport = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.1" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

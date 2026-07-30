@@ -14,7 +14,7 @@ sipx is not on crates.io yet. Install it from Git with Rust <!-- BEGIN generated
 
 ```bash
 cargo install --git https://github.com/codewandler/sipx \
-  --tag v1.0.0-alpha --locked sipx-cli
+  --tag v1.0.0-alpha.1 --locked sipx-cli
 ```
 
 `--tag` makes the installation reproducible. This site follows the newer `main` branch; to
@@ -26,11 +26,11 @@ cargo install --git https://github.com/codewandler/sipx \
 ```
 
 Confirm which version was installed. This documentation build covers
-<!-- BEGIN generated:workspace-version -->1.0.0-alpha<!-- END generated:workspace-version -->:
+<!-- BEGIN generated:workspace-version -->1.0.0-alpha.1<!-- END generated:workspace-version -->:
 
 ```console
 $ sipx version
-sipx 1.0.0-alpha
+sipx 1.0.0-alpha.1
 ```
 
 ## Prepare audio

@@ -1,12 +1,12 @@
 ---
 title: What's new
-description: Release highlights for sipx 1.0.0-alpha and guidance on the newer main-branch documentation.
+description: Release highlights for sipx 1.0.0-alpha.1 and guidance on the newer main-branch documentation.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-alpha — 2026-07-30
+## 1.0.0-alpha.1 — 2026-07-30
 <!-- END generated:release-heading -->
 
 This is the current tagged release. It establishes a measured alpha baseline for the SIP,
@@ -17,7 +17,7 @@ Install this exact release with:
 
 ```bash
 cargo install --git https://github.com/codewandler/sipx \
-  --tag v1.0.0-alpha --locked sipx-cli
+  --tag v1.0.0-alpha.1 --locked sipx-cli
 ```
 
 ### Release highlights
@@ -57,5 +57,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 alpha. Use the tag above when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-alpha` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-alpha.1` merely because it appears on this
 site.

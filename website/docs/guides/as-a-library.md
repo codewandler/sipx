@@ -14,7 +14,7 @@ sipx is not on crates.io yet. Pin the tagged alpha release in `Cargo.toml`:
 
 ```toml
 [dependencies]
-sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha" }
+sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.1" }
 ```
 
 This website documents `main`, which can be tested explicitly with:
@@ -31,7 +31,7 @@ Optional behavior is opt-in. For example, make Opus selectable by `sipx-call` li
 
 ```toml
 [dependencies]
-sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha", features = ["opus"] }
+sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.1", features = ["opus"] }
 ```
 
 Opus links a C library. Enabling the feature makes `Codecs::Opus` available; it does not silently
