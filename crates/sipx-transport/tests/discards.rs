@@ -128,7 +128,10 @@ fn unexplained(path: &Path) -> Vec<Site> {
 /// **§12.1's guard.** Every discard in the signalling path is counted or explained.
 #[test]
 fn no_discard_in_the_signalling_path_is_silent() {
-    let unexplained: Vec<Site> = sources().iter().flat_map(|path| unexplained(path)).collect();
+    let unexplained: Vec<Site> = sources()
+        .iter()
+        .flat_map(|path| unexplained(path))
+        .collect();
 
     if !unexplained.is_empty() {
         let listing = unexplained
@@ -136,11 +139,10 @@ fn no_discard_in_the_signalling_path_is_silent() {
             .map(|site| {
                 format!(
                     "  {}:{}\n      {}",
-                    site.file
-                        .file_name()
-                        .map_or_else(|| site.file.display().to_string(), |name| name
-                            .to_string_lossy()
-                            .into_owned()),
+                    site.file.file_name().map_or_else(
+                        || site.file.display().to_string(),
+                        |name| name.to_string_lossy().into_owned()
+                    ),
                     site.line,
                     site.text
                 )
@@ -167,11 +169,7 @@ fn the_scan_detects_an_unexplained_discard() {
     std::fs::create_dir_all(&directory).expect("a scratch directory");
 
     let cases: [(&str, &str, bool); 5] = [
-        (
-            "bare.rs",
-            "fn f() {\n    let _ = send();\n}\n",
-            true,
-        ),
+        ("bare.rs", "fn f() {\n    let _ = send();\n}\n", true),
         (
             "reasoned.rs",
             "fn f() {\n    // discard: nobody is waiting for this.\n    let _ = send();\n}\n",
@@ -215,7 +213,8 @@ fn the_scan_detects_an_unexplained_discard() {
 /// reason that is not next to its code is a reason nobody will read when they change that code.
 #[test]
 fn a_reason_below_a_discard_does_not_explain_it() {
-    let directory = std::env::temp_dir().join(format!("sipx-discards-order-{}", std::process::id()));
+    let directory =
+        std::env::temp_dir().join(format!("sipx-discards-order-{}", std::process::id()));
     std::fs::create_dir_all(&directory).expect("a scratch directory");
     let path = directory.join("below.rs");
     std::fs::write(

@@ -127,7 +127,9 @@ async fn a_shed_request_and_an_unmatched_response_both_appear_in_the_counter_sna
 
     // A response matching no client transaction, with nobody watching for it. It is right to drop
     // it; dropping it without counting is what this forbids.
-    let stray = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let stray = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
     stray
         .send_to(&stray_response(&busy_via, "stray-counter@sipx"), busy_addr)
         .await
@@ -236,7 +238,9 @@ async fn an_undisturbed_endpoint_reports_no_losses() {
 #[tokio::test]
 async fn a_malformed_datagram_counts_as_a_parse_failure_and_not_as_a_request() {
     let (endpoint, _incoming) = endpoint().await;
-    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
 
     // Not a SIP message and not STUN: STUN is diverted before the parser (§5) and would be
     // counted as neither.
@@ -245,9 +249,17 @@ async fn a_malformed_datagram_counts_as_a_parse_failure_and_not_as_a_request() {
         .await
         .expect("sends");
 
-    until(COUNTING_BOUND, "a malformed datagram was not counted", async || {
-        endpoint.counters().transport(TransportKind::Udp).parse_failures > 0
-    })
+    until(
+        COUNTING_BOUND,
+        "a malformed datagram was not counted",
+        async || {
+            endpoint
+                .counters()
+                .transport(TransportKind::Udp)
+                .parse_failures
+                > 0
+        },
+    )
     .await;
 
     let udp = endpoint.counters().transport(TransportKind::Udp);
@@ -276,11 +288,9 @@ async fn the_snapshot_is_readable_without_the_loop() {
     let _ = read_synchronously();
 
     endpoint.shutdown().await;
-    until(
-        COUNTING_BOUND,
-        "the endpoint never stopped",
-        async || endpoint.outstanding().await.is_err(),
-    )
+    until(COUNTING_BOUND, "the endpoint never stopped", async || {
+        endpoint.outstanding().await.is_err()
+    })
     .await;
 
     // The loop is gone. `outstanding()` now fails by construction; the snapshot must not, because

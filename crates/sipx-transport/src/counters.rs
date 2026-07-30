@@ -396,13 +396,7 @@ impl Meters {
             Timer::B => bump(&self.timeout_b),
             Timer::F => bump(&self.timeout_f),
             Timer::H => bump(&self.timeout_h),
-            Timer::D
-            | Timer::I
-            | Timer::J
-            | Timer::K
-            | Timer::L
-            | Timer::M
-            | Timer::Trying100 => {}
+            Timer::D | Timer::I | Timer::J | Timer::K | Timer::L | Timer::M | Timer::Trying100 => {}
         }
     }
 

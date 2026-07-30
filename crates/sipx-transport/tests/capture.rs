@@ -19,7 +19,9 @@ use bytes::Bytes;
 use sipx_sip::build::RequestBuilder;
 use sipx_sip::build::ResponseBuilder;
 use sipx_sip::{HeaderName, Host, HostName, Method, StatusCode, Uri};
-use sipx_transport::{CaptureConfig, Config, Handle, Incoming, Target, TransportKind, bind, new_branch};
+use sipx_transport::{
+    CaptureConfig, Config, Handle, Incoming, Target, TransportKind, bind, new_branch,
+};
 use tokio::sync::mpsc::Receiver;
 
 /// A bound on failure, not a window to measure in (`X-29`). The writer is on its own thread, so the
@@ -58,9 +60,10 @@ async fn plain() -> (Handle, Receiver<Incoming>) {
 }
 
 fn request(sender: &Handle, method: &Method, call_id: &'static str) -> sipx_sip::Request {
-    RequestBuilder::new(method.clone(), Uri::sip(Host::Name(
-        HostName::new("callee.example").expect("valid"),
-    )))
+    RequestBuilder::new(
+        method.clone(),
+        Uri::sip(Host::Name(HostName::new("callee.example").expect("valid"))),
+    )
     .header(
         HeaderName::Via,
         Bytes::from(format!(
@@ -125,7 +128,9 @@ fn comment_in(body: &[u8], from: usize) -> String {
             break;
         }
         let value_at = cursor + 4;
-        let value = body.get(value_at..value_at + usize::from(len)).unwrap_or(&[]);
+        let value = body
+            .get(value_at..value_at + usize::from(len))
+            .unwrap_or(&[]);
         if code == 1 {
             return String::from_utf8_lossy(value).into_owned();
         }
@@ -199,12 +204,12 @@ fn destination_port(packet: &Packet) -> u16 {
 async fn a_loopback_exchange_is_recorded_with_its_real_addresses() {
     let path = capture_path("exchange");
     let (caller, _caller_incoming) = recording(&path).await;
-    let (callee, mut callee_incoming) = plain().await;
-    let callee_addr = callee.local_addr();
+    let (answerer, mut answerer_incoming) = plain().await;
+    let answerer_addr = answerer.local_addr();
 
     // The callee answers, so there is a response to record as well as a request.
     let responder = tokio::spawn(async move {
-        let incoming = callee_incoming.recv().await.expect("a request arrives");
+        let incoming = answerer_incoming.recv().await.expect("a request arrives");
         let response = ResponseBuilder::to_request(
             &incoming.request,
             StatusCode::new(200).expect("valid"),
@@ -212,7 +217,7 @@ async fn a_loopback_exchange_is_recorded_with_its_real_addresses() {
         )
         .expect("builds")
         .build();
-        callee
+        answerer
             .respond(&incoming.key, response)
             .await
             .expect("responds");
@@ -221,7 +226,7 @@ async fn a_loopback_exchange_is_recorded_with_its_real_addresses() {
     let mut responses = caller
         .send(
             request(&caller, &Method::Options, "capture-x12@sipx"),
-            Target::udp(callee_addr),
+            Target::udp(answerer_addr),
         )
         .await
         .expect("sends");
@@ -232,9 +237,11 @@ async fn a_loopback_exchange_is_recorded_with_its_real_addresses() {
     assert_eq!(response.status.code(), 200);
     responder.await.ok();
 
-    until(WRITING_BOUND, "the capture never got two records", async || {
-        path.exists() && read_capture(&path).packets.len() >= 2
-    })
+    until(
+        WRITING_BOUND,
+        "the capture never got two records",
+        async || path.exists() && read_capture(&path).packets.len() >= 2,
+    )
     .await;
 
     let capture = read_capture(&path);
@@ -244,12 +251,16 @@ async fn a_loopback_exchange_is_recorded_with_its_real_addresses() {
     let out = &capture.packets[0];
     let back = &capture.packets[1];
     assert!(payload(out).starts_with("OPTIONS "), "{}", payload(out));
-    assert!(payload(back).starts_with("SIP/2.0 200"), "{}", payload(back));
+    assert!(
+        payload(back).starts_with("SIP/2.0 200"),
+        "{}",
+        payload(back)
+    );
 
     // Real ports in the synthetic UDP header, and the direction reversed between the two.
     assert_eq!(source_port(out), caller.local_addr().port());
-    assert_eq!(destination_port(out), callee_addr.port());
-    assert_eq!(source_port(back), callee_addr.port());
+    assert_eq!(destination_port(out), answerer_addr.port());
+    assert_eq!(source_port(back), answerer_addr.port());
     assert_eq!(destination_port(back), caller.local_addr().port());
 
     // The comment is the authoritative statement of the transport (§13.1), because the packet's own
@@ -261,7 +272,10 @@ async fn a_loopback_exchange_is_recorded_with_its_real_addresses() {
 
     let counters = caller.counters();
     assert!(counters.capture.records >= 2, "{counters:?}");
-    assert_eq!(counters.capture.dropped, 0, "nothing should have been dropped");
+    assert_eq!(
+        counters.capture.dropped, 0,
+        "nothing should have been dropped"
+    );
     assert_eq!(counters.capture.errors, 0, "and nothing should have failed");
 }
 
@@ -281,7 +295,11 @@ async fn capture_off_opens_nothing_and_counts_nothing() {
             .await;
     }
     until(WRITING_BOUND, "no request ever arrived", async || {
-        endpoint.counters().transport(TransportKind::Udp).requests_in > 0
+        endpoint
+            .counters()
+            .transport(TransportKind::Udp)
+            .requests_in
+            > 0
     })
     .await;
 
@@ -304,9 +322,10 @@ async fn credentials_do_not_reach_the_file() {
 
     // Sent as raw bytes from a plain socket, so the message reaches the capture by the receive path
     // exactly as a peer's would — before parsing, per §13.2.
-    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("binds");
-    let message = format!(
-        "REGISTER sip:example.net SIP/2.0\r\n\
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let message = "REGISTER sip:example.net SIP/2.0\r\n\
          Via: SIP/2.0/UDP 127.0.0.1:9;branch=z9hG4bKredact\r\n\
          To: <sip:alice@example.net>\r\n\
          From: <sip:alice@example.net>;tag=r\r\n\
@@ -318,15 +337,16 @@ async fn credentials_do_not_reach_the_file() {
          Content-Type: application/sdp\r\n\
          Content-Length: 96\r\n\r\n\
          v=0\r\n\
-         a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:d0RmdmcmVCspeEc3QGZiNWpVLFJhQX1cfHAwJSoj|2^20|1\r\n"
-    );
+         a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:d0RmdmcmVCspeEc3QGZiNWpVLFJhQX1cfHAwJSoj|2^20|1\r\n";
     peer.send_to(message.as_bytes(), endpoint.local_addr())
         .await
         .expect("sends");
 
-    until(WRITING_BOUND, "the capture never got the message", async || {
-        path.exists() && !read_capture(&path).packets.is_empty()
-    })
+    until(
+        WRITING_BOUND,
+        "the capture never got the message",
+        async || path.exists() && !read_capture(&path).packets.is_empty(),
+    )
     .await;
 
     let raw = std::fs::read(&path).expect("readable");
@@ -355,7 +375,10 @@ async fn credentials_do_not_reach_the_file() {
         "pn-provider=apns",
         "AES_CM_128_HMAC_SHA1_80",
     ] {
-        assert!(whole.contains(kept), "redaction removed {kept}, which it needs");
+        assert!(
+            whole.contains(kept),
+            "redaction removed {kept}, which it needs"
+        );
     }
 
     let recorded = read_capture(&path);
@@ -402,14 +425,18 @@ async fn a_datagram_that_does_not_parse_is_still_captured() {
     let path = capture_path("malformed");
     let (endpoint, _incoming) = recording(&path).await;
 
-    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
     peer.send_to(b"THIS IS NOT SIP\r\n\r\n", endpoint.local_addr())
         .await
         .expect("sends");
 
-    until(WRITING_BOUND, "the malformed datagram was not captured", async || {
-        path.exists() && !read_capture(&path).packets.is_empty()
-    })
+    until(
+        WRITING_BOUND,
+        "the malformed datagram was not captured",
+        async || path.exists() && !read_capture(&path).packets.is_empty(),
+    )
     .await;
 
     let capture = read_capture(&path);
@@ -418,9 +445,17 @@ async fn a_datagram_that_does_not_parse_is_still_captured() {
         "{}",
         payload(&capture.packets[0])
     );
-    until(WRITING_BOUND, "the parse failure was not counted", async || {
-        endpoint.counters().transport(TransportKind::Udp).parse_failures > 0
-    })
+    until(
+        WRITING_BOUND,
+        "the parse failure was not counted",
+        async || {
+            endpoint
+                .counters()
+                .transport(TransportKind::Udp)
+                .parse_failures
+                > 0
+        },
+    )
     .await;
     let udp = endpoint.counters().transport(TransportKind::Udp);
     assert_eq!(udp.requests_in, 0, "a malformed datagram is not a request");

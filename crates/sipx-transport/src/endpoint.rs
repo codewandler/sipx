@@ -234,7 +234,6 @@ enum Command {
     Shutdown,
 }
 
-
 /// A response that matched no client transaction (RFC 3261 §16.7).
 ///
 /// A user agent has nothing to do with one of these and is right to ignore it: it either answers a
@@ -1716,7 +1715,9 @@ impl Driver {
             // discarded in silence (§12.1).
             if sender.send(event).await.is_err() {
                 self.meters.discard_transaction_event();
-                tracing::debug!("a transaction event had no receiver; the caller stopped listening");
+                tracing::debug!(
+                    "a transaction event had no receiver; the caller stopped listening"
+                );
             }
             return;
         }

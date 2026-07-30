@@ -221,6 +221,12 @@ const fn padded(len: usize) -> usize {
     len.next_multiple_of(4)
 }
 
+/// The zero bytes that carry `len` up to the next multiple of four.
+fn padding(len: usize) -> &'static [u8] {
+    const ZEROS: [u8; 3] = [0; 3];
+    ZEROS.get(..padded(len).saturating_sub(len)).unwrap_or(&[])
+}
+
 /// Write a block: type, total length, body, total length again.
 ///
 /// The trailing length is what makes a truncated file readable backwards from the end, which is
@@ -231,8 +237,7 @@ fn write_block(out: &mut impl Write, kind: u32, body: &[u8]) -> std::io::Result<
     out.write_all(&kind.to_ne_bytes())?;
     out.write_all(&total.to_ne_bytes())?;
     out.write_all(body)?;
-    let padding = padded(body.len()).saturating_sub(body.len());
-    out.write_all(&[0u8; 3].get(..padding).unwrap_or(&[]))?;
+    out.write_all(padding(body.len()))?;
     out.write_all(&total.to_ne_bytes())
 }
 
@@ -243,7 +248,7 @@ fn push_option(body: &mut Vec<u8>, code: u16, value: &[u8]) {
     body.extend_from_slice(&len.to_ne_bytes());
     let value = value.get(..usize::from(len)).unwrap_or(value);
     body.extend_from_slice(value);
-    body.extend_from_slice(&[0u8; 3].get(..padded(value.len()) - value.len()).unwrap_or(&[]));
+    body.extend_from_slice(padding(value.len()));
 }
 
 /// The Section Header Block and the one Interface Description Block.
@@ -290,7 +295,7 @@ fn write_packet(out: &mut impl Write, record: &Record) -> std::io::Result<()> {
     body.extend_from_slice(&len.to_ne_bytes()); // captured length
     body.extend_from_slice(&len.to_ne_bytes()); // original length
     body.extend_from_slice(&packet);
-    body.extend_from_slice(&[0u8; 3].get(..padded(packet.len()) - packet.len()).unwrap_or(&[]));
+    body.extend_from_slice(padding(packet.len()));
     push_option(&mut body, OPT_COMMENT, comment(record).as_bytes());
     push_option(&mut body, OPT_END, &[]);
 
@@ -308,10 +313,7 @@ fn comment(record: &Record) -> String {
         record.local,
         record.peer,
     );
-    if matches!(
-        record.transport,
-        TransportKind::Tls | TransportKind::Wss
-    ) {
+    if matches!(record.transport, TransportKind::Tls | TransportKind::Wss) {
         comment.push_str(" decrypted-in-process=yes");
     }
     if record.redacted {
@@ -337,8 +339,8 @@ fn synthesise(record: &Record) -> Vec<u8> {
     let mut packet = Vec::with_capacity(40 + 8 + payload.len());
     match (source.ip(), destination.ip()) {
         (IpAddr::V4(from), IpAddr::V4(to)) => {
-            let total = u16::try_from(20usize.saturating_add(usize::from(udp_len)))
-                .unwrap_or(u16::MAX);
+            let total =
+                u16::try_from(20usize.saturating_add(usize::from(udp_len))).unwrap_or(u16::MAX);
             let mut header = Vec::with_capacity(20);
             header.push(0x45); // IPv4, 20-byte header
             header.push(0); // DSCP/ECN
@@ -716,7 +718,10 @@ mod tests {
         assert!(out.contains("nonce=\"abc123\""), "{out}");
         assert!(out.contains("username=\"alice\""), "{out}");
         assert!(out.contains("qop=auth"), "{out}");
-        assert!(out.starts_with("REGISTER sip:example.net SIP/2.0\r\n"), "{out}");
+        assert!(
+            out.starts_with("REGISTER sip:example.net SIP/2.0\r\n"),
+            "{out}"
+        );
     }
 
     /// Vector X15, and the length-preservation rule that keeps `Content-Length` honest.
@@ -734,11 +739,17 @@ mod tests {
             !out.contains("d0RmdmcmVCspeEc3QGZiNWpVLFJhQX1cfHAwJSoj"),
             "the SRTP master key is still in the capture: {out}"
         );
-        assert!(out.contains("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:"), "{out}");
+        assert!(
+            out.contains("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:"),
+            "{out}"
+        );
         // The tag and the crypto-suite are kept: §5.1.2 makes them the thing an answer has to echo,
         // so a negotiation bug is invisible without them.
         assert!(out.contains("AES_CM_128_HMAC_SHA1_80"), "{out}");
-        assert!(out.contains("|2^20|1:32"), "the lifetime and MKI are not secret: {out}");
+        assert!(
+            out.contains("|2^20|1:32"),
+            "the lifetime and MKI are not secret: {out}"
+        );
         assert_eq!(
             redacted.len(),
             message.len(),
@@ -784,7 +795,10 @@ mod tests {
             "trace@sipx",
             "CSeq: 1 INVITE",
         ] {
-            assert!(out.contains(kept), "redaction removed {kept}, which it needs: {out}");
+            assert!(
+                out.contains(kept),
+                "redaction removed {kept}, which it needs: {out}"
+            );
         }
         assert!(!out.contains("\"secret\""), "{out}");
     }
