@@ -130,11 +130,15 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     let mut agent = UserAgent::new(handle, ua_config);
 
+    // Both reports name the address of record the same way: the normalised AOR, not the argument
+    // as typed, so a caller matching on it does not have to.
+    let aor = format!("sip:{user}@{domain}");
+
     match agent.register().await {
         Ok(lease) => {
             let mut report = Report::new()
                 .text("status", "registered")
-                .text("aor", format!("sip:{user}@{domain}"))
+                .text("aor", aor.clone())
                 .seconds("expires", lease.granted)
                 .seconds("refresh_in", lease.refresh_after);
             if outbound {
@@ -156,19 +160,8 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
                 // there a flow for the request the push was sent for. `woken` is that ordering;
                 // when to call it is the application's, and this flag is the CLI acting as its
                 // own push service for one ring.
-                match agent.woken().await {
-                    Ok(pending) => {
-                        let mut report = Report::new()
-                            .text("status", "woken")
-                            .text("aor", format!("sip:{user}@{domain}"))
-                            .seconds("expires", pending.lease.granted)
-                            .seconds("refresh_in", pending.lease.refresh_after);
-                        if let Some(purr) = &pending.purr {
-                            report = report.text("purr", purr);
-                        }
-                        report.emit(format);
-                    }
-                    Err(error) => return report_failure(format, &error),
+                if let Err(exit) = report_wake(&mut agent, format, &aor).await {
+                    return exit;
                 }
             }
 
@@ -204,7 +197,7 @@ struct Reachability {
 
 /// Read the reachability flags, refusing every combination that would otherwise parse and be
 /// dropped.
-fn reachability(args: &Args) -> Result<Reachability, String> {
+fn reachability(args: &Args<'_>) -> Result<Reachability, String> {
     let provider = args.value("push-provider");
     let prid = args.value("push-prid");
     let param = args.value("push-param");
@@ -278,6 +271,31 @@ fn reachability(args: &Args) -> Result<Reachability, String> {
     };
 
     Ok(Reachability { flow, device, wake })
+}
+
+/// Drive RFC 8599 §4.1.3's binding-refresh REGISTER and report the lease it returned.
+///
+/// A wake is reported as its own line rather than as fields on the registration's, because it is
+/// a second exchange with the registrar: what was true after registering stays true, and a caller
+/// reading the stream sees both answers instead of one overwritten by the other.
+async fn report_wake(agent: &mut UserAgent, format: Format, aor: &str) -> Result<(), Exit> {
+    match agent.woken().await {
+        Ok(pending) => {
+            let mut report = Report::new()
+                .text("status", "woken")
+                .text("aor", aor)
+                .seconds("expires", pending.lease.granted)
+                .seconds("refresh_in", pending.lease.refresh_after);
+            // §4.2: the PURR is the registrar's, assigned when it has one to give. Absent is the
+            // ordinary case, so the field appears only when it was actually handed out.
+            if let Some(purr) = &pending.purr {
+                report = report.text("purr", purr);
+            }
+            report.emit(format);
+            Ok(())
+        }
+        Err(error) => Err(report_failure(format, &error)),
+    }
 }
 
 fn report_failure(format: Format, error: &sipx_ua::Error) -> Exit {

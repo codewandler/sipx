@@ -188,6 +188,60 @@ async fn answer_register(
         .expect("answers");
 }
 
+/// Wait for a REGISTER, returning it with the address it came from.
+///
+/// The registration and the binding refresh a push triggers are the same wait, so it is written
+/// once. The timeout is what turns a REGISTER that never arrives into a named failure instead of
+/// a test that hangs until the harness kills it.
+async fn next_register(
+    registrar: &tokio::net::UdpSocket,
+    expected: &str,
+) -> (String, std::net::SocketAddr) {
+    let mut buf = vec![0u8; 65_535];
+    let (length, source) =
+        tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut buf))
+            .await
+            .unwrap_or_else(|_| panic!("{expected}"))
+            .expect("reads");
+    let request = String::from_utf8_lossy(&buf[..length]).into_owned();
+    assert!(request.starts_with("REGISTER"), "{expected}: {request}");
+    (request, source)
+}
+
+/// What `--outbound` with the push flags must put on the wire: RFC 5626's flow identity and RFC
+/// 8599's push parameters, on the one `Contact` a registrar will store.
+///
+/// This is the assertion that fails when nothing above `sipx-ua` builds the config — a plain
+/// REGISTER carries none of it.
+fn assert_outbound_push_register(request: &str) {
+    let contact = header_line(request, "Contact");
+    assert!(
+        contact.contains(";reg-id=1"),
+        "RFC 5626 §4.2's flow number is missing — nothing built the Outbound config: {contact}"
+    );
+    assert!(
+        contact.contains("+sip.instance=\"<urn:uuid:"),
+        "RFC 5626 §4.1's device identity: {contact}"
+    );
+    for param in ["pn-provider=webpush", "pn-prid=c1a5b3e7d9f2"] {
+        assert!(
+            contact.contains(param),
+            "RFC 8599 §4.1.2's {param} is missing: {contact}"
+        );
+    }
+    // §8.7 registers the pn-* parameters as *URI* parameters: inside the angle brackets, where a
+    // registrar's URI parser looks. Outside them a `;` starts a header parameter.
+    assert!(
+        contact.find("pn-provider=") < contact.rfind('>'),
+        "the push parameters belong inside the Contact's angle brackets: {contact}"
+    );
+    let supported = header_line(request, "Supported");
+    assert!(
+        supported.contains("outbound"),
+        "§4.2 makes offering the option tag a MUST: {supported}"
+    );
+}
+
 /// The acceptance test for S-29: a registration placed over an Outbound flow, and woken.
 ///
 /// `--outbound` must put RFC 5626's `reg-id` and `+sip.instance` on the `Contact` and the
@@ -224,58 +278,19 @@ async fn register_over_a_flow_keeps_it_and_a_push_wakes_it() {
         .spawn()
         .expect("spawns");
 
-    let mut buf = vec![0u8; 65_535];
-
     // The registration itself: one flow, and the push parameters in the Contact URI.
-    let (length, source) =
-        tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut buf))
-            .await
-            .expect("a REGISTER arrives")
-            .expect("reads");
-    let first = String::from_utf8_lossy(&buf[..length]).into_owned();
-    assert!(first.starts_with("REGISTER"), "{first}");
-
-    let contact = header_line(&first, "Contact");
-    assert!(
-        contact.contains(";reg-id=1"),
-        "RFC 5626 §4.2's flow number is missing — nothing built the Outbound config: {contact}"
-    );
-    assert!(
-        contact.contains("+sip.instance=\"<urn:uuid:"),
-        "RFC 5626 §4.1's device identity: {contact}"
-    );
-    for param in ["pn-provider=webpush", "pn-prid=c1a5b3e7d9f2"] {
-        assert!(
-            contact.contains(param),
-            "RFC 8599 §4.1.2's {param} is missing: {contact}"
-        );
-    }
-    // §8.7 registers the pn-* parameters as *URI* parameters: inside the angle brackets, where a
-    // registrar's URI parser looks. Outside them a `;` starts a header parameter.
-    assert!(
-        contact.find("pn-provider=") < contact.rfind('>'),
-        "the push parameters belong inside the Contact's angle brackets: {contact}"
-    );
-    let supported = header_line(&first, "Supported");
-    assert!(
-        supported.contains("outbound"),
-        "§4.2 makes offering the option tag a MUST: {supported}"
-    );
+    let (first, source) = next_register(&registrar, "a REGISTER arrives").await;
+    assert_outbound_push_register(&first);
 
     answer_register(&registrar, &first, source).await;
 
     // `--wake`: the push arrived, so §4.1.3's binding-refresh REGISTER must follow — same flow,
     // same push parameters, a later CSeq.
-    let (length, source) =
-        tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut buf))
-            .await
-            .expect("a binding-refresh REGISTER arrives after the wake")
-            .expect("reads");
-    let second = String::from_utf8_lossy(&buf[..length]).into_owned();
-    assert!(
-        second.starts_with("REGISTER"),
-        "§4.1.3's answer to a push is a binding-refresh REGISTER: {second}"
-    );
+    let (second, source) = next_register(
+        &registrar,
+        "§4.1.3's answer to a push is a binding-refresh REGISTER",
+    )
+    .await;
     let refreshed = header_line(&second, "Contact");
     assert!(
         refreshed.contains(";reg-id=1"),
