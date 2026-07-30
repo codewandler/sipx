@@ -1138,39 +1138,65 @@ mod tests {
                 .expect("a Via sent-by holds an IPv6reference too");
         assert!(matches!(host, Host::Ip(ip) if ip == expected));
         assert_eq!(port, Some(5060));
+
+        // RFC 2373's `hexpart` offers two productions that can end in "::", and both derive the
+        // three-colon form. §4.10's own message exercises `hexseq "::"`; these are the other one
+        // (empty `hexseq`) and the same one at full width. Covered here through `Uri::parse` as
+        // well as in the spec-table pin, so the carve-out is known to work on the R-URI path.
+        for (input, want) in [
+            ("sip:user@[:::192.0.2.1]", "::192.0.2.1"),
+            ("sip:user@[1:2:3:4:5:::192.0.2.1]", "1:2:3:4:5::192.0.2.1"),
+        ] {
+            let want = want.parse::<IpAddr>().expect("a valid RFC 4291 address");
+            match uri(input).host() {
+                Some(Host::Ip(ip)) => assert_eq!(*ip, want, "{input}"),
+                other => panic!("{input} should be an IPv6 literal, got {other:?}"),
+            }
+        }
     }
 
     /// The narrowness is the story: `:::` is read as `::` in exactly one position, and every other
     /// place it can appear stays a typed error rather than an address parsed on a guess.
     #[test]
     fn three_colons_anywhere_but_before_an_embedded_ipv4_address_stay_rejected() {
-        let rejected = [
+        // The variant is asserted, not merely the failure. `is_err()` alone would have let the
+        // last two rows pass while the spec named the wrong error for them, and the variant is
+        // what the transaction layer picks a response code from.
+        let rejected: &[(&str, UriError)] = &[
             // No embedded IPv4 address at all — the derivation cannot produce ':::' here.
-            "sip:user@[2001:db8:::10]",
-            "sip:user@[2001:db8:::]",
-            "sip:user@[:::]",
+            ("sip:user@[2001:db8:::10]", UriError::Host),
+            ("sip:user@[2001:db8:::]", UriError::Host),
+            ("sip:user@[:::]", UriError::Host),
             // ':::' before something that only looks like one.
-            "sip:user@[2001:db8:::192.0.2]",
-            "sip:user@[2001:db8:::192.0.2.1.5]",
-            "sip:user@[2001:db8:::192.0.2.256]",
-            "sip:user@[2001:db8:::0192.0.2.1]",
+            ("sip:user@[2001:db8:::192.0.2]", UriError::Host),
+            ("sip:user@[2001:db8:::192.0.2.1.5]", UriError::Host),
+            ("sip:user@[2001:db8:::192.0.2.256]", UriError::Host),
+            ("sip:user@[2001:db8:::0192.0.2.1]", UriError::Host),
             // A fourth colon is not the derivation; it leaves a colon on the tail.
-            "sip:user@[2001:db8::::192.0.2.1]",
-            "sip:user@[::::192.0.2.1]",
+            ("sip:user@[2001:db8::::192.0.2.1]", UriError::Host),
+            ("sip:user@[::::192.0.2.1]", UriError::Host),
             // Two occurrences, and a '::' run already spent — the rewrite must not create a
             // second one and have it accepted.
-            "sip:user@[2001:db8:::192.0.2.1:::192.0.2.2]",
-            "sip:user@[2001:db8::1:::192.0.2.1]",
+            (
+                "sip:user@[2001:db8:::192.0.2.1:::192.0.2.2]",
+                UriError::Host,
+            ),
+            ("sip:user@[2001:db8::1:::192.0.2.1]", UriError::Host),
             // ':::' in the middle rather than before the embedded address.
-            "sip:user@[2001:::db8:192.0.2.1]",
-            // The tolerance must not leak into the unbracketed host rule.
-            "sip:user@2001:db8:::192.0.2.1",
+            ("sip:user@[2001:::db8:192.0.2.1]", UriError::Host),
+            // Unbracketed, and it fails *before* any address parser sees it: the host is split at
+            // its first ':' and `db8:::192.0.2.1` is rejected as a port. The valid two-colon
+            // address below fails identically, which is the point — RFC 3261 §19.1.1's brackets
+            // are what make an IPv6 address reachable at all, not the carve-out.
+            ("sip:user@2001:db8:::192.0.2.1", UriError::Port),
+            ("sip:user@2001:db8::192.0.2.1", UriError::Port),
         ];
-        for input in rejected {
-            let got = Uri::parse(Bytes::from(input.to_owned()));
-            assert!(
-                got.is_err(),
-                "{input:?} is not RFC 5118 §4.10's construct and must stay a typed error, \
+        for (input, expected) in rejected {
+            let got = Uri::parse(Bytes::from((*input).to_owned()));
+            assert_eq!(
+                got.as_ref().err(),
+                Some(expected),
+                "{input:?} is not RFC 5118 §4.10's construct and must stay {expected:?}, \
                  got {got:?}"
             );
         }

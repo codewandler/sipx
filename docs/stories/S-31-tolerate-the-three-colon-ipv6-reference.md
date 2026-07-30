@@ -92,3 +92,53 @@ short/long/out-of-range IPv4 tails.
 
 **`docs/maturity.md` drifts** and is fenced: RFC 5118 moves from partial to implemented in its
 coverage table. Left for the coordinator to regenerate with `./scripts/maturity.py`.
+
+## Progress — rework round 1
+
+Review found the code correct and the *artifact* wrong. Both findings were real; both fixed.
+
+**B1 — §4.8's table named the wrong error for the unbracketed row.** It said `UriError::Host`;
+the answer is `UriError::Port`. The cause is structural, not a typo, and worth the paragraph the
+spec now gives it: an unbracketed `host` is split at its **first** `:` (`uri.rs:709-711`), so
+`db8:::192.0.2.1` goes to `parse_port` and the text never reaches `parse_ipv6_reference` at all.
+
+I did not just correct the variant. The row as written implied the carve-out was declining to
+apply, which is the wrong lesson — so the table now carries the **valid** two-colon address
+unbracketed as a second row, failing identically as `Port`. That pair says what the row is really
+about: RFC 3261 §19.1.1's brackets are what make an IPv6 address reachable, and RFC 5118 §4.2 is
+the message that omits them. A reader can no longer take the row as a statement about `:::`.
+
+**B1's second half — the table was unchecked.** Nine checkable claims, and the suite asserted only
+`is_err()`. Fixed at both levels:
+- `three_colon_table_rows_parse_exactly_as_the_spec_says` (new file
+  `crates/sipx-sip/tests/ipv6_reference_tolerance.rs`) transcribes every row and asserts the exact
+  `Ok` address or exact `UriError` variant. Verified it catches the real defect: flipping that row
+  back to `Host` fails with `left: Some(Port) right: Some(Host)`.
+- `three_colons_anywhere_but_before_an_embedded_ipv4_address_stay_rejected` in `uri.rs` upgraded
+  from `is_err()` to exact-variant assertions on all fifteen rows.
+
+**B2 — two accepted shapes were in neither table nor test.** Both are RFC 2373's *other* `hexpart`
+production, so they were inside the stated rule rather than holes, but an unenumerated table is the
+same problem one step removed. `[:::192.0.2.1]` and `[1:2:3:4:5:::192.0.2.1]` are now table rows,
+pinned in the table test, and exercised through `Uri::parse` in the `uri.rs` positive test. §4.8
+now says explicitly that **both** `hexpart` productions are covered and nothing else is.
+
+**The narrowness is now a permanent guard, not a review artefact.**
+`the_tolerance_admits_nothing_but_the_rfc2373_derivation` enumerates 21 heads x 6 separators x 14
+tails = 1764 combinations (1428 distinct references) and asserts the three-way property: accepted
+by both parsers means identical addresses; accepted only by sipx means exactly one `:::`, no
+`::::`, an `IPv4address` tail, a `::`-free `hexseq` head, and a valid two-colon rewrite; rejected
+by sipx means rejected by RFC 4291 too. It also pins the **whole** beyond-RFC-4291 set as 24
+enumerated strings, so a widening cannot land as a changed count — it shows up as a diff of
+literal addresses.
+
+Numbers are measured on **this** grid, not carried over from the review's: 86 plain accepts and 24
+distinct carve-out accepts here, against the review's 115/27 on its own head and tail lists. I did
+not copy those figures; my first attempt asserted them and failed, which is the test doing its job.
+
+**Test suite, not `fuzz/`, and the file says why.** `fuzz/fuzz_targets/parse_uri.rs` already hunts
+panics on arbitrary URI bytes — the right tool for "does anything crash". This is the other kind of
+question, "is the accepted set exactly this set", which is decidable over a fixed grid, runs in
+under a millisecond, and is only worth anything if it runs on every commit.
+
+`docs/maturity.md` still drifts and is still fenced: wire layer implemented 2 to 3, partial 3 to 2.

@@ -192,23 +192,41 @@ written against RFC 3261 and emit the third colon, and RFC 5118 §4.10 is normat
 "following the Robustness Principle [RFC1122], an implementation must tolerate both of the above
 constructs."
 
-sipx tolerates it as a **single documented carve-out**, not by relaxing the host rule:
+sipx tolerates it as a **single documented carve-out**, not by relaxing the host rule. Both of
+RFC 2373's `hexpart` productions that can end in `"::"` are covered, and nothing else is:
 
-| Reference | Result |
-|---|---|
-| `[2001:db8::192.0.2.1]` | `2001:db8::192.0.2.1` — RFC 4291, the correct construct |
-| `[2001:db8:::192.0.2.1]` | `2001:db8::192.0.2.1` — the §4.10 carve-out |
-| `[2001:db8:::10]` | `UriError::Host` — no embedded IPv4 address |
-| `[2001:db8::::192.0.2.1]` | `UriError::Host` — four colons is not the derivation |
-| `[2001:db8::1:::192.0.2.1]` | `UriError::Host` — the rewrite would need two `::` runs |
-| `2001:db8:::192.0.2.1` (unbracketed) | `UriError::Host` — the carve-out is inside `[` `]` only |
+| `host` | Result | Why |
+|---|---|---|
+| `[2001:db8::192.0.2.1]` | `2001:db8::192.0.2.1` | RFC 4291, the correct construct |
+| `[2001:db8:::192.0.2.1]` | `2001:db8::192.0.2.1` | carve-out, `hexpart = hexseq "::"` |
+| `[1:2:3:4:5:::192.0.2.1]` | `1:2:3:4:5::192.0.2.1` | carve-out, the same production at full width |
+| `[:::192.0.2.1]` | `::192.0.2.1` | carve-out, `hexpart = "::"` with an empty `hexseq` |
+| `[2001:db8:::10]` | `UriError::Host` | no embedded IPv4 address, so not the derivation |
+| `[2001:db8::::192.0.2.1]` | `UriError::Host` | four colons is not the derivation |
+| `[2001:db8::1:::192.0.2.1]` | `UriError::Host` | the rewrite would need two `::` runs |
+| `2001:db8:::192.0.2.1` | `UriError::Port` | unbracketed — see below |
+| `2001:db8::192.0.2.1` | `UriError::Port` | unbracketed, and *valid* under RFC 4291 |
 
-**[sipx]** The mechanism is what keeps the table's bottom four rows honest: one `:::` is rewritten
-to `::` and **retried through the same RFC 4291 parser**, which still has to accept the result.
-There is no second address grammar, so the accepted language is exactly RFC 4291 plus that one
-derivation. Rationale: reaching for a more permissive address parser would trade one unmet MUST
-for an unmeasured surface on unauthenticated input, and sipx's posture is typed errors on network
-input.
+Every row is pinned by `three_colon_table_rows_parse_exactly_as_the_spec_says` in
+`crates/sipx-sip/tests/ipv6_reference_tolerance.rs`, asserting the exact `Ok` address or the exact
+`UriError` variant. A table of checkable claims that nothing checks is the failure mode
+`check-pool-key.py` exists to prevent, and this table is small enough to hold to the same standard.
+
+**[sipx]** The last two rows fail for a reason that is *not* the carve-out declining to apply, and
+the pair is in the table to say so. An unbracketed `host` is split at its **first** `:` and
+everything after it is a port, so `db8:::192.0.2.1` is rejected by the port rule and the text never
+reaches an address parser at all. The valid two-colon address fails identically. That is the
+bracket requirement doing its job — RFC 3261 §19.1.1 requires `[` `]` around an IPv6 address in a
+URI, and RFC 5118 §4.2 is the message that omits them, the one message in that corpus the RFC
+titles invalid.
+
+**[sipx]** The mechanism is what keeps the three `UriError::Host` rows honest: one `:::` is
+rewritten to `::` and **retried through the same RFC 4291 parser**, which still has to accept the
+result. There is no second address grammar, so the accepted language is exactly RFC 4291 plus that
+one derivation — enumerated and asserted, not merely intended, by
+`the_tolerance_admits_nothing_but_the_rfc2373_derivation` in the same file. Rationale: reaching for
+a more permissive address parser would trade one unmet MUST for an unmeasured surface on
+unauthenticated input, and sipx's posture is typed errors on network input.
 
 **[sipx] Tolerated is not normalised.** RFC 5118 §4.10 permits re-serializing the three-colon form
 as two; sipx does not. A parsed URI keeps its verbatim bytes (`Uri::raw`), so a message forwarded
