@@ -105,8 +105,8 @@ Combinations that cannot work are usage errors (exit 2), never parsed and droppe
 pair, `--push-param` alone, `--wake` without the push flags, `--instance` without `--outbound`,
 an `--instance` that is not a URN (RFC 5626 §4.1's grammar is `instance-val = urn`), and a
 `--push-prid` that a URI parameter cannot hold. A valued flag left without a value — `--instance`
-with nothing after it, or `--target=` — is refused by [the rule above](#cli-reference) for every
-command, not just this one.
+with nothing after it, or `--target=` — is refused for every command by the rule stated at the top
+of this page, not by anything specific to `register`.
 
 ## `sipx peers`
 
