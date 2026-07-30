@@ -64,10 +64,31 @@ async fn start_answerer(
     String,
     tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
 ) {
+    start_answerer_in(None, extra).await
+}
+
+/// As [`start_answerer`], but running the answerer in a directory of the test's choosing.
+///
+/// Only [`no_capture_flag_means_no_file`] needs this, and it needs it for a specific reason: an
+/// assertion that *no* file was written has to know where a file could have appeared, and a file
+/// nobody named can only land at a path compiled into the binary — which is a relative one. Giving
+/// the process an empty directory of its own turns "no file at this path" into "no file at all".
+async fn start_answerer_in(
+    dir: Option<&std::path::Path>,
+    extra: &[&str],
+) -> (
+    tokio::process::Child,
+    String,
+    tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+) {
     let mut args = vec!["answer", "--local", "127.0.0.1:0", "--json", "--wait", "20"];
     args.extend_from_slice(extra);
 
-    let mut child = sipx()
+    let mut command = sipx();
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let mut child = command
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1259,33 +1280,28 @@ async fn a_valued_flag_given_no_value_is_refused_by_every_command() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **`X-18`'s command-line half.** `--capture <path>` records the signalling of a real call.
+/// Place one real call against a fresh answerer, both processes running in `dir`, and return only
+/// once the answerer has exited cleanly.
 ///
-/// The story's reason for wanting this on the command line rather than only in a test is the
-/// vision's "testable from a shell": a capture that can only be switched on by editing code is
-/// unavailable in the incident it exists for. So this runs the built binary and reads the file a
-/// shell would be left holding.
+/// The two capture tests below need exactly the same thing and must not disagree about what it is.
+/// A capture records signalling, so a test about capture that places no call has no subject; and the
+/// answerer's *exit* is what flushes the writer, so nothing may be read before it. `X-45` factored
+/// this out of the positive test rather than give the negative one a harness of its own, because two
+/// harnesses drift and a pair that has drifted is no longer a pair.
 ///
-/// The assertion is a substring search over the whole file rather than a parsed pcapng, and that is
-/// deliberate here: `sipx-transport`'s own tests parse the format block by block, so what is left to
-/// establish at this layer is only that the flag reached `Config::capture` at all. Duplicating the
-/// reader would test the reader twice and the flag once.
-#[tokio::test]
-async fn the_capture_flag_records_the_signalling_of_a_call() {
-    let dir = scratch("capture-flag");
-    let capture = dir.join("signalling.pcapng");
-
-    let (mut answerer, address, mut lines) = start_answerer(&[
-        "--duration",
-        "1",
-        "--capture",
-        capture.to_str().expect("a path"),
-    ])
-    .await;
+/// Every wait here is causal — the answerer announces its port, the caller exits, the answerer
+/// prints its result line, the answerer exits — and the durations are bounds on failure, not
+/// measurements (`X-28`, `X-29`). The exception is `--duration 1`, which is neither: it is how long
+/// the call lasts before either end hangs up.
+async fn place_a_call(dir: &std::path::Path, answerer_flags: &[&str]) {
+    let mut args = vec!["--duration", "1"];
+    args.extend_from_slice(answerer_flags);
+    let (mut answerer, address, mut lines) = start_answerer_in(Some(dir), &args).await;
 
     let caller = tokio::time::timeout(
         Duration::from_secs(40),
         sipx()
+            .current_dir(dir)
             .args([
                 "dial",
                 &format!("sip:answer@{address}"),
@@ -1314,12 +1330,35 @@ async fn the_capture_flag_records_the_signalling_of_a_call() {
         .expect("no timeout")
         .expect("a line")
         .expect("the result line");
-    assert!(answered.contains("\"status\":\"answered\""), "{answered}");
+    assert!(
+        answered.contains("\"status\":\"answered\""),
+        "the call has to have happened for anything below to be about a call: {answered}"
+    );
 
-    // The capture is read only after the answerer has exited, which is what flushes it — and the
-    // exit is now asserted rather than discarded, so an empty capture cannot be an answerer that
-    // died holding it (`X-40`).
     answerer_exits_cleanly(&mut answerer).await;
+}
+
+/// **`X-18`'s command-line half.** `--capture <path>` records the signalling of a real call.
+///
+/// The story's reason for wanting this on the command line rather than only in a test is the
+/// vision's "testable from a shell": a capture that can only be switched on by editing code is
+/// unavailable in the incident it exists for. So this runs the built binary and reads the file a
+/// shell would be left holding.
+///
+/// The assertion is a substring search over the whole file rather than a parsed pcapng, and that is
+/// deliberate here: `sipx-transport`'s own tests parse the format block by block, so what is left to
+/// establish at this layer is only that the flag reached `Config::capture` at all. Duplicating the
+/// reader would test the reader twice and the flag once.
+#[tokio::test]
+async fn the_capture_flag_records_the_signalling_of_a_call() {
+    let dir = scratch("capture-flag");
+    let capture = dir.join("signalling.pcapng");
+
+    // The capture is read only after the call has run its course and the answerer has exited, which
+    // is what flushes it — `place_a_call` will not return before then, and it asserts the exit
+    // rather than discarding it, so an empty capture cannot be an answerer that died holding it
+    // (`X-40`).
+    place_a_call(&dir, &["--capture", capture.to_str().expect("a path")]).await;
 
     let bytes = std::fs::read(&capture).expect("the capture the flag asked for exists");
     assert!(
@@ -1343,21 +1382,58 @@ async fn the_capture_flag_records_the_signalling_of_a_call() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Off unless asked for, at the command line as well as in the library: a run with no `--capture`
-/// writes no file. Without this the flag could be ignored entirely and the test above would be the
-/// only thing that noticed — and it would pass if capture were unconditional.
+/// Off unless asked for, at the command line as well as in the library: a real call, placed with no
+/// `--capture`, leaves nothing on disk.
+///
+/// **This test used to be unable to observe either half of its own name (`X-45`).** It killed the
+/// answerer the instant it announced its port, and then asserted that one path did not exist. Both
+/// halves were vacuous. A capture is written while signalling flows, so a run with no call cannot
+/// see a capture being written; and the path it watched was one nothing would ever write to, because
+/// a capture nobody asked for is given no path and can only fall back to a name compiled into the
+/// binary. Sabotaging `apply_capture` to capture unconditionally — the exact defect this guards —
+/// left the old test green.
+///
+/// So both halves are fixed here. A **real call** happens, because signalling crossing the wire is
+/// the only thing a capture could record. And the assertion is over the **directory** the two
+/// processes ran in rather than a path chosen in advance: an unconditional capture has to put its
+/// file somewhere, and absent a flag that somewhere is a relative default, so an empty directory
+/// catches it whatever it is called. (A compiled-in *absolute* default would still escape. That is
+/// the known edge of this assertion, and a far less likely regression than a bare file name.)
+///
+/// The **positive control comes first and is what makes the negative mean anything**: without it,
+/// "no file appeared" is equally consistent with capture being broken outright, which is the failure
+/// mode a test named for the flag being off is least able to notice. The neighbour above asserts
+/// what a capture *contains*; the control here asserts only that this same call, in this same
+/// directory, does produce one when asked — which is the claim the absence below is measured
+/// against.
 #[tokio::test]
 async fn no_capture_flag_means_no_file() {
     let dir = scratch("capture-absent");
-    let unwanted = dir.join("signalling.pcapng");
+    // A directory each, so neither run can see the other's files.
+    let asked = dir.join("asked");
+    let unasked = dir.join("unasked");
+    std::fs::create_dir_all(&asked).expect("a directory");
+    std::fs::create_dir_all(&unasked).expect("a directory");
 
-    let (mut answerer, _address, _lines) = start_answerer(&["--duration", "1"]).await;
-    let _ = answerer.kill().await;
-
+    let wanted = asked.join("signalling.pcapng");
+    place_a_call(&asked, &["--capture", wanted.to_str().expect("a path")]).await;
+    let control = std::fs::read(&wanted).expect("the control capture exists");
     assert!(
-        !unwanted.exists(),
-        "a capture nobody asked for was written to {}",
-        unwanted.display()
+        String::from_utf8_lossy(&control).contains("INVITE sip:"),
+        "the control captured no signalling, so an absence below would prove nothing about the flag"
     );
+
+    place_a_call(&unasked, &[]).await;
+    let left_behind: Vec<std::path::PathBuf> = std::fs::read_dir(&unasked)
+        .expect("the directory the call ran in")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    assert!(
+        left_behind.is_empty(),
+        "the same call, with no --capture, wrote {left_behind:?} — and the control above proves \
+         this run would have produced a capture had one been asked for"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
