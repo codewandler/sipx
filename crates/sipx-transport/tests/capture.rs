@@ -461,17 +461,14 @@ async fn a_datagram_that_does_not_parse_is_still_captured() {
     assert_eq!(udp.requests_in, 0, "a malformed datagram is not a request");
 }
 
-/// **The security review's three leaks, closed and asserted the way it found them**: a real socket
-/// into a real endpoint, then the file on disk searched for the secret.
+/// The fixtures for [`no_legal_spelling_of_a_credential_reaches_the_file`]: what the spelling is, the
+/// raw message, and the secret that must not appear in the file.
 ///
-/// Each of these spellings is legal SIP that a literal `"authorization:"` prefix does not match, and
-/// each one put a digest response into a capture in cleartext. The unit tests in `src/capture.rs`
-/// cover the rule; this covers the *path* — that the bytes reach the file through redaction and not
-/// around it.
-#[tokio::test]
-async fn no_legal_spelling_of_a_credential_reaches_the_file() {
-    // (what it is, the raw message, the secret that must not appear)
-    let cases: [(&str, String, &str); 5] = [
+/// Every row is legal SIP that a literal `"authorization:"` prefix does not match, and every one of
+/// them put a credential into a capture in cleartext. Separate from the test only because the table is
+/// long — adding a spelling means adding a row here.
+fn credential_spellings() -> [(&'static str, String, &'static str); 5] {
+    [
         (
             "folded onto a continuation line",
             [
@@ -541,10 +538,20 @@ async fn no_legal_spelling_of_a_credential_reaches_the_file() {
             .join("\r\n"),
             "BEARERTOKEN0007",
         ),
-    ];
+    ]
+}
 
+/// **The security review's leaks, closed and asserted the way it found them**: a real socket into a
+/// real endpoint, then the file on disk searched for the secret.
+///
+/// The unit tests in `src/capture.rs` cover the *rule*; this covers the *path* — that the bytes reach
+/// the file through redaction rather than around it. Every spelling is reported together rather than
+/// stopping at the first, because a fix that closes three and leaves the fourth is the failure this
+/// test exists to prevent.
+#[tokio::test]
+async fn no_legal_spelling_of_a_credential_reaches_the_file() {
     let mut leaked: Vec<String> = Vec::new();
-    for (spelling, message, secret) in cases {
+    for (spelling, message, secret) in credential_spellings() {
         let path = capture_path(&format!("leak-{secret}"));
         let (endpoint, _incoming) = recording(&path).await;
 

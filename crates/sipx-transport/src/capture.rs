@@ -15,11 +15,15 @@
 //! may fall behind but cannot reorder what it was given.
 //!
 //! **A capture is a security surface.** It is written to be handed to someone outside the trust
-//! boundary it was recorded in, so [`redact`] removes the secrets that would still be valid in
-//! another person's hands: digest responses, SRTP master keys, push tokens, instance URNs. What it
-//! cannot remove is identity — `To`, `From` and the SDP addresses survive, and they are enough to
-//! say who called whom and from where. Redaction makes a capture safe to *attach*, not safe to
-//! publish. See §13.3.
+//! boundary it was recorded in, so redaction removes the secrets that would still be valid in
+//! another person's hands: digest responses, opaque `Bearer` and `Basic` tokens, SRTP master keys,
+//! push tokens, instance URNs. What it cannot remove is identity — `To`, `From` and the SDP
+//! addresses survive, and they are enough to say who called whom and from where. Redaction makes a
+//! capture safe to *attach*, not safe to publish. See §13.3, and the section comment further down
+//! for why the scan is structural rather than a header-name prefix.
+//!
+//! Redaction is internal on purpose: it is a policy that grows as new credential-bearing headers are
+//! registered, and publishing it would make each addition a breaking change under `A-8`.
 
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
