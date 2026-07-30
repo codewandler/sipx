@@ -577,14 +577,17 @@ impl StreamStats {
         jitter
     }
 
-    /// Produce a report block, and reset the per-interval counters.
+    /// The block a report would carry right now, leaving the interval open.
     ///
-    /// The fraction is loss *since the last report*, not since the stream began — a call that
-    /// lost heavily at the start and is now clean must report clean, or nobody can see it
-    /// recover.
-    pub fn report_block(&mut self) -> ReportBlock {
-        let expected = self.expected();
-        let expected_interval = expected.saturating_sub(self.expected_at_last_report);
+    /// This is the one to read to *look* at the numbers. The interval belongs to the reports
+    /// actually sent — RFC 3550 §6.4.1 defines `fraction_lost` as loss since the previous SR or
+    /// RR *packet*, not since somebody last enquired — so closing it is [`Self::report_block`]'s
+    /// job and reading is free. `M-33`: while these were the same function, an application
+    /// polling for a live display closed windows nobody was told about, and the next real report
+    /// described only what had arrived since the display was drawn.
+    #[must_use]
+    pub fn pending_report_block(&self) -> ReportBlock {
+        let expected_interval = self.expected().saturating_sub(self.expected_at_last_report);
         let received_interval = self.received.saturating_sub(self.received_at_last_report);
         let lost_interval = i64::try_from(expected_interval).unwrap_or(0)
             - i64::try_from(received_interval).unwrap_or(0);
@@ -596,9 +599,6 @@ impl StreamStats {
             u8::try_from(scaled.clamp(0, 255)).unwrap_or(0)
         };
 
-        self.expected_at_last_report = expected;
-        self.received_at_last_report = self.received;
-
         ReportBlock {
             ssrc: self.ssrc,
             fraction_lost: fraction,
@@ -608,6 +608,21 @@ impl StreamStats {
             last_sender_report: 0,
             delay_since_last_sender_report: 0,
         }
+    }
+
+    /// Produce a report block **to send**, closing the interval and starting the next.
+    ///
+    /// The fraction is loss *since the last report*, not since the stream began — a call that
+    /// lost heavily at the start and is now clean must report clean, or nobody can see it
+    /// recover. That is what the `&mut` is: only the path that puts the block on the wire may
+    /// call this, because a caller that only wants to read the numbers and closes an interval
+    /// anyway hides that interval's loss from the far end for good. Read with
+    /// [`Self::pending_report_block`] instead.
+    pub fn report_block(&mut self) -> ReportBlock {
+        let block = self.pending_report_block();
+        self.expected_at_last_report = self.expected();
+        self.received_at_last_report = self.received;
+        block
     }
 }
 
@@ -892,6 +907,46 @@ mod tests {
         assert_eq!(
             second.cumulative_lost, 4,
             "but the cumulative count still remembers the four lost earlier"
+        );
+    }
+
+    /// Which of the two readers closes the interval, asserted rather than described (`M-33`).
+    ///
+    /// The interval belongs to the reports that were sent: `pending_report_block` may be called
+    /// any number of times and describe the same window each time, and only `report_block` moves
+    /// the boundary. A single function that did both let a caller reading the numbers empty the
+    /// window the next report was going to describe.
+    #[test]
+    fn only_sending_a_report_closes_the_interval() {
+        let mut stats = StreamStats::new(7);
+        let mut arrival = 0u32;
+        for sequence in 1u16..=10 {
+            arrival += 160;
+            if sequence == 4 || sequence == 8 {
+                continue;
+            }
+            stats.on_packet(sequence, u32::from(sequence) * 160, arrival);
+        }
+
+        // Two of the ten expected, in 256ths — and the same answer however often it is asked.
+        let first = stats.pending_report_block();
+        assert_eq!(first.fraction_lost, 51, "{first:?}");
+        assert_eq!(
+            stats.pending_report_block(),
+            first,
+            "reading is not a side effect"
+        );
+        assert_eq!(stats.report_block(), first, "and describes what is sent");
+
+        // Now the interval has moved: nothing has arrived since, so there is nothing to report.
+        let after = stats.pending_report_block();
+        assert_eq!(
+            after.fraction_lost, 0,
+            "a closed interval is empty: {after:?}"
+        );
+        assert_eq!(
+            after.cumulative_lost, 2,
+            "while the cumulative count spans the stream: {after:?}"
         );
     }
 
