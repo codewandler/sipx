@@ -64,6 +64,8 @@ _This is the layer applications actually program against, so it is the one that 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
 - [M-31 — Make the answer and the negotiated codec agree, once](M-31-the-answer-and-the-negotiated-codec-can-disagree.md) · Media · found by M-30's review — `sipx-sdp/src/answer.rs:423-427` compares an rtpmap clock rate as a string while `codec_named` parses it to `u32`, so an offer with `a=rtpmap:0 PCMU/08000` settles on PCMU while the answer names only `8`
+- [M-32 — Give the media path's discards the same counters the transport got](M-32-media-discards-are-uncounted.md) · Media · X-18 counted every transport discard and refused this half rather than invent the answer — `sipx-transport` cannot depend on `sipx-media`, so it needs a shared crate underneath both or a parallel type of `ShedCounts`' shape; census below, including a DTMF digit dropped with neither a log nor a counter
+- [M-33 — Settle whether reading a report block consumes the reporting window](M-33-two-comments-disagree-about-consuming-a-reporting-window.md) · Media · found by X-18 — `session.rs:1404-1410` and `:1364-1367` carry contradictory comments about whether `report_block()` consumes a reporting window; one is wrong, and which one decides whether `MediaSession::stats()` is safe to poll
 - [M-28 — Offer DTLS-SRTP from a call, and stop claiming it until then](M-28-dtls-srtp-unreachable-from-a-call.md) · Media · found by X-27 — dial hardcodes SDES, so sipx cannot offer DTLS-SRTP at all, while RFC 5763 and 5764 are both marked implemented with both roles
 
 ### Quic
