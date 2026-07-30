@@ -7,38 +7,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+## [1.0.0-alpha.3] — 2026-07-30
 
-- **M12's exit criterion has been checked against evidence, and it is one clause short (`X-51`)** —
-  all four of M12's stories are closed, which prompted the question and is not an answer to it. Three
-  clauses hold as written: the RFC 5118 corpus is fully classified with an empty deviation list, the
-  interop matrix runs the identical test list against two independent peers with neither declaring a
-  divergence, and the fuzzer drives the transaction layer with built message sequences rather than
-  bytes over a corpus proven unmodified.
-  - **The third does not.** "Every discard in the signalling path is counted and exportable next to a
-    capture" fails in two of its own words: *every* reaches only `sipx-transport`, whose guard scans
-    that crate and no other, while `sipx-call` drops a call event uncounted and discards six send
-    results; and *next to* is false outside the process, because the counters are read by no shipped
-    binary while `--capture` is on three commands with no counterpart for the numbers. Filed as
-    `X-54`.
-  - `M-32` staying open does **not** hold M12 open — the clause says *signalling* path, and the media
-    counters are outside it. That was read off the clause's words rather than assumed either way.
-
-### Fixed
-
-- **`sip-tls.md` no longer claims a minimum-TLS-version knob that nobody built (`X-46`)** — §3.2
-  listed the minimum protocol version as configurable, and neither `ClientTls` nor `ServerTls` takes
-  a version. The spec was corrected rather than the knob built, for a reason worth recording: above
-  the floor its only representable value is "1.3 only", and the *absence* of a version-selecting API
-  is currently what evidences the RFC 8996 and 8446 rows — `docs/rfc/README.md` says those are
-  "proved by the absence of an API", so building the knob would have falsified three documents to
-  satisfy a fourth.
-  - The sweep of §3.2's other entries found a second inaccuracy: trust anchors were described as
-    defaulting to the system roots, when there is no default at all — anchors are required and an
-    empty set is refused at construction.
-  - **The claim is now guarded rather than merely corrected.** A new test holds every §3.2 entry
-    against the public surface of `tls.rs`, so a future entry naming an API that does not exist fails
-    the build. That is the difference between fixing this instance and fixing the class.
+**One breaking change, and four measurements that turned out not to measure what they said.**
+`collect_digits` now takes two durations, because one window spent on two questions is the defect
+`X-40` already found a layer up. The rest of this release is the same theme applied to the
+project's own instruments: two tests that could not fail for the reason they existed, a spec
+claiming a knob nobody built, and two milestones whose exit criteria were read against story
+statuses rather than against tests — one of which turned out not to be met after all.
 
 ### Changed — breaking
 
@@ -62,7 +38,54 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   many seconds") than the old early return was, but scripts that relied on the answerer returning as
   soon as the audio stopped will see calls last longer.
 
+### Changed
+
+- **M12's exit criterion has been checked against evidence, and it is one clause short (`X-51`)** —
+  all four of M12's stories are closed, which prompted the question and is not an answer to it. Three
+  clauses hold as written: the RFC 5118 corpus is fully classified with an empty deviation list, the
+  interop matrix runs the identical test list against two independent peers with neither declaring a
+  divergence, and the fuzzer drives the transaction layer with built message sequences rather than
+  bytes over a corpus proven unmodified.
+  - **The third does not.** "Every discard in the signalling path is counted and exportable next to a
+    capture" fails in two of its own words: *every* reaches only `sipx-transport`, whose guard scans
+    that crate and no other, while `sipx-call` drops a call event uncounted and discards six send
+    results; and *next to* is false outside the process, because the counters are read by no shipped
+    binary while `--capture` is on three commands with no counterpart for the numbers. Filed as
+    `X-54`.
+  - `M-32` staying open does **not** hold M12 open — the clause says *signalling* path, and the media
+    counters are outside it. That was read off the clause's words rather than assumed either way.
+
+
+- **M10's exit criterion is stated once, and it does not require TURN (`X-50`)** — `docs/roadmap.md`
+  gave the milestone two exit criteria that disagreed: a `Done when` sentence about a media path
+  symmetric RTP cannot provide, and an epic heading scoping M10 to all six children of `M-16`,
+  including RFC 8656. The sentence governs. `M-24`'s relayed candidate is in the ICE epic and in no
+  milestone, and the third clause is settled in writing as *some* endpoints symmetric RTP cannot
+  connect rather than *any* — both ends behind symmetric NAT is precisely the residue a relay buys.
+  - **M10 is still not recorded as reached, and the reason is not TURN.** Checked against tests
+    rather than story statuses, only the ICE clause is demonstrated as written: the GRUU test is an
+    `OPTIONS` to a single agent rather than two registrations of one address of record each taking a
+    call, and the push test stops when the INVITE arrives without anything answering it. `X-52`
+    carries that remaining distance.
+  - The same question is now open for M12, whose four stories are all closed and whose `Done when`
+    has never been checked against evidence (`X-51`).
+
 ### Fixed
+
+- **`sip-tls.md` no longer claims a minimum-TLS-version knob that nobody built (`X-46`)** — §3.2
+  listed the minimum protocol version as configurable, and neither `ClientTls` nor `ServerTls` takes
+  a version. The spec was corrected rather than the knob built, for a reason worth recording: above
+  the floor its only representable value is "1.3 only", and the *absence* of a version-selecting API
+  is currently what evidences the RFC 8996 and 8446 rows — `docs/rfc/README.md` says those are
+  "proved by the absence of an API", so building the knob would have falsified three documents to
+  satisfy a fourth.
+  - The sweep of §3.2's other entries found a second inaccuracy: trust anchors were described as
+    defaulting to the system roots, when there is no default at all — anchors are required and an
+    empty set is refused at construction.
+  - **The claim is now guarded rather than merely corrected.** A new test holds every §3.2 entry
+    against the public surface of `tls.rs`, so a future entry naming an API that does not exist fails
+    the build. That is the difference between fixing this instance and fixing the class.
+
 
 - **`verbose_logging_stays_off_stdout` can now observe logging at all (`X-53`)** — the second
   instance of the defect above, found by the same sweep. It ran a command refused as a usage error
@@ -90,22 +113,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     to notice.
   - A second instance of the same shape was found by the same sweep and filed as `X-53` rather than
     folded into this diff.
-
-### Changed
-
-- **M10's exit criterion is stated once, and it does not require TURN (`X-50`)** — `docs/roadmap.md`
-  gave the milestone two exit criteria that disagreed: a `Done when` sentence about a media path
-  symmetric RTP cannot provide, and an epic heading scoping M10 to all six children of `M-16`,
-  including RFC 8656. The sentence governs. `M-24`'s relayed candidate is in the ICE epic and in no
-  milestone, and the third clause is settled in writing as *some* endpoints symmetric RTP cannot
-  connect rather than *any* — both ends behind symmetric NAT is precisely the residue a relay buys.
-  - **M10 is still not recorded as reached, and the reason is not TURN.** Checked against tests
-    rather than story statuses, only the ICE clause is demonstrated as written: the GRUU test is an
-    `OPTIONS` to a single agent rather than two registrations of one address of record each taking a
-    call, and the push test stops when the INVITE arrives without anything answering it. `X-52`
-    carries that remaining distance.
-  - The same question is now open for M12, whose four stories are all closed and whose `Done when`
-    has never been checked against evidence (`X-51`).
 
 ## [1.0.0-alpha.2] — 2026-07-30
 
@@ -2240,7 +2247,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.2...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.3...HEAD
+[1.0.0-alpha.3]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.2...v1.0.0-alpha.3
 [1.0.0-alpha.2]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.1...v1.0.0-alpha.2
 [1.0.0-alpha.1]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha...v1.0.0-alpha.1
 [1.0.0-alpha]: https://github.com/codewandler/sipx/compare/v0.12.0...v1.0.0-alpha

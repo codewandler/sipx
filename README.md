@@ -9,7 +9,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 <!-- BEGIN generated:badges -->
 <a href="https://codewandler.github.io/sipx/"><img alt="docs: codewandler.github.io/sipx" src="https://img.shields.io/static/v1?label=docs&message=codewandler.github.io%2Fsipx&color=blue"></a>
-<a href="CHANGELOG.md"><img alt="release: 1.0.0-alpha.2" src="https://img.shields.io/static/v1?label=release&message=1.0.0-alpha.2&color=blue"></a>
+<a href="CHANGELOG.md"><img alt="release: 1.0.0-alpha.3" src="https://img.shields.io/static/v1?label=release&message=1.0.0-alpha.3&color=blue"></a>
 <a href="#try-the-cli"><img alt="MSRV: rustc 1.88" src="https://img.shields.io/static/v1?label=MSRV&message=rustc%201.88&color=blue"></a>
 <a href="docs/compliance.md"><img alt="RFCs: 32 implemented of 70" src="https://img.shields.io/static/v1?label=RFCs&message=32%20implemented%20of%2070&color=blue"></a>
 <a href="docs/compliance.md"><img alt="codecs: G.711 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20Opus&color=blue"></a>
@@ -18,7 +18,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 </div>
 
-> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-alpha.2<!-- END generated:workspace-version -->.** The public site documents `main`, which can move ahead of the latest
+> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-alpha.3<!-- END generated:workspace-version -->.** The public site documents `main`, which can move ahead of the latest
 > tag. Public APIs are not frozen. Start with the tagged install below when reproducibility matters.
 
 ## Does it fit?
@@ -44,11 +44,11 @@ deployment shape.
 
 ## Try the CLI
 
-The <!-- BEGIN generated:release-tag -->v1.0.0-alpha.2<!-- END generated:release-tag --> release needs
+The <!-- BEGIN generated:release-tag -->v1.0.0-alpha.3<!-- END generated:release-tag --> release needs
 Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```sh
-cargo install --locked --git https://github.com/codewandler/sipx --tag v1.0.0-alpha.2 sipx-cli
+cargo install --locked --git https://github.com/codewandler/sipx --tag v1.0.0-alpha.3 sipx-cli
 sipx version
 ```
 
@@ -75,8 +75,8 @@ Until the crates are published, pin Git dependencies to the same tag:
 
 ```toml
 [dependencies]
-sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.2" }
-sipx-transport = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.2" }
+sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.3" }
+sipx-transport = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.3" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

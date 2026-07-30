@@ -1,12 +1,12 @@
 ---
 title: What's new
-description: Release highlights for sipx 1.0.0-alpha.2 and guidance on the newer main-branch documentation.
+description: Release highlights for sipx 1.0.0-alpha.3 and guidance on the newer main-branch documentation.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-alpha.2 — 2026-07-30
+## 1.0.0-alpha.3 — 2026-07-30
 <!-- END generated:release-heading -->
 
 This is the current tagged release. It establishes a measured alpha baseline for the SIP,
@@ -17,10 +17,30 @@ Install this exact release with:
 
 ```bash
 cargo install --git https://github.com/codewandler/sipx \
-  --tag v1.0.0-alpha.2 --locked sipx-cli
+  --tag v1.0.0-alpha.3 --locked sipx-cli
 ```
 
 ### Release highlights
+
+- **Breaking: `MediaSession::collect_digits` takes two durations.** It took one, and spent it on two
+  different questions — how long to wait for the first keypress, and how long a silence means the
+  caller has stopped. Whichever was slower won, and the result was an empty collection rather than a
+  short one. Pass the old value as both arguments to keep the old behaviour, including the defect.
+  As a consequence, `sipx answer` now holds a call for its full `--duration` when nobody dials,
+  which is what `--duration` is documented to mean.
+- **`sip-tls.md` no longer advertises a minimum-TLS-version setting.** There was no such setting;
+  the specification was corrected rather than the setting invented, because the absence of a
+  version-selecting API is what currently evidences the TLS floor. A new test holds every
+  configurable entry in that section against the crate's real public surface.
+- **Two tests that could not fail were repaired**, and both are in the shipped CLI's suite: one
+  asserting no capture file is written never placed a call, and one asserting logs stay off standard
+  output ran a command that logged nothing at all. Each now runs a real call and carries a positive
+  control, so an absence means something.
+- **Both remaining milestones were checked against their evidence rather than their story lists.**
+  M10's exit criterion is now stated once and does not require a relay; M12's is one clause short,
+  and the four closed stories under it did not make it met.
+
+#### Still current from earlier alphas
 
 - **A call can use ICE.** An application selects host gathering or a configured STUN server through
   one call-level media policy; the default selects no ICE and is unchanged. A call between two
@@ -74,5 +94,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 alpha. Use the tag above when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-alpha.2` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-alpha.3` merely because it appears on this
 site.
