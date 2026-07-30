@@ -533,8 +533,32 @@ def committed_story(commit, name, cache):
     return cache[key]
 
 
+def shallow_history():
+    """Whether git's history is truncated, so filing days cannot be read out of it.
+
+    A shallow checkout is not the absent-git case `git_text` handles: git answers, and answers
+    wrongly. The grafted commit has no parent, so every story file present in it reads as *added*
+    there — the filed count becomes the number of story files that exist rather than the number of
+    filings that happened, and every one of them is dated to the checkout's single commit.
+
+    Both numbers agreed for as long as every story ever filed still existed under its original path,
+    and CI checked out at the default depth 1. The first renumber — `eee4394`, `P-6` refiled as
+    `P-7`, two filings and one surviving file — made them differ by one, and the mismatch surfaced as
+    a diagnostic accusing the journal of recording facts the snapshot did not have (`X-49`). The
+    journal was right; the history it was compared against was one commit deep.
+    """
+    answer = git_text(["rev-parse", "--is-shallow-repository"])
+    return answer is not None and answer.strip() == "true"
+
+
 def history_story_fact_days():
     """Committed `(day, identity)` facts, newest first, using the board's content rule."""
+    if shallow_history():
+        raise SystemExit(
+            "maturity: story filing days are read from history, and this is a shallow checkout. "
+            "Fetch the full history (`git fetch --unshallow`, or `fetch-depth: 0` on "
+            "actions/checkout) and run this again."
+        )
     cache = COMMITTED_STORY_CACHE
     filed = []
     lines = git_lines(

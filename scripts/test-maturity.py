@@ -879,6 +879,58 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
         self.assertNotEqual(checked.returncode, 0)
         self.assertIn("event-date journal basis", checked.stderr)
 
+    def shallow_checkout(self, repo, depth=1):
+        """A depth-limited clone — what `actions/checkout` produces without `fetch-depth: 0`."""
+        checkout = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, checkout, ignore_errors=True)
+        self.git(
+            repo.parent,
+            "clone",
+            "-q",
+            "--no-local",
+            "--depth",
+            str(depth),
+            f"file://{repo}",
+            str(checkout),
+        )
+        return checkout
+
+    def test_a_shallow_checkout_is_refused_rather_than_miscounted(self):
+        """`X-49`: what made `main` and every pull request red, and where it pointed the reader.
+
+        A depth-1 checkout has no history to read filing days out of. `git log` still answers: the
+        grafted commit has no parent, so every story file in it reads as *added* there. The filed
+        count silently becomes the number of story files that exist.
+
+        That count equalled the real one for as long as every story ever filed still existed. The
+        first renumber broke it — `eee4394` refiled `P-6` as `P-7`, which is two filings and one
+        surviving file — and the diagnostic accused the event-date journal of recording a fact the
+        snapshot did not have. The journal was the one thing that was right.
+
+        The fixture reproduces that shape: three filings across history, two story files at `HEAD`.
+        """
+        repo = self.fixture()
+        (repo / "docs" / "stories" / "X-1-a-story.md").unlink()
+        self.write_story(repo, "X-3", "ready")
+        self.commit(repo, "renumber X-1 to X-3, which files a story a third time")
+        self.assertEqual(self.run_maturity(repo).returncode, 0, "the renumber must regenerate")
+        self.commit(repo, "the report of the renumbered board")
+
+        shallow = self.shallow_checkout(repo)
+        refused = self.run_maturity(shallow, "--check")
+        self.assertNotEqual(refused.returncode, 0, "a truncated history must not answer")
+        self.assertIn("shallow checkout", refused.stderr)
+        self.assertNotIn("journal", refused.stderr, "the journal is not what is wrong")
+
+        # And the guard is about the depth, not about being a clone: the same checkout with its
+        # history filled in is green, which is what `fetch-depth: 0` buys CI.
+        self.git(shallow, "fetch", "-q", "--unshallow")
+        self.assertEqual(
+            self.run_maturity(shallow, "--check").returncode,
+            0,
+            "an unshallowed checkout reads the same history as the origin",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

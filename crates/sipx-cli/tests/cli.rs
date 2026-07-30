@@ -19,6 +19,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use sipx_audio::{Wav, read_wav, write_wav};
+use sipx_testkit::certs::Ca;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -126,6 +127,275 @@ async fn answerer_exits_cleanly(answerer: &mut tokio::process::Child) {
          captured describes a process that failed: {}",
         String::from_utf8_lossy(&complaint)
     );
+}
+
+/// Certificate material written where the CLI can consume it through its public file flags.
+struct TlsFixture {
+    ca: std::path::PathBuf,
+    cert: std::path::PathBuf,
+    key: std::path::PathBuf,
+}
+
+fn tls_fixture(name: &str) -> TlsFixture {
+    let dir = scratch(name);
+    let authority = Ca::new();
+    let (cert, key) = authority.issue_for("sipx.test");
+    let ca = dir.join("ca.pem");
+    let cert_path = dir.join("server.pem");
+    let key_path = dir.join("server.key");
+    std::fs::write(&ca, authority.pem()).expect("writes the CA");
+    std::fs::write(&cert_path, cert).expect("writes the certificate");
+    std::fs::write(&key_path, key).expect("writes the private key");
+    TlsFixture {
+        ca,
+        cert: cert_path,
+        key: key_path,
+    }
+}
+
+/// `DPH-1`, plus the cleartext transports around it: every released signalling transport is
+/// selected through the command line and carries a complete, bounded call. The assertions are on
+/// both processes' terminal reports so a flag accepted and then ignored cannot pass.
+#[tokio::test]
+async fn dph_1_every_released_transport_carries_a_loopback_command_call() {
+    let tls = tls_fixture("dph-1");
+    let ca = tls.ca.to_string_lossy().into_owned();
+    let cert = tls.cert.to_string_lossy().into_owned();
+    let key = tls.key.to_string_lossy().into_owned();
+
+    for transport in ["udp", "tcp", "tls", "ws", "wss"] {
+        let mut answer_args = vec!["--transport", transport, "--duration", "1"];
+        if matches!(transport, "tls" | "wss") {
+            answer_args.extend_from_slice(&["--tls-cert", &cert, "--tls-key", &key]);
+        }
+        let (mut answerer, address, mut lines) = start_answerer(&answer_args).await;
+
+        let uri = format!("sip:bob@{address}");
+        let mut dialer = sipx();
+        dialer.args([
+            "dial",
+            &uri,
+            "--transport",
+            transport,
+            "--duration",
+            "1",
+            "--timeout",
+            "5",
+            "--json",
+        ]);
+        if matches!(transport, "tls" | "wss") {
+            dialer.args(["--tls-ca", &ca, "--tls-server-name", "sipx.test"]);
+        }
+        let output = tokio::time::timeout(Duration::from_secs(15), dialer.output())
+            .await
+            .unwrap_or_else(|_| panic!("{transport} dial is bounded"))
+            .expect("dial runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{transport} dial failed: {stdout} / {stderr}"
+        );
+        assert!(
+            stdout.contains(&format!("\"requested_transport\":\"{transport}\"")),
+            "{transport}: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("\"negotiated_transport\":\"{transport}\"")),
+            "{transport}: {stdout}"
+        );
+
+        let answered = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+            .await
+            .unwrap_or_else(|_| panic!("{transport} answer is bounded"))
+            .expect("reads answer report")
+            .expect("answer report exists");
+        assert!(
+            answered.contains(&format!("\"requested_transport\":\"{transport}\"")),
+            "{transport}: {answered}"
+        );
+        assert!(
+            answered.contains(&format!("\"negotiated_transport\":\"{transport}\"")),
+            "{transport}: {answered}"
+        );
+        answerer_exits_cleanly(&mut answerer).await;
+    }
+}
+
+/// `DPH-2`: trusting the issuer is insufficient when the requested identity is wrong. WSS must
+/// return a typed TLS failure and must not retry over WS, TCP or UDP.
+#[tokio::test]
+async fn dph_2_wss_name_mismatch_fails_without_downgrade() {
+    let tls = tls_fixture("dph-2");
+    let ca = tls.ca.to_string_lossy().into_owned();
+    let cert = tls.cert.to_string_lossy().into_owned();
+    let key = tls.key.to_string_lossy().into_owned();
+    let (mut answerer, address, _lines) =
+        start_answerer(&["--transport", "wss", "--tls-cert", &cert, "--tls-key", &key]).await;
+
+    let uri = format!("sip:bob@{address}");
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        sipx()
+            .args([
+                "dial",
+                &uri,
+                "--transport",
+                "wss",
+                "--tls-ca",
+                &ca,
+                "--tls-server-name",
+                "wrong.test",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("the refused dial is bounded")
+    .expect("dial runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "name mismatch connected: {stdout} / {stderr}"
+    );
+    assert!(stderr.contains("\"status\":\"failed\""), "{stderr}");
+    assert!(
+        stderr.contains("certificate") || stderr.contains("tls handshake"),
+        "the typed failure names TLS verification: {stderr}"
+    );
+    assert!(
+        !stdout.contains("\"negotiated_transport\"")
+            && !stderr.contains("\"negotiated_transport\""),
+        "{stdout} / {stderr}"
+    );
+
+    answerer.kill().await.expect("stops the answerer");
+    let _ = answerer.wait().await;
+}
+
+/// Registration uses the same selection and certificate policy as calls. This is deliberately a
+/// real endpoint rather than a mock byte sink: TCP framing, TLS and both WebSocket handshakes must
+/// complete before the REGISTER reaches the registrar.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one matrix test keeps identical assertions visible for every released transport"
+)]
+async fn register_selects_every_released_transport() {
+    let tls = tls_fixture("register-transports");
+    let ca = tls.ca.to_string_lossy().into_owned();
+    let cert = std::fs::read(&tls.cert).expect("reads certificate");
+    let key = std::fs::read(&tls.key).expect("reads key");
+
+    for (kind, name) in [
+        (sipx_transport::TransportKind::Udp, "udp"),
+        (sipx_transport::TransportKind::Tcp, "tcp"),
+        (sipx_transport::TransportKind::Tls, "tls"),
+        (sipx_transport::TransportKind::Ws, "ws"),
+        (sipx_transport::TransportKind::Wss, "wss"),
+    ] {
+        let local: std::net::SocketAddr = "127.0.0.1:0".parse().expect("an address");
+        let mut config = sipx_transport::Config::new(local);
+        config.tcp = kind == sipx_transport::TransportKind::Tcp;
+        if kind == sipx_transport::TransportKind::Tls {
+            let identity = sipx_transport::tls::Identity::from_pem(&cert, &key).expect("identity");
+            config.tls_server = Some((
+                sipx_transport::tls::ServerTls::new(identity).expect("TLS server"),
+                0,
+            ));
+        }
+        if kind == sipx_transport::TransportKind::Ws {
+            config.ws_server = Some(0);
+        }
+        if kind == sipx_transport::TransportKind::Wss {
+            let identity = sipx_transport::tls::Identity::from_pem(&cert, &key).expect("identity");
+            config.wss_server = Some((
+                sipx_transport::tls::ServerTls::new(identity).expect("WSS server"),
+                0,
+            ));
+        }
+        let (handle, mut incoming) = sipx_transport::bind(config).await.expect("registrar binds");
+        let address = match kind {
+            sipx_transport::TransportKind::Udp | sipx_transport::TransportKind::Tcp => {
+                handle.local_addr()
+            }
+            sipx_transport::TransportKind::Tls => handle.tls_addr().expect("TLS address"),
+            sipx_transport::TransportKind::Ws => handle.ws_addr().expect("WS address"),
+            sipx_transport::TransportKind::Wss => handle.wss_addr().expect("WSS address"),
+        };
+        let registrar = handle.clone();
+        let serving = tokio::spawn(async move {
+            let request = tokio::time::timeout(Duration::from_secs(10), incoming.recv())
+                .await
+                .expect("REGISTER is bounded")
+                .expect("REGISTER arrives");
+            assert_eq!(request.transport, kind);
+            let contact = request
+                .request
+                .headers
+                .value(&sipx_sip::HeaderName::Contact)
+                .expect("REGISTER carries Contact");
+            let response = sipx_sip::build::ResponseBuilder::to_request(
+                &request.request,
+                sipx_sip::StatusCode::new(200).expect("status"),
+                "OK",
+            )
+            .expect("response")
+            .header(
+                sipx_sip::HeaderName::Contact,
+                bytes::Bytes::from(format!("{};expires=60", String::from_utf8_lossy(&contact))),
+            )
+            .expect("Contact")
+            .build();
+            registrar
+                .respond(&request.key, response)
+                .await
+                .expect("REGISTER answered");
+        });
+
+        let target = address.to_string();
+        let mut command = sipx();
+        command.args([
+            "register",
+            "sip:alice@example.com",
+            "--target",
+            &target,
+            "--transport",
+            name,
+            "--expires",
+            "60",
+            "--json",
+        ]);
+        if matches!(
+            kind,
+            sipx_transport::TransportKind::Tls | sipx_transport::TransportKind::Wss
+        ) {
+            command.args(["--tls-ca", &ca, "--tls-server-name", "sipx.test"]);
+        }
+        let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+            .await
+            .unwrap_or_else(|_| panic!("{name} registration is bounded"))
+            .expect("register runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{name} register failed: {stdout} / {stderr}"
+        );
+        assert!(
+            stdout.contains(&format!("\"requested_transport\":\"{name}\"")),
+            "{name}: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("\"negotiated_transport\":\"{name}\"")),
+            "{name}: {stdout}"
+        );
+        serving.await.expect("registrar task");
+        handle.shutdown().await;
+    }
 }
 
 /// The first header line with this name, without its terminator.

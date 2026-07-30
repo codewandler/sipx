@@ -554,6 +554,13 @@ pub struct MediaSession {
     stats: Arc<Mutex<StreamStats>>,
     /// What the far end last told us, and when.
     feedback: Arc<Mutex<Feedback>>,
+    /// The running ICE driver, for the exchanges that come after the one that started the session
+    /// ([`Self::renegotiate_ice`], `docs/specs/ice.md` §13.5).
+    ///
+    /// The loops were handed their own clones when they were spawned; this one is the signalling
+    /// layer's, and it is what makes a re-offer able to reach the agent at all. `None` is a stream
+    /// with no ICE, which is the default and must stay indistinguishable from the pre-ICE session.
+    ice: Option<crate::ice::driver::Handle>,
     stop: Arc<Stop>,
 }
 
@@ -1167,11 +1174,12 @@ impl MediaSession {
             outbound: shared.outbound,
             feedback: Arc::clone(&shared.feedback),
             srtp: srtp_keys,
-            ice,
+            ice: ice.clone(),
             stop: Arc::clone(&shared.stop),
         });
 
         Self {
+            ice,
             outgoing: outgoing_tx,
             digits: Mutex::new(digits_rx),
             tones: AtomicU64::new(0),
@@ -1200,6 +1208,59 @@ impl MediaSession {
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Whether ICE is driving this stream's path.
+    ///
+    /// The signalling layer's question before it builds any later description: RFC 8839 §4.4 makes
+    /// the ICE attributes mandatory on every subsequent offer and answer for a stream doing ICE,
+    /// and §6 makes their *absence* mean the peer has stopped. A session carrying no agent must
+    /// therefore not grow ICE attributes on a re-offer, and one carrying an agent must not lose
+    /// them.
+    #[must_use]
+    pub fn runs_ice(&self) -> bool {
+        self.ice.is_some()
+    }
+
+    /// Apply a later exchange's ICE half, and read back what this side must now signal
+    /// (RFC 8839 §4.4; `docs/specs/ice.md` §13.5).
+    ///
+    /// `local` carries fresh credentials and a fresh tiebreaker when this exchange is a restart —
+    /// §4.4.1.1.1 says a new ICE session, and the answer to one names the answerer's *own* new
+    /// credentials rather than the ones the finished session keyed its checks with. `None` is
+    /// every ordinary re-offer: hold, resume, a codec change, a session refresh. `peer` is the
+    /// description that arrived, when one has.
+    ///
+    /// Returns `None` when this stream is not running ICE, or when the driver has already stopped.
+    /// Both mean the same thing to a caller: answer without ICE attributes rather than block on a
+    /// session that is ending.
+    ///
+    /// Whether the peer's half *is* a restart is deliberately not asked here. That is
+    /// §4.4.1.1.1's question about the peer's two credentials, the agent has always answered it,
+    /// and a second implementation of it on this side would be a second thing to keep right.
+    pub async fn renegotiate_ice(
+        &self,
+        local: Option<(sipx_sdp::ice::Credentials, u64)>,
+        peer: Option<&ice::Negotiation>,
+    ) -> Option<ice::Local> {
+        let handle = self.ice.as_ref()?;
+        let peer = match peer {
+            Some(ice::Negotiation::Ice {
+                credentials,
+                candidates,
+                lite,
+            }) => Some(crate::ice::driver::Peer {
+                credentials: credentials.clone(),
+                candidates: candidates.clone(),
+                lite: *lite,
+            }),
+            // `Absent` and `Mismatch` alike: RFC 8839 §5.3 says ICE MUST NOT be used for a
+            // mismatched stream, and §6 says no candidates means no ICE. Neither is a description
+            // to feed an agent — but this side still re-signals its own half, because the running
+            // session is what the peer is sending media to.
+            _ => None,
+        };
+        handle.renegotiated(local, peer).await
     }
 
     /// Queue one packet's worth of samples.

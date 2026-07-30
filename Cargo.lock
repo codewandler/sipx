@@ -1677,6 +1677,7 @@ dependencies = [
  "sipx-call",
  "sipx-rtp",
  "sipx-sip",
+ "sipx-testkit",
  "sipx-transport",
  "sipx-ua",
  "tokio",

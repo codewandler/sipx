@@ -28,8 +28,8 @@ sipx version
 ```
 
 The CLI is designed for scripts and test calls. It reads and writes WAV files; it does **not**
-open a microphone, speaker, or other sound device. It currently selects UDP or TCP only, so
-`dial` and `register` cannot use TLS or secure WebSocket and deliberately refuse `sips:` URIs.
+open a microphone, speaker, or other sound device. `dial`, `answer`, and `register` select UDP,
+TCP, TLS, WebSocket, or secure WebSocket, with mandatory certificate verification on secure paths.
 
 [Make a local call →](getting-started.md)
 

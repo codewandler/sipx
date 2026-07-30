@@ -48,18 +48,18 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 | Pillar | Open stories |
 |---|---|
 | Signalling | 11 |
-| Media | 8 |
 | Application | 7 |
-| Phone | 7 |
-| Build | 3 |
+| Media | 6 |
+| Phone | 6 |
+| Build | 4 |
 | Transport | 1 |
-| **total** | **37** |
+| **total** | **35** |
 
-135 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+139 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:0e699372d1ba985deb396d1b68aeaee729ec0b219987f8a5434bf0cc0176db87","closed":{"2026-07-28":58,"2026-07-29":47,"2026-07-30":29},"filed":{"2026-07-28":95,"2026-07-29":43,"2026-07-30":35}} -->
+<!-- maturity-event-days: {"basis":"sha256:4172e8c37ec3b05e288ad48cd123a7368c0532aee97fe5f5df7244dffef491c4","closed":{"2026-07-28":58,"2026-07-29":47,"2026-07-30":33},"filed":{"2026-07-28":95,"2026-07-29":43,"2026-07-30":37}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -67,7 +67,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 |---|---|---|---|
 | 2026-07-28 | 95 | 58 | -37 |
 | 2026-07-29 | 43 | 47 | +4 |
-| 2026-07-30 | 35 | 29 | -6 |
+| 2026-07-30 | 37 | 33 | -4 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

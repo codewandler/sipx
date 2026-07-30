@@ -63,6 +63,20 @@ pub enum Event {
         /// Which incarnation received it, so an old queued pong cannot answer a new flow.
         id: u64,
     },
+    /// TLS authentication failed before the connection became usable.
+    ///
+    /// Separate from `Closed` so a caller can distinguish a rejected certificate from an
+    /// established connection that later disappeared. `Closed` still follows and releases the
+    /// pool slot.
+    #[cfg(feature = "tls")]
+    HandshakeFailed {
+        /// Which secure connection was attempted.
+        key: ConnectionKey,
+        /// Which incarnation failed.
+        id: u64,
+        /// The TLS backend's verification detail, containing no key material.
+        detail: String,
+    },
     /// The connection is gone.
     ///
     /// Every transaction bound to it is given a transport error rather than being left to
@@ -605,6 +619,15 @@ impl Pool {
                     // logged rather than swallowed, and the connection simply does not exist —
                     // there is no fallback to cleartext.
                     tracing::warn!(%error, peer = %task_key.peer, "TLS handshake failed");
+                    // discard: the endpoint may have shut down before this bounded task reports;
+                    // no caller remains to receive the typed failure in that case.
+                    let _ = events
+                        .send(Event::HandshakeFailed {
+                            key: task_key,
+                            id,
+                            detail: error.to_string(),
+                        })
+                        .await;
                 }
             }
         });
@@ -669,6 +692,15 @@ impl Pool {
                     }
                     Err(error) => {
                         tracing::warn!(%error, peer = %task_key.peer, "TLS handshake failed");
+                        // discard: the endpoint may have shut down before this bounded task
+                        // reports; no caller remains to receive the typed failure in that case.
+                        let _ = events
+                            .send(Event::HandshakeFailed {
+                                key: task_key,
+                                id,
+                                detail: error.to_string(),
+                            })
+                            .await;
                     }
                 }
                 return;
@@ -1001,7 +1033,10 @@ mod tests {
             Event::Message { message, .. } => {
                 assert_eq!(message.to_bytes().as_ref(), MESSAGE.as_bytes());
             }
-            Event::Pong { .. } | Event::Closed { .. } | Event::FramingFailed { .. } => {
+            Event::Pong { .. }
+            | Event::Closed { .. }
+            | Event::FramingFailed { .. }
+            | Event::HandshakeFailed { .. } => {
                 panic!("expected a message")
             }
         }

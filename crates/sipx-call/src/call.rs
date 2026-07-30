@@ -7,8 +7,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use bytes::Bytes;
+use sipx_media::ice::{Gathering, LocalDescription, Negotiation as IceNegotiation};
 use sipx_media::{Codec, Interrupt, MediaPort, MediaSession, Playback};
-use sipx_sdp::{Capabilities, Direction, SessionDescription};
+use sipx_sdp::ice::{ComponentId, Credentials};
+use sipx_sdp::{Capabilities, Connection, Direction, SessionDescription};
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
 use sipx_sip::session::{self, MinSe, SessionExpires};
 use sipx_sip::update::{self, Reception};
@@ -73,6 +75,12 @@ pub struct Call {
     codecs: Codecs,
     /// What the running session negotiated, for comparison against a re-offer.
     current: Negotiated,
+    /// The peer's ICE credentials as this side last saw them (RFC 8839 §4.4.1.1.1).
+    ///
+    /// The only thing a restart can be recognised against: a later offer restarts ICE when **both**
+    /// its `ice-ufrag` and its `ice-pwd` differ from these. `None` is a call that never ran ICE, or
+    /// one whose peer has not described it — and neither can restart something that never started.
+    peer_ice: Option<sipx_sdp::ice::Credentials>,
     /// Whether the call is on hold, and which way.
     hold: Direction,
     /// Whether the media is encrypted.
@@ -609,7 +617,7 @@ impl Call {
         let capabilities = self
             .codecs
             .capabilities(self.media_address, self.media.local_addr().port());
-        let answer_sdp = sipx_sdp::answer(&offer, &capabilities);
+        let mut answer_sdp = sipx_sdp::answer(&offer, &capabilities);
         if answer_sdp
             .media
             .iter()
@@ -617,6 +625,7 @@ impl Call {
         {
             return Ok(None);
         }
+        self.answer_ice(&offer, &mut answer_sdp).await;
 
         // Hold is a direction, not a separate state: `sendonly` or `inactive` from the far end
         // means it will not play what we send.
@@ -637,6 +646,121 @@ impl Call {
 
         self.move_media_if_changed(renegotiated).await?;
         Ok(Some(answer_sdp))
+    }
+
+    /// Give the running agent the ICE half of an answer to one of our later offers.
+    ///
+    /// The offering side's mirror of [`Self::answer_ice`], and it signals nothing: the answer is
+    /// the end of this exchange, so what comes back from the agent has no description left to go
+    /// into. What matters is that the agent hears it at all — a restart this side offered is only
+    /// half a restart until the peer's new credentials and candidates arrive.
+    async fn accept_answer_ice(&mut self, answer: &SessionDescription) {
+        if !self.media.runs_ice() {
+            return;
+        }
+        let peer = answer
+            .media
+            .first()
+            .map_or(IceNegotiation::Absent, |audio| {
+                sipx_media::ice::negotiate(answer, audio)
+            });
+        // Recorded for the same reason the initial exchange records it: the next offer from the
+        // peer is a restart only if it differs from what was last seen, and an answer is a
+        // description like any other.
+        self.peer_ice_restarted(&peer);
+        let _ = self.media.renegotiate_ice(None, Some(&peer)).await;
+    }
+
+    /// Put this side's ICE half into a later offer (RFC 8839 §4.4; `ice.md` §13.5).
+    ///
+    /// The offering counterpart of [`Self::answer_ice`], and it carries the same rule: a stream
+    /// doing ICE restates its half in **every** subsequent offer, because §6 makes their absence
+    /// mean this side has stopped. [`Self::restart_ice`] is the one caller that also draws new
+    /// credentials, and drawing them is the whole of what it does — §4.4.1.1.1 says both values
+    /// changing *is* the restart, so there is no second flag to set on the wire.
+    async fn offer_ice(&mut self, offer: &mut SessionDescription, ice: IceOffer) {
+        if !self.media.runs_ice() {
+            return;
+        }
+        let local = match ice {
+            IceOffer::Continue => None,
+            IceOffer::Restart => fresh_ice_parameters(),
+        };
+        // No peer half: this is an offer, and the answer that responds to it comes back through
+        // `Dialing`/`renegotiate` like any other.
+        let Some(signalled) = self.media.renegotiate_ice(local, None).await else {
+            return;
+        };
+        let Some(audio) = offer.media.first_mut() else {
+            return;
+        };
+        audio
+            .attributes
+            .retain(|attribute| !is_ice_attribute(attribute));
+        audio.attributes.extend(ice_attributes(&signalled));
+    }
+
+    /// Put this side's ICE half into the answer to a later offer (RFC 8839 §4.4; `ice.md` §13.5).
+    ///
+    /// Three things happen here and they are one operation because they must not be reordered:
+    /// the offer is read for the peer's half, this side takes new parameters when §4.4.1.1.1 says
+    /// the offer is a restart, and both are handed to the running agent — which is what decides
+    /// whether the session is rebuilt. What comes back is what this answer signals.
+    ///
+    /// **A stream doing ICE re-signals on every exchange**, not only on a restart. §6 makes the
+    /// absence of `candidate` attributes mean the peer has stopped doing ICE, so an answer that
+    /// dropped them mid-call would tell the far end to fall back to symmetric RTP on a path it had
+    /// already agreed to check. Hold, resume, a codec change and a session refresh all come
+    /// through here, and none of them is a restart.
+    ///
+    /// A call with no agent is left exactly as it was: no attributes, no round trip to a driver
+    /// that does not exist.
+    async fn answer_ice(&mut self, offer: &SessionDescription, answer: &mut SessionDescription) {
+        if !self.media.runs_ice() {
+            return;
+        }
+        let peer = offer.media.first().map_or(IceNegotiation::Absent, |audio| {
+            sipx_media::ice::negotiate(offer, audio)
+        });
+        // §4.4.1.1.1 is a question about the *peer's* two credentials, and this side answers it
+        // only to know whether to draw its own new ones. The agent asks it again for itself, from
+        // the credentials it is actually keyed to; see `MediaSession::renegotiate_ice`.
+        let local = self
+            .peer_ice_restarted(&peer)
+            .then(fresh_ice_parameters)
+            .flatten();
+        let Some(signalled) = self.media.renegotiate_ice(local, Some(&peer)).await else {
+            return;
+        };
+        let Some(audio) = answer.media.first_mut() else {
+            return;
+        };
+        audio
+            .attributes
+            .retain(|attribute| !is_ice_attribute(attribute));
+        audio.attributes.extend(ice_attributes(&signalled));
+    }
+
+    /// Whether this offer restarts ICE (RFC 8839 §4.4.1.1.1).
+    ///
+    /// **Both** credentials changed, and only both. One alone is not a restart, which is the case
+    /// the rule is worded to exclude: a peer may legitimately re-send a description with one value
+    /// re-derived and the other unchanged, and treating that as a restart would tear down a
+    /// working session for nothing.
+    ///
+    /// The comparison is against what this side last *saw*, which is why it is recorded here
+    /// rather than derived from the SDP twice — "the same value moving between the session level
+    /// and the media level is not a restart" is only true if what is compared is the effective
+    /// value for the stream, which is what [`sipx_media::ice::negotiate`] resolves.
+    fn peer_ice_restarted(&mut self, peer: &IceNegotiation) -> bool {
+        let IceNegotiation::Ice { credentials, .. } = peer else {
+            return false;
+        };
+        let restarted = self.peer_ice.as_ref().is_some_and(|seen| {
+            seen.ufrag() != credentials.ufrag() && seen.pwd() != credentials.pwd()
+        });
+        self.peer_ice = Some(credentials.clone());
+        restarted
     }
 
     /// Answer an UPDATE that arrived in this dialog (RFC 3311 §5.2).
@@ -780,10 +904,16 @@ impl Call {
         self.target = in_dialog_target(&self.dialog, self.target.clone());
         self.peer_allows_update = update::peer_allows(&response.headers);
 
-        if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
-            && let Ok(renegotiated) = negotiated(&answer, self.codecs)
-        {
-            self.move_media_if_changed(renegotiated).await?;
+        if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body())) {
+            // The answer's ICE half, before the codec comparison: on a restart it carries the
+            // peer's new credentials and candidates, and an agent that is not told about them
+            // checks a path nobody is answering on. On an ordinary re-offer it is the same half
+            // again, which the agent merges (RFC 8839 §4.2) rather than replaces — so a
+            // re-answer cannot silence ICE on a call that is working.
+            self.accept_answer_ice(&answer).await;
+            if let Ok(renegotiated) = negotiated(&answer, self.codecs) {
+                self.move_media_if_changed(renegotiated).await?;
+            }
         }
         self.hold = direction;
         self.adopt_session(&response);
@@ -960,11 +1090,54 @@ impl Call {
         Ok(())
     }
 
+    /// Restart ICE on this call (RFC 8445 §9, RFC 8839 §4.4.1.1.1; `ice.md` §13.5).
+    ///
+    /// Sends a re-INVITE whose offer carries **new** `ice-ufrag` and `ice-pwd` for this stream,
+    /// which is the entire signal — the peer reads both having changed and begins a new ICE
+    /// session. Everything else about the call is unchanged, including its direction, so a
+    /// restart does not resume a call that was on hold.
+    ///
+    /// Media keeps flowing on the pair the finished session selected until the new one selects its
+    /// own. That is what makes a restart usable in the situation it exists for: the path has become
+    /// doubtful, not yet unusable, and going silent while checks converge would turn a recoverable
+    /// call into a dropped one.
+    ///
+    /// A call not running ICE is left alone and reports success. There is nothing to restart, and
+    /// making the caller distinguish "no ICE" from "restart failed" would push the check to every
+    /// call site.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] when the re-INVITE cannot be built or sent, or when the far end refuses
+    /// it — the same failures as any other renegotiation, and like them it leaves the call running.
+    pub async fn restart_ice(&mut self) -> Result<()> {
+        if !self.media.runs_ice() {
+            return Ok(());
+        }
+        self.reoffer(self.hold, IceOffer::Restart).await
+    }
+
     /// Send a re-INVITE renegotiating this call.
     ///
     /// `direction` puts the call on hold (`SendOnly` or `Inactive`) or takes it off
     /// (`SendRecv`).
+    ///
+    /// Note what hold is **not**: RFC 8839 §4.4.1.1.1 makes `c=0.0.0.0` imply an ICE restart, so a
+    /// hold spelled with a null connection address would restart ICE on every mute. Hold here is a
+    /// direction and nothing else (RFC 3264), which is what it has always been, and this is the
+    /// story that makes that a decision rather than an accident.
     pub async fn reinvite(&mut self, direction: Direction) -> Result<()> {
+        self.reoffer(direction, IceOffer::Continue).await
+    }
+
+    /// The re-INVITE both public entry points send, and the one place their difference lives.
+    ///
+    /// `ice` is a parameter rather than a field on [`Call`] because it is a property of *this*
+    /// offer and of nothing else. Held as state it would be a fourth `bool` on a struct that
+    /// already has three — which is what `clippy::struct_excessive_bools` objects to, and the
+    /// objection is right: a flag set before a call and cleared after it is a state machine
+    /// written in the hardest way to read.
+    async fn reoffer(&mut self, direction: Direction, ice: IceOffer) -> Result<()> {
         let (local, remote) = self.dialog.local_and_remote();
         let cseq = self.dialog.next_cseq();
 
@@ -975,7 +1148,8 @@ impl Call {
         // The session version must increase with each modified offer, so the far end can tell
         // a changed description from a repeated one.
         capabilities.session_version = u64::from(cseq);
-        let offer = offer_from(&capabilities);
+        let mut offer = offer_from(&capabilities);
+        self.offer_ice(&mut offer, ice).await;
 
         let (uri, routes) = self.dialog.request_target();
         let builder = RequestBuilder::new(Method::Invite, uri)
@@ -1064,10 +1238,16 @@ impl Call {
 
         send_ack(&self.endpoint, &self.dialog, self.target.clone()).await?;
 
-        if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
-            && let Ok(renegotiated) = negotiated(&answer, self.codecs)
-        {
-            self.move_media_if_changed(renegotiated).await?;
+        if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body())) {
+            // The answer's ICE half, before the codec comparison: on a restart it carries the
+            // peer's new credentials and candidates, and an agent that is not told about them
+            // checks a path nobody is answering on. On an ordinary re-offer it is the same half
+            // again, which the agent merges (RFC 8839 §4.2) rather than replaces — so a
+            // re-answer cannot silence ICE on a call that is working.
+            self.accept_answer_ice(&answer).await;
+            if let Ok(renegotiated) = negotiated(&answer, self.codecs) {
+                self.move_media_if_changed(renegotiated).await?;
+            }
         }
         self.hold = direction;
         // §7.2: the session expiration is measured from the 2xx, and a re-INVITE sent for any
@@ -1710,6 +1890,65 @@ impl Codecs {
     }
 }
 
+/// Whether an initial call exchange uses ICE (`docs/specs/ice.md` §13.4).
+///
+/// Disabled is the default and preserves the historical symmetric-RTP path byte for byte. Host
+/// and STUN policies gather only after the media sockets have bound; a silent STUN server leaves
+/// the host candidates in place rather than failing the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IcePolicy {
+    /// Emit no ICE attributes and start no connectivity-check worker.
+    #[default]
+    Disabled,
+    /// Gather host candidates from the bound media sockets.
+    Host,
+    /// Gather host candidates and ask this STUN server for server-reflexive candidates.
+    Stun(SocketAddr),
+}
+
+/// The media choices shared by dialing and answering a call.
+///
+/// This is the call-layer boundary the diagnostic phone consumes. It deliberately contains
+/// policy, not a pre-built ICE agent: credentials, tiebreakers and sockets are fresh per call and
+/// remain owned by the media path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MediaPolicy {
+    /// Which codecs are offered and accepted.
+    pub codecs: Codecs,
+    /// Whether and how the initial exchange gathers ICE candidates.
+    pub ice: IcePolicy,
+}
+
+impl MediaPolicy {
+    /// Select a codec set while retaining the other media choices.
+    #[must_use]
+    pub const fn with_codecs(mut self, codecs: Codecs) -> Self {
+        self.codecs = codecs;
+        self
+    }
+
+    /// Select an ICE policy while retaining the other media choices.
+    #[must_use]
+    pub const fn with_ice(mut self, ice: IcePolicy) -> Self {
+        self.ice = ice;
+        self
+    }
+
+    /// Build fresh per-call gathering state when ICE was selected.
+    fn gathering(self, offerer: bool) -> Result<Option<Gathering>> {
+        if self.ice == IcePolicy::Disabled {
+            return Ok(None);
+        }
+        let credentials = Credentials::new(token(), format!("{}{}", token(), token()))
+            .ok_or_else(|| Error::Sdp("could not generate valid ICE credentials".to_owned()))?;
+        let mut gathering = Gathering::new(credentials, offerer);
+        if let IcePolicy::Stun(server) = self.ice {
+            gathering.stun_server = Some(server);
+        }
+        Ok(Some(gathering))
+    }
+}
+
 /// How a call is placed.
 #[derive(Debug, Clone)]
 pub struct DialOptions {
@@ -1737,13 +1976,11 @@ pub struct DialOptions {
     /// registration says outbound requests must traverse proxies. Without it, a call placed
     /// through a registration reaches a proxy holding no state for it.
     pub service_route: Vec<String>,
-    /// Which codecs the call offers, most preferred first.
+    /// The media policy for this call.
     ///
-    /// [`Codecs::G711`] by default, and the default is deliberate: G.711 is
-    /// mandatory-to-implement and links no C library, while Opus links libopus and is behind
-    /// the `opus` feature — so the better codec is always a choice, never an accident of the
-    /// build.
-    pub codecs: Codecs,
+    /// The default is G.711, no ICE. In particular, enabling a crate feature never changes what
+    /// goes on the wire without an application selecting it.
+    pub media: MediaPolicy,
 }
 
 impl DialOptions {
@@ -1756,7 +1993,7 @@ impl DialOptions {
             timeout: None,
             session_expires: None,
             service_route: Vec::new(),
-            codecs: Codecs::default(),
+            media: MediaPolicy::default(),
         }
     }
 
@@ -1766,7 +2003,14 @@ impl DialOptions {
     /// decides what the call carries, and a peer without Opus still gets G.711.
     #[must_use]
     pub fn with_codecs(mut self, codecs: Codecs) -> Self {
-        self.codecs = codecs;
+        self.media.codecs = codecs;
+        self
+    }
+
+    /// Use this complete media policy for the call.
+    #[must_use]
+    pub fn with_media_policy(mut self, media: MediaPolicy) -> Self {
+        self.media = media;
         self
     }
 
@@ -1810,17 +2054,142 @@ impl DialOptions {
 /// Both the receive address and the codec set come from the caller's [`DialOptions`], so they are
 /// taken as one rather than passed apart: they are two halves of the same decision about what this
 /// side is offering, and splitting them invites a call site that reads the set from somewhere else.
-fn offered_media(
+async fn offered_media(
     options: &DialOptions,
     port: &MediaPort,
     transport: TransportKind,
-) -> (Capabilities, SessionDescription) {
+) -> Result<(Capabilities, SessionDescription, Option<LocalDescription>)> {
+    let local_ice = match options.media.gathering(true)? {
+        Some(gathering) => Some(port.gather(&gathering).await),
+        None => None,
+    };
+    let advertised = local_ice
+        .as_ref()
+        .and_then(|local| local.default_destination(ComponentId::RTP))
+        .unwrap_or_else(|| SocketAddr::new(options.media_address, port.local_addr().port()));
     let capabilities = options
+        .media
         .codecs
-        .capabilities(options.media_address, port.local_addr().port())
+        .capabilities(advertised.ip(), advertised.port())
         .with_srtp(transport.is_secure());
-    let offer = offer_from(&capabilities);
-    (capabilities, offer)
+    let mut offer = offer_from(&capabilities);
+    if let Some(local) = &local_ice {
+        add_ice(&mut offer, local, &[]);
+    }
+    Ok((capabilities, offer, local_ice))
+}
+
+/// Put one gathered local description into the audio stream it belongs to.
+fn add_ice(
+    description: &mut SessionDescription,
+    local: &LocalDescription,
+    additional: &[sipx_sdp::Attribute],
+) {
+    let Some(default) = local.default_destination(ComponentId::RTP) else {
+        return;
+    };
+    description.connection = Some(Connection::new(default.ip()));
+    if let Some(audio) = description.media.first_mut() {
+        audio.port = default.port();
+        audio.attributes.extend(local.attributes());
+        audio.attributes.extend_from_slice(additional);
+    }
+}
+
+/// The `a=` names RFC 8839 §5 gives ICE, so a later description can replace its own half.
+///
+/// Replaced rather than appended: `sipx_sdp::answer` copies the stream it is answering, so an
+/// answer built from an offer that carried ICE starts out holding the *peer's* `ice-ufrag`,
+/// `ice-pwd` and candidates. Extending that with ours would produce a description claiming both
+/// sets, and a peer reading the first `ice-ufrag` it finds would key its checks to its own
+/// credentials.
+const ICE_ATTRIBUTES: &[&str] = &[
+    "ice-ufrag",
+    "ice-pwd",
+    "ice-options",
+    "ice-lite",
+    "ice-pacing",
+    "candidate",
+    "remote-candidates",
+];
+
+/// Whether an attribute is one of the ICE names a later description restates.
+///
+/// `ice-mismatch` is deliberately **not** here. RFC 8839 §5.3 makes it a statement about the
+/// exchange rather than a parameter of this side's ICE session, and a stream that carries it is
+/// one ICE is not running for at all.
+fn is_ice_attribute(attribute: &sipx_sdp::Attribute) -> bool {
+    ICE_ATTRIBUTES
+        .iter()
+        .any(|name| attribute.name.eq_ignore_ascii_case(name))
+}
+
+/// This side's ICE half for a later offer or answer (RFC 8839 §4.4; `ice.md` §13.5).
+///
+/// The same three lines an initial description carries, from the agent rather than from the
+/// gathering that has long since finished — `ice2` included, because §13.5's re-signalling has to
+/// restate the whole half and a peer that stopped seeing `ice-options` would read it as a change.
+fn ice_attributes(local: &sipx_media::ice::Local) -> Vec<sipx_sdp::Attribute> {
+    let mut attributes = vec![
+        sipx_sdp::Attribute::valued("ice-ufrag", local.credentials.ufrag()),
+        sipx_sdp::Attribute::valued("ice-pwd", local.credentials.pwd()),
+        sipx_sdp::Attribute::valued("ice-options", sipx_sdp::ice::ICE2),
+    ];
+    attributes.extend(
+        local
+            .candidates
+            .iter()
+            .map(|candidate| sipx_sdp::Attribute::valued("candidate", candidate.to_value())),
+    );
+    attributes
+}
+
+/// What a later offer says about the ICE session already running (RFC 8839 §4.4; `ice.md` §13.5).
+///
+/// Two variants and not a `bool`, because the wire difference between them is not a flag: a
+/// continuing offer restates the credentials in force, and a restart states new ones. §4.4.1.1.1
+/// makes *that change* the entire signal, so there is nothing else for either variant to set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IceOffer {
+    /// Restate this side's half unchanged — hold, resume, a codec change, a session refresh.
+    Continue,
+    /// Draw new credentials and a new tiebreaker, which is what begins a new ICE session.
+    Restart,
+}
+
+/// The peer's ICE credentials as the description in this body states them, for [`Call::peer_ice`].
+///
+/// Read from the message that completed the initial exchange — the 2xx for a caller, the INVITE
+/// for a callee — because a restart is only ever recognisable as a *change* from what was last
+/// seen, and a call that recorded nothing would read the peer's first re-offer as one.
+///
+/// `None` for a description with no ICE, which is the ordinary call: nothing that arrives later can
+/// restart a session that never began.
+fn peer_ice_credentials(body: &[u8]) -> Option<sipx_sdp::ice::Credentials> {
+    let description = sipx_sdp::parse(&String::from_utf8_lossy(body)).ok()?;
+    let audio = description.media.first()?;
+    match sipx_media::ice::negotiate(&description, audio) {
+        IceNegotiation::Ice { credentials, .. } => Some(credentials),
+        IceNegotiation::Absent | IceNegotiation::Mismatch => None,
+    }
+}
+
+/// Credentials and a tiebreaker for a new ICE session (RFC 8839 §5.4, RFC 8445 §7.1.3).
+///
+/// Drawn per session and never reused, for the reason `ice.md` §13.4 gives about the initial
+/// exchange and which applies unchanged to a restart: credentials that outlive the session they
+/// authenticated make one session's checks valid in another. A tiebreaker carried across would
+/// resolve a role conflict the way the *previous* session resolved it.
+///
+/// `None` when credentials could not be built — the same failure `MediaPolicy::gathering` reports
+/// on the initial exchange, from the same generator, so it is not reachable in practice. It
+/// degrades rather than failing the renegotiation: the agent keeps the credentials it has, the
+/// answer restates them, and the peer keys its new session's checks to those. RFC 8839 §4.4.1.1.1
+/// asks the answerer for new ones; reusing them is worse than complying and much better than
+/// refusing a re-offer on a call that is working.
+fn fresh_ice_parameters() -> Option<(sipx_sdp::ice::Credentials, u64)> {
+    let credentials = Credentials::new(token(), format!("{}{}", token(), token()))?;
+    Some((credentials, rand::random()))
 }
 
 /// The INVITE that opens a call.
@@ -2006,14 +2375,20 @@ async fn open_invitation(
     to: &Uri,
     options: &DialOptions,
     identity: &Identity,
-) -> Result<(MediaPort, Capabilities, String, Request)> {
+) -> Result<(
+    MediaPort,
+    Capabilities,
+    Option<LocalDescription>,
+    String,
+    Request,
+)> {
     // The offer has to name the port audio will arrive on, and only a bound socket knows it.
     // So the port is bound now and the session started once the answer says where and in what.
     let port = MediaPort::bind(SocketAddr::new(options.media_address, 0))
         .await
         .map_err(Error::Io)?;
 
-    let (capabilities, offer) = offered_media(options, &port, target.transport);
+    let (capabilities, offer, ice) = offered_media(options, &port, target.transport).await?;
 
     // The `Via` is built here rather than left to the transport, because a CANCEL has to carry
     // the *same* branch as the INVITE it cancels — that identity is what matches the two at the
@@ -2039,7 +2414,7 @@ async fn open_invitation(
             service_route: &options.service_route,
         },
     )?;
-    Ok((port, capabilities, via, invite))
+    Ok((port, capabilities, ice, via, invite))
 }
 
 /// Take back an invitation the caller has stopped waiting for.
@@ -2084,16 +2459,48 @@ async fn withdraw(
             }
             continue;
         }
-        if late.status.is_success()
-            && let Some(dialog) = Dialog::from_response(invite, &late)
-        {
-            let in_dialog = in_dialog_target(&dialog, target.clone());
-            let _ = send_ack(endpoint, &dialog, in_dialog.clone()).await;
-            if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
-                let _ = endpoint.send(bye, in_dialog).await;
-            }
+        if late.status.is_success() {
+            ack_then_bye(endpoint, invite, &late, target.clone()).await;
         }
         break;
+    }
+}
+
+/// Acknowledge a 2xx this side will not proceed with, and hang the dialog up (RFC 3261 §15).
+///
+/// Both callers reach it having already put a 2xx beyond recall: [`withdraw`], where a CANCEL lost
+/// its race, and [`dial_with`], where establishing the call failed after the far end already
+/// believed one existed. Neither may simply walk away — an unacknowledged 2xx is retransmitted for
+/// 32 seconds and then streamed at a port this side has closed.
+///
+/// Every step is best-effort by design. This runs on a path that is already failing, and a BYE
+/// that cannot be built or sent must not mask the error that brought us here.
+async fn ack_then_bye(endpoint: &Handle, invite: &Request, response: &Response, target: Target) {
+    let Some(dialog) = Dialog::from_response(invite, response) else {
+        return;
+    };
+    let in_dialog = in_dialog_target(&dialog, target);
+    let _ = send_ack(endpoint, &dialog, in_dialog.clone()).await;
+    if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
+        let _ = endpoint.send(bye, in_dialog).await;
+    }
+}
+
+/// What a non-2xx final response means to the caller.
+///
+/// RFC 4028 §6's 422 is separated out because it is the one rejection that is *actionable*: it
+/// names the interval the far end would accept, so a caller can retry with it rather than only
+/// learn that it failed. Every other status is reported as it arrived.
+fn rejection(response: &Response) -> Error {
+    const INTERVAL_TOO_SMALL: u16 = 422;
+    if response.status.code() == INTERVAL_TOO_SMALL
+        && let Some(required) = required_interval(response)
+    {
+        return Error::IntervalTooBrief(required);
+    }
+    Error::Rejected {
+        status: response.status.code(),
+        reason: String::from_utf8_lossy(&response.reason).into_owned(),
     }
 }
 
@@ -2105,7 +2512,7 @@ async fn dial_with(
     identity: &Identity,
 ) -> Result<Call> {
     let media_address = options.media_address;
-    let (port, capabilities, via, invite) =
+    let (port, capabilities, ice, via, invite) =
         open_invitation(endpoint, &target, to, options, identity).await?;
 
     let mut responses = endpoint.send(invite.clone(), target.clone()).await?;
@@ -2121,6 +2528,7 @@ async fn dial_with(
         match await_final(&mut responses, options.timeout, &mut acknowledging).await {
             Waited::Final { response, ringing } => (response, ringing),
             Waited::Gone => return Err(Error::NoResponse),
+            Waited::Transport(error) => return Err(Error::Transport(error)),
             Waited::GaveUp { provisional } => {
                 withdraw(
                     endpoint,
@@ -2138,16 +2546,7 @@ async fn dial_with(
     if !response.status.is_success() {
         // A non-2xx is acknowledged by the transaction layer itself, so there is nothing to
         // send here — only a media port to release, which happens when `port` drops.
-        const INTERVAL_TOO_SMALL: u16 = 422;
-        if response.status.code() == INTERVAL_TOO_SMALL
-            && let Some(required) = required_interval(&response)
-        {
-            return Err(Error::IntervalTooBrief(required));
-        }
-        return Err(Error::Rejected {
-            status: response.status.code(),
-            reason: String::from_utf8_lossy(&response.reason).into_owned(),
-        });
+        return Err(rejection(&response));
     }
 
     // From here the far end believes a dialog exists, so *every* path must acknowledge.
@@ -2155,7 +2554,15 @@ async fn dial_with(
     // streaming media at a port we have closed.
     // Where in-dialog requests go if the 2xx carries no `Contact` to refresh the target with.
     let fallback = target.clone();
-    match establish(&invite, &response, fallback, port, &capabilities, options) {
+    match establish(
+        &invite,
+        &response,
+        fallback,
+        port,
+        ice,
+        &capabilities,
+        options,
+    ) {
         Ok((dialog, media, in_dialog, settled)) => {
             let ack = build_ack(endpoint, &dialog, &in_dialog)?;
             endpoint
@@ -2183,8 +2590,9 @@ async fn dial_with(
                 awaiting_ack: None,
                 ended: false,
                 media_address,
-                codecs: options.codecs,
+                codecs: options.media.codecs,
                 current: settled.negotiated,
+                peer_ice: peer_ice_credentials(response.body()),
                 encrypted: settled.srtp.is_some(),
                 hold: Direction::SendRecv,
                 referral: None,
@@ -2208,13 +2616,7 @@ async fn dial_with(
         Err(error) => {
             // RFC 3261 §15: a UAC that cannot proceed after a 2xx acknowledges it and then
             // sends BYE. Walking away silently is what leaves the far end streaming.
-            if let Some(dialog) = Dialog::from_response(&invite, &response) {
-                let in_dialog = in_dialog_target(&dialog, target.clone());
-                let _ = send_ack(endpoint, &dialog, in_dialog.clone()).await;
-                if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
-                    let _ = endpoint.send(bye, in_dialog).await;
-                }
-            }
+            ack_then_bye(endpoint, &invite, &response, target).await;
             Err(error)
         }
     }
@@ -2230,15 +2632,28 @@ fn establish(
     response: &Response,
     fallback: Target,
     port: MediaPort,
+    ice: Option<LocalDescription>,
     offered: &Capabilities,
     options: &DialOptions,
 ) -> Result<(Dialog, MediaSession, Target, Settled)> {
     let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    let settled = settle_answer(offered.crypto.as_slice(), &answer, options.codecs)?;
+    let settled = settle_answer(offered.crypto.as_slice(), &answer, options.media.codecs)?;
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
-    let media = port.start(settled.media_config())?;
+    let media = match ice {
+        Some(mut local) => {
+            let negotiation = answer
+                .media
+                .first()
+                .map_or(IceNegotiation::Absent, |audio| {
+                    sipx_media::ice::negotiate(&answer, audio)
+                });
+            local.accept(&negotiation);
+            port.start_with_ice(settled.media_config(), local)?
+        }
+        None => port.start(settled.media_config())?,
+    };
     Ok((dialog, media, target, settled))
 }
 
@@ -2280,7 +2695,7 @@ pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAdd
         media_address,
         &token(),
         None,
-        Codecs::default(),
+        MediaPolicy::default(),
     )
     .await
 }
@@ -2299,7 +2714,23 @@ pub async fn answer_with(
     media_address: IpAddr,
     codecs: Codecs,
 ) -> Result<Call> {
-    answer_tagged(endpoint, incoming, media_address, &token(), None, codecs).await
+    answer_with_policy(
+        endpoint,
+        incoming,
+        media_address,
+        MediaPolicy::default().with_codecs(codecs),
+    )
+    .await
+}
+
+/// Answer using one coherent codec, security and ICE policy.
+pub async fn answer_with_policy(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    policy: MediaPolicy,
+) -> Result<Call> {
+    answer_tagged(endpoint, incoming, media_address, &token(), None, policy).await
 }
 
 /// The same, with the `To` tag chosen by the caller rather than freshly minted.
@@ -2316,7 +2747,7 @@ pub(crate) async fn answer_tagged(
     media_address: IpAddr,
     tag: &str,
     claim: Option<Claim<'_>>,
-    codecs: Codecs,
+    policy: MediaPolicy,
 ) -> Result<Call> {
     // Ahead of the claim, deliberately: an offer that cannot be read fails here with nothing
     // sent, and an invitation that was never taken is one a CANCEL can still end.
@@ -2331,7 +2762,7 @@ pub(crate) async fn answer_tagged(
         tag,
         None,
         claim,
-        codecs,
+        policy,
     )
     .await
 }
@@ -2390,6 +2821,8 @@ pub struct Dialing {
     seen: sipx_sip::rel::Sequence,
     /// `None` only after [`Self::answered`] has handed the port to the [`Call`].
     media: Option<EarlyMedia>,
+    /// The ICE agent gathered for the same port, retained until an answer supplies its peer half.
+    ice: Option<LocalDescription>,
     /// What the INVITE offered, kept because an SRTP answer has to be paired with the offer it
     /// answers and because a later UPDATE offers from the same starting point.
     capabilities: Capabilities,
@@ -2465,7 +2898,7 @@ pub async fn dial_early(
     to: &Uri,
     options: &DialOptions,
 ) -> Result<Dialing> {
-    let (port, capabilities, via, invite) =
+    let (port, capabilities, ice, via, invite) =
         open_invitation(endpoint, &target, to, options, &Identity::fresh()).await?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
 
@@ -2479,6 +2912,7 @@ pub async fn dial_early(
         dialog: None,
         seen: sipx_sip::rel::Sequence::default(),
         media: Some(EarlyMedia::Offered(port)),
+        ice,
         capabilities,
         // RFC 3264: the INVITE carried our offer, so an exchange is open until the far end
         // answers it — which before the 200 can only happen in a reliable provisional.
@@ -2811,8 +3245,9 @@ impl Dialing {
         let settled = settle_answer(
             self.capabilities.crypto.as_slice(),
             &answer,
-            self.options.codecs,
+            self.options.media.codecs,
         )?;
+        self.accept_remote_ice(&answer);
         let Some(EarlyMedia::Offered(port)) = self.media.take() else {
             return Ok(());
         };
@@ -2820,8 +3255,11 @@ impl Dialing {
             port,
             capabilities: self.capabilities.clone(),
             settled,
+            // The calling side retains its gathered agent on `Dialing`; `Early::ice` is the
+            // answering side's ownership path into `answer_early`.
+            ice: None,
             media_address: self.options.media_address,
-            codecs: self.options.codecs,
+            codecs: self.options.media.codecs,
         })));
         self.negotiation.received_answer();
         Ok(())
@@ -2929,8 +3367,9 @@ impl Dialing {
                     awaiting_ack: None,
                     ended: false,
                     media_address: self.options.media_address,
-                    codecs: self.options.codecs,
+                    codecs: self.options.media.codecs,
                     current: settled.negotiated,
+                    peer_ice: peer_ice_credentials(response.body()),
                     encrypted: settled.srtp.is_some(),
                     hold: self.hold,
                     referral: None,
@@ -3003,7 +3442,10 @@ impl Dialing {
             Some(EarlyMedia::Offered(port)) => (port, self.settle_from(response)?),
             None => return Err(Error::NoDialog),
         };
-        let media = port.start(settled.media_config())?;
+        let media = match self.ice.take() {
+            Some(local) => port.start_with_ice(settled.media_config(), local)?,
+            None => port.start(settled.media_config())?,
+        };
         Ok((dialog, media, settled))
     }
 
@@ -3014,13 +3456,27 @@ impl Dialing {
         let settled = settle_answer(
             self.capabilities.crypto.as_slice(),
             &answer,
-            self.options.codecs,
+            self.options.media.codecs,
         )?;
+        self.accept_remote_ice(&answer);
         // Our INVITE's offer is answered here rather than in a provisional, so the exchange
         // closes now. Without this the first UPDATE on the confirmed call would be refused as
         // glare against an offer that has in fact been answered.
         self.negotiation.received_answer();
         Ok(settled)
+    }
+
+    /// Give the gathered agent the answer to the offer that created it.
+    fn accept_remote_ice(&mut self, answer: &SessionDescription) {
+        let negotiation = answer
+            .media
+            .first()
+            .map_or(IceNegotiation::Absent, |audio| {
+                sipx_media::ice::negotiate(answer, audio)
+            });
+        if let Some(local) = self.ice.as_mut() {
+            local.accept(&negotiation);
+        }
     }
 
     /// Take back the invitation, whatever state it is in.
@@ -3040,6 +3496,90 @@ impl Dialing {
     }
 }
 
+/// The `200` that carries the answer, with the session-timer headers the negotiation settled on.
+///
+/// `agreed` is [`negotiate_session`]'s outcome: `None` when neither side asked for RFC 4028's
+/// refresh, and otherwise the interval and refresher this answer commits to. `Require: timer` goes
+/// on only when the negotiation said so — a 2xx that requires an extension the offer did not
+/// support is a call the caller must reject.
+///
+/// # Errors
+///
+/// Returns [`Error`] when a header value cannot be built.
+fn ok_with_answer(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    to_with_tag: &str,
+    answer: &SessionDescription,
+    agreed: Option<session::Accepted>,
+) -> Result<Response> {
+    let mut response = ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?
+        .set_header(&HeaderName::To, Bytes::from(to_with_tag.to_owned()))?
+        .header(
+            HeaderName::Contact,
+            Bytes::from(contact_for(endpoint, incoming.transport)),
+        )?
+        // RFC 3311 §4: the 2xx "SHOULD contain an Allow header field listing the UPDATE
+        // method". This is where a UAC learns it, and RFC 4028 §7.4 then reads it to decide
+        // whether a session refresh may be an UPDATE.
+        .header(
+            HeaderName::Allow,
+            Bytes::from_static(update::ALLOW.as_bytes()),
+        )?
+        .header(
+            HeaderName::ContentType,
+            Bytes::from_static(b"application/sdp"),
+        )?
+        .body(Bytes::from(answer.to_string_sdp()));
+
+    if let Some(accepted) = agreed {
+        let expires = SessionExpires {
+            interval: accepted.interval,
+            refresher: Some(accepted.refresher),
+        };
+        response = response
+            .header(HeaderName::SessionExpires, Bytes::from(expires.to_string()))?
+            .header(HeaderName::Supported, Bytes::from_static(b"timer"))?;
+        if accepted.require {
+            response = response.header(HeaderName::Require, Bytes::from_static(b"timer"))?;
+        }
+    }
+    Ok(response.build())
+}
+
+/// Read the offer's ICE half and gather for the answer if the policy selects it (`ice.md` §13.4).
+///
+/// One function for the three answering paths — the free answer functions, the dispatcher's
+/// invitation and [`Early::settle`] — because "when does an answerer gather?" is one rule and
+/// three copies of it are three chances to disagree. Two of them already did: one asked
+/// `matches!(.., Ice { .. })` and one asked [`IceNegotiation::runs_ice`], which are the same
+/// question spelled two ways until one of them acquires a case the other lacks.
+///
+/// Gathering is deliberately *after* reading the peer's half. A policy selecting ICE never means
+/// "require the peer to implement it" (`ice.md` §13.4), so an offer carrying no candidate costs no
+/// gathering, no STUN transaction and no timer.
+///
+/// # Errors
+///
+/// Returns [`Error`] when the policy cannot produce a gathering configuration.
+async fn answer_gathering(
+    port: &MediaPort,
+    offer: &SessionDescription,
+    policy: MediaPolicy,
+) -> Result<(IceNegotiation, Option<LocalDescription>)> {
+    let remote = offer.media.first().map_or(IceNegotiation::Absent, |audio| {
+        sipx_media::ice::negotiate(offer, audio)
+    });
+    if !remote.runs_ice() {
+        return Ok((remote, None));
+    }
+    let local = match policy.gathering(false)? {
+        Some(gathering) => Some(port.gather(&gathering).await),
+        None => None,
+    };
+    Ok((remote, local))
+}
+
 /// A session that has been described and answered, but not yet accepted.
 ///
 /// What an early dialog needs in order to be renegotiable at all. RFC 3311 §5.1 will not let an
@@ -3055,6 +3595,8 @@ pub(crate) struct Early {
     pub(crate) port: MediaPort,
     pub(crate) capabilities: Capabilities,
     pub(crate) settled: Settled,
+    /// The gathered ICE agent retained until the provisional exchange becomes a call.
+    pub(crate) ice: Option<LocalDescription>,
     pub(crate) media_address: IpAddr,
     /// The codec set the provisional's answer was built from, kept because the exchange is not
     /// over: an UPDATE may reoffer before the 200, and it has to be answered from the same set
@@ -3068,16 +3610,30 @@ impl Early {
         media_address: IpAddr,
         secure: bool,
         offer: &SessionDescription,
-        codecs: Codecs,
+        policy: MediaPolicy,
     ) -> Result<(Self, SessionDescription)> {
-        let negotiated = negotiated(offer, codecs)?;
+        let negotiated = negotiated(offer, policy.codecs)?;
         let port = MediaPort::bind(SocketAddr::new(media_address, 0))
             .await
             .map_err(Error::Io)?;
-        let capabilities = codecs
-            .capabilities(media_address, port.local_addr().port())
+        let (remote_ice, mut local_ice) = answer_gathering(&port, offer, policy).await?;
+        let advertised = local_ice
+            .as_ref()
+            .and_then(|local| local.default_destination(ComponentId::RTP))
+            .unwrap_or_else(|| SocketAddr::new(media_address, port.local_addr().port()));
+        let capabilities = policy
+            .codecs
+            .capabilities(advertised.ip(), advertised.port())
             .with_srtp(secure);
-        let answer = sipx_sdp::answer(offer, &capabilities);
+        let mut answer = sipx_sdp::answer(offer, &capabilities);
+        if let Some(local) = local_ice.as_mut() {
+            local.accept(&remote_ice);
+            add_ice(&mut answer, local, &remote_ice.answer_attributes());
+        } else if policy.ice != IcePolicy::Disabled
+            && let Some(audio) = answer.media.first_mut()
+        {
+            audio.attributes.extend(remote_ice.answer_attributes());
+        }
         if answer
             .media
             .iter()
@@ -3094,8 +3650,9 @@ impl Early {
                 port,
                 capabilities,
                 settled,
+                ice: local_ice,
                 media_address,
-                codecs,
+                codecs: policy.codecs,
             },
             answer,
         ))
@@ -3178,6 +3735,24 @@ pub async fn answer_ringing_with(
     ringing: &crate::Ringing,
     codecs: Codecs,
 ) -> Result<Call> {
+    answer_ringing_with_policy(
+        endpoint,
+        incoming,
+        media_address,
+        ringing,
+        MediaPolicy::default().with_codecs(codecs),
+    )
+    .await
+}
+
+/// [`answer_ringing`], using one coherent codec and ICE policy.
+pub async fn answer_ringing_with_policy(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    ringing: &crate::Ringing,
+    policy: MediaPolicy,
+) -> Result<Call> {
     // RFC 3262 §3 and §5: a 2xx must not go out while a reliable provisional carrying a session
     // description is unacknowledged. This path never puts a description in one — `ring` sends a
     // bodiless provisional, and `ring_early` is the entry point that does, where
@@ -3197,7 +3772,7 @@ pub async fn answer_ringing_with(
         ringing.tag(),
         Some(ringing.is_reliable()),
         None,
-        codecs,
+        policy,
     )
     .await
 }
@@ -3276,7 +3851,12 @@ pub async fn answer_early(
     }
     let response = response.build();
 
-    let media = early.port.start(early.settled.media_config())?;
+    let media = match early.ice {
+        Some(local) => early
+            .port
+            .start_with_ice(early.settled.media_config(), local)?,
+        None => early.port.start(early.settled.media_config())?,
+    };
     endpoint.respond(&incoming.key, response.clone()).await?;
 
     let acked = Arc::new(tokio::sync::Notify::new());
@@ -3300,6 +3880,7 @@ pub async fn answer_early(
         media_address: early.media_address,
         codecs: early.codecs,
         current: early.settled.negotiated,
+        peer_ice: peer_ice_credentials(incoming.request.body()),
         hold: Direction::SendRecv,
         encrypted: early.settled.is_encrypted(),
         referral: None,
@@ -3404,9 +3985,9 @@ async fn answer_negotiated(
     tag: &str,
     reliable_ringing: Option<bool>,
     claim: Option<Claim<'_>>,
-    codecs: Codecs,
+    policy: MediaPolicy,
 ) -> Result<Call> {
-    let negotiated = negotiated(&offer, codecs)?;
+    let negotiated = negotiated(&offer, policy.codecs)?;
 
     // The port is bound before the session starts, because the answer has to name it *and* the
     // session has to be created with the keys that answer settles on. Starting the session first
@@ -3415,10 +3996,24 @@ async fn answer_negotiated(
         .await
         .map_err(Error::Io)?;
 
-    let capabilities = codecs
-        .capabilities(media_address, port.local_addr().port())
+    let (remote_ice, mut local_ice) = answer_gathering(&port, &offer, policy).await?;
+    let advertised = local_ice
+        .as_ref()
+        .and_then(|local| local.default_destination(ComponentId::RTP))
+        .unwrap_or_else(|| SocketAddr::new(media_address, port.local_addr().port()));
+    let capabilities = policy
+        .codecs
+        .capabilities(advertised.ip(), advertised.port())
         .with_srtp(incoming.transport.is_secure());
-    let answer_sdp = sipx_sdp::answer(&offer, &capabilities);
+    let mut answer_sdp = sipx_sdp::answer(&offer, &capabilities);
+    if let Some(local) = local_ice.as_mut() {
+        local.accept(&remote_ice);
+        add_ice(&mut answer_sdp, local, &remote_ice.answer_attributes());
+    } else if policy.ice != IcePolicy::Disabled
+        && let Some(audio) = answer_sdp.media.first_mut()
+    {
+        audio.attributes.extend(remote_ice.answer_attributes());
+    }
     if answer_sdp
         .media
         .iter()
@@ -3432,7 +4027,10 @@ async fn answer_negotiated(
         negotiated,
         srtp: srtp_keys_answering(capabilities.crypto.as_ref(), offer_crypto(&offer)),
     };
-    let media = port.start(settled.media_config())?;
+    let media = match local_ice {
+        Some(local) => port.start_with_ice(settled.media_config(), local)?,
+        None => port.start(settled.media_config())?,
+    };
 
     let to_with_tag = {
         let existing = incoming
@@ -3446,38 +4044,7 @@ async fn answer_negotiated(
 
     let agreed = negotiate_session(endpoint, incoming).await?;
 
-    let mut response = ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?
-        .set_header(&HeaderName::To, Bytes::from(to_with_tag))?
-        .header(
-            HeaderName::Contact,
-            Bytes::from(contact_for(endpoint, incoming.transport)),
-        )?
-        // RFC 3311 §4: the 2xx "SHOULD contain an Allow header field listing the UPDATE
-        // method". This is where a UAC learns it, and RFC 4028 §7.4 then reads it to decide
-        // whether a session refresh may be an UPDATE.
-        .header(
-            HeaderName::Allow,
-            Bytes::from_static(update::ALLOW.as_bytes()),
-        )?
-        .header(
-            HeaderName::ContentType,
-            Bytes::from_static(b"application/sdp"),
-        )?
-        .body(Bytes::from(answer_sdp.to_string_sdp()));
-
-    if let Some(accepted) = agreed {
-        let expires = SessionExpires {
-            interval: accepted.interval,
-            refresher: Some(accepted.refresher),
-        };
-        response = response
-            .header(HeaderName::SessionExpires, Bytes::from(expires.to_string()))?
-            .header(HeaderName::Supported, Bytes::from_static(b"timer"))?;
-        if accepted.require {
-            response = response.header(HeaderName::Require, Bytes::from_static(b"timer"))?;
-        }
-    }
-    let response = response.build();
+    let response = ok_with_answer(endpoint, incoming, &to_with_tag, &answer_sdp, agreed)?;
 
     // Before the 200, not after. An INVITE with no usable `Contact` cannot form a dialog
     // (RFC 3261 §12.1.1), and answering first would put a 2xx on the wire for a call this side
@@ -3531,8 +4098,9 @@ async fn answer_negotiated(
         awaiting_ack: Some(acked),
         ended: false,
         media_address,
-        codecs,
+        codecs: policy.codecs,
         current: settled.negotiated,
+        peer_ice: peer_ice_credentials(incoming.request.body()),
         hold: Direction::SendRecv,
         encrypted: settled.srtp.is_some(),
         referral: None,
@@ -3601,6 +4169,8 @@ enum Waited {
     },
     /// The transaction ended without a final response.
     Gone,
+    /// The selected transport could not be established or used.
+    Transport(sipx_transport::Error),
 }
 
 /// Wait for the final response to an INVITE, remembering whether a provisional arrived.
@@ -3654,6 +4224,18 @@ async fn await_final(
                 if let Err(error) = acknowledge(&response, acknowledging).await {
                     tracing::debug!(%error, "could not acknowledge a reliable provisional");
                 }
+            }
+            Some(sipx_sip::transaction::TuEvent::TransportError) => {
+                // Preserve TLS verification failures because treating a rejected certificate as
+                // "no response" hides the security decision the caller must act on. Other send
+                // failures retain the call API's established NoResponse behavior; changing those
+                // exit semantics is outside this transport-selection story.
+                if let Some(error @ sipx_transport::Error::Tls(_)) =
+                    responses.take_transport_error()
+                {
+                    return Waited::Transport(error);
+                }
+                return Waited::Gone;
             }
             Some(_) => {}
             None => return Waited::Gone,

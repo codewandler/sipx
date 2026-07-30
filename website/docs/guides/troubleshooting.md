@@ -89,9 +89,9 @@ authentication username expected by the service, password, target, and whether t
 a protected transport. The current CLI can authenticate `register`, but `dial --password` is
 refused because call authentication is not implemented; it will not silently discard the secret.
 
-The CLI cannot select TLS or WSS. If the service requires either, use the Rust transport APIs and
-configure trust anchors rather than trying to bypass certificate verification. See
-[Security](../reference/security.md).
+Select `--transport tls` or `--transport wss`, add a private authority with `--tls-ca`, and set
+`--tls-server-name` only when the service identity differs from the URI host. A name, issuer, or
+expiry failure is reported as TLS and never retried over cleartext. See [Security](../reference/security.md).
 
 ## A call or registration times out
 

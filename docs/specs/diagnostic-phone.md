@@ -39,9 +39,18 @@ I/O.
 
 ## 3. Command surface
 
-`dial`, `answer` and `register` accept `--transport`. TLS and WSS additionally accept a server name,
-trust roots and optional client identity. A secure URI cannot be combined with a cleartext
-transport. Certificate verification is on by default; disabling it is not part of this contract.
+`dial`, `answer` and `register` accept `--transport <udp|tcp|tls|ws|wss>`. The existing `--tcp`
+flag remains an alias. On outbound TLS/WSS, `--tls-server-name` overrides the URI host used for
+verification, `--tls-ca` adds PEM roots to the platform store, and the paired `--tls-cert` /
+`--tls-key` flags provide an optional client identity. On `answer`, that certificate/key pair is
+the required server identity for TLS/WSS; outbound-only name and trust options are refused. A
+secure URI cannot be combined with a cleartext transport. Certificate verification is on by
+default; disabling it is not part of this contract.
+
+An invocation that does not use `--transport` retains its existing output byte for byte. An
+explicit selection adds `requested_transport` and `negotiated_transport` to terminal results; the
+pre-call `answer` announcement carries only the requested transport because nothing has negotiated
+yet.
 
 `dial` and `answer` accept ordered `--codec` values, `--media-security`, `--ice`, `--stun-server`,
 `--audio-input` and `--audio-output`. File flags remain aliases for WAV endpoints. Device selectors

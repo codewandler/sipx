@@ -293,6 +293,7 @@ pub struct Incoming {
 #[derive(Debug)]
 pub struct Responses {
     rx: mpsc::Receiver<TuEvent>,
+    failures: mpsc::Receiver<Error>,
     peeked: Option<TuEvent>,
 }
 
@@ -303,6 +304,15 @@ impl Responses {
             return Some(event);
         }
         self.rx.recv().await
+    }
+
+    /// Take the concrete driver failure associated with a `TransportError` event.
+    ///
+    /// The sans-I/O transaction layer carries only the fact that transport failed. The endpoint
+    /// queues the I/O-layer cause before feeding that fact into the core, which lets an application
+    /// preserve a TLS verification error instead of reporting an unanswered request.
+    pub fn take_transport_error(&mut self) -> Option<Error> {
+        self.failures.try_recv().ok()
     }
 
     /// Look at the next event without consuming it.
@@ -339,6 +349,7 @@ enum Command {
         request: Box<Request>,
         target: Target,
         events: mpsc::Sender<TuEvent>,
+        failures: mpsc::Sender<Error>,
         reply: oneshot::Sender<Result<TransactionKey>>,
     },
     Respond {
@@ -369,6 +380,12 @@ enum Command {
     Outstanding(oneshot::Sender<usize>),
     /// Stop the driver after every listener, handshake and pooled connection has terminated.
     Shutdown,
+}
+
+#[derive(Debug)]
+struct ClientSink {
+    events: mpsc::Sender<TuEvent>,
+    failures: mpsc::Sender<Error>,
 }
 
 /// A response that matched no client transaction (RFC 3261 §16.7).
@@ -475,12 +492,14 @@ impl Handle {
         }
 
         let (events_tx, events_rx) = mpsc::channel(32);
+        let (failures_tx, failures_rx) = mpsc::channel(1);
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(Command::Request {
                 request: Box::new(request),
                 target,
                 events: events_tx,
+                failures: failures_tx,
                 reply: reply_tx,
             })
             .await
@@ -488,6 +507,7 @@ impl Handle {
         reply_rx.await.map_err(|_| Error::EndpointClosed)??;
         Ok(Responses {
             rx: events_rx,
+            failures: failures_rx,
             peeked: None,
         })
     }
@@ -1246,7 +1266,7 @@ struct Driver {
     reconnect: HashMap<TransactionKey, Target>,
     /// How long a request may sit unanswered before its transaction is abandoned.
     unanswered_limit: std::time::Duration,
-    clients: HashMap<TransactionKey, mpsc::Sender<TuEvent>>,
+    clients: HashMap<TransactionKey, ClientSink>,
     incoming: mpsc::Sender<Incoming>,
     commands: mpsc::Receiver<Command>,
     net: mpsc::Receiver<tcp::Event>,
@@ -1525,6 +1545,20 @@ impl Driver {
                     let _ = waiter.send(Ok(None));
                 }
             }
+            #[cfg(feature = "tls")]
+            tcp::Event::HandshakeFailed { key, id, detail } => {
+                // Authentication failure is terminal for this generation. Remove it now and fail
+                // its transactions with the typed cause; the `Closed` emitted by the task wrapper
+                // then becomes a stale close and has no second effect.
+                if !self.pool.remove(&key, id) {
+                    return;
+                }
+                let generation = ConnectionGeneration {
+                    key: key.clone(),
+                    id,
+                };
+                self.fail_transactions_on(&generation, Some(detail)).await;
+            }
             tcp::Event::Closed { key, id } => {
                 // A retiring generation can report after a replacement with the same key has
                 // already joined. Every side effect below belongs to the generation that closed,
@@ -1545,7 +1579,7 @@ impl Driver {
                         let _ = waiter.send(Err(Error::ConnectionClosed));
                     }
                 }
-                self.fail_transactions_on(&generation).await;
+                self.fail_transactions_on(&generation, None).await;
             }
         }
     }
@@ -1554,7 +1588,11 @@ impl Driver {
     ///
     /// The alternative is letting them time out, which means waiting up to 32 seconds to
     /// discover something already known — a bad experience and a resource leak.
-    async fn fail_transactions_on(&mut self, closed: &ConnectionGeneration) {
+    async fn fail_transactions_on(
+        &mut self,
+        closed: &ConnectionGeneration,
+        tls_detail: Option<String>,
+    ) {
         let affected: Vec<TransactionKey> = self
             .transaction_generations
             .iter()
@@ -1566,6 +1604,18 @@ impl Driver {
             .map(|(key, _)| key.clone())
             .collect();
         for key in affected {
+            #[cfg(feature = "tls")]
+            if let Some(detail) = &tls_detail
+                && let Some(client) = self.clients.get(&key)
+            {
+                let failure = Error::Tls(crate::tls::TlsError::Handshake {
+                    peer: closed.key.peer.to_string(),
+                    detail: detail.clone(),
+                });
+                let _ = client.failures.try_send(failure);
+            }
+            #[cfg(not(feature = "tls"))]
+            let _ = &tls_detail;
             let outputs = self.layer.on_transport_error(&key);
             self.perform(&key, outputs, None).await;
         }
@@ -1793,6 +1843,7 @@ impl Driver {
                 request,
                 target,
                 events,
+                failures,
                 reply,
             } => {
                 let Some((key, outputs)) = self
@@ -1805,7 +1856,8 @@ impl Driver {
                     return;
                 };
                 self.destinations.insert(key.clone(), target);
-                self.clients.insert(key.clone(), events);
+                self.clients
+                    .insert(key.clone(), ClientSink { events, failures });
                 // discard: the caller stopped waiting. A dropped receiver means nobody is listening
                 // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = reply.send(Ok(key.clone()));
@@ -1918,6 +1970,12 @@ impl Driver {
                         Err(error) => {
                             self.meters.discard_send_failure();
                             tracing::warn!(%error, %addr, "send failed");
+                            if let Some(client) = self.clients.get(key) {
+                                // One transport failure terminates this transaction, so one
+                                // bounded slot is sufficient. A full/closed slot means the caller
+                                // has already stopped listening.
+                                let _ = client.failures.try_send(error);
+                            }
                             let outputs = self.layer.on_transport_error(key);
                             return Box::pin(self.perform(key, outputs, origin)).await;
                         }
@@ -2129,12 +2187,12 @@ impl Driver {
         origin: Option<(SocketAddr, TransportKind)>,
     ) {
         // A client transaction's events go to whoever sent the request.
-        if let Some(sender) = self.clients.get(key) {
+        if let Some(client) = self.clients.get(key) {
             // The receiver is gone: the application dropped its `Responses` before the transaction
             // finished. Legitimate — a caller that stopped caring is allowed to — but it means an
             // outcome went nowhere, and nothing retransmits an event, so it is counted rather than
             // discarded in silence (§12.1).
-            if sender.send(event).await.is_err() {
+            if client.events.send(event).await.is_err() {
                 self.meters.discard_transaction_event();
                 tracing::debug!(
                     "a transaction event had no receiver; the caller stopped listening"
@@ -2339,7 +2397,14 @@ mod tests {
             },
         );
         let (client_events, mut received) = mpsc::channel(8);
-        driver.clients.insert(transaction.clone(), client_events);
+        let (failures, _failure_rx) = mpsc::channel(1);
+        driver.clients.insert(
+            transaction.clone(),
+            super::ClientSink {
+                events: client_events,
+                failures,
+            },
+        );
 
         // Generation zero predates every real pool entry (IDs begin at one), modelling an old
         // task's delayed close after the current generation and transaction were installed.
@@ -2417,7 +2482,14 @@ mod tests {
             .transaction_generations
             .insert(transaction.clone(), generation.clone());
         let (client_events, mut received) = mpsc::channel(8);
-        driver.clients.insert(transaction, client_events);
+        let (failures, _failure_rx) = mpsc::channel(1);
+        driver.clients.insert(
+            transaction,
+            super::ClientSink {
+                events: client_events,
+                failures,
+            },
+        );
         let (pong, pong_result) = tokio::sync::oneshot::channel();
         driver
             .pong_waiters

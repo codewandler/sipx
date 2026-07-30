@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use sipx_audio::{Wav, read_wav, write_wav};
 use sipx_call::Call;
-use sipx_sip::Uri;
-use sipx_transport::{Config as TransportConfig, Target, TransportKind, bind};
+use sipx_sip::{Host, Uri};
+use sipx_transport::{Config as TransportConfig, TransportKind, bind};
 
 use crate::Args;
 use crate::output::{Exit, Format, Report, fail};
@@ -29,13 +29,22 @@ OPTIONS:
                       0 waits as long as the transaction layer does, which is 32 seconds.
     --from <URI>      Our own address (default sip:sipx@<local>)
     --local <ADDR>    Local address to bind (default 0.0.0.0:0)
-    --tcp             Use TCP rather than UDP
+    --transport <T>   Signalling: udp, tcp, tls, ws or wss (default udp)
+    --tcp             Legacy alias for --transport tcp
+    --tls-server-name <N>  Certificate identity to verify (default URI host)
+    --tls-ca <FILE>   Add PEM trust roots to the platform store
+    --tls-cert <FILE> Client certificate chain for mutual TLS (with --tls-key)
+    --tls-key <FILE>  Client private key for mutual TLS (with --tls-cert)
     --stats           Report call quality on exit: loss, jitter, round trip, MOS estimate
     --capture <FILE>  Record signalling to this pcapng file. Credentials are redacted;
                       TLS is recorded decrypted. Still identifies who called whom
     --json            Report as JSON
 ";
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the command lifecycle is kept in execution order so validation-before-I/O remains auditable"
+)]
 pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // Help, then any flag given no value — refused before the URI is even looked at, so a dropped
     // `--play` or `--record` cannot turn into a call that carries no audio (`S-30`).
@@ -49,11 +58,13 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         return fail(format, Exit::Usage, "a URI to call is required");
     };
 
-    // Before anything else, and before the URI is parsed for an address: a scheme this CLI cannot
-    // honour is refused rather than quietly downgraded.
-    if let Some(why) = crate::insecure_scheme_refusal(uri) {
-        return fail(format, Exit::Usage, &why);
-    }
+    let Ok(to) = Uri::parse(bytes::Bytes::from(uri.to_owned())) else {
+        return fail(format, Exit::Usage, &format!("not a SIP URI: {uri}"));
+    };
+    let transport = match crate::signalling::Selection::from_args(&args, to.scheme().is_secure()) {
+        Ok(transport) => transport,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
 
     // `--password` is a global valued flag, so `dial` *parses* it. It used to then throw it away:
     // a call challenged with 407 failed while the person who supplied credentials was told nothing
@@ -70,20 +81,18 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         );
     }
 
-    let transport = if args.flag("tcp") {
-        TransportKind::Tcp
-    } else {
-        TransportKind::Udp
-    };
-
-    let Some(target_addr) = target_of(uri) else {
+    let Some((target_addr, server_name)) = target_of(&to, transport.kind()) else {
         return fail(
             format,
             Exit::Usage,
             &format!("{uri} must name an address and port, e.g. sip:bob@192.0.2.1:5060"),
         );
     };
-    let target = Target::new(target_addr, transport);
+    let target = match transport.target(&args, target_addr, &server_name) {
+        Ok(target) => target,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
+    let negotiated_transport = target.transport;
 
     // Audio to play is read before the call is placed: failing after the far end has answered
     // means hanging up on someone for a mistake that was visible beforehand.
@@ -103,14 +112,14 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     let mut config = TransportConfig::new(local);
     config.sent_by = media_address.to_string();
     crate::apply_capture(&args, &mut config);
+    if let Err(message) = transport.configure_client(&args, &mut config) {
+        return fail(format, Exit::Usage, &message);
+    }
     let (handle, _incoming) = match bind(config).await {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
     };
 
-    let Ok(to) = Uri::parse(bytes::Bytes::from(uri.to_owned())) else {
-        return fail(format, Exit::Usage, &format!("not a SIP URI: {uri}"));
-    };
     let from = args
         .value("from")
         .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
@@ -140,18 +149,21 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     };
     let recorded = exchange(&mut call, clip.as_ref(), args.value("dtmf"), duration).await;
 
-    let mut report = Report::new()
-        .text("status", "answered")
-        .text("peer", uri)
-        .number(
-            "duration_ms",
-            i64::try_from(started.elapsed().as_millis()).unwrap_or(0),
-        )
-        .number(
-            "samples_recorded",
-            i64::try_from(recorded.len()).unwrap_or(0),
-        )
-        .boolean("heard_audio", !recorded.is_empty());
+    let mut report = transport.report(
+        Report::new()
+            .text("status", "answered")
+            .text("peer", uri)
+            .number(
+                "duration_ms",
+                i64::try_from(started.elapsed().as_millis()).unwrap_or(0),
+            )
+            .number(
+                "samples_recorded",
+                i64::try_from(recorded.len()).unwrap_or(0),
+            )
+            .boolean("heard_audio", !recorded.is_empty()),
+        negotiated_transport,
+    );
 
     if args.flag("stats") {
         report = with_quality(report, &call.media().quality().await);
@@ -251,18 +263,15 @@ fn write_clip(path: &str, samples: &[i16]) -> Result<(), String> {
 }
 
 /// The address and port a URI names, if it names one directly.
-pub(crate) fn target_of(uri: &str) -> Option<std::net::SocketAddr> {
-    let rest = uri
-        .strip_prefix("sip:")
-        .or_else(|| uri.strip_prefix("sips:"))?;
-    let host = rest.rsplit('@').next()?;
-    let host = host.split(';').next()?;
-    if let Ok(addr) = host.parse::<std::net::SocketAddr>() {
-        return Some(addr);
-    }
-    host.parse::<IpAddr>()
-        .ok()
-        .map(|ip| std::net::SocketAddr::new(ip, 5060))
+pub(crate) fn target_of(
+    uri: &Uri,
+    transport: TransportKind,
+) -> Option<(std::net::SocketAddr, String)> {
+    let Host::Ip(ip) = uri.host()? else {
+        return None;
+    };
+    let port = uri.port().unwrap_or_else(|| transport.default_port());
+    Some((std::net::SocketAddr::new(*ip, port), ip.to_string()))
 }
 
 /// Add the call's quality to a report.
@@ -348,10 +357,15 @@ mod tests {
 
     use super::*;
 
+    fn target(input: &str, transport: TransportKind) -> Option<std::net::SocketAddr> {
+        let uri = Uri::parse(bytes::Bytes::from(input.to_owned())).expect("a URI");
+        target_of(&uri, transport).map(|(addr, _)| addr)
+    }
+
     #[test]
     fn a_uri_naming_an_address_and_port_is_the_target() {
         assert_eq!(
-            target_of("sip:bob@192.0.2.1:5080").map(|a| a.to_string()),
+            target("sip:bob@192.0.2.1:5080", TransportKind::Udp).map(|a| a.to_string()),
             Some("192.0.2.1:5080".to_owned())
         );
     }
@@ -359,7 +373,7 @@ mod tests {
     #[test]
     fn a_uri_without_a_port_gets_the_default() {
         assert_eq!(
-            target_of("sip:bob@192.0.2.1").map(|a| a.to_string()),
+            target("sip:bob@192.0.2.1", TransportKind::Udp).map(|a| a.to_string()),
             Some("192.0.2.1:5060".to_owned())
         );
     }
@@ -367,7 +381,7 @@ mod tests {
     #[test]
     fn a_uri_with_no_user_still_yields_its_host() {
         assert_eq!(
-            target_of("sip:192.0.2.1:5060").map(|a| a.to_string()),
+            target("sip:192.0.2.1:5060", TransportKind::Udp).map(|a| a.to_string()),
             Some("192.0.2.1:5060".to_owned())
         );
     }
@@ -375,35 +389,15 @@ mod tests {
     #[test]
     fn uri_parameters_are_not_part_of_the_host() {
         assert_eq!(
-            target_of("sip:bob@192.0.2.1:5060;transport=tcp").map(|a| a.to_string()),
+            target("sip:bob@192.0.2.1:5060;transport=tcp", TransportKind::Tcp)
+                .map(|a| a.to_string()),
             Some("192.0.2.1:5060".to_owned())
         );
     }
 
     #[test]
     fn a_name_is_not_a_target_this_command_can_use() {
-        assert!(target_of("sip:bob@example.com").is_none());
-        assert!(target_of("bob@192.0.2.1").is_none(), "no scheme");
-    }
-
-    /// `S-27`. Before this, `target_of` stripped `sips:` in the same `or_else` as `sip:`, so the
-    /// address came back looking ordinary and the INVITE went out over UDP in the clear. The
-    /// downgrade was invisible: the call connects and the audio flows.
-    #[test]
-    fn a_sips_uri_is_refused_rather_than_dialled_in_the_clear() {
-        let why = crate::insecure_scheme_refusal("sips:bob@192.0.2.1")
-            .expect("a sips: URI this CLI cannot honour must be refused");
-        assert!(
-            why.contains("TLS"),
-            "the refusal has to name the missing capability, not call the URI malformed: {why}"
-        );
-        // The proof that the old behaviour was a silent downgrade rather than a parse failure:
-        // the address still resolves perfectly well, which is exactly why nothing caught it.
-        assert_eq!(
-            target_of("sips:bob@192.0.2.1").map(|a| a.to_string()),
-            Some("192.0.2.1:5060".to_owned()),
-            "if this ever returns None, the refusal above is no longer what protects the caller"
-        );
+        assert!(target("sip:bob@example.com", TransportKind::Udp).is_none());
     }
 
     /// The behavioural half of `S-27`, and the one that actually matters: the *command* refuses,
@@ -452,15 +446,6 @@ mod tests {
             exit.code(),
             Exit::Usage.code(),
             "a password dial cannot use must be refused, not accepted and dropped"
-        );
-    }
-
-    #[test]
-    fn a_plain_sip_uri_is_not_refused() {
-        assert!(crate::insecure_scheme_refusal("sip:bob@192.0.2.1").is_none());
-        assert!(
-            crate::insecure_scheme_refusal("bob@192.0.2.1").is_none(),
-            "a URI with no scheme is target_of's to reject, and it says something else"
         );
     }
 

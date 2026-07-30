@@ -25,9 +25,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
-use sipx_sdp::ice::ComponentId;
+use sipx_sdp::ice::{Candidate, ComponentId, Credentials};
 
 use super::agent::{Agent, Input, Output, Timer};
 use super::candidate::LocalBase;
@@ -60,6 +60,43 @@ pub(crate) enum Event {
         /// Which component carried it.
         component: ComponentId,
     },
+    /// A later offer or answer on this call carried the peer's ICE half (RFC 8839 §4.4; [spec]
+    /// §13.5).
+    ///
+    /// This is the third fact, and it is a fact like the other two: a description arrived. What it
+    /// means — merge the candidates, or rebuild for a restart — is the agent's to decide, exactly
+    /// as it decides for the description that started the session.
+    ///
+    /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+    Renegotiated {
+        /// The local parameters to adopt first, when this exchange is a restart this side is
+        /// offering or answering. `None` leaves the running session's credentials in place.
+        local: Option<(Credentials, u64)>,
+        /// The peer's half, when the description carried one. `None` is a restart this side is
+        /// offering, whose answer has not arrived yet.
+        peer: Option<Peer>,
+        /// Where to send back what the next description must signal, once both are applied.
+        reply: oneshot::Sender<Local>,
+    },
+}
+
+/// The peer's ICE half, as [`super::Negotiation`] read it out of a description.
+#[derive(Debug)]
+pub(crate) struct Peer {
+    pub(crate) credentials: Credentials,
+    pub(crate) candidates: Vec<Candidate>,
+    pub(crate) lite: bool,
+}
+
+/// What this side must put in its next offer or answer for the stream ([spec] §13.5).
+///
+/// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+#[derive(Debug, Clone)]
+pub struct Local {
+    /// `a=ice-ufrag` and `a=ice-pwd`, read back from the agent rather than from the caller's copy.
+    pub credentials: Credentials,
+    /// `a=candidate`, priced by the agent, in descending priority.
+    pub candidates: Vec<Candidate>,
 }
 
 /// The handle the media path holds: where to send events, and whether it is worth sending them.
@@ -89,6 +126,29 @@ impl Handle {
         {
             tracing::debug!(%from, "dropping a connectivity check the ice driver could not take");
         }
+    }
+
+    /// Apply a later exchange's ICE half and read back what the next description must signal.
+    ///
+    /// Awaited rather than dropped on a full queue, which is the opposite of
+    /// [`Self::datagram`]'s rule and for the opposite reason: a connectivity check is
+    /// retransmitted by the far end, and an offer/answer is not. Losing one silently would leave
+    /// the agent keyed to credentials the peer has stopped using, so the checks would authenticate
+    /// against nothing and the caller would signal candidates for a session that no longer exists.
+    ///
+    /// `None` when the driver has stopped — the session is ending, and the caller answers without
+    /// ICE attributes rather than waiting for a task that will never reply.
+    pub(crate) async fn renegotiated(
+        &self,
+        local: Option<(Credentials, u64)>,
+        peer: Option<Peer>,
+    ) -> Option<Local> {
+        let (reply, answered) = oneshot::channel();
+        self.events
+            .send(Event::Renegotiated { local, peer, reply })
+            .await
+            .ok()?;
+        answered.await.ok()
     }
 
     /// Note that media went out, if there is a selected pair for it to have gone out on.
@@ -207,9 +267,55 @@ impl Driver {
                     self.agent.handle(Input::Datagram { from, on, bytes })
                 }
                 Event::DataSent { component } => self.agent.handle(Input::DataSent { component }),
+                Event::Renegotiated { local, peer, reply } => {
+                    let outputs = self.renegotiated(local, peer);
+                    // Dropped receiver means the signalling side gave up on this exchange; the
+                    // agent has still applied it, which is correct — the peer's credentials
+                    // changed whether or not anybody is waiting to hear what ours are.
+                    let _ = reply.send(Local {
+                        credentials: self.agent.credentials().clone(),
+                        candidates: super::gather::lines(self.agent.local_candidates()),
+                    });
+                    outputs
+                }
             };
             self.apply(outputs).await;
         }
+    }
+
+    /// Apply a later exchange's ICE half to the running agent (RFC 8839 §4.4; [spec] §13.5).
+    ///
+    /// The order is the contract and not an implementation detail. Our own parameters go in
+    /// **first**, so that when the peer's description turns out to be a restart, the checklists the
+    /// agent rebuilds are keyed to the credentials this side is about to signal rather than to the
+    /// ones the finished session used. Applied the other way round, the new session would start
+    /// authenticating with credentials the peer has already been told to forget.
+    ///
+    /// Whether this *is* a restart is not decided here. It is RFC 8839 §4.4.1.1.1's question about
+    /// the peer's two credentials, the agent has always answered it, and asking it a second time
+    /// here would be a second place for the answer to drift.
+    ///
+    /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+    fn renegotiated(
+        &mut self,
+        local: Option<(Credentials, u64)>,
+        peer: Option<Peer>,
+    ) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        if let Some((credentials, tiebreaker)) = local {
+            outputs.extend(self.agent.handle(Input::LocalCredentials {
+                credentials,
+                tiebreaker,
+            }));
+        }
+        if let Some(peer) = peer {
+            outputs.extend(self.agent.handle(Input::RemoteDescription {
+                credentials: peer.credentials,
+                candidates: peer.candidates,
+                lite: peer.lite,
+            }));
+        }
+        outputs
     }
 
     /// Perform the agent's outputs, **in the order given** ([spec] §2): a `Send` always precedes

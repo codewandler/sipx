@@ -562,6 +562,76 @@ This is the common case and it must stay the common case. **A stack that require
 call has regressed**, and the regression test is the existing suite: the symmetric-RTP tests must
 pass unchanged, with no ICE attributes offered unless ICE is switched on.
 
+### 13.4 Call-layer selection
+
+The application selects ICE through `sipx_call::MediaPolicy`, not by constructing an agent or
+editing SDP. `IcePolicy` is a closed choice:
+
+| Policy | Offerer | Answerer |
+|---|---|---|
+| `Disabled` (default) | gather nothing; emit no ICE attributes | ignore ICE for local selection and retain the pre-ICE answer path |
+| `Host` | gather host candidates before sending the initial offer | when the offer carries usable ICE, gather host candidates before answering |
+| `Stun(server)` | gather host and server-reflexive candidates using `server` | when the offer carries usable ICE, gather host and server-reflexive candidates using `server` |
+
+The call layer generates a fresh credential pair and tiebreaker for every enabled initial exchange.
+They are not application inputs: reusing either across calls makes one call's authenticated checks
+valid in another. A configured STUN server that is silent produces the host candidates gathered by
+the same operation; it does not fail the call and does not silently turn ICE off.
+
+On the offering side, the bound `MediaPort` is gathered before the INVITE is built. Its attributes
+are appended to the audio stream, and the stream default destination is the gathered RTP default.
+The local description is held with that exact port until the answer arrives. The answer is read with
+`sipx_media::ice::negotiate`, fed to `LocalDescription::accept`, and the port is started through
+`start_with_ice`.
+
+On the answering side, negotiation is read before gathering. `Absent` retains the historical answer
+byte for byte and starts no ICE worker. `Mismatch` adds `a=ice-mismatch` and uses the ordinary media
+path. `Ice` gathers, appends the local attributes to the answer, feeds the peer description to the
+agent and starts that same bound port through `start_with_ice`. A selected policy never means
+"require the peer to implement ICE"; it means use ICE when the exchange supplies both halves.
+
+Once an agent is started, connectivity failure is a media-path failure and is never permission to
+fall back to the SDP default destination. That would turn an explicit ICE exchange into an
+unauthenticated downgrade after the peer had already agreed to checks.
+
+### 13.5 A later exchange on a running call
+
+§13.4 covers the exchange that starts the session. Every exchange after it — a re-INVITE, an
+UPDATE, and the answers to either — is governed by RFC 8839 §4.4, and the rule has two halves that
+must not be confused with each other.
+
+**Every subsequent description for a stream doing ICE carries the ICE attributes.** `a=ice-ufrag`,
+`a=ice-pwd` and the candidates go out again unchanged. This is not decoration: §6 says an agent
+determines its peer supports ICE by the presence of `candidate` attributes, so a re-offer that
+omits them says the peer has *stopped* doing ICE, and the receiver would be right to fall back to
+symmetric RTP on a call that had already agreed to checks. Hold, resume, a codec change and a
+session refresh are all subsequent offers, and none of them is a restart.
+
+**Both credentials changing, and only both, is a restart** (§4.4.1.1.1, restated from §13.2). One
+alone is not. The same value moving between the session level and the media level is not. The
+receiver of a restart:
+
+1. takes new local credentials and a new tiebreaker for the new session — the answer to a restart
+   carries the answerer's own new `ice-ufrag` and `ice-pwd`, not the ones the old session used;
+2. re-gathers, rebuilds the checklists and may redetermine the role, all of which is
+   `Agent::restart`;
+3. **keeps sending media on the previously selected pair** until the new session selects one. A
+   restart that goes silent is worse than no restart, and this is the property the selected pair is
+   deliberately not cleared for.
+
+Re-gathering reuses the bound sockets, because the sockets are what the peer is already sending to
+and the session is still running on them. The host candidates are therefore the same addresses, and
+a server-reflexive candidate learned by the initial gathering is still the same NAT binding — §11's
+keepalives on the selected pair are what have been holding it open. **A restart does not re-run the
+STUN transaction**, which is a real limit rather than an oversight: the socket is owned by the
+receive loop once the session is running, so a Binding response would arrive as an ICE datagram and
+be read as a connectivity check. A path that has changed so completely that the reflexive address
+moved is not recovered by this, and that case belongs with `M-24`'s relay.
+
+`c=0.0.0.0` is not used for anything. Setting it implies a restart, so hold is `a=inactive` or
+`a=sendonly` (RFC 3264) and nothing else — a hold that spelled itself with a null connection
+address would restart ICE on every mute.
+
 ## 14. Test vectors
 
 Tests are derived from these, not from the implementation.
@@ -584,6 +654,9 @@ Tests are derived from these, not from the implementation.
    that decides whether two identical stacks converge.
 8. **§6.4's initial-state example** — RFC 8445 §6.1.2.6's three-checklist, five-foundation table,
    asserted pair by pair.
+9. **Call-layer reachability** — two calls select ICE through `MediaPolicy`; their advertised host
+   candidates terminate at silent sockets and only their server-reflexive candidates reach the
+   bound media ports. Audio arrives only after a nominated pair replaces the unusable defaults.
 
 ## 15. Where the code goes
 

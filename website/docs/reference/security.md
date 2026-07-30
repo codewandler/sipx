@@ -14,15 +14,15 @@ selects a call path that provides both.
 | Capability | `sipx` CLI | Rust libraries |
 |---|---|---|
 | UDP and TCP signalling | Yes | Yes, through `sipx-transport` |
-| TLS and secure WebSocket (WSS) | **No.** `dial` and `register` expose UDP or TCP only; a `sips:` URI is refused rather than downgraded | Yes. `sipx-transport` supports TLS and WSS when their Cargo features are enabled |
-| Certificate verification | Not reachable from the current CLI | Mandatory for outgoing TLS and WSS; there is no skip-verification option |
-| SDES-keyed SRTP | **No.** The CLI cannot select the protected signalling path required to carry an SDES key | Yes. `sipx-call` negotiates SDES-keyed SRTP when the selected signalling transport is secure |
+| TLS and secure WebSocket (WSS) | Yes, selected explicitly with `--transport tls` or `--transport wss` | Yes. `sipx-transport` supports TLS and WSS when their Cargo features are enabled |
+| Certificate verification | Mandatory. Platform roots, additional PEM roots, service identity and optional mutual-TLS identity are configurable; verification cannot be disabled | Mandatory for outgoing TLS and WSS; there is no skip-verification option |
+| SDES-keyed SRTP | Yes. A CLI call over TLS or WSS selects the call layer's protected-signalling path | Yes. `sipx-call` negotiates SDES-keyed SRTP when the selected signalling transport is secure |
 | DTLS-SRTP | No | The SDP, fingerprint checking, handshake, and SRTP context pieces exist in `sipx-sdp` and `sipx-media`, but no `sipx-call` API can select or complete a DTLS-keyed call |
 | Signalling capture | `--capture <FILE>` writes a redacted pcapng file | `sipx-transport::CaptureConfig` enables capture; redaction is on by default |
 
-If your requirement is “an encrypted call from the command line,” the current answer is no. Use
-the Rust libraries with an explicitly configured TLS or WSS transport, and check
-`Call::is_encrypted()` after negotiation.
+For a protected command-line call, select TLS or WSS and provide any private trust root explicitly;
+the result reports both requested and negotiated transport. Media remains SDES-keyed SRTP until the
+call-level DTLS story lands.
 
 ## TLS and WSS protect one hop
 

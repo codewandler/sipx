@@ -319,7 +319,13 @@ async fn reflexive(socket: &UdpSocket, server: SocketAddr, within: Duration) -> 
 }
 
 /// Turn the agent's priced candidates into `a=candidate` lines (RFC 8839 §5.1).
-fn lines(candidates: &[LocalCandidate]) -> Vec<Candidate> {
+///
+/// Shared with the driver, which signals the same list again for every later exchange on the call
+/// ([spec] §13.5) — one ordering rule and one set of `raddr`/`rport` decisions, so a re-offer
+/// cannot describe the same sockets differently from the offer that opened the session.
+///
+/// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+pub(crate) fn lines(candidates: &[LocalCandidate]) -> Vec<Candidate> {
     let mut lines: Vec<Candidate> = candidates
         .iter()
         .filter_map(|candidate| {

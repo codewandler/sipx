@@ -81,6 +81,22 @@ pub enum Input {
         /// §6.1.1 makes a full agent facing one controlling unconditionally.
         lite: bool,
     },
+    /// The local half of the ICE session a restart is about to begin ([spec] §13.5).
+    ///
+    /// Applied **before** the [`Self::RemoteDescription`] that carries the restart, because the
+    /// answer to a restart has to name these rather than the credentials the old session keyed its
+    /// checks with. Setting them is not itself a restart: nothing is rebuilt until a description
+    /// arrives whose `ice-ufrag` *and* `ice-pwd` have both changed (RFC 8839 §4.4.1.1.1), so an
+    /// offerer can announce its new parameters and still be answered by a peer that declines.
+    ///
+    /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+    LocalCredentials {
+        /// Our `a=ice-ufrag` and `a=ice-pwd` for the new session (RFC 8839 §5.4).
+        credentials: Credentials,
+        /// §7.1.3's tiebreaker, drawn fresh — a restart is a new session, and reusing the old
+        /// value would resolve a role conflict the way the previous session resolved it.
+        tiebreaker: u64,
+    },
     /// A local candidate the driver gathered.
     LocalCandidate(Gathered),
     /// Gathering will produce nothing further.
@@ -340,6 +356,18 @@ impl Agent {
         self.tiebreaker
     }
 
+    /// Our short-term credentials — what a later offer or answer must put in `a=ice-ufrag` and
+    /// `a=ice-pwd` for this stream ([spec] §13.5).
+    ///
+    /// Read rather than remembered by the caller: these change under [`Input::LocalCredentials`],
+    /// and a signalling layer holding its own copy is a second place for them to be right.
+    ///
+    /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+    #[must_use]
+    pub const fn credentials(&self) -> &Credentials {
+        &self.credentials
+    }
+
     /// The checklist set.
     #[must_use]
     pub const fn checklists(&self) -> &ChecklistSet {
@@ -376,6 +404,13 @@ impl Agent {
                 candidates,
                 lite,
             } => self.remote_description(credentials, &candidates, lite, &mut out),
+            Input::LocalCredentials {
+                credentials,
+                tiebreaker,
+            } => {
+                self.credentials = credentials;
+                self.tiebreaker = tiebreaker;
+            }
             Input::LocalCandidate(gathered) => self.local_candidate(gathered),
             Input::GatheringDone => {
                 self.phase = self.phase.max(Phase::Gathered);

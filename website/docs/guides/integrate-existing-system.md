@@ -52,8 +52,9 @@ and capture a machine-readable result:
 sipx dial sip:probe@192.0.2.10:5060 --play probe.wav --timeout 15 --json
 ```
 
-The CLI consumes and produces WAV files; it does not use a microphone or headset. It supports UDP
-and TCP signalling but cannot select TLS, WSS, or encrypted media. See the
+The CLI consumes and produces WAV files; it does not use a microphone or headset. It selects UDP,
+TCP, TLS, WS, or WSS signalling; secure signalling uses mandatory certificate verification and
+SDES-keyed SRTP. See the
 [CLI reference](../reference/cli.md) and [Security](../reference/security.md) before treating the
 probe as a production security test.
 

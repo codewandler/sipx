@@ -94,12 +94,9 @@ SIPX_PASSWORD='your-password' \
 ```
 
 Prefer `SIPX_PASSWORD` to `--password`, because command-line arguments may be visible to other
-local processes. Useful options include `--target host:port` to bypass discovery, `--tcp` for
-TCP, and `--outbound` for an RFC 5626 flow.
-
-The CLI offers UDP and TCP only. It has no TLS or secure WebSocket selector and refuses `sips:`
-addresses rather than downgrading them. Use `sipx-transport` and `sipx-ua` when registration
-requires secure signalling.
+local processes. Useful options include `--target host:port` to bypass discovery,
+`--transport tls` or `--transport wss` for protected signalling, and `--outbound` for an RFC 5626
+flow. Private authorities are added with `--tls-ca`; certificate verification cannot be disabled.
 
 See the [CLI reference](../reference/cli.md) for push-refresh options, capture handling, output
 fields, and exit codes.

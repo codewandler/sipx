@@ -456,8 +456,8 @@ class ClaimReachability(unittest.TestCase):
         `test_an_implemented_media_row_with_no_role_must_still_reach_a_call`.
 
         Both halves matter. The media rows that keep their roles must have a selector a call
-        actually runs; the media rows whose roles `X-30` removed must not. The second half is the
-        evidence that 8445 and 8839 were genuine over-claims and not the rule misfiring.
+        actually runs; once that selector appears, the rows whose roles were removed must regain
+        only the roles the call-layer evidence supports.
         """
         call_src = (ROOT / "crates" / "sipx-call" / "src").rglob("*.rs")
         call_source = "\n".join(f.read_text() for f in call_src)
@@ -475,16 +475,16 @@ class ClaimReachability(unittest.TestCase):
             with self.subTest(rfc=number):
                 self.assertEqual(["uac", "uas"], by_number[number]["roles"])
 
-        # RFC 8445 and 8839 claim nothing: ICE is selected through `start_with_ice`, and the crate
-        # that serves the role does not mention ICE at all — not the session, not the candidates,
-        # not the gathering. Word-boundary matched, because `alice` is all over these fixtures.
-        self.assertIsNone(
-            re.search(r"\bice\b", call_source, re.I),
-            "sipx-call now mentions ICE. If a call can select it, RFC 8445 and 8839 may claim"
-            " roles again and `M-27` is done — update those rows and this test. If it is only a"
-            " comment, this assertion is what needs relaxing, not the rows.",
+        # RFC 8445 and 8839 regain both roles only with the call-layer selector and startup path
+        # that make their initial offer/answer procedures reachable.
+        self.assertIsNotNone(
+            re.search(r"\bIcePolicy\b", call_source),
+            "sipx-call no longer exposes the ICE selection its RFC roles rely on",
         )
-        self.assertNotIn("start_with_ice", call_source)
+        self.assertIn("start_with_ice", call_source)
+        for number in (8445, 8839):
+            with self.subTest(rfc=number):
+                self.assertEqual(["uac", "uas"], by_number[number]["roles"])
 
         # RFC 8122 claims nothing for the subtler reason: `sipx-call` *does* render
         # `a=fingerprint`, so a path-based check could be satisfied by citing it — but the branch
@@ -694,14 +694,14 @@ class ClaimReachability(unittest.TestCase):
             with self.subTest(rfc=entry["number"]):
                 self.assertEqual([], report.misdeclared_layer(entry))
 
-    def test_the_media_rows_that_prompted_this_story_claim_no_unreachable_role(self):
-        """RFC 8122, 8445 and 8839, named in X-30's Notes as carrying the shape today.
+    def test_the_still_unreachable_media_rows_claim_no_role(self):
+        """The DTLS-SRTP rows still have no call-layer selector.
 
         Asserted by number rather than left to the registry-wide check, so that restoring a role
         to one of them names the story that removed it.
         """
         by_number = {e["number"]: e for e in registry_entries()}
-        for number in (5763, 5764, 8122, 8445, 8839):
+        for number in (5763, 5764, 8122):
             with self.subTest(rfc=number):
                 self.assertEqual([], by_number[number].get("roles", []))
 

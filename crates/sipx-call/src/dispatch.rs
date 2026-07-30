@@ -181,6 +181,21 @@ impl Invitation {
         media_address: IpAddr,
         codecs: Codecs,
     ) -> Result<Call> {
+        self.answer_with_policy(
+            endpoint,
+            media_address,
+            crate::call::MediaPolicy::default().with_codecs(codecs),
+        )
+        .await
+    }
+
+    /// [`Self::answer`], using one coherent codec and ICE policy.
+    pub async fn answer_with_policy(
+        &self,
+        endpoint: &Handle,
+        media_address: IpAddr,
+        policy: crate::call::MediaPolicy,
+    ) -> Result<Call> {
         // Handed down rather than taken here, so that the invitation is taken immediately before
         // the `200` leaves rather than before the work that builds it — every step of which can
         // fail with nothing sent, and an invitation taken by one of those is one no CANCEL can
@@ -191,7 +206,7 @@ impl Invitation {
             media_address,
             self.pending.tag(),
             Some(&|| self.pending.claim()),
-            codecs,
+            policy,
         )
         .await
     }

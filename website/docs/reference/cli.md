@@ -24,19 +24,15 @@ say nothing. Both ways a value goes missing are refused:
 
 `--help` is answered before any of this, so it still prints when the rest of the line is wrong.
 
-:::warning The binary cannot make an encrypted call
+`dial`, `answer`, and `register` select `udp`, `tcp`, `tls`, `ws`, or `wss` with
+`--transport <T>`. The default remains UDP; `--tcp` remains a compatible alias. TLS/WSS verify
+certificates with the platform trust store plus `--tls-ca <FILE>`, and use the URI host unless
+`--tls-server-name <NAME>` explicitly supplies the service identity. There is no flag that disables
+verification and a `sips:` URI cannot select a cleartext transport.
 
-`--tcp` is the only transport flag `dial` and `register` take, so every call the CLI places runs
-over UDP or TCP. There is no way to ask it for TLS or a secure WebSocket, and SRTP is negotiated
-only when the signalling protects the key — so **nothing you can type here produces encrypted
-media.**
-
-The stack does: a call over WSS carries SDES-keyed SRTP, and that is asserted in
-`sipx-call/tests/secure_media.rs`. The claim on [the front page](../intro.md) is a claim about the
-library, and this page is where the difference is written down rather than left for you to
-discover. Reaching it from the CLI needs a transport flag that does not exist yet.
-
-:::
+`dial` and `register` may present a mutual-TLS identity with `--tls-cert <FILE>` and
+`--tls-key <FILE>`. `answer` uses the same pair as its required server identity when listening on
+TLS or WSS. Supplying only half the pair is a usage error before any socket is opened.
 
 ## `sipx dial <URI>`
 
@@ -51,13 +47,19 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 | `--timeout <S>` | Give up if not answered in this many seconds (default 20). `0` waits as long as the transaction layer does — 32 seconds |
 | `--from <URI>` | Our own address (default `sip:sipx@<local>`) |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
-| `--tcp` | Use TCP rather than UDP |
+| `--transport <T>` | Use `udp`, `tcp`, `tls`, `ws`, or `wss` (default `udp`) |
+| `--tcp` | Legacy alias for `--transport tcp` |
+| `--tls-server-name <N>` | Certificate identity to verify (default URI host) |
+| `--tls-ca <FILE>` | Add PEM trust roots to the platform store |
+| `--tls-cert <FILE>` | Mutual-TLS client certificate chain; requires `--tls-key` |
+| `--tls-key <FILE>` | Mutual-TLS client private key; requires `--tls-cert` |
 | `--stats` | Report call quality on exit: loss, jitter, round trip, MOS estimate |
 | `--capture <FILE>` | Record the signalling to this [pcapng](https://en.wikipedia.org/wiki/Pcap) file for a bug report. Credentials are redacted — digest responses and opaque `Bearer`/`Basic` tokens, SRTP keys (`a=crypto`, `k=`), push tokens, instance URNs. **TLS and WSS are recorded decrypted**, because capturing ciphertext from inside the process would be worse than capturing outside it. What redaction cannot remove is identity: the file still says who called whom, when, and from where, so treat it as sensitive |
 
 Report fields: `status`, `peer`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
 `recording` when `--record` was given, and `loss`, `packets_lost`, `jitter_ms`, `mos`,
-`round_trip_ms` under `--stats`.
+`round_trip_ms` under `--stats`. An explicit `--transport` also reports `requested_transport` and
+`negotiated_transport`; legacy no-flag and `--tcp` output remains byte-for-byte compatible.
 
 ## `sipx answer`
 
@@ -70,6 +72,10 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 | `--duration <S>` | Hang up after this many seconds (default 30) |
 | `--wait <S>` | Give up if no call arrives within this many seconds (default 60) |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:5060`) |
+| `--transport <T>` | Listen for `udp`, `tcp`, `tls`, `ws`, or `wss` (default keeps the historical UDP/TCP listeners) |
+| `--tcp` | Select the historical TCP listener explicitly |
+| `--tls-cert <FILE>` | TLS/WSS server certificate chain; requires `--tls-key` |
+| `--tls-key <FILE>` | TLS/WSS server private key; requires `--tls-cert` |
 | `--reject` | Answer 603 Decline instead |
 | `--busy` | Answer 486 Busy Here instead |
 | `--once` | Exit after one call (the default; kept for clarity in scripts) |
@@ -77,7 +83,9 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 
 Reports twice: `status: "listening"` with the bound `address` first, then
 `status: "answered"` with `caller`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
-`dtmf` when digits arrived and `recording` when `--record` was given.
+`dtmf` when digits arrived and `recording` when `--record` was given. Explicit selection adds the
+requested transport to the listening report and both requested and negotiated transport to the
+terminal report.
 
 ## `sipx register <AOR>`
 
@@ -89,7 +97,12 @@ Register with a registrar: `sipx register sip:alice@example.com`
 | `--target <ADDR>` | Where to send, if not derived from the AOR (`host:port`) |
 | `--expires <S>` | Lease to ask for, in seconds (default 3600) |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
-| `--tcp` | Use TCP rather than UDP |
+| `--transport <T>` | Use `udp`, `tcp`, `tls`, `ws`, or `wss` (default `udp`) |
+| `--tcp` | Legacy alias for `--transport tcp` |
+| `--tls-server-name <N>` | Certificate identity to verify (default AOR domain) |
+| `--tls-ca <FILE>` | Add PEM trust roots to the platform store |
+| `--tls-cert <FILE>` | Mutual-TLS client certificate chain; requires `--tls-key` |
+| `--tls-key <FILE>` | Mutual-TLS client private key; requires `--tls-cert` |
 | `--keep-alive` | Keep refreshing until interrupted |
 | `--outbound` | Register as one Outbound flow (RFC 5626): `reg-id` and `+sip.instance` on the Contact, the `outbound` option tag offered |
 | `--instance <URN>` | With `--outbound`: present this device identity rather than a freshly generated one — §4.1 wants it stable across restarts, and the CLI keeps no state, so persisting one is the caller's job |
@@ -102,7 +115,8 @@ Register with a registrar: `sipx register sip:alice@example.com`
 Report fields: `status`, `aor`, `expires`, `refresh_in` — plus `flow` under `--outbound`
 (whether the registrar reported an Outbound registration, RFC 5626 §6) and `push` under the push
 flags (whether the registrar named the same push service, RFC 8599 §8.2). `--wake` adds a second
-report line with `status: "woken"` and, when the registrar assigned one, `purr`.
+report line with `status: "woken"` and, when the registrar assigned one, `purr`. Explicit transport
+selection adds `requested_transport` and `negotiated_transport` to the registration result.
 
 Combinations that cannot work are usage errors (exit 2), never parsed and dropped: half a push
 pair, `--push-param` alone, `--wake` without the push flags, `--instance` without `--outbound`,

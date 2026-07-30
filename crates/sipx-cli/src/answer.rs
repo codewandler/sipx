@@ -21,6 +21,10 @@ OPTIONS:
     --duration <S>    Hang up after this many seconds (default 30)
     --wait <S>        Give up if no call arrives within this many seconds (default 60)
     --local <ADDR>    Local address to bind (default 0.0.0.0:5060)
+    --transport <T>   Signalling: udp, tcp, tls, ws or wss (no flag keeps UDP/TCP)
+    --tcp             Legacy alias for --transport tcp
+    --tls-cert <FILE> Server certificate chain for TLS/WSS (with --tls-key)
+    --tls-key <FILE>  Server private key for TLS/WSS (with --tls-cert)
     --reject          Answer 603 Decline instead
     --busy            Answer 486 Busy Here instead
     --once            Exit after one call (default; kept for clarity in scripts)
@@ -29,12 +33,21 @@ OPTIONS:
     --json            Report as JSON
 ";
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the command lifecycle is kept in execution order so validation-before-I/O remains auditable"
+)]
 pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // Refused before the socket is bound, so a dropped flag cannot become an answerer that
     // reports `listening` and then records nothing (`S-30`).
     let args = match crate::arguments(raw, HELP, format) {
         Ok(args) => args,
         Err(exit) => return exit,
+    };
+
+    let transport = match crate::signalling::Selection::from_args(&args, false) {
+        Ok(transport) => transport,
+        Err(message) => return fail(format, Exit::Usage, &message),
     };
 
     let clip = match args.value("play").map(read_clip) {
@@ -53,6 +66,9 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         "127.0.0.1".clone_into(&mut config.sent_by);
     }
     crate::apply_capture(&args, &mut config);
+    if let Err(message) = transport.configure_listener(&args, &mut config) {
+        return fail(format, Exit::Usage, &message);
+    }
     let (handle, mut incoming) = match bind(config).await {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
@@ -60,14 +76,34 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     // Announce the port before waiting, so a script that started this in the background knows
     // where to call without guessing or racing.
-    Report::new()
-        .text("status", "listening")
-        .text("address", handle.local_addr().to_string())
+    let Some(listening) = transport.listener_addr(&handle) else {
+        return fail(
+            format,
+            Exit::Failed,
+            "the selected signalling listener did not bind",
+        );
+    };
+    transport
+        .requested_report(
+            Report::new()
+                .text("status", "listening")
+                .text("address", listening.to_string()),
+        )
         .emit(format);
 
     let wait = Duration::from_secs(args.number("wait").unwrap_or(60));
-    let Ok(Some(request)) = tokio::time::timeout(wait, incoming.recv()).await else {
-        return fail(format, Exit::Timeout, "no call arrived");
+    let deadline = tokio::time::Instant::now() + wait;
+    let request = loop {
+        let Ok(Some(request)) = tokio::time::timeout_at(deadline, incoming.recv()).await else {
+            return fail(
+                format,
+                Exit::Timeout,
+                "no call arrived on the selected transport",
+            );
+        };
+        if transport.accepts(request.transport) {
+            break request;
+        }
     };
 
     let caller = request
@@ -78,7 +114,15 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         .unwrap_or_default();
 
     if args.flag("reject") || args.flag("busy") {
-        return refuse(&handle, &request, &caller, args.flag("busy"), format).await;
+        return refuse(
+            &handle,
+            &request,
+            &caller,
+            args.flag("busy"),
+            transport,
+            format,
+        )
+        .await;
     }
 
     let media_address: IpAddr = if local.ip().is_unspecified() {
@@ -114,18 +158,21 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     let digits = digits.unwrap_or_default();
 
-    let mut report = Report::new()
-        .text("status", "answered")
-        .text("caller", caller)
-        .number(
-            "duration_ms",
-            i64::try_from(started.elapsed().as_millis()).unwrap_or(0),
-        )
-        .number(
-            "samples_recorded",
-            i64::try_from(recorded.len()).unwrap_or(0),
-        )
-        .boolean("heard_audio", !recorded.is_empty());
+    let mut report = transport.report(
+        Report::new()
+            .text("status", "answered")
+            .text("caller", caller)
+            .number(
+                "duration_ms",
+                i64::try_from(started.elapsed().as_millis()).unwrap_or(0),
+            )
+            .number(
+                "samples_recorded",
+                i64::try_from(recorded.len()).unwrap_or(0),
+            )
+            .boolean("heard_audio", !recorded.is_empty()),
+        request.transport,
+    );
 
     if !digits.is_empty() {
         report = report.text("dtmf", digits);
@@ -149,6 +196,7 @@ async fn refuse(
     request: &sipx_transport::Incoming,
     caller: &str,
     busy: bool,
+    transport: crate::signalling::Selection,
     format: Format,
 ) -> Exit {
     let (code, reason) = if busy {
@@ -178,10 +226,14 @@ async fn refuse(
     };
     let _ = handle.respond(&request.key, builder.build()).await;
 
-    Report::new()
-        .text("status", "refused")
-        .text("caller", caller)
-        .number("code", i64::from(code))
+    transport
+        .report(
+            Report::new()
+                .text("status", "refused")
+                .text("caller", caller)
+                .number("code", i64::from(code)),
+            request.transport,
+        )
         .emit(format);
     Exit::Success
 }

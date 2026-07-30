@@ -16,11 +16,11 @@
 //! `tests/cli.rs`.
 //!
 //! **Supported**: `register`, `dial`, `answer`, `peers`, their flags, `SIPX_PASSWORD`, the `--book`
-//! lookup order and the exit codes.
+//! lookup order, signalling transport selection and the exit codes.
 //!
-//! Refused rather than silently unsupported, because a flag that is accepted and dropped is worse than
-//! one that errors: a `sips:` URI (`S-27`, no TLS transport here) and `dial --password` (`S-28`, a call
-//! cannot answer a challenge yet).
+//! Refused rather than silently unsupported, because a flag that is accepted and dropped is worse
+//! than one that errors: a cleartext transport for a `sips:` URI and `dial --password` (`S-28`, a
+//! call cannot answer a challenge yet).
 //!
 
 mod advertise;
@@ -29,33 +29,11 @@ mod dial;
 mod output;
 mod peers;
 mod register;
+mod signalling;
 
 use std::process::ExitCode;
 
 use output::{Exit, Format};
-
-/// Why this URI cannot be honoured securely, if it asks to be.
-///
-/// A `sips:` URI is not a hint. RFC 3261 §19.1.1 makes TLS on every hop the URI's *meaning*, and
-/// §26.2.2 requires it. This CLI has no TLS transport to offer — `--tcp` selects TCP and there is no
-/// `--tls` — so the only two honest answers are to use TLS or to refuse.
-///
-/// It used to do neither, in **both** commands that send: `dial` and `register` each strip `sips:` in
-/// the same `or_else` as `sip:` and throw the distinction away, so the request went out in cleartext
-/// and nothing said so (`S-27`). That is the one outcome the scheme exists to forbid, and it is
-/// invisible to the person who asked for it — the call connects, the registration succeeds. On
-/// `register` it is worse than on `dial`, because what travels is a digest credential.
-///
-/// Lives here rather than in either command because it is a policy both share; putting it in one of
-/// them is how the second one came to be missed.
-pub(crate) fn insecure_scheme_refusal(uri: &str) -> Option<String> {
-    uri.strip_prefix("sips:").map(|_| {
-        format!(
-            "{uri} asks for TLS on every hop, and this CLI has no TLS transport — refusing rather \
-             than sending it in the clear. Use a sip: URI, or the library, which does have TLS and WSS"
-        )
-    })
-}
 
 const USAGE: &str = "\
 sipx — a command line SIP softphone
@@ -398,6 +376,11 @@ const VALUED_FLAGS: &[&str] = &[
     "--push-prid",
     "--push-param",
     "--capture",
+    "--transport",
+    "--tls-server-name",
+    "--tls-ca",
+    "--tls-cert",
+    "--tls-key",
 ];
 
 #[cfg(test)]

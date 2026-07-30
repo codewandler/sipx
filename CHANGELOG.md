@@ -7,7 +7,55 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI stopped checking the board against a history it had not fetched (`X-49`)** — `gate consistency`
+  and `rfc compliance` were red on `main` and on every pull request, both reporting that
+  `docs/maturity.md`'s event-date journal recorded 173 filed stories against a snapshot of 172. The
+  journal was correct. `actions/checkout` defaults to a depth-1 clone, and the filing days are read
+  from `git log -- docs/stories`: in a grafted single-commit checkout every story file present reads
+  as *added by that commit*, so the count became the number of story files that exist. The two agreed
+  until `P-6` was renumbered to `P-7` — two filings, one surviving file.
+  - Both jobs now check out with `fetch-depth: 0`, as `provenance` already did for its history scan.
+  - `maturity.py` **refuses a shallow checkout** and names the fix, rather than reporting a
+    depth-dependent count that surfaces as a corrupt report. Degrading to "rate unavailable" was
+    rejected: `--check` would then fail as report drift, the same misdirection one step further away.
+
+### Added
+
+- **A call recognises and offers an ICE restart, and keeps the audio up across it (`M-23`)** — a
+  re-offer whose `ice-ufrag` *and* `ice-pwd` have both changed begins a new ICE session (RFC 8839
+  §4.4.1.1.1): new credentials, a new tiebreaker, rebuilt checklists and a role that may be
+  redetermined. Media keeps flowing on the pair the finished session selected until the new one
+  selects its own, which is what makes a restart usable rather than a gap in the call.
+  `Call::restart_ice` offers one; the answering side detects one with no application involvement.
+  - **Every later description for a stream doing ICE now restates its ICE half.** RFC 8839 §6 makes
+    a missing `candidate` attribute mean the peer has stopped doing ICE, so the previous behaviour —
+    a re-INVITE built with no ICE attributes at all — told the far end to fall back to symmetric RTP
+    in the middle of a call that had already agreed to checks. Hold, resume, codec changes and
+    session refreshes all carry the half now, and none of them is a restart.
+  - Hold remains `a=sendonly`/`a=inactive` and never `c=0.0.0.0`, which §4.4.1.1.1 would read as a
+    restart on every mute. That was already true and is now asserted.
+  - A restart re-signals the sockets the session is already running on; it does **not** re-run the
+    STUN transaction, because the socket belongs to the receive loop once media is flowing. The
+    limit is recorded in `docs/specs/ice.md` §13.5.
+
 ### Changed
+
+- **A call can select ICE for its initial offer/answer (`M-27`)** — one call-layer media policy
+  reaches dialing, direct and dispatched answers, ringing answers and reliable early answers.
+  Host-only and configured-STUN gathering both retain fresh per-call state through media startup;
+  an unavailable STUN server degrades to host candidates. The default remains no ICE, emitting no
+  ICE attributes and running the existing symmetric-RTP path. A live-call test makes both default
+  destinations unusable and proves audio crosses only the nominated pair.
+
+- **The diagnostic phone can exercise every released signalling transport (`P-8`)** — `dial`,
+  `answer` and `register` now select UDP, TCP, TLS, WS or WSS through one fail-closed policy. Secure
+  URI schemes cannot choose cleartext, TLS and WSS verify the requested certificate identity and
+  trust roots, and certificate failure is reported as a typed transport error without downgrade.
+  Explicit selection reports both requested and negotiated transport in text and JSON, while
+  legacy invocations retain their existing byte-for-byte output. A bounded real-socket command
+  matrix covers all three commands and all five transports.
 
 - **Conformance, capability and release readiness are assessed separately (`X-48`)** — the dated
   repository review measures the SIP core, endpoint library, high-level call/media framework and

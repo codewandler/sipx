@@ -30,6 +30,7 @@ tokio = { workspace = true, features = ["full"] }
 
 [dev-dependencies]
 sipx-audio.workspace = true
+sipx-testkit.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
 [lints]

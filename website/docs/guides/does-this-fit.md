@@ -19,8 +19,8 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
   `sipx-call`'s `opus` feature and links a C library.
 - **SIP building blocks.** Use the parser, transaction and dialog machines, or SDP offer/answer
   without bringing in an async runtime, socket, or clock.
-- **Secure library transports.** The transport layer supports TLS and secure WebSocket with
-  certificate verification. Calls over secure signalling can use SDES-keyed SRTP.
+- **Secure transports.** The transport layer and diagnostic CLI support TLS and secure WebSocket
+  with certificate verification. Calls over secure signalling can use SDES-keyed SRTP.
 - **A scriptable test endpoint.** The CLI emits JSON and distinct exit codes, and moves audio
   through WAV files for repeatable automation.
 
@@ -30,9 +30,6 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
   add itself to a route set, store registrations for other endpoints, or provide dial plans.
 - **A desktop phone.** The CLI does not access a microphone, speaker, headset, or sound-device
   mixer. It plays and records 8 kHz, 16-bit, mono WAV files.
-- **Secure signalling from the CLI.** `sipx dial` and `sipx register` offer UDP and TCP only.
-  The CLI has no TLS or secure WebSocket selector and refuses `sips:` URIs. Secure transports
-  are available through the Rust libraries.
 - **ICE or a general NAT traversal service.** `rport`, symmetric RTP, and Outbound cover many
   registered-endpoint cases, but sipx does not perform ICE connectivity checks or provide a
   relay. Some NAT topologies will have no working media path.

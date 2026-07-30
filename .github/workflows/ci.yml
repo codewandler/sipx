@@ -92,6 +92,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `test-maturity.py` renders the real report, and the report dates every story filing
+          # from `git log -- docs/stories`. A depth-1 checkout has no such history: git reports
+          # every story file as added by the grafted commit, so the count is the number of files
+          # that happen to exist rather than the number of filings that happened.
+          fetch-depth: 0
       - run: ./scripts/gate.py --check
       - run: python3 scripts/test-gate.py
       # The registry's schema guard has had a suite since X-15 and no job ran it. Both suites are
@@ -173,6 +179,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `maturity.py --check` reads the story-filing history out of `git log`, which a
+          # depth-1 checkout does not have. See the `gate` job above.
+          fetch-depth: 0
       # The compliance table is generated from a registry and claims things about the code. This
       # fails the build if it has drifted from either — a table nobody checks becomes marketing.
       - run: ./scripts/rfc-report.py --check

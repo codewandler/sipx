@@ -67,9 +67,9 @@ Both commands finish with an `answered` report. `caller.wav` contains audio sent
 dialler, and `reply.wav` contains the answerer's greeting. The reports also say how many
 samples were recorded and whether any audio was heard.
 
-The CLI currently supports UDP by default and TCP with `--tcp`. It has no TLS or secure
-WebSocket selector, so it refuses `sips:` instead of silently sending an insecure call. Use
-the Rust transport and call libraries when secure signalling is required.
+The CLI defaults to UDP and selects TCP, TLS, WebSocket, or secure WebSocket with `--transport`.
+Secure paths verify the URI host against the peer certificate and never retry over cleartext; use
+`--tls-ca` to add a private authority.
 
 ## Register an address
 

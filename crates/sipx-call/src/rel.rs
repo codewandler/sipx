@@ -17,7 +17,7 @@ use sipx_sip::update;
 use sipx_sip::{HeaderName, Method, Response, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
 
-use crate::call::{Codecs, Early};
+use crate::call::{Codecs, Early, MediaPolicy};
 use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
 
@@ -394,6 +394,29 @@ pub async fn ring_early_with(
     media_address: IpAddr,
     codecs: Codecs,
 ) -> Result<Ringing> {
+    ring_early_with_policy(
+        endpoint,
+        incoming,
+        status,
+        reason,
+        media_address,
+        MediaPolicy::default().with_codecs(codecs),
+    )
+    .await
+}
+
+/// [`ring_early`], using one coherent codec and ICE policy.
+///
+/// ICE has to be selected here because the answer and its candidates leave in the provisional;
+/// [`crate::answer_early`] only confirms the already-completed exchange.
+pub async fn ring_early_with_policy(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    status: u16,
+    reason: &'static str,
+    media_address: IpAddr,
+    policy: MediaPolicy,
+) -> Result<Ringing> {
     if !Offered::in_request(&incoming.request).supported {
         // Not a refusal of the call — the caller can still be rung the ordinary way. It is a
         // refusal to put an answer somewhere it may be silently lost.
@@ -409,7 +432,7 @@ pub async fn ring_early_with(
         media_address,
         incoming.transport.is_secure(),
         &offer,
-        codecs,
+        policy,
     )
     .await?;
     ring_with(endpoint, incoming, status, reason, true, Some(settled)).await

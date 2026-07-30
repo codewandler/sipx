@@ -24,7 +24,12 @@ OPTIONS:
     --target <ADDR>      Where to send, if not derived from the AOR (host:port)
     --expires <S>        Lease to ask for, in seconds (default 3600)
     --local <ADDR>       Local address to bind (default 0.0.0.0:0)
-    --tcp                Use TCP rather than UDP
+    --transport <T>      Signalling: udp, tcp, tls, ws or wss (default udp)
+    --tcp                Legacy alias for --transport tcp
+    --tls-server-name <N> Certificate identity to verify (default AOR domain)
+    --tls-ca <FILE>      Add PEM trust roots to the platform store
+    --tls-cert <FILE>    Client certificate chain for mutual TLS (with --tls-key)
+    --tls-key <FILE>     Client private key for mutual TLS (with --tls-cert)
     --keep-alive         Keep refreshing until interrupted
     --outbound           Register as one Outbound flow (RFC 5626), and report whether the
                          registrar accepted it
@@ -38,6 +43,10 @@ OPTIONS:
     --json               Report as JSON
 ";
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the command lifecycle is kept in execution order so validation-before-I/O remains auditable"
+)]
 pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // Before the address of record, and before any socket: a valued flag that was given no value
     // cannot be honoured, and reading it as absent is what let `--instance` register a device
@@ -52,11 +61,13 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         return fail(format, Exit::Usage, "an address of record is required");
     };
 
-    // Same refusal as `dial`, and it matters more here: a registration challenged with digest
-    // sends a credential, so a silent downgrade to UDP puts it on the wire in the clear (`S-27`).
-    if let Some(why) = crate::insecure_scheme_refusal(aor) {
-        return fail(format, Exit::Usage, &why);
-    }
+    let Ok(parsed_aor) = Uri::parse(bytes::Bytes::from(aor.to_owned())) else {
+        return fail(
+            format,
+            Exit::Usage,
+            &format!("not a SIP address of record: {aor}"),
+        );
+    };
 
     let Some((user, domain)) = parse_aor(aor) else {
         return fail(
@@ -82,16 +93,21 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
-    let transport = if args.flag("tcp") {
-        TransportKind::Tcp
-    } else {
-        TransportKind::Udp
-    };
+    let transport =
+        match crate::signalling::Selection::from_args(&args, parsed_aor.scheme().is_secure()) {
+            Ok(transport) => transport,
+            Err(message) => return fail(format, Exit::Usage, &message),
+        };
 
-    let target = match resolve_target(args.value("target"), &domain, transport) {
+    let unresolved = match resolve_target(args.value("target"), &domain, transport.kind()) {
         Ok(target) => target,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
+    let target = match transport.target(&args, unresolved.addr, &domain) {
+        Ok(target) => target,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
+    let negotiated_transport = target.transport;
 
     let local = args.value("local").unwrap_or("0.0.0.0:0");
     let Ok(local) = local.parse() else {
@@ -103,6 +119,9 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // bound address may be 0.0.0.0, which names every interface and reaches none.
     config.sent_by = crate::advertise::reachable_ip(local, target.addr.ip()).to_string();
     crate::apply_capture(&args, &mut config);
+    if let Err(message) = transport.configure_client(&args, &mut config) {
+        return fail(format, Exit::Usage, &message);
+    }
     let (handle, _incoming) = match bind(config).await {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
@@ -141,11 +160,14 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     match agent.register().await {
         Ok(lease) => {
-            let mut report = Report::new()
-                .text("status", "registered")
-                .text("aor", aor.clone())
-                .seconds("expires", lease.granted)
-                .seconds("refresh_in", lease.refresh_after);
+            let mut report = transport.report(
+                Report::new()
+                    .text("status", "registered")
+                    .text("aor", aor.clone())
+                    .seconds("expires", lease.granted)
+                    .seconds("refresh_in", lease.refresh_after),
+                negotiated_transport,
+            );
             if outbound {
                 // §6: a registrar that performed an outbound registration says so in `Require`.
                 // Asking and not getting it is not an error — the binding is an ordinary one —

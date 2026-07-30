@@ -48,8 +48,8 @@ and the scriptable WAV-based CLI.
 
 ### Not complete in this release
 
-ICE and a DTLS-keyed call path are not available. The CLI cannot select TLS or secure WebSocket,
-and it uses WAV files instead of sound devices. The experimental `sipx-host` process can bind and
+ICE and a DTLS-keyed call path are not available. The CLI uses WAV files instead of sound devices.
+The experimental `sipx-host` process can bind and
 answer calls, but application callback bindings are not implemented.
 
 ## Changes on `main`

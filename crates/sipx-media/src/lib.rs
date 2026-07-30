@@ -24,13 +24,13 @@
 //!
 //!
 //! **Supported**: `MediaSession` and the RTP/RTCP plumbing under it — binding, symmetric RTP, the
-//! pacing clock, SRTP keyed from SDES, quality statistics.
+//! pacing clock, SRTP keyed from SDES, quality statistics — plus [`ice`], whose gathering and
+//! selected-pair driver are consumed by `sipx-call`.
 //!
-//! **Experimental**, and each for the same reason — nothing above this crate selects it:
+//! **Experimental**:
 //!
 //! - [`dtls`] — a DTLS-SRTP handshake with no caller. `Config.srtp` takes `SrtpKeys` and the handshake
 //!   produces `srtp::Context`, so the two do not currently meet (`M-28`).
-//! - [`ice`] — a complete agent that no call gathers with (`M-27`).
 //! - [`Bridge`] and [`Conference`] — real and tested over sessions **you** own; a `Call` does not hand
 //!   out its `MediaSession`, so two calls cannot be bridged yet (`C-6`).
 
