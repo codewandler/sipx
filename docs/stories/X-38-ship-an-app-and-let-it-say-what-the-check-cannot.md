@@ -40,7 +40,7 @@ until a second application disagrees.
       basis*, and `REACHABILITY_CHECKED` is deliberately **not** widened.
 - [x] **Anything the application does not use is marked experimental**, following `A-8`'s rule, and the
       list is non-empty. A shipped app that needs everything is a claim and should be checked like one.
-      → seven `**Experimental** (`A-8`)` modules plus `sipx-app-protocol`, which no application
+      → nine `**Experimental** (`A-8`)` modules plus `sipx-app-protocol`, which no application
       reaches. Non-emptiness is asserted, not assumed:
       `test-app-surface.py::test_an_application_that_needs_everything_is_reported`.
 - [x] **A second implementation disagreeing widens the surface.** The rule must say what happens when
@@ -177,12 +177,13 @@ until a second application disagrees.
   not something to fake by parsing English.
 - Filed at `X-37`'s close, which reconsidered the predicate rather than build the check its
   predecessors named as a *successor* — read its Notes for why.
-- **Gate: 22 steps, all green, on `55ad8f5`** (`./scripts/gate.py`, exit 0). That is 20 steps as
-  inherited from `main` plus the two this story adds, `app surface tests` and `app surface`, both of
-  which ran. An earlier run of this branch was red on `fmt`, `clippy` and `test` — all three inherited
-  steps failing on this branch's own code, fixed in `07a072c`, and none of them the two new ones. The
-  `maturity` step was green throughout, so the `X-39` defect did not arise here.
-- **Failing-first, re-verified against the merge base with the final checker.** Copying
+- **Gate: 22 steps, all green, on `6af754f`** (`./scripts/gate.py`, exit 0), and the `test` step now
+  runs `crates/sipx-app/tests/host.rs`. That is 20 steps as inherited from `main` plus the two this
+  story adds, `app surface tests` and `app surface`, both of which ran. Two earlier runs of this branch
+  were red, both on inherited steps failing on this branch's own code and never on the two new ones:
+  `fmt`, `clippy` and `test` before `07a072c`, and `fmt` alone before `6af754f`. The `maturity` step was
+  green throughout, so the `X-39` defect did not arise here.
+- **Failing-first, re-verified against the merge base with the reworked checker.** Copying
   `scripts/check-app-surface.py` into a clean `cffb6ed` tree and running `--check` exits 1 and names six
   crates — `sipx-audio`, `sipx-call`, `sipx-media`, `sipx-rtp`, `sipx-sdp`, `sipx-ua` — each declaring
   `Supported` surface no application reaches. On this branch it exits 0. The failure is the missing
