@@ -64,6 +64,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`verbose_logging_stays_off_stdout` can now observe logging at all (`X-53`)** — the second
+  instance of the defect above, found by the same sweep. It ran a command refused as a usage error
+  before any socket was bound, so the CLI emitted no log records and the assertion held identically
+  whether logging went to stderr or stdout. Redirecting `init_logging` to stdout left it green in
+  0.00 s.
+  - It now places a real call against a verbose answerer and asserts four things the old one could
+    not: no log records on stdout, every stdout line a parseable JSON object, records **present** on
+    stderr (the control that makes the absence mean something), and none at DEBUG when the same call
+    runs quietly — so the records are attributable to the flag rather than to the call.
+  - The exit codes of both processes are asserted, which the old test never checked.
+  - It surfaced a real CLI defect, filed as `X-57` rather than fixed here: `-vv` is documented,
+    accepted, and inert.
+
 - **`no_capture_flag_means_no_file` can now observe the flag it is named for (`X-45`)** — the test
   killed the answerer the moment it announced its port and then asserted one path did not exist, so
   both halves were vacuous: a capture is written while signalling flows, so a run with no call cannot

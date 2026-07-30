@@ -2,7 +2,7 @@
 id: X-53
 title: Make `verbose_logging_stays_off_stdout` able to observe logging at all
 pillar: Build
-status: ready
+status: done
 priority: 4
 epic: conformance
 areas: [sipx-cli]
@@ -16,19 +16,19 @@ Give the second instance of `X-45`'s defect the same fix: a test named for a pro
 currently observe should be able to fail when that property is violated.
 
 ## Acceptance
-- [ ] **Demonstrate the blindness before fixing it.** `crates/sipx-cli/tests/cli.rs:647` runs
+- [x] **Demonstrate the blindness before fixing it.** `crates/sipx-cli/tests/cli.rs:647` runs
       `dial sip:bob@example.com --json -vv`, which is refused as a usage error before any socket is
       bound, so the CLI emits no log events at all. `assert!(stdout.is_empty())` therefore holds
       whether logging goes to stderr or to stdout. Sabotage `init_logging` to write to stdout, show
       the current test still green, and record that as the failing-first evidence — the same shape
       `X-45` used.
-- [ ] **The rewritten test runs a command that actually logs**, at a verbosity that produces records,
+- [x] **The rewritten test runs a command that actually logs**, at a verbosity that produces records,
       and asserts stdout carries none of them while stderr does. A test that asserts only the
       absence, with nothing proving records existed to be misplaced, has the defect it is replacing.
-- [ ] **The exit code is asserted.** The current test does not check it, so nothing pins the code
+- [x] **The exit code is asserted.** The current test does not check it, so nothing pins the code
       path it silently depends on — a change that made the invocation succeed instead of being
       refused would move the test to a different branch without failing it.
-- [ ] Failing-first: the sabotaged build must make the rewritten test red, and the restored build
+- [x] Failing-first: the sabotaged build must make the rewritten test red, and the restored build
       must make it green. Both runs quoted.
 
 ## Progress
