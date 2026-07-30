@@ -77,9 +77,7 @@ async fn host_on(document: &str) -> SocketAddr {
 }
 
 fn callee_uri() -> Uri {
-    Uri::sip(UriHost::Name(
-        HostName::new("host.example").expect("valid"),
-    ))
+    Uri::sip(UriHost::Name(HostName::new("host.example").expect("valid")))
 }
 
 /// Everything here is bounded, so a test that is wrong about the wiring fails instead of hanging.
