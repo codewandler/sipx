@@ -199,6 +199,10 @@ async fn a_soak_run_leaves_nothing_behind() {
         async move { place_one_call(&caller, callee_addr).await }
     })
     .await;
+    // A definition of silence: how long a hole has to be before "everything that was going to end
+    // has ended" is true, so that what is still resident afterwards is a leak rather than RFC
+    // 3261's Timer J doing exactly what it is supposed to. Settling for longer makes the reading
+    // more trustworthy, not less, which is why `SETTLE_PAST_TIMERS` is a floor (`X-44`).
     tokio::time::sleep(SETTLE_PAST_TIMERS).await;
 
     let tolerance = Tolerance {

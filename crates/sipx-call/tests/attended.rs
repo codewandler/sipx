@@ -249,6 +249,10 @@ async fn a_replaces_naming_this_dialog_takes_the_call_over() {
     // And the media of the replaced call has stopped.
     let before = bob.media().packets_sent();
     bob.media().play(&vec![0i16; 1600], 160).await;
+    // A definition of silence: how long a hole has to be before "it stopped sending" is true.
+    // The assertion below is negative, so load lengthens the window and can only make it fail —
+    // there is no arrival to poll for, and waiting for a packet that must never come would be a
+    // ten-second sleep in every run (`X-44`).
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(
         bob.media().packets_sent(),

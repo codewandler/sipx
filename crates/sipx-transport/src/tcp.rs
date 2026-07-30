@@ -1168,6 +1168,9 @@ mod tests {
         pool.accept(stream, peer);
         assert_eq!(pool.len(), 1);
 
+        // A definition of silence, with the window set to zero by the pool's own configuration:
+        // `idle_timeout: Duration::ZERO` means any hole at all counts as idle, and this is that
+        // hole. Load lengthens it, which is the direction that keeps the connection idle (`X-44`).
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert_eq!(pool.evict_idle().len(), 1);
         let mut byte = [0u8; 1];
@@ -1262,6 +1265,8 @@ mod tests {
             TransportKind::Ws,
         );
         pool.accept_ws(server, key, Duration::from_secs(60));
+        // A definition of silence, as above: `idle_timeout: Duration::ZERO` makes any hole an
+        // idle one, and load lengthening this hole keeps it idle rather than ending it (`X-44`).
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert_eq!(pool.evict_idle().len(), 1);
 

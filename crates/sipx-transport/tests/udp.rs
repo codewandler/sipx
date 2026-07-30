@@ -216,7 +216,10 @@ async fn a_retransmitted_request_reaches_the_application_once() {
         .expect("a request");
     assert_eq!(first.request.method, Method::Options);
 
-    // Give the loop time to have delivered a duplicate if it were going to.
+    // A definition of silence: how long a hole has to be before "no duplicate was delivered" is
+    // true. The assertion is negative, so load lengthens the window and can only make it fail —
+    // and waiting for a second delivery that must never happen would be a ten-second sleep in
+    // every run (`X-44`).
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(
         server_rx.try_recv().is_err(),
@@ -255,6 +258,10 @@ async fn a_request_to_nowhere_times_out() {
         .expect("sends");
 
     let mut ended = false;
+    // A bound on failure: how long to wait for the transaction to say it is over before concluding
+    // it never will. It bounds each pass rather than the loop, which is safe only because the far
+    // end here is a port nothing is bound to — there is no peer that could keep the loop alive by
+    // answering, so the only two outcomes are the end event and this bound (`X-44`).
     while let Ok(event) = tokio::time::timeout(Duration::from_secs(3), responses.next()).await {
         if event.is_none() {
             ended = true;
@@ -299,6 +306,9 @@ async fn an_oversized_datagram_is_refused_rather_than_truncated() {
     );
 
     // And nothing reached the far end.
+    //
+    // A definition of silence: how long a hole has to be before "it was not sent at all" is true.
+    // Negative, so load lengthens the window and can only make it fail (`X-44`).
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         server_rx.try_recv().is_err(),

@@ -1466,6 +1466,10 @@ impl MediaSession {
     /// are confused (`X-28`).
     pub async fn record_until_idle(&self, idle: Duration) -> Vec<i16> {
         let mut samples = Vec::new();
+        // `idle` is a definition of silence, and on the first pass it is also the deadline for the
+        // stream to start — which is the trap the documentation above is about, kept deliberately
+        // rather than hidden. The remedy is not a wider window here; it is [`Self::record_at_least`]
+        // for every caller that knows the count, which is nearly all of them (`X-28`, `X-44`).
         while let Ok(Some(frame)) = tokio::time::timeout(idle, self.recv()).await {
             samples.extend_from_slice(&frame);
         }
@@ -3194,6 +3198,10 @@ mod tests {
         assert!(capped.is_err(), "the timeout is what ends this play");
 
         let before = left.packets_sent();
+        // A definition of silence: how long a hole has to be before "the clip stopped" is true.
+        // Both assertions are negative — no more than the bound went out, and the far end did not
+        // hear the whole clip — so load lengthens the window and can only make them fail, and
+        // there is no arrival to poll for (`X-44`).
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(
             left.packets_sent() - before <= Playback::STOP_BOUND_PACKETS,
@@ -3231,9 +3239,16 @@ mod tests {
         let from_left = tone(800);
         let from_right: Vec<i16> = tone(800).iter().map(|s| -s).collect();
 
-        // Left must learn right's address, which it does from right's first packet.
+        // Left must learn right's address, which it does from right's first packet — so wait for
+        // that packet to have *arrived* rather than for a window to pass (`X-44`). The primer is
+        // one packet's worth, and recording it here is also what makes the count below exact:
+        // what `left` hears afterwards is everything except this primer.
         right.play(&from_right[..160], 160).await;
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            left.record_at_least(160, DELIVERY_BOUND).await.len(),
+            160,
+            "left never heard right's primer, so it cannot have learned right's address"
+        );
 
         let (left_recorded, right_recorded) = tokio::join!(
             async {
@@ -3294,9 +3309,16 @@ mod tests {
     async fn media_returns_to_where_it_came_from_not_where_the_sdp_said() {
         let (left, right) = pair(Codec::Pcmu).await;
 
+        // Left latches the source address off right's first packet, so wait for that packet to
+        // have arrived rather than for a window to pass (`X-44`). A fixed window here was racing
+        // the same pipeline `X-28` measured — two 20 ms pacers and a jitter buffer entitled to
+        // grow — and losing it produced a reply sent to 127.0.0.1:1 and an empty recording.
         right.play(&tone(320), 160).await;
-        // Give left time to latch the source address.
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert_eq!(
+            left.record_at_least(320, DELIVERY_BOUND).await.len(),
+            320,
+            "left never heard right, so it cannot have latched right's address"
+        );
 
         let reply = tone(320);
         left.play(&reply, 160).await;
@@ -3772,6 +3794,12 @@ mod tests {
             .send_to(&forged.encode(), left.local_addr())
             .await
             .expect("sends");
+        // Ordering a stimulus: the forged packet has to reach the receive path *before* the
+        // genuine stream resumes, or the test proves nothing about the buffer being poisoned.
+        // A packet rejected on its SSRC moves no counter — that is what rejecting it means — so
+        // there is nothing to poll for here. Under-wait makes this test pass having proved
+        // nothing rather than fail, which is the direction to accept and the thing to suspect if
+        // it ever stops catching a regression (`X-44`).
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // The genuine stream still gets through.

@@ -207,6 +207,10 @@ async fn a_body_arriving_after_its_headers_is_framed_by_content_length() {
 
     stream.write_all(headers.as_bytes()).await.expect("writes");
     stream.flush().await.expect("flushes");
+    // Ordering a stimulus: the point of this test is that the headers and the body arrive as two
+    // separate reads, which is what a split TCP message looks like on the wire. Both writes are
+    // this test's, the server publishes nothing between them — a half-read message is not an
+    // event — and load lengthening this gap only makes the split surer (`X-44`).
     tokio::time::sleep(Duration::from_millis(50)).await;
     stream.write_all(body.as_bytes()).await.expect("writes");
 
@@ -375,6 +379,15 @@ async fn a_response_reconnects_to_the_sent_by_port_not_the_source_port() {
     // The peer goes away before the answer is ready, as a peer that has finished dialling out
     // routinely does.
     drop(stream);
+    // Ordering a stimulus, and the weakest claim of that kind in the tree — read it sceptically.
+    // The two things being ordered are both this test's: dropping the connection, and writing the
+    // answer. What has to happen between them is not ours, though: the *server* has to have
+    // processed the EOF, or the response goes back down the dead connection and this test never
+    // exercises the advertised port at all. That is a happens-before, and the honest fix would be
+    // to wait for the server to publish it. `Handle` exposes no such event — there is no
+    // connection-closed signal on the public API — so the window stands in for it. Under-wait
+    // does not fail this test; it makes it pass vacuously, having proved nothing, which is the
+    // failure mode to watch for if the assertions below ever stop finding anything (`X-44`).
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let response = ok_for(&incoming.request);

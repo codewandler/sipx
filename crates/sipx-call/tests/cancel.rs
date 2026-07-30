@@ -462,6 +462,9 @@ async fn a_cancel_after_the_answer_does_not_tear_the_dialog_down() {
     );
 
     // Nothing else: the invitation was not ended, so no 487 chased the 2xx …
+    //
+    // A definition of silence: how long a hole has to be before "no event followed" is true. The
+    // assertion is negative, so load lengthens the window and can only make it fail (`X-44`).
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         events.try_recv().is_none(),
@@ -530,6 +533,9 @@ async fn a_replayed_cancel_draws_the_same_answer_and_nothing_more() {
     // the dispatcher at all. It fails `a_cancel_after_the_answer_does_not_tear_the_dialog_down`,
     // which is where that guard is actually held to account. This assertion pins the layering —
     // if the absorption below ever stops happening, the guard above has to catch the copy.
+    //
+    // The window is a definition of silence: how long a hole has to be before "no second event"
+    // is true. Negative, so load can only make it fail (`X-44`).
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         events.try_recv().is_none(),

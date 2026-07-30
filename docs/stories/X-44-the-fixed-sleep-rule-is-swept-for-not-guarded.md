@@ -51,7 +51,79 @@ normatively stops depending on the next person to sweep for violations.
       legitimate categories is *not* refused. Both must be red before the guard exists.
 
 ## Progress
-- Not started. Filed while integrating the `X-39`/`X-40`/`M-33` wave, from three independent sightings.
+- Filed while integrating the `X-39`/`X-40`/`M-33` wave, from three independent sightings.
+- `scripts/check-fixed-sleep.py` is the guard, gate step `fixed sleeps` (23 steps now), CI job
+  `fixed-sleep`. It reads the **shape** — a suspension whose only completion condition is a clock
+  reading a fixed duration — so `tokio::time::sleep`, `std::thread::sleep`, `sleep_until`,
+  `time::advance`, a bare `interval.tick()`, a hand-rolled `while now < deadline` spin and a private
+  helper wrapping any of them are one thing. The wrapper hop is what a grep can never see, and
+  `scripts/test-gate.py`'s `test_a_rename_does_not_get_past_it` plants the identical defect in all
+  six spellings and requires all six to be refused. **Wrappers are collected from the whole
+  workspace**, because reading one file's helpers made the rule a spelling again — a review defeated
+  it with `pub async fn settle()` in `sipx-testkit`, imported. The price is that a name shared with
+  a non-wrapper is ambiguous, so such a name is left alone rather than reported: asking an author to
+  classify `stream.flush()` would be asking for a sentence that is false about the line in front of
+  them.
+- **A second rule catches the other regression, and a sleep-grep never could.** A loop whose every
+  pass is bounded by a *relative* `timeout(D, …)` spends one duration on both "how long may it take
+  to start" and "how long a gap means it has ended" — `X-40` exactly, and `M-34` one call along.
+  Run against the tree as it stood at `882fc5f^`, the guard names
+  `crates/sipx-cli/tests/interop_media/mod.rs:112`, which is the defect at its own line. There is no
+  `sleep` in it.
+- **Structural excuses, not written ones.** A duration bounding an awaited event (`timeout`, a
+  `select!` arm beside another arm), a poll interval inside a loop that re-tests its condition, an
+  absolute `timeout_at` bounding a whole loop, and a window the loop body reassigns after the first
+  arrival — which is `X-40`'s own fix — are not reported, because those are the fixes the rule asks
+  for and a guard that charged for its own remedy would be switched off. A `start_paused` runtime is
+  exempt for the same reason: there is no wall clock to race.
+- **Scope: `src/` as well as `tests/`.** `X-40` proved the defect can be written in production code,
+  and `crates/sipx-media/src/session.rs` holds more fixed-duration waits than any file under a
+  `tests/` directory — a guard over test directories would have covered less than half the suite.
+  Seven of the thirty hits were in `src/`, and two of those were the defect.
+- **The sweep found thirty sites and the `0.12.0` claim was false.** Exactly two sites in the whole
+  workspace already said which question their duration answered — `cli.rs`'s `elapsed() < 12s` and
+  `events.rs`'s widened window, both left deliberately by `X-29` — and the other thirty said
+  nothing. Two of those were the defect and are now causal waits: `session.rs`'s
+  `media_returns_to_where_it_came_from_not_where_the_sdp_said` and
+  `audio_flows_in_both_directions_at_once` both slept for a fixed window to let the far end latch a
+  source address, and now record the packet that latches it. The rest were classified at the call
+  site. After review round 1 the tree carries **28** such sites: four converted rather than
+  classified, and the rest saying which question their duration answers.
+- **The load gradient the Notes ask about was considered and not adopted.** Running the suspect
+  tests under deliberate oversubscription would manufacture CPU load, which non-negotiable 5 in
+  `AGENTS.md` forbids; and `M-33`'s own numbers are the argument against it as a *check* — 14 of 20
+  at 6x, 1 of 8 at 5x, 0 of 12 at 2x. A detector that fires probabilistically makes a green run
+  prove nothing and a red one a re-run, which is precisely the "re-run it instead of believing it"
+  disease `X-34` was filed against. The static check is deterministic, costs milliseconds, and
+  fails the same way every time. The load gradient stays what it was: how a *defect* is measured
+  once it is suspected, not how it is found.
+- **No suppression list, under any name** (`X-35`'s standard). No path is exempt; the four
+  categories a duration may claim are `a bound on failure`, `a definition of silence`, `the clock is
+  the measurement` and `ordering a stimulus`. The fourth is the one to argue with in review — it is
+  the case `X-28` and `X-29` both left sites for and neither named, and the question a reader should
+  put to it is "what would you have waited for".
+- **The classification has to be on the line, and nothing else counts.** The first version also read
+  the doc comment of any `SCREAMING_CASE` constant the line named, resolved workspace-wide, so that
+  a constant could document itself once instead of forty times. A review showed that for what it
+  was: `DELIVERY_BOUND` is declared in four files and doc'd "a bound on failure" in each, so a bare
+  sleep before a *positive* assertion was reported as classified with nothing written where it was
+  read. The channel is gone and cost nothing to remove — a constant used as a genuine bound reaches
+  a `timeout` and is never reported in the first place.
+- **`.expect()` is not counted, and the reason is written down.** `AGENTS.md` treats it as a panic
+  and this suite writes the defect that way, but 2 885 of the workspace's `.expect(` calls are
+  plumbing on an unrelated operation, and counting them would report nearly every wait in the tree.
+  What is counted instead is the **non-blocking read** underneath — `try_recv`, `try_next`,
+  `try_lock` — because nothing but the clock can have made one succeed. That closes the shape the
+  review demonstrated and leaves `foo().await.expect(…)` as a stated limit rather than a silent one.
+- **Review round 1 found three sites where the guard passed and the reason was wrong.** Two had an
+  answer to "what would you have waited for" and are now causal:
+  `bridge.rs::dropping_a_bridge_stops_the_forwarding` waits for `Arc::strong_count` to fall back to
+  one, which *is* "both legs noticed the drop" and is the property the test is named for; and
+  `call.rs::a_reinvite_200_is_retransmitted_until_it_is_acked` needed no wait at all, because an
+  mpsc receiver queues what arrives before its task is first polled. The third,
+  `tcp.rs`'s peer-goes-away window, has no observable in the public `Handle` API and now says so,
+  and says that under-wait makes it pass vacuously rather than fail. Six `ordering a stimulus` sites
+  remain, not the nine first claimed.
 
 ## Notes
 - **Reads with `X-40`**, which is the third instance of the family and proved the defect can live in

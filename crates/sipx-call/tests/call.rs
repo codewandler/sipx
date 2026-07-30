@@ -245,6 +245,8 @@ async fn hanging_up_ends_the_call() {
         .await;
     let before = caller.media().packets_sent();
     caller.media().play(&clip(100).samples, 160).await;
+    // A definition of silence: how long a hole has to be before "it stopped sending" is true.
+    // The assertion is negative, so load lengthens the window and can only make it fail (`X-44`).
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(
         caller.media().packets_sent(),
@@ -337,6 +339,8 @@ async fn a_bye_from_the_far_end_ends_the_call_locally() {
     // And the media has stopped: nothing more goes out.
     let before = caller.media().packets_sent();
     caller.media().play(&clip(100).samples, 160).await;
+    // A definition of silence, as in `hanging_up_ends_the_call` above: the assertion is negative,
+    // so load lengthens the window and can only make it fail (`X-44`).
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(
         caller.media().packets_sent(),
@@ -1059,9 +1063,9 @@ async fn a_cancel_is_not_sent_before_a_provisional_arrives() {
     // This site has one assertion of each kind, so it keeps one wait of each kind (`X-29`).
     //
     // The window stays for the *negative* half below — that no CANCEL was sent. A CANCEL would
-    // leave at the moment the dial gave up, which has already happened, so this is a window to
-    // look in rather than a deadline to beat: load can only make it pass, and the failure mode is
-    // a missed regression rather than a flake.
+    // leave at the moment the dial gave up, which has already happened, so this is a definition
+    // of silence rather than a deadline to beat: load can only make it pass, and the failure mode
+    // is a missed regression rather than a flake.
     tokio::time::sleep(Duration::from_millis(300)).await;
     // The *positive* half — that the invitation was sent at all — is an arrival, so it gets a
     // deadline loop on the condition. No flake was ever observed here; the shape is the argument,
@@ -1261,12 +1265,16 @@ async fn a_reinvite_200_is_retransmitted_until_it_is_acked() {
         .expect("sends");
 
     // Pump in-dialog requests into the call, which is what a real application does.
+    //
+    // No wait after this. The channel is the happens-before: `callee_incoming` is an mpsc
+    // receiver, so a request that arrives before this task is first polled is queued and delivered
+    // when it is polled, and nothing is lost by starting the pump late. The 100 ms sleep that used
+    // to sit here bought nothing (`X-44`).
     tokio::spawn(async move {
         while let Some(incoming) = callee_incoming.recv().await {
             let _ = callee.handle(&incoming).await;
         }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // A re-INVITE, whose 200 this peer deliberately never acknowledges.
     let renegotiate = format!(
@@ -1533,6 +1541,17 @@ async fn a_cancel_waits_for_a_late_provisional_rather_than_being_abandoned() {
     };
 
     // Ring only *after* the caller has already given up waiting.
+    //
+    // Ordering a stimulus: the 180 this test injects has to land *after* the caller's own 250 ms
+    // timeout at the top of this test, not before it. Giving up puts nothing on the wire — a
+    // CANCEL cannot be sent until the provisional arrives, which is the whole point — so there is
+    // nothing to watch for.
+    //
+    // Not "load can only push this later": load stretches this sleep and the dial's own 250 ms
+    // clock together, so the order is not guaranteed by the margin. What makes it tolerable is the
+    // direction of the failure — a 180 that arrives too early is answered by a caller still
+    // waiting, and the CANCEL below then arrives for the ordinary reason, so the test passes
+    // vacuously rather than flaking. It proves less than it looks on a loaded machine (`X-44`).
     tokio::time::sleep(Duration::from_millis(500)).await;
     let ringing = format!(
         "SIP/2.0 180 Ringing\r\n{}\r\n{}\r\n{};tag=peertag\r\n{}\r\n{}\r\nContent-Length: 0\r\n\r\n",

@@ -123,6 +123,10 @@ fn a_scenario_spanning_a_minute_of_virtual_time_runs_instantly() {
         .run();
 
     assert_eq!(run.conclusion, Conclusion::Ended(EndCause::Remote));
+    // The clock is the measurement: the claim *is* that a minute of scenario time costs no real
+    // time, so elapsed time is the thing under test rather than a wait standing in for one. The
+    // gap it has to resolve is 250 ms against 60 s, and load can only push the number up — which
+    // is the direction that fails (`X-44`).
     assert!(
         started.elapsed() < Duration::from_millis(250),
         "a minute of virtual time must not cost real time: {:?}",

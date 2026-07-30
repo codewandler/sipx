@@ -262,9 +262,25 @@ async fn dropping_a_bridge_stops_the_forwarding() {
     let (right, bob) = pair(Codec::Pcmu, Codec::Pcmu).await;
     let right = Arc::new(right);
 
+    // `connect` clones the session into both legs, so `right` is held three times: once here and
+    // once by each forwarding task. Both tasks releasing it is exactly "both legs noticed the
+    // drop", which is the property this test is named for — so wait for the count instead of for a
+    // window (`X-44`). A fixed sleep here was a happens-before in disguise: under-wait leaves the
+    // legs forwarding, audio crosses, and `heard.is_empty()` fails on a loaded machine with
+    // nothing wrong in the tree.
     let bridge = Bridge::connect(Arc::new(left), Arc::clone(&right));
+    assert_eq!(Arc::strong_count(&right), 3, "both legs hold the session");
     drop(bridge);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let released = tokio::time::timeout(Duration::from_secs(10), async {
+        while Arc::strong_count(&right) > 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "a dropped bridge left a forwarding task holding the session"
+    );
 
     // Nothing crosses any more.
     //
