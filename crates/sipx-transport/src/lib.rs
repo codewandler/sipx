@@ -26,6 +26,8 @@
 //! `respond` guarantees the response is on the wire before it returns — see
 //! `docs/designs/sip-transport.md`, which records that as a guarantee rather than an internal detail.
 
+pub mod capture;
+pub mod counters;
 #[cfg(feature = "dns")]
 pub mod dns;
 pub mod endpoint;
@@ -41,7 +43,11 @@ pub mod tls;
 #[cfg(feature = "ws")]
 pub mod ws;
 
-pub use endpoint::{Config, Handle, Incoming, Responses, ShedCounts, Unmatched, bind, new_branch};
+pub use capture::{CaptureConfig, Direction};
+pub use counters::{
+    CaptureCounts, Counters, DiscardCounts, ShedCounts, TimeoutCounts, TransportCounts,
+};
+pub use endpoint::{Config, Handle, Incoming, Responses, Unmatched, bind, new_branch};
 pub use error::{Error, Result};
 pub use resolve::{Naptr, Resolver, Srv, resolve};
 pub use stun::Reply as StunReply;

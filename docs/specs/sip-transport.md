@@ -179,3 +179,268 @@ requests. Answering 503 is what the status code is for, and it tells the peer so
 | X8 | Loopback with 50 % loss | The request is retransmitted and the transaction still completes |
 | X9 | SRV records with weights 10 and 90, fixed seed | Selection matches RFC 2782's distribution |
 | X10 | Application channel full | New requests are answered 503, and timers keep firing |
+| X11 | A shed request and an unmatched response | Both appear in the counter snapshot (§12) |
+| X12 | Loopback `OPTIONS`, capture on | Two records — request out, response in — with the real ports |
+| X13 | Malformed datagram, capture on | Captured malformed, and counted a parse failure and not a request (§12.2) |
+| X14 | `Authorization` with a digest `response`, capture on | `realm` and `nonce` survive; the `response` value does not (§13.3) |
+| X15 | SDP `a=crypto` in a captured body | Tag and suite survive; the key after `inline:` does not (§13.3) |
+| X16 | Capture off | No file is opened, and the snapshot's capture counters stay zero |
+
+## 12. Counters
+
+**[sipx]** The endpoint keeps counters, and nothing else: no metrics library, no exposition
+format, no push. A snapshot — a plain struct — is read through the handle
+(`Handle::counters`, next to `Handle::outstanding`), and what an application does with it is
+the application's business. A stack that picks an exposition format picks it for every user of
+the library, and that is the one observability decision that cannot be undone later.
+
+The counters live in atomics shared between the driver and every handle, exactly as
+`ShedCounts` already does (§10): the loop is busy in precisely the situation the counters
+describe, so a counter that could only be read by asking the loop would be unreadable when it
+mattered.
+
+The two neighbours on `Handle` show the choice being made. `Handle::shed` is synchronous and
+reads shared atomics; `Handle::outstanding` is `async` and returns `Result`, because it asks
+the loop and the loop may be gone. `Handle::counters` is deliberately the first shape and not
+the second: a snapshot that returned `Err(EndpointClosed)` under load — or blocked behind the
+work it is trying to describe — would fail exactly when an operator reached for it.
+
+The snapshot covers, at minimum:
+
+- requests and responses, in and out, **per transport** — which transport is the first
+  question a support case asks;
+- requests shed for backpressure (§10), embedded as the existing `ShedCounts`;
+- responses that matched no client transaction (RFC 3261 §16.7), counted whether or not an
+  application is watching for them;
+- parse failures, per transport — a malformed datagram and a stream whose framing is lost are
+  the same failure on different transports, and both are counted. A connection task has no counters
+  in scope, so it reports the loss to the driver (`Event::FramingFailed`) and the driver counts it,
+  which keeps every counter in the crate at one increment site;
+- retransmissions sent — a rising count with no matching traffic growth is a peer that is not
+  hearing us, and the difference between a network problem and an application one;
+- transactions timed out, per the timer that fired (B, F or H);
+- every place the stack discards something it was given: see §12.1.
+
+### 12.1 No silent discards
+
+**[sipx]** Every discard in the signalling path has a counter. A test enumerates the discard
+sites — every `tracing` line that reports dropping or ignoring, and every `let _ = …` that
+discards a result — and fails when one appears without a counter or a written reason. A silent
+drop is the failure this section exists to end; the enumeration is what keeps it ended as the
+code changes.
+
+A discard whose reason is logged but not counted is still a failure here: logs rotate, and an
+operator asking "how often" deserves an answer that is not `grep | wc -l`.
+
+**The enumeration's limit, stated because it is real.** A discarded *result* is found structurally —
+`let _ = …` is unambiguous — but a log line that reports a loss can only be recognised by the words it
+uses, and there is no closed vocabulary for that. The check holds a list of words, and the first
+version of that list held three and missed two live sites: a TCP connection closed on a framing error
+and a WebSocket closed on a malformed message, each of which discards everything in flight on that
+connection. Adding a word costs a false positive and one comment; leaving one out is a silent hole, so
+the list errs long. It is not a proof that no silent discard exists — it is a ratchet that stops the
+ones it can name from coming back.
+
+### 12.2 What the numbers do not promise
+
+**[sipx]** A counter that overstates its own accuracy is worse than a missing one, because it
+will be used to rule a cause out. Three limits, stated here because they belong where the
+counters are defined and not in a release note:
+
+1. **A snapshot is not an instant.** The fields are separate atomics read one after another, so
+   a snapshot taken while traffic flows can show `requests_in` from a later moment than
+   `responses_in`. Each field is individually monotonic and none is ever lost; the *relationship
+   between two fields* is only exact when the endpoint is quiet. Differences between successive
+   snapshots are sound; arithmetic identities across fields of one snapshot are not.
+2. **In and out do not balance, by construction.** A datagram that fails to parse is counted as
+   a parse failure and **not** as a request or a response, because which one it would have been
+   is exactly what could not be determined. `requests_in + responses_in + parse_failures` is the
+   number of messages that arrived; `requests_in + responses_in` alone silently omits the
+   malformed ones.
+3. **Retransmissions are counted where the timer fires**, so a retransmission the socket then
+   refuses is still counted as sent. Counting it after the socket call would mean a peer that
+   stopped hearing us produced a *falling* count, which inverts the signal the counter exists
+   to give.
+
+Every counter is incremented at exactly one site with `Relaxed` ordering, which is what makes
+the first limit the only ordering hazard: there is no path on which one event increments a
+counter twice, and none on which an increment is lost.
+
+## 13. Capture
+
+**[sipx]** An endpoint can record the signalling it exchanges to a file: every message sent
+and every message received, with a timestamp, the transport, and both addresses, bodies
+included. Off by default; enabling it is per endpoint (`Config::capture`) and costs an
+`Option` check per message when off.
+
+**The file contains the decrypted messages — call content, identities, everything the peers
+exchanged except the secrets §13.3 names.** TLS and WebSocket-over-TLS traffic is captured
+*before* encryption on send and *after* decryption on receive, because capturing ciphertext
+from inside the process would be strictly worse than capturing it from outside. Whoever enables
+a capture is responsible for the file.
+
+That responsibility is not discharged by redaction and §13.3 does not pretend otherwise: a
+capture is written to be *attached to a bug report*, which is to say handed to someone outside
+the trust boundary it was recorded in. Redaction removes the secrets that would still be valid
+in someone else's hands. It does not make the file safe to publish.
+
+### 13.1 Format: pcapng
+
+The capture is written as **pcapng** (the format the IETF's pcapng draft specifies and every
+current packet-analysis tool reads: Section Header Block, one Interface Description Block,
+Enhanced Packet Blocks). Chosen over the classic pcap format for three reasons, in order of
+how much they would hurt to retrofit:
+
+1. **Per-packet metadata.** A pcapng packet block carries options; each captured message gets
+   a comment naming the transport, the direction, and whether the bytes were decrypted in
+   process. Classic pcap has nowhere to put that, and "was this TLS or TCP" is not a question
+   a bug report should leave to the port number.
+2. **Nanosecond-capable, per-interface timestamp resolution.** Classic pcap fixes the
+   resolution for the whole file in a field several tools still misread.
+3. **Self-describing structure.** Block types and lengths make a truncated capture readable up
+   to the truncation — which is the normal state of a capture taken during a crash.
+
+Packets are written with `LINKTYPE_RAW` (101): a synthesised IPv4 or IPv6 header matching the
+address family of the real addresses, then a synthesised **UDP** header carrying the real
+ports, then the message. One captured message is one packet. The addresses and ports are the
+real ones; the link and transport layers are invented, because there is no link layer inside a
+process and no captured byte ever came off one.
+
+**The UDP header is synthetic even when the real transport was TCP, TLS or WebSocket, and the
+authoritative statement of the transport is the block comment, not the packet.** This is a
+deliberate limit rather than an oversight. Writing a truthful TCP header would mean inventing
+per-connection sequence numbers, and that is invented protocol state whose only purpose is to
+let a tool reassemble a stream sipx has *already* framed — the message boundaries are known
+here, which is why one message is one packet. Inventing the state would add a class of
+capture-only bug (a wrong sequence number renders a capture unreadable in a way the wire never
+was) to buy back a step already done. A reader who wants the transport reads the comment; a
+reader who infers it from IP protocol 17 has been told plainly here not to.
+
+For the same reason the UDP checksum is written as zero — "not computed", which is what it in
+fact is, and legal on IPv4. Note that a zero UDP checksum is *not* legal on IPv6 (RFC 8200
+§8.1), so a strict reader may flag IPv6 packets in a capture; the alternative is a pseudo-header
+checksum over a datagram that never existed, which is more invention for a cosmetic gain. The
+IPv4 header checksum **is** computed, because it covers only the twenty bytes actually written
+and costs six lines, and leaving it zero would have every tool flag every packet — the exact
+noise this section is otherwise trying to avoid.
+
+### 13.2 Faithfulness
+
+**Ordering is established in the driver loop; the write is not performed there.** At the point
+the bytes go to or come from the socket, the loop stamps the record with a monotonically
+increasing sequence number and a timestamp, and hands it to a writer over a bounded channel.
+The writer owns the file and runs off the loop.
+
+This split is the whole of "enabling it must not change message ordering or timing", and it is
+worth saying why the obvious alternative is wrong. Writing inline — one buffered write per
+message, on the loop — reads as the more faithful design and is not. The loop that writes is
+the same loop that fires retransmission timers, so an inline write puts the filesystem in the
+retransmission path: a slow or full disk then delays Timer A, which is precisely the
+"observation that perturbs a retransmission race" the story forbids, and it fails worst in the
+disk-full case this section already anticipates below. **Do not re-introduce the inline write.**
+
+Faithfulness does not depend on where the syscall happens. It depends on the order being
+*decided* at the observation point, which is what the sequence number records. The writer may
+fall behind the loop; it cannot reorder what it was given, because the order is data by the time
+it arrives. What the writer can do is run out of room: the channel is bounded, and an overrun
+drops records rather than blocking the loop — counted as `capture_dropped`, never silent
+(§12.1). A capture with a gap that says so is usable; a stack that stalled to avoid the gap is
+not.
+
+UDP datagrams are captured before parsing, so a malformed message is captured malformed — the
+bytes a peer actually sent are the whole point of the exercise. On stream transports the
+framing happens in the connection's task and the raw bytes are not retained, so the message is
+captured as parsed and re-serialised; start lines and header values are preserved byte-for-byte,
+but the capture is not a byte-exact record of the stream and does not pretend to be one.
+
+A write that fails (a full disk is the usual reason) is logged once, counted in the snapshot
+(`capture_errors`), and disables the capture: a capture that is silently not happening is the
+same failure as a silent discard, one level up.
+
+### 13.3 Redaction
+
+**[sipx]** Secrets are removed before a record reaches the writer, on by default. The rule is
+narrow and mechanical: replace the *value* of a field that is a live credential, keep everything
+that makes the message diagnosable.
+
+| Redacted | Where | Why it cannot stay |
+|---|---|---|
+| `response` parameter | `Authorization`, `Proxy-Authorization` | The digest response is the answer to a challenge; with the nonce beside it in the same capture it is replayable (RFC 7616 §5.5). |
+| `nextnonce`, `rspauth` | `Authentication-Info` | Server-side halves of the same exchange. |
+| Key after `inline:` | SDP `a=crypto` | The SRTP master key **in the body** (RFC 4568 §6.1). It decrypts the media the same capture may be describing. |
+| `pn-prid`, `pn-param` | `Contact` | A push token is a bearer credential for waking a device (RFC 8599 §4). |
+| `+sip.instance` URN | `Contact` | A stable device identifier that outlives the call and correlates a user across captures (RFC 5626 §4.1). |
+
+Kept deliberately: request lines and status codes, `Call-ID`, `CSeq`, `Via` and `branch`, `To`
+and `From` including display names and AORs, `realm`, `nonce`, `qop`, `algorithm`, `opaque`, the
+`a=crypto` tag and crypto-suite, and every SDP line that is not key material. Each is either
+required to follow a transaction or is the thing a support case is about. The challenge
+parameters stay because a digest failure is unreadable without them and a nonce with no response
+beside it is not a credential.
+
+Three consequences, stated rather than discovered later:
+
+- **Redaction is by name, so an unknown credential-bearing extension header is kept.** The list
+  is the specified places a secret appears, not a guarantee that nothing else is sensitive.
+- **What remains still identifies people.** `To`, `From` and the SDP's addresses survive, and
+  they are enough to say who called whom, when, and from where. This is the residue the §13
+  disclosure is about.
+- **Redaction changes the bytes**, so a redacted record is not byte-exact. The block comment
+  says when a record was altered, and §13.2's stream caveat already means byte-exactness is not
+  claimed for stream transports.
+
+An endpoint may opt *out* — a capture taken in a lab against a test registrar has no secrets
+worth removing, and forcing redaction there would hide a digest bug from the one capture taken
+to find it. Opting out is explicit, per endpoint, and never the default. **It is deliberately not
+reachable from the command line**: a flag would put "ship the credentials" one word away from
+whoever is debugging an incident, which is when they are least able to weigh it.
+
+#### 13.3.1 Every spelling, not the common one
+
+**[sipx]** Redaction reads raw bytes, because a datagram is captured before parsing (§13.2) and a
+message that does not parse is exactly where a credential turns up somewhere unexpected. The price is
+that the scan cannot assume one spelling of a header, and a first implementation did: it matched the
+literal `authorization:` against physical lines split on CRLF. Three legal spellings walked past it,
+each carrying a digest response into a capture in cleartext — a folded header (§7.3.1), an
+`Authorization : …` with the whitespace HCOLON permits (§25.1), and a bare-LF message, which became
+one long line and so matched no header name at all.
+
+The rule is therefore structural rather than literal:
+
+1. Lines are split on **CRLF, bare LF or bare CR**.
+2. Continuation lines are **unfolded** into one logical header before anything reads it, because a
+   fold can fall inside a parameter name. The fold becomes a single space, as §7.3.1 says; if that
+   yields no credential and the header was folded, the fold is removed entirely and the line is
+   scanned again. A fold inside a token names no parameter in SIP, but "no parser would read that as
+   a credential" is a worse thing to be wrong about than one extra scan.
+3. A header's **name is the bytes before its first colon with trailing whitespace trimmed**, not a
+   prefix.
+4. **A line whose name cannot be established is redacted conservatively**, not skipped. Where the
+   structure is absent a credential could be anywhere, and being wrong that way costs a mangled value
+   in a capture instead of a leaked one.
+
+Two consequences are worth stating. A **redacted** header is written back unfolded, since the fold is
+equivalent to a space and a redacted record is not byte-exact in any case; an untouched header keeps
+its original bytes, folds and terminators included. And the **body** is never re-terminated — its
+length is declared in `Content-Length`, so a bare LF inside an SDP body stays a bare LF.
+
+#### 13.3.2 Also removed
+
+**[sipx]** Beyond the parameters §13.3 tabulates:
+
+- **An opaque credential.** `Authorization: Bearer <token>` (RFC 8898) and the long-deprecated
+  `Basic <base64>` carry the credential *as* the value, so there is no parameter to find and the whole
+  of it goes. An unrecognised scheme whose value contains no `=` is treated the same way, because a
+  token68 is the only other thing it can be. The scheme name is kept: which scheme failed is the
+  diagnosis.
+- **Every `inline:` key on an `a=crypto` line**, not the first. RFC 4568 §9.1 is
+  `key-params = key-param *(";" key-param)`, and a single-occurrence search left the second key in
+  the file.
+- **SDP `k=`** (RFC 4566 §5.12). Deprecated by its own RFC and still a key in cleartext. The method is
+  kept and the key goes; `k=prompt` names no key and is left alone.
+- **A credential in a nested message.** `message/sipfrag` (RFC 3420) and multipart bodies put real
+  headers where the body scanner sees body lines, so a credential header found there is redacted too —
+  length-preservingly, because it is inside the body.
+
+A `quoted-pair` does not end a quoted value (§25.1), so an escaped quote inside a digest response does
+not leave its tail behind.

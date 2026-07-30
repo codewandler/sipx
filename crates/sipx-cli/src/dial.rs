@@ -31,6 +31,8 @@ OPTIONS:
     --local <ADDR>    Local address to bind (default 0.0.0.0:0)
     --tcp             Use TCP rather than UDP
     --stats           Report call quality on exit: loss, jitter, round trip, MOS estimate
+    --capture <FILE>  Record signalling to this pcapng file. Credentials are redacted;
+                      TLS is recorded decrypted. Still identifies who called whom
     --json            Report as JSON
 ";
 
@@ -100,6 +102,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     let mut config = TransportConfig::new(local);
     config.sent_by = media_address.to_string();
+    crate::apply_capture(&args, &mut config);
     let (handle, _incoming) = match bind(config).await {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),

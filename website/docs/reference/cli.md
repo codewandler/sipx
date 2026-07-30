@@ -53,6 +53,7 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
 | `--tcp` | Use TCP rather than UDP |
 | `--stats` | Report call quality on exit: loss, jitter, round trip, MOS estimate |
+| `--capture <FILE>` | Record the signalling to this [pcapng](https://en.wikipedia.org/wiki/Pcap) file for a bug report. Credentials are redacted — digest responses and opaque `Bearer`/`Basic` tokens, SRTP keys (`a=crypto`, `k=`), push tokens, instance URNs. **TLS and WSS are recorded decrypted**, because capturing ciphertext from inside the process would be worse than capturing outside it. What redaction cannot remove is identity: the file still says who called whom, when, and from where, so treat it as sensitive |
 
 Report fields: `status`, `peer`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
 `recording` when `--record` was given, and `loss`, `packets_lost`, `jitter_ms`, `mos`,
@@ -72,6 +73,7 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 | `--reject` | Answer 603 Decline instead |
 | `--busy` | Answer 486 Busy Here instead |
 | `--once` | Exit after one call (the default; kept for clarity in scripts) |
+| `--capture <FILE>` | Record the signalling to this [pcapng](https://en.wikipedia.org/wiki/Pcap) file for a bug report. Credentials are redacted — digest responses and opaque `Bearer`/`Basic` tokens, SRTP keys (`a=crypto`, `k=`), push tokens, instance URNs. **TLS and WSS are recorded decrypted**, because capturing ciphertext from inside the process would be worse than capturing outside it. What redaction cannot remove is identity: the file still says who called whom, when, and from where, so treat it as sensitive |
 
 Reports twice: `status: "listening"` with the bound `address` first, then
 `status: "answered"` with `caller`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
@@ -94,6 +96,7 @@ Register with a registrar: `sipx register sip:alice@example.com`
 | `--push-provider <P>` | Push notification service this device can be woken through (RFC 8599). Requires `--push-prid` |
 | `--push-prid <T>` | The identifier the push service knows this device by. Requires `--push-provider` |
 | `--push-param <X>` | Service-specific extra, when the service needs one |
+| `--capture <FILE>` | Record the signalling to this [pcapng](https://en.wikipedia.org/wiki/Pcap) file for a bug report. Credentials are redacted — digest responses and opaque `Bearer`/`Basic` tokens, SRTP keys (`a=crypto`, `k=`), push tokens, instance URNs. **TLS and WSS are recorded decrypted**, because capturing ciphertext from inside the process would be worse than capturing outside it. What redaction cannot remove is identity: the file still says who called whom, when, and from where, so treat it as sensitive |
 | `--wake` | Act as though a push arrived once registered: send §4.1.3's binding-refresh REGISTER and report what it learned. Requires the push flags |
 
 Report fields: `status`, `aor`, `expires`, `refresh_in` — plus `flow` under `--outbound`

@@ -164,6 +164,29 @@ pub(crate) fn arguments<'a>(
     Args::new(raw).map_err(|message| output::fail(format, Exit::Usage, &message))
 }
 
+/// Turn a signalling capture on if `--capture <path>` asked for one.
+///
+/// `docs/specs/sip-transport.md` §13. One function rather than three copies because all three
+/// commands that bind an endpoint want exactly the same thing, and because the *reason* below should
+/// be written once.
+///
+/// **There is deliberately no flag to turn redaction off.** The library allows it — a lab capture
+/// against a test registrar has no secret worth removing, and redaction would hide the digest bug the
+/// capture was taken to find — but exposing that here would put "ship the credentials" one word away
+/// from someone debugging an incident at 3am, which is the moment they are least able to weigh it.
+/// A caller who genuinely needs an unredacted capture is writing code, not typing a flag.
+///
+/// Nothing is validated about the path here. `bind` fails with `Error::Capture` naming it, which is a
+/// better error than anything this could produce by guessing, and checking twice would leave two
+/// answers to keep in step.
+fn apply_capture(args: &Args<'_>, config: &mut sipx_transport::Config) {
+    if let Some(path) = args.value("capture") {
+        // `Args::new` has already refused an empty value (`S-30`), so a path here is a real one and
+        // `None` means the flag was absent.
+        config.capture = Some(sipx_transport::CaptureConfig::new(path));
+    }
+}
+
 /// Shared argument parsing.
 ///
 /// Deliberately small rather than a dependency: sipx needs flags and one positional, and a
@@ -311,6 +334,7 @@ const VALUED_FLAGS: &[&str] = &[
     "--push-provider",
     "--push-prid",
     "--push-param",
+    "--capture",
 ];
 
 #[cfg(test)]

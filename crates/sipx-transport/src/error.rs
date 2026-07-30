@@ -54,6 +54,18 @@ pub enum Error {
     /// A transport that is declared but not yet implemented.
     #[error("the {0} transport is not implemented yet")]
     UnsupportedTransport(&'static str),
+    /// A capture file could not be opened (`docs/specs/sip-transport.md` §13).
+    ///
+    /// Reported from `bind` rather than swallowed, because the alternative is an endpoint that
+    /// starts, appears to be recording, and writes nothing — the same failure as a silent discard,
+    /// one level up. The path is named because a permission or directory mistake is the usual cause.
+    #[error("the capture at {path} could not be opened: {source}")]
+    Capture {
+        /// Where the capture was to be written.
+        path: String,
+        /// Why it could not be.
+        source: std::io::Error,
+    },
     /// A datagram larger than the path MTU on an unreliable transport (RFC 3261 §18.1.1).
     ///
     /// Named rather than truncated: a truncated SIP message is a security problem, not a

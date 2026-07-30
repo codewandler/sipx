@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 use sipx_sip::transaction::{Dispatch, Output, Timer, TransactionKey, TransactionLayer, TuEvent};
@@ -16,6 +16,8 @@ use sipx_sip::{Header, HeaderName, Limits, Message, Request, Response, Timers, p
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::capture::{Capture, CaptureConfig, Direction};
+use crate::counters::{Counters, Meters, ShedCounts};
 use crate::error::{Error, Result};
 use crate::nat::apply_received_and_rport;
 use crate::target::{ConnectionKey, Target, TransportKind, response_destination};
@@ -91,6 +93,11 @@ pub struct Config {
     pub unanswered_limit: std::time::Duration,
     /// How the connection pool behaves.
     pub pool: PoolConfig,
+    /// Record the signalling this endpoint exchanges to a file (§13).
+    ///
+    /// `None` — the default — costs one `Option` check per message and opens nothing. **A capture
+    /// contains call content and identities even after redaction**; see [`CaptureConfig`].
+    pub capture: Option<CaptureConfig>,
 }
 
 impl Config {
@@ -118,6 +125,7 @@ impl Config {
             ws_server: None,
             #[cfg(feature = "wss")]
             wss_server: None,
+            capture: None,
             #[cfg(feature = "ws")]
             ws_keepalive: std::time::Duration::from_secs(25),
             unanswered_limit: std::time::Duration::from_secs(180),
@@ -226,22 +234,6 @@ enum Command {
     Shutdown,
 }
 
-/// What the endpoint has dropped because the application was not keeping up.
-///
-/// Kept as atomics behind an `Arc` rather than answered by the event loop, and that is the point:
-/// the loop is busy in exactly the situation this counts, so a counter you could only read by
-/// asking it would be unreadable when it mattered. [`Handle::shed`] reads it without touching the
-/// loop at all.
-///
-/// The three kinds are counted apart because their consequences differ by an order of magnitude,
-/// and one number would hide that.
-#[derive(Debug, Default)]
-struct Shed {
-    requests: AtomicU64,
-    acks: AtomicU64,
-    unmatched: AtomicU64,
-}
-
 /// A response that matched no client transaction (RFC 3261 §16.7).
 ///
 /// A user agent has nothing to do with one of these and is right to ignore it: it either answers a
@@ -262,54 +254,14 @@ pub struct Unmatched {
     pub transport: TransportKind,
 }
 
-/// A snapshot of what an endpoint has shed (see [`Handle::shed`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ShedCounts {
-    /// Requests that reached a server transaction and could not be handed to the application.
-    ///
-    /// Answered `503 Service Unavailable` with a `Retry-After`, so the peer is told something
-    /// true rather than left to retransmit into a queue that is still full.
-    pub requests: u64,
-    /// **ACKs** that could not be handed over.
-    ///
-    /// The serious one, and the reason these are not one number. An ACK for a 2xx has no
-    /// transaction to answer — RFC 3261 §17.1.1.3 makes it a new transaction of its own, and
-    /// there is no response to an ACK in SIP at all — so there is no 503 to send and nothing
-    /// retransmits it after Timer H. Both ends are then in a dialog that no timer will reap
-    /// unless session timers (RFC 4028) happen to be in play. A non-zero count here means calls
-    /// are leaking.
-    pub acks: u64,
-    /// Requests that matched no transaction and could not be handed over.
-    ///
-    /// The peer will retransmit an unmatched INVITE, so this is the most survivable of the three
-    /// — but it is still loss, and it was previously invisible.
-    pub unmatched: u64,
-}
-
-impl ShedCounts {
-    /// Whether anything has been shed at all.
-    #[must_use]
-    pub fn any(self) -> bool {
-        self.total() > 0
-    }
-
-    /// Everything shed, of every kind.
-    #[must_use]
-    pub fn total(self) -> u64 {
-        self.requests
-            .saturating_add(self.acks)
-            .saturating_add(self.unmatched)
-    }
-}
-
 /// A handle to a running endpoint.
 #[derive(Debug, Clone)]
 pub struct Handle {
     commands: mpsc::Sender<Command>,
     local_addr: SocketAddr,
-    /// What has been dropped for backpressure, shared with the driver so it can be read while
-    /// the driver is busy — which is the only time it is interesting.
-    shed: Arc<Shed>,
+    /// Every counter, shared with the driver so they can be read while the driver is busy —
+    /// which is the only time they are interesting (§12).
+    meters: Arc<Meters>,
     #[cfg(feature = "tls")]
     tls_addr: Option<SocketAddr>,
     #[cfg(feature = "ws")]
@@ -496,6 +448,8 @@ impl Handle {
         {
             return format!("{}:{}", self.sent_by, addr.port());
         }
+        // discard: not a loss. The parameter is unused unless a transport feature is on, and
+        // this is the suppressor rather than a discarded result.
         let _ = transport;
         format!("{}:{}", self.sent_by, self.sent_by_port)
     }
@@ -596,11 +550,21 @@ impl Handle {
     /// a peer something true. `ShedCounts::acks` is different: see its documentation.
     #[must_use]
     pub fn shed(&self) -> ShedCounts {
-        ShedCounts {
-            requests: self.shed.requests.load(Ordering::Relaxed),
-            acks: self.shed.acks.load(Ordering::Relaxed),
-            unmatched: self.shed.unmatched.load(Ordering::Relaxed),
-        }
+        self.meters.snapshot().shed
+    }
+
+    /// Everything this endpoint will say about itself (§12).
+    ///
+    /// Synchronous, and deliberately so. [`Self::outstanding`] beside it is `async` and returns a
+    /// `Result` because it asks the event loop; this reads shared atomics and cannot fail, because a
+    /// snapshot that was unavailable while the loop was busy would be unavailable in exactly the
+    /// situation an operator reaches for it.
+    ///
+    /// A snapshot is **not a consistent instant** — see [`Counters`] for what that does and does not
+    /// allow you to conclude.
+    #[must_use]
+    pub fn counters(&self) -> Counters {
+        self.meters.snapshot()
     }
 
     /// How many transactions and destinations the endpoint is still holding.
@@ -623,6 +587,8 @@ impl Handle {
 
     /// Stop the endpoint.
     pub async fn shutdown(&self) {
+        // discard: the endpoint is shutting down. A closed command channel means the loop has
+        // already stopped, which is exactly the outcome being asked for.
         let _ = self.commands.send(Command::Shutdown).await;
     }
 }
@@ -688,11 +654,11 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     let (commands_tx, commands_rx) = mpsc::channel(config.capacity);
     let (incoming_tx, incoming_rx) = mpsc::channel(config.capacity);
 
-    let shed = Arc::new(Shed::default());
+    let meters = Arc::new(Meters::default());
     let handle = Handle {
         commands: commands_tx,
         local_addr,
-        shed: Arc::clone(&shed),
+        meters: Arc::clone(&meters),
         #[cfg(feature = "tls")]
         tls_addr: secure_addr,
         #[cfg(feature = "ws")]
@@ -703,6 +669,18 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         ws_sent_by: Arc::from(crate::ws::invented_sent_by()),
         sent_by: Arc::new(config.sent_by.clone()),
         sent_by_port,
+    };
+
+    // Started before the driver, so a path that cannot be opened fails `bind` rather than leaving a
+    // running endpoint that appears to be recording and writes nothing.
+    let capture = match &config.capture {
+        Some(wanted) => Some(
+            Capture::start(wanted, Arc::clone(&meters)).map_err(|source| Error::Capture {
+                path: wanted.path.display().to_string(),
+                source,
+            })?,
+        ),
+        None => None,
     };
 
     let (net_tx, net_rx) = mpsc::channel(config.capacity);
@@ -733,7 +711,9 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         pool: Pool::new(config.pool, config.limits, net_tx),
         limits: config.limits,
         mtu: config.mtu,
-        shed,
+        meters,
+        capture,
+        local_addr,
         unmatched: None,
         stun_waiters: HashMap::new(),
         pong_waiters: HashMap::new(),
@@ -768,6 +748,13 @@ async fn listen_tls(
             tokio::spawn(async move {
                 match acceptor.accept(stream).await {
                     Ok(tls) => {
+                        // Discarded deliberately, with the reason §12.1 asks for rather than a
+                        // counter: a send on this channel fails only when the driver has already
+                        // stopped, so the connection has nothing left to be adopted *into*. The
+                        // socket closes as it drops, which is the correct outcome and not a loss —
+                        // and this runs in a task spawned before the driver exists, so there is no
+                        // counter in scope to reach for anyway.
+                        // discard: see the reason below.
                         let _ = adopt
                             .send(Box::new(move |pool: &mut Pool| pool.accept_tls(tls, peer)))
                             .await;
@@ -871,6 +858,10 @@ async fn adopt_upgraded<S>(
     match upgraded {
         Ok(socket) => {
             let key = ConnectionKey::new(peer, transport);
+            // Discarded deliberately; see the matching site in `listen_tls` for the reason. A failed
+            // send here means the driver has stopped, and a connection with no driver to be adopted
+            // into is closed by dropping it.
+            // discard: see the reason below.
             let _ = adopt
                 .send(Box::new(move |pool: &mut Pool| {
                     pool.accept_ws(socket, key, keepalive);
@@ -962,9 +953,16 @@ struct Driver {
     pool: Pool,
     limits: Limits,
     mtu: usize,
-    /// Keep-alives sent over UDP, waiting for the STUN response that answers them.
-    /// Shared with every [`Handle`]; see [`ShedCounts`].
-    shed: Arc<Shed>,
+    /// Every counter, shared with every [`Handle`]; see [`Counters`].
+    meters: Arc<Meters>,
+    /// The running capture, if one was configured (§13). `None` is the ordinary case.
+    capture: Option<Capture>,
+    /// The address this endpoint is bound to.
+    ///
+    /// Stored rather than asked of the socket. It cannot change after `bind`, and
+    /// `UdpSocket::local_addr` is a `getsockname(2)` — which a previous version of this called once
+    /// per observed message, capture on or off.
+    local_addr: SocketAddr,
     /// Where to send responses that match no client transaction, if anyone asked for them.
     ///
     /// `None` is the ordinary case and costs nothing: no channel exists, and the response is
@@ -1058,11 +1056,21 @@ impl Driver {
             self.on_stun(&datagram, source);
             return;
         }
+        // Captured before parsing, so a malformed datagram is captured malformed: the bytes a
+        // peer actually sent are the whole point of the exercise (§13.2).
+        self.observe(source, TransportKind::Udp, Direction::In, || {
+            datagram.clone()
+        });
+
         match parse_datagram(datagram, &self.limits) {
             Ok(message) => self.on_message(message, source, TransportKind::Udp).await,
             Err(error) => {
                 // One malformed packet must not disturb the socket. The alternative is a
                 // trivial denial of service.
+                //
+                // Counted as a parse failure and deliberately not as a request or a response:
+                // which it would have been is exactly what could not be determined (§12.2).
+                self.meters.parse_failure(TransportKind::Udp);
                 tracing::debug!(%error, %source, "dropping malformed datagram");
             }
         }
@@ -1093,6 +1101,8 @@ impl Driver {
                     self.stun_waiters.insert(id, answered);
                 }
                 Err(error) => {
+                    // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                    // for this answer, so nothing is lost and there is nothing worth counting.
                     let _ = answered.send(Err(error));
                 }
             }
@@ -1113,6 +1123,8 @@ impl Driver {
                     .push_back(answered);
             }
             Err(error) => {
+                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = answered.send(Err(error));
             }
         }
@@ -1123,12 +1135,14 @@ impl Driver {
         let Some(reply) = crate::stun::parse_reply(datagram) else {
             // A Binding *Request*: something on the network is treating this socket as a STUN
             // server. Not ours to answer, and not an error worth raising.
+            self.meters.discard_stun_unmatched();
             tracing::debug!(%source, "ignoring a STUN message that is not a reply");
             return;
         };
         let Some(waiter) = self.stun_waiters.remove(&reply.id()) else {
             // An unsolicited or late reply. Dropping it is right: matching it to a *different*
             // keep-alive would report one flow's liveness as another's.
+            self.meters.discard_stun_unmatched();
             tracing::debug!(%source, "a STUN reply matched no keep-alive");
             return;
         };
@@ -1138,6 +1152,8 @@ impl Driver {
             // failed."
             crate::stun::Reply::Failed { .. } => Err(Error::KeepaliveRefused),
         };
+        // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+        // for this answer, so nothing is lost and there is nothing worth counting.
         let _ = waiter.send(answer);
     }
 
@@ -1148,7 +1164,20 @@ impl Driver {
                 source,
                 transport,
             } => {
+                // Re-serialised rather than raw: framing happened in the connection's task and the
+                // stream bytes are not retained, so §13.2 records that a stream capture is not
+                // byte-exact and does not pretend to be.
+                // `to_bytes` re-serialises and allocates, so it is inside the closure: with no
+                // capture configured it never runs.
+                self.observe(source, transport, Direction::In, || message.to_bytes());
                 self.on_message(*message, source, transport).await;
+            }
+            tcp::Event::FramingFailed { key } => {
+                // The stream half of a parse failure, counted against the transport that carried it
+                // (§12). `Closed` follows and fails the transactions bound to the connection; this
+                // is the *loss* — everything in flight on a stream whose framing is gone — which
+                // until now was a `tracing::debug!` and nothing else.
+                self.meters.parse_failure(key.transport);
             }
             tcp::Event::Pong { key } => {
                 // First waiter for this connection, or nobody — a peer is entitled to send a
@@ -1156,6 +1185,8 @@ impl Driver {
                 if let Some(queue) = self.pong_waiters.get_mut(&key)
                     && let Some(waiter) = queue.pop_front()
                 {
+                    // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                    // for this answer, so nothing is lost and there is nothing worth counting.
                     let _ = waiter.send(Ok(None));
                 }
             }
@@ -1165,6 +1196,8 @@ impl Driver {
                 // making the caller wait out its own timeout for something already known.
                 if let Some(queue) = self.pong_waiters.remove(&key) {
                     for waiter in queue {
+                        // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                        // for this answer, so nothing is lost and there is nothing worth counting.
                         let _ = waiter.send(Err(Error::ConnectionClosed));
                     }
                 }
@@ -1195,6 +1228,12 @@ impl Driver {
     }
 
     async fn on_message(&mut self, message: Message, source: SocketAddr, transport: TransportKind) {
+        // The one site inbound messages are counted, whichever transport carried them here: a
+        // datagram arrives through `on_datagram` and a stream message through `on_net_event`, and
+        // both funnel into this method (§12).
+        self.meters
+            .message_in(transport, matches!(message, Message::Response(_)));
+
         let message = match message {
             Message::Request(mut request) => {
                 apply_received_and_rport(&mut request, source);
@@ -1241,6 +1280,12 @@ impl Driver {
             }
             Dispatch::Unmatched(message) => {
                 tracing::debug!(%source, "message matched no transaction");
+                // Counted before the question of whether anyone is watching: §16.7 makes an
+                // unmatched response a forwarding element's business and a user agent's non-problem,
+                // and the *rate* is worth knowing to either of them.
+                if matches!(&*message, Message::Response(_)) {
+                    self.meters.unmatched_response();
+                }
                 // A response that matched nothing. RFC 3261 §16.7 step 1 makes this a forwarding
                 // element's business — it must forward such a response statelessly — and no
                 // business at all of a user agent, which is why it goes only to a caller that
@@ -1258,7 +1303,7 @@ impl Driver {
                             })
                             .is_err()
                         {
-                            self.shed.unmatched.fetch_add(1, Ordering::Relaxed);
+                            self.meters.shed.unmatched.fetch_add(1, Ordering::Relaxed);
                             tracing::warn!(
                                 %source,
                                 "unmatched-response watcher is not keeping up; dropped one"
@@ -1288,7 +1333,7 @@ impl Driver {
                         // counter moved. There is no transaction here to answer with a 503 — this
                         // request matched none — so counting and saying so is the whole of what
                         // can be done, and it is a great deal more than nothing.
-                        self.shed.unmatched.fetch_add(1, Ordering::Relaxed);
+                        self.meters.shed.unmatched.fetch_add(1, Ordering::Relaxed);
                         tracing::warn!(
                             %source,
                             method = %method,
@@ -1348,6 +1393,7 @@ impl Driver {
                     "abandoning a transaction the application never answered; that is an \
                      application bug rather than a network one"
                 );
+                self.meters.discard_unanswered();
             }
 
             // `clients` is never touched, and `destinations` only when nothing else claims the
@@ -1371,6 +1417,11 @@ impl Driver {
     async fn on_timers(&mut self) {
         let due = self.timers.take_due(tokio::time::Instant::now());
         for (key, timer) in due {
+            // Counted here, where the timer fires, rather than after the socket call. A
+            // retransmission the socket then refuses is still a retransmission this endpoint
+            // decided to send; counting it later would mean a peer that stopped hearing us
+            // produced a *falling* count (§12.2).
+            self.meters.on_timer(timer);
             let outputs = self.layer.on_timer(&key, timer);
             self.perform(&key, outputs, None).await;
         }
@@ -1388,11 +1439,15 @@ impl Driver {
                     .layer
                     .send_request(*request, target.transport.reliability())
                 else {
+                    // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                    // for this answer, so nothing is lost and there is nothing worth counting.
                     let _ = reply.send(Err(Error::NoVia));
                     return;
                 };
                 self.destinations.insert(key.clone(), target);
                 self.clients.insert(key.clone(), events);
+                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = reply.send(Ok(key.clone()));
                 self.perform(&key, outputs, None).await;
             }
@@ -1412,6 +1467,8 @@ impl Driver {
                     // No transaction to answer on. Reporting success here would tell an
                     // application its 200 OK went out while the caller heard nothing — the
                     // caller times out believing the call failed, the callee believes it is up.
+                    // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                    // for this answer, so nothing is lost and there is nothing worth counting.
                     let _ = sent.send(Err(Error::NoTransaction));
                     return;
                 }
@@ -1422,6 +1479,8 @@ impl Driver {
                 // asked for — a test could not see the difference, because on a `current_thread`
                 // runtime the oneshot does not yield and `perform` finished either way.
                 let performed = self.perform(&key, outputs, None).await;
+                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = sent.send(performed.into_result());
             }
             Command::Direct {
@@ -1430,7 +1489,10 @@ impl Driver {
                 sent,
             } => {
                 let bytes = Message::Request(*request).to_bytes();
+                self.observe_out(&bytes, &target, false);
                 let result = self.transmit(bytes, target, false, None).await;
+                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = sent.send(result);
             }
             Command::WatchUnmatched(sink) => {
@@ -1447,6 +1509,8 @@ impl Driver {
                 // Every per-transaction map, not just the transactions. An entry that outlives
                 // its transaction is exactly the leak a count of transactions alone would miss,
                 // and a map left out here is a map a soak run is structurally blind to.
+                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = reply.send(
                     clients
                         + servers
@@ -1474,14 +1538,17 @@ impl Driver {
                             origin.map(|(addr, transport)| Target::new(addr, transport))
                         });
                     let Some(target) = target else {
+                        self.meters.discard_no_destination();
                         tracing::warn!("no destination for a message the transaction wants sent");
                         continue;
                     };
                     let is_response = matches!(*message, Message::Response(_));
                     let bytes = message.to_bytes();
                     let addr = target.addr;
+                    self.observe_out(&bytes, &target, is_response);
                     let fallback = self.reconnect.get(key).cloned();
                     if let Err(error) = self.transmit(bytes, target, is_response, fallback).await {
+                        self.meters.discard_send_failure();
                         tracing::warn!(%error, %addr, "send failed");
                         let outputs = self.layer.on_transport_error(key);
                         return Box::pin(self.perform(key, outputs, origin)).await;
@@ -1507,6 +1574,44 @@ impl Driver {
             }
         }
         Performed
+    }
+
+    /// Hand one observed message to the capture, if one is running (§13).
+    ///
+    /// Called from the driver loop, which is what makes the sequence number the capture stamps
+    /// meaningful: the *order* is decided here, at the point the bytes crossed the boundary, and the
+    /// write happens elsewhere. Costs one `Option` check when no capture is configured.
+    fn observe(
+        &mut self,
+        peer: SocketAddr,
+        transport: TransportKind,
+        direction: Direction,
+        bytes: impl FnOnce() -> Bytes,
+    ) {
+        // `bytes` is a closure so that an endpoint with no capture pays nothing: see
+        // `Capture::observe_if_capturing`, which is where the guard and its test live.
+        Capture::observe_if_capturing(
+            self.capture.as_mut(),
+            &self.meters,
+            self.local_addr,
+            peer,
+            transport,
+            direction,
+            bytes,
+        );
+    }
+
+    /// Count and capture a SIP message on its way out.
+    ///
+    /// The one site outbound messages are counted, so §12.2's "exactly one increment site per
+    /// counter" holds. Deliberately *not* inside [`Driver::transmit`]: that also carries keep-alives,
+    /// which are not SIP messages and must not be counted as requests.
+    fn observe_out(&mut self, bytes: &Bytes, target: &Target, is_response: bool) {
+        self.meters.message_out(target.transport, is_response);
+        // Already serialised — the send needs these bytes either way — so the clone is a refcount.
+        self.observe(target.addr, target.transport, Direction::Out, || {
+            bytes.clone()
+        });
     }
 
     /// Put bytes on the wire that are not a SIP message.
@@ -1630,7 +1735,16 @@ impl Driver {
     ) {
         // A client transaction's events go to whoever sent the request.
         if let Some(sender) = self.clients.get(key) {
-            let _ = sender.send(event).await;
+            // The receiver is gone: the application dropped its `Responses` before the transaction
+            // finished. Legitimate — a caller that stopped caring is allowed to — but it means an
+            // outcome went nowhere, and nothing retransmits an event, so it is counted rather than
+            // discarded in silence (§12.1).
+            if sender.send(event).await.is_err() {
+                self.meters.discard_transaction_event();
+                tracing::debug!(
+                    "a transaction event had no receiver; the caller stopped listening"
+                );
+            }
             return;
         }
 
@@ -1659,14 +1773,14 @@ impl Driver {
                         // dialog no timer reaps unless RFC 4028 session timers happen to be
                         // running. This is the one that leaks calls, which is why it is
                         // counted apart and logged at error rather than warn.
-                        self.shed.acks.fetch_add(1, Ordering::Relaxed);
+                        self.meters.shed.acks.fetch_add(1, Ordering::Relaxed);
                         tracing::error!(
                             %source,
                             "application queue full; an ACK was dropped and cannot be refused — \
                              the dialog it would have completed will not be reaped"
                         );
                     } else {
-                        self.shed.requests.fetch_add(1, Ordering::Relaxed);
+                        self.meters.shed.requests.fetch_add(1, Ordering::Relaxed);
                         tracing::warn!(%source, "application queue full; refusing the transaction");
                         self.refuse(key).await;
                     }
@@ -1696,9 +1810,7 @@ impl Driver {
     }
 
     fn local_addr(&self) -> SocketAddr {
-        self.socket
-            .local_addr()
-            .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)))
+        self.local_addr
     }
 }
 

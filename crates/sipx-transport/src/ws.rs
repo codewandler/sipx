@@ -220,6 +220,8 @@ pub(crate) async fn dial<S>(
         Ok(socket) => pump(socket, key, outgoing, events, limits, keepalive).await,
         Err(error) => {
             tracing::warn!(%error, peer = %key.peer, "websocket handshake failed");
+            // discard: the driver has stopped, so there is no longer anyone to tell that a
+            // connection closed.
             let _ = events.send(Event::Closed { key }).await;
         }
     }
@@ -279,7 +281,11 @@ pub(crate) async fn pump<S>(
                         // The same reasoning as a `Content-Length` framing error on TCP: once
                         // the two ends disagree about where a message ends, nothing further
                         // from this peer can be trusted to be what it claims.
+                        // discard: everything in flight on this connection, for the same reason as
+                        // TCP's framing error. Counted by the driver, which the `FramingFailed`
+                        // below tells; a connection task has no `Meters` in scope.
                         tracing::debug!(%peer, %detail, "closing on a malformed websocket message");
+                        let _ = events.send(Event::FramingFailed { key: key.clone() }).await;
                         break;
                     }
                 }
@@ -299,7 +305,11 @@ pub(crate) async fn pump<S>(
 
     // A close frame, so the peer learns this was deliberate rather than a network failure it
     // should retry through.
+    // discard: a best-effort close on a connection that is already going. Failure means the
+    // peer has gone, which is the very state being reported on the next line.
     let _ = sink.close().await;
+    // discard: the driver has stopped, so there is no longer anyone to tell that a
+    // connection closed.
     let _ = events.send(Event::Closed { key }).await;
 }
 

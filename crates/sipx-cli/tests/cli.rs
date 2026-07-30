@@ -932,3 +932,102 @@ async fn a_valued_flag_given_no_value_is_refused_by_every_command() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **`X-18`'s command-line half.** `--capture <path>` records the signalling of a real call.
+///
+/// The story's reason for wanting this on the command line rather than only in a test is the
+/// vision's "testable from a shell": a capture that can only be switched on by editing code is
+/// unavailable in the incident it exists for. So this runs the built binary and reads the file a
+/// shell would be left holding.
+///
+/// The assertion is a substring search over the whole file rather than a parsed pcapng, and that is
+/// deliberate here: `sipx-transport`'s own tests parse the format block by block, so what is left to
+/// establish at this layer is only that the flag reached `Config::capture` at all. Duplicating the
+/// reader would test the reader twice and the flag once.
+#[tokio::test]
+async fn the_capture_flag_records_the_signalling_of_a_call() {
+    let dir = scratch("capture-flag");
+    let capture = dir.join("signalling.pcapng");
+
+    let (mut answerer, address, mut lines) = start_answerer(&[
+        "--duration",
+        "1",
+        "--capture",
+        capture.to_str().expect("a path"),
+    ])
+    .await;
+
+    let caller = tokio::time::timeout(
+        Duration::from_secs(40),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:answer@{address}"),
+                "--local",
+                "127.0.0.1:0",
+                "--json",
+                "--duration",
+                "1",
+                "--timeout",
+                "15",
+            ])
+            .output(),
+    )
+    .await
+    .expect("the caller finishes")
+    .expect("runs");
+    assert!(
+        caller.status.success(),
+        "dial failed: {} / {}",
+        String::from_utf8_lossy(&caller.stdout),
+        String::from_utf8_lossy(&caller.stderr)
+    );
+
+    let answered = tokio::time::timeout(Duration::from_secs(25), lines.next_line())
+        .await
+        .expect("no timeout")
+        .expect("a line")
+        .expect("the result line");
+    assert!(answered.contains("\"status\":\"answered\""), "{answered}");
+    let _ = answerer.wait().await;
+
+    let bytes = std::fs::read(&capture).expect("the capture the flag asked for exists");
+    assert!(
+        bytes.len() > 100,
+        "the capture is {} bytes, so nothing was written to it",
+        bytes.len()
+    );
+    let whole = String::from_utf8_lossy(&bytes);
+    // The signalling of the call that just happened, in both directions.
+    assert!(whole.contains("INVITE sip:"), "no INVITE in the capture");
+    assert!(
+        whole.contains("SIP/2.0 200"),
+        "no answer in the capture, so only one direction was recorded"
+    );
+    // pcapng, not a text log: the Section Header Block's own comment.
+    assert!(
+        whole.contains("sipx signalling capture"),
+        "the file is not a pcapng section"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Off unless asked for, at the command line as well as in the library: a run with no `--capture`
+/// writes no file. Without this the flag could be ignored entirely and the test above would be the
+/// only thing that noticed — and it would pass if capture were unconditional.
+#[tokio::test]
+async fn no_capture_flag_means_no_file() {
+    let dir = scratch("capture-absent");
+    let unwanted = dir.join("signalling.pcapng");
+
+    let (mut answerer, _address, _lines) = start_answerer(&["--duration", "1"]).await;
+    let _ = answerer.kill().await;
+
+    assert!(
+        !unwanted.exists(),
+        "a capture nobody asked for was written to {}",
+        unwanted.display()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
