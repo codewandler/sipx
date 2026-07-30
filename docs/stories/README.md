@@ -51,7 +51,6 @@ _This is the layer applications actually program against, so it is the one that 
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
-- [X-51 — Check M12's exit criterion against evidence, now that all four of its stories are closed](X-51-m12s-exit-criterion-has-never-been-checked.md) · Build · found integrating X-50 — X-16, X-17, X-18 and X-19 are all done, and nobody has ever asked whether M12's four Done-when clauses hold; M10 looked reached by status and was not
 - [X-44 — Guard the fixed-sleep rule mechanically, because the sweep did not hold](X-44-the-fixed-sleep-rule-is-swept-for-not-guarded.md) · Build · found while integrating the X-39/X-40/M-33 wave — `X-29` swept the workspace and `0.12.0` claims "no test in the workspace now asserts after a fixed sleep", but nothing enforces it and two new instances appeared within the same wave
 - [X-52 — Demonstrate M10's GRUU and push clauses as they are written](X-52-m10s-first-two-clauses-are-held-by-mechanism.md) · Build · found by X-50 — T-20 and T-21 are done and their tests stop short of the clauses; the GRUU test is an OPTIONS to one agent and the push test ends when the INVITE arrives, so nothing answers it
 - [X-55 — Count a story closed inside a merge commit, or refuse to be closed inside one](X-55-a-story-closed-inside-a-merge-commit-is-not-counted.md) · Build · found integrating M-34 — its `status: done` landed in the merge commit, `git log -p` shows no diff for merges, so the closing was invisible to the history walk and the journal came out one ahead of the snapshot
@@ -74,6 +73,10 @@ _Everything above this layer inherits its correctness properties. SIP's genuinel
 - [S-28 — Answer a 401 or 407 on an outbound INVITE](S-28-a-call-cannot-answer-an-authentication-challenge.md) · Signalling · found while closing P-7 — sipx-call has no credential type and no 401/407 path at all, so a challenged call fails outright; the digest machinery exists in sipx-ua and nothing above the registration path can reach it
 - [S-32 — Refuse a numeric flag that was given something that is not a number](S-32-a-flag-given-a-non-number-is-ignored.md) · Signalling · found by S-30 — `Args::number` conflates "absent" with "not a number", so `sipx answer --wait notanumber` exits 0 after the default 60s; `dial::numeric` already fixed it for `dial` alone, which is the tell that it was patched per-command instead of at the source
 - [S-33 — Decide what `sipx answer` should exit with when it heard no audio](S-33-sipx-answer-exits-zero-having-heard-nothing.md) · Signalling · found by X-40's implementor — the answerer reports `heard_audio: false` and still exits 0, so a script cannot distinguish a silent call from a good one by exit code
+
+### Transport layer
+_The transport layer is the only place in the signalling stack that touches the network, which_
+- [X-54 — Count every discard in the signalling path, and let the numbers out beside the capture](X-54-every-discard-is-one-crates-worth-of-every.md) · Build · found by X-51 — M12's third clause says *every* discard in the signalling path is counted and exportable next to a capture; the enumeration covers one crate, the dialog layer has uncounted losses, and nothing outside the crates' own tests can read either counter snapshot
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -261,6 +264,7 @@ _The phone is both the product's front door and its most demanding integration t
 - [X-48 — Audit conformance, capability and release readiness](X-48-audit-conformance-and-release-readiness.md) · Build · evidence-based assessment of the shipped library and phone surfaces, with gaps kept distinct from implemented-but-unreachable code
 - [X-49 — Stop CI checking the board against a history it did not fetch](X-49-ci-checks-the-board-against-a-truncated-history.md) · Build · found by CI going red on main and on every pull request at 1.0.0-alpha — two jobs failed, both accusing docs/maturity.md's event-date journal of recording a fact the snapshot did not have
 - [X-50 — Decide whether M10 requires TURN, because the roadmap says both](X-50-m10-has-two-exit-criteria-that-disagree.md) · Build · found closing M-23 — M10's "Done when" is satisfied today, while the ICE epic header calls M-24 an M10 story and M-24 is open; the milestone cannot be declared or deferred without picking one
+- [X-51 — Check M12's exit criterion against evidence, now that all four of its stories are closed](X-51-m12s-exit-criterion-has-never-been-checked.md) · Build · found integrating X-50 — X-16, X-17, X-18 and X-19 are all done, and nobody has ever asked whether M12's four Done-when clauses hold; M10 looked reached by status and was not
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

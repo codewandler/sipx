@@ -7,6 +7,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **M12's exit criterion has been checked against evidence, and it is one clause short (`X-51`)** —
+  all four of M12's stories are closed, which prompted the question and is not an answer to it. Three
+  clauses hold as written: the RFC 5118 corpus is fully classified with an empty deviation list, the
+  interop matrix runs the identical test list against two independent peers with neither declaring a
+  divergence, and the fuzzer drives the transaction layer with built message sequences rather than
+  bytes over a corpus proven unmodified.
+  - **The third does not.** "Every discard in the signalling path is counted and exportable next to a
+    capture" fails in two of its own words: *every* reaches only `sipx-transport`, whose guard scans
+    that crate and no other, while `sipx-call` drops a call event uncounted and discards six send
+    results; and *next to* is false outside the process, because the counters are read by no shipped
+    binary while `--capture` is on three commands with no counterpart for the numbers. Filed as
+    `X-54`.
+  - `M-32` staying open does **not** hold M12 open — the clause says *signalling* path, and the media
+    counters are outside it. That was read off the clause's words rather than assumed either way.
+
 ### Fixed
 
 - **`sip-tls.md` no longer claims a minimum-TLS-version knob that nobody built (`X-46`)** — §3.2
