@@ -38,8 +38,18 @@
 }
 
 .hero--sipx .hero__subtitle {
-  max-width: 42rem;
+  max-width: 48rem;
   margin: 0 auto 1.5rem;
+}
+
+.sipx-development-notice {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--ifm-color-warning-dark);
+  border-radius: 8px;
+  background: var(--ifm-color-warning-contrast-background);
+  color: var(--ifm-color-emphasis-900);
 }
 
 .sipx-cards {

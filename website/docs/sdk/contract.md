@@ -1,23 +1,26 @@
 ---
-title: The contract, in short
-description: sipx.app.v1 at a glance — the event and instruction vocabulary, the envelope, and the rule that makes barge-in compose.
+title: The experimental contract
+description: A tour of sipx.app.v1, whose types and interpreter exist but whose webhook, session, and embedded bindings do not.
 ---
 
-# The contract, in short
+# The experimental contract
 
-:::caution Preview
+:::caution Experimental and not connected to customer code
 
-`sipx.app.v1` is experimental. The normative version — with the envelope fields, failure
-semantics, authentication and test vectors — is
-[`docs/specs/app-contract.md`](https://github.com/codewandler/sipx/blob/main/docs/specs/app-contract.md);
-this page is the tour.
+The contract types, JSON format, interpreter, and deterministic vectors exist. `sipx-host` answers
+calls, but it does not deliver these events to a webhook or session and does not run an embedded
+handler. The wire shape may change before those bindings ship.
 
 :::
 
-## An event
+The normative definition, including validation, ordering, failure semantics, authentication, and
+test vectors, is
+[`docs/specs/app-contract.md`](https://github.com/codewandler/sipx/blob/main/docs/specs/app-contract.md).
+This page is a non-normative tour.
 
-Every event carries a **full snapshot** of the call — your code never needs to remember state,
-and a missed delivery cannot leave it permanently wrong:
+## Event envelope
+
+An event identifies the contract version and sequence and carries a call snapshot:
 
 ```json
 {
@@ -25,23 +28,24 @@ and a missed delivery cannot leave it permanently wrong:
   "seq": 4,
   "at": "2026-07-28T09:15:04.221Z",
   "call": {
-    "id": "b7c1…", "direction": "inbound", "state": "answered",
-    "from": "sip:alice@example.com", "to": "sip:support@example.net",
+    "id": "b7c1…",
+    "direction": "inbound",
+    "state": "answered",
+    "from": "sip:alice@example.com",
+    "to": "sip:support@example.net",
     "media": { "encrypted": true, "on_hold": false, "muted": false }
   },
   "event": { "type": "call.dtmf", "digit": "5", "duration_ms": 160 }
 }
 ```
 
-Event types: `call.incoming` · `call.ringing` · `call.answered` · `call.dtmf` ·
-`call.playback.finished` · `call.gather.finished` · `call.recording.finished` ·
-`call.dial.finished` · `call.transfer.requested` · `call.transfer.progress` · `call.bridged` /
-`call.unbridged` · `call.hold` / `call.resumed` · `call.ended`.
+The vocabulary covers incoming, ringing, answered, and ended calls; DTMF; playback, gather,
+recording, and dial completion; transfer progress; bridge state; and hold state.
 
-## A program
+## Instruction program
 
-Your response is an ordered program. Every instruction has your `id`, echoed back on its
-completion event:
+Customer code answers with an ordered program. Its instruction identifiers are echoed by the
+corresponding completion events:
 
 ```json
 {
@@ -53,23 +57,34 @@ completion event:
 }
 ```
 
-Verbs: `answer` · `ring` · `reject` · `play` · `gather` · `record` · `send_dtmf` · `dial` ·
-`bridge` / `unbridge` · `hold` / `resume` · `mute` / `unmute` · `transfer` (blind or attended)
-· `accept_transfer` / `refuse_transfer` · `pause` · `tag` · `hangup`.
+The vocabulary includes answer, ring, reject, play, gather, record, DTMF, dial, bridge, hold,
+mute, transfer, pause, tag, and hangup operations. A word in the contract is not itself evidence
+that the current host or public call API can perform that operation end to end.
 
-## The rule that makes it compose
+## Replacement and ordering
 
-In webhook mode, **a response replaces the whole pending program**. Respond to a `call.dtmf`
-event with a new program and the queued prompt is gone — that is barge-in, without a cancel
-API. At most one callback is outstanding per call; events that happen meanwhile queue and
-arrive in order, each with a current snapshot.
+In webhook mode, a response replaces the entire pending program. Responding to a digit event with
+a new program therefore removes queued prompt work without a separate cancel instruction. At most
+one callback is outstanding per call; events that happen meanwhile queue and are delivered in
+sequence with a current snapshot.
 
-Anything that needs to act at an arbitrary moment — coordinating two legs, killing a call from
-the outside, originating calls — is **session mode**: same vocabulary over a WebSocket, no
-alternation, plus `originate`.
+Session mode is specified as full duplex for actions that need not alternate with callbacks, such
+as originating a call or acting on an external command. The embedded mode is intended to preserve
+the same session semantics without a wire boundary.
 
-## What happens when your code is down
+These are contract rules tested by the interpreter and harness. They are not usable deployment
+modes yet because all three binding adapters are unavailable.
 
-Declared, not coded: per app you configure `timeout_ms` and what a timeout, a 5xx or an
-unreachable endpoint each mean — keep going with the current program, hang up, or reject. The
-default keeps an already-scripted call alive rather than killing it.
+## Failure policy
+
+The configuration declares a callback timeout and an action for timeout, an unreachable app, and
+4xx or 5xx responses. Depending on the condition, the policy may continue the current program,
+hang up, or reject the call. The default preserves already-scripted work instead of ending an
+active call merely because the next callback cannot be reached.
+
+This policy is active in the current host for the one failure it can encounter without a binding:
+the app is always unreachable. It does not mean the host has attempted an HTTP request, opened a
+session, or loaded a handler.
+
+See the [SDK overview](overview.md) for the implementation boundary and the supported alternatives
+available today.

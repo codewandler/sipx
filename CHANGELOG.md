@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The public docs are an adoption path rather than an internal status ledger (`X-47`)** — the
+  README and website now lead with the shipped CLI and Rust workflows, state the WAV-only and
+  secure-transport boundaries at the decision point, and keep the experimental SDK out of the main
+  navigation. Security, troubleshooting and integrating an endpoint into an existing SIP system each
+  have a canonical guide; the RFC table is published on-site. Release, MSRV, crate and RFC facts are
+  generated or checked from their existing sources, and the docs build rejects internal work-item IDs
+  and design/story links in public pages.
+
 - **Negotiated media starts transactionally, and the constructors that can fail now say so
   (`M-35`, `M-36`, `M-37`)** — `MediaPort::start` returns `Result<MediaSession, SetupError>` and
   `Conference::new` returns `Result<Conference, ConferenceError>`. `sipx-call` carries the new error

@@ -90,6 +90,9 @@ fi
 echo "==> building the samples the guides inline"
 cargo build --workspace --examples --quiet
 
+echo "==> testing the public-doc generators and guards"
+python3 scripts/test-sync-website.py
+
 echo "==> checking the inlined samples match the files"
 ./scripts/sync-website.py --check
 

@@ -1,0 +1,119 @@
+---
+title: Integrate with an existing SIP system
+description: Add sipx endpoints and call applications gradually without confusing endpoint, proxy, registrar, and application roles.
+---
+
+# Integrate with an existing SIP system
+
+You rarely need to replace a working SIP service to adopt sipx. Start by identifying the role you
+need, then add sipx at an endpoint boundary where its behavior can be tested independently.
+
+## Map the roles first
+
+| SIP role | What it does | sipx status |
+|---|---|---|
+| User agent client | Originates requests and calls | Shipped in the CLI and Rust libraries |
+| User agent server | Receives requests and answers calls | Shipped in the CLI and Rust libraries |
+| Registration client | Publishes an endpoint's Contact as a lease | Shipped in `sipx register` and `sipx-ua` |
+| Proxy | Routes or forks other endpoints' requests and maintains a route set | Not a role provided by this repository |
+| Registrar and location service | Accepts and stores registrations for other endpoints | Not a role provided by this repository |
+| Call application | Plays, records, gathers digits, transfers, and owns call behavior | Shipped as Rust APIs; the language-neutral application contract is Experimental |
+
+These roles are distinct in [RFC 3261](https://www.rfc-editor.org/rfc/rfc3261). Registering a sipx
+endpoint with an existing registrar does not make sipx a registrar, and accepting an incoming call
+does not make it a proxy.
+
+## Choose a narrow first workload
+
+Good first integrations are endpoints with explicit inputs and outputs:
+
+- a health probe that places a call and checks the result;
+- an announcement endpoint that answers, plays a WAV file, and records the caller;
+- a notification dialler that reports JSON and branches on the exit code;
+- a Rust service that registers one endpoint and owns its calls.
+
+Keep routing, registration storage, queues, and other network-wide policy in the system that
+already owns those roles. A direct endpoint workload establishes signalling, authentication,
+audio, and failure behavior without making a cutover depend on unfinished application surfaces.
+
+## Add a CLI endpoint
+
+For a direct test, start an answerer on an address your existing system can reach. Replace the
+documentation address below with the endpoint's reachable interface address:
+
+```bash
+sipx answer --local 192.0.2.20:5070 --play greeting.wav --record caller.wav --wait 60
+```
+
+Route one test destination to that address and port. For an outbound probe, call a concrete target
+and capture a machine-readable result:
+
+```bash
+sipx dial sip:probe@192.0.2.10:5060 --play probe.wav --timeout 15 --json
+```
+
+The CLI consumes and produces WAV files; it does not use a microphone or headset. It supports UDP
+and TCP signalling but cannot select TLS, WSS, or encrypted media. See the
+[CLI reference](../reference/cli.md) and [Security](../reference/security.md) before treating the
+probe as a production security test.
+
+## Register an endpoint
+
+When the existing system requires registration, treat it as a renewable lease:
+
+```bash
+SIPX_PASSWORD='secret' sipx register sip:alice@example.net \
+  --target 192.0.2.10:5060 --keep-alive
+```
+
+Use RFC 5626 Outbound when calls must return down a client-opened flow:
+
+```bash
+SIPX_PASSWORD='secret' sipx register sip:alice@example.net \
+  --target 192.0.2.10:5060 --outbound --instance urn:uuid:YOUR-STABLE-ID --keep-alive
+```
+
+Persist the instance URN across restarts. Registration and call answering are separate CLI
+processes, so a long-lived production endpoint is usually clearer as one Rust application using
+`sipx-ua` and `sipx-call` on the same transport endpoint.
+
+## Move the durable endpoint into Rust
+
+Use the Rust libraries when the integration needs one process to register, answer, place calls,
+service in-dialog requests, or select protected transports. The public guides show the smallest
+complete paths:
+
+- [Choose the library crates](as-a-library.md)
+- [Place a call](place-a-call.md)
+- [Answer a call](answer-a-call.md)
+- [Register](register.md)
+
+Set the bound and advertised addresses explicitly. Behind NAT, sipx's symmetric RTP behavior can
+handle common endpoint mappings after valid media arrives, but a complete ICE path and media relay
+fallback are not available. Validate from the network where the endpoint will actually run, not
+only on loopback.
+
+## Know the application boundary
+
+Rust applications can already answer, play, record, send or collect DTMF, and transfer. Do not plan
+a proxy or registrar replacement around those endpoint APIs. Coupling and bridging two independent
+`Call` objects is also not yet a finished public call-layer workflow.
+
+`sipx-host` is an Experimental host process. It can bind a SIP listener, admit and answer inbound
+calls, and carry them until the caller ends them. It cannot yet invoke a webhook, accept a session
+controller, or run an embedded handler, so the language-neutral contract is not a production
+application integration path. Its precise status is on the [SDK overview](../sdk/overview.md).
+
+## Validate before expanding
+
+For each new endpoint, verify:
+
+1. success and refusal outcomes are distinguishable;
+2. authentication fails closed with a wrong credential;
+3. Contact, Via, and SDP addresses are reachable from the real network;
+4. audio flows in both directions for the full call;
+5. BYE and timeout paths release signalling and media resources;
+6. TLS certificate failures are refused when the Rust application uses TLS or WSS.
+
+Expand destinations only after those checks pass. [Troubleshooting](troubleshooting.md) maps the
+common symptoms to the address, NAT, media, authentication, and capture checks that settle them.

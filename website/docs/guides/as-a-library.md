@@ -5,9 +5,42 @@ description: The crates are useful separately — a parser and transaction machi
 
 # Use sipx as a library
 
-The crates are useful separately. `sipx-sip` and `sipx-sdp` depend on **no async runtime at
-all** — take them for a parser, transaction state machines, or offer/answer as a pure function,
-without taking a socket layer with them.
+The crates are useful separately. Take the pure protocol core, the async transport and user-agent
+layers, or the complete call framework.
+
+## Add a dependency
+
+sipx is not on crates.io yet. Pin the tagged alpha release in `Cargo.toml`:
+
+```toml
+[dependencies]
+sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha" }
+```
+
+This website documents `main`, which can be tested explicitly with:
+
+```toml
+[dependencies]
+sipx-call = { git = "https://github.com/codewandler/sipx", branch = "main" }
+```
+
+Commit `Cargo.lock` for applications and binaries so the selected Git revision is reproducible.
+For a library, use the tagged dependency unless you intentionally require unreleased work.
+
+Optional behavior is opt-in. For example, make Opus selectable by `sipx-call` like this:
+
+```toml
+[dependencies]
+sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha", features = ["opus"] }
+```
+
+Opus links a C library. Enabling the feature makes `Codecs::Opus` available; it does not silently
+change the codecs a call offers. G.711 remains the default selection.
+
+## Parse without a runtime
+
+`sipx-sip` and `sipx-sdp` depend on **no async runtime at all**. Use them for a parser,
+transaction state machines, or offer/answer as pure logic without taking a socket layer.
 
 The example below is a real file that CI compiles
 ([`crates/sipx-sip/examples/parse_a_message.rs`](https://github.com/codewandler/sipx/blob/main/crates/sipx-sip/examples/parse_a_message.rs)):
@@ -75,22 +108,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 <!-- END generated:example -->
 
-## What is worth noticing
-
-**Nothing is lost on the wire.** A parsed message borrows the bytes it arrived in, and a header
-sipx has no behaviour for survives intact and re-serializes byte for byte. That is why
-*parse-only* is a status in [the compliance table](../reference/compliance.md) rather than a
-gap in it — a message carrying an exotic header field passes through unharmed even though
-nothing acts on it.
-
-**The core does no I/O.** The transaction machines take inputs and return outputs: time arrives
-as a fired-timer input and leaves as a set-timer output. They can be driven with no clock and no
-socket, which is how the retransmission behaviour is tested deterministically rather than
-chased through timing flakes.
-
-**Malformed input is a value.** `unsafe` is forbidden across the workspace and parse failures
-are typed errors, with the whole RFC 4475 torture corpus asserted — including which layer must
-object to each message that has to be rejected.
+The message borrows its input bytes, preserves headers it does not interpret, and returns typed
+parse errors. Transaction time enters as a fired-timer input and leaves as a set-timer output.
+Those properties make the core deterministic to drive from another runtime or a unit test.
 
 ## Which crate
 
@@ -106,11 +126,23 @@ object to each message that has to be rejected.
 | Calls with playback, recording, DTMF, transfer | `sipx-call` |
 | A phone to run rather than embed — the `sipx` binary | `sipx-cli` |
 | The `sipx.app.v1` contract: its types, wire format and interpreter | `sipx-app-protocol` |
-| The application host that runs handler programs on real calls — in development | `sipx-app` |
+| The experimental host process and deterministic application-contract harness | `sipx-app` |
 
-This table is exactly the crates that publish, held to it by
-`./scripts/check-audio-claims.py --check` in CI: a published crate no table describes has no front
-door anyone can be held to.
+`sipx-app` includes a `sipx-host` process that can bind a listener and answer a call. It does not
+yet implement webhook, session, or embedded callback bindings, so handler programs cannot drive
+those calls.
+
+## Runtime and feature boundaries
+
+- `sipx-sip` and `sipx-sdp` are sans-I/O and have no async runtime.
+- `sipx-transport`, `sipx-ua`, `sipx-media`, and `sipx-call` use Tokio for I/O-facing work.
+- `sipx-transport` enables UDP, TCP, DNS, TLS, WebSocket, and secure WebSocket by default. Use
+  `default-features = false` with an explicit feature list for a smaller transport build.
+- `sipx-ua` enables its `runtime` feature by default. Disable defaults only when using its
+  authentication and other non-runtime primitives without the transport-backed user agent.
+- `sipx-media` has no default features. `opus` links the optional codec library; `dtls` links the
+  optional handshake backend. The DTLS components cannot yet key a `Call` or `MediaSession`.
+- `sipx-call`'s only optional feature is `opus`; its default call codec set is G.711.
 
 ## The API reference
 
@@ -127,6 +159,5 @@ docs.rs so that it always matches the guides next to it. Start points:
 | `sipx-media` | [`MediaSession`](https://codewandler.github.io/sipx/api/sipx_media/session/struct.MediaSession.html) |
 | `sipx-call` | [`dial`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.dial.html) · [`answer`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.answer.html) · [`Call`](https://codewandler.github.io/sipx/api/sipx_call/call/struct.Call.html) |
 
-Every public item in the workspace carries documentation, and the build denies both a missing
-one and an intra-doc link that resolves nowhere. That is not a claim about diligence — it is
-`RUSTDOCFLAGS="-D warnings"` in the build script CI runs.
+The API reference is generated from the same `main` branch as this site. When using the tagged
+release, consult the checked-out source documentation if an API has changed on `main`.

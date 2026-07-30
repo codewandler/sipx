@@ -110,8 +110,8 @@ const config = {
         logo: { alt: '', src: 'img/logo.svg' },
         items: [
           { type: 'docSidebar', sidebarId: 'docs', position: 'left', label: 'Docs' },
-          { to: '/docs/sdk/overview', label: 'SDK', position: 'left' },
-          { to: '/docs/whats-new', label: "What's new", position: 'left' },
+          { to: '/docs/getting-started', label: 'CLI', position: 'left' },
+          { to: '/docs/guides/as-a-library', label: 'Rust libraries', position: 'left' },
           {
             href: 'https://codewandler.github.io/sipx/api/',
             label: 'API',
@@ -128,8 +128,20 @@ const config = {
             items: [
               { label: 'Getting started', to: '/docs/getting-started' },
               { label: 'Does sipx fit?', to: '/docs/guides/does-this-fit' },
-              { label: 'SDK', to: '/docs/sdk/overview' },
-              { label: 'Migrate', to: '/docs/migrate/from-kamailio' },
+              {
+                label: 'Integrate an endpoint',
+                to: '/docs/guides/integrate-existing-system',
+              },
+              { label: 'Troubleshooting', to: '/docs/guides/troubleshooting' },
+            ],
+          },
+          {
+            title: 'Libraries',
+            items: [
+              { label: 'Choose a crate', to: '/docs/guides/as-a-library' },
+              { label: 'Place a call', to: '/docs/guides/place-a-call' },
+              { label: 'Answer a call', to: '/docs/guides/answer-a-call' },
+              { label: 'Register', to: '/docs/guides/register' },
             ],
           },
           {
@@ -137,10 +149,10 @@ const config = {
             items: [
               { label: 'GitHub', href: 'https://github.com/codewandler/sipx' },
               { label: 'API reference', href: 'https://codewandler.github.io/sipx/api/' },
-              {
-                label: 'RFC compliance',
-                href: 'https://github.com/codewandler/sipx/blob/main/docs/compliance.md',
-              },
+              { label: 'Security', to: '/docs/reference/security' },
+              { label: 'RFC compliance', to: '/docs/reference/compliance' },
+              { label: "What's new", to: '/docs/whats-new' },
+              { label: 'Experimental SDK', to: '/docs/sdk/overview' },
             ],
           },
         ],

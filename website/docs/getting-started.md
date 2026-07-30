@@ -1,74 +1,108 @@
 ---
 title: Getting started
-description: Install the sipx CLI and place your first call between two terminals in five minutes — no PBX, no account, no configuration file.
+description: Install the sipx CLI and place a first call between two terminals with WAV audio.
 ---
 
 # Getting started
 
-Five minutes to a real call: two sipx processes, one dials the other, audio flows both ways.
-No PBX, no account, no configuration file.
+This walkthrough makes a real local SIP call between two `sipx` processes. It needs no PBX,
+account, or configuration file.
 
-## Install
+## Install the tagged release
 
-sipx is not on crates.io yet; install the CLI straight from the repository (you need a
-[Rust toolchain](https://rustup.rs)):
-
-```bash
-cargo install --git https://github.com/codewandler/sipx sipx-cli
-```
-
-That builds the `sipx` binary. Check it:
+sipx is not on crates.io yet. Install it from Git with Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```bash
-sipx version
+cargo install --git https://github.com/codewandler/sipx \
+  --tag v1.0.0-alpha --locked sipx-cli
 ```
 
-## Your first call
+`--tag` makes the installation reproducible. This site follows the newer `main` branch; to
+try that development state instead, use:
 
-Terminal one — answer whatever calls, play a greeting, record what the caller says:
+```bash
+cargo install --git https://github.com/codewandler/sipx \
+  --branch main --locked sipx-cli
+```
+
+Confirm which version was installed. This documentation build covers
+<!-- BEGIN generated:workspace-version -->1.0.0-alpha<!-- END generated:workspace-version -->:
+
+```console
+$ sipx version
+sipx 1.0.0-alpha
+```
+
+## Prepare audio
+
+The CLI is a scriptable softphone, not a desktop audio phone. It never opens a microphone or
+speaker. Audio enters through `--play` and leaves through `--record`.
+
+Input WAV files must be **8 kHz, 16-bit, mono PCM**. If you do not have one, omit `--play` on
+either command below. The call will still complete, but that side sends silence.
+
+## Make a call
+
+In terminal one, listen on the default local address, play a greeting, and record the caller:
 
 ```bash
 sipx answer --play greeting.wav --record caller.wav --once
 ```
 
-Terminal two — call it:
+The first report identifies the listening socket:
 
-```bash
-sipx dial sip:you@127.0.0.1:5060 --play hello.wav --record reply.wav --duration 10
+```text
+status   listening
+address  0.0.0.0:5060
 ```
 
-Both sides report what happened; `reply.wav` contains the greeting the answering side played.
-WAV files are 8 kHz, 16-bit, mono — and if you have none lying around, both commands work
-without `--play` (you will record silence, but the call is real).
-
-## Register against a PBX
-
-If you have a SIP account somewhere:
+In terminal two, call that listener for ten seconds:
 
 ```bash
-SIPX_PASSWORD='…' sipx register sip:alice@example.com --keep-alive
+sipx dial sip:you@127.0.0.1:5060 \
+  --play hello.wav --record reply.wav --duration 10
 ```
 
-The registration is treated as a lease: sipx refreshes it before it expires, for as long as the
-command runs. See [the guide](guides/register.md) for what is worth knowing.
+Both commands finish with an `answered` report. `caller.wav` contains audio sent by the
+dialler, and `reply.wav` contains the answerer's greeting. The reports also say how many
+samples were recorded and whether any audio was heard.
 
-## Scripting it
+The CLI currently supports UDP by default and TCP with `--tcp`. It has no TLS or secure
+WebSocket selector, so it refuses `sips:` instead of silently sending an insecure call. Use
+the Rust transport and call libraries when secure signalling is required.
 
-Every command speaks `--json` — one single-line JSON object on stdout — and returns a distinct
-exit code per outcome (success, rejected, unauthorized, timeout, busy…), so a shell script can
-branch on what actually happened:
+## Register an address
+
+If you have SIP account credentials, keep the password out of the process list:
 
 ```bash
-if sipx dial sip:alice@example.com --timeout 15 --json > result.json; then
+SIPX_PASSWORD='your-password' \
+  sipx register sip:alice@example.com --keep-alive
+```
+
+Registration is a lease. `--keep-alive` refreshes it until the command is interrupted. The CLI
+can use UDP or TCP for registration, but not TLS; see [Register against a PBX](guides/register.md)
+for target selection, Outbound, and the library API.
+
+## Script the result
+
+Add `--json` to emit one single-line JSON object on stdout. Commands also use distinct exit
+codes for success, rejection, authentication failure, timeout, busy, usage error, and other
+failure:
+
+```bash
+if sipx dial sip:alice@192.0.2.10:5060 --timeout 15 --json >result.json; then
   echo "answered"
 fi
 ```
 
-The full command, flag and exit-code list is in the [CLI reference](reference/cli.md).
+Logs go to stderr, so JSON on stdout remains parseable. See the [CLI reference](reference/cli.md)
+for every flag, output field, and exit code.
 
 ## Next
 
-- [Place a call from Rust](guides/place-a-call.md) — the same call as a program.
+- [Use sipx as a library](guides/as-a-library.md).
+- [Place a call from Rust](guides/place-a-call.md).
 - [Answer calls from Rust](guides/answer-a-call.md).
-- [Does sipx fit?](guides/does-this-fit.md) — what it does and deliberately does not do.
-- [The SDK preview](sdk/overview.md) — where call control without Rust is headed.
+- [Does sipx fit?](guides/does-this-fit.md).
+- [Troubleshooting](guides/troubleshooting.md).

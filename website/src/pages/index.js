@@ -5,34 +5,34 @@ import Layout from '@theme/Layout';
 
 const CARDS = [
   {
-    title: 'Calls',
-    body: 'Place and answer, hold and resume, blind and attended transfer — with session timers so a vanished far end ends the call.',
-    to: '/docs/guides/place-a-call',
+    title: 'A scriptable CLI',
+    body: 'Place, answer, and register from a shell with JSON results and distinct exit codes. Playback and recording use WAV files, not a microphone or speaker.',
+    to: '/docs/reference/cli',
   },
   {
-    title: 'Audio',
-    body: 'G.711 both ways by default, Opus when a call selects it and the library is built with the feature. DTMF, WAV playback and recording, an adaptive jitter buffer, and mid-call quality statistics.',
+    title: 'A Rust call framework',
+    body: 'Place and answer calls, register, transfer, play and record audio, receive DTMF, and inspect call quality from typed Rust APIs.',
+    to: '/docs/guides/as-a-library',
+  },
+  {
+    title: 'Telephony audio',
+    body: 'G.711 in both directions, WAV playback and recording, DTMF, jitter buffering, and quality statistics. Opus is selectable through an optional library feature.',
     to: '/docs/guides/answer-a-call',
   },
   {
-    title: 'Security that cannot be turned off',
-    body: 'TLS and secure WebSocket with certificate verification that has no off switch, and SRTP negotiated automatically when the signalling protects the key.',
-    to: '/docs/guides/does-this-fit',
-  },
-  {
-    title: 'A library first',
+    title: 'A Sans-I/O core',
     body: 'The protocol core does no I/O: parser, transactions and dialogs are pure state machines you can take without a socket layer attached.',
     to: '/docs/guides/as-a-library',
   },
   {
-    title: 'A phone you can script',
-    body: 'sipx dial, answer and register from a shell — every command speaks --json and returns a distinct exit code per outcome.',
-    to: '/docs/reference/cli',
+    title: 'Secure library transports',
+    body: 'The Rust transport layer supports TLS and secure WebSocket with certificate verification, and calls can negotiate SRTP when signalling protects the key.',
+    to: '/docs/reference/security',
   },
   {
-    title: 'The SDK (preview)',
-    body: 'Call events out, instructions in: the contract that will let you build call behaviour without writing Rust. Specified, experimental, in progress.',
-    to: '/docs/sdk/overview',
+    title: 'Measured RFC coverage',
+    body: 'A generated registry distinguishes implemented behaviour, partial support, syntax-only parsing, and work that has not started.',
+    to: '/docs/reference/compliance',
   },
 ];
 
@@ -43,17 +43,25 @@ export default function Home() {
       <header className="hero--sipx">
         <img src={useBaseUrl('/img/logo.svg')} alt="" />
         <h1 className="hero__title">sipx</h1>
-        <p className="hero__subtitle">{siteConfig.tagline} As a library you embed, or as a command you run.</p>
+        <p className="hero__subtitle">
+          {siteConfig.tagline} Build a programmable SIP endpoint as a Rust library you embed or
+          a command you run. sipx is not a proxy, registrar, or configuration-driven PBX.
+        </p>
         <div>
           <Link className="button button--primary button--lg" to="/docs/getting-started">
-            Get started
+            Try the CLI
           </Link>{' '}
-          <Link className="button button--secondary button--lg" to="/docs/guides/does-this-fit">
-            Does sipx fit?
+          <Link className="button button--secondary button--lg" to="/docs/guides/as-a-library">
+            Use the Rust libraries
           </Link>
         </div>
       </header>
       <main>
+        <aside className="sipx-development-notice" aria-label="Documentation version">
+          <strong>Development documentation:</strong> this site describes <code>main</code>, which
+          can move ahead of the latest tagged release. The getting-started guide provides both
+          reproducible tagged and development install commands.
+        </aside>
         <div className="sipx-cards">
           {CARDS.map((card) => (
             <Link key={card.title} className="sipx-card" to={card.to}>

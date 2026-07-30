@@ -1,9 +1,12 @@
 ---
 title: Register against a PBX
-description: Registration as a lease — refresh before expiry, answer digest with the strongest algorithm offered, and the refusal cases that make it trustworthy.
+description: Register an endpoint, handle digest authentication, and refresh the granted lease before it expires.
 ---
 
 # Register against a PBX
+
+A registrar maps an address of record such as `sip:alice@example.com` to the endpoint where
+calls should arrive. The binding expires unless the endpoint refreshes it.
 
 The example below is a real file that CI compiles
 ([`crates/sipx-ua/examples/register.rs`](https://github.com/codewandler/sipx/blob/main/crates/sipx-ua/examples/register.rs)):
@@ -67,27 +70,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## What is worth noticing
 
-**A registration is a lease, not a request.** The server decides how long it lasts, which is not
-always what was asked for, and it has to be refreshed before it expires. `Lease::refresh_after`
-is deliberately shorter than `granted` — refreshing at the moment of expiry is a race with the
-network.
+**Treat registration as a lease.** The registrar decides the granted lifetime, which can differ
+from the requested value. `Lease::refresh_after` is deliberately earlier than `Lease::granted`,
+because refreshing at expiry races the network. The example performs one registration; a
+long-running application should call `UserAgent::keep_registered` or schedule refreshes from the
+returned lease.
 
-**Digest is answered with the strongest algorithm offered.** sipx does MD5, SHA-256 and
-SHA-512/256, each with its `-sess` variant. When a challenge offers several, the strongest wins
-rather than the topmost: a challenge is not integrity-protected, so an on-path attacker who can
-reorder the header fields could otherwise put the weakest algorithm first and be obeyed
-(RFC 8760 §3). Ties go to the earlier challenge, so the server's order still decides where
-strength does not.
+**Digest selection is deterministic.** sipx supports MD5 and the 256-bit and 512/256-bit SHA-2
+variants, including their `-sess` forms. It selects the strongest offered algorithm as required
+by RFC 8760, with the registrar's order breaking equal-strength ties. Authentication failures
+are returned as typed errors rather than accepted as a registration.
 
-**The digests are checked against the RFCs' own worked examples**, not against sipx's
-arithmetic: RFC 2617 §3.5, RFC 7616 §3.9.1, and §3.9.2's SHA-512/256 vector as corrected by
-errata 4897.
-
-**This is verified against Kamailio**, including the case that makes the success meaningful: a
-wrong password is refused.
+**Advertise a reachable contact.** The example binds an ephemeral local socket and uses its
+address in `Contact`, which is suitable for a controlled local setup. A deployed endpoint must
+advertise an address the registrar can route back to. RFC 5626 Outbound can keep requests on a
+client-opened flow when direct inbound reachability is unavailable.
 
 ## From the command line
 
 ```bash
-sipx register sip:alice@example.com --password '…'
+SIPX_PASSWORD='your-password' \
+  sipx register sip:alice@example.com --keep-alive
 ```
+
+Prefer `SIPX_PASSWORD` to `--password`, because command-line arguments may be visible to other
+local processes. Useful options include `--target host:port` to bypass discovery, `--tcp` for
+TCP, and `--outbound` for an RFC 5626 flow.
+
+The CLI offers UDP and TCP only. It has no TLS or secure WebSocket selector and refuses `sips:`
+addresses rather than downgrading them. Use `sipx-transport` and `sipx-ua` when registration
+requires secure signalling.
+
+See the [CLI reference](../reference/cli.md) for push-refresh options, capture handling, output
+fields, and exit codes.

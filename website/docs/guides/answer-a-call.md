@@ -10,7 +10,7 @@ The example below is a real file that CI compiles
 
 <!-- BEGIN generated:example crates/sipx-call/examples/answer_a_call.rs -->
 ```rust
-//! Wait for a call, answer it, record what the caller says, and hang up.
+//! Wait for a call, answer it, record what the caller says, and serve it until it ends.
 //!
 //! ```text
 //! cargo run --example answer_a_call
@@ -24,7 +24,7 @@ The example below is a real file that CI compiles
 
 use std::time::Duration;
 
-use sipx_call::answer;
+use sipx_call::{answer, serve};
 use sipx_sip::Method;
 use sipx_transport::{Config, bind};
 
@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let call = answer(&endpoint, &request, "127.0.0.1".parse()?).await?;
+        let mut call = answer(&endpoint, &request, "127.0.0.1".parse()?).await?;
         println!("answered over {:?}", request.transport);
 
         // Record until the caller goes quiet for half a second.
@@ -52,6 +52,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .record_until_idle(Duration::from_millis(500))
             .await;
         println!("heard {} samples", heard.len());
+
+        // Keep feeding in-dialog requests and timer deadlines to the call. In particular, this
+        // answers a BYE and stops the media when the caller hangs up.
+        serve(&mut call, &mut incoming).await?;
+        println!("the call ended");
         break;
     }
     Ok(())
@@ -67,12 +72,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 **`answer` handles the retransmission of the 200.** Over UDP a lost 200 means the caller gives
 up while this side believes the call is established; sipx resends it until the ACK arrives.
 
-**In-dialog requests need feeding to the call.** A BYE arrives on the same `incoming` channel;
-pass it to `Call::handle` or the call will not notice it has ended and the media will keep
-flowing.
+**`serve` owns the complete call lifecycle.** A BYE arrives on the same `incoming` channel, and a
+session timer also needs to wake when no message arrives. `serve` handles both until the call ends;
+without that loop the call would not notice the far end had gone and its media could keep flowing.
 
 ## From the command line
 
 ```bash
-sipx answer --play greeting.wav --record caller.wav --duration 30
+sipx answer --play greeting.wav --record caller.wav --duration 30 --wait 60 --once
 ```

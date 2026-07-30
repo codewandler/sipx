@@ -1,59 +1,77 @@
 ---
 title: SDK overview
-description: Where "build call behaviour without writing Rust" is headed — call events out, instructions in, one contract with webhook, session and embedded runtimes.
+description: Experimental application hosting — what sipx-host does now and which customer-code bindings are still unavailable.
 ---
 
 # SDK overview
 
-:::caution Preview
+:::caution Experimental
 
-The SDK is **specified, not shipped**. This page describes the direction and what exists
-today, honestly labeled. The wire contract is experimental and may change until two real
-applications run against it.
+The application host and `sipx.app.v1` contract may change without a migration path. There is no
+supported language-neutral SDK or callback binding today.
 
 :::
 
-## The idea
+## What exists today
 
-Everything sipx can do on a call — answer, play, collect digits, dial, bridge, transfer, mute,
-hang up — expressed as **data** instead of Rust:
+`sipx-host` is a real process. Given a host configuration, it binds the first declared SIP
+listener, admits incoming invitations under that configuration, answers or refuses them according
+to the declared failure policy, and carries answered calls until the caller ends them. It also
+answers the out-of-dialog requests a call listener must handle.
 
-- The server sends your code an **event** (a call arrived, a digit was pressed, playback
-  finished), carrying a full snapshot of the call.
-- Your code returns **instructions** — an ordered program: *answer, play `welcome.wav`, gather
-  four digits, dial the person they asked for, bridge*.
+The surrounding implementation includes:
 
-Your code never touches SIP, never parses a message, and is written in whatever runs where you
-deploy it. Three ways of running the same contract:
+- a parser and validator for host configuration;
+- the `sipx.app.v1` Rust types and JSON wire format in `sipx-app-protocol`;
+- a sans-I/O instruction interpreter;
+- a deterministic harness for contract events, instructions, timing, retries, and failure policy;
+- a host binary whose real SIP path is exercised by tests.
 
-| Mode | Your code is | Status |
+That is enough to prove that the host can run and answer a call. It is not yet enough for customer
+code to control that call.
+
+## What is unavailable
+
+None of the customer-code bindings is implemented:
+
+| Intended mode | Boundary | Status |
 |---|---|---|
-| **Webhook** | an HTTP endpoint returning instruction documents | specified |
-| **Session** | a process holding a WebSocket (or pipe), free to act mid-call at any time | specified |
-| **Embedded TypeScript** | a `.ts` handler the server runs in-process | designed |
+| Webhook | The host sends an event document to an HTTP endpoint and applies its returned program | Unavailable |
+| Session | A controller exchanges events and instructions over a full-duplex connection | Unavailable |
+| Embedded handler | The host runs a handler in-process | Unavailable |
 
-The TypeScript SDK's handler API is the same in session and embedded mode — a handler is
-portable between "my own Node service" and "a file the server loads" without code changes.
+The host accepts configuration that describes these modes because the configuration and failure
+semantics are implemented first. It treats the app as unreachable at runtime. The configured
+`on_unreachable` action therefore decides whether an incoming call is rejected, answered and held,
+or answered and then hung up. A successful host start does not prove that a configured callback is
+being invoked.
 
-## What is real today
+There is also no TypeScript package, no WebSocket session server, no webhook delivery client, and
+no embedded TypeScript engine in this repository today.
 
-- The contract is written down as a normative spec with test vectors:
-  [`docs/specs/app-contract.md`](https://github.com/codewandler/sipx/blob/main/docs/specs/app-contract.md)
-  — see [the contract summary](contract.md) for the short version.
-- The kernel work it needs (a call event stream, multi-call serving, playback control, mute,
-  bridging from the public API) is designed and tracked in
-  [the app-sdk design](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md).
-- The host — the server that terminates calls and runs your handlers — is the `sipx-app`
-  crate in this repository, in development; the crate exists, the code is on the board.
+## The intended model
 
-Until then, the scriptable surface that ships today is the **CLI**: every command speaks
-`--json` and exits with a distinct code per outcome, which is enough for real automation —
-dialers, monitors, test harnesses — from any language that can spawn a process. See the
-[CLI reference](../reference/cli.md).
+The contract expresses call behavior as data:
 
-## What it will never do
+- The host emits an event such as an incoming call, digit, or completed playback, with a snapshot
+  of the call.
+- Customer code returns an ordered instruction program such as answer, play, gather digits, dial,
+  bridge, or hang up.
+- Each binding carries the same event and instruction vocabulary; it must not add a private side
+  channel to SIP messages or process state.
 
-No routing between endpoints, no registration control for other people, no raw SIP header
-access, and no TTS verb. Dial plans and routing engines remain things you build *with* sipx —
-the contract moves call behaviour across the language boundary; it does not turn sipx into a
-configuration-driven PBX.
+The normative contract is
+[`docs/specs/app-contract.md`](https://github.com/codewandler/sipx/blob/main/docs/specs/app-contract.md).
+The [contract tour](contract.md) describes its envelope and vocabulary while keeping the missing
+runtime boundary explicit.
+
+## What to use now
+
+Use the [CLI](../reference/cli.md) for shell automation and bounded call tasks. Use
+[`sipx-call`](../guides/as-a-library.md) when a Rust application needs to own call behavior. Do not
+build a deployment that depends on webhook, session, or embedded callbacks until those bindings
+exist and this page no longer labels them unavailable.
+
+The host is not intended to become a proxy, registrar, routing engine, voicemail system, or
+configuration-driven exchange. Those are separate roles; see
+[Integrate with an existing SIP system](../guides/integrate-existing-system.md).

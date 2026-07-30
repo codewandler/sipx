@@ -1,92 +1,73 @@
 ---
 title: Does sipx fit?
-description: The honest answer — sipx is a phone, not an exchange. What it does, what it deliberately does not, and where every claim is measured.
+description: Where sipx fits today, what is shipped, and which telephony roles and media paths are not available yet.
 ---
 
 # Does sipx fit?
 
-The shortest honest answer: **sipx is a phone, not an exchange.** It places and answers calls,
-registers and transfers. It does not route other people's calls.
+The short answer: sipx is a programmable **SIP user agent**. It is a strong fit for an endpoint,
+test client, dialler, or voice application. It is not a proxy, registrar, or PBX.
 
-## It fits if you want to
+## It fits when you need
 
-- **Place or answer calls from a program** — a dialler, an alerting system, a test harness, a
-  voice application.
-- **Register against a PBX or carrier** and be reachable — including from behind NAT, down a
-  flow the client opened (RFC 5626 Outbound), with `Path` and `Service-Route` honoured, with a
-  GRUU for one instance of the registration, and with a binding refreshed when a push wakes the
-  client.
-- **Carry real audio**: G.711 both ways, DTMF, playback and recording. Opus too, behind
-  `sipx-call`'s `opus` feature — a call offers G.711 unless it selects Opus.
-- **Build on the pieces**: a SIP parser and transaction machines with no async runtime at all,
-  or SDP offer/answer as a pure function.
-- **Encrypt a call end to end**, signalling and media, without a way to accidentally turn the
-  verification off.
-- **Notice a far end that vanishes.** RFC 4028 session timers turn "the other phone lost power"
-  from a call that stays up forever into one that ends — see [placing a call](place-a-call.md).
-- **Serve subscriptions.** A notifier with a subscription store and packages registered by name
-  (RFC 6665), with `dialog`, `reg` and `presence` documents and PUBLISH behind an entity tag.
-  You supply what the documents describe; see the caveat below.
+- **Calls from Rust or a shell.** Place and answer calls, send DTMF, hold, resume, transfer,
+  play audio, record audio, and read quality statistics.
+- **A registered endpoint.** Digest authentication, automatic lease refresh, `Path`,
+  `Service-Route`, GRUU, RFC 5626 Outbound on a client-opened flow, and push-assisted binding
+  refresh are available.
+- **Telephony audio.** G.711 µ-law and A-law are the default. Opus is selectable through
+  `sipx-call`'s `opus` feature and links a C library.
+- **SIP building blocks.** Use the parser, transaction and dialog machines, or SDP offer/answer
+  without bringing in an async runtime, socket, or clock.
+- **Secure library transports.** The transport layer supports TLS and secure WebSocket with
+  certificate verification. Calls over secure signalling can use SDES-keyed SRTP.
+- **A scriptable test endpoint.** The CLI emits JSON and distinct exit codes, and moves audio
+  through WAV files for repeatable automation.
 
-## It does not fit if you want
+## Choose something else when you need
 
-- **A proxy or a registrar.** sipx does not fork requests, insert `Record-Route`, or hold
-  registrations for other people. That is a different kind of program — see
-  [migrating from Kamailio](../migrate/from-kamailio.md) for where those roles live.
-- **Media through NAT that symmetric RTP cannot solve.** `rport`, symmetric RTP and Outbound
-  cover the registered-phone case; there is no ICE yet, so the paths only a relay or
-  connectivity checks would fix are not fixed.
-- **A codec beyond G.711 and Opus.** Those two are what `sipx-audio` implements, and `Codecs` is
-  the whole of the choice — there is no G.722, no G.729, and no way to hand a call a codec sipx
-  does not have. Opus needs `sipx-call`'s `opus` feature, which links a C library; G.711 is the
-  default and needs nothing.
-- **Bridging or conferencing two *calls*.** `sipx-media` implements both, over media sessions you
-  hold. A `Call` owns its media session outright and lends only a reference, so two calls cannot
-  be handed to a bridge — that is `C-6`, and the [migration
-  notes](../migrate/from-asterisk.md) mark it in progress rather than done.
-- **Browser interoperability.** WebSocket transport works, so one of the two pieces browsers
-  insist on is there. ICE is not, and neither is a DTLS-keyed media session — see the edges
-  below — so a browser and sipx will agree on a session and then fail to find a media path in
-  most networks.
-- **Presence or busy-lamp fields as a finished feature.** The event framework is built (RFC
-  6665), and so are the `dialog`, `reg` and `presence` packages with PIDF and PUBLISH — but the
-  packages produce documents, and joining them to sipx's live dialogs and registrations is
-  yours to write. A watcher gets what you publish to it, not an automatic view of what the
-  stack is doing.
-- **Messaging.** `MESSAGE` parses and nothing acts on it.
+- **Proxy, registrar, or PBX behavior.** sipx does not fork or route other users' requests,
+  add itself to a route set, store registrations for other endpoints, or provide dial plans.
+- **A desktop phone.** The CLI does not access a microphone, speaker, headset, or sound-device
+  mixer. It plays and records 8 kHz, 16-bit, mono WAV files.
+- **Secure signalling from the CLI.** `sipx dial` and `sipx register` offer UDP and TCP only.
+  The CLI has no TLS or secure WebSocket selector and refuses `sips:` URIs. Secure transports
+  are available through the Rust libraries.
+- **ICE or a general NAT traversal service.** `rport`, symmetric RTP, and Outbound cover many
+  registered-endpoint cases, but sipx does not perform ICE connectivity checks or provide a
+  relay. Some NAT topologies will have no working media path.
+- **A browser media endpoint.** WebSocket signalling alone is insufficient: the current call
+  path has neither ICE nor DTLS-keyed media, so browser interoperability is not a shipped use case.
+- **Video or additional codecs.** The media stack is for telephony audio. Calls support G.711
+  and optional Opus, not arbitrary application-supplied codecs.
+- **Bridging two `Call` values.** `sipx-media` can bridge or conference media sessions that you
+  own, but a `Call` owns its media session and cannot currently be handed to those operations.
+- **Automatic presence from live stack state.** Subscription and event-package components are
+  present, but applications must supply the documents they publish; live calls and registrations
+  are not automatically projected into presence state.
+- **SIP instant messaging.** `MESSAGE` can be parsed but has no user-agent behavior.
 
-## The state of it, precisely
+## Security boundary
 
-Every claim above is backed by [the compliance table](../reference/compliance.md), which is
-generated from a registry and checked in CI — a header it says sipx parses must actually be
-known to the parser, and a file it cites must exist. It marks 70 RFCs as implemented, partial,
-parse-only or not started, and *partial* entries say which part is missing.
+TLS protects each signalling hop, not necessarily every intermediary. With SDES, SRTP key
+material is carried in SDP, so any intermediary terminating that secure signalling can read it.
+The DTLS fingerprint, certificate-checking, and handshake components exist in the SDP and media
+crates, but they are not connected to a media session or call today. There is no supported route
+to a DTLS-keyed call, and SRTP currently has one transform with no rekeying.
 
-Two things are worth reading there before committing to sipx:
+See [Security](../reference/security.md) for the CLI-versus-library matrix and
+[RFC compliance](../reference/compliance.md) for the checked, protocol-by-protocol status.
 
-**Media encryption is real but has edges.** SRTP's default transform, keyed by SDES. SDES puts the
-key in the SDP body, so an intermediary that terminates the TLS can read it. DTLS-SRTP keys on the
-media path and does not have that property, and RFC 5763 and RFC 5764 are implemented as far as
-certificates and fingerprints go — but **no media session can be keyed by DTLS today, by any
-route**: the handshake produces finished SRTP contexts while a media session is configured with
-master keys and salts, and the handshake cannot run on the media port §5.1.2 requires it to share.
-That is `M-28`, not a switch to flip. What is also left is one transform and no rekeying, which is
-why RFC 3711 is marked *partial* rather than *implemented*.
+## Application host status
 
-**Some things parse and do nothing.** `Accept-Contact` and others survive the wire intact and
-nothing acts on them. That is deliberate — losslessness first — and it is recorded as
-*parse-only* rather than counted as support.
+The experimental `sipx-host` binary exists. It reads configuration, binds a listener, answers
+a real call, and follows the configured policy for an unreachable application. None of the
+external or embedded application callback bindings is implemented, so handler programs cannot
+drive calls yet. Do not select it when application callbacks are a requirement.
 
-## Where it has been tested
+## Make the decision
 
-Against **two independent peers**, not only against itself — a proxy (Kamailio) and a PBX and
-back-to-back user agent on an unrelated SIP library (Asterisk). One peer is one more reading of
-the RFCs, not a consensus, which is why there are two.
-
-Every peer runs the same list: registration over UDP, TCP, TLS and WebSocket, plus the refusals
-that make the successes mean something — a wrong password, a certificate for another host, an
-issuer nobody vouches for. The peer that answers calls also places and answers them with sipx,
-with audio flowing and a BYE ending it, and does it again with SDES-keyed SRTP on the media.
-
-The whole RFC 4475 torture corpus is asserted, including the messages that must be *rejected*
-and by which layer.
+If you need a programmable endpoint and the limits above fit, start with
+[Getting started](../getting-started.md) or [choose a crate](as-a-library.md). If sipx will join
+an existing deployment, first map the user-agent, proxy, registrar, and application roles in
+[Integrate with an existing SIP system](integrate-existing-system.md).

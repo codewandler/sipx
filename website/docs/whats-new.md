@@ -1,57 +1,61 @@
 ---
 title: What's new
-description: The current state of sipx, release by release — and the full engineering changelog for the detail.
+description: Release highlights for sipx 1.0.0-alpha and guidance on the newer main-branch documentation.
 ---
 
 # What's new
 
-sipx is **pre-1.0**: this site tracks `main`, and the
-[changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) carries the full
-engineering history, story by story.
+<!-- BEGIN generated:release-heading -->
+## 1.0.0-alpha — 2026-07-30
+<!-- END generated:release-heading -->
 
-## Where it stands
+This is the current tagged release. It establishes a measured alpha baseline for the SIP,
+transport, call, and media stack; it is not an API-stability promise. Breaking API changes are
+still possible before 1.0.
 
-The stack places and receives calls with encrypted media between its own endpoints, and
-registers against a real third-party registrar (Kamailio) over UDP, TCP, TLS and WebSocket.
-The CLI dials, answers and registers from a shell with JSON output and per-outcome exit codes.
+Install this exact release with:
 
-Recently landed:
+```bash
+cargo install --git https://github.com/codewandler/sipx \
+  --tag v1.0.0-alpha --locked sipx-cli
+```
 
-- **Outbound (RFC 5626)** — registration down a flow the client opened, with `reg-id`,
-  `+sip.instance`, and keep-alives on the flow being tested, so NAT bindings that lapse stop
-  being fatal.
-- **Service-Route (RFC 3608)** — requests sipx sends now follow the route set the registrar
-  handed back.
-- **Path (RFC 3608's inbound twin, RFC 3327)** — registration through a proxy chain that needs
-  to route back down the way it came.
-- **Reliable provisionals (RFC 3262)** — 100rel and PRACK, so "it is ringing" survives a lossy
-  network.
-- **Session timers (RFC 4028)** — a far end that vanishes ends the call instead of leaving it
-  up forever.
-- **SRTP with SDES keying (RFC 3711, RFC 4568)** — media encrypted when the signalling
-  protects the key, with the [edges documented honestly](reference/compliance.md).
-- **DTLS-SRTP (RFC 5763, RFC 5764)** — the keying that never touches the signalling path: the
-  handshake runs over the media path and the certificate is checked against the
-  `a=fingerprint` the SDP carried, or no keys are returned. Everything the two RFCs decide is
-  compiled always; only the handshake sits behind the off-by-default `dtls` feature. **It cannot
-  yet key a call, and there is no arrangement of the crates that makes it** — the handshake hands
-  back finished SRTP contexts while a media session is configured with master keys and salts, and
-  it cannot run on the media port §5.1.2 requires it to share. `sipx-call` and the CLI offer SDES;
-  joining the two halves is `M-28`.
-- **The event notification framework (RFC 6665)** — a notifier with a subscription store and
-  packages registered by name, plus the `dialog`, `reg` and `presence` packages and PUBLISH
-  behind an entity tag. The packages produce documents; joining them to sipx's live dialogs and
-  registrations is still yours to write.
-- **A call reports itself as a typed event stream** — ringing, answered, a DTMF digit and how
-  long it was held, playback and recording finishing, transfer progress, hold and resume, and
-  ended with a cause, pushed onto a channel the call owns instead of found by polling it.
+### Release highlights
 
-Not there yet: ICE. Of the two pieces a browser insists on, WebSocket transport is in place and a
-DTLS-keyed media session is not — see above. Without connectivity checks a browser and sipx would
-agree on a session and then fail to find a media path in most networks anyway.
+- **Media startup is transactional.** A media session or conference is returned only after its
+  configuration and codecs have been validated. Startup failures are typed errors, and no worker
+  or socket is left behind.
+- **Transport resource limits cover live work.** Connection eviction now terminates the evicted
+  connection, and unauthenticated TLS and WebSocket handshakes share a finite per-endpoint budget
+  and deadline.
+- **Invalid runtime settings fail before binding.** Zero channel capacities, connection or
+  handshake limits, handshake deadlines, WebSocket keepalives, and media worker intervals are
+  rejected as configuration errors rather than reaching a panic or dead worker.
+- **Conference shutdown owns its workers.** Removing a participant, closing a conference, or
+  dropping it initiates cleanup of participant collectors, media sessions, and sockets.
+- **Codec construction cannot change the negotiated codec.** An Opus setup failure is reported
+  instead of substituting G.711 bytes under the negotiated Opus payload type.
+- **Media statistics are observational.** Reading current statistics no longer resets the RTCP
+  reporting interval; sending a report is the operation that closes that interval.
+- **CLI recordings retain received audio.** `sipx answer` and `sipx dial` wait separately for the
+  first frame and for later idle, and a duration limit preserves samples recorded before it fires.
+- **RFC support claims require implementation evidence.** Implemented and partial entries in the
+  generated compliance table cite workspace source, so prose alone cannot make a support claim.
 
-## The SDK direction
+The alpha also includes the shipped user-agent surface described throughout this site: calls,
+registration, G.711 audio, optional Opus, RTP/RTCP, secure library transports, SDES-keyed SRTP,
+and the scriptable WAV-based CLI.
 
-The `sipx.app.v1` contract — call events out, instructions in, so call behaviour can be built
-without writing Rust — is now [specified](sdk/overview.md) and experimental. The kernel work it
-needs is designed and tracked, and the host has its home in the workspace: `crates/sipx-app`.
+### Not complete in this release
+
+ICE and a DTLS-keyed call path are not available. The CLI cannot select TLS or secure WebSocket,
+and it uses WAV files instead of sound devices. The experimental `sipx-host` process can bind and
+answer calls, but application callback bindings are not implemented.
+
+## Changes on `main`
+
+This website is built from `main`, so a page or API link may describe work newer than the tagged
+alpha. Use the tag above when reproducibility matters, and consult the
+[complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
+Git revision. Unreleased behavior is not part of `1.0.0-alpha` merely because it appears on this
+site.

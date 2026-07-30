@@ -5,37 +5,48 @@
 /** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */
 const sidebars = {
   docs: [
-    'intro',
-    'getting-started',
     {
       type: 'category',
-      label: 'Guides',
+      label: 'Start',
       collapsed: false,
       items: [
+        'intro',
+        'getting-started',
         'guides/does-this-fit',
-        'guides/place-a-call',
-        'guides/answer-a-call',
-        'guides/register',
-        'guides/as-a-library',
+        'guides/integrate-existing-system',
       ],
     },
     {
       type: 'category',
-      label: 'SDK (preview)',
-      items: ['sdk/overview', 'sdk/contract'],
+      label: 'CLI',
+      collapsed: false,
+      items: ['reference/cli', 'guides/troubleshooting'],
     },
     {
       type: 'category',
-      label: 'Migrate to sipx',
+      label: 'Rust libraries',
       collapsed: false,
-      items: ['migrate/from-kamailio', 'migrate/from-asterisk'],
+      items: [
+        'guides/as-a-library',
+        'guides/place-a-call',
+        'guides/answer-a-call',
+        'guides/register',
+      ],
     },
     {
       type: 'category',
       label: 'Reference',
-      items: ['reference/cli', 'reference/compliance'],
+      items: [
+        'reference/security',
+        'reference/compliance',
+        'whats-new',
+      ],
     },
-    'whats-new',
+    {
+      type: 'category',
+      label: 'Experimental',
+      items: ['sdk/overview', 'sdk/contract'],
+    },
   ],
 };
 
