@@ -38,6 +38,7 @@ use sipx_call::{Dispatched, Dispatcher, Invitation};
 use sipx_sip::{HeaderName, StatusCode, Uri, build::ResponseBuilder, uri::Host as UriHost};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use sipx_ua::{Config as AgentConfig, UserAgent};
+use tokio::sync::mpsc;
 
 use crate::config::{Admission, ConfigError, HostConfig, Listener, Protocol, Running};
 use crate::harness::policy::OnFailure;
@@ -212,7 +213,13 @@ impl Host {
     }
 
     /// Admit one invitation under the document's routing, and act on the answer.
-    async fn admit(&mut self, handle: &Handle, listener: &Listener, invitation: Invitation) {
+    async fn admit(
+        &mut self,
+        handle: &Handle,
+        listener: &Listener,
+        invitation: Invitation,
+        ended: &mpsc::Sender<String>,
+    ) {
         let call_id = call_id(invitation.request());
         match self.running.admit(&call_id, &listener.name) {
             Admission::App(policy) => {
@@ -224,11 +231,13 @@ impl Host {
                         refuse(handle, invitation.request(), status, "Unavailable").await;
                         self.running.end(&call_id);
                     }
-                    OnFailure::Hangup | OnFailure::Continue => {
-                        let hang_up_at_once =
-                            matches!(policy.failure.on_unreachable, OnFailure::Hangup);
-                        self.carry(handle, invitation, hang_up_at_once).await;
-                        self.running.end(&call_id);
+                    OnFailure::Hangup => {
+                        self.carry(handle, invitation, call_id, true, ended.clone())
+                            .await;
+                    }
+                    OnFailure::Continue => {
+                        self.carry(handle, invitation, call_id, false, ended.clone())
+                            .await;
                     }
                 }
             }
@@ -250,28 +259,70 @@ impl Host {
     }
 
     /// Answer an invitation and serve the call to its end on its own task.
-    async fn carry(&self, handle: &Handle, invitation: Invitation, hang_up_at_once: bool) {
-        let call = match invitation.answer(handle, self.media_address).await {
-            Ok(call) => call,
-            // The caller gave up, or the answer could not be sent. Either way there is no call
-            // to carry and nothing useful to say to a peer that is already gone.
-            Err(_) => return,
+    ///
+    /// The task reports `call_id` back over `ended` whichever way the call finishes, so the
+    /// admission is forgotten exactly once and only after the call is really over.
+    async fn carry(
+        &self,
+        handle: &Handle,
+        invitation: Invitation,
+        call_id: String,
+        hang_up_at_once: bool,
+        ended: mpsc::Sender<String>,
+    ) {
+        // The caller gave up, or the answer could not be sent. Either way there is no call to carry
+        // and nothing useful to say to a peer that is already gone — but the admission still has to
+        // be released, or a host that is refused often enough leaks one entry per attempt.
+        let Ok(mut call) = invitation.answer(handle, self.media_address).await else {
+            let _ = ended.send(call_id).await;
+            return;
         };
-        let (_, inbox) = invitation.into_parts();
+        let (_, mut inbox) = invitation.into_parts();
         tokio::spawn(async move {
-            let mut call = call;
-            let mut inbox = inbox;
             if hang_up_at_once {
                 let _ = call.hang_up().await;
-                return;
+            } else {
+                // `serve` is the one loop: it honours the RFC 4028 session timer, answers what the
+                // call does not claim rather than dropping it, and returns when the call ends.
+                let _ = sipx_call::serve(&mut call, &mut inbox).await;
+                if !call.is_ended() {
+                    let _ = call.hang_up().await;
+                }
             }
-            // `serve` is the one loop: it honours the RFC 4028 session timer, answers what the
-            // call does not claim rather than dropping it, and returns when the call ends.
-            let _ = sipx_call::serve(&mut call, &mut inbox).await;
-            if !call.is_ended() {
-                let _ = call.hang_up().await;
-            }
+            let _ = ended.send(call_id).await;
         });
+    }
+}
+
+/// How many finished calls may be waiting to be forgotten before a task reporting one has to wait.
+///
+/// Generous rather than tuned: the only cost of a large queue here is memory for a string per call,
+/// and the cost of a small one is a finishing call blocking on a loop that is busy answering.
+const ENDINGS: usize = 1024;
+
+/// Every call that has reported its end since the last turn of the loop.
+///
+/// Non-blocking on purpose. The alternative is selecting over this and `Dispatcher::next`, which
+/// would make the loop's correctness depend on that future being cancel-safe — a property it does
+/// not document, and one a host should not quietly assume.
+fn drain(endings: &mut mpsc::Receiver<String>) -> Vec<String> {
+    let mut ended = Vec::new();
+    while let Ok(call) = endings.try_recv() {
+        ended.push(call);
+    }
+    ended
+}
+
+/// Answer a request that arrived outside any dialog.
+///
+/// RFC 3261 §11 makes OPTIONS a liveness probe, and a host that leaves it unanswered is one a
+/// carrier marks down — so this is not optional politeness. The user agent owns the `Allow` list
+/// that says what this stack answers; going through it rather than building a 200 here is what keeps
+/// the advertised list and the real one from drifting apart. Anything it does not claim gets an
+/// honest "not implemented" rather than silence.
+async fn answer_out_of_dialog(agent: &UserAgent, handle: &Handle, request: &Incoming) {
+    if !matches!(agent.answer(request).await, Ok(true)) {
+        refuse(handle, request, NOT_IMPLEMENTED, "Not Implemented").await;
     }
 }
 
@@ -314,16 +365,17 @@ mod tests {
     use super::*;
 
     /// A document with one UDP call listener routed to one app.
-    const DOCUMENT: &str = "\
+    const DOCUMENT: &str = r#"
 [listener.edge]
-protocol = \"sip\"
-bind = \"127.0.0.1:0\"
-transport = \"udp\"
-app = \"greeter\"
+protocol  = "sip"
+transport = "udp"
+bind      = "127.0.0.1:0"
+app       = "greeter"
 
 [app.greeter]
-url = \"https://example.net/greeter\"
-";
+binding = "embedded"
+handler = "greeter.ts"
+"#;
 
     #[test]
     fn a_host_reads_its_listener_out_of_the_document() {
@@ -354,5 +406,80 @@ bind = \"127.0.0.1:0\"
             "127.0.0.1".parse().unwrap(),
         );
         assert!(matches!(error, Err(HostError::Config(_))));
+    }
+
+    /// The knob is load-bearing, and this is what says so.
+    ///
+    /// The host runs no app callback yet, so *every* admitted call takes the `on_unreachable` branch.
+    /// If that value did not come from the document, the operator's declaration would be decoration
+    /// and the host would be answering according to a constant compiled into it.
+    #[test]
+    fn the_document_decides_what_an_unreachable_app_does() {
+        let refusing = r#"
+[listener.edge]
+protocol  = "sip"
+transport = "udp"
+bind      = "127.0.0.1:0"
+app       = "greeter"
+
+[app.greeter]
+binding = "embedded"
+handler = "greeter.ts"
+
+[app.greeter.on_failure]
+on_unreachable = { reject = 503 }
+"#;
+        let config = HostConfig::parse(refusing).unwrap();
+        let mut running = Running::start(config);
+        let Admission::App(policy) = running.admit("call-1", "edge") else {
+            panic!("the document routes `edge` to an app");
+        };
+        assert_eq!(
+            policy.failure.on_unreachable,
+            OnFailure::Reject { status: 503 },
+            "the host refuses with the status the document named, not a constant",
+        );
+
+        // And the §9.2 default is the other branch, so both are reachable from a document.
+        let default = HostConfig::parse(DOCUMENT).unwrap();
+        let mut running = Running::start(default);
+        let Admission::App(policy) = running.admit("call-2", "edge") else {
+            panic!("the document routes `edge` to an app");
+        };
+        assert_eq!(policy.failure.on_unreachable, OnFailure::Continue);
+    }
+
+    /// N11: a live call keeps the policy it was admitted with, so the admission may only be
+    /// forgotten once the call is really over.
+    ///
+    /// This is a regression. The first version of `carry` spawned the call and then ended the
+    /// admission immediately, which left `live_calls` reading zero with calls up and `policy_of`
+    /// returning `None` for a call that was still running — the one thing `Running` exists to get
+    /// right.
+    #[test]
+    fn an_admission_is_released_only_when_the_call_reports_its_end() {
+        let config = HostConfig::parse(DOCUMENT).unwrap();
+        let mut running = Running::start(config);
+        running.admit("call-1", "edge");
+        assert_eq!(running.live_calls(), 1);
+        assert!(running.policy_of("call-1").is_some());
+
+        let (ended, mut endings) = mpsc::channel::<String>(ENDINGS);
+        assert!(
+            drain(&mut endings).is_empty(),
+            "nothing has ended, so nothing is forgotten",
+        );
+        assert_eq!(
+            running.live_calls(),
+            1,
+            "a turn of the loop with no ending must not release a live call",
+        );
+
+        ended.try_send("call-1".to_owned()).unwrap();
+        for call in drain(&mut endings) {
+            running.end(&call);
+        }
+        assert_eq!(running.live_calls(), 0);
+        assert!(running.policy_of("call-1").is_none());
     }
 }

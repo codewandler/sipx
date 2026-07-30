@@ -56,9 +56,14 @@ until a second application disagrees.
       application reaches; after the host exists it names none.
 
 ## Progress
-- **Done, pending review.** The host exists (`crates/sipx-app/src/host.rs`, `sipx-host` binary), the
-  surface is derived from its dependency closure (`scripts/check-app-surface.py`), the maturity report
-  reports predicate 1 against that definition, and the graduation rule is in `README.md`.
+- **Implemented; gate state is recorded below and nowhere else.** The host exists
+  (`crates/sipx-app/src/host.rs`, `sipx-host` binary), the surface is derived from its dependency
+  closure (`scripts/check-app-surface.py`), the maturity report reports predicate 1 against that
+  definition, and the graduation rule is in `README.md`.
+- **An earlier revision of this list said "Done, pending review" before any gate had run.** It was
+  written by a process that then died, which is the shape this repository has been bitten by twice — a
+  claim left behind that reads like evidence. Replaced rather than amended: the only gate result that
+  counts is the one at the bottom of this list, naming the commit it ran against.
 - **What the host deliberately does not do.** It runs no app callback: `A-2`, `A-4` and `A-5` are all
   still open, so nothing carries `sipx.app.v1` to customer code yet. That absence is routed through the
   document's own §9.2 `on_unreachable` declaration rather than papered over, which is also the first
