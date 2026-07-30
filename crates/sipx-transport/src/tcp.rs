@@ -316,6 +316,8 @@ impl Pool {
                 Ok(stream) => pump(stream, key, writer_rx, events, limits).await,
                 Err(error) => {
                     tracing::debug!(%error, peer = %key.peer, "connect failed");
+                    // discard: the driver has stopped, so there is no longer anyone to tell that a
+                    // connection closed.
                     let _ = events.send(Event::Closed { key }).await;
                 }
             }
@@ -340,6 +342,8 @@ impl Pool {
                 Ok(stream) => stream,
                 Err(error) => {
                     tracing::debug!(%error, peer = %key.peer, "connect failed");
+                    // discard: the driver has stopped, so there is no longer anyone to tell that a
+                    // connection closed.
                     let _ = events.send(Event::Closed { key }).await;
                     return;
                 }
@@ -351,6 +355,8 @@ impl Pool {
                     // logged rather than swallowed, and the connection simply does not exist —
                     // there is no fallback to cleartext.
                     tracing::warn!(%error, peer = %key.peer, "TLS handshake failed");
+                    // discard: the driver has stopped, so there is no longer anyone to tell that a
+                    // connection closed.
                     let _ = events.send(Event::Closed { key }).await;
                 }
             }
@@ -395,6 +401,8 @@ impl Pool {
                 Ok(stream) => stream,
                 Err(error) => {
                     tracing::debug!(%error, peer = %key.peer, "connect failed");
+                    // discard: the driver has stopped, so there is no longer anyone to tell that a
+                    // connection closed.
                     let _ = events.send(Event::Closed { key }).await;
                     return;
                 }
@@ -409,6 +417,8 @@ impl Pool {
                     }
                     Err(error) => {
                         tracing::warn!(%error, peer = %key.peer, "TLS handshake failed");
+                        // discard: the driver has stopped, so there is no longer anyone to tell that a
+                        // connection closed.
                         let _ = events.send(Event::Closed { key }).await;
                     }
                 }
@@ -530,6 +540,8 @@ async fn pump<S>(
         }
     }
 
+    // discard: the driver has stopped, so there is no longer anyone to tell that a
+    // connection closed.
     let _ = events.send(Event::Closed { key }).await;
 }
 

@@ -449,6 +449,8 @@ impl Handle {
         {
             return format!("{}:{}", self.sent_by, addr.port());
         }
+        // discard: not a loss. The parameter is unused unless a transport feature is on, and
+        // this is the suppressor rather than a discarded result.
         let _ = transport;
         format!("{}:{}", self.sent_by, self.sent_by_port)
     }
@@ -586,6 +588,8 @@ impl Handle {
 
     /// Stop the endpoint.
     pub async fn shutdown(&self) {
+        // discard: the endpoint is shutting down. A closed command channel means the loop has
+        // already stopped, which is exactly the outcome being asked for.
         let _ = self.commands.send(Command::Shutdown).await;
     }
 }
@@ -750,6 +754,7 @@ async fn listen_tls(
                         // socket closes as it drops, which is the correct outcome and not a loss —
                         // and this runs in a task spawned before the driver exists, so there is no
                         // counter in scope to reach for anyway.
+                        // discard: see the reason below.
                         let _ = adopt
                             .send(Box::new(move |pool: &mut Pool| pool.accept_tls(tls, peer)))
                             .await;
@@ -856,6 +861,7 @@ async fn adopt_upgraded<S>(
             // Discarded deliberately; see the matching site in `listen_tls` for the reason. A failed
             // send here means the driver has stopped, and a connection with no driver to be adopted
             // into is closed by dropping it.
+            // discard: see the reason below.
             let _ = adopt
                 .send(Box::new(move |pool: &mut Pool| {
                     pool.accept_ws(socket, key, keepalive);
@@ -1087,6 +1093,8 @@ impl Driver {
                     self.stun_waiters.insert(id, answered);
                 }
                 Err(error) => {
+                    // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                    // for this answer, so nothing is lost and there is nothing worth counting.
                     let _ = answered.send(Err(error));
                 }
             }
@@ -1107,6 +1115,8 @@ impl Driver {
                     .push_back(answered);
             }
             Err(error) => {
+                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = answered.send(Err(error));
             }
         }
@@ -1134,6 +1144,8 @@ impl Driver {
             // failed."
             crate::stun::Reply::Failed { .. } => Err(Error::KeepaliveRefused),
         };
+        // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+        // for this answer, so nothing is lost and there is nothing worth counting.
         let _ = waiter.send(answer);
     }
 
@@ -1156,6 +1168,8 @@ impl Driver {
                 if let Some(queue) = self.pong_waiters.get_mut(&key)
                     && let Some(waiter) = queue.pop_front()
                 {
+                    // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                    // for this answer, so nothing is lost and there is nothing worth counting.
                     let _ = waiter.send(Ok(None));
                 }
             }
@@ -1165,6 +1179,8 @@ impl Driver {
                 // making the caller wait out its own timeout for something already known.
                 if let Some(queue) = self.pong_waiters.remove(&key) {
                     for waiter in queue {
+                        // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                        // for this answer, so nothing is lost and there is nothing worth counting.
                         let _ = waiter.send(Err(Error::ConnectionClosed));
                     }
                 }
@@ -1406,11 +1422,15 @@ impl Driver {
                     .layer
                     .send_request(*request, target.transport.reliability())
                 else {
+                    // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                    // for this answer, so nothing is lost and there is nothing worth counting.
                     let _ = reply.send(Err(Error::NoVia));
                     return;
                 };
                 self.destinations.insert(key.clone(), target);
                 self.clients.insert(key.clone(), events);
+                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = reply.send(Ok(key.clone()));
                 self.perform(&key, outputs, None).await;
             }
@@ -1430,6 +1450,8 @@ impl Driver {
                     // No transaction to answer on. Reporting success here would tell an
                     // application its 200 OK went out while the caller heard nothing — the
                     // caller times out believing the call failed, the callee believes it is up.
+                    // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                    // for this answer, so nothing is lost and there is nothing worth counting.
                     let _ = sent.send(Err(Error::NoTransaction));
                     return;
                 }
@@ -1440,6 +1462,8 @@ impl Driver {
                 // asked for — a test could not see the difference, because on a `current_thread`
                 // runtime the oneshot does not yield and `perform` finished either way.
                 let performed = self.perform(&key, outputs, None).await;
+                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = sent.send(performed.into_result());
             }
             Command::Direct {
@@ -1450,6 +1474,8 @@ impl Driver {
                 let bytes = Message::Request(*request).to_bytes();
                 self.observe_out(&bytes, &target, false);
                 let result = self.transmit(bytes, target, false, None).await;
+                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = sent.send(result);
             }
             Command::WatchUnmatched(sink) => {
@@ -1466,6 +1492,8 @@ impl Driver {
                 // Every per-transaction map, not just the transactions. An entry that outlives
                 // its transaction is exactly the leak a count of transactions alone would miss,
                 // and a map left out here is a map a soak run is structurally blind to.
+                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
+                // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = reply.send(
                     clients
                         + servers
