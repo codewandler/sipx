@@ -7,6 +7,9 @@
 //! Time is a parameter, not a call to a clock, for the same reason it is in the timer queue: a
 //! notifier driven by a scheduler somebody else owns has to be able to say what "now" is, and a
 //! test that wants to watch a subscription expire should not have to wait an hour.
+//! **Experimental** (`A-8`): public and tested, with no caller above this crate — nothing in the
+//! workspace receives a SUBSCRIBE off a socket.
+//!
 
 use std::time::Duration;
 

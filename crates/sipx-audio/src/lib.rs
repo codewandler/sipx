@@ -20,6 +20,22 @@
 //! `scripts/check-audio-claims.py` holds the summary above, the package description and the
 //! website's crate table to what this crate implements, so the next codec named here has to
 //! exist before the gate goes green.
+//!
+//! # Stability
+//!
+//! sipx is pre-1.0, so **neither word below means frozen**. `1.0.0` is what freezes an API, and its
+//! predicates are in `docs/roadmap.md`. Until then:
+//!
+//! - **Supported** — meant to be depended on. Breaking changes get a `CHANGELOG.md` entry saying what
+//!   to do instead. New enum variants and new struct fields may still appear in a minor release, so a
+//!   downstream `match` should carry a `_` arm.
+//! - **Experimental** — may change shape or be removed without a migration note. Depend on it only if
+//!   you are prepared to follow it.
+//!
+//!
+//! **Supported.** G.711 both ways, mixing and WAV. Opus is behind the off-by-default `opus` feature and
+//! is **Experimental** for a reason that is not about this crate: no call can select it
+//! (`M-30`), so nothing above has ever constrained its shape.
 
 pub mod g711;
 pub mod mix;

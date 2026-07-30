@@ -39,6 +39,22 @@
 //! // The call has no program yet, so the one thing to do is ask the app for one.
 //! assert!(matches!(outputs.first(), Some(Output::Deliver { .. })));
 //! ```
+//!
+//! # Stability
+//!
+//! sipx is pre-1.0, so **neither word below means frozen**. `1.0.0` is what freezes an API, and its
+//! predicates are in `docs/roadmap.md`. Until then:
+//!
+//! - **Supported** — meant to be depended on. Breaking changes get a `CHANGELOG.md` entry saying what
+//!   to do instead. New enum variants and new struct fields may still appear in a minor release, so a
+//!   downstream `match` should carry a `_` arm.
+//! - **Experimental** — may change shape or be removed without a migration note. Depend on it only if
+//!   you are prepared to follow it.
+//!
+//!
+//! **Experimental**, as the heading above already says and as
+//! `tests/spec_tables.rs::the_spec_and_the_crate_agree_that_this_is_experimental` enforces. It settles
+//! when two dissimilar applications have been written against it, per the contract's own spec.
 
 mod base64;
 mod document;

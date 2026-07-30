@@ -14,6 +14,9 @@
 //! When the codecs differ there is no choice, and the bridge says so rather than transcoding
 //! quietly. Someone looking at a call that sounds worse than it should is entitled to find out
 //! why from the software rather than by reasoning about it.
+//! **Experimental** (`A-8`): real over `MediaSession`s you own, and unreachable from a `Call`,
+//! which does not hand its session out. Two calls cannot be bridged yet (`C-6`).
+//!
 
 use std::sync::Arc;
 

@@ -11,41 +11,61 @@ audio — as a library you embed, or as a command you run.
 
 ## Can it do what I need?
 
-Today sipx is a **user agent** — a phone. It calls, answers, registers, transfers, bridges and
-conferences. It is **not a proxy or a registrar**: it does not fork requests or hold other
-people's registrations.
+Today sipx is a **user agent** — a phone. It calls, answers, registers and transfers. It is **not
+a proxy or a registrar**: it does not fork requests or hold other people's registrations.
 
 | | |
 |---|---|
 | **Calls** | Place and answer, SDP offer/answer, hold and resume, blind and attended transfer, session timers |
-| **Audio** | G.711 µ-law and A-law, Opus behind a feature, DTMF, play and record WAV |
+| **Audio** | G.711 µ-law and A-law, DTMF, play and record WAV. Opus is in `sipx-audio` behind the `opus` feature; a call offers G.711 only — see [the edges](#the-honest-version) |
 | **Signalling security** | TLS and secure WebSocket, with certificate verification that **cannot be turned off** |
-| **Media security** | SRTP, keyed by SDES when the signalling is secure. DTLS-SRTP keying lives in `sipx-sdp` and `sipx-media`; a call placed by `sipx-call` or the CLI does not offer it yet |
+| **Media security** | SRTP, keyed by SDES when the signalling is secure. DTLS-SRTP keying lives in `sipx-sdp` and `sipx-media`; no call and no CLI invocation offers it yet |
 | **Transports** | UDP, TCP, TLS, WebSocket, secure WebSocket |
-| **Reachability** | NAT via `rport` and symmetric RTP; `Path` and `Service-Route` honoured; RFC 5626 Outbound down a client-opened flow. No GRUU, push or ICE yet. |
-| **Multi-party** | Bridge two calls, or conference several with N−1 mixing |
+| **Reachability** | NAT via `rport` and symmetric RTP; `Path` and `Service-Route` honoured; RFC 5626 Outbound down a client-opened flow, GRUU, and a binding refreshed on a push. No ICE yet. |
+| **Multi-party** | Bridging two media sessions and conferencing several with N−1 mixing live in `sipx-media`; reaching them from a `Call` is being finished |
 | **Quality** | Loss, jitter, round-trip time and an estimated MOS, readable mid-call |
 
-It is verified against **Kamailio**, not only against itself: registration over UDP, TCP, TLS
-and WebSocket — and the refusals that make the successes mean something.
+It is verified against **two independent peers**, not only against itself — a proxy (Kamailio) and
+a PBX and back-to-back user agent on an unrelated SIP library (Asterisk). Every peer runs the same
+list: registration over UDP, TCP, TLS and WebSocket, and the refusals that make the successes mean
+something. The one that answers calls also places and answers them with sipx, with SDES-keyed SRTP
+on the media.
 
 ## The honest version
 
-Two things are worth knowing before you decide.
+Four things are worth knowing before you decide. The last three are one shape: a capability that
+is real in a crate and cannot be reached from a call, which is the distinction the [compliance
+table](reference/compliance.md) draws per RFC and this page had been blurring.
 
 **It is a phone, not an exchange.** If you need something that routes other people's calls,
 sipx is not that yet, and the [compliance table](reference/compliance.md) says so per RFC
 rather than leaving you to find out.
 
 **The encryption has edges.** Media is encrypted when the signalling is — `sips:` or WSS —
-using SRTP's default transform. A call placed by `sipx-call` or the CLI keys it with SDES, which
-puts the key in the SDP body, so any intermediary that terminates the TLS can read it. DTLS-SRTP
-(RFC 5763 and RFC 5764) keys on the media path instead and does not have that property; it is
-implemented and reachable by building your own capabilities with `sipx-sdp` and `sipx-media`,
-but `dial` and `answer` do not offer it yet. Everything those two RFCs decide is compiled
-always, and only the handshake sits behind the off-by-default `dtls` feature. What is left is
-one transform and no rekeying, which is why [the table](reference/compliance.md) marks RFC 3711
-*partial* rather than implemented.
+using SRTP's default transform, keyed by SDES. That puts the key in the SDP body, so any
+intermediary that terminates the TLS can read it. (The `sipx` binary cannot get there at all: it
+takes no flag for a secure transport, so nothing you type at it produces encrypted media — see
+[the CLI reference](reference/cli.md).) DTLS-SRTP
+(RFC 5763 and RFC 5764) keys on the media path instead and does not have that property, and
+everything those two RFCs decide about certificates and fingerprints is implemented — but **no
+media session can be keyed by DTLS today, by any route.** The handshake returns finished SRTP
+contexts and a media session is configured with master keys and salts; the two do not meet. Nor
+can the handshake run on the media port RFC 5764 §5.1.2 requires it to share, because a media
+port does not lend out its socket. So there is no arrangement of `sipx-sdp` and `sipx-media` that
+gets you a DTLS-keyed call, and writing your own capabilities does not either; the work is
+tracked as `M-28`. What is also left is one transform and no rekeying, which is why [the
+table](reference/compliance.md) marks RFC 3711 *partial* rather than implemented.
+
+**Opus is in the workspace and not on offer.** `sipx-audio` encodes and decodes it behind the
+`opus` feature, and no call selects it: every entry point in `sipx-call` builds a G.711-only
+offer, none of them takes capabilities from you, and the payload-type reader refuses Opus
+deliberately — a dynamic number means whatever `a=rtpmap` said, so guessing Opus from 111 would
+decode somebody else's codec. If you need Opus on a call today, sipx is not that yet.
+
+**Bridging and conferencing are library pieces, not call operations.** `sipx-media` has both, and
+they take a shared media session; a `Call` owns its media outright and lends only a reference, so
+there is no way to hand two calls to a bridge. Connecting them is `C-6`. Two `MediaSession`s you
+built yourself can be bridged today.
 
 ## Where to go from here
 

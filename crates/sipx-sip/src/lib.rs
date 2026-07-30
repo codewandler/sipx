@@ -1,7 +1,7 @@
 //! Sans-IO SIP core.
 //!
 //! This crate implements SIP (RFC 3261) as pure state machines: message parsing and
-//! serialization, the client and server transaction FSMs, and dialog identity and state.
+//! serialization, and the client and server transaction FSMs.
 //! It performs **no I/O**, spawns no tasks, and reads no clock. Time enters as a fired-timer
 //! input and leaves as a set-timer output; bytes enter as received data and leave as data to
 //! send. Async transports live in `sipx-transport`.
@@ -19,6 +19,26 @@
 //! Parsing is also *lazy and layered*: a message that frames correctly parses even if one of
 //! its headers is malformed, because a proxy must be able to forward what it cannot itself
 //! interpret. See `docs/specs/sip-message.md`.
+//!
+//! # Stability
+//!
+//! sipx is pre-1.0, so **neither word below means frozen**. `1.0.0` is what freezes an API, and its
+//! predicates are in `docs/roadmap.md`. Until then:
+//!
+//! - **Supported** — meant to be depended on. Breaking changes get a `CHANGELOG.md` entry saying what
+//!   to do instead. New enum variants and new struct fields may still appear in a minor release, so a
+//!   downstream `match` should carry a `_` arm.
+//! - **Experimental** — may change shape or be removed without a migration note. Depend on it only if
+//!   you are prepared to follow it.
+//!
+//!
+//! **Supported.** Parsing, serialisation and the §17 transaction machines are the most heavily tested
+//! surface in the workspace and are what everything above is built on.
+//!
+//! Not yet settled: the error enums are exhaustive today (`ParseError`, `BuildError`, `UriError`,
+//! `HeaderError`, `FramingError`, `StartLineError`, `HeaderSyntaxError`), which reads as a promise not
+//! to add variants — and that promise has been broken before. See `A-8`'s note on the unit of the
+//! promise; do not write an exhaustive `match` over them.
 
 pub mod build;
 pub mod error;

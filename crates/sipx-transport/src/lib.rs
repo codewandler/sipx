@@ -9,6 +9,22 @@
 //! signalling path takes a lock, and no transaction is reachable from two tasks.
 //!
 //! See `docs/specs/sip-transport.md`.
+//!
+//! # Stability
+//!
+//! sipx is pre-1.0, so **neither word below means frozen**. `1.0.0` is what freezes an API, and its
+//! predicates are in `docs/roadmap.md`. Until then:
+//!
+//! - **Supported** — meant to be depended on. Breaking changes get a `CHANGELOG.md` entry saying what
+//!   to do instead. New enum variants and new struct fields may still appear in a minor release, so a
+//!   downstream `match` should carry a `_` arm.
+//! - **Experimental** — may change shape or be removed without a migration note. Depend on it only if
+//!   you are prepared to follow it.
+//!
+//!
+//! **Supported.** UDP, TCP, TLS and WebSocket are all in the default feature set and all carry a call.
+//! `respond` guarantees the response is on the wire before it returns — see
+//! `docs/designs/sip-transport.md`, which records that as a guarantee rather than an internal detail.
 
 #[cfg(feature = "dns")]
 pub mod dns;

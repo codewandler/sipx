@@ -49,3 +49,9 @@ pretty_assertions.workspace = true
 
 [lints]
 workspace = true
+
+# docs.rs builds default features; `scripts/build-docs.sh` builds `--all-features`. Without this the
+# two front doors document different APIs, and the one a reader lands on from crates.io is the one
+# missing the optional half — for `sipx-media` that is the only `Handshake` implementation (`A-8`).
+[package.metadata.docs.rs]
+all-features = true

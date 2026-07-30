@@ -12,9 +12,15 @@ is the order the remaining gaps close in and why.
 
 _As of 2026-07-29:_ **M0 through M8 are complete.** `sipx-sip` is a working sans-IO SIP core:
 URIs, headers, an incremental parser for both datagram and stream transports, message validation,
-injection-proof builders, and all four transaction state machines with matching and stores. 941
-tests pass; clippy is clean at `-D warnings` on both feature sets; the whole RFC 4475 torture
-corpus is green across all four of its layers.
+injection-proof builders, and all four transaction state machines with matching and stores. Clippy
+is clean at `-D warnings` on both feature sets, and the whole RFC 4475 torture corpus is green
+across all four of its layers.
+
+**This block carries no test count on purpose.** It said "941 tests pass" through four releases
+that took the real number past 1300 — the same drift `X-22` fixed in the gate and `X-24` fixed in
+the pool-key docs, and for the same reason: a number transcribed by hand into prose has no way to
+be wrong out loud. Run `./scripts/gate.py` for the count that is true today. `X-32` generates the
+rest of what this section keeps getting wrong.
 
 sipx registers against a real Kamailio over UDP, TCP and TLS and answers `OPTIONS`. Between two
 sipx endpoints it places calls carrying G.711 audio in both directions, encrypted with SRTP when
@@ -209,6 +215,80 @@ What the compliance table still shows red after M12 is a list of features on rol
 holds, and therefore last by this roadmap's own rule: SIPREC (7865, 7866), MESSAGE (3428), INFO
 (6086), `tel` URI normalisation (3966), caller preferences (3841), the rest of the SRTP transform
 set and rekeying (3711), RFC 5923's `alias` parameter, and the signed `Referred-By` token (3892).
+
+## The v1 gate, and the alpha before it
+
+**v1 is not a feature count.** The vision makes "maximum feature count" a non-goal and says plainly
+that *a smaller stack whose every path is tested beats a larger one whose edges are guesswork*. So
+the gate to 1.0 is not "M12 is done" and not "the compliance table is all green" — it is the north
+star, made checkable: **correct under adversarial input and adversarial timing, provably, and
+honest about what it does not do.**
+
+A stack can be short of features and still be worth depending on. It cannot be *wrong about itself*
+and be worth depending on, because every consumer's design decision rests on what the table says.
+
+### `1.0.0-alpha` — the predicates
+
+The alpha is the point at which a v1 **could** technically be cut. Each item is checkable by a
+person reading the repo, and most are already checked by the gate.
+
+1. **No claim outlives its caller.** No entry in [`docs/rfc/registry.toml`](rfc/registry.toml)
+   claims a role that nothing above the implementing crate can reach, at *any* layer. `X-30` made
+   this mechanical for `media`, `X-33` widened it to `security` and measured and *declined* the rest:
+   a path check is satisfied by citing a file whose relevant branch is dead, and a syntactic caller
+   check would be fitted to the three rows that motivated it. The honest closure is not a better
+   check but a real application — `X-38` — after which the reachable-from-a-call surface is *defined*
+   as what that application uses. Rows that cannot be made true are demoted, not explained.
+2. **Adversarial input and adversarial timing are both fuzzed.** Four parser targets and the
+   transaction-sequence driver (`X-19`), the second with an oracle that can fail without a panic.
+   Met, subject to `X-31` closing the harness's own drift holes.
+3. **A red gate means a defect.** No test in the workspace fails because the machine was busy.
+   `X-28` cleared the media path; `X-29` is the rest. **This one is load-bearing for the others** —
+   every predicate here is asserted by the gate, so a gate that cries wolf invalidates all of them.
+4. **No known-wrong shipped path.** Every defect the suite or the fuzzer has found is fixed, or is
+   an `#[ignore]`d regression test naming the story that will fix it. No silent deviation.
+5. **The public API says what it guarantees.** Every published crate marks its surface stable or
+   experimental. v1 freezes what "stable" means, so the line has to exist before it can be frozen.
+6. **Testable from a shell** (principle 6) for everything the CLI exposes.
+7. **The distance to v1 is generated, not asserted** — `X-32`, so this section cannot quietly go
+   stale the way the Status block above did.
+
+### `1.0.0` — the predicates
+
+The alpha is the point where a v1 *could* be cut. These are what would make it right to actually cut
+one, and they are separate because every one of them needs something this repository cannot supply on
+its own. Each is checkable, for the same reason the alpha predicates are: a prose paragraph is not a
+definition.
+
+1. **Every alpha predicate above holds**, and has held across at least one release rather than only at
+   the moment of measurement.
+2. **Reachability is bound to callers at every layer.** No layer in
+   [`maturity.md`](maturity.md) carries the "unverified against callers" caveat — that is `X-37`, and
+   until it lands `implemented` outside `media` and `security` means "the code exists".
+3. **The public API has been used from outside this repository**, by at least one application nobody
+   here wrote. This is the one the roadmap has always given as the reason to wait, and it is not
+   something a gate can assert: it is recorded when it happens, with what broke.
+4. **Every published crate's contract is stated and has survived a breaking change being refused.**
+   `A-8` states them; v1 needs at least one instance of a change being shaped by the contract rather
+   than the contract being edited to fit the change.
+5. **Interop passes against two independent implementations for every transport the README claims.**
+   Today it is two peers, and not across every transport — the count is in `tests/interop/`, not here,
+   so this is read from there rather than restated.
+
+**What is deliberately absent from that list**: any feature count, any RFC total, any percentage. The
+vision makes maximum feature count a non-goal and says a smaller stack whose every path is tested
+beats a larger one whose edges are guesswork. A v1 gate built on coverage would contradict the
+document it is supposed to serve.
+
+### What the alpha is *not* waiting for
+
+M9–M12, the ICE and discovery epics, QUIC, and the red rows listed under "After M12". Those make
+sipx do **more**; the alpha is about sipx being **right**, and about the table being a measurement
+rather than a claim. They are v1's content, not its gate — and shipping an alpha is how the API
+surface gets exercised before it is frozen.
+
+**We stop at the alpha deliberately.** Cutting `1.0.0` means freezing the public API, and the API
+has not yet been used by anyone outside this repository.
 
 ## Epics
 

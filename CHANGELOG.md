@@ -5,7 +5,410 @@ All notable changes to sipx are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### Added
+
+- **The distance to `1.0.0-alpha` is generated, not estimated (`X-32`)** — someone asked how far sipx
+  was from v1 and the honest answer was that the question had no denominator: the roadmap ran M0–M12
+  and never named 1.0, and the only `v1` in the tree was `sipx.app.v1`, a protocol version. So the
+  predicates were written down first, and `scripts/maturity.py` now generates `docs/maturity.md` from
+  `docs/rfc/registry.toml`, story frontmatter and git. Two new gate steps, taking the gate to **20**.
+  - **v1 is defined as five predicates** beside the alpha's seven, and they are separate because each
+    needs something this repository cannot supply — chiefly *"the public API has been used from outside
+    this repository"*, which no gate can assert and which the roadmap always gave as the reason to wait.
+    **No feature count, no RFC total, no percentage** in either list: the vision makes maximum feature
+    count a non-goal, so a coverage-based gate would contradict the document it serves.
+  - **A predicate's state comes from the board and nowhere else.** Each names the stories that close it
+    and is met only when all are `done`, so the table cannot drift. The nastiest failure mode is pinned
+    by a test: a blocker list pointing at a story that does not exist reports **unknown**, not met —
+    otherwise deleting a story would look like finishing it.
+  - **Two predicates are reported as `attested` rather than `computed`, and say why.** "No known-wrong
+    shipped path" cannot be computed, because a defect nobody has found leaves no trace in either
+    source; what is reported is the absence of *open* stories describing one. `S-27` is the proof of the
+    difference — a `sips:` URI dialled in cleartext, found by reading code, not by any report.
+  - **The most useful output is the one nobody asked for first**: stories filed versus closed per day,
+    from git. **−37 on 2026-07-28, +4 on 2026-07-29, +1 on 2026-07-30.** The report says plainly that
+    the marker is not a single winning day but the date the crossover becomes *durable*, because a
+    shrinking board means nothing while discovery still outpaces it.
+  - **No aggregate percentage exists, and a test forbids one.** `media` is 15 RFCs with 11 partial;
+    `security` is 11 with none. One number would call them alike. `partial` is counted as `partial` and
+    never as a fraction of done.
+  - It states its blind spot rather than implying precision: outside `media` and `security`,
+    `implemented` means the code exists and has not been checked against a caller. Another test ties
+    that caveat to `rfc-report.py`'s actual scope, so widening the check there fails here until the
+    caveat follows.
+  - The check earned itself on its first run: closing `X-32`'s own story changed the answer and turned
+    the gate red until the report was regenerated.
+
 ## [Unreleased]
+
+### Added
+
+- **The RFC 5118 IPv6 torture corpus is asserted against, at both layers (`X-16`)** — all twelve
+  messages from Appendix A, recovered by `scripts/import-rfc5118-corpus.sh` rather than retyped, with
+  `--check` re-deriving them from the RFC so the fixtures cannot drift from their source. Asserted in
+  `sipx-sip` and, for the three messages carrying a session description, in `sipx-sdp`.
+  - **It found a conformance defect, and the defect is recorded rather than hidden.** RFC 5118 §4.10
+    requires a parser to tolerate `[2001:db8:::192.0.2.1]` — the three-colon form RFC 3261's ABNF can
+    produce, inherited from the obsoleted RFC 2373 — and sipx rejects it. That is an unmet normative
+    MUST, so the row is `partial` and not `implemented`, and the gap is one typed entry in
+    `rfc5118::DEVIATIONS` saying what the RFC requires, what sipx does, and why it stands.
+  - **A new failure cannot be absorbed silently.** The converse assertion requires every message the
+    RFC calls valid to parse, and is guarded by hard counts — eleven valid, one recorded deviation, ten
+    covered — so admitting a second deviation means editing a number in a diff rather than quietly
+    widening a skip. A recorded deviation is also asserted to still reproduce, and prints
+    delete-this-entry instructions when it stops.
+  - **No source changed.** This story is the measurement; the §4.10 fix is its own story.
+  - Two defects in the RFC's own archive are handled and documented: the files are bare-LF terminated
+    with no CR anywhere, and all three SDP messages declare a `Content-Length` matching neither the LF
+    nor the CRLF body. The corpus stays bit-exact and `Case::wire()` applies three stated
+    transformations, with a test proving nothing else moved.
+
+- **A registration can be placed over an Outbound flow, and woken by a push (`S-29`)** — `sipx-ua`'s
+  RFC 5626 and 8599 support had no caller above its own tests, which is the eighth instance of the
+  same defect: a capability that exists in a crate and cannot be selected from a call. `sipx register`
+  now selects both.
+  - **`--outbound`** builds the Outbound config, putting `+sip.instance` (§4.1) and `reg-id` (§4.2) on
+    the REGISTER's `Contact` and offering the `outbound` option tag, and the command reports whether
+    the registrar accepted the flow by reading `Require: outbound` back off the 2xx (§6).
+  - **`--push-provider` / `--push-prid`** put RFC 8599 §4.1.2's parameters on the `Contact` URI and
+    report whether the registrar named the same service, read out of `Feature-Caps` (§8.2). `--wake`
+    drives `UserAgent::woken`, which is §4.1.3's ordering — the binding-refresh REGISTER goes out
+    *before* the pending request is expected — as a type rather than as a convention.
+  - **RFC 5626 and 8599 return to a `uac` role**, the roles `X-37` demoted for having no caller. Both
+    rows stay `partial`, and their notes now separate what has a caller above `sipx-ua` from what is
+    implemented and still reached by nothing: `ob` on a dialog-forming Contact (§4.3), §4.4
+    keep-alives, and multi-flow independent failure under §4.5 backoff. The CLI registers one flow per
+    invocation, so that half has no caller by construction.
+  - `sipx-ua`'s stability note narrows to match: **"registering as one Outbound flow"** is Supported;
+    `Flows`, `Attempt`, `keepalive_after` and `dialog_contact`'s `ob` are named Experimental under the
+    rule the same doc comment already stated, so the crate no longer contradicts itself.
+  - Every new flag is refused when malformed rather than accepted and dropped — six unit tests — and
+    each flag's value is registered so it can never be misread as the address of record.
+
+### Fixed
+
+- **A refused early answer now ends the invitation instead of hanging it (`S-25`)** — the one
+  place an RFC 4568 §5.1.3 refusal was reported nowhere: an answer arriving in a reliable
+  provisional (RFC 3262 §5). `observe`/`adopt_early_answer` now return `Result`, and a refusal
+  withdraws the invitation with a CANCEL (RFC 3261 §9.1) and returns `Error::Sdp` naming the
+  tag — instead of leaving a caller that never receives a 2xx to time out with no reason.
+  - A no-description provisional stays silent, and a guard test answers the 2xx afterwards to
+    prove the invitation lived.
+  - The registry row for RFC 4568 moves in the same commit, as `AGENTS.md` requires when
+    support changes.
+
+- **Reachability now measures *use*, not *paths* — and the caller-check was deliberately not built
+  (`X-37`)** — `X-30` and `X-33` both recorded a cross-crate caller check as their successor. This
+  story reconsidered it, and the answer was to adjudicate the three named cases by hand and file the
+  rest, rather than build a check fitted to the data it was tested on.
+  - **RFC 5626 and 8599 are demoted to no roles**, and `docs/compliance.md` moves with it — the
+    honest state, not a verdict. Verified by grep: `with_outbound` and `with_push` have **zero
+    callers outside `sipx-ua`'s own tests**, the same ICE shape `X-33` suspected and its path check
+    could not adjudicate, because both rows satisfied it by citing a genuine caller — `register.rs`
+    — for a plain registration. Wiring them back is `S-29`.
+  - **Why no check was built.** A syntactic caller-check would be fitted to three rows — wrong in the
+    ways macros and re-exports are wrong, and it would quietly stop finding the next shape. The
+    accurate version is a dependency plus minutes on the gate. A grep proved the return on either to
+    be two honest demotions. Both predecessors named the check a *successor* in prose, after building
+    the path check — the one moment building the next check is most tempting and least examined.
+  - **Alpha predicate 1 is re-framed.** It now attests the mechanical half (`X-30`, `X-33`, this) and
+    defers the rest to `X-38`: ship a real application, after which the reachable-from-a-call surface
+    is *defined* as what it uses. That is v1 predicate 3 in other words, and it cannot be gamed by a
+    dead-branch citation the way a path check can.
+
+- **The transaction-sequence fuzzer can no longer stop covering something silently (`X-31`,
+  alpha predicate 2)** — three of its guards could not catch the thing they were written for, and a
+  fuzzer that silently stops covering something is worse than one never written, because the green
+  campaign is read as evidence.
+  - **The timer table and the `Timer` enum now agree in both directions.** A const assert proved only
+    that the table and its count were the same *size*; a fourteenth variant would have been silently
+    never-fuzzed. `timer_row` is an exhaustive match, so adding one is now
+    `error[E0004]: non-exhaustive patterns`, and a test round-trips every row so the two cannot drift
+    on order either — the one drift exhaustiveness cannot see.
+  - **An unfalsifiable invariant arm is deleted rather than rescued.** `live > MAX_LIVE_TRANSACTIONS`
+    could never fire: the bound equals the vocabulary's key count, so pigeonhole made it decoration in
+    a file otherwise careful about exactly this. The two genuinely falsifiable arms carry it.
+  - **The corpus check sees additions, not only edits.** CI was `git diff --exit-code`, blind to
+    untracked files, so a seed added by hand would have passed. `check-corpus-untouched.sh` checks
+    both, as the RFC 4475 check always has; adding a file fails with it named.
+  - The RFC 2543 registry item needed nothing: `S-26` had already rewritten the row and deleted the
+    stale note in the same commit. Verifying that *was* the item.
+
+- **`respond`'s promise that the response is on the wire is now enforced by the compiler (`X-36`)** —
+  `respond_returns_only_once_the_response_has_been_sent` could not detect the thing it was named for.
+  Moving the success report ahead of the send left it passing and the whole crate green.
+  - **No test can observe that reversal**, which is why it stood. On a `current_thread` runtime,
+    sending on a oneshot does not yield, so the send always completed before the waiting task was
+    polled — the datagram was out whichever order the two lines were written in.
+  - So the guarantee is structural instead: `perform` hands back a `Performed`, and the `Ok` that
+    `respond` reports is obtainable only by consuming it. Reversing the statements is now
+    `error[E0425]: cannot find value 'performed' in this scope`, verified by doing it. A compile error
+    is a stronger pin than a red test and it cannot rot.
+  - The 50 ms bound is gone. It bought no detection power at any value, and the argument defending it
+    was wrong on its own arithmetic — it rested on a queued send being flushed "within a packet
+    interval", which is 20 ms, inside the 50 it was justifying. What remains is a 10 s deadline that
+    is a bound on *failure* in `X-29`'s sense.
+  - Recorded as a **public guarantee of `respond`** in `docs/designs/sip-transport.md`, because the
+    alternative is the failure the code already names at its `NoTransaction` branch: telling an
+    application its 200 OK went out while the caller heard nothing.
+
+- **`sips:` is refused rather than sent in the clear (`S-27`)** — `sipx dial sips:alice@host` placed
+  the call over **UDP in cleartext**, and `sipx register sips:…` did the same with a digest credential.
+  Both commands stripped `sips:` in the same `or_else` as `sip:`, threw the distinction away, and chose
+  their transport from one flag (`if args.flag("tcp")`). There is no TLS transport in either path, so
+  RFC 3261 §19.1.1 — which makes TLS on every hop the URI's *meaning*, not a hint — was silently
+  ignored. Both now refuse, naming the missing capability rather than calling the URI malformed, since
+  it is not malformed.
+  - **The downgrade was invisible, which is what made it serious**: the call connects, the
+    registration succeeds, the audio flows, and only a packet capture shows the promise was broken.
+  - **It was two defects, and a fix covering only `dial` was nearly shipped.** `register` has the
+    identical shape, and `TransportKind::Tls` appears in that file only inside a *test* of
+    `resolve_target` — never in the path a command takes. The refusal now lives in `main.rs` as shared
+    policy, because putting it in one command is how the other came to be missed.
+  - **Both tests were mutation-checked**: with the call-site disabled they fail `left: 5, right: 2`
+    (`Timeout` instead of `Usage`) and take 22 s and 32 s, because the command really does attempt the
+    cleartext send. That wall-clock is the defect, not a slow test.
+  - The first behavioural test was **vacuous and the mutation caught it** — it passed the URI as the
+    only argument, but `Args::positional` skips index 0 as the subcommand, so it asserted the "a URI is
+    required" path and passed with the fix disabled. The reason is written at both sites now.
+  - Left deliberately: `target_of` still defaults a `sips:` URI to port 5060 rather than 5061. No
+    command can reach that code with a `sips:` URI any more, so the wrongness is unreachable, and
+    writing a port for a transport this CLI does not have would be inventing a fact. It belongs with
+    the `--tls` work.
+
+- **Reachability is now asked of every *selected* capability, not just media ones (`X-33`)** — `X-30`
+  made "no claim outlives its caller" mechanical for `layer = "media"`. This widens it on the property
+  rather than the string, and each layer was measured before being admitted.
+  - `security` is in; **`transport` was measured and declined**, with the reason recorded: it mixes
+    capabilities something selects (RFC 7118, 5626, 8599) with plumbing every call runs (3263, 3581),
+    and an evidence-path check cannot separate the two.
+  - **The `roles`-versus-`status` hole is closed precisely.** `status = "implemented"` does *not* imply
+    reachability in general — RTP, SDP and the parser are implemented and selected by nobody — but it
+    does at a selection layer. So RFC **6716 and 7587 (Opus) are demoted to `partial`**: they claimed
+    `implemented` with no `roles` field at all, which is how they escaped the check entirely while no
+    call could select Opus. **The published table now reads 29 implemented / 24 partial where it read
+    31/22** — the demotion changes what the artifact says, which is the difference between a demotion
+    and a suppression list.
+  - **Both escape hatches are shut.** Evidence must now be a `.rs` file in a crate at or above
+    `sipx-call`, so `crates/sipx-call/README.md` proves nothing; and `layer` is pinned for any row
+    citing `sipx-media`, `sipx-rtp` or `sipx-audio`, so relabelling a media row no longer exits the
+    check. One residual is stated rather than hidden: a media capability implemented elsewhere could
+    still relabel.
+  - Nine rejected rows were corrected and **none suppressed** — 2617, 7616 and 8760 now cite the only
+    credential selection above the call layer; 5922 cites a whole call over TLS; 8866, 3550 and 4733
+    cite the call layer that runs them.
+  - **The four presence rows keep `uas` on a fact nobody had run**: nothing in the workspace receives a
+    SUBSCRIBE or PUBLISH off a socket, which is what makes `sipx-ua` the crate that *serves* the role.
+    That reason is now a test that goes red the moment anything dispatches on either method, instead of
+    a paragraph that would quietly expire.
+  - RFC 6665's stale *"no event packages ship yet"* sentence is replaced; `S-17` and `S-18` are done.
+  - **Five inherited "facts" failed when actually run**, across this story and its predecessor, and all
+    five are corrected in the design: the registry has **117** evidence paths of which **two** are not
+    `.rs` (recorded as "80, exactly one"), and a citation to `crates/sipx-cli/tests/cli.rs:116` as
+    exercising digest authentication was invented — that line is
+    `register_advertises_this_client_in_via_and_contact`, and the tree contains no
+    `password`/`401`/`407`/`Authorization` test at all. The conclusions survived; only the evidence was
+    fabricated.
+
+- **No test in the workspace now asserts after a fixed sleep (`X-29`, completing what `0.11.0`
+  started)** — `X-28` cleared the media path; this is the rest. Twenty-two sites, and the useful
+  result is that **three different cures were right**, chosen by what the wait was actually for:
+  - **A happens-before already existed — delete the wait.** Five `call.rs` sites, all sleeping after
+    `callee.reinvite(…).await`. `reinvite` returns only once the 200 is back, and `on_reinvite`
+    applies the direction and records the remote CSeq *before* responding, inside a `handle` call
+    across which the pump holds the call's mutex — so `caller.lock().await` on the next line **is**
+    the synchronisation. Independently reviewed and mutation-tested four ways, including moving the
+    state change 300 ms after the 200 but still inside `handle`, which keeps the test passing and so
+    confirms the mutex is what orders it.
+  - **An arrival with no ordering to lean on — deadline loop on the condition.** Eleven sites, the
+    deadline a bound on failure rather than a window to measure in.
+  - **A negative assertion, or a window that is itself the measurement — keep the window and say so
+    at the site.** Six sites. A window can only make an empty assertion pass, so the failure mode is
+    a missed regression rather than a flake.
+  - **The failing-first evidence was not obtained, and the story says so rather than arguing round
+    it.** 263 attempts across four sites under 600–1200 single-core spinners produced zero failures.
+    The finding is that `X-28`'s method cannot transfer to this family at all: a `tokio` sleep
+    **dilates with the load**, because a sleeping task is not competing for the CPU it is denied —
+    130 ms of sleeps became 3.0 s under 900 spinners, so the window grows along with the work it was
+    supposed to outrun. The original red gate's real trigger was three concurrent compilations, i.e.
+    memory and IO pressure, where a process stalls on a major fault without being CPU-starved.
+  - **One rationale in this story was false and is retracted in the same breath as shipping it.**
+    `udp.rs`'s comment argued the 50 ms bound *is* the assertion. Moving `sent.send(Ok(()))` ahead of
+    `perform` in `endpoint.rs` leaves `respond_returns_only_once_the_response_has_been_sent` passing
+    and the crate green, so the test cannot detect what its name claims and the bound buys no
+    detection power at any value. It also refuted itself on arithmetic, resting on a flush "within a
+    packet interval" — 20 ms, inside 50 ms. Filed as `X-36`; the bound stays until there is a test
+    that can tell, because removing a clock without one would be the weakening this story forbids.
+  - `session.rs`'s loops now name the precondition they lean on — nothing suspends between
+    `received.fetch_add` and `note_arrival`'s lock, and an uncontended `Mutex::lock().await` on a
+    `current_thread` runtime does not yield. Verified rather than asserted: inserting a 20 ms sleep
+    in that gap fails `a_session_reports_the_loss_it_saw` with `left: 9 / right: 10`.
+
+- **The public capability tables stop selling three capabilities no call can reach (`X-35`)** —
+  `README.md` describes the compliance table as "a measurement rather than a claim"; the four
+  hand-maintained capability tables above it were the opposite, and three of them were wrong.
+  - **Opus** was advertised as a stack capability on the README, in `intro.md`, in
+    `does-this-fit.md`'s *"It fits if you want to"* list and on the landing page. No call can select
+    it: `sipx-call` hardcodes `Capabilities::g711` at six sites, and `Codec::from_payload_type`
+    **deliberately** never returns Opus, so even a hand-written peer offer cannot arrive at it. It is
+    now scoped to the crates, the way `as-a-library.md` already did it.
+  - **Bridging** was sold in five places plus `sipx-call`'s own package description. `Bridge::connect`
+    needs an `Arc<MediaSession>` and `Call` lends only `&MediaSession`, with no `into_media`, no
+    `Arc` and no `Clone` — so two `Call`s cannot be bridged. `sipx-call`'s description loses the word;
+    `sipx-media`'s gains it, because that is where the capability lives. The gap is `C-6`.
+  - **DTLS-SRTP** was sold with a workaround — "reachable by building your own capabilities" — that
+    cannot be written, because no `MediaSession` can be keyed by DTLS at all: the key types and
+    `Config.srtp` never meet, and the handshake cannot share the media port RFC 5764 §5.1.2 requires.
+    Both "the two pieces a browser insists on are in place" claims are reduced to one.
+  - Four **stale denials** of capabilities that do exist (Outbound, Path, GRUU, push), an RFC count
+    off by one, and an under-claim hiding the second interop peer are corrected.
+  - **A missing warning is added**: `sipx dial` parses only `--tcp`, so the CLI can never place an
+    encrypted call, while the README promised encrypted media beside a `sip:` example. Said plainly in
+    `reference/cli.md` without weakening the library's claim, which is true and tested.
+  - **The guard is the point.** `X-26` removed the same untruth from `sipx-audio` and it survived at
+    `README.md:114` because the check read three strings and the README's crate table was not one of
+    them — `--check` exited 0 with a phantom RFC 4733 DTMF claim in place. It now reads **44 front
+    doors across all 11 published crates** and asserts crate-table membership equals the set of crates
+    without `publish = false`. Still no suppression list, under any name.
+  - It also found a defect in its own guard: an earlier pattern for a public item did not allow
+    `async`, so `pub async fn play` backed nothing — a crate could have advertised playback with the
+    whole feature written in `async fn`s and passed.
+  - **Standing risk, recorded rather than left implicit**: the backing synonyms — `digit` for DTMF,
+    `refer` for transfer, `flow` for Outbound — are each a real second name, but a synonym added in
+    future to turn a red check green would be a suppression list in disguise.
+
+## [0.11.0] — 2026-07-29
+
+### Fixed
+
+- **The compliance table stops claiming roles no call can reach (`X-30`)** — `rfc-report.py --check`
+  verified that every cited file exists, never that a claimed capability had a caller. So a feature
+  implemented and tested inside one crate, selectable from nowhere above it, read as shipped: RFC 8122,
+  8445 and 8839 each claimed both roles on the strength of code no call has ever run. Those three now
+  carry **no roles**, RFC 3711 kept both and gained the citations that justify them, and
+  `unreachable_role_claims` makes it mechanical — a media row may claim a role only if some cited file
+  lives in a crate at or above `sipx-call`. **No suppression list, under any name**, which is the whole
+  reason the check is worth having.
+  - **Fifth instance of one defect in two days**, alongside ICE (`M-27`), UPDATE (`S-22`), DTLS-SRTP
+    (`M-28`) and the SDES answer check (`M-29`). The table is described in `README.md` as "a
+    measurement rather than a claim"; for these rows it was neither.
+  - **The scope is a choice and now says so.** Measured unscoped at `57857c6` the rule rejects 22 of 29
+    role-claiming rows while only 3 rows were over-claiming at all — wrong 19 times out of 22 on the
+    question it exists to answer. It is scoped to media because media is where a capability is
+    *selected* (`with_srtp`, `with_dtls_srtp`, `start_with_ice`) and selecting nothing is both the
+    default and silent: the call still connects and every test in the crate below still passes. Other
+    layers cannot fail this way because nothing selects them — there is no `with_transactions`.
+    `layer = "media"` is labelled a proxy for selection and held against it by a test.
+  - **Two justifications for that scope were shipped before this one and both were false.** The first
+    said seven `sipx-ua` rows "cannot satisfy it at any price"; `sipx-cli` sits above both `sipx-call`
+    and `sipx-ua`. Its replacement distinguished them from ICE by having a cross-crate caller "which
+    `start_with_ice` has none of, in any crate" — `crates/sipx-media/tests/ice.rs:149-150` calls it
+    twice, and had that been the criterion 8445 and 8839 would have passed and the correction would
+    have collapsed. Twice a crisp-sounding untrue fact stood in for a judgement; the design now names
+    that as this story's own failure mode.
+  - **Two escape hatches closed or recorded.** The repository-root `tests/` path is gone — it made
+    `tests/interop/README.md` proof that a role was reachable — and `layer` being author-set is
+    recorded, with the check's own test suite containing the dodge so it stays visible.
+  - **Known limit, filed as `X-33`: the gate is on `roles`, not on `status`.** RFC 6716 and 7587 are
+    `status = "implemented"`, `layer = "media"`, with no `roles` field at all, so the check never
+    interrogates them — while Opus is unreachable from any call, `sipx-call` hardcoding G.711 at six
+    sites and `Codec::from_payload_type` *deliberately* never returning it.
+
+- **The DNS TTL test stops racing the scheduler (`X-29`, partial)** — `an_expired_entry_is_not_returned`
+  stored an entry with a 50 ms TTL and read it back immediately. Under load the entry expired *before*
+  that read, so a gate for a diff that had never opened `sipx-transport` came back red — and a correct
+  merge was one command from being reverted for it. The two halves of the test wanted opposite things
+  from the clock, so it is now two stores: a TTL the precondition read cannot race, and the real 50 ms
+  one for the expiry, waited *for* in a deadline loop where load can only lengthen the wait.
+  - Three `quality.rs` drains converted the same way; one left with its fixed window because its
+    assertion is negative, where a window can only make it pass.
+  - **Roughly 16 of `X-28`'s 20 enumerated sites are untouched and the story stays open** — the
+    `sipx-call` half entirely.
+  - **A finding worth more than the conversions**: the implementor could not reproduce a flake at the
+    `quality.rs` sites — 3/3 passes under 250 spinners pinned to one core — and said so instead of
+    dressing it up. Those tests spend most of their window *asleep*, and a sleeping task is not
+    starved of a CPU it is not asking for, so they sit far inside their margins. `X-28`'s risk
+    ranking for them was too high. `udp.rs:473`, a 50 ms bound on a *positive* socket read, is the
+    one plausibly near its edge and is the next site to fix — not the next in list order.
+
+- **A client transaction now gets the key its own responses produce (`S-26`, RFC 3261 §17.1.3)** —
+  `from_sent_request` delegated to `from_request`, which is §17.2.3, the **server** rule. For a
+  cookieless `Via` that keys on the Request-URI and the `To` tag; a response has no Request-URI at
+  all and carries the tag the UAS added rather than the one the request was sent with. So the client
+  key never matched any of its own responses — and it did not fail, it retransmitted until Timer F
+  with the answer sitting in front of it.
+  - Both client derivations now run through one private `legacy_client`, so `from_sent_request` and
+    `from_response` agree **field for field by construction** rather than by inspection. The old doc
+    comment already claimed this property; now it holds.
+  - **`to_tag` is left empty for the client key, and the reason is better than symmetry**: two 200s
+    to one forked INVITE carry two different tags and must both reach the single transaction that
+    sent it, which RFC 6026's `Accepted` state requires. `from_request` is untouched, so §17.2.3's
+    use of the `To` tag to tell one legacy *server* transaction from another still holds.
+  - **Reached by an application supplying its own cookieless `Via`, not by an old peer.** A client
+    transaction's topmost `Via` is always sipx's own and the transport stamps `z9hG4bK` on it. The
+    story was first filed claiming the opposite; corrected before implementation.
+  - Found by `X-19`'s fuzzer, whose ignored regression loses its `#[ignore]` here — and the
+    campaign's suppression goes with the defect: `KNOWN_DEFECTS` is now empty, `Known` uninhabited,
+    and the slot-based masking deleted, so `UnroutableResponse` is reported on every slot. It was
+    keyed by slot rather than by cause, so removing it outright is what takes that breadth away.
+
+### Added
+
+- **The gate refuses to report when it cannot be believed (`X-34`)** — five times in one evening a
+  full disk produced a red gate that read as a code defect, and a correct merge came one command from
+  being reverted for a failure in a crate its diff never opened. Cargo's messages in that state are
+  actively misleading: `failed to create file '…/target/debug/examples/canned_program.d': No such file
+  or directory` is a vanished `target/`, not a broken build. `./scripts/gate.py` now checks free space
+  before it starts and refuses, naming disk and printing both the threshold and the actual figure.
+  - **The threshold is measured, not guessed.** A cold worktree was driven through every build step
+    with `target/` measured after each — clippy 0.7 GiB, `test` 8.4, examples 0.0, msrv 0.6, feature
+    matrix 0.3, docs site 0.5 = 10.6 GiB — plus 10% for cargo's peak while it links. The provenance
+    sits at the constant, and a test asserts the threshold covers every size ever measured.
+  - **`ENOSPC` and the ENOENT-on-artifact shape are an infrastructure failure, exit code 2, printed
+    unlike a red step**: *"NOT A RESULT — the machine stopped this run, not the tree"*, naming the step,
+    quoting the evidence, saying why it is not your diff, and stating free space now. Five real
+    non-disk failures are asserted **not** to match, because erring toward "it was disk" would hide
+    real defects.
+  - **A disk failure ends the run**, which contradicts `run()`'s "every step, not up to the first
+    failure" rule on purpose: once `target/` is gone every remaining step fails for the same reason,
+    and that wall of red is exactly what misled five readers.
+  - **A shared `CARGO_TARGET_DIR` was considered and rejected on three grounds**, the strongest being
+    that it would promote one worktree's `cargo clean` into everyone's vanished `target/` — occurrence
+    4 of that evening — from accident to design feature. An externally set one is still honoured.
+  - **The implementor killed its own first design on its own measurement.** It began by crediting an
+    existing `target/` against the threshold so a warm gate would not be refused, then found the
+    integration worktree had gone 13 GiB → 22 GiB in one evening because nothing there had ever linked
+    the integration test binaries. A warm `target/` is no evidence the expensive part is built, so the
+    credit would have let precisely that run start with 2 GiB free.
+  - Reads with `X-29`: same disease, one layer apart. `X-29` is tests that fail because the machine is
+    busy; this is the gate failing because the machine is full. A gate that fails at random trains
+    everyone to re-run it instead of believing it.
+
+- **The transaction driver is fuzzed, not only the parser (`X-19`)** — four fuzz targets existed and
+  all four stopped at the parser, so the half of the north star about adversarial **timing** had
+  nothing at all. A new target drives `TransactionLayer` with a sequence decoded from the fuzzer's
+  bytes — incoming messages, application requests and fired timers in any order — with messages
+  **built** rather than parsed, so the budget is spent inside the RFC 3261 §17 state machines
+  instead of on bytes that do not parse.
+  - **The oracle is not "did it panic"**, which finds almost nothing in a state machine. Five
+    invariants, each with its own test: no state outside the §17 tables (as amended by RFC 6026),
+    no transaction outliving its terminal state, no timer firing for a removed key, a store bounded
+    by the vocabulary rather than by the program, and responses that must route.
+  - The corpus is seeded from the scenarios the existing FSM table tests already walk — 17 of them —
+    the way CI seeds the parser targets from the RFC 4475 corpus, and it runs in the existing fuzz
+    smoke job on the same time budget as one parser target.
+  - **It found a defect on its first campaign**, which is what the instrument is for:
+    `TransactionKey::from_sent_request` derives the *client* key through §17.2.3's **server** rules,
+    so a legacy (cookieless) key carries a Request-URI and `To` tag that `from_response` cannot —
+    the keys never compare equal and every response is unmatched. Committed as a minimised ignored
+    regression and a recorded spec deviation rather than fixed here; the fuzzer is the instrument,
+    not the repair. `S-26` fixes it.
+  - **Not reachable from the network** — established by independent review, not by the finding
+    itself. A client transaction's topmost `Via` is always sipx's own and always carries the magic
+    cookie, so this needs an application supplying its own `Via` to `Endpoint::send`. Recorded
+    because the first filing said otherwise.
+  - `sipx-sip` gained no dependency, no runtime and no clock read: the harness lives in
+    `sipx-testkit` and the diff adds zero lines to `sipx-sip/src/`.
 
 ## [0.10.0] — 2026-07-29
 
@@ -1303,7 +1706,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/codewandler/sipx/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/codewandler/sipx/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/codewandler/sipx/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/codewandler/sipx/compare/v0.7.0...v0.8.0

@@ -14,6 +14,9 @@
 //! A participant who has said nothing contributes silence, which is exactly right: the mix goes
 //! out on time and the quiet participant is simply quiet. The alternative — waiting for
 //! everyone — makes the whole conference as late as its worst connection.
+//! **Experimental** (`A-8`): as with [`super::bridge`], real over sessions you own and not
+//! reachable from a `Call` (`C-6`).
+//!
 
 use std::collections::HashMap;
 use std::sync::Arc;

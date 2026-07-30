@@ -10,6 +10,14 @@ What it deliberately does *not* claim to verify is behaviour. No script can read
 `crates/sipx-sip/src/transaction/client.rs` and decide whether Timer A is right; the tests do
 that. What it can do is stop an entry claiming syntax support for a header the code has never
 heard of, which is the failure mode a table like this actually has.
+
+The second failure mode, and the one that recurred: a capability implemented and tested inside
+one crate that nothing above it can select, reported as shipped because every check above passes
+for it. `unreachable_claims` is the check for that. It is scoped to the layers where a capability
+must be *selected* before a call can use it — media and security — by choice and not by necessity,
+and it asks the question of both kinds of claim a row makes there: the roles it lists, and, at the
+media layer, the status it states. The argument, the measurement each scope rests on and the ways
+they can still be walked around are in docs/designs/rfc-registry-grain.md.
 """
 
 import argparse
@@ -73,6 +81,209 @@ LIST_KEYS = {"evidence", "roles", "headers", "methods"}
 STRING_KEYS = {"spec"}
 
 
+# Where an application asks for a call. A media capability the call layer cannot select is one
+# no UA role can perform, however well the crate below implements and tests it.
+CALL_CRATE = "sipx-call"
+CRATES = ROOT / "crates"
+
+# The rule is scoped to the layers where a capability must be **selected**. That is a *choice*,
+# not something the workspace forced.
+#
+# The property: a capability at a selection layer is carried only because something asked for it —
+# `Capabilities::with_srtp`, `with_dtls_srtp`, `start_with_ice`, `Config::with_credentials`, a
+# `Target` built with a secure `TransportKind` — and asking for nothing is both the default and
+# silent. The call still connects, unencrypted and unauthenticated, and every test in the crate
+# below still passes. That is how ICE and DTLS-SRTP came to be built, tested and claimed for both
+# roles with no call able to select either.
+#
+# The other layers have no such gap because their capabilities are not selected at all: there is no
+# `with_transactions` and no `with_dns`, so "can a call reach the transaction layer" is a question
+# that cannot come out `no`. And a services row like RFC 3856 claims `uas` for a surface `sipx-ua`
+# *itself* serves — `sipx-call` does not depend on `sipx-ua` and no crate above it must select
+# anything.
+#
+# `security` was added by X-33. It has both halves of the property: `Config::with_credentials` is
+# the opt-in for digest and its only caller above the call layer sits inside an
+# `if let Some(password)` (crates/sipx-cli/src/register.rs), so a REGISTER with no password still
+# succeeds; and a secure transport is chosen per `Target`, with UDP the default. Measured, the four
+# security rows claiming a role all failed the rule, and three needed one honest citation each —
+# which is what X-30's first false justification ("those rows cannot satisfy it at any price")
+# denied was possible.
+#
+# `transport` was measured and left out: the layer mixes capabilities that *are* selected (RFC 7118
+# WebSocket, 5626 outbound, 8599 push) with plumbing on the path of every call (3263 DNS, 3581
+# `rport`), and an evidence-path check cannot tell them apart. Widening to it would reject 3263 and
+# 3581, which no citation could honestly fix. That is the proxy failing, and it is the case for the
+# successor check in docs/designs/rfc-registry-grain.md rather than for a longer layer list.
+#
+# `layer` is a proxy, used because this check reads evidence paths and nothing else; deciding
+# selection means resolving callers across crates, which is a different check on a different input.
+# The proxy's cost is that `layer` is author-set — `misdeclared_layer` below closes that for the
+# rows that would want the dodge.
+#
+# Measured before adoption on 57857c6, the unscoped rule rejects 22 of the 29 role-claiming rows.
+# Only 7 of those rejections point at anything true of the row and only 3 rows were over-claiming
+# at all, so on the question this check exists to answer the unscoped rule is wrong 19 times out of
+# 22. docs/designs/rfc-registry-grain.md carries the full count, the argument, the false
+# justifications this scope has been given, and what would widen it.
+ROLE_REACHABILITY_LAYERS = {"media", "security"}
+
+# The same rule applied to `status = "implemented"` rather than to `roles`, and scoped tighter.
+#
+# X-30 recorded that the check keyed on `roles` alone, so a row could say `implemented` about
+# something no call can reach and never be interrogated — which is what RFC 6716 and 7587 did for
+# Opus. A row with no `roles` claims nothing about a role; it still makes a claim, in the same
+# generated table, under a heading that reads "What sipx implements".
+#
+# Media only, and the reason is measured rather than preferred. Every media row claiming
+# `implemented` names a capability a call either carries or does not: SDP, RTP, DTMF and G.711 are
+# carried by every call and cite the call layer; Opus is carried by none. At the security layer
+# three of the seven `implemented` rows — 6125, 8446, 8996 — state *policies* of the TLS stack (a
+# non-matching SAN is refused rather than falling back to the CN; 1.3 preferred; 1.2 is the floor
+# and not configurable downward). A policy holds on every connection and is proved by the absence
+# of an API, so "which call reaches it" is not the question those rows answer, and asking it would
+# reject three honest rows. Held by
+# `test_the_status_gate_is_media_only_and_the_reason_is_measured`.
+#
+# `partial` is deliberately not held to this. It is the *demotion*, not an exception: it changes
+# what the published table says, from "✅ implemented" to "🟡 partial" with the note naming the gap,
+# which is the form RFC 5763, 5764, 8122, 8445 and 8839 already use for exactly this fact. There is
+# no suppression list — a row that cannot be made true is demoted, and every reader of the
+# generated table sees the demotion.
+STATUS_REACHABILITY_LAYERS = {"media"}
+
+# Crates whose only subject is media. A row citing one of them is a media row whatever its `layer`
+# says, which closes the dodge X-30 recorded as the strongest argument against scoping by layer at
+# all: nothing validated `layer` beyond membership of `LAYER_TITLE`, so relabelling an ICE row
+# `security` left the check entirely.
+#
+# It is not a general layer classifier and does not try to be. `sipx-sdp` is cited by RFC 3264,
+# which is legitimately `core`, and `sipx-transport` is cited by rows at three layers — so those
+# crates cannot pin anything. These three can, they are exactly the crates an unreachable media
+# capability lives in, and to leave the check an author would now have to stop citing their own
+# implementation. `test_no_row_declares_a_layer_its_evidence_contradicts` holds the registry to it.
+MEDIA_ONLY_CRATES = {"sipx-media", "sipx-rtp", "sipx-audio"}
+
+
+def call_layer_crates() -> set[str]:
+    """`sipx-call` and every workspace crate that can reach it.
+
+    Read from the manifests rather than listed here. A list would be one more hand-copied fact
+    about the workspace, and the way that fails is silent: a new crate above `sipx-call` would
+    not count as reachable, so a row citing it would be rejected for citing the right file.
+    """
+    dependencies = {}
+    for manifest in sorted(CRATES.glob("*/Cargo.toml")):
+        parsed = tomllib.loads(manifest.read_text())
+        named = set(parsed.get("dependencies", {})) | set(parsed.get("dev-dependencies", {}))
+        dependencies[manifest.parent.name] = {n for n in named if n.startswith("sipx-")}
+
+    reachable = {CALL_CRATE}
+    growing = True
+    while growing:
+        growing = False
+        for crate, on in dependencies.items():
+            if crate not in reachable and on & reachable:
+                reachable.add(crate)
+                growing = True
+    return reachable
+
+
+def reaches_the_call_layer(path: str, crates: set[str]) -> bool:
+    """Whether an evidence path is a Rust source file in a crate at or above the call layer.
+
+    Only `crates/<name>/….rs` counts, and both conditions were holes somebody had to walk into
+    before they were closed. The repository-root `tests/` tree is the interop harness — shell
+    scripts and peer configuration — and its Rust half lives in `crates/sipx-cli/tests/`, which
+    this accepts; admitting the root tree wholesale would have made `tests/interop/README.md` proof
+    that a role is reachable, since `evidence` may legitimately cite markdown. `X-30` closed that
+    and recorded the same hole one directory in: `crates/sipx-call/README.md` would have satisfied
+    a rule that only asked which crate the path was in.
+
+    The `.rs` condition closes it, and costs nothing measurable: of the registry's 117 evidence
+    paths exactly two are not `.rs` files — `docs/specs/sip-tls.md`, cited by RFC 5922 and 8996 —
+    and both are outside `crates/` anyway. It remains a path test and not a code test, so a row can
+    still satisfy it by citing a call-layer file containing a dead branch; that is the limit the
+    successor check in docs/designs/rfc-registry-grain.md exists to remove.
+    """
+    parts = pathlib.PurePosixPath(path).parts
+    return (
+        len(parts) > 1
+        and parts[0] == "crates"
+        and parts[1] in crates
+        and parts[-1].endswith(".rs")
+    )
+
+
+def unreachable_claims(entry, crates: set[str]) -> list[str]:
+    """A claim at a selection layer that no cited file shows a call can reach.
+
+    This is the one thing the other checks cannot see. A header must be in the parser's table and
+    a file must exist, but "implemented in a crate" and "reachable from a call" are different
+    facts, and until this check they were reported as the same one — five times in two days.
+    Unreachable code is untested code with better paperwork.
+
+    Two claims trigger it, and the remedy differs, so the message says which one applies. A `roles`
+    list is a claim about what a *user agent does*; `status = "implemented"` is a claim about the
+    code, and at the media layer those come to the same thing because a media capability is either
+    carried by a call or by nothing at all.
+    """
+    layer = entry.get("layer")
+    roles = entry.get("roles")
+    roles = roles if isinstance(roles, list) else []
+
+    claiming_roles = bool(roles) and layer in ROLE_REACHABILITY_LAYERS
+    claiming_status = (
+        entry.get("status") == "implemented" and layer in STATUS_REACHABILITY_LAYERS
+    )
+    if not (claiming_roles or claiming_status):
+        return []
+    if any(reaches_the_call_layer(p, crates) for p in entry.get("evidence", [])):
+        return []
+
+    if claiming_roles:
+        claim = ", ".join(roles)
+        remedy = "or drop the roles and say in the note what is missing"
+    else:
+        claim = "implemented"
+        remedy = (
+            "or lower the status to `partial` and say in the note that no call can select it"
+        )
+    return [
+        f"RFC {entry.get('number', '?')} claims {claim} but cites nothing a call can reach — no"
+        f" Rust source at or above {CALL_CRATE}. Either cite the call-layer code or test that"
+        f" selects it, {remedy}"
+    ]
+
+
+def misdeclared_layer(entry) -> list[str]:
+    """A row citing a media-only crate while declaring some other layer.
+
+    `layer` decides whether the reachability rule looks at a row at all, and nothing else validated
+    it beyond membership of `LAYER_TITLE` — so relabelling an ICE row `security` was the way out of
+    the check, recorded by `X-30` as the strongest argument against scoping by layer. This does not
+    classify layers in general; it makes the one dodge that matters unavailable, because the row
+    that would want it cites its own implementation and that implementation is in `sipx-media`,
+    `sipx-rtp` or `sipx-audio`.
+    """
+    layer = entry.get("layer")
+    if layer == "media":
+        return []
+    cited = set()
+    for path in entry.get("evidence", []):
+        parts = pathlib.PurePosixPath(path).parts
+        if len(parts) > 1 and parts[0] == "crates":
+            cited.add(parts[1])
+    offending = sorted(cited & MEDIA_ONLY_CRATES)
+    if not offending:
+        return []
+    return [
+        f"RFC {entry.get('number', '?')} declares layer {layer!r} but cites"
+        f" {', '.join(offending)}, which implement nothing but media — a media row relabelled is a"
+        f" media row that has left the reachability check"
+    ]
+
+
 def schema_problems(entry) -> list[str]:
     """Ways an entry departs from the per-RFC schema.
 
@@ -112,6 +323,7 @@ def schema_problems(entry) -> list[str]:
 def check(entries) -> list[str]:
     """Every claim that the code does not back up."""
     headers, methods = known_headers(), known_methods()
+    reachable = call_layer_crates()
     problems = []
 
     for entry in entries:
@@ -150,6 +362,9 @@ def check(entries) -> list[str]:
         # An entry that claims to be implemented and points at nothing is an assertion.
         if entry.get("status") in {"implemented", "partial"} and not entry.get("evidence"):
             problems.append(f"{where} claims {entry.get('status')} with no evidence cited")
+
+        problems.extend(misdeclared_layer(entry))
+        problems.extend(unreachable_claims(entry, reachable))
 
     numbers = [e["number"] for e in entries if "number" in e]
     for number, count in Counter(numbers).items():

@@ -45,6 +45,33 @@ call — and until it is, make the compliance table say so instead of claiming b
       left a test asserting the gap rather than closing it.)*
 
 ## Progress
+- **The gap is wider than this story and `docs/compliance.md:107-109` both record**, found by a
+  read-only public-docs sweep and worth knowing before anyone estimates the work. The registry row
+  says no role is reachable from `sipx-call`; in fact **no `MediaSession` can be keyed by DTLS at
+  all**, on two independent boundaries:
+  1. **The types never meet.** Everything that turns a handshake into keys returns pre-built SRTP
+     contexts — `dtls::Keys { outbound: srtp::Context, inbound: srtp::Context }`
+     (`sipx-media/src/dtls/mod.rs:116-121`), returned by `establish` (`:240`) and
+     `keys_from_exported` (`:150`). Nothing in `sipx-media`'s public surface accepts an
+     `srtp::Context`: `Config.srtp` is `Option<SrtpKeys>` (`session.rs:264`), and `SrtpKeys`
+     (`:375-381`) is master key *and salt* per direction, converted internally at `:1509-1511` via
+     `SrtpContext::new(key, salt)`. So this is not one row of wiring; it is a missing constructor.
+  2. **The handshake cannot run on the port RFC 5764 §5.1.2 requires it to share.**
+     `MediaPort.socket` is a private tokio `UdpSocket` with no accessor (`session.rs:801-810`),
+     while `dtls/openssl.rs:165-169` needs an owned `std::net::UdpSocket` it `connect`s itself.
+- **Consequence for the docs, now `X-35`'s**: `website/docs/intro.md:43-45` and
+  `whats-new.md:36-38` tell readers DTLS-SRTP is "reachable by building your own capabilities with
+  `sipx-sdp` and `sipx-media`". That workaround cannot be written. A determined user could implement
+  `Handshake`, call `export(60)` and re-split per §4.2 by hand into `SrtpKeys`' public fields — but
+  that bypasses `establish`'s RFC 8122 §6.2 fingerprint check and still cannot share the media port.
+- **2026-07-29 — the docs half above is done, by `X-35`.** `website/docs/intro.md`,
+  `whats-new.md` and `does-this-fit.md` no longer offer the workaround that cannot be written;
+  all three now say no media session can be keyed by DTLS today by any route, name both
+  boundaries, and point here. Nothing about the code changed, and the Acceptance items below are
+  untouched — this only removes the reader-facing claim that the work was already reachable.
+- Also: `capabilities.dtls()` is *read* at `crates/sipx-call/src/call.rs:3600` and **nothing anywhere
+  ever sets it**. The branch exists and is dead, which is the shape RFC 8122 had before it was
+  demoted — a reachability check that only follows evidence paths cannot see it.
 - **Still open, and deliberately.** One of five Acceptance items is done — the registry
   correction, which the story made unconditional. The code half remains and is the reason the
   story keeps its file rather than closing: `M-28` is not "DTLS-SRTP paperwork", it is "offer

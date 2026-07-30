@@ -41,16 +41,19 @@ _None._
 
 ## Next (ready — take the top one unless the user named a story)
 
+### Application SDK
+_The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
+- [A-9 — Make the published crates safe to freeze — `#[non_exhaustive]` and a README per crate](A-9-freeze-what-a-published-crate-can-add.md) · Application · A-8 stated the promise and left the two mechanical halves — every public error enum outside sipx-app-protocol is exhaustive, so it promises never to add a variant, and ten of eleven crates will publish to crates.io with no README at all
+- [X-38 — Ship a real application, and let its reality say what a check cannot](X-38-ship-an-app-and-let-it-say-what-the-check-cannot.md) · Build · alpha predicate 1, reconsidered at X-37 — a syntactic caller-check would be fitted to three rows, wrong in the ways macros and re-exports are wrong, and fitted to what is testable rather than what is true; the honest gate is that the reachable-from-a-call surface is exactly what one real application uses
+
 ### Call framework
 _This is the layer applications actually program against, so it is the one that decides whether_
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
-- [X-30 — Make the registry distinguish "implemented in a crate" from "reachable from a call"](X-30-registry-cannot-tell-reachable-from-implemented.md) · Build · fifth instance in two days — rfc-report.py --check verifies that cited files exist, never that a claimed capability has a caller, so a crate-level feature reads as a shipped one
-- [X-29 — Stop asserting after a sleep in sipx-call and sipx-transport](X-29-wall-clock-sleeps-outside-the-media-path.md) · Build · found by X-28's sweep, then confirmed by a real red gate — dns.rs:553 raced a 50ms TTL against the scheduler and failed a gate that had nothing to do with the diff being merged
-- [S-25 — Give the early-dialog loop a way to fail](S-25-early-dialog-observation-has-no-error-channel.md) · Signalling · found by M-29 — adopt_early_answer returns (), so a parse failure, a negotiation failure and a refused a=crypto in a reliable provisional are all discarded identically
+- [X-39 — Stop the maturity report from making the gate red for something that is not a defect](X-39-the-maturity-report-cannot-be-green-in-the-commit-that-moves-a-story.md) · Build · alpha predicate 3 — `maturity.py --check` cannot pass in the commit that files or closes a story, because Filed/Closed for today come from git history and the fact does not exist until the commit does; regenerated twice on 2026-07-30 for no defect either time
+- [X-40 — Stop asserting on recorded audio without waiting for it](X-40-a-recording-assertion-fails-when-the-machine-is-busy.md) · Build · alpha predicate 3, third instance after X-28 and X-29 — `dial_plays_a_file_and_records_the_far_end` waits for the call and then asserts on a real-time side effect, so under load it reads a valid WAV with zero samples; observed once, not reproducible in isolation
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
-- [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
 - [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 
@@ -59,6 +62,8 @@ _This is the layer applications actually program against, so it is the one that 
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [M-30 — Let a call select Opus, or stop shipping a codec nothing can reach](M-30-a-call-cannot-select-opus.md) · Media · M-13 built the codec, not the selection — sipx-call hardcodes G.711 at six sites and Codec::from_payload_type deliberately never returns Opus, so X-33 demoted RFC 6716 and 7587 to partial
+- [M-31 — Make the answer and the negotiated codec agree, once](M-31-the-answer-and-the-negotiated-codec-can-disagree.md) · Media · found by M-30's review — `sipx-sdp/src/answer.rs:423-427` compares an rtpmap clock rate as a string while `codec_named` parses it to `u32`, so an offer with `a=rtpmap:0 PCMU/08000` settles on PCMU while the answer names only `8`
 - [M-28 — Offer DTLS-SRTP from a call, and stop claiming it until then](M-28-dtls-srtp-unreachable-from-a-call.md) · Media · found by X-27 — dial hardcodes SDES, so sipx cannot offer DTLS-SRTP at all, while RFC 5763 and 5764 are both marked implemented with both roles
 
 ### Quic
@@ -66,7 +71,9 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
-- [X-19 — Fuzz the transaction driver, not only the parser](X-19-fuzz-the-transaction-driver.md) · Build · M12 · four fuzz targets, all of them parsers; the timing half of the north star is untested
+- [S-31 — Tolerate RFC 5118 §4.10's three-colon IPv6 reference](S-31-tolerate-the-three-colon-ipv6-reference.md) · Signalling · found by X-16's corpus — `[2001:db8:::192.0.2.1]` is rejected with `StartLine(Uri(Host))`, and RFC 5118 §4.10 is normative that an implementation MUST tolerate it; the one recorded entry in `rfc5118::DEVIATIONS`
+- [S-28 — Answer a 401 or 407 on an outbound INVITE](S-28-a-call-cannot-answer-an-authentication-challenge.md) · Signalling · found while closing P-7 — sipx-call has no credential type and no 401/407 path at all, so a challenged call fails outright; the digest machinery exists in sipx-ua and nothing above the registration path can reach it
+- [S-30 — Refuse a valued flag that was given no value, instead of ignoring it](S-30-a-valued-flag-with-no-value-is-silently-dropped.md) · Signalling · found by S-29's review — `Args::value` cannot tell "--flag was last" from "--flag was absent", so a trailing valued flag is accepted and dropped; CLI-wide, and it defeats the accepted-and-dropped rule S-29 asserted for its own six flags
 
 ### Transport layer
 _The transport layer is the only place in the signalling stack that touches the network, which_
@@ -109,6 +116,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 ## Done
 - [A-1 — Finish the host configuration and failure-semantics schema](A-1-host-configuration-schema.md) · Application · app-host phase 1 · spec work, no dependency on the app-sdk stories
 - [A-7 — The deterministic harness — fake time, scripted bindings, scripted calls](A-7-deterministic-harness.md) · Application · app-host phase 1 · built with the host, not after it · startable against contract vectors alone
+- [A-8 — Declare what each published crate guarantees](A-8-declare-what-each-crate-guarantees.md) · Application · alpha predicate 5 — v1 freezes what "stable" means, so the line between stable and experimental has to exist before it can be frozen
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
 - [C-4 — Serve many calls from one endpoint](C-4-serve-many-calls-from-one-endpoint.md) · Signalling · app-sdk · after C-3 · size M
 - [C-5 — The application contract crate and its sans-IO interpreter](C-5-app-contract-crate-and-interpreter.md) · Application · app-sdk · parallel to C-3/C-4/M-17/M-18 · spec is docs/specs/app-contract.md · size M
@@ -141,6 +149,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
 - [P-4 — Implement `sipx answer`](P-4-cli-answer.md) · Phone
 - [P-5 — List what can be called with `sipx peers`](P-5-peer-book-and-list.md) · Phone · the epic's first story — a peer book and one command, with no protocol work
+- [P-7 — Make `sipx dial --password` authenticate, or reject the flag](P-7-dial-accepts-a-password-and-discards-it.md) · Application · main.rs:168 accepts --password on dial and dial.rs never reads it, so a 407-challenged call fails while the user who supplied credentials is told nothing
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 - [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling
@@ -162,6 +171,10 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [S-19 — Implement the UPDATE method](S-19-update-method.md) · Signalling · M9 · RFC 3311 · the last session-integrity gap; 100rel unblocked it
 - [S-22 — Give the caller a handle on its early dialog](S-22-caller-early-dialog.md) · Signalling · found by S-19 — sipx as caller can neither send nor receive an UPDATE while ringing
 - [S-23 — Answer a CANCEL — the UAS half sipx never implemented](S-23-uas-cancel.md) · Signalling · found by C-4 — no 487 for the INVITE and no 200 for the CANCEL anywhere in the workspace
+- [S-25 — Give the early-dialog loop a way to fail](S-25-early-dialog-observation-has-no-error-channel.md) · Signalling · found by M-29 — adopt_early_answer returns (), so a parse failure, a negotiation failure and a refused a=crypto in a reliable provisional are all discarded identically
+- [S-26 — Match a response to the RFC 2543 client transaction that sent it](S-26-legacy-client-transaction-never-matches-its-response.md) · Signalling · found by X-19's fuzzer — from_sent_request derives the client key by §17.2.3's server rules, so a legacy key carries a Request-URI and To tag that from_response cannot, and every response is Unmatched
+- [S-27 — Refuse a `sips:` URI the CLI cannot honour securely, instead of sending it in the clear](S-27-a-sips-uri-is-dialled-in-plaintext.md) · Signalling · found by X-33's implementor — dial.rs:231 strips `sips:` exactly as `sip:` and defaults to port 5060, and dial.rs:49 only ever chooses UDP or TCP, so `sipx dial sips:…` sends the INVITE in cleartext and says nothing
+- [S-29 — Register over an Outbound flow, and let a registration wake on push](S-29-register-over-an-outbound-flow-and-push.md) · Signalling · with_outbound and with_push have no caller outside sipx-ua's own tests — the eighth instance of the recurring defect — so X-37 demoted RFC 5626 and 8599 to no roles; wiring them is what makes the roles honest again
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
@@ -195,7 +208,9 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-13 — Publish the API documentation](X-13-publish-the-api-documentation.md) · Build · track: docs · after X-12 in the same crate-free track
 - [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
 - [X-15 — Consider requirement-grain rows in the RFC registry](X-15-requirement-grain-registry.md) · Build · track: docs · an offer, not a dependency — decide whether per-RFC grain is enough
+- [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
 - [X-17 — Interoperate against a second independent implementation](X-17-second-interop-peer.md) · Build · M12 · one interop peer is a sample of one, and no peer has ever answered a sipx call
+- [X-19 — Fuzz the transaction driver, not only the parser](X-19-fuzz-the-transaction-driver.md) · Build · M12 · four fuzz targets, all of them parsers; the timing half of the north star is untested
 - [X-20 — Let a caller take the digest primitives without taking a runtime](X-20-digest-without-a-runtime.md) · Build · sipx-ua pulls tokio unconditionally, so sans-IO code cannot use S-16's Authenticator
 - [X-21 — Make the timer queue generic over its instant](X-21-timer-queue-generic-over-its-instant.md) · Build · the queue documents clock-independence its signature contradicts · additive, breaks nothing
 - [X-22 — Put the MSRV check in the documented gate](X-22-msrv-in-the-documented-gate.md) · Build · CI has an msrv job the gate does not name, so a green local gate lied through two releases
@@ -205,6 +220,15 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-26 — Stop sipx-audio advertising a codec and a resampler it does not have](X-26-audio-crate-claims-codecs-it-lacks.md) · Build · found by X-25 — the published crate description promises G.722 and resampling; neither exists
 - [X-27 — Place an interop call with encrypted media](X-27-interop-never-encrypts-media.md) · Build · found by M-25 — the n_a defect shipped in v0.3.0 through v0.8.0 because nothing ever exchanged SRTP with a non-sipx peer
 - [X-28 — Make the bridge audio test deterministic under load](X-28-bridge-test-is-load-flaky.md) · Build · found by M-25 — it races play against a fixed 400ms record on real sockets and records zero samples under load, so it will be blamed on innocent diffs
+- [X-29 — Stop asserting after a sleep in sipx-call and sipx-transport](X-29-wall-clock-sleeps-outside-the-media-path.md) · Build · found by X-28's sweep, then confirmed by a real red gate — dns.rs:553 raced a 50ms TTL against the scheduler and failed a gate that had nothing to do with the diff being merged
+- [X-30 — Make the registry distinguish "implemented in a crate" from "reachable from a call"](X-30-registry-cannot-tell-reachable-from-implemented.md) · Build · fifth instance in two days — rfc-report.py --check verifies that cited files exist, never that a claimed capability has a caller, so a crate-level feature reads as a shipped one
+- [X-31 — Close the drift holes in the transaction-sequence harness](X-31-harden-the-transaction-sequence-harness.md) · Build · found by X-19's independent review — one invariant arm is unfalsifiable by pigeonhole, the timer table is hand-maintained with a const assert that cannot catch drift, and the CI corpus check cannot see added files
+- [X-32 — Say what v1 is, and generate the distance to it](X-32-say-what-v1-is-and-measure-the-distance.md) · Build · nothing in the repo defines v1 — the only `v1` is `sipx.app.v1`, a protocol version — so "how far are we" cannot be answered, only estimated
+- [X-33 — Generalise the reachability check past the media layer](X-33-generalise-the-reachability-check-beyond-media.md) · Build · alpha predicate 1 — X-30 made "no claim outlives its caller" mechanical for layer = media only, and its own review showed the reason given for stopping there was false
+- [X-34 — Make the gate fail honestly when the disk is full](X-34-the-gate-has-no-disk-guard.md) · Build · five times on 2026-07-29 a full disk produced a red gate that read as a code defect — cargo reports ENOENT on build artifacts, and a correct merge was nearly reverted for it
+- [X-35 — Make the public capability tables measured, not hand-maintained](X-35-the-public-capability-tables-are-not-measured.md) · Build · two independent read-only sweeps found the front page advertising Opus, bridging and a DTLS-SRTP workaround that no call can reach — the same shape X-30 removed from the registry, in the four hand-maintained tables no script reads
+- [X-36 — Pin the send ordering `respond` already promises, and drop the clock that pretends to](X-36-respond-has-no-flushed-observable.md) · Build · respond_returns_only_once_the_response_has_been_sent cannot detect the thing it is named for — the ordering can be reversed in endpoint.rs and the test still passes, so its 50 ms bound is pure flake risk
+- [X-37 — Decide reachability by resolving callers, not by matching evidence paths](X-37-bind-reachability-to-callers-not-to-paths.md) · Build · the recorded successor to X-30 and X-33 — a path check is satisfied by citing a file, so a dead branch counts as reachable, the transport layer cannot be adjudicated at all, and a relabelled layer still escapes
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

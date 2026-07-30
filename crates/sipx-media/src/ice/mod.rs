@@ -9,6 +9,9 @@
 //! STUN profile [`stun`] implements.
 //!
 //! [`docs/specs/ice.md`]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+//! **Experimental** (`A-8`): the agent here is complete and tested, and no call gathers with it —
+//! `MediaSession::gather` and `start_with_ice` have no caller outside this crate (`M-27`).
+//!
 
 pub mod agent;
 pub mod candidate;
