@@ -16,7 +16,7 @@ repository and are recorded when they happen rather than computed.
 |---|---|---|---|
 | 1 | No claim outlives its caller, at any layer | open | `X-38` |
 | 2 | Adversarial input and adversarial timing are both fuzzed | met | — |
-| 3 | A red gate means a defect | open | `X-39`, `X-40`, `X-41`, `X-42` |
+| 3 | A red gate means a defect | open | `X-39`, `X-40`, `X-41` |
 | 4 | No known-wrong shipped path | met (attested) | — |
 | 5 | The public API says what it guarantees | met | — |
 | 6 | Testable from a shell for everything the CLI exposes | met (attested) | — |
@@ -49,13 +49,13 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 |---|---|
 | Signalling | 11 |
 | Media | 9 |
-| Build | 7 |
 | Application | 6 |
+| Build | 6 |
 | Phone | 1 |
 | Transport | 1 |
-| **total** | **35** |
+| **total** | **34** |
 
-117 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+118 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
@@ -65,7 +65,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 |---|---|---|---|
 | 2026-07-28 | 95 | 58 | -37 |
 | 2026-07-29 | 43 | 47 | +4 |
-| 2026-07-30 | 15 | 11 | -4 |
+| 2026-07-30 | 15 | 12 | -3 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 
