@@ -58,7 +58,12 @@ normatively stops depending on the next person to sweep for violations.
   `time::advance`, a bare `interval.tick()`, a hand-rolled `while now < deadline` spin and a private
   helper wrapping any of them are one thing. The wrapper hop is what a grep can never see, and
   `scripts/test-gate.py`'s `test_a_rename_does_not_get_past_it` plants the identical defect in all
-  six spellings and requires all six to be refused.
+  six spellings and requires all six to be refused. **Wrappers are collected from the whole
+  workspace**, because reading one file's helpers made the rule a spelling again — a review defeated
+  it with `pub async fn settle()` in `sipx-testkit`, imported. The price is that a name shared with
+  a non-wrapper is ambiguous, so such a name is left alone rather than reported: asking an author to
+  classify `stream.flush()` would be asking for a sentence that is false about the line in front of
+  them.
 - **A second rule catches the other regression, and a sleep-grep never could.** A loop whose every
   pass is bounded by a *relative* `timeout(D, …)` spends one duration on both "how long may it take
   to start" and "how long a gap means it has ended" — `X-40` exactly, and `M-34` one call along.
@@ -82,7 +87,8 @@ normatively stops depending on the next person to sweep for violations.
   `media_returns_to_where_it_came_from_not_where_the_sdp_said` and
   `audio_flows_in_both_directions_at_once` both slept for a fixed window to let the far end latch a
   source address, and now record the packet that latches it. The rest were classified at the call
-  site.
+  site. After review round 1 the tree carries **28** such sites: four converted rather than
+  classified, and the rest saying which question their duration answers.
 - **The load gradient the Notes ask about was considered and not adopted.** Running the suspect
   tests under deliberate oversubscription would manufacture CPU load, which non-negotiable 5 in
   `AGENTS.md` forbids; and `M-33`'s own numbers are the argument against it as a *check* — 14 of 20
@@ -96,6 +102,28 @@ normatively stops depending on the next person to sweep for violations.
   the measurement` and `ordering a stimulus`. The fourth is the one to argue with in review — it is
   the case `X-28` and `X-29` both left sites for and neither named, and the question a reader should
   put to it is "what would you have waited for".
+- **The classification has to be on the line, and nothing else counts.** The first version also read
+  the doc comment of any `SCREAMING_CASE` constant the line named, resolved workspace-wide, so that
+  a constant could document itself once instead of forty times. A review showed that for what it
+  was: `DELIVERY_BOUND` is declared in four files and doc'd "a bound on failure" in each, so a bare
+  sleep before a *positive* assertion was reported as classified with nothing written where it was
+  read. The channel is gone and cost nothing to remove — a constant used as a genuine bound reaches
+  a `timeout` and is never reported in the first place.
+- **`.expect()` is not counted, and the reason is written down.** `AGENTS.md` treats it as a panic
+  and this suite writes the defect that way, but 2 885 of the workspace's `.expect(` calls are
+  plumbing on an unrelated operation, and counting them would report nearly every wait in the tree.
+  What is counted instead is the **non-blocking read** underneath — `try_recv`, `try_next`,
+  `try_lock` — because nothing but the clock can have made one succeed. That closes the shape the
+  review demonstrated and leaves `foo().await.expect(…)` as a stated limit rather than a silent one.
+- **Review round 1 found three sites where the guard passed and the reason was wrong.** Two had an
+  answer to "what would you have waited for" and are now causal:
+  `bridge.rs::dropping_a_bridge_stops_the_forwarding` waits for `Arc::strong_count` to fall back to
+  one, which *is* "both legs noticed the drop" and is the property the test is named for; and
+  `call.rs::a_reinvite_200_is_retransmitted_until_it_is_acked` needed no wait at all, because an
+  mpsc receiver queues what arrives before its task is first polled. The third,
+  `tcp.rs`'s peer-goes-away window, has no observable in the public `Handle` API and now says so,
+  and says that under-wait makes it pass vacuously rather than fail. Six `ordering a stimulus` sites
+  remain, not the nine first claimed.
 
 ## Notes
 - **Reads with `X-40`**, which is the third instance of the family and proved the defect can live in

@@ -1036,6 +1036,139 @@ async fn settle_for_a_moment() {
                     f"for one spelling and the next author only has to write it differently",
                 )
 
+    def test_a_wrapper_in_another_crate_does_not_get_past_it(self):
+        """The rename, moved one crate over — a review defeated the first version of this exactly.
+
+        Reading one file's helpers made the whole wrapper rule a spelling again: `settle()` lives
+        in `sipx-testkit`, the test imports it, and the guard reported a clean tree. Wrappers are
+        collected from the whole workspace now, before any file is read for sites.
+        """
+        problems = self.mod.check(
+            self.tree(
+                {
+                    "crates/sipx-testkit/src/wait.rs": (
+                        "use std::time::Duration;\n\n"
+                        "pub async fn settle() {\n"
+                        "    tokio::time::sleep(Duration::from_millis(150)).await;\n"
+                        "}\n"
+                    ),
+                    "crates/sipx-call/tests/call.rs": (
+                        "use sipx_testkit::wait::settle;\n\n"
+                        "#[tokio::test]\n"
+                        "async fn a_packet_is_forwarded() {\n"
+                        "    let peer = start().await;\n"
+                        "    peer.send(&packet()).await;\n"
+                        "    settle().await;\n"
+                        '    assert_eq!(peer.received(), 1, "must have been forwarded");\n'
+                        "}\n"
+                    ),
+                }
+            )
+        ).problems
+        self.assertTrue(
+            problems,
+            "a wait wrapper declared in another crate was invisible, so the rename is defeated by "
+            "moving the helper one file over and importing it",
+        )
+
+    def test_a_name_shared_with_something_that_is_not_a_wait_is_not_reported(self):
+        """The price of collecting names workspace-wide, and where it has to be refused.
+
+        `MediaSession::flush` is a bare wait; `AsyncWriteExt::flush` on a `TcpStream` is not, and
+        this reader has no types to tell them apart. Reporting `stream.flush()` would ask an author
+        to write a classification that is false about the line in front of them, which teaches
+        exactly the wrong lesson — so a name any non-wrapper also declares is left alone.
+        """
+        self.assertEqual(
+            [],
+            self.mod.check(
+                self.tree(
+                    {
+                        "crates/sipx-media/src/session.rs": (
+                            "impl MediaSession {\n"
+                            "    pub async fn flush(&self, within: Duration) {\n"
+                            "        tokio::time::sleep(within).await;\n"
+                            "    }\n"
+                            "}\n"
+                        ),
+                        "crates/sipx-media/src/dtls.rs": (
+                            "impl Write for Channel {\n"
+                            "    fn flush(&mut self) -> std::io::Result<()> {\n"
+                            "        self.inner.flush()\n"
+                            "    }\n"
+                            "}\n"
+                        ),
+                        "crates/sipx-transport/tests/tcp.rs": (
+                            "#[tokio::test]\n"
+                            "async fn a_split_message_is_reassembled() {\n"
+                            '    stream.write_all(headers.as_bytes()).await.expect("writes");\n'
+                            '    stream.flush().await.expect("flushes");\n'
+                            '    assert_eq!(incoming.request.body().len(), body.len());\n'
+                            "}\n"
+                        ),
+                    }
+                )
+            ).problems,
+        )
+
+    def test_a_constant_documented_elsewhere_does_not_classify_a_site(self):
+        """A suppression channel keyed by name, which is what the first version of this had.
+
+        `DELIVERY_BOUND` is declared in four files and doc'd "a bound on failure" in each. Reading
+        constant documentation across the workspace meant naming one silenced a bare wait before a
+        *positive* assertion — the defect this story was filed for — with not a word written where
+        it was read. `X-35`'s standard is that the reason lives at the call site; a doc comment in
+        another crate is not the call site.
+        """
+        problems = self.mod.check(
+            self.tree(
+                {
+                    "crates/sipx-media/tests/bridge.rs": (
+                        "/// A bound on failure, not a window to measure in.\n"
+                        "const DELIVERY_BOUND: Duration = Duration::from_secs(10);\n"
+                    ),
+                    "crates/sipx-call/tests/call.rs": (
+                        "#[tokio::test]\n"
+                        "async fn a_packet_is_forwarded() {\n"
+                        "    let peer = start().await;\n"
+                        "    peer.send(&packet()).await;\n"
+                        "    tokio::time::sleep(DELIVERY_BOUND).await;\n"
+                        '    assert_eq!(peer.received(), 1, "must have been forwarded");\n'
+                        "}\n"
+                    ),
+                }
+            )
+        ).problems
+        self.assertTrue(
+            problems,
+            "a category phrase in another crate's constant documentation classified this site, "
+            "which is a suppression list keyed by constant name",
+        )
+
+    def test_a_non_blocking_read_is_the_claim_however_it_panics(self):
+        """`AGENTS.md` treats `expect` as a panic, and this suite writes the defect that way.
+
+        `.expect()` is not counted by name — 2 885 of them here are plumbing on an unrelated call,
+        and counting those would report almost every wait in the tree. What is counted is the
+        non-blocking read underneath: nothing but the clock can have made a `try_recv` succeed.
+        """
+        self.assertTrue(
+            self.problems(
+                """\
+#[tokio::test]
+async fn a_packet_is_forwarded() {
+    let peer = start().await;
+    peer.send(&packet()).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let got = peer.try_recv().expect("the packet must have been forwarded");
+    drop(got);
+}
+"""
+            ),
+            "a fixed wait followed by a non-blocking read was accepted because the panic was "
+            "spelled `.expect()` rather than `assert!`",
+        )
+
     def test_the_rule_covers_production_code_as_well_as_tests(self):
         """`X-40` proved the defect can live in `src/`, and most of this workspace's tests do too.
 

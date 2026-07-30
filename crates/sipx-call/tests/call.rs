@@ -1265,17 +1265,16 @@ async fn a_reinvite_200_is_retransmitted_until_it_is_acked() {
         .expect("sends");
 
     // Pump in-dialog requests into the call, which is what a real application does.
+    //
+    // No wait after this. The channel is the happens-before: `callee_incoming` is an mpsc
+    // receiver, so a request that arrives before this task is first polled is queued and delivered
+    // when it is polled, and nothing is lost by starting the pump late. The 100 ms sleep that used
+    // to sit here bought nothing (`X-44`).
     tokio::spawn(async move {
         while let Some(incoming) = callee_incoming.recv().await {
             let _ = callee.handle(&incoming).await;
         }
     });
-    // Ordering a stimulus: the pump has to be receiving before the re-INVITE below is injected,
-    // or the request sits in the channel and the retransmission this test is about is answered by
-    // nobody. A spawned task that has not been polled yet reaches no observable state — there is
-    // nothing it sets and nothing it sends — and load lengthening this window only makes the
-    // ordering surer (`X-44`).
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // A re-INVITE, whose 200 this peer deliberately never acknowledges.
     let renegotiate = format!(
@@ -1544,9 +1543,15 @@ async fn a_cancel_waits_for_a_late_provisional_rather_than_being_abandoned() {
     // Ring only *after* the caller has already given up waiting.
     //
     // Ordering a stimulus: the 180 this test injects has to land *after* the caller's own 250 ms
-    // timeout, not before it. Giving up puts nothing on the wire — a CANCEL cannot be sent until
-    // the provisional arrives, which is the whole point — so there is nothing to watch for, and
-    // load can only push this later, which is the direction that keeps the order (`X-44`).
+    // timeout at the top of this test, not before it. Giving up puts nothing on the wire — a
+    // CANCEL cannot be sent until the provisional arrives, which is the whole point — so there is
+    // nothing to watch for.
+    //
+    // Not "load can only push this later": load stretches this sleep and the dial's own 250 ms
+    // clock together, so the order is not guaranteed by the margin. What makes it tolerable is the
+    // direction of the failure — a 180 that arrives too early is answered by a caller still
+    // waiting, and the CANCEL below then arrives for the ordinary reason, so the test passes
+    // vacuously rather than flaking. It proves less than it looks on a loaded machine (`X-44`).
     tokio::time::sleep(Duration::from_millis(500)).await;
     let ringing = format!(
         "SIP/2.0 180 Ringing\r\n{}\r\n{}\r\n{};tag=peertag\r\n{}\r\n{}\r\nContent-Length: 0\r\n\r\n",

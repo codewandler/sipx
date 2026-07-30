@@ -252,9 +252,16 @@ however it is spelled — and reports it when an assertion depends on it. A wait
 condition is the event (a `timeout`, a `select!` arm beside another arm, a poll loop that re-tests
 its condition) is not reported at all, because those are the fixes this section asks for and a guard
 that charged for them would be switched off. The remedy for anything it does report is to wait for
-the thing, or to say **at the call site** which question the duration answers. The script's module
-documentation is the list of questions and the argument for each; this paragraph is the rule they
-implement, and stays the normative one.
+the thing, or to say **in a comment on that line** which question the duration answers. The script's
+module documentation is the list of questions and the argument for each; this paragraph is the rule
+they implement, and stays the normative one.
+
+The question to put to any of those comments is **"what would you have waited for"**. A review of
+the guard asked it of three sites that claimed there was nothing, and found an answer at two: a
+`Bridge` releases its `Arc` on the sessions when its legs stop, which is the property the test was
+named for; and an mpsc receiver queues what arrives before its task is first polled, which had made
+the wait unnecessary from the start. Where there is an answer, the answer is the fix — the comment
+is only for where there genuinely is not one, and it has to say which way the failure falls.
 
 ### The same two questions, for digits
 

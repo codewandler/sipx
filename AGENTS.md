@@ -105,12 +105,15 @@ the roadmap does not have fails the gate rather than being quietly dropped.
 **a fixed wall-clock duration may bound a failure, or define silence. It may not stand in for a
 happens-before.** It reads the *shape* rather than the word `sleep` — `std::thread::sleep`, a
 `sleep_until`, an `advance`, a bare `interval.tick()`, a hand-rolled deadline spin and a two-line
-private helper are the same thing — and it reads `src/` as well as `tests/`, because `X-40`'s
-instance of the defect was written in production code and most of this workspace's tests live in
-`#[cfg(test)]` modules beside it. **A wait it reports is either converted into a wait for the thing,
-or classified at the call site**: which of the four questions the duration answers, in the script's
-own words. There is no suppression list, under any name — the rule had been swept for twice and
-enforced by nothing, and two violations landed in the wave after the second sweep (`X-44`).
+private helper **declared anywhere in the workspace** are the same thing — and it reads `src/` as
+well as `tests/`, because `X-40`'s instance of the defect was written in production code and most of
+this workspace's tests live in `#[cfg(test)]` modules beside it. **A wait it reports is either
+converted into a wait for the thing, or classified in a comment on the line itself**: which of the
+four questions the duration answers, in the script's own words. Nothing else classifies it — not a
+constant's documentation, not a paragraph elsewhere in the file — because a reason that can be
+written somewhere else is a suppression list with extra steps, and there is no suppression list here
+under any name. The rule had been swept for twice and enforced by nothing, and two violations landed
+in the wave after the second sweep (`X-44`).
 
 `check-features.sh` is not optional garnish. `--all-features` hides a whole class of breakage:
 an optional transport that does not compile with its feature turned off is invisible until a

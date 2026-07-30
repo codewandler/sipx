@@ -3797,8 +3797,9 @@ mod tests {
         // Ordering a stimulus: the forged packet has to reach the receive path *before* the
         // genuine stream resumes, or the test proves nothing about the buffer being poisoned.
         // A packet rejected on its SSRC moves no counter — that is what rejecting it means — so
-        // there is nothing to poll for here, and load lengthening this window only makes the
-        // ordering surer (`X-44`).
+        // there is nothing to poll for here. Under-wait makes this test pass having proved
+        // nothing rather than fail, which is the direction to accept and the thing to suspect if
+        // it ever stops catching a regression (`X-44`).
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // The genuine stream still gets through.

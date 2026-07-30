@@ -30,6 +30,14 @@ bare are one shape, because the check reads the call's own name and not the modu
 nothing and awaits nothing else, *is* a bare wait, and calls to it are wait sites. That is the
 spelling a grep can never see, and it is one hop away from the obvious one.
 
+Those wrappers are collected **from the whole workspace**, not from the file being read. The first
+version of this check read one file, which meant the rename was defeated by moving the helper into
+`sipx-testkit` and importing it — the reviewer's `pub async fn settle()`, two files and zero
+comments, and the guard reported a clean tree. A shape that stops being a shape when it crosses a
+crate boundary is a spelling again. The cost of collecting names workspace-wide is that a function
+*sharing a name* with a wrapper is read as one; that direction of error is deliberate, because it
+ends in a sentence somebody has to write rather than in a defect nobody sees.
+
 **A wait that is not on a clock is not a wait.** Two shapes complete on the event rather than on
 the duration, and both are recognised structurally, with no comment asked of them:
 
@@ -57,15 +65,26 @@ one that fails under load while proving nothing about the diff under test.
 The reason has to be a **classification**, not a description. "Give the far end a moment to catch
 up" leaves the next reader exactly where the unannotated version did; what the rule needs to know
 is *which question this duration answers*. The categories are below, each with the spellings it is
-recognised by, and one of them has to appear in a comment attached to the wait — the contiguous
-`//` block above it, or a trailing comment on the line — or in the doc comment of the named
-constant the duration comes from. The call site, in other words.
+recognised by, and one of them has to appear **in a comment attached to the wait** — the contiguous
+`//` block immediately above it, or a trailing comment on the line. Nothing else counts.
 
-**There is no suppression list, under any name.** No path is special, no file is blessed, and
-nothing here can be silenced from a distance: `X-26`'s guard passed with a phantom claim in place
-because the claim was in a fourth file nobody had listed, `X-35` was built without a list for that
-reason, and this is the same decision. A wait this reports is either classifiable — in which case
-the classification belongs at the site, where the next reader is — or it is the defect.
+**There is no suppression list, under any name**, and nothing here can be silenced from a distance.
+The first version of this check also read the doc comment of any `SCREAMING_CASE` constant the line
+named, resolved across the whole workspace, on the reasoning that a named constant documents itself
+once instead of forty times. That was a suppression channel keyed by name: `DELIVERY_BOUND` is
+declared in four files and doc'd "a bound on failure" in each, so
+
+    tokio::time::sleep(DELIVERY_BOUND).await;
+    assert_eq!(peer.received(), 1, "the packet must have been forwarded");
+
+— a bare wait before a *positive* assertion, which is this story's whole subject — was reported as
+classified, with not one word written where it was read. The channel is gone. It cost nothing to
+remove, because a constant used as a genuine bound on failure reaches a `timeout` rather than a bare
+wait and is never reported in the first place; what it bought was the ability to import a silence.
+`X-26`'s guard passed with a phantom claim in place because the claim was in a fourth file nobody
+had listed, `X-35` was built without a list for that reason, and this is the same decision. A wait
+this reports is either classifiable — in which case the classification belongs at the site, where
+the next reader is — or it is the defect.
 
 # The categories
 
@@ -92,15 +111,17 @@ direction that fails.
 
 **Ordering a stimulus.** The wait separates two things the test itself injects — a 180 before a
 200, a header block before its body, a peer going away before the answer is written — rather than
-waiting for something to arrive. A longer wait preserves that order rather than breaking it, which
-is what makes it safe, and the site has to say what it looked for and why nothing observable sits
-between the two. It is the weakest of the four and the one to argue with in review: the question a
-reader should ask is "what would you have waited for", and where there is an answer, the answer is
-the fix.
+waiting for something to arrive. The site has to say what it looked for and why nothing observable
+sits between the two, and it has to say **which way the failure falls**: a wait too short here
+should make the test pass having proved nothing, not fail. It is the weakest of the four and the
+one to argue with in review. The question a reader should ask is "what would you have waited for",
+and where there is an answer, the answer is the fix — a review of this story asked it of three
+sites and found an answer at two of them, one an `Arc::strong_count` and one an mpsc channel that
+had made the wait unnecessary all along.
 
 # What it cannot see, stated rather than implied
 
-Three limits, all deliberate, because a guard whose edges are undocumented gets trusted past them.
+Four limits, all deliberate, because a guard whose edges are undocumented gets trusted past them.
 
 **It reads blocks, not data flow.** The assertion has to be reachable from the wait without leaving
 its block. A wait whose consequence is asserted three functions away is not reported, and there is
@@ -110,6 +131,13 @@ the shape almost every instance in this workspace has.
 **It cannot tell whether a stated category is true.** Nothing mechanical can. What it enforces is
 that the claim is *made*, at the line, in the diff — which is what turns "somebody happened to read
 this carefully" into "a reviewer was handed a falsifiable sentence".
+
+**It reads a claim about the awaited thing, not every way a test can panic.** An `assert!`, a
+`panic!` and a non-blocking read all count; a bare `.expect()` does not, and `_ASSERTION` explains
+why at length — 2 885 of them in this workspace are error handling on an unrelated call. A wait
+followed only by `foo().await.expect("…")` on the thing it was waiting for is therefore not
+reported. That is a genuine hole, and the narrower `try_recv().expect("…")` shape which is how this
+suite actually writes the defect is closed.
 
 **It says nothing about a duration's value, or about one duration doing two jobs.** A five
 millisecond bound on failure is correctly classified and still far too short, and `X-40`'s defect —
@@ -209,7 +237,21 @@ _SPIN = re.compile(r"\bwhile\b.*(?:Instant::now\s*\(\s*\)|\.elapsed\s*\(\s*\))\s
 _RELATIVE_TIMEOUT = re.compile(r"\btimeout\s*\(")
 
 #: Where an assertion is written, in the spellings this workspace uses.
+#:
+#: `.expect()` is deliberately not here, and the omission is load-bearing. `AGENTS.md` treats it as
+#: a panic, and `sleep(150ms).await; peer.try_recv().expect("…")` is exactly this rule's defect —
+#: but the workspace contains 2 885 `.expect(` calls and nearly all of them are plumbing on an
+#: unrelated operation (`peer.send_to(…).await.expect("sends")`), not a claim about what the wait
+#: was waiting for. Counting them would report almost every wait in the tree, and a guard that
+#: reports everything is read as reporting nothing. What is counted instead is the shape below.
 _ASSERTION = re.compile(r"\bassert(?:_eq|_ne|_matches)?!|\bpanic!|\bdebug_assert(?:_eq|_ne)?!")
+
+#: A read that does not wait. `try_recv`, `try_next`, `try_lock` — the question "is it here yet",
+#: asked without blocking. Whether the answer is asserted, unwrapped or matched on does not change
+#: what it is: nothing but the clock can have made it succeed, so a fixed wait in front of one is
+#: standing in for the arrival as surely as an `assert_eq!` would be. This is the `.expect()` case
+#: the docstring above declines to catch by its own name, caught by what it is doing.
+_NONBLOCKING_READ = re.compile(r"\.try_(?:recv|next|lock|read|write|iter|borrow)\s*\(")
 
 #: The clock read *inside* an assertion — the third category's own shape, and the one with no wait
 #: in it at all.
@@ -219,7 +261,6 @@ _FN = re.compile(r"\bfn\s+(?P<name>\w+)")
 _LOOP_HEAD = re.compile(r"^\s*(?:\}\s*)?(?:loop\s*\{|while\b|for\b)")
 _LEAVES_EARLY = re.compile(r"\b(?:break|return)\b|\?;")
 _PAUSED = re.compile(r"start_paused\s*=\s*true|\btime::pause\s*\(\s*\)")
-_CONSTANT = re.compile(r"\b([A-Z][A-Z0-9_]{2,})\b")
 
 #: Below this the reader has stopped understanding the workspace rather than found a small one. A
 #: checker that silently reads nothing reports nothing, forever — the failure `X-35` found in the
@@ -378,11 +419,15 @@ def assertion_depends_on(lines: list[str], at: int, end: int) -> bool:
     That is the shape of the defect: stimulate, let a duration pass, claim the stimulus arrived.
     A wait with nothing asserted after it in its own block is pacing or a stimulus in its own
     right, and this rule has nothing to say about it.
+
+    A non-blocking read counts as the claim, whatever is done with its answer. See
+    `_NONBLOCKING_READ`: it is the `.expect()` case, recognised by what it does rather than by the
+    method it panics through.
     """
     depth = 0
     for index in range(at + 1, end + 1):
         body = code(lines[index])
-        if _ASSERTION.search(body):
+        if _ASSERTION.search(body) or _NONBLOCKING_READ.search(body):
             return True
         depth += body.count("{") - body.count("}")
         if depth < 0:
@@ -412,70 +457,82 @@ def stated_reason(lines: list[str], at: int) -> str:
     return " ".join(parts)
 
 
-def declared_constants(lines: list[str]) -> dict[str, str]:
-    """Every `const NAME` in a file, with the comment block above it.
+class Declaration(NamedTuple):
+    """One function, reduced to what decides whether calling it is a wait."""
 
-    A named constant is the other half of "at the call site": `DELIVERY_BOUND` is the reason,
-    written once where the constant is declared, and repeating it at forty call sites would make
-    the forty-first the one that says something else. Collected across the whole workspace, because
-    `SETTLE_PAST_TIMERS` is declared in `sipx-testkit` and named in `sipx-call`'s soak — a reader
-    that only looked in the file in front of it would ask that site to restate a paragraph.
+    name: str
+    #: Whether its body is a bare wait and nothing else — see `wrappers`.
+    wraps_a_wait: bool
+    #: Whether it takes a receiver. A method is called as `.name(`, and this reader has no type
+    #: information, so `stream.flush()` and `MediaSession::flush` are indistinguishable to it.
+    is_method: bool
+
+
+def declarations(lines: list[str]) -> list[Declaration]:
+    """Every function in a file, and whether calling it is calling a bare wait.
+
+    A wrapper is the one spelling a grep can never see: a function that waits on the clock, asserts
+    nothing and awaits nothing else, so calling it is indistinguishable from writing the wait
+    inline. Non-wrappers are collected too, because a name shared with one is what tells the caller
+    the name is ambiguous.
     """
-    found = {}
-    for index, line in enumerate(lines):
-        declaration = re.search(r"\bconst\s+([A-Z][A-Z0-9_]{2,})\b", code(line))
-        if not declaration:
-            continue
-        above, doc = index - 1, []
-        while above >= 0 and is_comment(lines[above]):
-            doc.append(lines[above].lstrip().lstrip("/").strip())
-            above -= 1
-        found[declaration.group(1)] = " ".join(reversed(doc))
-    return found
-
-
-def constant_documentation(text: str, documented: dict[str, str]) -> str:
-    """What the constants named on this line say about themselves."""
-    return " ".join(documented.get(name, "") for name in _CONSTANT.findall(text))
-
-
-def wrappers(lines: list[str], spans: list[tuple[int, int]]) -> set[str]:
-    """Functions that are a bare wait wearing a different name.
-
-    The one spelling a grep can never see. A function qualifies when it waits on the clock,
-    asserts nothing, and awaits nothing else — so calling it is indistinguishable from writing the
-    wait inline, which means it has to be treated as one.
-    """
-    found = set()
-    for start, end in spans:
+    found = []
+    for start, end in functions(lines):
         body = [code(line) for line in lines[start : end + 1]]
         joined = "\n".join(body)
+        name = _FN.search(body[0])
+        if not name:
+            continue
+        signature = " ".join(body[: min(6, len(body))]).split(")")[0]
         # A helper that pauses the runtime's clock hands its callers a virtual one, so calling it
         # is not a wall-clock wait however it is spelled. `pass_the_refresh_deadline` in
         # `update.rs` is `pause(); advance(46s); resume()`, which is the honest fix rather than
         # the defect.
-        if _PAUSED.search(joined):
-            continue
         waiting = [
             index
             for index, line in enumerate(body)
             if _WAIT_CALL.search(line) or _ADVANCE.search(line) or _TICK.search(line)
         ]
-        if not waiting or _ASSERTION.search(joined):
-            continue
         awaits = [index for index, line in enumerate(body) if ".await" in line]
-        if any(index not in waiting for index in awaits):
-            continue
-        name = _FN.search(body[0])
-        if name:
-            found.add(name.group("name"))
+        wraps = bool(
+            waiting
+            and not _PAUSED.search(joined)
+            and not _ASSERTION.search(joined)
+            and all(index in waiting for index in awaits)
+        )
+        found.append(
+            Declaration(name.group("name"), wraps, re.search(r"\bself\b", signature) is not None)
+        )
     return found
 
 
-def sites(path: pathlib.Path, lines: list[str]) -> list[Site]:
-    """Every place in one file where a clock decides whether an assertion holds."""
-    spans = functions(lines)
-    named = wrappers(lines, spans)
+def wrapper_names(declared: dict[str, list[Declaration]]) -> set[str]:
+    """The names for which calling *anything* so called is calling a bare wait.
+
+    Two conditions, and the second is what keeps the first usable.
+
+    **Every function with the name has to be a wrapper.** One that is not makes the name ambiguous,
+    and a guard that reported the ambiguous case would be asking an author to write a
+    classification that is false about the call in front of them — which is worse than the hole it
+    closes.
+
+    **At least one of them has to be a free function.** A method is called as `.name(`, this reader
+    has no type information, and `stream.flush()` on a `TcpStream` is not `MediaSession::flush`
+    however alike the two lines look. A method-only name is therefore scoped to the file that
+    declares it, by the caller, where the receiver is almost always the type that declared it.
+    """
+    return {
+        name
+        for name, group in declared.items()
+        if all(one.wraps_a_wait for one in group) and any(not one.is_method for one in group)
+    }
+
+
+def sites(path: pathlib.Path, lines: list[str], named: set[str]) -> list[Site]:
+    """Every place in one file where a clock decides whether an assertion holds.
+
+    `named` is every wait wrapper in the workspace, not in this file. See `wrappers`.
+    """
     called = (
         re.compile(r"\b(?:" + "|".join(re.escape(name) for name in sorted(named)) + r")\s*\(")
         if named
@@ -613,14 +670,14 @@ def elapsed_sites(path: pathlib.Path, lines: list[str]) -> list[Site]:
 
 
 def problems_in(
-    path: pathlib.Path, lines: list[str], where: str, documented: dict[str, str]
+    path: pathlib.Path, lines: list[str], where: str, named: set[str]
 ) -> tuple[list[str], int, int]:
     """Every unclassified clock-decided assertion in a file, and what was counted getting there."""
     spans = functions(lines)
     problems: list[str] = []
     waits = 0
     classified = 0
-    for site in sites(path, lines):
+    for site in sites(path, lines, named):
         span = next(
             ((start, end) for start, end in spans if start <= site.line <= end),
             (0, len(lines) - 1),
@@ -633,12 +690,7 @@ def problems_in(
             if not assertion_depends_on(lines, site.line, span[1]):
                 continue
         waits += 1
-        reason = (
-            stated_reason(lines, site.line)
-            + " "
-            + constant_documentation(site.text, documented)
-        )
-        if _CLASSIFIED.search(reason):
+        if _CLASSIFIED.search(stated_reason(lines, site.line)):
             classified += 1
             continue
         problems.append(
@@ -668,12 +720,28 @@ def check(root: pathlib.Path) -> Report:
         path: path.read_text(encoding="utf-8").splitlines()
         for path in sorted((root / "crates").rglob("*.rs"))
     }
-    documented: dict[str, str] = {}
-    for lines in read.values():
-        documented.update(declared_constants(lines))
+    # Every wait wrapper anywhere in the workspace, collected before any file is read for sites. A
+    # helper that hides a sleep does so wherever it is declared, and reading one file at a time is
+    # what let `sipx_testkit::settle()` past this check.
+    everywhere: dict[str, list[Declaration]] = {}
+    per_file: dict[pathlib.Path, dict[str, list[Declaration]]] = {}
+    for path, lines in read.items():
+        here: dict[str, list[Declaration]] = {}
+        for one in declarations(lines):
+            everywhere.setdefault(one.name, []).append(one)
+            here.setdefault(one.name, []).append(one)
+        per_file[path] = here
+    named = wrapper_names(everywhere)
     for path, lines in read.items():
         where = path.relative_to(root)
-        problems, waits, classified = problems_in(path, lines, str(where), documented)
+        # Plus this file's own methods, which cannot be resolved across files without knowing the
+        # receiver's type. See `wrapper_names`.
+        local = {
+            name
+            for name, group in per_file[path].items()
+            if all(one.wraps_a_wait for one in group)
+        }
+        problems, waits, classified = problems_in(path, lines, str(where), named | local)
         report.problems += problems
         report.waits += waits
         report.classified += classified
