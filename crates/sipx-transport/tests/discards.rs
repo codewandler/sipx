@@ -44,6 +44,33 @@ const LOOKBACK: usize = 10;
 /// The marker that says a discard has been thought about (§12.1).
 const MARKER: &str = "// discard:";
 
+/// Words in a log message that mean something was thrown away.
+///
+/// **This list is the limit of the check, and it is a real one.** A discarded *result* is found
+/// structurally — `let _ =` is unambiguous — but a `tracing` line that reports a loss can only be
+/// recognised by what it says, and there is no closed vocabulary for that. The first version of this
+/// list held three words and missed two live sites: `tcp.rs`'s "closing connection on framing error"
+/// and `ws.rs`'s "closing on a malformed websocket message", each of which drops a connection and
+/// everything in flight on it.
+///
+/// So: adding a word here is cheap and the failure mode is a false positive, which costs one
+/// `// discard:` comment. Leaving one out is a silent hole. When in doubt, add the word.
+const LOSS_WORDS: &[&str] = &[
+    "dropping",
+    "dropped",
+    "discard",
+    "ignoring",
+    "ignored",
+    "malformed",
+    "abandon",
+    "refus",
+    "unmatched",
+    "framing error",
+    "not keeping up",
+    "never answered",
+    "lost",
+];
+
 /// A discard the scan found.
 #[derive(Debug)]
 struct Site {
@@ -99,10 +126,8 @@ fn unexplained(path: &Path) -> Vec<Site> {
         // A `tracing` line whose own message says something was thrown away. §12.1 is explicit that
         // logging a discard is not counting it: logs rotate, and "how often" should not be answered
         // with `grep | wc -l`.
-        let reports_a_drop = trimmed.contains("tracing::")
-            && ["dropping", "ignoring", "discard"]
-                .iter()
-                .any(|word| trimmed.contains(word));
+        let reports_a_drop =
+            trimmed.contains("tracing::") && LOSS_WORDS.iter().any(|word| trimmed.contains(word));
         if !discards && !reports_a_drop {
             continue;
         }

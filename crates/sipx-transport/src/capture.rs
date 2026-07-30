@@ -407,6 +407,28 @@ fn ones_complement(header: &[u8]) -> u16 {
 // ---------------------------------------------------------------------------------------------
 // Redaction (§13.3)
 // ---------------------------------------------------------------------------------------------
+//
+// # Why this reads bytes rather than a parsed message
+//
+// A UDP datagram is captured *before* parsing (§13.2), so redaction has to work on whatever a peer
+// sent — including a message the parser would reject, which is precisely where a credential turns up
+// somewhere unexpected. That decision is right and is kept.
+//
+// What it costs is that this code cannot assume one spelling. SIP's grammar permits several for the
+// same header, the parser accepts them, and a first version of this module gated on the single
+// literal `"authorization:"` — so a folded header, an `Authorization : …` with whitespace before the
+// colon, and a bare-LF message each carried a digest response into a capture file in cleartext. The
+// shape below exists to stop that class rather than those three cases:
+//
+// 1. **Lines are split on CRLF, bare LF or bare CR.** Anything else makes a malformed message one
+//    long line, and one long line matches no header name at all.
+// 2. **Continuation lines are unfolded into one logical header** before anything looks at it
+//    (RFC 3261 §7.3.1), because a fold can fall in the middle of a parameter name.
+// 3. **A header's name is the bytes before its first colon, with trailing whitespace trimmed**, not
+//    a literal prefix — HCOLON allows whitespace before the colon (§25.1).
+// 4. **A line whose name cannot be determined is redacted conservatively rather than skipped.** If
+//    the structure is not there, a credential could be anywhere, and the cost of guessing wrong is a
+//    mangled value in a capture instead of a leaked one.
 
 /// Header parameters whose values are live credentials.
 const REDACTED_PARAMS: &[&[u8]] = &[
@@ -423,83 +445,254 @@ const REDACTED_PARAMS: &[&[u8]] = &[
     b"+sip.instance",
 ];
 
-/// What a redacted header value is replaced with.
+/// Headers whose value is an authentication credential.
+///
+/// Separate from [`CONTACT_HEADERS`] because only these carry an auth *scheme*, and the scheme
+/// decides whether the credential is a named parameter or one opaque token.
+const AUTH_HEADERS: &[&[u8]] = &[
+    b"authorization",
+    b"proxy-authorization",
+    b"authentication-info",
+    b"proxy-authenticate",
+    b"www-authenticate",
+];
+
+/// Headers that carry credential *parameters* without a scheme. `m` is `Contact`'s compact form.
+const CONTACT_HEADERS: &[&[u8]] = &[b"contact", b"m"];
+
+/// Schemes whose credential is one opaque token rather than named parameters.
+///
+/// RFC 8898 registers `Bearer` for SIP, and `Basic` — removed from SIP by RFC 3261 §22.1 — is still
+/// what a misconfigured gateway sends. In both the token *is* the credential, so there is no
+/// parameter to find and the whole of it goes. An unrecognised scheme whose value carries no `=` is
+/// treated the same way, because a token68 is the only other thing it can be.
+const OPAQUE_SCHEMES: &[&[u8]] = &[b"bearer", b"basic"];
+
+/// What a redacted value is replaced with.
 const REDACTION: &[u8] = b"REDACTED";
 
-/// Strip the secrets §13.3 names, in place over the message bytes.
+/// One physical line and the terminator that ended it.
 ///
-/// Returns `None` when nothing was found, so an unredacted message is not copied. Works on bytes
-/// rather than a parsed message because a UDP datagram is captured *before* parsing (§13.2) and a
-/// malformed message must still be redacted — it is exactly the case where a credential ends up
-/// somewhere unexpected.
-#[must_use]
-pub fn redact(message: &[u8]) -> Option<Bytes> {
-    let mut out: Vec<u8> = Vec::new();
-    let mut changed = false;
-    let mut rest = message;
-    let mut in_body = false;
+/// The terminator is carried rather than normalised because the **body** must keep its exact byte
+/// length: `Content-Length` counts it, and rewriting a bare LF inside an SDP body as CRLF would leave
+/// every message in the capture inconsistent with its own header.
+struct Line<'a> {
+    text: &'a [u8],
+    terminator: &'a [u8],
+}
 
-    loop {
-        let (line, tail) = match find(rest, b"\r\n") {
-            Some(at) => (
-                rest.get(..at).unwrap_or(&[]),
-                rest.get(at.saturating_add(2)..).unwrap_or(&[]),
-            ),
-            None => (rest, &[][..]),
+/// Split a message on any of the three terminators one arrives with.
+///
+/// RFC 3261 §7 says CRLF, and §13.2 promises a malformed message is captured anyway — so a peer that
+/// sends bare LF must not thereby switch redaction off.
+fn lines(message: &[u8]) -> Vec<Line<'_>> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut at = 0usize;
+    while at < message.len() {
+        let width = match message.get(at) {
+            Some(b'\r') if message.get(at.saturating_add(1)) == Some(&b'\n') => 2,
+            Some(b'\r' | b'\n') => 1,
+            _ => 0,
         };
-
-        // The blank line ends the headers; everything after it is the body, where the SRTP key
-        // lives.
-        if !in_body && line.is_empty() {
-            in_body = true;
+        if width == 0 {
+            at = at.saturating_add(1);
+            continue;
         }
+        let end = at.saturating_add(width);
+        out.push(Line {
+            text: message.get(start..at).unwrap_or(&[]),
+            terminator: message.get(at..end).unwrap_or(&[]),
+        });
+        at = end;
+        start = end;
+    }
+    if start < message.len() {
+        out.push(Line {
+            text: message.get(start..).unwrap_or(&[]),
+            terminator: &[],
+        });
+    }
+    out
+}
 
-        let redacted = if in_body {
-            redact_body_line(line)
+fn is_wsp(byte: u8) -> bool {
+    byte == b' ' || byte == b'\t'
+}
+
+/// Whether a line is a continuation of the header above it (RFC 3261 §7.3.1).
+fn is_continuation(line: &[u8]) -> bool {
+    line.first().copied().is_some_and(is_wsp)
+}
+
+/// Join a header and its continuation lines into one logical line.
+///
+/// §7.3.1 makes a fold equivalent to a single space, which is what it is replaced with. Unfolding has
+/// to happen before anything reads the line: a fold may fall inside a parameter name, so
+/// `respo\r\n nse="…"` is a `response` parameter and matches nothing until it is joined up.
+fn unfold(physical: &[Line<'_>], from: usize, to: usize, separator: &[u8]) -> Vec<u8> {
+    let mut logical = Vec::new();
+    for index in from..to {
+        let Some(line) = physical.get(index) else {
+            continue;
+        };
+        if index == from {
+            logical.extend_from_slice(line.text);
         } else {
-            redact_header_line(line)
+            logical.extend_from_slice(separator);
+            logical.extend_from_slice(line.text.trim_ascii_start());
+        }
+    }
+    logical
+}
+
+/// A header's name, lowercased — the bytes before the first colon with trailing whitespace trimmed.
+///
+/// `None` when there is no colon, which means this is not a line whose name can be established.
+fn header_name(line: &[u8]) -> Option<Vec<u8>> {
+    let at = line.iter().position(|byte| *byte == b':')?;
+    Some(line.get(..at)?.trim_ascii_end().to_ascii_lowercase())
+}
+
+/// Strip the secrets §13.3 names.
+///
+/// Returns `None` when nothing was found, so an unredacted message is never copied.
+pub(crate) fn redact(message: &[u8]) -> Option<Bytes> {
+    let physical = lines(message);
+    let mut out: Vec<u8> = Vec::with_capacity(message.len().saturating_add(16));
+    let mut changed = false;
+    let mut in_body = false;
+    let mut index = 0usize;
+
+    while index < physical.len() {
+        let Some(line) = physical.get(index) else {
+            break;
         };
-        match redacted {
-            Some(line) => {
-                changed = true;
-                out.extend_from_slice(&line);
+
+        if in_body {
+            // Length-preserving, because `Content-Length` counts these bytes.
+            match redact_body_line(line.text) {
+                Some(redacted) => {
+                    changed = true;
+                    out.extend_from_slice(&redacted);
+                }
+                None => out.extend_from_slice(line.text),
             }
-            None => out.extend_from_slice(line),
+            out.extend_from_slice(line.terminator);
+            index = index.saturating_add(1);
+            continue;
         }
 
-        if find(rest, b"\r\n").is_none() {
-            break;
+        // The empty line ends the headers. Its own terminator is part of the separator and is copied
+        // through unchanged.
+        if line.text.is_empty() {
+            in_body = true;
+            out.extend_from_slice(line.terminator);
+            index = index.saturating_add(1);
+            continue;
         }
-        out.extend_from_slice(b"\r\n");
-        rest = tail;
+
+        // This line plus any continuation of it are one header.
+        let mut end = index.saturating_add(1);
+        while physical
+            .get(end)
+            .is_some_and(|next| is_continuation(next.text))
+        {
+            end = end.saturating_add(1);
+        }
+
+        // §7.3.1 makes a fold equivalent to a single space, so that is the reading a parser gets and
+        // the one tried first. If it finds nothing and the header *was* folded, the fold is removed
+        // entirely and the line is scanned again: a fold inside a token names no parameter in SIP, but
+        // "no parser would read that as a credential" is a worse thing to be wrong about than one
+        // extra scan of a rare line. Fail safe on spellings — that is the whole lesson of this module.
+        let redacted = redact_header(&unfold(&physical, index, end, b" ")).or_else(|| {
+            (end.saturating_sub(index) > 1)
+                .then(|| redact_header(&unfold(&physical, index, end, b"")))
+                .flatten()
+        });
+        match redacted {
+            Some(redacted) => {
+                changed = true;
+                // Emitted unfolded: the fold is equivalent to a space (§7.3.1), and a redacted
+                // record is not byte-exact in any case (§13.3).
+                out.extend_from_slice(&redacted);
+                out.extend_from_slice(b"\r\n");
+            }
+            None => {
+                // Untouched, so the original bytes go through exactly — folds, terminators and all.
+                for at in index..end {
+                    if let Some(original) = physical.get(at) {
+                        out.extend_from_slice(original.text);
+                        out.extend_from_slice(original.terminator);
+                    }
+                }
+            }
+        }
+        index = end;
     }
 
     changed.then(|| Bytes::from(out))
 }
 
-/// Redact the credential parameters of one header line.
-fn redact_header_line(line: &[u8]) -> Option<Vec<u8>> {
-    // Only headers that can carry one, so a `To` display name containing the word "response" is
-    // left alone.
-    let carries_credential = [
-        b"authorization:".as_slice(),
-        b"proxy-authorization:".as_slice(),
-        b"authentication-info:".as_slice(),
-        b"proxy-authenticate:".as_slice(),
-        b"www-authenticate:".as_slice(),
-        b"contact:".as_slice(),
-        b"m:".as_slice(),
-    ]
-    .iter()
-    .any(|name| starts_with_ci(line, name));
-    if !carries_credential {
-        return None;
+/// Redact one logical header line, if it is one that can carry a secret.
+fn redact_header(line: &[u8]) -> Option<Vec<u8>> {
+    match header_name(line) {
+        Some(name) if AUTH_HEADERS.contains(&name.as_slice()) => redact_auth_header(line),
+        Some(name) if CONTACT_HEADERS.contains(&name.as_slice()) => redact_params(line, false),
+        // A named header that carries no credential: a `From` display name reading `response=me` is
+        // not a credential and is left alone.
+        Some(_) => None,
+        // No colon, so there is no name to go on. Redact conservatively: this is the malformed case,
+        // and being wrong costs a mangled value rather than a leaked one.
+        None => redact_params(line, false),
     }
+}
 
+/// Redact an authentication header, whichever shape its scheme gives it.
+fn redact_auth_header(line: &[u8]) -> Option<Vec<u8>> {
+    let colon = line.iter().position(|byte| *byte == b':')?;
+    let after_colon = colon.saturating_add(1);
+    let value = line.get(after_colon..).unwrap_or(&[]);
+
+    // The scheme is the first token of the value; the credential is whatever follows it.
+    let lead = value
+        .iter()
+        .position(|byte| !is_wsp(*byte))
+        .unwrap_or(value.len());
+    let token = value.get(lead..).unwrap_or(&[]);
+    let width = token
+        .iter()
+        .position(|byte| is_wsp(*byte))
+        .unwrap_or(token.len());
+    let scheme = token.get(..width).unwrap_or(&[]).to_ascii_lowercase();
+    let rest_at = after_colon.saturating_add(lead).saturating_add(width);
+    let rest = line.get(rest_at..).unwrap_or(&[]);
+
+    let opaque = OPAQUE_SCHEMES.contains(&scheme.as_slice())
+        // An unrecognised scheme whose credential carries no `=` has no parameter to find, so the
+        // credential is the token itself. Fail safe rather than leave it.
+        || (!scheme.is_empty() && !rest.trim_ascii().is_empty() && !rest.contains(&b'='));
+
+    if opaque {
+        let mut redacted = Vec::with_capacity(line.len());
+        redacted.extend_from_slice(line.get(..rest_at).unwrap_or(&[]));
+        redacted.push(b' ');
+        redacted.extend_from_slice(REDACTION);
+        return Some(redacted);
+    }
+    redact_params(line, false)
+}
+
+/// Replace every credential parameter on a line.
+///
+/// `preserve_len` keeps each replacement the same width as what it replaced, which the body needs and
+/// a header does not — see [`redact_body_line`].
+fn redact_params(line: &[u8], preserve_len: bool) -> Option<Vec<u8>> {
     let mut out = line.to_vec();
     let mut changed = false;
     for name in REDACTED_PARAMS {
-        while let Some(replaced) = redact_param(&out, name) {
+        while let Some(replaced) = redact_param(&out, name, preserve_len) {
             out = replaced;
             changed = true;
         }
@@ -507,10 +700,23 @@ fn redact_header_line(line: &[u8]) -> Option<Vec<u8>> {
     changed.then_some(out)
 }
 
-/// Replace the first not-yet-redacted `name=value` in `line`.
+/// The bytes a redacted value is replaced with.
+fn replacement(width: usize, preserve_len: bool) -> Vec<u8> {
+    if !preserve_len {
+        return REDACTION.to_vec();
+    }
+    let mut padded = Vec::with_capacity(width);
+    padded.extend_from_slice(REDACTION.get(..width.min(REDACTION.len())).unwrap_or(&[]));
+    while padded.len() < width {
+        padded.push(b'X');
+    }
+    padded
+}
+
+/// Replace the first not-yet-redacted `name=value` on a line.
 ///
-/// Returns `None` once there is nothing left to do, which is what terminates the loop above.
-fn redact_param(line: &[u8], name: &[u8]) -> Option<Vec<u8>> {
+/// Returns `None` once there is nothing left to do, which is what terminates the caller's loop.
+fn redact_param(line: &[u8], name: &[u8], preserve_len: bool) -> Option<Vec<u8>> {
     let mut from = 0usize;
     loop {
         let at = find_ci(line, name, from)?;
@@ -541,6 +747,12 @@ fn redact_param(line: &[u8], name: &[u8]) -> Option<Vec<u8>> {
         let mut end = value_start;
         while let Some(&byte) = line.get(end) {
             if quoted {
+                // A quoted-pair escapes the next octet, including a quote (RFC 3261 §25.1), so the
+                // string does not end here and the escaped byte is part of the value.
+                if byte == b'\\' && line.get(end.saturating_add(1)).is_some() {
+                    end = end.saturating_add(2);
+                    continue;
+                }
                 if byte == b'"' {
                     break;
                 }
@@ -551,69 +763,103 @@ fn redact_param(line: &[u8], name: &[u8]) -> Option<Vec<u8>> {
         }
 
         let value = line.get(value_start..end).unwrap_or(&[]);
-        // Already done: without this the caller's `while let` would never terminate.
-        //
-        // An *empty* value is skipped for a different reason: there is no secret in it, and
-        // rewriting it would change the bytes of a message that had nothing to hide — which would
-        // make `redacted=yes` appear in the capture comment for no reason.
-        if value == REDACTION || value.is_empty() {
-            from = end;
+        // Already done, or nothing there to do. Without the first the caller's loop would not
+        // terminate; the second keeps a message that had nothing to hide from being rewritten.
+        if value == replacement(value.len(), preserve_len).as_slice() || value.is_empty() {
+            from = end.max(at.saturating_add(1));
             continue;
         }
 
         let mut out = Vec::with_capacity(line.len());
         out.extend_from_slice(line.get(..value_start).unwrap_or(&[]));
-        out.extend_from_slice(REDACTION);
+        out.extend_from_slice(&replacement(value.len(), preserve_len));
         out.extend_from_slice(line.get(end..).unwrap_or(&[]));
         return Some(out);
     }
 }
 
-/// Redact an SDP `a=crypto` key (RFC 4568 §6.1).
+/// Redact a line of a message body.
 ///
-/// **Length-preserving, unlike the header redaction above**, and that is not fussiness: the body's
-/// length is declared in `Content-Length`, so shortening a line here would leave every message in
-/// the capture inconsistent with its own header and unparseable by the tool the capture exists to be
-/// read in. The header case has no such constraint.
+/// **Length-preserving, unlike a header**, and that is not fussiness: the body's length is declared in
+/// `Content-Length`, so shortening a line here would leave every message in the capture inconsistent
+/// with its own header and unparseable by the tool the capture exists to be read in.
 fn redact_body_line(line: &[u8]) -> Option<Vec<u8>> {
-    if !starts_with_ci(line, b"a=crypto:") {
-        return None;
+    if starts_with_ci(line, b"a=crypto:") {
+        return redact_inline_keys(line);
     }
-    let at = find(line, b"inline:")?;
-    let value_start = at.saturating_add(b"inline:".len());
-    let mut end = value_start;
-    while let Some(&byte) = line.get(end) {
-        // The key runs to the `|` that begins the optional lifetime or MKI, or to the end of the
-        // parameter. Those two are not secret and are kept.
-        if matches!(byte, b'|' | b' ' | b'\t' | b';') {
-            break;
+    if starts_with_ci(line, b"k=") {
+        return redact_sdp_key(line);
+    }
+    // A SIP message nested in a body — `message/sipfrag` (RFC 3420), or a part of a multipart — puts
+    // real headers where this function sees body lines. Handled by name, like any other header, but
+    // length-preserving because it is inside the body either way.
+    match header_name(line) {
+        Some(name)
+            if AUTH_HEADERS.contains(&name.as_slice())
+                || CONTACT_HEADERS.contains(&name.as_slice()) =>
+        {
+            redact_params(line, true)
         }
-        end = end.saturating_add(1);
+        _ => None,
     }
-    let width = end.saturating_sub(value_start);
+}
+
+/// Redact every `inline:` key on an `a=crypto` line (RFC 4568 §6.1).
+///
+/// Every one, because `key-params = key-param *(";" key-param)` (§9.1) permits more than one and a
+/// single-occurrence search left the second key in the file.
+fn redact_inline_keys(line: &[u8]) -> Option<Vec<u8>> {
+    const INLINE: &[u8] = b"inline:";
+    let mut out: Vec<u8> = Vec::with_capacity(line.len());
+    let mut cursor = 0usize;
+    let mut changed = false;
+
+    while let Some(found) = find_from(line, INLINE, cursor) {
+        let value_start = found.saturating_add(INLINE.len());
+        let mut end = value_start;
+        while let Some(&byte) = line.get(end) {
+            // The key runs to the `|` that begins the optional lifetime or MKI, or to the end of the
+            // parameter. Neither of those is secret and both are kept.
+            if matches!(byte, b'|' | b' ' | b'\t' | b';') {
+                break;
+            }
+            end = end.saturating_add(1);
+        }
+        let width = end.saturating_sub(value_start);
+        out.extend_from_slice(line.get(cursor..value_start).unwrap_or(&[]));
+        if width > 0 {
+            out.extend_from_slice(&replacement(width, true));
+            changed = true;
+        }
+        cursor = end;
+    }
+    out.extend_from_slice(line.get(cursor..).unwrap_or(&[]));
+    changed.then_some(out)
+}
+
+/// Redact an SDP `k=` key (RFC 4566 §5.12).
+///
+/// Deprecated by the RFC itself and still a key in cleartext when it appears. `k=<method>:<key>` —
+/// the method is kept, the key goes. `k=prompt` carries no key and is left alone.
+fn redact_sdp_key(line: &[u8]) -> Option<Vec<u8>> {
+    let colon = line.iter().position(|byte| *byte == b':')?;
+    let value_start = colon.saturating_add(1);
+    let width = line.len().saturating_sub(value_start);
     if width == 0 {
         return None;
     }
-
-    let mut replacement = Vec::with_capacity(width);
-    replacement.extend_from_slice(REDACTION.get(..width.min(REDACTION.len())).unwrap_or(&[]));
-    while replacement.len() < width {
-        replacement.push(b'X');
-    }
-
     let mut out = Vec::with_capacity(line.len());
     out.extend_from_slice(line.get(..value_start).unwrap_or(&[]));
-    out.extend_from_slice(&replacement);
-    out.extend_from_slice(line.get(end..).unwrap_or(&[]));
+    out.extend_from_slice(&replacement(width, true));
     Some(out)
 }
 
-/// Case-sensitive substring search.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+/// Case-sensitive substring search from `from`.
+fn find_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    (0..=haystack.len().saturating_sub(needle.len()))
+    (from..=haystack.len().saturating_sub(needle.len()))
         .find(|&at| haystack.get(at..at.saturating_add(needle.len())) == Some(needle))
 }
 
@@ -641,7 +887,34 @@ impl Capture {
     /// Called from the driver loop, which is what makes the sequence number meaningful. Everything
     /// expensive — redaction, the synthetic headers, the write — happens after this returns or on
     /// another thread.
-    pub(crate) fn observe(
+    /// Observe a message if a capture is running, and do **no work at all** if one is not.
+    ///
+    /// The laziness is a contract rather than an optimisation, which is why it lives in one function
+    /// with a test on it instead of being a discipline at three call sites. `bytes` is a closure
+    /// because producing them is not free on every path — an inbound stream message has to be
+    /// re-serialised to be captured (§13.2) — and an endpoint with no capture configured must not pay
+    /// for a file nobody asked for. The story's Acceptance says capture "costs nothing when off", and
+    /// a version of this that took `&Bytes` made that false for every TCP, TLS and WebSocket message.
+    pub(crate) fn observe_if_capturing(
+        capture: Option<&mut Self>,
+        meters: &Meters,
+        local: SocketAddr,
+        peer: SocketAddr,
+        transport: TransportKind,
+        direction: Direction,
+        bytes: impl FnOnce() -> Bytes,
+    ) {
+        // Both arms of this return before `bytes` is called, which is the whole point.
+        let Some(capture) = capture else {
+            return;
+        };
+        if capture.is_failed() {
+            return;
+        }
+        capture.observe(meters, &bytes(), local, peer, transport, direction);
+    }
+
+    fn observe(
         &mut self,
         meters: &Meters,
         bytes: &Bytes,
@@ -650,9 +923,6 @@ impl Capture {
         transport: TransportKind,
         direction: Direction,
     ) {
-        if self.is_failed() {
-            return;
-        }
         let (bytes, redacted) = if self.redact {
             match redact(bytes) {
                 Some(clean) => (clean, true),
@@ -842,6 +1112,286 @@ mod tests {
         // No trailing CRLF: the last line must still be processed.
         let no_crlf = redact(b"Authorization: Digest response=\"xyz\"").expect("redacted");
         assert!(!text(&no_crlf).contains("xyz"));
+    }
+
+    /// Join lines with CRLF and end the headers, so a fixture cannot accidentally indent a line and
+    /// thereby turn it into a folded continuation of the one above — which is a real SIP rule and was
+    /// how the first draft of these tests fooled itself.
+    fn message(lines: &[&str]) -> Vec<u8> {
+        joined(lines, "\r\n")
+    }
+
+    /// The same, with a chosen terminator, for the spellings that are the point of the test.
+    fn joined(lines: &[&str], terminator: &str) -> Vec<u8> {
+        let mut out = String::new();
+        for line in lines {
+            out.push_str(line);
+            out.push_str(terminator);
+        }
+        out.push_str(terminator);
+        out.into_bytes()
+    }
+
+    /// **The class the security review found**: legal spellings of the same header that a literal
+    /// `"authorization:"` prefix does not match, each of which carried a digest response into a
+    /// capture file in cleartext. Table-driven because the class is the point, not the cases — a new
+    /// spelling belongs here as a row.
+    #[test]
+    fn every_legal_spelling_of_a_credential_header_is_redacted() {
+        const SECRET: &str = "SPELLINGSECRET0001";
+
+        let folded = message(&[
+            "REGISTER sip:example.net SIP/2.0",
+            "Authorization: Digest username=\"alice\",",
+            "\tresponse=\"SPELLINGSECRET0001\"",
+            "Content-Length: 0",
+        ]);
+        let folded_mid_name = message(&[
+            "REGISTER sip:example.net SIP/2.0",
+            "Authorization: Digest respo",
+            " nse=\"SPELLINGSECRET0001\"",
+        ]);
+        let space_before_colon = message(&[
+            "REGISTER sip:example.net SIP/2.0",
+            "Authorization : Digest response=\"SPELLINGSECRET0001\"",
+        ]);
+        let tab_before_colon = message(&[
+            "REGISTER sip:example.net SIP/2.0",
+            "Authorization\t: Digest response=\"SPELLINGSECRET0001\"",
+        ]);
+        let bare_lf = joined(
+            &[
+                "REGISTER sip:example.net SIP/2.0",
+                "Authorization: Digest response=\"SPELLINGSECRET0001\"",
+            ],
+            "\n",
+        );
+        let bare_cr = joined(
+            &[
+                "REGISTER sip:example.net SIP/2.0",
+                "Authorization: Digest response=\"SPELLINGSECRET0001\"",
+            ],
+            "\r",
+        );
+        let unterminated =
+            b"REGISTER sip:example.net SIP/2.0\r\nAuthorization: Digest response=\"SPELLINGSECRET0001\"".to_vec();
+
+        let cases: [(&str, &[u8]); 7] = [
+            ("folded onto a continuation line (RFC 3261 §7.3.1)", &folded),
+            (
+                "folded in the middle of the parameter name",
+                &folded_mid_name,
+            ),
+            (
+                "whitespace before the colon, which HCOLON permits (§25.1)",
+                &space_before_colon,
+            ),
+            ("a tab before the colon", &tab_before_colon),
+            ("bare LF, which made the whole datagram one line", &bare_lf),
+            ("bare CR", &bare_cr),
+            ("no trailing terminator at all", &unterminated),
+        ];
+
+        for (spelling, raw) in cases {
+            let redacted =
+                redact(raw).unwrap_or_else(|| panic!("{spelling}: nothing was redacted at all"));
+            let out = text(&redacted);
+            assert!(
+                !out.contains(SECRET),
+                "{spelling}: the credential survived redaction: {out}"
+            );
+        }
+    }
+
+    /// A line whose name cannot be established is redacted conservatively rather than skipped.
+    ///
+    /// The fail-safe half of the fix. "Unparseable" is exactly when a credential turns up somewhere
+    /// unexpected, so the absence of structure must not become the absence of redaction.
+    #[test]
+    fn a_line_with_no_header_name_is_redacted_conservatively() {
+        let raw = message(&[
+            "REGISTER sip:example.net SIP/2.0",
+            "GARBAGE WITHOUT A COLON response=\"CONSERVATIVE0004\"",
+        ]);
+        let out = text(&redact(&raw).expect("a nameless line is still scanned"));
+        assert!(!out.contains("CONSERVATIVE0004"), "{out}");
+    }
+
+    /// **B2**: `key-params = key-param *(";" key-param)` (RFC 4568 §9.1), so one line can carry more
+    /// than one key, and a single-occurrence search left the second in the file.
+    #[test]
+    fn every_inline_key_on_a_crypto_line_is_redacted() {
+        let raw = message(&[
+            "INVITE sip:bob@example.net SIP/2.0",
+            "Content-Length: 0",
+            "",
+            "v=0",
+            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:FIRSTKEY0005aaaaaaaaaaaaaaaaaaaa|2^20|1;inline:SECONDKEY0006bbbbbbbbbbbbbbbbbbb|2^20|2",
+        ]);
+        let redacted = redact(&raw).expect("both keys are redacted");
+        let out = text(&redacted);
+        assert!(
+            !out.contains("FIRSTKEY0005"),
+            "the first key survived: {out}"
+        );
+        assert!(
+            !out.contains("SECONDKEY0006"),
+            "the second key survived: {out}"
+        );
+        assert!(out.contains("|2^20|1"), "the lifetime is not secret: {out}");
+        assert!(out.contains("|2^20|2"), "{out}");
+        assert_eq!(
+            redacted.len(),
+            raw.len(),
+            "body redaction must preserve length"
+        );
+    }
+
+    /// An opaque credential is the whole token, so there is no parameter to find (RFC 8898).
+    #[test]
+    fn an_opaque_scheme_has_its_whole_credential_removed() {
+        for (scheme, secret) in [
+            ("Bearer", "BEARERTOKEN0007"),
+            ("bearer", "BEARERTOKEN0007"),
+            ("Basic", "BASICSECRET0008"),
+            // An unregistered scheme whose value carries no `=` can only be a token68.
+            ("Weird", "WEIRDTOKEN0009"),
+        ] {
+            let raw = message(&[
+                "REGISTER sip:example.net SIP/2.0",
+                &format!("Authorization: {scheme} {secret}"),
+            ]);
+            let out =
+                text(&redact(&raw).unwrap_or_else(|| panic!("{scheme} was not redacted at all")));
+            assert!(!out.contains(secret), "{scheme}: {out}");
+            // The scheme is kept: which scheme failed is the diagnosis.
+            assert!(out.contains(scheme), "{scheme} should survive: {out}");
+        }
+    }
+
+    /// A digest challenge still redacts by parameter rather than being read as an opaque token.
+    #[test]
+    fn a_digest_header_is_not_mistaken_for_an_opaque_credential() {
+        let raw = message(&[
+            "REGISTER sip:example.net SIP/2.0",
+            "Authorization: Digest realm=\"example.net\", nonce=\"n\", response=\"DIGEST0010\"",
+        ]);
+        let out = text(&redact(&raw).expect("redacted"));
+        assert!(!out.contains("DIGEST0010"), "{out}");
+        assert!(out.contains("realm=\"example.net\""), "{out}");
+        assert!(out.contains("nonce=\"n\""), "{out}");
+    }
+
+    /// SDP `k=` carries a key in cleartext (RFC 4566 §5.12). Deprecated, and still a key.
+    #[test]
+    fn an_sdp_key_field_is_redacted_but_prompt_is_not() {
+        let raw = message(&[
+            "INVITE sip:bob@example.net SIP/2.0",
+            "",
+            "v=0",
+            "k=base64:SDPKEY0011aaaa",
+        ]);
+        let redacted = redact(&raw).expect("a k= key is redacted");
+        let out = text(&redacted);
+        assert!(!out.contains("SDPKEY0011"), "{out}");
+        assert!(out.contains("k=base64:"), "the method is kept: {out}");
+        assert_eq!(redacted.len(), raw.len(), "length preserved");
+
+        let prompt = message(&["INVITE sip:bob@example.net SIP/2.0", "", "v=0", "k=prompt"]);
+        assert!(
+            redact(&prompt).is_none(),
+            "k=prompt carries no key, so there is nothing to rewrite"
+        );
+    }
+
+    /// A SIP message nested in a body (RFC 3420 `message/sipfrag`, or a multipart part) puts real
+    /// headers where the body scanner sees body lines.
+    #[test]
+    fn a_credential_nested_in_a_body_is_redacted() {
+        let raw = message(&[
+            "INVITE sip:bob@example.net SIP/2.0",
+            "Content-Type: message/sipfrag",
+            "",
+            "REGISTER sip:inner SIP/2.0",
+            "Authorization: Digest response=\"NESTEDSECRET0012\"",
+        ]);
+        let redacted = redact(&raw).expect("a nested credential is redacted");
+        let out = text(&redacted);
+        assert!(!out.contains("NESTEDSECRET0012"), "{out}");
+        assert_eq!(
+            redacted.len(),
+            raw.len(),
+            "a body stays the length Content-Length claims"
+        );
+    }
+
+    /// A quoted-pair does not end the quoted string (RFC 3261 §25.1), so the tail after an escaped
+    /// quote is part of the value rather than something to leave behind.
+    #[test]
+    fn an_escaped_quote_inside_a_value_does_not_end_it() {
+        let raw = message(&[
+            "REGISTER sip:example.net SIP/2.0",
+            "Authorization: Digest response=\"aaa\\\"TAIL0013\"",
+        ]);
+        let out = text(&redact(&raw).expect("redacted"));
+        assert!(
+            !out.contains("TAIL0013"),
+            "the escaped tail survived: {out}"
+        );
+    }
+
+    /// A message with nothing to hide is not copied, and is not marked as redacted.
+    ///
+    /// `redact`'s own contract, and the thing that keeps redaction off the cost of an ordinary
+    /// capture: a folded `From` header must come back untouched rather than silently unfolded.
+    #[test]
+    fn a_message_with_no_credential_is_never_rewritten() {
+        let folded = message(&[
+            "INVITE sip:bob@example.net SIP/2.0",
+            "From: \"Alice\"",
+            " <sip:alice@example.net>;tag=abcd",
+            "Subject: a response= that is not a parameter",
+        ]);
+        assert!(
+            redact(&folded).is_none(),
+            "nothing to redact must mean no copy, so a fold survives untouched"
+        );
+    }
+
+    /// **The "costs nothing when off" claim, as a test that fails if the cost comes back.**
+    ///
+    /// The Acceptance says capture must cost nothing when off, and a version of this module took
+    /// `&Bytes` — so every inbound TCP, TLS and WebSocket message was re-serialised and heap-allocated
+    /// to be handed to a capture that did not exist. That is invisible to a test asserting "no file
+    /// and zero counters", which is why the guard lives in one function and this asserts the closure
+    /// is never called.
+    #[test]
+    fn no_capture_means_the_bytes_are_never_produced() {
+        let meters = Meters::default();
+        let produced = std::cell::Cell::new(false);
+
+        Capture::observe_if_capturing(
+            None,
+            &meters,
+            "127.0.0.1:5060".parse().expect("valid"),
+            "127.0.0.1:5061".parse().expect("valid"),
+            TransportKind::Tcp,
+            Direction::In,
+            || {
+                produced.set(true);
+                Bytes::from_static(b"OPTIONS sip:x SIP/2.0\r\n\r\n")
+            },
+        );
+
+        assert!(
+            !produced.get(),
+            "with no capture configured the message must not even be serialised"
+        );
+        assert_eq!(
+            meters.snapshot().capture,
+            crate::counters::CaptureCounts::default(),
+            "and nothing is counted"
+        );
     }
 
     #[test]

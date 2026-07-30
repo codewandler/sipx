@@ -213,7 +213,9 @@ The snapshot covers, at minimum:
 - responses that matched no client transaction (RFC 3261 §16.7), counted whether or not an
   application is watching for them;
 - parse failures, per transport — a malformed datagram and a stream whose framing is lost are
-  the same failure on different transports;
+  the same failure on different transports, and both are counted. A connection task has no counters
+  in scope, so it reports the loss to the driver (`Event::FramingFailed`) and the driver counts it,
+  which keeps every counter in the crate at one increment site;
 - retransmissions sent — a rising count with no matching traffic growth is a peer that is not
   hearing us, and the difference between a network problem and an application one;
 - transactions timed out, per the timer that fired (B, F or H);
@@ -229,6 +231,15 @@ code changes.
 
 A discard whose reason is logged but not counted is still a failure here: logs rotate, and an
 operator asking "how often" deserves an answer that is not `grep | wc -l`.
+
+**The enumeration's limit, stated because it is real.** A discarded *result* is found structurally —
+`let _ = …` is unambiguous — but a log line that reports a loss can only be recognised by the words it
+uses, and there is no closed vocabulary for that. The check holds a list of words, and the first
+version of that list held three and missed two live sites: a TCP connection closed on a framing error
+and a WebSocket closed on a malformed message, each of which discards everything in flight on that
+connection. Adding a word costs a false positive and one comment; leaving one out is a silent hole, so
+the list errs long. It is not a proof that no silent discard exists — it is a ratchet that stops the
+ones it can name from coming back.
 
 ### 12.2 What the numbers do not promise
 
@@ -380,4 +391,56 @@ Three consequences, stated rather than discovered later:
 
 An endpoint may opt *out* — a capture taken in a lab against a test registrar has no secrets
 worth removing, and forcing redaction there would hide a digest bug from the one capture taken
-to find it. Opting out is explicit, per endpoint, and never the default.
+to find it. Opting out is explicit, per endpoint, and never the default. **It is deliberately not
+reachable from the command line**: a flag would put "ship the credentials" one word away from
+whoever is debugging an incident, which is when they are least able to weigh it.
+
+#### 13.3.1 Every spelling, not the common one
+
+**[sipx]** Redaction reads raw bytes, because a datagram is captured before parsing (§13.2) and a
+message that does not parse is exactly where a credential turns up somewhere unexpected. The price is
+that the scan cannot assume one spelling of a header, and a first implementation did: it matched the
+literal `authorization:` against physical lines split on CRLF. Three legal spellings walked past it,
+each carrying a digest response into a capture in cleartext — a folded header (§7.3.1), an
+`Authorization : …` with the whitespace HCOLON permits (§25.1), and a bare-LF message, which became
+one long line and so matched no header name at all.
+
+The rule is therefore structural rather than literal:
+
+1. Lines are split on **CRLF, bare LF or bare CR**.
+2. Continuation lines are **unfolded** into one logical header before anything reads it, because a
+   fold can fall inside a parameter name. The fold becomes a single space, as §7.3.1 says; if that
+   yields no credential and the header was folded, the fold is removed entirely and the line is
+   scanned again. A fold inside a token names no parameter in SIP, but "no parser would read that as
+   a credential" is a worse thing to be wrong about than one extra scan.
+3. A header's **name is the bytes before its first colon with trailing whitespace trimmed**, not a
+   prefix.
+4. **A line whose name cannot be established is redacted conservatively**, not skipped. Where the
+   structure is absent a credential could be anywhere, and being wrong that way costs a mangled value
+   in a capture instead of a leaked one.
+
+Two consequences are worth stating. A **redacted** header is written back unfolded, since the fold is
+equivalent to a space and a redacted record is not byte-exact in any case; an untouched header keeps
+its original bytes, folds and terminators included. And the **body** is never re-terminated — its
+length is declared in `Content-Length`, so a bare LF inside an SDP body stays a bare LF.
+
+#### 13.3.2 Also removed
+
+**[sipx]** Beyond the parameters §13.3 tabulates:
+
+- **An opaque credential.** `Authorization: Bearer <token>` (RFC 8898) and the long-deprecated
+  `Basic <base64>` carry the credential *as* the value, so there is no parameter to find and the whole
+  of it goes. An unrecognised scheme whose value contains no `=` is treated the same way, because a
+  token68 is the only other thing it can be. The scheme name is kept: which scheme failed is the
+  diagnosis.
+- **Every `inline:` key on an `a=crypto` line**, not the first. RFC 4568 §9.1 is
+  `key-params = key-param *(";" key-param)`, and a single-occurrence search left the second key in
+  the file.
+- **SDP `k=`** (RFC 4566 §5.12). Deprecated by its own RFC and still a key in cleartext. The method is
+  kept and the key goes; `k=prompt` names no key and is left alone.
+- **A credential in a nested message.** `message/sipfrag` (RFC 3420) and multipart bodies put real
+  headers where the body scanner sees body lines, so a credential header found there is redacted too —
+  length-preservingly, because it is inside the body.
+
+A `quoted-pair` does not end a quoted value (§25.1), so an escaped quote inside a digest response does
+not leave its tail behind.

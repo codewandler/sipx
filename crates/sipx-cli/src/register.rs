@@ -33,7 +33,8 @@ OPTIONS:
     --push-prid <T>      The identifier that service knows this device by
     --push-param <X>     Service-specific extra, when the service needs one
     --wake               Act as though a push arrived: refresh the binding and report the PURR
-    --capture <FILE>     Record the signalling to this pcapng file (credentials redacted)
+    --capture <FILE>     Record signalling to this pcapng file. Credentials are redacted;
+                         TLS is recorded decrypted. Still identifies who called whom
     --json               Report as JSON
 ";
 

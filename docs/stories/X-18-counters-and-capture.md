@@ -82,6 +82,26 @@ it exchanged recoverable as a capture that can be attached to a bug report.
   help text at run time, so registering the flag and documenting it was enough to cover it.
   **There is deliberately no flag to turn redaction off**, though the library allows it: exposing that
   would put "ship the credentials" one word away from someone debugging an incident at 3am.
+- **Security review round 1 — four blockers, all closed.** An independent review got a digest
+  `response` into the file in cleartext three ways, so "(credentials redacted)" was a false claim in a
+  security surface. What was wrong was not three cases but one assumption: the scan matched the literal
+  `authorization:` against lines split on CRLF only, so a folded header, an `Authorization : …` with
+  the whitespace HCOLON permits, and a bare-LF message each walked past it — the last switching
+  redaction off entirely, which contradicted this module's own stated design. Redaction is now
+  structural: split on CRLF/LF/CR, unfold into logical headers, take the name as the bytes before the
+  first colon, and **redact conservatively when a line has no name** rather than skipping it. Spec
+  §13.3.1. Also closed: every `inline:` key rather than the first (§13.3.2), opaque `Bearer`/`Basic`
+  credentials, SDP `k=`, credentials nested in a `message/sipfrag` body, and `quoted-pair`.
+- **A stream whose framing is lost is now counted.** `parse_failures` was reachable only on UDP, so it
+  read zero for four transports — the same defect class as the `adopted_late` counter deleted earlier.
+  A connection task has no counters in scope, so it reports `Event::FramingFailed` and the driver
+  counts it, which keeps one increment site per counter. The discard detector's word list missed both
+  sites; it is wider now and §12.1 states that the list *is* the limit.
+- **"Costs nothing when off" is now true, and tested.** It was not: `local_addr()` was a
+  `getsockname(2)` per observed message, and every inbound stream message was re-serialised for a
+  capture that did not exist. The address is a field now, and the bytes are a closure behind
+  `Capture::observe_if_capturing` — one function with one test asserting the closure never runs when
+  there is no capture, because "no file and zero counters" cannot see this.
 - **Media (Acceptance 3) is deliberately not done, and not merely unfinished.** "Join them" hides a
   design decision: `sipx-transport` cannot depend on `sipx-media`, so media counters either need a
   shared counters crate underneath both, or a parallel type of the same shape. The repo has already

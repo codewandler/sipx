@@ -32,6 +32,20 @@ pub enum Event {
         /// arrived over TLS must not be reported as cleartext.
         transport: TransportKind,
     },
+    /// Framing was lost, so the connection is being closed and everything in flight with it.
+    ///
+    /// Reported rather than only logged because it is the stream half of a parse failure, and §12
+    /// counts those *per transport*: "a malformed datagram and a stream whose framing is lost are
+    /// the same failure on different transports". The connection task has no counter in scope — it
+    /// is spawned before the driver — so it says what happened and the driver counts it, which is
+    /// also how every other counter in this crate stays at one increment site.
+    ///
+    /// A `Closed` follows. This does not replace it: what is lost and what is closed are two facts,
+    /// and an operator needs the first to explain the second.
+    FramingFailed {
+        /// Which connection lost framing.
+        key: ConnectionKey,
+    },
     /// A CRLF keep-alive arrived on this connection (RFC 5626 §4.4.1).
     ///
     /// Reported rather than dropped because it is the *pong* half of the mechanism: a UA that sent
@@ -525,7 +539,17 @@ async fn pump<S>(
                         Err(error) => {
                             // Framing is lost. Resynchronizing would mean guessing where the
                             // next message starts, which is how a body becomes a request.
+                            //
+                            // discard: everything in flight on this connection, which is the
+                            // largest single loss in this file. Counted, but not here — the
+                            // `FramingFailed` below carries it to the driver, which owns every
+                            // counter in this crate (§12.1). A connection task is spawned before the
+                            // driver exists and has no `Meters` in scope.
                             tracing::debug!(%error, %peer, "closing connection on framing error");
+                            // discard: the driver has stopped, so there is no longer anyone to tell
+                            // that framing was lost. The `Closed` below is discarded for the same
+                            // reason and the connection closes as it drops.
+                            let _ = events.send(Event::FramingFailed { key: key.clone() }).await;
                             break;
                         }
                     }
@@ -623,7 +647,9 @@ mod tests {
             Event::Message { message, .. } => {
                 assert_eq!(message.to_bytes().as_ref(), MESSAGE.as_bytes());
             }
-            Event::Pong { .. } | Event::Closed { .. } => panic!("expected a message"),
+            Event::Pong { .. } | Event::Closed { .. } | Event::FramingFailed { .. } => {
+                panic!("expected a message")
+            }
         }
     }
 
@@ -682,11 +708,25 @@ mod tests {
             .await
             .expect("writes");
 
-        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        // The loss is reported before the close, and both are needed: `FramingFailed` is what the
+        // driver counts as a parse failure on this transport (§12), and `Closed` is what fails the
+        // transactions bound to the connection. Reporting only the second would leave "everything in
+        // flight on this connection is gone" as a `tracing::debug!` and nothing else, which is what
+        // it was.
+        let first = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await
             .expect("no timeout")
             .expect("an event");
-        assert!(matches!(event, Event::Closed { .. }));
+        assert!(
+            matches!(first, Event::FramingFailed { .. }),
+            "a framing error must report the loss, not only the close: {first:?}"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("no timeout")
+            .expect("an event");
+        assert!(matches!(second, Event::Closed { .. }), "{second:?}");
     }
 
     /// The default refuses to carry unrelated outbound traffic over a connection a peer

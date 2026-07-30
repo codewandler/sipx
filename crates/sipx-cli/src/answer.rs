@@ -24,7 +24,8 @@ OPTIONS:
     --reject          Answer 603 Decline instead
     --busy            Answer 486 Busy Here instead
     --once            Exit after one call (default; kept for clarity in scripts)
-    --capture <FILE>  Record the signalling to this pcapng file (credentials redacted)
+    --capture <FILE>  Record signalling to this pcapng file. Credentials are redacted;
+                      TLS is recorded decrypted. Still identifies who called whom
     --json            Report as JSON
 ";
 

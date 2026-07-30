@@ -31,7 +31,8 @@ OPTIONS:
     --local <ADDR>    Local address to bind (default 0.0.0.0:0)
     --tcp             Use TCP rather than UDP
     --stats           Report call quality on exit: loss, jitter, round trip, MOS estimate
-    --capture <FILE>  Record the signalling to this pcapng file (credentials redacted)
+    --capture <FILE>  Record signalling to this pcapng file. Credentials are redacted;
+                      TLS is recorded decrypted. Still identifies who called whom
     --json            Report as JSON
 ";
 

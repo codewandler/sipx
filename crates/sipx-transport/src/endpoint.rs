@@ -713,6 +713,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         mtu: config.mtu,
         meters,
         capture,
+        local_addr,
         unmatched: None,
         stun_waiters: HashMap::new(),
         pong_waiters: HashMap::new(),
@@ -956,6 +957,12 @@ struct Driver {
     meters: Arc<Meters>,
     /// The running capture, if one was configured (§13). `None` is the ordinary case.
     capture: Option<Capture>,
+    /// The address this endpoint is bound to.
+    ///
+    /// Stored rather than asked of the socket. It cannot change after `bind`, and
+    /// `UdpSocket::local_addr` is a `getsockname(2)` — which a previous version of this called once
+    /// per observed message, capture on or off.
+    local_addr: SocketAddr,
     /// Where to send responses that match no client transaction, if anyone asked for them.
     ///
     /// `None` is the ordinary case and costs nothing: no channel exists, and the response is
@@ -1051,7 +1058,9 @@ impl Driver {
         }
         // Captured before parsing, so a malformed datagram is captured malformed: the bytes a
         // peer actually sent are the whole point of the exercise (§13.2).
-        self.observe(&datagram, source, TransportKind::Udp, Direction::In);
+        self.observe(source, TransportKind::Udp, Direction::In, || {
+            datagram.clone()
+        });
 
         match parse_datagram(datagram, &self.limits) {
             Ok(message) => self.on_message(message, source, TransportKind::Udp).await,
@@ -1158,8 +1167,17 @@ impl Driver {
                 // Re-serialised rather than raw: framing happened in the connection's task and the
                 // stream bytes are not retained, so §13.2 records that a stream capture is not
                 // byte-exact and does not pretend to be.
-                self.observe(&message.to_bytes(), source, transport, Direction::In);
+                // `to_bytes` re-serialises and allocates, so it is inside the closure: with no
+                // capture configured it never runs.
+                self.observe(source, transport, Direction::In, || message.to_bytes());
                 self.on_message(*message, source, transport).await;
+            }
+            tcp::Event::FramingFailed { key } => {
+                // The stream half of a parse failure, counted against the transport that carried it
+                // (§12). `Closed` follows and fails the transactions bound to the connection; this
+                // is the *loss* — everything in flight on a stream whose framing is gone — which
+                // until now was a `tracing::debug!` and nothing else.
+                self.meters.parse_failure(key.transport);
             }
             tcp::Event::Pong { key } => {
                 // First waiter for this connection, or nobody — a peer is entitled to send a
@@ -1565,17 +1583,22 @@ impl Driver {
     /// write happens elsewhere. Costs one `Option` check when no capture is configured.
     fn observe(
         &mut self,
-        bytes: &Bytes,
         peer: SocketAddr,
         transport: TransportKind,
         direction: Direction,
+        bytes: impl FnOnce() -> Bytes,
     ) {
-        // Read before the mutable borrow below, not because the borrow checker insists but because
-        // the address is the same for every record and reading it per message would be noise.
-        let local = self.local_addr();
-        if let Some(capture) = self.capture.as_mut() {
-            capture.observe(&self.meters, bytes, local, peer, transport, direction);
-        }
+        // `bytes` is a closure so that an endpoint with no capture pays nothing: see
+        // `Capture::observe_if_capturing`, which is where the guard and its test live.
+        Capture::observe_if_capturing(
+            self.capture.as_mut(),
+            &self.meters,
+            self.local_addr,
+            peer,
+            transport,
+            direction,
+            bytes,
+        );
     }
 
     /// Count and capture a SIP message on its way out.
@@ -1585,7 +1608,10 @@ impl Driver {
     /// which are not SIP messages and must not be counted as requests.
     fn observe_out(&mut self, bytes: &Bytes, target: &Target, is_response: bool) {
         self.meters.message_out(target.transport, is_response);
-        self.observe(bytes, target.addr, target.transport, Direction::Out);
+        // Already serialised — the send needs these bytes either way — so the clone is a refcount.
+        self.observe(target.addr, target.transport, Direction::Out, || {
+            bytes.clone()
+        });
     }
 
     /// Put bytes on the wire that are not a SIP message.
@@ -1784,9 +1810,7 @@ impl Driver {
     }
 
     fn local_addr(&self) -> SocketAddr {
-        self.socket
-            .local_addr()
-            .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)))
+        self.local_addr
     }
 }
 

@@ -460,3 +460,189 @@ async fn a_datagram_that_does_not_parse_is_still_captured() {
     let udp = endpoint.counters().transport(TransportKind::Udp);
     assert_eq!(udp.requests_in, 0, "a malformed datagram is not a request");
 }
+
+/// **The security review's three leaks, closed and asserted the way it found them**: a real socket
+/// into a real endpoint, then the file on disk searched for the secret.
+///
+/// Each of these spellings is legal SIP that a literal `"authorization:"` prefix does not match, and
+/// each one put a digest response into a capture in cleartext. The unit tests in `src/capture.rs`
+/// cover the rule; this covers the *path* — that the bytes reach the file through redaction and not
+/// around it.
+#[tokio::test]
+async fn no_legal_spelling_of_a_credential_reaches_the_file() {
+    // (what it is, the raw message, the secret that must not appear)
+    let cases: [(&str, String, &str); 5] = [
+        (
+            "folded onto a continuation line",
+            [
+                "REGISTER sip:example.net SIP/2.0",
+                "Via: SIP/2.0/UDP 127.0.0.1:9;branch=z9hG4bKfold",
+                "Call-ID: fold@sipx",
+                "Authorization: Digest realm=\"example.net\", nonce=\"n\",",
+                "\tresponse=\"FOLDEDSECRET0001\"",
+                "Content-Length: 0",
+                "",
+            ]
+            .join("\r\n"),
+            "FOLDEDSECRET0001",
+        ),
+        (
+            "whitespace before the colon (HCOLON)",
+            [
+                "REGISTER sip:example.net SIP/2.0",
+                "Via: SIP/2.0/UDP 127.0.0.1:9;branch=z9hG4bKhcolon",
+                "Call-ID: hcolon@sipx",
+                "Authorization : Digest response=\"HCOLONSECRET0002\"",
+                "Content-Length: 0",
+                "",
+            ]
+            .join("\r\n"),
+            "HCOLONSECRET0002",
+        ),
+        (
+            "bare LF line endings",
+            [
+                "REGISTER sip:example.net SIP/2.0",
+                "Via: SIP/2.0/UDP 127.0.0.1:9;branch=z9hG4bKbarelf",
+                "Call-ID: barelf@sipx",
+                "Authorization: Digest response=\"BARELFSECRET0003\"",
+                "Content-Length: 0",
+                "",
+            ]
+            .join("\n"),
+            "BARELFSECRET0003",
+        ),
+        (
+            "a second inline: key on one a=crypto line",
+            [
+                "INVITE sip:bob@example.net SIP/2.0",
+                "Via: SIP/2.0/UDP 127.0.0.1:9;branch=z9hG4bKtwokeys",
+                "Call-ID: twokeys@sipx",
+                "Content-Type: application/sdp",
+                "Content-Length: 141",
+                "",
+                "v=0",
+                "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:FIRSTKEY0005aaaaaaaaaaaaaaaaaaaa|2^20|1;inline:SECONDKEY0006bbbbbbbbbbbbbbbbbbb|2^20|2",
+                "",
+            ]
+            .join("\r\n"),
+            "SECONDKEY0006",
+        ),
+        (
+            "an opaque Bearer credential",
+            [
+                "REGISTER sip:example.net SIP/2.0",
+                "Via: SIP/2.0/UDP 127.0.0.1:9;branch=z9hG4bKbearer",
+                "Call-ID: bearer@sipx",
+                "Authorization: Bearer BEARERTOKEN0007xyz",
+                "Content-Length: 0",
+                "",
+            ]
+            .join("\r\n"),
+            "BEARERTOKEN0007",
+        ),
+    ];
+
+    for (spelling, message, secret) in cases {
+        let path = capture_path(&format!("leak-{secret}"));
+        let (endpoint, _incoming) = recording(&path).await;
+
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        peer.send_to(message.as_bytes(), endpoint.local_addr())
+            .await
+            .expect("sends");
+
+        until(
+            WRITING_BOUND,
+            "the message never reached the capture",
+            async || path.exists() && !read_capture(&path).packets.is_empty(),
+        )
+        .await;
+
+        // The whole file, byte for byte, the way the reviewer looked at it.
+        let raw = std::fs::read(&path).expect("readable");
+        let whole = String::from_utf8_lossy(&raw);
+        assert!(
+            !whole.contains(secret),
+            "{spelling}: {secret} IS PRESENT in {}",
+            path.display()
+        );
+        // And the message really did arrive, so this is not passing by capturing nothing.
+        assert!(
+            whole.contains("sipx") || whole.contains("SIP/2.0"),
+            "{spelling}: nothing recognisable was captured at all"
+        );
+    }
+}
+
+/// A capture's own failures are counted, and a dropped record leaves a visible gap.
+///
+/// `CaptureCounts::dropped` and `::errors` were previously asserted by nothing at all — a counter no
+/// test exercises is a counter that can be quietly wrong, which is the §12.2 lesson one level up. A
+/// one-deep queue is the cheap way to force an overrun: the writer cannot keep up with a burst, and
+/// what must not happen is the driver blocking to wait for it.
+#[tokio::test]
+async fn an_overrun_capture_drops_records_and_says_so() {
+    let path = capture_path("overrun");
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    let mut capture = CaptureConfig::new(&path);
+    capture.queue = 1;
+    config.capture = Some(capture);
+    let (endpoint, _incoming) = bind(config).await.expect("binds");
+
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    // A burst, so the bounded queue cannot absorb all of it.
+    for index in 0..400u32 {
+        let message = format!(
+            "OPTIONS sip:x SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:9;branch=z9hG4bKb{index}\r\n\
+             Call-ID: overrun-{index}@sipx\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n"
+        );
+        let _ = peer
+            .send_to(message.as_bytes(), endpoint.local_addr())
+            .await;
+    }
+
+    until(WRITING_BOUND, "no record was ever written", async || {
+        endpoint.counters().capture.records > 0
+    })
+    .await;
+
+    let counters = endpoint.counters();
+    // Whether an overrun happened depends on how the writer is scheduled, so this asserts the
+    // invariant rather than a number: every observed message either reached the writer or was
+    // counted as dropped, and none was lost without being counted.
+    let observed = counters.transport(TransportKind::Udp).requests_in;
+    assert!(
+        counters.capture.records + counters.capture.dropped >= observed,
+        "records {} + dropped {} must account for the {observed} messages observed: {counters:?}",
+        counters.capture.records,
+        counters.capture.dropped
+    );
+    assert_eq!(
+        counters.capture.errors, 0,
+        "nothing here should make a write fail: {counters:?}"
+    );
+
+    // Whatever did reach the file is readable, and its sequence numbers are strictly increasing —
+    // a dropped record leaves a gap rather than corrupting the order (§13.2).
+    let recorded = read_capture(&path);
+    let mut previous = 0u64;
+    for packet in &recorded.packets {
+        let seq: u64 = packet
+            .comment
+            .split("seq=")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|value| value.parse().ok())
+            .expect("every record carries its sequence number");
+        assert!(
+            seq > previous,
+            "sequence numbers must increase even across a gap: {seq} after {previous}"
+        );
+        previous = seq;
+    }
+}
