@@ -141,13 +141,51 @@ class TheReport(unittest.TestCase):
         )
 
     def test_the_report_states_its_blind_spot(self):
+        """The report must name the limit of its own reachability claim.
+
+        This used to assert the string `unverified against callers`, which was the caveat `X-30`
+        through `X-37` left standing. `X-38` resolved it by definition — the surface *is* what the
+        shipped application uses — and the replacement bullet quotes the old phrase while saying it is
+        gone, so the original assertion went on passing against text that no longer made the claim.
+        A test that cannot fail for the reason it was written is the defect `X-36` was filed over, so
+        it is pinned to the new limit instead: one application, entered per crate.
+        """
         text = maturity.render()
         self.assertIn("What this cannot see", text)
         self.assertIn(
-            "unverified against callers",
+            "one application's opinion",
             text,
-            "the `implemented`-does-not-mean-reachable caveat must survive edits",
+            "the report must say that its reachable surface is one application's, not everyone's",
         )
+        self.assertIn(
+            "per crate",
+            text,
+            "the surface is entered per crate, so a supported module nothing names is not caught",
+        )
+
+    def test_predicate_one_reports_the_application_as_its_basis(self):
+        """`X-38`: predicate 1 stopped being an attestation and says what it is computed from.
+
+        Both halves matter. If it went back to `attested` the report would be claiming less than the
+        gate now enforces; if it claimed to be computed without naming the application and the checker,
+        a reader could not tell what the computation was over — and the definition *is* the result here.
+        """
+        predicate = next(item for item in maturity.ALPHA if item.number == 1)
+        self.assertEqual(predicate.kind, "computed")
+        self.assertIn(maturity.SURFACE_APPLICATION, predicate.detail)
+        self.assertIn(maturity.SURFACE_CHECKER, predicate.detail)
+
+    def test_a_computed_predicate_is_not_labelled_an_attestation(self):
+        """The note over predicate 1 must not call its mechanical check an attestation."""
+        text = maturity.render()
+        self.assertNotIn("Predicate 1 is attested", text)
+        self.assertIn("Predicate 1 is computed", text)
+
+    def test_the_resolved_caveat_is_gone_from_the_layer_table(self):
+        """The four layers that carried `**no**` must no longer say a caller has not been found."""
+        text = maturity.render()
+        self.assertNotIn("| **no** |", text)
+        self.assertIn("Reachability basis", text)
 
     def test_no_aggregate_percentage_is_reported(self):
         """One number over unlike layers is the metric this story exists to refuse."""

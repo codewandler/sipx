@@ -100,6 +100,10 @@ jobs:
       - run: python3 scripts/test-pool-key.py
       - run: python3 scripts/test-audio-claims.py
       - run: python3 scripts/test-maturity.py
+      # X-38: the surface checker's own suite. Both bugs it had while being written reported
+      # nothing, which is indistinguishable from a clean tree — so it is tested on fabricated
+      # workspaces whose claims the test wrote.
+      - run: python3 scripts/test-app-surface.py
       # X-23: the interop harness's own suite. It stubs the container runtime, so it runs here in
       # seconds rather than in the `interop` job that needs a peer.
       - run: python3 scripts/test-interop-run.py
@@ -183,6 +187,10 @@ jobs:
       # The distance to 1.0 is generated from the registry and the board. A hand-kept maturity
       # number is the most tempting thing to let drift and the least useful when it has.
       - run: ./scripts/maturity.py --check
+      # Alpha predicate 1: the reachable-from-a-call surface is defined as what the shipped
+      # application uses, so this fails when a crate claims supported surface no application
+      # reaches, or when the application starts selecting something still marked experimental.
+      - run: ./scripts/check-app-surface.py --check
 
   # The documentation site. Built on every push and pull request so a broken link fails review
   # rather than the deployed page; published only from `main`.

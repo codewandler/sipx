@@ -1,5 +1,10 @@
 //! The DTLS handshake itself, over the media socket.
 //!
+//! **Experimental** (`A-8`): behind the `dtls` feature, which no shipped binary enables, so this is
+//! reachable from the library and from no application and nothing above it has constrained its shape
+//! (`X-38`). [`super`] says the same of what it keys; this module says it on its own page because a
+//! reader who lands here should not have to go up a level to find out (`A-8`'s rule).
+//!
 //! Everything RFC 5764 *decides* is in [`super`] and is compiled whatever the features say. This
 //! module is only the record layer and the handshake, and it is behind the `dtls` feature because
 //! it is where the C dependency lives.

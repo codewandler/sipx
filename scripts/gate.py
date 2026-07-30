@@ -105,6 +105,10 @@ def gate_steps(msrv: str) -> list[Step]:
         # is the kind of thing that can be quietly wrong for a long time. Milliseconds, and it also
         # asserts that every predicate names a story that exists.
         Step("maturity tests", "gate", ("python3", "scripts/test-maturity.py")),
+        # X-38: the surface checker decides which crates are on the reachable-from-a-call surface,
+        # which makes its own bugs invisible — both the ones it had while being written reported
+        # *nothing*, and a checker with no output looks exactly like a clean tree.
+        Step("app surface tests", "gate", ("python3", "scripts/test-app-surface.py")),
         # The interop harness reserves machine-global things and used to let two runs share them,
         # which `X-23` measured as both call tests timing out together. The suite stubs the
         # container runtime, so it belongs beside the others rather than in the `interop` job.
@@ -134,6 +138,10 @@ def gate_steps(msrv: str) -> list[Step]:
         # estimated. A stale answer is worse than none, because the only decision it feeds is when
         # to cut a release.
         Step("maturity", "docs", ("./scripts/maturity.py", "--check")),
+        # X-38, alpha predicate 1: the reachable surface is *defined* as what the shipped
+        # application uses, so a crate claiming supported surface nothing reaches — or an
+        # application reaching for something still marked experimental — is a red gate.
+        Step("app surface", "docs", ("./scripts/check-app-surface.py", "--check")),
         Step("fmt", "fmt", ("cargo", "fmt", "--all", "--check")),
         Step(
             "clippy",
