@@ -1350,10 +1350,6 @@ impl MediaSession {
         self.received.load(Ordering::Relaxed)
     }
 
-    /// What the receive path has seen: loss, jitter and sequence position.
-    ///
-    /// Readable mid-call, which is the point — statistics that only appear when the call ends
-    /// cannot be used to do anything about the call.
     /// How the call is going: loss, jitter, round-trip time and an estimated score.
     ///
     /// Readable at any point, not only at the end. The round-trip time is `None` until a report
@@ -1361,10 +1357,11 @@ impl MediaSession {
     /// control port on this side and a peer that answers, so it stays `None` against a peer
     /// that does not do RTCP rather than being filled in with a guess.
     pub async fn quality(&self) -> sipx_rtp::Quality {
-        // Read, never `report_block()`. That function *consumes* a reporting window — it is how
-        // `fraction_lost` is computed — so an application polling quality every second would
-        // quietly empty the window the next RTCP report was going to describe, and the far end
-        // would be told the call was clean.
+        // The counters directly, never `report_block()`: that one closes the reporting interval
+        // (RFC 3550 §6.4.1), so an application polling quality every second would quietly empty
+        // the window the next RTCP report was going to describe, and the far end would be told
+        // the call was clean. `pending_report_block()` would be safe now, but the whole-call
+        // figures below are not in a report block at all.
         let (lost, expected, jitter_units) = {
             let stats = self.stats.lock().await;
             (stats.cumulative_lost(), stats.expected(), stats.jitter())
@@ -1403,10 +1400,22 @@ impl MediaSession {
 
     /// The receiver report this session would send right now (RFC 3550 §6.4.1).
     ///
-    /// Reading it does not consume the report window, so polling it does not make the *next*
-    /// RTCP report claim a clean interval that was in fact lossy.
+    /// **Safe to poll**, as often as a dashboard likes: reading does not close the reporting
+    /// interval, so it cannot make the *next* RTCP report claim a clean interval that was in fact
+    /// lossy. That is a decision and not an accident (`M-33`) — §6.4.1 defines `fraction_lost` as
+    /// loss since the previous SR or RR *packet*, so the interval boundary is a report having been
+    /// sent, and a read is not one. The RTCP loop closes it, via
+    /// [`StreamStats::report_block`](sipx_rtp::rtcp::StreamStats::report_block); this reads with
+    /// [`pending_report_block`](sipx_rtp::rtcp::StreamStats::pending_report_block).
+    ///
+    /// `fraction_lost` is therefore whatever has accumulated since the last report went out, which
+    /// makes it a poor thing to *display*: it swings with each interval, and a poller sees whichever
+    /// interval it happened to catch. [`Self::quality`] is the figure for a caller to show.
+    ///
+    /// The two echo fields are zero here. They are filled in by the sending loop, which is the only
+    /// place that knows how long a peer's sender report has been held.
     pub async fn stats(&self) -> sipx_rtp::rtcp::ReportBlock {
-        self.stats.lock().await.report_block()
+        self.stats.lock().await.pending_report_block()
     }
 
     /// Wait until everything queued has actually been sent.

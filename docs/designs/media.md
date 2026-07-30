@@ -186,6 +186,18 @@ never reported as zero. The MOS is rendered to two decimal places on purpose —
 it has simplified impairment terms, and eight digits would invite comparing two calls on the last
 one.
 
+**Who closes a reporting interval.** `M-33` settled it: **a report being sent**, never a read.
+RFC 3550 §6.4.1 defines `fraction_lost` as loss since the previous SR or RR *packet*, so the
+boundary is a transmission and looking at the numbers is not one. `StreamStats` says that in its
+signatures — `pending_report_block(&self)` to read, `report_block(&mut self)` for the RTCP loop that
+actually sends — and `MediaSession::stats()` is therefore documented as safe to poll. Before that,
+one function did both under two comments that disagreed about which it was, and the observable
+consequence was a defect and not a documentation gap: an application polling `stats()` for a
+dashboard closed the window the next report was going to describe, so the peer was told a lossy
+interval was clean. `M-10` had found and fixed the same trap in `quality()` and left `stats()`
+holding it, which is why the fix here is a signature the trap cannot survive rather than a
+corrected sentence.
+
 ## Waiting for audio: two questions, two verbs
 
 Everything in this record is tested over real sockets against a real clock, so how a test *waits*
