@@ -10,6 +10,20 @@ below — alongside `help` and `version`. Global: `--json` switches the report t
 object on stdout; `-v`/`-vv` raise log verbosity on stderr (never stdout, so JSON stays
 parseable); `-h`/`--help` on any command.
 
+Every flag below whose name is followed by a placeholder — `--timeout <S>`, `--book <FILE>` — needs
+a value, and a flag given none is a usage error (exit 2) naming the flag. It is never read as
+absent: falling back to the default would run the command on something you did not ask for, and
+say nothing. Both ways a value goes missing are refused:
+
+- **Nothing after the flag.** `sipx register sip:alice@example.com --outbound --instance` is
+  refused, rather than registering a device identity that was generated instead of given.
+- **An empty value**, in either form — `--instance=` or `--instance ""`. No valued flag has a
+  meaningful empty value, and omitting a flag is already how you ask for its default, so an empty
+  one can only be a mistake. It is an easy one to make: an unset shell variable expands to exactly
+  this, which is how `--target "$ADDR"` arrives with nothing in it.
+
+`--help` is answered before any of this, so it still prints when the rest of the line is wrong.
+
 :::warning The binary cannot make an encrypted call
 
 `--tcp` is the only transport flag `dial` and `register` take, so every call the CLI places runs
@@ -90,7 +104,9 @@ report line with `status: "woken"` and, when the registrar assigned one, `purr`.
 Combinations that cannot work are usage errors (exit 2), never parsed and dropped: half a push
 pair, `--push-param` alone, `--wake` without the push flags, `--instance` without `--outbound`,
 an `--instance` that is not a URN (RFC 5626 §4.1's grammar is `instance-val = urn`), and a
-`--push-prid` that a URI parameter cannot hold.
+`--push-prid` that a URI parameter cannot hold. A valued flag left without a value — `--instance`
+with nothing after it, or `--target=` — is refused by [the rule above](#cli-reference) for every
+command, not just this one.
 
 ## `sipx peers`
 
