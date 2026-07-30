@@ -17,9 +17,9 @@ compliance document usually becomes untrue.
 | | Meaning | Count |
 |---|---|---|
 | ✅ implemented | Behaviour present and tested for the roles listed | 29 |
-| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 24 |
+| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 25 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 6 |
-| ⬜ not started | Tracked as a target, not started | 10 |
+| ⬜ not started | Tracked as a target, not started | 9 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
 
 The list is bounded on purpose: it is what sipx already touches plus what it has decided
@@ -39,8 +39,8 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 | [4475](https://www.rfc-editor.org/rfc/rfc4475) | SIP Torture Test Messages | ✅ implemented | uac, uas | — | The whole corpus, recovered bit-exactly from the RFC's own archive and classified by which layer must object to each message. |
 | [3261](https://www.rfc-editor.org/rfc/rfc3261) | SIP: Session Initiation Protocol | 🟡 partial | uac, uas | — | Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2). |
 | [3986](https://www.rfc-editor.org/rfc/rfc3986) | Uniform Resource Identifier: Generic Syntax | 🟡 partial | — | — | The SIP and SIPS subset. Percent-encoding and the reserved sets are handled; the general grammar is not. |
+| [5118](https://www.rfc-editor.org/rfc/rfc5118) | SIP Torture Test Messages for IPv6 | 🟡 partial | uac, uas | — | All twelve Appendix A messages, recovered bit-exactly from the RFC's own archive and classified by which layer must object, asserted at the SIP layer and — for the SDP bodies of §4.6, §4.8 and §4.9 — at the SDP layer too. Missing: §4.10's three-colon IPv6 reference, which the RFC says an implementation must tolerate and sipx rejects as a malformed address. That one gap is recorded as the sole entry in `rfc5118::DEVIATIONS` and asserted, so closing it fails the test that records it. |
 | [3966](https://www.rfc-editor.org/rfc/rfc3966) | The tel URI for Telephone Numbers | 🔤 syntax only | — | — | Represented and round-tripped. Nothing normalises or routes on a tel URI. |
-| [5118](https://www.rfc-editor.org/rfc/rfc5118) | SIP Torture Test Messages for IPv6 | ⬜ not started | — | — | The IPv6 counterpart of 4475. sipx parses IPv6 hosts but has never been asserted against this corpus. |
 
 ## Transport — how a message travels, and how the far end is found
 
