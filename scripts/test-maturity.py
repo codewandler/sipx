@@ -131,6 +131,53 @@ class ThePredicateRule(unittest.TestCase):
                 )
 
 
+class TheStatusVocabulary(unittest.TestCase):
+    """One definition of each status word, in the file that defines it (`X-38` rework).
+
+    The report asserted "`implemented` now means the code exists in a crate the shipped application
+    depends on". That was false — RFC 8996 is `implemented` citing `docs/specs/sip-tls.md` and no crate
+    — and it gave a load-bearing word a second meaning conflicting with the schema table that
+    `rfc-report.py` actually enforces. Two definitions across the two documents a reader consults is the
+    drift this repository keeps closing, so the report now reads the definition instead of restating it.
+    """
+
+    def test_the_definition_is_read_from_the_schema_table(self):
+        self.assertEqual(
+            maturity.status_definition("implemented"),
+            "Behaviour present and tested for the roles listed",
+        )
+
+    def test_a_word_the_schema_does_not_define_is_an_error(self):
+        """A reader that silently returned nothing would render an empty definition."""
+        with self.assertRaises(SystemExit):
+            maturity.status_definition("invented")
+
+    def test_the_report_quotes_the_schema_rather_than_redefining_it(self):
+        self.assertIn(maturity.status_definition("implemented"), maturity.render())
+
+    def test_the_report_does_not_claim_implemented_requires_a_crate(self):
+        """The false sentence, as a test. RFC 8996 is the counterexample and it is in the registry."""
+        report = maturity.render()
+        self.assertNotIn("the code exists in a crate", report)
+        spec_only = [
+            row
+            for row in maturity.registry()
+            if row.get("status") == "implemented"
+            and row.get("evidence")
+            and all(not str(item).startswith("crates/") for item in row["evidence"])
+        ]
+        self.assertTrue(
+            spec_only,
+            "if no `implemented` row rested on a specification alone, the sentence this test "
+            "guards against would have been true and this test is the thing to revisit",
+        )
+        self.assertIn(
+            8996,
+            [row["number"] for row in spec_only],
+            "RFC 8996 is the counterexample the rework was found by",
+        )
+
+
 class TheReport(unittest.TestCase):
     def test_the_committed_report_is_what_the_sources_say(self):
         """`--check`'s subject, asserted here too so a stale report fails the suite as well."""
