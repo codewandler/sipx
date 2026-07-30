@@ -170,6 +170,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The answer on the wire and the codec the session is built with can no longer name different
+  formats (`M-31`)** — an offer carrying `a=rtpmap:0 PCMU/08000` settled negotiation on µ-law at payload
+  type 0 while the answer named only `8`, so sipx sent on a number the answer never offered *and*
+  decoded the peer's A-law through a µ-law session: audible garbage rather than silence, with nothing
+  in the stack reporting an error. RFC 8866 §6.6 format identity was being decided twice — textually
+  where the answer was built, numerically where the codec was chosen.
+  - **One reader, in the lower crate.** `sipx-sdp`'s new `rtpmap` module is the only place the question
+    is answered: the encoding name case-insensitively, the clock rate and channel count **by value**,
+    an omitted channel count meaning one. `answer.rs`'s private rule is deleted rather than reduced to
+    a wrapper, and `sipx-call`'s `codec_named` now parses nothing — it asks the same predicate once per
+    codec it can run. The direction is forced by the dependency: `answer` builds what goes on the wire
+    and cannot call up, so only the lower crate can hold the rule. Nothing above it came down with it —
+    which rtpmaps map to a codec sipx has, and which codecs the application selected, both stay in
+    `sipx-call`.
+  - **Three live disagreements, not the one that was filed.** The reported leading-zero clock rate, the
+    same split in the *channel* field, and a **signed** rate that nobody predicted: `u32::from_str`
+    accepts `+8000`, so the parsing rule read it as eight thousand where the textual rule did not — the
+    same defect reached from the other side. A fourth appears under the `opus` feature, on Opus's own
+    rate. Enumerated by instrumenting the table, so this is measured rather than reasoned.
+  - **The single rule resolves those two opposite ways** — `08000` is tolerated, `+8000` is refused —
+    which is the argument that this is one reader and not a normalisation pass. Agreement comes from
+    there being one reader, not from any particular verdict. A rate that is empty, is not a decimal
+    digit string, or overflows a `u32` is a typed error and a non-match, never a panic.
+  - **Held by a table, not by a comment.** `call.rs:3945` previously claimed "the same rule the answer
+    was built with … The two have to agree" while nothing enforced it. The agreement is now a
+    biconditional over 17 offers (20 with `opus`): the payload type negotiation settles on must appear
+    in the answer, and a stream negotiation refuses must be one the answer rejected with port 0. Both
+    halves are reachable defects, which is why it is not a one-way check.
+  - `docs/specs/sdp-format-identity.md` is new and normative for the rule, the grammar, everything
+    refused, and what is deliberately *not* unified.
+
 - **RFC 5118 §4.10's three-colon IPv6 reference is tolerated (`S-31`)** — `[2001:db8:::192.0.2.1]` was
   rejected, and §4.10 is normative that an implementation "**must** tolerate both of the above
   constructs". This closes the one deviation `X-16` recorded rather than fixed, so RFC 5118 moves from

@@ -150,9 +150,9 @@ pub fn same_format(offered: &str, local: &str) -> bool {
 /// A decimal digit string, by value.
 ///
 /// Strict about the spelling in every way but one. `u32::from_str` on its own would accept `+8000`
-/// and reject `+8000`'s neighbours inconsistently with any reader that looks at the characters, so
-/// the digits are checked here rather than left to it: an empty field, a sign, surrounding
-/// whitespace and a digit separator all name no rate.
+/// while rejecting ` 8000` and `8_000`, which is a different rule from any reader that looks at the
+/// characters, so the digits are checked here rather than left to it: an empty field, a sign,
+/// surrounding whitespace and a digit separator all name no rate.
 ///
 /// **Leading zeros are tolerated on purpose.** RFC 8866 §9's `integer` rule starts at a non-zero
 /// digit, so `08000` is strictly ungrammatical — but it is unambiguously eight thousand, it is

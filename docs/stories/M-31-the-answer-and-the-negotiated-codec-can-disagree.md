@@ -2,7 +2,7 @@
 id: M-31
 title: Make the answer and the negotiated codec agree, once
 pillar: Media
-status: in-progress
+status: done
 priority: 4
 design: docs/designs/media.md
 epic: media
