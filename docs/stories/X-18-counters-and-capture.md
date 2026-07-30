@@ -50,14 +50,30 @@ it exchanged recoverable as a capture that can be attached to a bug report.
 - [ ] Failing-first test: `a_shed_request_and_an_unmatched_response_both_appear_in_the_counter_snapshot`.
 
 ## Progress
-- Not started. The stack emits `tracing` and nothing else: no counter leaves the process, and there is
-  no metrics or capture dependency in any crate manifest.
+- Resumed after the first implementor was stopped mid-flight. What it left was `docs/specs/sip-transport.md`
+  §12–§13 and nothing else; no code had been started, which was the right order (`AGENTS.md` §4).
+- Spec §12–§13 reviewed rather than inherited. Kept: counters-not-metrics, and atomics shared with the
+  handle. Rewritten: §13.2, which specified the write *inline in the driver loop* and argued that this
+  was the faithful choice — it is the opposite, since that loop also fires retransmission timers, so an
+  inline write puts the filesystem in the retransmission path and perturbs exactly the race the
+  Acceptance protects. Ordering is now established at the observation point (sequence + timestamp) and
+  the write handed off. Reduced: §13.1 no longer invents per-connection TCP sequence numbers.
+  Added: §12.2 (what the counters do not promise) and §13.3 (redaction).
+- The starting claim that "no counter leaves the process" was already false when this story was filed:
+  `T-19` landed `ShedCounts` and `Handle::shed`.
 
 ## Notes
-- `T-19` is the story that makes this urgent rather than nice: its acceptance requires a shed request
+- `T-19` is the story that makes this urgent rather than nice: its acceptance required a shed request
   to be "counted, and the count […] reachable from outside the endpoint". That is one counter reached
   one way; this is the general case, and doing the general case second is the right order because
-  `T-19` is a live fault.
+  `T-19` was a live fault.
+- **Corrected while resuming:** `T-19` has since landed, so the frontmatter note's "adds the first
+  counter and has nowhere to put it" describes the situation when this story was filed, not the one it
+  is being implemented in. `ShedCounts` exists (`sipx-transport/src/endpoint.rs`) and *is* reachable
+  from outside, through `Handle::shed`. That changes nothing about this story's substance — one
+  hand-placed counter is not a destination for the next twenty — and it improves it: `Shed` is the
+  precedent to follow rather than a thing to invent, and `Handle::shed` versus the `async`
+  `Handle::outstanding` beside it is the argument for which shape a snapshot should take.
 - The counter list above is not a wish list. Each entry is a place where the current code loses
   information that a support case would need: which transport, how many, and when it started.
 - Deliberately not in scope: tracing spans across the whole stack, and any push-based export. Both are

@@ -179,6 +179,12 @@ requests. Answering 503 is what the status code is for, and it tells the peer so
 | X8 | Loopback with 50 % loss | The request is retransmitted and the transaction still completes |
 | X9 | SRV records with weights 10 and 90, fixed seed | Selection matches RFC 2782's distribution |
 | X10 | Application channel full | New requests are answered 503, and timers keep firing |
+| X11 | A shed request and an unmatched response | Both appear in the counter snapshot (§12) |
+| X12 | Loopback `OPTIONS`, capture on | Two records — request out, response in — with the real ports |
+| X13 | Malformed datagram, capture on | Captured malformed, and counted a parse failure and not a request (§12.2) |
+| X14 | `Authorization` with a digest `response`, capture on | `realm` and `nonce` survive; the `response` value does not (§13.3) |
+| X15 | SDP `a=crypto` in a captured body | Tag and suite survive; the key after `inline:` does not (§13.3) |
+| X16 | Capture off | No file is opened, and the snapshot's capture counters stay zero |
 
 ## 12. Counters
 
@@ -192,6 +198,12 @@ The counters live in atomics shared between the driver and every handle, exactly
 `ShedCounts` already does (§10): the loop is busy in precisely the situation the counters
 describe, so a counter that could only be read by asking the loop would be unreadable when it
 mattered.
+
+The two neighbours on `Handle` show the choice being made. `Handle::shed` is synchronous and
+reads shared atomics; `Handle::outstanding` is `async` and returns `Result`, because it asks
+the loop and the loop may be gone. `Handle::counters` is deliberately the first shape and not
+the second: a snapshot that returned `Err(EndpointClosed)` under load — or blocked behind the
+work it is trying to describe — would fail exactly when an operator reached for it.
 
 The snapshot covers, at minimum:
 
@@ -218,6 +230,31 @@ code changes.
 A discard whose reason is logged but not counted is still a failure here: logs rotate, and an
 operator asking "how often" deserves an answer that is not `grep | wc -l`.
 
+### 12.2 What the numbers do not promise
+
+**[sipx]** A counter that overstates its own accuracy is worse than a missing one, because it
+will be used to rule a cause out. Three limits, stated here because they belong where the
+counters are defined and not in a release note:
+
+1. **A snapshot is not an instant.** The fields are separate atomics read one after another, so
+   a snapshot taken while traffic flows can show `requests_in` from a later moment than
+   `responses_in`. Each field is individually monotonic and none is ever lost; the *relationship
+   between two fields* is only exact when the endpoint is quiet. Differences between successive
+   snapshots are sound; arithmetic identities across fields of one snapshot are not.
+2. **In and out do not balance, by construction.** A datagram that fails to parse is counted as
+   a parse failure and **not** as a request or a response, because which one it would have been
+   is exactly what could not be determined. `requests_in + responses_in + parse_failures` is the
+   number of messages that arrived; `requests_in + responses_in` alone silently omits the
+   malformed ones.
+3. **Retransmissions are counted where the timer fires**, so a retransmission the socket then
+   refuses is still counted as sent. Counting it after the socket call would mean a peer that
+   stopped hearing us produced a *falling* count, which inverts the signal the counter exists
+   to give.
+
+Every counter is incremented at exactly one site with `Relaxed` ordering, which is what makes
+the first limit the only ordering hazard: there is no path on which one event increments a
+counter twice, and none on which an increment is lost.
+
 ## 13. Capture
 
 **[sipx]** An endpoint can record the signalling it exchanges to a file: every message sent
@@ -225,11 +262,16 @@ and every message received, with a timestamp, the transport, and both addresses,
 included. Off by default; enabling it is per endpoint (`Config::capture`) and costs an
 `Option` check per message when off.
 
-**The file contains the decrypted messages — credentials, call content, everything the peers
-exchanged.** TLS and WebSocket-over-TLS traffic is captured *before* encryption on send and
-*after* decryption on receive, because capturing ciphertext from inside the process would be
-strictly worse than capturing it from outside. Whoever enables a capture is responsible for
-the file.
+**The file contains the decrypted messages — call content, identities, everything the peers
+exchanged except the secrets §13.3 names.** TLS and WebSocket-over-TLS traffic is captured
+*before* encryption on send and *after* decryption on receive, because capturing ciphertext
+from inside the process would be strictly worse than capturing it from outside. Whoever enables
+a capture is responsible for the file.
+
+That responsibility is not discharged by redaction and §13.3 does not pretend otherwise: a
+capture is written to be *attached to a bug report*, which is to say handed to someone outside
+the trust boundary it was recorded in. Redaction removes the secrets that would still be valid
+in someone else's hands. It does not make the file safe to publish.
 
 ### 13.1 Format: pcapng
 
@@ -247,18 +289,52 @@ how much they would hurt to retrofit:
 3. **Self-describing structure.** Block types and lengths make a truncated capture readable up
    to the truncation — which is the normal state of a capture taken during a crash.
 
-Packets are written with `LINKTYPE_RAW`: a synthesised IPv4 or IPv6 header, then the real
-transport header — UDP as-is, TCP with per-connection synthetic sequence numbers so analysis
-tooling can reassemble streams — then the message. The addresses and ports are the real ones;
-only the link layer is invented, because there is no link layer inside a process. Checksums
-are computed, not zeroed, so a strict tool does not flag every packet.
+Packets are written with `LINKTYPE_RAW` (101): a synthesised IPv4 or IPv6 header matching the
+address family of the real addresses, then a synthesised **UDP** header carrying the real
+ports, then the message. One captured message is one packet. The addresses and ports are the
+real ones; the link and transport layers are invented, because there is no link layer inside a
+process and no captured byte ever came off one.
+
+**The UDP header is synthetic even when the real transport was TCP, TLS or WebSocket, and the
+authoritative statement of the transport is the block comment, not the packet.** This is a
+deliberate limit rather than an oversight. Writing a truthful TCP header would mean inventing
+per-connection sequence numbers, and that is invented protocol state whose only purpose is to
+let a tool reassemble a stream sipx has *already* framed — the message boundaries are known
+here, which is why one message is one packet. Inventing the state would add a class of
+capture-only bug (a wrong sequence number renders a capture unreadable in a way the wire never
+was) to buy back a step already done. A reader who wants the transport reads the comment; a
+reader who infers it from IP protocol 17 has been told plainly here not to.
+
+For the same reason the UDP checksum is written as zero — "not computed", which is what it in
+fact is, and legal on IPv4. Note that a zero UDP checksum is *not* legal on IPv6 (RFC 8200
+§8.1), so a strict reader may flag IPv6 packets in a capture; the alternative is a pseudo-header
+checksum over a datagram that never existed, which is more invention for a cosmetic gain. The
+IPv4 header checksum **is** computed, because it covers only the twenty bytes actually written
+and costs six lines, and leaving it zero would have every tool flag every packet — the exact
+noise this section is otherwise trying to avoid.
 
 ### 13.2 Faithfulness
 
-Writing happens in the driver loop, at the point the bytes go to or come from the socket —
-not on a channel to a writer task. That is what "enabling it must not change message ordering
-or timing" means concretely: the capture observes the same ordering the wire sees, and the
-cost of observation is one buffered write per message, paid only when capture is on.
+**Ordering is established in the driver loop; the write is not performed there.** At the point
+the bytes go to or come from the socket, the loop stamps the record with a monotonically
+increasing sequence number and a timestamp, and hands it to a writer over a bounded channel.
+The writer owns the file and runs off the loop.
+
+This split is the whole of "enabling it must not change message ordering or timing", and it is
+worth saying why the obvious alternative is wrong. Writing inline — one buffered write per
+message, on the loop — reads as the more faithful design and is not. The loop that writes is
+the same loop that fires retransmission timers, so an inline write puts the filesystem in the
+retransmission path: a slow or full disk then delays Timer A, which is precisely the
+"observation that perturbs a retransmission race" the story forbids, and it fails worst in the
+disk-full case this section already anticipates below. **Do not re-introduce the inline write.**
+
+Faithfulness does not depend on where the syscall happens. It depends on the order being
+*decided* at the observation point, which is what the sequence number records. The writer may
+fall behind the loop; it cannot reorder what it was given, because the order is data by the time
+it arrives. What the writer can do is run out of room: the channel is bounded, and an overrun
+drops records rather than blocking the loop — counted as `capture_dropped`, never silent
+(§12.1). A capture with a gap that says so is usable; a stack that stalled to avoid the gap is
+not.
 
 UDP datagrams are captured before parsing, so a malformed message is captured malformed — the
 bytes a peer actually sent are the whole point of the exercise. On stream transports the
@@ -269,3 +345,39 @@ but the capture is not a byte-exact record of the stream and does not pretend to
 A write that fails (a full disk is the usual reason) is logged once, counted in the snapshot
 (`capture_errors`), and disables the capture: a capture that is silently not happening is the
 same failure as a silent discard, one level up.
+
+### 13.3 Redaction
+
+**[sipx]** Secrets are removed before a record reaches the writer, on by default. The rule is
+narrow and mechanical: replace the *value* of a field that is a live credential, keep everything
+that makes the message diagnosable.
+
+| Redacted | Where | Why it cannot stay |
+|---|---|---|
+| `response` parameter | `Authorization`, `Proxy-Authorization` | The digest response is the answer to a challenge; with the nonce beside it in the same capture it is replayable (RFC 7616 §5.5). |
+| `nextnonce`, `rspauth` | `Authentication-Info` | Server-side halves of the same exchange. |
+| Key after `inline:` | SDP `a=crypto` | The SRTP master key **in the body** (RFC 4568 §6.1). It decrypts the media the same capture may be describing. |
+| `pn-prid`, `pn-param` | `Contact` | A push token is a bearer credential for waking a device (RFC 8599 §4). |
+| `+sip.instance` URN | `Contact` | A stable device identifier that outlives the call and correlates a user across captures (RFC 5626 §4.1). |
+
+Kept deliberately: request lines and status codes, `Call-ID`, `CSeq`, `Via` and `branch`, `To`
+and `From` including display names and AORs, `realm`, `nonce`, `qop`, `algorithm`, `opaque`, the
+`a=crypto` tag and crypto-suite, and every SDP line that is not key material. Each is either
+required to follow a transaction or is the thing a support case is about. The challenge
+parameters stay because a digest failure is unreadable without them and a nonce with no response
+beside it is not a credential.
+
+Three consequences, stated rather than discovered later:
+
+- **Redaction is by name, so an unknown credential-bearing extension header is kept.** The list
+  is the specified places a secret appears, not a guarantee that nothing else is sensitive.
+- **What remains still identifies people.** `To`, `From` and the SDP's addresses survive, and
+  they are enough to say who called whom, when, and from where. This is the residue the §13
+  disclosure is about.
+- **Redaction changes the bytes**, so a redacted record is not byte-exact. The block comment
+  says when a record was altered, and §13.2's stream caveat already means byte-exactness is not
+  claimed for stream transports.
+
+An endpoint may opt *out* — a capture taken in a lab against a test registrar has no secrets
+worth removing, and forcing redaction there would hide a digest bug from the one capture taken
+to find it. Opting out is explicit, per endpoint, and never the default.
