@@ -39,7 +39,7 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 | security | 11 | 7 | 0 | 3 | 1 | yes |
 | services | 15 | 5 | 5 | 3 | 2 | **no** |
 | transport | 14 | 7 | 4 | 3 | 0 | **no** |
-| wire | 6 | 2 | 2 | 1 | 1 | **no** |
+| wire | 6 | 2 | 3 | 0 | 1 | **no** |
 
 70 RFCs tracked. Outside the layers marked *yes*, `implemented` means the code exists and has **not** been checked against a caller above the implementing crate — see `X-37`.
 
@@ -50,12 +50,12 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 | Signalling | 10 |
 | Media | 7 |
 | Application | 6 |
-| Build | 4 |
+| Build | 3 |
 | Phone | 1 |
 | Transport | 1 |
-| **total** | **29** |
+| **total** | **28** |
 
-114 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+115 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
@@ -65,7 +65,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 |---|---|---|---|
 | 2026-07-28 | 95 | 58 | -37 |
 | 2026-07-29 | 43 | 47 | +4 |
-| 2026-07-30 | 6 | 8 | +2 |
+| 2026-07-30 | 6 | 9 | +3 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 
