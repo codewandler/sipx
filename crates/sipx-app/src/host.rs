@@ -158,6 +158,26 @@ impl Host {
     pub async fn run(&mut self) -> Result<(), HostError> {
         let listener = self.call_listener()?;
         let (handle, incoming) = bind(Self::endpoint_config(&listener)).await?;
+        self.serve(handle, incoming).await
+    }
+
+    /// Answer calls on an endpoint that is already bound, until it closes.
+    ///
+    /// [`Host::run`] is this plus the bind. They are separate so that **something can drive the
+    /// application** (`X-38` rework): a document binds `127.0.0.1:0`, so a test that let the host bind
+    /// could not learn the port to send an INVITE to, and the review found that nothing in the
+    /// repository ran this module at all — the story claimed "sipx-app answers a call" and no test
+    /// asserted it. A caller that binds the endpoint itself knows the address, and everything below
+    /// this line is the same code `run` executes.
+    ///
+    /// # Errors
+    /// A document with no call listener.
+    pub async fn serve(
+        &mut self,
+        handle: Handle,
+        incoming: mpsc::Receiver<Incoming>,
+    ) -> Result<(), HostError> {
+        let listener = self.call_listener()?;
         let agent = UserAgent::new(handle.clone(), Self::agent_config(&listener));
         let mut dispatcher = Dispatcher::new(handle.clone(), incoming);
         // A call runs on its own task, so the task reports its own end here and the loop forgets it

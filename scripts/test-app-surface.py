@@ -775,6 +775,36 @@ class TheRealWorkspace(unittest.TestCase):
             "the application that defines the surface has to exist",
         )
 
+    def test_something_actually_runs_the_application(self):
+        """**Existing is not running** (`X-38` rework).
+
+        This assertion checked that `host.rs` was on disk, which the review pointed out is the whole of
+        what it checked: `serve`, `admit`, `carry`, `answer_out_of_dialog` and `refuse` were executed by
+        nothing, and the commit message said "sipx-app answers a call". A surface defined by an
+        application nobody runs rests on what compiles — the same weakness as the path checks this
+        predicate replaced, since `README.md`'s claim is that an application "has no dead branch to
+        cite".
+
+        So the acceptance is now that an integration test exists, drives the host over a socket, and
+        covers both branches of the knob the host routes an unreachable app through. Asserted on the
+        file's content rather than on a name, because a test that was renamed and gutted would still
+        satisfy a name.
+        """
+        integration = surface.CRATES / "sipx-app" / "tests" / "host.rs"
+        self.assertTrue(
+            integration.exists(),
+            "the application that defines the surface has to be run by something",
+        )
+        text = integration.read_text(encoding="utf-8")
+        for needle, why in (
+            ("Host::start", "the test has to start the real host"),
+            ("host.serve(", "and drive its real loop"),
+            ("dial(", "with a real invitation over a real socket"),
+            ("Method::Options", "covering the out-of-dialog branch (RFC 3261 §11)"),
+            ("on_failure", "and both branches of the document's failure knob"),
+        ):
+            self.assertIn(needle, text, why)
+
 
 if __name__ == "__main__":
     unittest.main()
