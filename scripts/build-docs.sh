@@ -6,15 +6,53 @@
 # runs locally.
 #
 # The site is the customer-facing `website/` (Docusaurus); the internal contributor material in
-# `docs/` is deliberately not published. Three guarantees are enforced here rather than hoped
-# for: every code sample on the site is a real example file the workspace compiles; every page
-# the site links to exists (the site build refuses broken links); and every relative link
-# inside the *internal* docs tree still resolves, so the unpublished half rots no faster than
-# the published one.
+# `docs/` is deliberately not published.
+#
+# -- the contract of the `docs site` gate step (X-41) -----------------------------------------
+#
+# This is one step in `./scripts/gate.py`, and a gate step is read by its exit code. So the rule
+# here is narrower than "run the build": **no check in this file may print a defect and exit 0.**
+#
+# It was broken. `onBrokenAnchors` was unset in `website/docusaurus.config.js`, Docusaurus
+# defaults it to `warn`, and the step printed
+#
+#     [WARNING] Docusaurus found broken anchors! … -> linking to /sipx/docs#sipx
+#     [SUCCESS] Generated static files in "build".
+#
+# and exited 0. The gate reported every step green with a dead link in the published site, and
+# the only reason anyone found out is that `S-30` read the step's output instead of trusting its
+# result. That is the `X-36` failure: it looks like coverage and is not.
+#
+# What is checked, and how each one fails:
+#
+#   1. the samples the guides inline compile        `cargo build --examples` exits non-zero
+#   2. the inlined text matches those files         `sync-website.py --check` exits non-zero
+#   3. every link in the internal `docs/` tree      `check-docs-links.py` exits non-zero —
+#      resolves, file *and* anchor                  including anchors, which its predecessor
+#                                                   split off and threw away
+#   4. the site has no dead link, dead anchor,      all four reporting handlers in
+#      dead relative markdown link or duplicate     `docusaurus.config.js` are `throw`, each
+#      route                                        stated there with its reason
+#   5. the site build printed no warning at all     WARNING_EXCEPTIONS below, empty on purpose:
+#                                                   a handler we never audited cannot ride green
+#   6. check 4 is actually armed                    the guard self-check at the bottom builds a
+#                                                   page linking to an anchor no page emits and
+#                                                   fails if that build *succeeds*
+#   7. every public item is documented and every    `RUSTDOCFLAGS=-D warnings cargo doc`
+#      intra-doc link resolves
+#
+# `set -euo pipefail` below is load-bearing for all of it: without `pipefail`, piping the site
+# build into a log to inspect its output would discard the build's own exit code, which is how a
+# step grows this defect back by accident.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
+
+# Docusaurus warnings that are deliberately not failures. Empty, and it should stay that way:
+# anything added here needs a reason on the line and a story against it, because every entry is
+# a defect this step is choosing to print and exit 0 about. Matched as fixed substrings.
+WARNING_EXCEPTIONS=()
 
 if ! command -v node >/dev/null; then
     echo "node is not installed (>= 20 needed): https://nodejs.org" >&2
@@ -30,46 +68,90 @@ cargo build --workspace --examples --quiet
 echo "==> checking the inlined samples match the files"
 ./scripts/sync-website.py --check
 
-echo "==> checking internal docs links"
-python3 - <<'PYEOF'
-import pathlib
-import re
-import sys
-import urllib.parse
+# The unpublished half. Docusaurus never sees `docs/`, so its link graph is checked here or
+# nowhere — and anchors are part of the link, not decoration on it.
+echo "==> checking internal docs links and anchors"
+./scripts/check-docs-links.py
 
-root = pathlib.Path(".")
-problems = []
-pages = [root / "README.md", root / "AGENTS.md", *sorted((root / "docs").rglob("*.md"))]
-for page in pages:
-    text = page.read_text(encoding="utf-8")
-    # Markdown links only; code spans and fences excluded by stripping fenced blocks first.
-    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
-    for link in re.findall(r"\]\(([^)\s]+)\)", text):
-        if link.startswith(("http://", "https://", "mailto:", "#")):
-            continue
-        target = urllib.parse.unquote(link.split("#")[0])
-        if not target:
-            continue
-        if not (page.parent / target).exists():
-            problems.append(f"{page} -> {link}")
-
-if problems:
-    print("internal docs links that go nowhere:", file=sys.stderr)
-    for problem in sorted(set(problems)):
-        print(f"  {problem}", file=sys.stderr)
-    sys.exit(1)
-print(f"links: {len(pages)} internal pages, every relative link resolves")
-PYEOF
-
-# The site build. `onBrokenLinks: 'throw'` in docusaurus.config.js is the link check for the
-# published half: a page that links to something the site does not publish fails right here.
+# The site build. The four reporting handlers in docusaurus.config.js are the link check for the
+# published half; a page that links to something the site does not publish, or to an anchor no
+# page emits, fails right here.
 echo "==> building the site"
+site_log="$(mktemp)"
+trap 'rm -f "$site_log"' EXIT
 cd website
 if [ ! -d node_modules ]; then
     if [ -f package-lock.json ]; then npm ci; else npm install; fi
 fi
-npm run build
+# The exit code is the build's, not tee's — see `pipefail` above.
+npm run build 2>&1 | tee "$site_log"
 cd "$HERE"
+
+# Check 5. A handler nobody audited, or one Docusaurus adds in a later version, would otherwise
+# print here and exit 0 all over again — this time under a heading we have not read yet.
+warnings="$(grep -F '[WARNING]' "$site_log" || true)"
+for allowed in ${WARNING_EXCEPTIONS[@]+"${WARNING_EXCEPTIONS[@]}"}; do
+    warnings="$(printf '%s\n' "$warnings" | grep -Fv -- "$allowed" || true)"
+done
+if [ -n "$(printf '%s' "$warnings" | tr -d '[:space:]')" ]; then
+    echo >&2
+    echo "the site build printed a warning, which this step treats as a defect:" >&2
+    printf '%s\n' "$warnings" >&2
+    echo >&2
+    echo "either fix it, or add it to WARNING_EXCEPTIONS in this script with a reason and a" >&2
+    echo "story — a warning that exits 0 is the defect X-41 was filed for." >&2
+    exit 1
+fi
+
+# Check 6. The guard has to be armed, and "the config says throw" is not the same claim as "a
+# dead anchor fails this build". So: write a page linking to an id no page emits — the `h1` of
+# the front page, which is the exact shape S-30 hit, because Docusaurus renders a page's first
+# `h1` as the page header and gives it no id — and require the build to fail.
+#
+# It runs after the real build so a genuine site defect is reported as itself, and it reuses the
+# warm Docusaurus cache in `website/`, so it costs seconds rather than another cold build.
+echo "==> checking a dead anchor still fails the build"
+probe="website/docs/zz-anchor-guard-probe.md"
+guard_log="$(mktemp)"
+guard_out="$(mktemp -d)"
+trap 'rm -rf "$site_log" "$guard_log" "$guard_out" "$probe"' EXIT
+rm -f "$probe"  # a run killed mid-probe leaves this behind; it must not become a real page
+cat > "$probe" <<'PROBEEOF'
+---
+title: anchor guard probe
+description: Written by scripts/build-docs.sh and deleted again. If you are reading this in a
+  commit, the build was killed mid-check — delete the file.
+---
+
+# anchor guard probe
+
+A link to an id no page emits: [the front page's h1](/docs/#sipx).
+
+And one nothing could ever emit, so that adding a `## sipx` heading to the front page turns this
+check into a false "not armed" rather than leaving it with nothing to trip on:
+[nowhere](/docs/#zz-no-page-emits-this-id).
+PROBEEOF
+guard_status=0
+(cd website && npm run build --silent -- --out-dir "$guard_out") >"$guard_log" 2>&1 || guard_status=$?
+rm -f "$probe"
+if [ "$guard_status" -eq 0 ]; then
+    echo >&2
+    echo "a page linking to an anchor no page emits BUILT SUCCESSFULLY." >&2
+    echo >&2
+    echo "the site's broken-anchor guard is not armed: check onBrokenAnchors in" >&2
+    echo "website/docusaurus.config.js. Until it is, this step can print a dead link and" >&2
+    echo "exit 0, and the gate's verdict does not mean what it says (X-41)." >&2
+    exit 1
+fi
+if ! grep -qi 'broken anchor' "$guard_log"; then
+    echo >&2
+    echo "the probe build failed, but not for the broken anchor it was written to trip:" >&2
+    tail -20 "$guard_log" >&2
+    echo >&2
+    echo "this check proves nothing in that state — fix the build, or fix the probe." >&2
+    exit 1
+fi
+echo "anchors: a link to an id no page emits fails the build"
 
 # The API reference, published into the site rather than beside it. `-D warnings` is the point:
 # a missing doc on a public item or an intra-doc link that resolves nowhere fails here rather

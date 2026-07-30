@@ -2,8 +2,8 @@
 // contributor material (stories, designs, specs, roadmap) stays in ../docs and is deliberately
 // not published here — see ../docs/README.md for the split.
 //
-// Built on every push and pull request (a broken link fails the build: onBrokenLinks below);
-// deployed from main by CI, with the rustdoc API reference copied in under /api.
+// Built on every push and pull request (a dead link fails the build: the reporting handlers
+// below); deployed from main by CI, with the rustdoc API reference copied in under /api.
 
 // @ts-check
 
@@ -19,13 +19,47 @@ const config = {
   deploymentBranch: 'gh-pages',
   trailingSlash: false,
 
+  // -- what a defect in the site does to the build (X-41) -------------------------------------
+  //
+  // Docusaurus reports these four independently, and three of the four default to `warn`, which
+  // prints the defect and exits 0. The `docs site` gate step is a step whose exit code is the
+  // only thing anyone reads, so a `warn` here is a green gate with a dead link in the published
+  // site — which is exactly what happened: `onBrokenAnchors` was unset, `S-30` linked to
+  // `#cli-reference` (an id Docusaurus does not emit for a page's `h1`, because the first `h1`
+  // becomes the page header), the step printed the broken anchor and the gate reported all
+  // steps green. Every one of the four is therefore stated here rather than inherited, with the
+  // reason, so that "it defaults to something sensible" is never the answer again.
+  //
+  // All four are `throw`. The site is what the README points at as a measurement and the
+  // compliance table is served from it, so there is no defect in this list a reader should meet
+  // before we do. If one of them ever has to be relaxed, it belongs here with a reason next to
+  // it and a story against it — not as a deleted line.
+
+  // A link to a page the site does not publish. Docusaurus already defaults this to `throw`;
+  // stated anyway, because the default is the only one of the four that is strict and a reader
+  // cannot tell a deliberate `throw` from an absent line.
   onBrokenLinks: 'throw',
+
+  // A link to an `#anchor` no page on the site emits. Defaults to `warn` (Docusaurus plans
+  // `throw` for v4). This is the defect X-41 exists for.
+  onBrokenAnchors: 'throw',
+
+  // Two routes claiming the same path — one page silently wins and the other becomes
+  // unreachable. Defaults to `warn`. Not a link defect, but the same failure: printed, and
+  // exited 0. A page nobody can reach is worse than a page that 404s, because the sidebar
+  // still offers it.
+  onDuplicateRoutes: 'throw',
 
   favicon: 'img/logo.svg',
 
   markdown: {
     mermaid: true,
     hooks: {
+      // A relative Markdown link (`./guides/register.md`) that resolves to no file. Defaults to
+      // `warn`, and it is a *separate* default from `onBrokenLinks` above: the resolution
+      // happens while the Markdown is compiled, before any route exists, so `onBrokenLinks`
+      // never sees it. Was already `throw`; kept, and now audited alongside the other three
+      // rather than being the one setting somebody remembered.
       onBrokenMarkdownLinks: 'throw',
     },
   },
