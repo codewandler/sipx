@@ -63,6 +63,28 @@ again on the strength of a registration that actually uses them.
   side of both RFCs, and driving flow keep-alives from `register --keep-alive` — the CLI
   reports whether a flow exists; holding it open across a long-lived registration is the
   keep-alive loop's question, not this story's.
+- **Resumed after the first implementor was interrupted, and its work re-verified rather than
+  trusted.** The commit that reads as finished (`67bd291`) had never been gated: a run on it fails
+  `clippy`, `test` and `msrv` identically, because `reachability` elided a lifetime that
+  `-D elided-lifetimes-in-paths` rejects, so **`sipx-cli` did not compile under CI's flags and the
+  acceptance test above had never once executed**. Two functions also broke
+  `-D clippy::too_many_lines` (`register::run` at 106, the test at 109). `965372d` fixes all three
+  by naming the lifetime the way `dial.rs` already does and by extracting `report_wake`,
+  `next_register` and `assert_outbound_push_register` — no change to what the command sends or
+  reports.
+- **The failing-first test is now verified on a real run**, not asserted. With the merge base's
+  implementation (`5363747`) restored under this branch's test file,
+  `cargo test -p sipx-cli --all-features --test cli register_over_a_flow_keeps_it_and_a_push_wakes_it`
+  fails at `cli.rs:218` with "RFC 5626 §4.2's flow number is missing — nothing built the Outbound
+  config: Contact: <sip:alice@127.0.0.1:57738>" — the missing capability, not a compile error. It
+  passes on the branch.
+- **`docs/maturity.md` is left alone deliberately**, and the gate's `maturity` and `maturity tests`
+  steps are red because of it. The drift is *not* this branch's: `./scripts/maturity.py --check`
+  fails identically at the merge base and on `main` (`7b8e5e1`). The drifting line is the
+  "Discovery versus closure" table's row for **today**, a whole-board daily Filed/Closed aggregate
+  that every concurrent story perturbs — regenerating it here would bake in a snapshot that is
+  stale the moment the next story lands, and would collide with the sibling implementor on the same
+  line. It belongs to whoever integrates, not to one story.
 
 ## Notes
 - **The eighth instance of the recurring defect** — after ICE (`M-27`), UPDATE (`S-22`), DTLS-SRTP
