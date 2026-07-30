@@ -12,8 +12,9 @@ the stories, not the generated region. New work? Copy [`_TEMPLATE.md`](_TEMPLATE
 **M0 through M8 are complete.** sipx registers against a real Kamailio over UDP, TCP and TLS,
 places calls with encrypted G.711 audio, bridges and mixes them, transfers them, authenticates the
 other side rather than only answering, and serves subscriptions to what its dialogs and
-registrations are doing — with 976 tests green and clippy clean at `-D warnings` on both feature
-sets.
+registrations are doing — with the gate green and clippy clean at `-D warnings` on both feature
+sets. **No test count here on purpose**, for the reason the [roadmap](../roadmap.md#status) gives:
+this one said 976 for four releases that took the real number past 1500. Run `./scripts/gate.py`.
 
 The open work is the **application SDK and its host**. `C-3`, the epic's keystone, is done: a call
 now reports what happens to it as a typed event stream, which is the input alphabet `C-4`, `C-5`,
@@ -45,26 +46,13 @@ _None._
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
 - [A-9 — Make the published crates safe to freeze — `#[non_exhaustive]` and a README per crate](A-9-freeze-what-a-published-crate-can-add.md) · Application · A-8 stated the promise and left the two mechanical halves — every public error enum outside sipx-app-protocol is exhaustive, so it promises never to add a variant, and ten of eleven crates will publish to crates.io with no README at all
 
-### bounded transport lifetimes
-_The endpoint exposes connection and queue limits, but those numbers do not currently bound every_
-- [T-25 — Make pool eviction close the live connection it evicts](T-25-make-pool-eviction-close-the-live-connection-it-evicts.md) · Signalling · R-01 in the 2026-07-30 repository review — map removal drops the writer but leaves the socket task blocked on reads, so the configured pool bound is not a live-connection bound
-- [T-26 — Bound unauthenticated TLS and WebSocket handshakes](T-26-bound-unauthenticated-tls-and-websocket-handshakes.md) · Signalling · R-02 in the 2026-07-30 repository review — accepted stream handshakes are spawned before pool admission with no deadline or concurrency budget
-- [T-27 — Reject invalid endpoint runtime configuration before binding](T-27-reject-invalid-endpoint-runtime-configuration-before-binding.md) · Signalling · R-06 and the WebSocket part of R-07 in the 2026-07-30 repository review — zero public capacities panic and zero keepalive terminates the task
-
 ### Call framework
 _This is the layer applications actually program against, so it is the one that decides whether_
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
-### commit-stable generated measurements
-_A generated measurement that is green only in the worktree where it was written is not a gate. The_
-- [X-39 — Stop the maturity report from making the gate red for something that is not a defect](X-39-the-maturity-report-cannot-be-green-in-the-commit-that-moves-a-story.md) · Build · alpha predicate 3 — `maturity.py --check` cannot pass in the commit that files or closes a story, because Filed/Closed for today come from git history and the fact does not exist until the commit does; regenerated twice on 2026-07-30 for no defect either time
-
 ### Conformance
-- [X-40 — Stop asserting on recorded audio without waiting for it](X-40-a-recording-assertion-fails-when-the-machine-is-busy.md) · Build · alpha predicate 3, third instance after X-28 and X-29 — `dial_plays_a_file_and_records_the_far_end` waits for the call and then asserts on a real-time side effect, so under load it reads a valid WAV with zero samples; observed once, not reproducible in isolation
-- [X-41 — Make a broken anchor fail the docs build instead of warning inside a green gate](X-41-the-docs-build-warns-about-broken-anchors-and-passes.md) · Build · alpha predicate 3 — the `docs site` step printed a broken anchor and exited 0, because Docusaurus defaults `onBrokenAnchors` to warn; found by S-30, which only caught it by reading the step's output instead of trusting its exit code
 - [X-44 — Guard the fixed-sleep rule mechanically, because the sweep did not hold](X-44-the-fixed-sleep-rule-is-swept-for-not-guarded.md) · Build · found while integrating the X-39/X-40/M-33 wave — `X-29` swept the workspace and `0.12.0` claims "no test in the workspace now asserts after a fixed sleep", but nothing enforces it and two new instances appeared within the same wave
 - [X-45 — Make `no_capture_flag_means_no_file` able to observe the thing it is named for](X-45-a-capture-test-that-places-no-call-cannot-observe-capture.md) · Build · found by X-40's implementor — the test kills the answerer immediately and never places a call, so it cannot detect a capture file being written *during* a call; the X-36 shape
-- [X-43 — Evidence RFC 8996 with a refusal, not with a document](X-43-rfc-8996-is-claimed-against-a-document.md) · Build · the only `implemented` row of 70 whose evidence cites no code — `evidence = ["docs/specs/sip-tls.md"]` — and it is a negative claim, so the only thing that can back it is a handshake that fails
 - [X-46 — Stop `sip-tls.md` claiming a configurable minimum TLS version that does not exist](X-46-sip-tls-claims-a-configurable-minimum-version.md) · Build · found by X-43's implementor — `docs/specs/sip-tls.md` §3.2 lists the minimum protocol version as CONFIGURABLE, but neither `ClientTls` nor `ServerTls` takes a version and nothing above them names one
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
@@ -76,15 +64,8 @@ _A generated measurement that is green only in the worktree where it was written
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
 - [M-32 — Give the media path's discards the same counters the transport got](M-32-media-discards-are-uncounted.md) · Media · X-18 counted every transport discard and refused this half rather than invent the answer — `sipx-transport` cannot depend on `sipx-media`, so it needs a shared crate underneath both or a parallel type of `ShedCounts`' shape; census below, including a DTMF digit dropped with neither a log nor a counter
-- [M-33 — Settle whether reading a report block consumes the reporting window](M-33-two-comments-disagree-about-consuming-a-reporting-window.md) · Media · found by X-18 — `session.rs:1404-1410` and `:1364-1367` carry contradictory comments about whether `report_block()` consumes a reporting window; one is wrong, and which one decides whether `MediaSession::stats()` is safe to poll
 - [M-34 — Give `collect_digits` a start deadline separate from its inter-digit gap](M-34-collect-digits-conflates-the-start-deadline-with-the-gap.md) · Media · found by X-40's implementor — `crates/sipx-media/src/session.rs:1117` has the identical one-window shape that made `sipx answer` record zero samples, so the DTMF test is the same flake waiting
 - [M-28 — Offer DTLS-SRTP from a call, and stop claiming it until then](M-28-dtls-srtp-unreachable-from-a-call.md) · Media · found by X-27 — dial hardcodes SDES, so sipx cannot offer DTLS-SRTP at all, while RFC 5763 and 5764 are both marked implemented with both roles
-
-### media runtime safety
-_Media setup crosses three boundaries where a public value becomes a long-lived worker: ownership,_
-- [M-35 — Make dropping a conference stop every participant collector](M-35-make-dropping-a-conference-stop-every-participant-collector.md) · Media · R-05 in the 2026-07-30 repository review — Conference Drop aborts only the mixer while detached collectors retain participant sessions
-- [M-36 — Reject zero media worker intervals before starting](M-36-reject-zero-media-worker-intervals-before-starting.md) · Media · media portion of R-07 in the 2026-07-30 repository review — zero packet and mix periods kill tasks while a zero RTCP interval can hot-loop
-- [M-37 — Never put a fallback codec under a negotiated payload type](M-37-never-put-a-fallback-codec-under-a-negotiated-payload-type.md) · Media · R-08 in the 2026-07-30 repository review — failed Opus setup constructs Direct PCMU state while retaining the negotiated Opus payload type
 
 ### Quic
 - [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11
@@ -162,6 +143,10 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [M-29 — Make a live call run the SDES answer check it already owns](M-29-call-layer-pairs-srtp-keys-unchecked.md) · Media · found by M-26 — verify_answer and SrtpKeys::from_answer exist and sipx-call calls neither, so a live call still keys on an answer nobody checked
 - [M-30 — Let a call select Opus, or stop shipping a codec nothing can reach](M-30-a-call-cannot-select-opus.md) · Media · M-13 built the codec, not the selection — sipx-call hardcodes G.711 at six sites and Codec::from_payload_type deliberately never returns Opus, so X-33 demoted RFC 6716 and 7587 to partial
 - [M-31 — Make the answer and the negotiated codec agree, once](M-31-the-answer-and-the-negotiated-codec-can-disagree.md) · Media · found by M-30's review — `sipx-sdp/src/answer.rs:423-427` compares an rtpmap clock rate as a string while `codec_named` parses it to `u32`, so an offer with `a=rtpmap:0 PCMU/08000` settles on PCMU while the answer names only `8`
+- [M-33 — Settle whether reading a report block consumes the reporting window](M-33-two-comments-disagree-about-consuming-a-reporting-window.md) · Media · found by X-18 — `session.rs:1404-1410` and `:1364-1367` carry contradictory comments about whether `report_block()` consumes a reporting window; one is wrong, and which one decides whether `MediaSession::stats()` is safe to poll
+- [M-35 — Make dropping a conference stop every participant collector](M-35-make-dropping-a-conference-stop-every-participant-collector.md) · Media · R-05 in the 2026-07-30 repository review — Conference Drop aborts only the mixer while detached collectors retain participant sessions
+- [M-36 — Reject zero media worker intervals before starting](M-36-reject-zero-media-worker-intervals-before-starting.md) · Media · media portion of R-07 in the 2026-07-30 repository review — zero packet and mix periods kill tasks while a zero RTCP interval can hot-loop
+- [M-37 — Never put a fallback codec under a negotiated payload type](M-37-never-put-a-fallback-codec-under-a-negotiated-payload-type.md) · Media · R-08 in the 2026-07-30 repository review — failed Opus setup constructs Direct PCMU state while retaining the negotiated Opus payload type
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -215,6 +200,9 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [T-20 — Implement GRUU](T-20-gruu.md) · Signalling · M10 · RFC 5627 · needs T-14's Path and T-15's instance ID
 - [T-21 — Be reachable through a push notification](T-21-push-notification.md) · Signalling · M10 · RFC 8599 · a client holding no connection at all
 - [T-23 — Let a WebSocket target name its own path and port](T-23-websocket-request-path-and-port.md) · Signalling · found by X-17 — the second interop peer serves SIP over WebSocket somewhere sipx cannot ask for
+- [T-25 — Make pool eviction close the live connection it evicts](T-25-make-pool-eviction-close-the-live-connection-it-evicts.md) · Signalling · R-01 in the 2026-07-30 repository review — map removal drops the writer but leaves the socket task blocked on reads, so the configured pool bound is not a live-connection bound
+- [T-26 — Bound unauthenticated TLS and WebSocket handshakes](T-26-bound-unauthenticated-tls-and-websocket-handshakes.md) · Signalling · R-02 in the 2026-07-30 repository review — accepted stream handshakes are spawned before pool admission with no deadline or concurrency budget
+- [T-27 — Reject invalid endpoint runtime configuration before binding](T-27-reject-invalid-endpoint-runtime-configuration-before-binding.md) · Signalling · R-06 and the WebSocket part of R-07 in the 2026-07-30 repository review — zero public capacities panic and zero keepalive terminates the task
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core
@@ -251,7 +239,11 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-36 — Pin the send ordering `respond` already promises, and drop the clock that pretends to](X-36-respond-has-no-flushed-observable.md) · Build · respond_returns_only_once_the_response_has_been_sent cannot detect the thing it is named for — the ordering can be reversed in endpoint.rs and the test still passes, so its 50 ms bound is pure flake risk
 - [X-37 — Decide reachability by resolving callers, not by matching evidence paths](X-37-bind-reachability-to-callers-not-to-paths.md) · Build · the recorded successor to X-30 and X-33 — a path check is satisfied by citing a file, so a dead branch counts as reachable, the transport layer cannot be adjudicated at all, and a relabelled layer still escapes
 - [X-38 — Ship a real application, and let its reality say what a check cannot](X-38-ship-an-app-and-let-it-say-what-the-check-cannot.md) · Build · alpha predicate 1, reconsidered at X-37 — a syntactic caller-check would be fitted to three rows, wrong in the ways macros and re-exports are wrong, and fitted to what is testable rather than what is true; the honest gate is that the reachable-from-a-call surface is exactly what one real application uses
+- [X-39 — Stop the maturity report from making the gate red for something that is not a defect](X-39-the-maturity-report-cannot-be-green-in-the-commit-that-moves-a-story.md) · Build · alpha predicate 3 — `maturity.py --check` cannot pass in the commit that files or closes a story, because Filed/Closed for today come from git history and the fact does not exist until the commit does; regenerated twice on 2026-07-30 for no defect either time
+- [X-40 — Stop asserting on recorded audio without waiting for it](X-40-a-recording-assertion-fails-when-the-machine-is-busy.md) · Build · alpha predicate 3, third instance after X-28 and X-29 — `dial_plays_a_file_and_records_the_far_end` waits for the call and then asserts on a real-time side effect, so under load it reads a valid WAV with zero samples; observed once, not reproducible in isolation
+- [X-41 — Make a broken anchor fail the docs build instead of warning inside a green gate](X-41-the-docs-build-warns-about-broken-anchors-and-passes.md) · Build · alpha predicate 3 — the `docs site` step printed a broken anchor and exited 0, because Docusaurus defaults `onBrokenAnchors` to warn; found by S-30, which only caught it by reading the step's output instead of trusting its exit code
 - [X-42 — Stop a predicate reporting met while open stories describe it failing](X-42-predicate-3-does-not-know-about-its-own-open-defects.md) · Build · `scripts/maturity.py:100` hardcodes predicate 3's story list as X-28/X-29/X-34/X-36, all done, so it computes as met while X-39, X-40 and X-41 — all filed for that predicate — are open and invisible to it
+- [X-43 — Evidence RFC 8996 with a refusal, not with a document](X-43-rfc-8996-is-claimed-against-a-document.md) · Build · the only `implemented` row of 70 whose evidence cites no code — `evidence = ["docs/specs/sip-tls.md"]` — and it is a negative claim, so the only thing that can back it is a handshake that fails
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

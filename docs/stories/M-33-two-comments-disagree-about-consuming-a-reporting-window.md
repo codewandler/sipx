@@ -2,7 +2,7 @@
 id: M-33
 title: Settle whether reading a report block consumes the reporting window
 pillar: Media
-status: in-progress
+status: done
 priority: 4
 design: docs/designs/media.md
 epic: media

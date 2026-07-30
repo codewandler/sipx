@@ -10,6 +10,13 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
+_As of 2026-07-30:_ **all seven `1.0.0-alpha` predicates are met**, and `1.0.0-alpha` is cut.
+[`maturity.md`](maturity.md) reports them, and it reports them as *computed* rather than asserted —
+which is what predicate 7 was for. What this does **not** mean is that v1 is close: its first
+predicate requires the alpha's seven to have held **across at least one release** rather than at the
+moment one was cut, and the rest each need something outside this repository, chiefly a public API
+used from outside it. See [the v1 gate](#the-v1-gate-and-the-alpha-before-it).
+
 _As of 2026-07-29:_ **M0 through M8 are complete.** `sipx-sip` is a working sans-IO SIP core:
 URIs, headers, an incremental parser for both datagram and stream transports, message validation,
 injection-proof builders, and all four transaction state machines with matching and stores. Clippy

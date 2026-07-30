@@ -2,7 +2,7 @@
 id: T-25
 title: Make pool eviction close the live connection it evicts
 pillar: Signalling
-status: in-progress
+status: done
 priority: 1
 design: docs/designs/bounded-transports.md
 epic: bounded-transports

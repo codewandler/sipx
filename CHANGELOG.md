@@ -5,6 +5,147 @@ All notable changes to sipx are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Negotiated media starts transactionally, and the constructors that can fail now say so
+  (`M-35`, `M-36`, `M-37`)** — `MediaPort::start` returns `Result<MediaSession, SetupError>` and
+  `Conference::new` returns `Result<Conference, ConferenceError>`. `sipx-call` carries the new error
+  through as `Error::Media`. The rule behind all three: validation and codec construction complete
+  before any worker is spawned, or startup returns a typed error and leaves no worker or socket
+  alive. `docs/specs/media-runtime.md` is that boundary written down, and it is new.
+
+### Fixed
+
+- **Pool eviction closes the connection it evicts (`T-25`)** — `max_connections` bounded entries in
+  the routing map, not sockets. Eviction removed the entry and left the task running, because a quiet
+  peer keeps its read half open after every writer sender is gone, so the connection outlived the
+  record describing it and the configured maximum bounded bookkeeping.
+  - Every pooled connection now has an endpoint-owned cancellation signal and holds its slot until
+    its task has **terminated**, not until its entry is dropped.
+  - **A same-key replacement reserves its own generation instead of consuming a second victim.**
+    That was the subtle half: a replacement arriving at a full pool while the cancelled task had not
+    yet finished would evict an unrelated connection to make room for a slot that was about to free
+    itself.
+  - Every message, pong, transaction destination and close event now carries the generation that
+    produced it, so a retiring generation gets exactly one close event, fails only its own
+    transactions and keep-alive waiters, and cannot remove or answer for its live replacement.
+    Vectors X17, X20, X21, X24 in `docs/specs/sip-transport.md`.
+
+- **Unauthenticated TLS and WebSocket handshakes have a budget (`T-26`)** — there was none. The
+  connection pool only bounds peers that already completed a handshake far enough to have a pool key,
+  so everything before that point — accepted sockets and spawned handshake tasks — was unbounded, and
+  an unauthenticated peer could grow it at will.
+  - TLS, WebSocket and secure WebSocket now share **one budget of 64 live handshakes** per endpoint
+    with a **10 second deadline**. A socket that cannot take a permit *without waiting* is closed
+    immediately; there is deliberately no pre-handshake queue, because a queue is the same unbounded
+    growth wearing a different name.
+  - Timeout, protocol failure, successful adoption and endpoint shutdown each release exactly one
+    permit. TLS followed by a WebSocket upgrade is **one** handshake with one deadline, not two.
+
+- **Unusable endpoint configuration is refused before anything binds (`T-27`)** — a request-channel
+  capacity of zero reached the runtime channel constructor and panicked; a zero WebSocket keepalive
+  started a task whose timer terminated on its first tick. One validator now runs on every public
+  construction path before a socket is bound or a task starts, and returns a typed error naming the
+  field. Nothing is silently clamped — a clamp would make the configuration a suggestion.
+
+- **Dropping a conference stops every participant collector (`M-35`)** — collectors, their media
+  sessions and their sockets survived the conference that owned them, because nothing terminated them
+  short of a participant producing another frame or closing its own session. The conference now keeps
+  cancellation and completion ownership for every collector, and removal, explicit close and `Drop`
+  all reach one idempotent shutdown. `Drop` initiates bounded cleanup; it does not block.
+
+- **Zero worker intervals are rejected instead of killing the worker they configure (`M-36`)** — a
+  zero packet duration, RTCP interval or conference mix interval each produced a timer that
+  terminated on its first tick, so audio stopped with nothing reporting an error. All three are
+  refused before a socket is bound. The floor is one millisecond and that is also the resolution
+  samples-per-packet is derived from: **a positive sub-millisecond value passes a timer check and
+  then derives an empty audio frame**, which is why "greater than zero" was not the test.
+
+- **A codec that fails to construct no longer ships a different codec under its payload type
+  (`M-37`)** — Opus encoder or decoder construction failure fell back to a PCMU pipeline while
+  negotiation kept the Opus payload type, so the far end read the number it agreed to and decoded
+  G.711 bytes as Opus. Failure is now a typed `SetupError::Codec` naming the codec and which half
+  failed, and no diagnostic carries media, SRTP keys or DTLS key material.
+
+- **Reading the media statistics no longer consumes the reporting window (`M-33`)** — two comments
+  disagreed and the doc comment was the false one: `stats()` called `report_block()`, which takes
+  `&mut self` and resets the counters. Two reads with nothing in between returned `fraction_lost: 51`
+  then `0`, and a single poll between two RTCP intervals turned a 64 on the wire into 0.
+  - **A reporting interval is closed by a report being sent, never by a read.** RFC 3550 §6.4.1
+    defines the fraction over the previous SR/RR *packet*, so the boundary is a transmission. The
+    split is now two functions rather than a corrected sentence — `pending_report_block(&self)` reads,
+    `report_block(&mut self)` closes and belongs to the RTCP send loop alone — so the trap cannot
+    come back.
+  - The wire test derives §6.4.1's required fraction for whatever window each report *names* rather
+    than arranging a boundary and assuming the timer fires between two batches. The arranged version
+    failed 14 of 20 runs at 6× CPU oversubscription; the derived one is 0 failures in 12 runs at 6×
+    and 20 at 15×. The technique is written down in `docs/designs/media.md`.
+
+- **`sipx answer` and `sipx dial` record the call they were asked to record (`X-40`)** — filed as a
+  flaky-test story and it was a production defect, deterministic, with two independent causes on one
+  line of `answer.rs` and `dial.rs`.
+  - **One window was answering two questions.** The recording was never bounded by `--duration`; it
+    was bounded by `record_until_idle`'s 500 ms, which is *also* its only window for waiting for the
+    **first** frame. Audio arriving 1.5 s into a `--duration 10` call produced a WAV with **zero
+    samples** and `duration_ms: 801`. `X-28` fixed this in the library and left both production
+    callers on the old primitive.
+  - **`unwrap_or_default` discarded a full recording at the cap.** When the far end is still talking
+    as the call's time runs out, the outer `timeout` fires and replaced everything recorded so far
+    with silence: `duration_ms: 2006`, `samples_recorded: 0`.
+  - In both cases the answerer reported `"status":"answered"` and **exited 0**, so no exit-status
+    assertion could have caught it. Exit status is now asserted at all four sites that run the binary.
+  - **The lesson is about the filing, not the fix.** "Observed once under load, 15/15 in isolation"
+    reads like a test race and sent the search to the test; a 1.5 second sleep reproduces it 3/3.
+    *Not reproducible in isolation* described the symptom, never the defect.
+
+- **The docs-site step fails on a defect instead of printing it (`X-41`)** — `onBrokenAnchors` was
+  unset, Docusaurus defaults it to `warn`, and the step printed `Docusaurus found broken anchors!`
+  and exited 0. The gate reported green with a dead link in the published site, and it surfaced only
+  because `S-30` read the output rather than trusting the result.
+  - All **four** reporting handlers are now stated with a reason each, `onDuplicateRoutes` included —
+    it is not a link defect but it had the identical print-and-exit-0 shape.
+  - The step's contract is written where the step is defined, under one rule: **no check in this file
+    may print a defect and exit 0.** Any `[WARNING]` in the build output fails it, with an
+    intentionally empty exceptions list as the named place for a deliberate one.
+  - **It proves the guard is armed rather than trusting the setting**, by building a page that links
+    to an anchor no page emits and failing if that build succeeds.
+  - `scripts/check-docs-links.py` is new: the internal-links check lifted out of a heredoc and
+    extended to anchors, which the heredoc discarded with `link.split("#")[0]` — a link to a missing
+    file failed the build and a link to a missing heading was invisible. 208 internal pages, every
+    relative link and anchor resolving.
+  - The dead-anchor count this turned up was **zero**; the story is carried by the setting, not by
+    the cleanup.
+
+- **The maturity report describes the commit being made, not the rest of the tree (`X-39`)** — the
+  working-tree union shipped in `0.12.0` fixed the ordinary all-changes commit and left the selective
+  one wrong: a staged report could count a story the commit does not contain, so the local check and
+  a clean checkout of the resulting commit disagreed. That is the `X-22` failure class the gate
+  section exists to prevent, arriving inside the gate's own measuring instrument.
+  - **The snapshot is chosen by what is staged.** Any staged story change selects the index; with
+    none, the complete worktree is the snapshot and the ordinary workflow is unchanged. Staging the
+    report while story changes sit unstaged is refused rather than guessed at.
+  - **Dates were the other half.** Pending facts took the wall-clock day while history groups by
+    author date, so midnight or an amend moved a fact between rows. The generated region now carries
+    an event-date journal keyed to the filed and closed story paths, so unchanged totals cannot
+    conceal rewritten attribution, and a committed fact absent from the journal is still computed
+    from history — forgetting to regenerate stays strict drift.
+
+- **RFC 8996 cites the code that refuses TLS 1.0 and 1.1, not a document (`X-43`)** — the row claimed
+  `implemented` against prose. **The refusal was already real**: all four tests in
+  `crates/sipx-transport/tests/tls_versions.rs` passed the first time they ran, unchanged, at the
+  merge base. The defect was the evidence, and it is reported as such.
+  - The test writes a `ClientHello` byte by byte at a real listener with `client_version` 1.0 and 1.1
+    and no `supported_versions`, and requires a fatal `protocol_version` alert with nothing reaching
+    the application — `docs/specs/sip-tls.md` §6 vector **L9**, in the spec unrun since `T-7`. **The
+    1.2 control is the load-bearing half**: rustls demands `signature_algorithms` before it looks at
+    the version at all, so the first draft was refused with alert 40 and would have passed a looser
+    assertion.
+  - **The rule was adopted, not just the row fixed.** `prose_only_claims` now requires every
+    `implemented` or `partial` row to cite at least one `crates/….rs` path. Measured before adopting:
+    of 32 `implemented` and 22 `partial` rows, 8996 was the only one failing.
+
 ## [0.12.0] — 2026-07-30
 
 ### Added

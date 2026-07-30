@@ -2,7 +2,7 @@
 id: T-27
 title: Reject invalid endpoint runtime configuration before binding
 pillar: Signalling
-status: in-progress
+status: done
 priority: 5
 design: docs/designs/bounded-transports.md
 epic: bounded-transports

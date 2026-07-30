@@ -2,7 +2,7 @@
 id: T-26
 title: Bound unauthenticated TLS and WebSocket handshakes
 pillar: Signalling
-status: in-progress
+status: done
 priority: 2
 design: docs/designs/bounded-transports.md
 epic: bounded-transports

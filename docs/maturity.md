@@ -16,13 +16,13 @@ repository and are recorded when they happen rather than computed.
 |---|---|---|---|
 | 1 | No claim outlives its caller, at any layer | met | — |
 | 2 | Adversarial input and adversarial timing are both fuzzed | met | — |
-| 3 | A red gate means a defect | open | `X-39`, `X-40`, `X-41` |
-| 4 | No known-wrong shipped path | open | `M-35`, `M-36`, `M-37`, `T-25`, `T-26`, `T-27` |
+| 3 | A red gate means a defect | met | — |
+| 4 | No known-wrong shipped path | met (attested) | — |
 | 5 | The public API says what it guarantees | met | — |
 | 6 | Testable from a shell for everything the CLI exposes | met (attested) | — |
 | 7 | The distance to v1 is generated, not asserted | met | — |
 
-**5 of 7 predicates met.** A predicate is met when every story declaring it is `done`. **A story declares its predicate itself**, in its own `predicate:` frontmatter field, so there is no list of predicate stories kept here to fall behind the board — which is what happened, and is `X-42`.
+**7 of 7 predicates met.** A predicate is met when every story declaring it is `done`. **A story declares its predicate itself**, in its own `predicate:` frontmatter field, so there is no list of predicate stories kept here to fall behind the board — which is what happened, and is `X-42`.
 
 - **Predicate 1 is computed, not attested.** Computed, but the thing computed is a *definition* rather than a search. `X-38` ships an application (`sipx-app`) and defines the reachable-from-a-call surface as what it uses; `scripts/check-app-surface.py` holds every crate's `Supported` claim against that application's real dependency closure, and the gate is red when the two disagree. The three path checks before it could only find capabilities that were *mentioned* — a path is satisfied by citing a file whose relevant branch is dead — and none of them could say whether a capability was worth selecting. An application answers that by needing it or not. What this does **not** say is that every row of a layer is individually reached: the declarations it checks are per crate, so the surface is entered per crate.
 - **Predicate 4 is attested, not computed.** Cannot be computed: a defect nobody has found leaves no trace in either source. What is reported is the absence of *open* stories describing one.
@@ -47,17 +47,19 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Signalling | 14 |
-| Media | 12 |
-| Build | 7 |
+| Signalling | 11 |
+| Media | 8 |
 | Application | 6 |
+| Build | 3 |
 | Phone | 1 |
 | Transport | 1 |
-| **total** | **41** |
+| **total** | **30** |
 
-122 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+133 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
+
+<!-- maturity-event-days: {"basis":"sha256:6b3ab6c79ae00add7b71c2bff4e74115021afdbcaa914bc0f0cf9c08db2e1fc4","closed":{"2026-07-28":58,"2026-07-29":47,"2026-07-30":27},"filed":{"2026-07-28":95,"2026-07-29":43,"2026-07-30":26}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -65,18 +67,18 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 |---|---|---|---|
 | 2026-07-28 | 95 | 58 | -37 |
 | 2026-07-29 | 43 | 47 | +4 |
-| 2026-07-30 | 26 | 16 | -10 |
+| 2026-07-30 | 26 | 27 | +1 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 
-Both are read from committed history **union the working tree**, and that union is what makes today's row hold still: `git commit` moves a fact from the second source to the first without changing the count, so the commit that files or closes a story can carry a report of itself. It could not before `X-39`, when the day rows came from history alone and the count the report needed was created by the commit containing the report — which made the gate's `maturity` step red in most commits and never for a defect. The row is not tolerated or marked provisional, because either of those leaves it unchecked today and strictly checked tomorrow; the crossover date is the number to watch, so it is the source that changed.
+Both are read from committed history **union a deterministic pre-commit snapshot**. With no staged story change that snapshot is the complete worktree, preserving the ordinary edit → generate → stage-all workflow. Any staged story change selects the index, so a selective commit excludes unstaged and untracked stories. The generated comment above is the event-date journal; its basis binds the dates to the filed and closed story paths, so unchanged totals cannot conceal rewritten attribution. Existing facts were seeded from commit author dates; a new fact gets the day the report first observes it. Carrying that journal in the staged report keeps the row fixed across midnight and an amend with a retained author date. A committed fact absent from the journal is still computed from history, so forgetting regeneration remains strict drift.
 
 ## What this cannot see
 
 - **The reachable surface is one application's opinion, and it is entered per crate.** `X-38` replaced *unverified against callers* with a definition: what `sipx-app` uses is the surface. That is a real caller rather than a grep, and it is also a single one — so a supported *module* that the application's crates never name is not caught, because the declarations being checked are per crate. A second application disagreeing is the intended way this widens, and the rule for it is in `README.md`: an experimental item that something outside this repository depends on graduates, with a `CHANGELOG.md` entry.
 - **A predicate's stories are whichever stories declare it, so what this cannot see is a story that declares nothing.** Every predicate above is read from the `predicate:` field of the stories themselves; a story naming a predicate that does not exist fails the gate rather than being dropped, and a computed predicate no story declares reads **unknown** rather than met. What no script can decide is which predicate a story *should* have named — so a filer who leaves the field empty is the one remaining way a predicate reads met while a defect against it is open. That is narrower than what it replaced: the association used to live in `scripts/maturity.py`, where three defects filed against predicate 3 in one session went unrecorded because the filer had no reason to open the file (`X-42`).
 - **An absence of stories is not an absence of defects.** Predicate 4 in particular reports the absence of open stories describing a known-wrong path, which is not the same as there being none. `S-27` — a `sips:` URI dialled in cleartext — was found on the day it was filed, not by this report.
-- **Today's row is a working answer, not yet a historical one.** It counts uncommitted story files as filed and uncommitted `status: done` lines as closed, which is what lets the commit that moves the table contain the table (`X-39`). A story here means what the board means by one — a file carrying frontmatter with an `id` — so a scratch note left in the directory is not a story filed today. So a dirty tree reports a day git history does not show yet: the next commit makes it true, and `--check` calls it drift if that commit does not carry the regenerated report. Every earlier day is history alone and cannot move.
+- **The newest row can describe a pre-commit snapshot rather than `HEAD`.** Pending filed and closed facts are assigned the day this report first observes them, and their event-date journal is carried inside the generated region. This is deliberately not called the next commit's author date: Git has no such date before that commit exists. With a selective story snapshot, unstaged and untracked stories are excluded, so a dirty worktree can describe a different future board without changing the report of the commit currently staged (`X-39`).
 - **Nothing here measures whether the tests are good**, only that they pass. Predicate 3 exists because a test can be green and assert nothing: `X-36` found one that could not detect the reversal of the invariant it was named for.
 
 <!-- END maturity -->

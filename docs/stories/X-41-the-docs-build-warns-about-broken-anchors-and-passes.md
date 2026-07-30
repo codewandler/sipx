@@ -2,7 +2,7 @@
 id: X-41
 title: Make a broken anchor fail the docs build instead of warning inside a green gate
 pillar: Build
-status: in-progress
+status: done
 priority: 3
 design: docs/roadmap.md
 epic: conformance

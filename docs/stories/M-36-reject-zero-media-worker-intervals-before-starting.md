@@ -2,7 +2,7 @@
 id: M-36
 title: Reject zero media worker intervals before starting
 pillar: Media
-status: in-progress
+status: done
 priority: 6
 design: docs/designs/media-runtime-safety.md
 epic: media-runtime-safety

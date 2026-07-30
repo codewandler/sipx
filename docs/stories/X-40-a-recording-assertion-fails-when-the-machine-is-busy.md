@@ -2,7 +2,7 @@
 id: X-40
 title: Stop asserting on recorded audio without waiting for it
 pillar: Build
-status: in-progress
+status: done
 priority: 3
 design: docs/designs/media.md
 epic: conformance

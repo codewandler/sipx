@@ -2,7 +2,7 @@
 id: X-43
 title: Evidence RFC 8996 with a refusal, not with a document
 pillar: Build
-status: in-progress
+status: done
 priority: 5
 design: docs/designs/rfc-registry-grain.md
 epic: conformance
