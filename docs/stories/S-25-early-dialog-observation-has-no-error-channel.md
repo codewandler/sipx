@@ -2,7 +2,7 @@
 id: S-25
 title: Give the early-dialog loop a way to fail
 pillar: Signalling
-status: in-progress
+status: done
 priority: 6
 design: docs/designs/sip-ua.md
 epic: conformance
