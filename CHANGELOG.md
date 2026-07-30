@@ -7,6 +7,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The fixed-sleep rule is enforced rather than swept for (`X-44`)** — `docs/designs/media.md` has
+  said since `X-28` that a fixed wall-clock duration may bound a failure or define silence and may
+  not stand in for a happens-before. It was swept twice, `0.12.0` claimed the workspace was clean,
+  and nothing enforced it — so two fresh violations landed in the wave after the second sweep, one of
+  them in production code. `scripts/check-fixed-sleep.py` is a 23rd gate step and a CI job.
+  - **It reads the shape, not the word `sleep`.** `tokio::time::sleep`, `std::thread::sleep`,
+    `sleep_until`, a bare `interval.tick()`, a hand-rolled deadline spin and a wait hidden behind a
+    private helper in another crate are all refused. It also reports a loop whose every pass is
+    bounded by a *relative* timeout, which is the only reason it catches `X-40`'s regression — that
+    defect contains no sleep at all.
+  - **It covers `src/` as well as `tests/`**, because this workspace keeps much of its suite in
+    `#[cfg(test)]` modules beside the code, and 7 of the first 30 hits were under `src/`.
+  - **There is no suppression list, under any name** (`X-35`'s standard). A site says at its own line
+    which of four questions its duration answers, or the gate is red. The first run found **30
+    clock-decided assertions and 2 that said which** — two were real defects and are now causal
+    waits; the rest carry their reason.
+  - Review found the first version evadable twice over — by moving a wait wrapper one file away, and
+    by naming a constant documented in another crate — and both are closed, the second by deleting
+    the cross-file lookup rather than narrowing it.
+
 ## [1.0.0-alpha.3] — 2026-07-30
 
 **One breaking change, and four measurements that turned out not to measure what they said.**
