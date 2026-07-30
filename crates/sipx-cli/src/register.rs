@@ -37,17 +37,12 @@ OPTIONS:
 ";
 
 pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    if crate::wants_help(raw) {
-        print!("{HELP}");
-        return Exit::Success;
-    }
-
     // Before the address of record, and before any socket: a valued flag that was given no value
     // cannot be honoured, and reading it as absent is what let `--instance` register a device
     // identity nobody chose (`S-30`).
-    let args = match Args::new(raw) {
+    let args = match crate::arguments(raw, HELP, format) {
         Ok(args) => args,
-        Err(message) => return fail(format, Exit::Usage, &message),
+        Err(exit) => return exit,
     };
 
     let Some(aor) = args.positional() else {

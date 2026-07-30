@@ -27,7 +27,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::Args;
 use crate::output::{Exit, Format, Report, fail};
 
 pub(crate) const HELP: &str = "\
@@ -168,16 +167,11 @@ impl std::error::Error for Error {
 }
 
 pub(crate) fn run(raw: &[String], format: Format) -> Exit {
-    if crate::wants_help(raw) {
-        print!("{HELP}");
-        return Exit::Success;
-    }
-
     // A `--book` with no path is refused rather than silently falling through to the environment
     // and reporting whichever book happens to be there (`S-30`).
-    let args = match Args::new(raw) {
+    let args = match crate::arguments(raw, HELP, format) {
         Ok(args) => args,
-        Err(message) => return fail(format, Exit::Usage, &message),
+        Err(exit) => return exit,
     };
 
     let peers = match load(args.value("book")) {

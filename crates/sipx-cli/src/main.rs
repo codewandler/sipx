@@ -142,6 +142,28 @@ pub(crate) fn wants_help(raw: &[String]) -> bool {
     raw.iter().any(|arg| arg == "--help" || arg == "-h")
 }
 
+/// A command's arguments, or the exit it should return instead of running.
+///
+/// Every command opens the same way — answer `--help`, then refuse an argument list that cannot be
+/// honoured — and it lives here rather than four times over because the *order* is the part worth
+/// getting right once. Help is answered first so that `sipx dial --help --play` documents the
+/// command instead of complaining about `--play`.
+///
+/// `Err` carries the exit to return, which is `Exit::Success` when help was printed: from the
+/// caller's side both arms are "stop here", and distinguishing them would only give four commands
+/// the chance to disagree about it.
+pub(crate) fn arguments<'a>(
+    raw: &'a [String],
+    help: &str,
+    format: Format,
+) -> Result<Args<'a>, Exit> {
+    if wants_help(raw) {
+        print!("{help}");
+        return Err(Exit::Success);
+    }
+    Args::new(raw).map_err(|message| output::fail(format, Exit::Usage, &message))
+}
+
 /// Shared argument parsing.
 ///
 /// Deliberately small rather than a dependency: sipx needs flags and one positional, and a
@@ -391,7 +413,10 @@ mod tests {
             let raw = args(&["register", flag]);
             let error =
                 Args::new(&raw).expect_err("a valued flag in final position was given no value");
-            assert!(error.contains(flag), "the refusal must name {flag}: {error}");
+            assert!(
+                error.contains(flag),
+                "the refusal must name {flag}: {error}"
+            );
 
             // An empty value, in both forms a shell can hand one over.
             let joined = format!("{flag}=");
@@ -401,7 +426,10 @@ mod tests {
             ] {
                 let raw = args(items);
                 let error = Args::new(&raw).expect_err("an empty value is not a value");
-                assert!(error.contains(flag), "the refusal must name {flag}: {error}");
+                assert!(
+                    error.contains(flag),
+                    "the refusal must name {flag}: {error}"
+                );
             }
         }
     }
@@ -415,6 +443,11 @@ mod tests {
 
         let raw = args(&["dial", "sip:a@b.c", "--json"]);
         assert!(parsed(&raw).flag("json"));
+
+        // `--json=` is nothing this rule has an opinion about: the flag takes no value, so an
+        // empty one is not a value gone missing.
+        let raw = args(&["dial", "sip:a@b.c", "--json="]);
+        assert!(Args::new(&raw).is_ok());
     }
 
     /// A positional argument may contain an `=` — a URI parameter is spelled with one — and that

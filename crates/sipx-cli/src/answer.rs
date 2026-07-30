@@ -7,7 +7,6 @@ use sipx_audio::{Wav, read_wav, write_wav};
 use sipx_sip::{HeaderName, StatusCode};
 use sipx_transport::{Config as TransportConfig, bind};
 
-use crate::Args;
 use crate::output::{Exit, Format, Report, fail};
 
 pub(crate) const HELP: &str = "\
@@ -29,16 +28,11 @@ OPTIONS:
 ";
 
 pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    if crate::wants_help(raw) {
-        print!("{HELP}");
-        return Exit::Success;
-    }
-
     // Refused before the socket is bound, so a dropped flag cannot become an answerer that
     // reports `listening` and then records nothing (`S-30`).
-    let args = match Args::new(raw) {
+    let args = match crate::arguments(raw, HELP, format) {
         Ok(args) => args,
-        Err(message) => return fail(format, Exit::Usage, &message),
+        Err(exit) => return exit,
     };
 
     let clip = match args.value("play").map(read_clip) {
