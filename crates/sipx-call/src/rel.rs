@@ -17,7 +17,7 @@ use sipx_sip::update;
 use sipx_sip::{HeaderName, Method, Response, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
 
-use crate::call::Early;
+use crate::call::{Codecs, Early};
 use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
 
@@ -359,12 +359,40 @@ pub async fn ring(
 /// The media port is bound now, and the [`Call`](crate::Call) that
 /// [`answer_early`](crate::answer_early) builds takes it over: the answer has already told the
 /// far end where to send, and binding a second port would make the 200 contradict the 183.
+///
+/// Answers from the default codec set, [`Codecs::G711`]. [`ring_early_with`] takes a selection,
+/// and it has to be made *here* rather than at [`crate::answer_early`]: the answer goes out in
+/// this provisional, so by the time the 200 is built the codec has been agreed for some time.
 pub async fn ring_early(
     endpoint: &Handle,
     incoming: &Incoming,
     status: u16,
     reason: &'static str,
     media_address: IpAddr,
+) -> Result<Ringing> {
+    ring_early_with(
+        endpoint,
+        incoming,
+        status,
+        reason,
+        media_address,
+        Codecs::default(),
+    )
+    .await
+}
+
+/// [`ring_early`], from a chosen codec set rather than the default one (`M-30`).
+///
+/// The [`Call`](crate::Call) that [`crate::answer_early`] builds inherits `codecs`, so an UPDATE
+/// arriving before the 200 — the whole reason this path exists — is answered from the same set the
+/// 183 answered from rather than from the default one.
+pub async fn ring_early_with(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    status: u16,
+    reason: &'static str,
+    media_address: IpAddr,
+    codecs: Codecs,
 ) -> Result<Ringing> {
     if !Offered::in_request(&incoming.request).supported {
         // Not a refusal of the call — the caller can still be rung the ordinary way. It is a
@@ -377,7 +405,8 @@ pub async fn ring_early(
     }
     let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    let settled = Early::settle(media_address, incoming.transport.is_secure(), &offer).await?;
+    let settled =
+        Early::settle(media_address, incoming.transport.is_secure(), &offer, codecs).await?;
     ring_with(endpoint, incoming, status, reason, true, Some(settled)).await
 }
 

@@ -781,7 +781,7 @@ impl Call {
         self.peer_allows_update = update::peer_allows(&response.headers);
 
         if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
-            && let Ok(renegotiated) = negotiated(&answer)
+            && let Ok(renegotiated) = negotiated(&answer, self.codecs)
         {
             self.move_media_if_changed(renegotiated).await?;
         }
@@ -1060,7 +1060,7 @@ impl Call {
         send_ack(&self.endpoint, &self.dialog, self.target.clone()).await?;
 
         if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
-            && let Ok(renegotiated) = negotiated(&answer)
+            && let Ok(renegotiated) = negotiated(&answer, self.codecs)
         {
             self.move_media_if_changed(renegotiated).await?;
         }
@@ -2145,6 +2145,7 @@ async fn dial_with(
         target.clone(),
         port,
         capabilities.crypto.as_slice(),
+        options.codecs,
     ) {
         Ok((dialog, media, in_dialog, settled)) => {
             let ack = build_ack(endpoint, &dialog, &in_dialog)?;
@@ -2173,6 +2174,7 @@ async fn dial_with(
                 awaiting_ack: None,
                 ended: false,
                 media_address,
+                codecs: options.codecs,
                 current: settled.negotiated,
                 encrypted: settled.srtp.is_some(),
                 hold: Direction::SendRecv,
@@ -2216,10 +2218,11 @@ fn establish(
     fallback: Target,
     port: MediaPort,
     offered: &[sipx_sdp::crypto::Crypto],
+    codecs: Codecs,
 ) -> Result<(Dialog, MediaSession, Target, Settled)> {
     let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    let settled = settle_answer(offered, &answer)?;
+    let settled = settle_answer(offered, &answer, codecs)?;
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
     let media = port.start(settled.media_config());
@@ -2236,6 +2239,7 @@ fn establish(
 fn settle_answer(
     offered: &[sipx_sdp::crypto::Crypto],
     answer: &SessionDescription,
+    codecs: Codecs,
 ) -> Result<Settled> {
     // Both halves or neither, *and* the two halves have to be the ones the two ends agreed on:
     // a stream keyed at one end only is a call that connects and carries silence, and one keyed
@@ -2243,7 +2247,7 @@ fn settle_answer(
     // worth having, so both come back as `Error::Sdp` rather than as a quietly plain call.
     let answered = answered_crypto(answer);
     Ok(Settled {
-        negotiated: negotiated(answer)?,
+        negotiated: negotiated(answer, codecs)?,
         srtp: srtp_keys(offered, answered.as_ref())?,
     })
 }
@@ -2254,8 +2258,35 @@ fn settle_answer(
 /// `sipx-sip`'s server transaction moves to `Accepted` and absorbs retransmissions of the
 /// *request*, but it does not resend the response. Over UDP one lost 200 means the caller
 /// gives up while this side holds an established call, so this is not optional.
+///
+/// Answers from the default codec set, [`Codecs::G711`]. [`answer_with`] takes a selection.
 pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAddr) -> Result<Call> {
-    answer_tagged(endpoint, incoming, media_address, &token(), None).await
+    answer_tagged(
+        endpoint,
+        incoming,
+        media_address,
+        &token(),
+        None,
+        Codecs::default(),
+    )
+    .await
+}
+
+/// [`answer`], from a chosen codec set rather than the default one (`M-30`).
+///
+/// The answering counterpart of [`DialOptions::with_codecs`]. `codecs` bounds what the answer may
+/// settle on, and no more than that: RFC 3264 §6.1 gives the *order* to the offerer, so a caller
+/// offering G.711 first is answered G.711 first even from [`Codecs::Opus`]. What the selection
+/// decides is whether Opus is on the table at all — an offer of it answered from
+/// [`Codecs::G711`] is answered G.711, because a call must never settle on a codec the
+/// application did not ask to carry.
+pub async fn answer_with(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    codecs: Codecs,
+) -> Result<Call> {
+    answer_tagged(endpoint, incoming, media_address, &token(), None, codecs).await
 }
 
 /// The same, with the `To` tag chosen by the caller rather than freshly minted.
@@ -2272,13 +2303,24 @@ pub(crate) async fn answer_tagged(
     media_address: IpAddr,
     tag: &str,
     claim: Option<Claim<'_>>,
+    codecs: Codecs,
 ) -> Result<Call> {
     // Ahead of the claim, deliberately: an offer that cannot be read fails here with nothing
     // sent, and an invitation that was never taken is one a CANCEL can still end.
     let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
     // No provisional was sent on this path, so there is nothing to report as `Ringing`.
-    answer_negotiated(endpoint, incoming, media_address, offer, tag, None, claim).await
+    answer_negotiated(
+        endpoint,
+        incoming,
+        media_address,
+        offer,
+        tag,
+        None,
+        claim,
+        codecs,
+    )
+    .await
 }
 
 /// The media an invitation has bound, and what the far end has said about it.
@@ -2693,7 +2735,11 @@ impl Dialing {
         let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body())) else {
             return;
         };
-        let settled = match settle_answer(self.capabilities.crypto.as_slice(), &answer) {
+        let settled = match settle_answer(
+            self.capabilities.crypto.as_slice(),
+            &answer,
+            self.options.codecs,
+        ) {
             Ok(settled) => settled,
             // Logged rather than discarded in silence. The session stays `Offered`, so nothing
             // is keyed on this answer and the 2xx settles the exchange again through
@@ -2713,6 +2759,7 @@ impl Dialing {
             capabilities: self.capabilities.clone(),
             settled,
             media_address: self.options.media_address,
+            codecs: self.options.codecs,
         })));
         self.negotiation.received_answer();
     }
@@ -2799,6 +2846,7 @@ impl Dialing {
                     awaiting_ack: None,
                     ended: false,
                     media_address: self.options.media_address,
+                    codecs: self.options.codecs,
                     current: settled.negotiated,
                     encrypted: settled.srtp.is_some(),
                     hold: self.hold,
@@ -2880,7 +2928,11 @@ impl Dialing {
     fn settle_from(&mut self, response: &Response) -> Result<Settled> {
         let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
             .map_err(|error| Error::Sdp(error.to_string()))?;
-        let settled = settle_answer(self.capabilities.crypto.as_slice(), &answer)?;
+        let settled = settle_answer(
+            self.capabilities.crypto.as_slice(),
+            &answer,
+            self.options.codecs,
+        )?;
         // Our INVITE's offer is answered here rather than in a provisional, so the exchange
         // closes now. Without this the first UPDATE on the confirmed call would be refused as
         // glare against an offer that has in fact been answered.
@@ -2921,6 +2973,10 @@ pub(crate) struct Early {
     pub(crate) capabilities: Capabilities,
     pub(crate) settled: Settled,
     pub(crate) media_address: IpAddr,
+    /// The codec set the provisional's answer was built from, kept because the exchange is not
+    /// over: an UPDATE may reoffer before the 200, and it has to be answered from the same set
+    /// rather than from the default one.
+    pub(crate) codecs: Codecs,
 }
 
 impl Early {
@@ -2929,13 +2985,15 @@ impl Early {
         media_address: IpAddr,
         secure: bool,
         offer: &SessionDescription,
+        codecs: Codecs,
     ) -> Result<(Self, SessionDescription)> {
-        let negotiated = negotiated(offer)?;
+        let negotiated = negotiated(offer, codecs)?;
         let port = MediaPort::bind(SocketAddr::new(media_address, 0))
             .await
             .map_err(Error::Io)?;
-        let capabilities =
-            Capabilities::g711(media_address, port.local_addr().port()).with_srtp(secure);
+        let capabilities = codecs
+            .capabilities(media_address, port.local_addr().port())
+            .with_srtp(secure);
         let answer = sipx_sdp::answer(offer, &capabilities);
         if answer
             .media
@@ -2954,6 +3012,7 @@ impl Early {
                 capabilities,
                 settled,
                 media_address,
+                codecs,
             },
             answer,
         ))
@@ -2966,7 +3025,7 @@ impl Early {
     /// accepted something, and guessing which of our formats it meant is worse than keeping
     /// what the last completed exchange settled.
     pub(crate) fn adopt_answer(&mut self, answer: &SessionDescription) {
-        if let Ok(negotiated) = negotiated(answer) {
+        if let Ok(negotiated) = negotiated(answer, self.codecs) {
             self.settled.negotiated = negotiated;
         }
     }
@@ -2980,7 +3039,7 @@ impl Early {
     /// already has, and changing it because *their* description changed would ask them to
     /// renegotiate again to learn where we went.
     pub(crate) fn reanswer(&mut self, offer: &SessionDescription) -> Option<SessionDescription> {
-        let negotiated = negotiated(offer).ok()?;
+        let negotiated = negotiated(offer, self.codecs).ok()?;
         let answer = sipx_sdp::answer(offer, &self.capabilities);
         if answer
             .media
@@ -3004,11 +3063,30 @@ impl Early {
 /// what this side's tag is (RFC 3261 §12.1.1); a 200 with a different one creates a *second*
 /// dialog. The caller ACKs the dialog it knows about, this side waits for an ACK to the other,
 /// and the 200 is retransmitted for 32 seconds into a call that is actually up.
+///
+/// Answers from the default codec set, [`Codecs::G711`]. [`answer_ringing_with`] takes a
+/// selection.
 pub async fn answer_ringing(
     endpoint: &Handle,
     incoming: &Incoming,
     media_address: IpAddr,
     ringing: &crate::Ringing,
+) -> Result<Call> {
+    answer_ringing_with(endpoint, incoming, media_address, ringing, Codecs::default()).await
+}
+
+/// [`answer_ringing`], from a chosen codec set rather than the default one (`M-30`).
+///
+/// The selection is made here rather than at [`ring`](crate::ring) because `ring` sends a
+/// bodiless provisional: nothing about the session has been said yet when it goes out, so the
+/// answer this builds is still the first one. That is exactly what separates this from
+/// [`answer_early`], where the answer left in the 183 and the choice had to be made with it.
+pub async fn answer_ringing_with(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    ringing: &crate::Ringing,
+    codecs: Codecs,
 ) -> Result<Call> {
     // RFC 3262 §3 and §5: a 2xx must not go out while a reliable provisional carrying a session
     // description is unacknowledged. This path never puts a description in one — `ring` sends a
@@ -3029,6 +3107,7 @@ pub async fn answer_ringing(
         ringing.tag(),
         Some(ringing.is_reliable()),
         None,
+        codecs,
     )
     .await
 }
@@ -3129,6 +3208,7 @@ pub async fn answer_early(
         awaiting_ack: Some(acked),
         ended: false,
         media_address: early.media_address,
+        codecs: early.codecs,
         current: early.settled.negotiated,
         hold: Direction::SendRecv,
         encrypted: early.settled.is_encrypted(),
@@ -3218,6 +3298,10 @@ pub(crate) type Claim<'a> = &'a (dyn Fn() -> Result<()> + Send + Sync);
 /// [`answer`] path) means there is no ringing to report at all.
 ///
 /// `claim` is the dispatcher's, and is invoked at one specific line below; see [`Claim`].
+///
+/// `codecs` is what this side is willing to carry. It bounds the answer at both ends of the one
+/// exchange: [`negotiated`] may not settle outside it, and [`Codecs::capabilities`] builds the
+/// answer from it — so the codec the session starts on is always one the answer named.
 async fn answer_negotiated(
     endpoint: &Handle,
     incoming: &Incoming,
@@ -3226,8 +3310,9 @@ async fn answer_negotiated(
     tag: &str,
     reliable_ringing: Option<bool>,
     claim: Option<Claim<'_>>,
+    codecs: Codecs,
 ) -> Result<Call> {
-    let negotiated = negotiated(&offer)?;
+    let negotiated = negotiated(&offer, codecs)?;
 
     // The port is bound before the session starts, because the answer has to name it *and* the
     // session has to be created with the keys that answer settles on. Starting the session first
@@ -3236,7 +3321,8 @@ async fn answer_negotiated(
         .await
         .map_err(Error::Io)?;
 
-    let capabilities = Capabilities::g711(media_address, port.local_addr().port())
+    let capabilities = codecs
+        .capabilities(media_address, port.local_addr().port())
         .with_srtp(incoming.transport.is_secure());
     let answer_sdp = sipx_sdp::answer(&offer, &capabilities);
     if answer_sdp
@@ -3351,6 +3437,7 @@ async fn answer_negotiated(
         awaiting_ack: Some(acked),
         ended: false,
         media_address,
+        codecs,
         current: settled.negotiated,
         hold: Direction::SendRecv,
         encrypted: settled.srtp.is_some(),
@@ -3956,11 +4043,35 @@ pub fn contact_for(endpoint: &Handle, transport: TransportKind) -> String {
 /// On success the replaced call is hung up and its media torn down. On failure the new INVITE
 /// is refused and the existing call is left exactly as it was: a replacement that cannot be
 /// honoured must not cost the user the call they already had.
+///
+/// Answers from the default codec set, [`Codecs::G711`]. [`answer_replacing_with`] takes a
+/// selection.
 pub async fn answer_replacing(
     endpoint: &Handle,
     incoming: &Incoming,
     media_address: IpAddr,
     replaced: &mut Call,
+) -> Result<Call> {
+    answer_replacing_with(
+        endpoint,
+        incoming,
+        media_address,
+        replaced,
+        Codecs::default(),
+    )
+    .await
+}
+
+/// [`answer_replacing`], from a chosen codec set rather than the default one (`M-30`).
+///
+/// `codecs` applies to the *replacement*, which is the only call being negotiated here. The one
+/// being replaced is hung up, and nothing renegotiates it on the way out.
+pub async fn answer_replacing_with(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    replaced: &mut Call,
+    codecs: Codecs,
 ) -> Result<Call> {
     let Some(asked_for) = Replaces::of(&incoming.request) else {
         refuse_request(endpoint, incoming, 400, "Bad Request").await?;
@@ -3977,7 +4088,7 @@ pub async fn answer_replacing(
 
     // Answer first. If this fails the old call is untouched, which is the right way round:
     // hanging up first and then failing to answer would leave the user with no call at all.
-    let taken_over = answer(endpoint, incoming, media_address).await?;
+    let taken_over = answer_with(endpoint, incoming, media_address, codecs).await?;
 
     // Then end the one being replaced (RFC 3891 §3). Its media stops with it.
     let _ = replaced.hang_up().await;

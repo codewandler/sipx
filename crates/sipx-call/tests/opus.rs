@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use sipx_call::{Call, Codecs, DialOptions, answer_with, dial};
 use sipx_media::Codec;
-use sipx_sip::{HeaderName, Host, HostName, Method, Uri};
+use sipx_sip::{Host, HostName, Method, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use tokio::sync::mpsc::Receiver;
 

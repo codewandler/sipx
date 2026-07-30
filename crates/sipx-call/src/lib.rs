@@ -43,12 +43,13 @@ pub mod transfer;
 mod update;
 
 pub use call::{
-    Call, DialOptions, Dialing, answer, answer_early, answer_replacing, answer_ringing, dial,
-    dial_early, dial_once, serve,
+    Call, Codecs, DialOptions, Dialing, answer, answer_early, answer_replacing,
+    answer_replacing_with, answer_ringing, answer_ringing_with, answer_with, dial, dial_early,
+    dial_once, serve,
 };
 pub use dialog::{Dialog, DialogId, Role};
 pub use dispatch::{Calls, DispatchCounts, Dispatched, Dispatcher, Invitation};
 pub use error::{Error, Result};
 pub use event::{CallEvent, CallEvents, EndCause};
-pub use rel::{Ringing, ring, ring_early};
+pub use rel::{Ringing, ring, ring_early, ring_early_with};
 pub use transfer::{Referral, Replaces, Transfer, TransferState};

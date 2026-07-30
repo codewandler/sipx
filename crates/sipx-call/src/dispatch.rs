@@ -42,7 +42,7 @@ use sipx_sip::{HeaderName, Method, Request, StatusCode};
 use sipx_transport::{Handle, Incoming};
 use tokio::sync::mpsc;
 
-use crate::call::{Call, token};
+use crate::call::{Call, Codecs, token};
 use crate::dialog::{Dialog, cseq_number, from_tag, to_tag};
 use crate::error::{Error, Result};
 use crate::event::{CallEvents, EndCause, EventSink};
@@ -161,7 +161,26 @@ impl Invitation {
     /// Prefer this to [`crate::answer`] on anything a [`Dispatcher`] surfaced. The free function
     /// still works and still answers correctly — it simply cannot tell the dispatcher what it
     /// did, so a CANCEL that arrives around it is judged on the transaction's last known state.
+    ///
+    /// Answers from the default codec set, [`Codecs::G711`]. [`Self::answer_with`] takes a
+    /// selection.
     pub async fn answer(&self, endpoint: &Handle, media_address: IpAddr) -> Result<Call> {
+        self.answer_with(endpoint, media_address, Codecs::default())
+            .await
+    }
+
+    /// [`Self::answer`], from a chosen codec set rather than the default one (`M-30`).
+    ///
+    /// The dispatcher's counterpart of [`crate::answer_with`]. This exists rather than being left
+    /// to the free function because this is the path the docs above tell an application to prefer:
+    /// a selection reachable only through [`crate::answer_with`] would be a selection every
+    /// dispatched call has to give up cancellation bookkeeping to make.
+    pub async fn answer_with(
+        &self,
+        endpoint: &Handle,
+        media_address: IpAddr,
+        codecs: Codecs,
+    ) -> Result<Call> {
         // Handed down rather than taken here, so that the invitation is taken immediately before
         // the `200` leaves rather than before the work that builds it — every step of which can
         // fail with nothing sent, and an invitation taken by one of those is one no CANCEL can
@@ -172,6 +191,7 @@ impl Invitation {
             media_address,
             self.pending.tag(),
             Some(&|| self.pending.claim()),
+            codecs,
         )
         .await
     }
