@@ -59,6 +59,28 @@ REACHABILITY_CHECKED = {"media", "security"}
 SURFACE_CHECKER = "scripts/check-app-surface.py"
 SURFACE_APPLICATION = "sipx-app"
 
+#: Where `status` is defined. There is exactly one definition of each status word, it lives in this
+#: table, and `rfc-report.py` is what enforces it.
+RFC_README = ROOT / "docs" / "rfc" / "README.md"
+
+
+def status_definition(word: str) -> str:
+    """The definition of a `status` word, read from `docs/rfc/README.md`'s schema table.
+
+    **Read rather than restated, because restating it produced a false sentence** (`X-38` rework). This
+    report claimed "`implemented` now means the code exists in a crate the shipped application depends
+    on", which was wrong twice over: RFC 8996 is `implemented` on the evidence of `docs/specs/sip-tls.md`
+    and no crate at all, and the sentence handed the load-bearing word a second definition conflicting
+    with the schema table — two meanings across the two documents a reader consults, which is precisely
+    the drift this repository keeps closing. `X-38` did not change what `implemented` means. It changed
+    what decides *reachability*, which is a different column.
+    """
+    for line in RFC_README.read_text(encoding="utf-8").splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) == 2 and cells[0] == f"`{word}`":
+            return cells[1].rstrip(".")
+    raise SystemExit(f"maturity: no definition of `{word}` in {RFC_README.relative_to(ROOT)}")
+
 
 class Predicate:
     """One alpha predicate, and how its state is arrived at.
@@ -318,12 +340,17 @@ def render():
     total = len(rows)
     lines.append("")
     lines.append(
-        f"{total} RFCs tracked. **`implemented` now means the code exists in a crate the shipped "
-        f"application depends on** — that is the definition `X-38` put in place of the caveat this "
-        f"table carried for `core`, `services`, `transport` and `wire`, and `{SURFACE_CHECKER}` fails "
-        f"the gate when a crate claims supported surface no application reaches. The two layers that "
-        f"also say *path check* carry `rfc-report.py`'s per-row check on top; the others are entered "
-        f"per crate, so a single row of them is not individually attested."
+        f"{total} RFCs tracked. `implemented` means what "
+        f"[`docs/rfc/README.md`](rfc/README.md) says it means — *{status_definition('implemented')}* — "
+        f"and `rfc-report.py` is what enforces that. **`X-38` did not change the status words. It "
+        f"changed the basis of the last column**: every layer now has a shipped application under it, "
+        f"in place of the caveat this table carried for `core`, `services`, `transport` and `wire`, "
+        f"which said no caller had been found. `{SURFACE_CHECKER}` fails the gate when a crate claims "
+        f"supported surface no application reaches. The two layers that also say *path check* carry "
+        f"`rfc-report.py`'s per-row check on top; the others are entered per crate, so a single row of "
+        f"them is not individually attested. The column is about reachability, not about which crate "
+        f"holds the code: what a row must cite is `docs/rfc/README.md`'s business, and `X-43` is where "
+        f"the one row citing no code is being weighed."
     )
     lines.append("")
 

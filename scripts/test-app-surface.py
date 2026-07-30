@@ -50,6 +50,23 @@ class Workspace:
         self.root = pathlib.Path(tempfile.mkdtemp())
         self.crates = self.root / "crates"
         self.crates.mkdir()
+        #: The root `[workspace.dependencies]` table, by crate name. Written on every `add`, because
+        #: this is a real input to the checker: an edge written `foo.workspace = true` inherits the
+        #: features set here, and a fixture that had no root manifest would read the repository's own.
+        self.workspace_dependencies: dict[str, str] = {}
+
+    def inherits(self, name, table):
+        """Set a root `[workspace.dependencies]` entry, e.g. `features = ["opus"]`."""
+        self.workspace_dependencies[name] = table
+        self._write_root()
+        return self
+
+    def _write_root(self):
+        lines = ["[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\n"]
+        for name, table in sorted(self.workspace_dependencies.items()):
+            extra = f", {table}" if table else ""
+            lines.append(f'{name} = {{ path = "crates/{name}"{extra} }}\n')
+        (self.root / "Cargo.toml").write_text("".join(lines))
 
     def add(self, name, *, declares="", dependencies=(), dev_dependencies=(), modules=None,
             publish=True, library=True, features=None, gated=None, entry_extra=""):
@@ -89,15 +106,20 @@ class Workspace:
             path = directory / "src" / f"{module}.rs"
             if not path.exists():
                 path.write_text("//! A gated module.\n")
+
+        self.workspace_dependencies.setdefault(name, "")
+        self._write_root()
         return self
 
     def __enter__(self):
-        self._saved = surface.CRATES
+        self._saved = (surface.CRATES, surface.ROOT)
         surface.CRATES = self.crates
+        surface.ROOT = self.root
+        self._write_root()
         return self
 
     def __exit__(self, *_):
-        surface.CRATES = self._saved
+        surface.CRATES, surface.ROOT = self._saved
         shutil.rmtree(self.root, ignore_errors=True)
         return False
 
@@ -190,9 +212,29 @@ class TheAssertions(unittest.TestCase):
                 dependencies=["sipx-unused"],
             )
             workspace.add("sipx-unused", declares="//! **Supported.** All of it.")
-            problems = surface.unreached_supported(surface.closure(("sipx-app",)))
+            problems = surface.unused_edges(surface.closure(("sipx-app",)))
             self.assertEqual(len(problems), 1, problems)
             self.assertIn("never named", problems[0])
+            self.assertIn("also declares part of itself `Supported`", problems[0])
+
+    def test_a_manifest_edge_is_not_use_whatever_the_crate_claims(self):
+        """The generalised form: the laundering route does not depend on claiming `Supported`.
+
+        Reporting only the `Supported` case left the count movable from a manifest. Adding
+        `sipx-app-protocol` — which claims nothing — to the host's manifest put it in the closure and
+        silently dropped the experimental-crate list from one entry to none.
+        """
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-quiet"],
+            )
+            workspace.add("sipx-quiet", declares="//! # Experimental\n//!\n//! Says nothing else.")
+            problems = surface.unused_edges(surface.closure(("sipx-app",)))
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn("never named", problems[0])
+            self.assertNotIn("Supported", problems[0])
 
     def test_naming_the_crate_in_code_satisfies_it(self):
         with Workspace() as workspace:
@@ -218,7 +260,7 @@ class TheAssertions(unittest.TestCase):
                 declares="//! **Supported.** All of it.",
                 modules={"secret": "//! **Experimental** (`A-8`): nothing above selects it.\n"},
             )
-            problems = surface.reached_experimental(surface.closure(("sipx-app",)))
+            problems = surface.reached_experimental(surface.resolve(("sipx-app",)))
             self.assertEqual(len(problems), 1, problems)
             self.assertIn("graduates", problems[0])
 
@@ -239,7 +281,7 @@ class TheAssertions(unittest.TestCase):
                     "other": "//! Fine.\n",
                 },
             )
-            problems = surface.reached_experimental(surface.closure(("sipx-app",)))
+            problems = surface.reached_experimental(surface.resolve(("sipx-app",)))
             self.assertEqual(len(problems), 1, problems)
 
     def test_a_module_its_own_crate_uses_is_not_a_caller_above_it(self):
@@ -253,7 +295,7 @@ class TheAssertions(unittest.TestCase):
                     "inside": "use sipx_deep::secret::Thing;\n",
                 },
             )
-            self.assertEqual(surface.reached_experimental(surface.closure(("sipx-app",))), [])
+            self.assertEqual(surface.reached_experimental(surface.resolve(("sipx-app",))), [])
 
     def test_a_test_module_is_not_a_caller(self):
         """A reference below `#[cfg(test)]` is a test, and a test does not widen the surface."""
@@ -269,7 +311,7 @@ class TheAssertions(unittest.TestCase):
                 declares="//! **Supported.** All of it.",
                 modules={"secret": "//! **Experimental** (`A-8`): nothing selects it.\n"},
             )
-            self.assertEqual(surface.reached_experimental(surface.closure(("sipx-app",))), [])
+            self.assertEqual(surface.reached_experimental(surface.resolve(("sipx-app",))), [])
 
     def test_a_bin_only_crate_is_not_judged(self):
         """Nothing can depend on a crate with no library, so its absence accuses nobody."""
@@ -364,7 +406,7 @@ class FeaturesArePartOfSelection(unittest.TestCase):
             problems = surface.unselectable_and_unmarked(surface.resolve(("sipx-app",)))
             self.assertEqual(len(problems), 1, problems)
             self.assertIn("sipx_deep::fancy", problems[0])
-            self.assertIn("`codec` feature", problems[0])
+            self.assertIn("`codec`", problems[0])
 
     def test_marking_it_experimental_satisfies_the_rule(self):
         with Workspace() as workspace:
@@ -441,6 +483,285 @@ class FeaturesArePartOfSelection(unittest.TestCase):
             )
 
 
+class TheReviewFindings(unittest.TestCase):
+    """The four attacks that got through the first version, each of which passed *silently*.
+
+    Kept as one class because they share a shape: every one of them let a one-line edit move the
+    reported surface while the checker printed success. That is the failure direction this script's own
+    docstrings call the worst case, so each gets a test naming the edit that used to work.
+    """
+
+    def test_a_feature_set_in_the_workspace_table_is_seen(self):
+        """`B1`: every crate writes `foo.workspace = true`, so this is where a feature goes."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-deep"],
+                modules={"host": "use sipx_deep::thing;\n"},
+            )
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                features={"default": [], "codec": []},
+                gated={"fancy": "codec"},
+                modules={"fancy": "//! **Experimental** (`A-8`): nothing enables `codec`.\n"},
+            )
+            self.assertNotIn("codec", surface.resolve(("sipx-app",))["sipx-deep"])
+
+            workspace.inherits("sipx-deep", 'features = ["codec"]')
+            self.assertIn(
+                "codec",
+                surface.resolve(("sipx-app",))["sipx-deep"],
+                "a feature set in the root table genuinely ships, so the checker must see it",
+            )
+
+    def test_a_per_crate_feature_list_adds_to_the_inherited_one(self):
+        """Cargo's rule, and the reason both tables have to be read rather than either one."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=[("sipx-deep", 'features = ["extra"]')],
+                modules={"host": "use sipx_deep::thing;\n"},
+            )
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                features={"default": [], "codec": [], "extra": []},
+            )
+            workspace.inherits("sipx-deep", 'features = ["codec"]')
+            enabled = surface.resolve(("sipx-app",))["sipx-deep"]
+            self.assertIn("codec", enabled, "the inherited feature survives")
+            self.assertIn("extra", enabled, "and the per-crate one is added, not substituted")
+
+    def test_a_wholly_experimental_crate_the_application_selects_is_reported(self):
+        """`B2`: `README.md` promised this and only the module-sized case was checked."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-contract"],
+                modules={"host": "use sipx_contract::Envelope;\n"},
+            )
+            workspace.add(
+                "sipx-contract",
+                declares="//! # Experimental\n//!\n//! It settles when two applications exist.",
+            )
+            self.assertEqual(surface.wholly_experimental(), ["sipx-contract"])
+            problems = surface.reached_experimental_crates(surface.resolve(("sipx-app",)))
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn("declares its whole self **Experimental**", problems[0])
+            self.assertIn("graduates", problems[0])
+
+    def test_listing_which_modules_are_experimental_is_not_a_whole_crate_claim(self):
+        """Six library crates write `**Experimental**` while listing their modules."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-deep"],
+                modules={"host": "use sipx_deep::thing;\n"},
+            )
+            workspace.add(
+                "sipx-deep",
+                declares=(
+                    "//! **Supported**: the parser.\n"
+                    "//! **Experimental**: `presence` and `subscribe`.\n"
+                ),
+            )
+            self.assertEqual(
+                surface.wholly_experimental(),
+                [],
+                "naming which modules are experimental is not declaring the crate so",
+            )
+
+    def test_a_comment_is_not_a_caller(self):
+        """`B4`: the hole `M-30` closed in `rfc-report.py`, in this checker."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-contract"],
+                modules={
+                    "host": "//! One day we might use sipx_contract::Envelope here.\n",
+                },
+            )
+            workspace.add("sipx-contract", declares="//! # Experimental\n//!\n//! Nothing yet.")
+            self.assertEqual(
+                surface.reached_experimental_crates(surface.resolve(("sipx-app",))),
+                [],
+                "a sentence about a symbol calls nothing",
+            )
+            problems = surface.unused_edges(surface.closure(("sipx-app",)))
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn("never named", problems[0])
+
+    def test_a_comment_does_not_demand_a_graduation_either(self):
+        """It fired both ways: prose naming an experimental module raised a spurious demand."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-deep"],
+                modules={
+                    "host": "use sipx_deep::thing;\n// see also sipx_deep::fancy one day\n",
+                },
+            )
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                modules={"fancy": "//! **Experimental** (`A-8`): nothing selects it.\n"},
+                entry_extra="pub mod fancy;\n",
+            )
+            self.assertEqual(
+                surface.reached_experimental(surface.resolve(("sipx-app",))),
+                [],
+                "a comment must not force a module to graduate",
+            )
+
+    def test_a_compound_cfg_still_gates_a_module(self):
+        """`B5`: `all(feature = "opus", not(doc))` read as unconditional."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-deep"],
+                modules={"host": "use sipx_deep::thing;\n"},
+            )
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                features={"default": [], "codec": []},
+                modules={"fancy": "//! A codec that says nothing about its status.\n"},
+                entry_extra='#[cfg(all(feature = "codec", not(doc)))]\npub mod fancy;\n',
+            )
+            gate = surface.module_gates("sipx-deep")["fancy"]
+            self.assertEqual(gate.features, frozenset({"codec"}))
+            self.assertFalse(gate.satisfied_by(set()), "an unenabled feature still gates it")
+            problems = surface.unselectable_and_unmarked(surface.resolve(("sipx-app",)))
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn("sipx_deep::fancy", problems[0])
+
+    def test_any_is_read_as_a_disjunction(self):
+        with Workspace() as workspace:
+            workspace.add("sipx-app", declares="//! **Experimental.**")
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                features={"a": [], "b": []},
+                modules={"fancy": "//! Something.\n"},
+                entry_extra='#[cfg(any(feature = "a", feature = "b"))]\npub mod fancy;\n',
+            )
+            gate = surface.module_gates("sipx-deep")["fancy"]
+            self.assertTrue(gate.satisfied_by({"b"}), "either feature is enough")
+            self.assertFalse(gate.satisfied_by(set()))
+
+    def test_a_non_feature_atom_does_not_gate_anything(self):
+        """`not(doc)` says nothing about which features a module needs."""
+        with Workspace() as workspace:
+            workspace.add("sipx-app", declares="//! **Experimental.**")
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                modules={"fancy": "//! Something.\n"},
+                entry_extra="#[cfg(not(doc))]\npub mod fancy;\n",
+            )
+            self.assertTrue(surface.module_gates("sipx-deep")["fancy"].satisfied_by(set()))
+
+    def test_two_modules_of_the_same_name_under_different_parents_are_distinct(self):
+        """The bare-name key collided, and `setdefault` kept whichever was read first."""
+        with Workspace() as workspace:
+            workspace.add("sipx-app", declares="//! **Experimental.**")
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                features={"one": [], "two": []},
+            )
+            source = surface.CRATES / "sipx-deep" / "src"
+            for parent, feature in (("first", "one"), ("second", "two")):
+                (source / parent).mkdir()
+                (source / parent / "mod.rs").write_text(
+                    f'//! A parent.\n#[cfg(feature = "{feature}")]\npub mod shared;\n'
+                )
+                (source / parent / "shared.rs").write_text("//! A leaf.\n")
+            (source / "lib.rs").write_text(
+                (source / "lib.rs").read_text() + "pub mod first;\npub mod second;\n"
+            )
+            gates = surface.module_gates("sipx-deep")
+            self.assertEqual(gates["first::shared"].features, frozenset({"one"}))
+            self.assertEqual(gates["second::shared"].features, frozenset({"two"}))
+
+    def test_a_claim_citing_the_cli_must_be_a_claim_the_cli_backs(self):
+        """`B3`: the largest `Supported` claim in the tree rests on a citation nothing verified.
+
+        `sipx-ua`'s declaration justifies registration, digest auth, Path, Service-Route, Outbound and
+        push by `sipx register --outbound` — by the CLI, which `APPLICATIONS` refuses to count. That is
+        a real, shipped caller, so the claim is not demoted; what was missing is that the citation was
+        trusted. Now it is checked.
+        """
+        with Workspace() as workspace:
+            workspace.add("sipx-app", declares="//! **Experimental.**")
+            workspace.add(
+                "sipx-cli",
+                declares="//! The command line.",
+                library=False,
+                modules={"main": "fn main() {}\n"},
+            )
+            workspace.add(
+                "sipx-registrar",
+                declares="//! **Supported**: leases, driven by `sipx register`.",
+            )
+            problems = surface.cli_cited_but_uncalled()
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn("cites the command line", problems[0])
+
+    def test_a_citation_the_cli_really_backs_passes(self):
+        with Workspace() as workspace:
+            workspace.add("sipx-app", declares="//! **Experimental.**")
+            workspace.add(
+                "sipx-cli",
+                declares="//! The command line.",
+                library=False,
+                modules={"main": "use sipx_registrar::Lease;\nfn main() {}\n"},
+            )
+            workspace.add(
+                "sipx-registrar",
+                declares="//! **Supported**: leases, driven by `sipx register`.",
+            )
+            self.assertEqual(surface.cli_cited_but_uncalled(), [])
+
+    def test_a_claim_citing_no_application_is_not_asked_about_the_cli(self):
+        """Only a declaration that names the CLI is held to naming it truthfully."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-quiet"],
+                modules={"host": "use sipx_quiet::thing;\n"},
+            )
+            workspace.add(
+                "sipx-cli",
+                declares="//! The command line.",
+                library=False,
+                modules={"main": "fn main() {}\n"},
+            )
+            workspace.add("sipx-quiet", declares="//! **Supported**: the parser.")
+            self.assertEqual(surface.cli_cited_but_uncalled(), [])
+
+    def test_a_test_module_in_the_middle_of_a_file_does_not_blind_the_rest(self):
+        """The minor: truncating at the first `#[cfg(test)]` discarded 30.2% of `crates/*/src`."""
+        text = (
+            "use sipx_deep::real;\n"
+            "#[cfg(test)]\nmod tests {\n    use sipx_deep::fake;\n    fn f() { let _ = 1; }\n}\n"
+            "use sipx_deep::also_real;\n"
+        )
+        cut = surface.code(text)
+        self.assertIn("also_real", cut, "the code after a test module is still code")
+        self.assertIn("real", cut)
+        self.assertNotIn("fake", cut, "and the test module itself is still cut")
+
+
 class TheNonEmptyRule(unittest.TestCase):
     def test_an_application_that_needs_everything_is_reported(self):
         """Acceptance item 4: a shipped app that needs the whole stack is a claim, not a result."""
@@ -510,6 +831,36 @@ class TheRealWorkspace(unittest.TestCase):
             (surface.CRATES / "sipx-app" / "src" / "host.rs").exists(),
             "the application that defines the surface has to exist",
         )
+
+    def test_something_actually_runs_the_application(self):
+        """**Existing is not running** (`X-38` rework).
+
+        This assertion checked that `host.rs` was on disk, which the review pointed out is the whole of
+        what it checked: `serve`, `admit`, `carry`, `answer_out_of_dialog` and `refuse` were executed by
+        nothing, and the commit message said "sipx-app answers a call". A surface defined by an
+        application nobody runs rests on what compiles — the same weakness as the path checks this
+        predicate replaced, since `README.md`'s claim is that an application "has no dead branch to
+        cite".
+
+        So the acceptance is now that an integration test exists, drives the host over a socket, and
+        covers both branches of the knob the host routes an unreachable app through. Asserted on the
+        file's content rather than on a name, because a test that was renamed and gutted would still
+        satisfy a name.
+        """
+        integration = surface.CRATES / "sipx-app" / "tests" / "host.rs"
+        self.assertTrue(
+            integration.exists(),
+            "the application that defines the surface has to be run by something",
+        )
+        text = integration.read_text(encoding="utf-8")
+        for needle, why in (
+            ("Host::start", "the test has to start the real host"),
+            ("host.serve(", "and drive its real loop"),
+            ("dial(", "with a real invitation over a real socket"),
+            ("Method::Options", "covering the out-of-dialog branch (RFC 3261 §11)"),
+            ("on_failure", "and both branches of the document's failure knob"),
+        ):
+            self.assertIn(needle, text, why)
 
 
 if __name__ == "__main__":

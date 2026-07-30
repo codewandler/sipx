@@ -40,7 +40,7 @@ until a second application disagrees.
       basis*, and `REACHABILITY_CHECKED` is deliberately **not** widened.
 - [x] **Anything the application does not use is marked experimental**, following `A-8`'s rule, and the
       list is non-empty. A shipped app that needs everything is a claim and should be checked like one.
-      → seven `**Experimental** (`A-8`)` modules plus `sipx-app-protocol`, which no application
+      → nine `**Experimental** (`A-8`)` modules plus `sipx-app-protocol`, which no application
       reaches. Non-emptiness is asserted, not assumed:
       `test-app-surface.py::test_an_application_that_needs_everything_is_reported`.
 - [x] **A second implementation disagreeing widens the surface.** The rule must say what happens when
@@ -110,18 +110,80 @@ until a second application disagrees.
   application stops using returns to `Experimental` with a `CHANGELOG.md` entry, and any registry row
   that rested on the removed path is demoted in the same commit. A surface that can only widen is a
   freeze arriving one item at a time.
+- **Review round 1: nine attacks, five caught, four through — and every one that got through failed
+  silently.** That is the signature this script's own docstrings name as the worst case, so each is now
+  a named test rather than a fix.
+  - **Features in `[workspace.dependencies]` were invisible.** Every crate writes `foo.workspace =
+    true`, so the root table is where a feature naturally goes; `features = ["opus"]` there genuinely
+    makes the shipped binary link libopus, and the checker called it green while its own docstring
+    claimed the roots were resolved as shipped. **Opus is the example `README.md` leans on, so this was
+    the predicate failing, not a gap.** Both tables are read now, with Cargo's rule that a per-crate
+    list adds to the inherited one.
+  - **A crate-level `**Experimental**` declaration was never read**, so wiring `sipx-app-protocol` into
+    the host passed *and* dropped the experimental-crate count from 1 to 0. `README.md` promised the
+    build fails in that case, so the rule as written was false for the crate-sized case. `A-2`, `A-4`
+    and `A-5` wire exactly that crate in, so this was days away rather than hypothetical.
+  - **A comment counted as a caller** — `M-30`'s hole, in this checker, closed with `M-30`'s fix. It
+    fired both ways: prose naming an experimental module raised a spurious graduation demand.
+  - **A compound `cfg` read as unconditional**, so `all(feature = "opus", not(doc))` un-gated Opus and
+    the marker could then be deleted with the gate still green.
+- **Generalising the manifest-edge guard mattered more than the comment fix.** It only protected crates
+  claiming `Supported`, so a manifest line alone still moved the reported surface. It now applies to
+  every crate, which makes an unused workspace dependency reportable in its own right.
+- **Nothing ran the application, which went at the centre of the argument rather than at the checker.**
+  `serve`, `admit`, `carry`, `answer_out_of_dialog` and `refuse` were executed by no test and no script;
+  there was no `crates/sipx-app/tests/`; `de61fc3` said "sipx-app answers a call" and nothing asserted
+  it; and acceptance item 1's named assertion checked that `host.rs` was on disk. A surface defined by
+  an application nobody runs rests on what compiles — **the same weakness as the path checks this
+  predicate replaced**, since the claim in `README.md` is that an application has no dead branch to
+  cite. `crates/sipx-app/tests/host.rs` now drives it over real sockets: an INVITE answered and held,
+  a `reject = 603` document refusing with the operator's status, an OPTIONS probe answered 200 through
+  the agent's own `Allow` list, a session-only document refusing to serve, and N11 asserted against a
+  call that happened. `Host::run` is now the bind plus `Host::serve`, because a document binds an
+  ephemeral port and nothing could otherwise learn the address to send to.
+- **`sipx-ua`'s registration surface: named, kept, and its basis now checked.** It enters the closure on
+  one line of `host.rs`; the host uses only its answering half and never calls `register`. Its whole
+  `Supported` claim — leases, digest auth, Path, Service-Route, one Outbound flow, push — is justified
+  in its own documentation by `sipx register --outbound`, i.e. by `sipx-cli`, which `APPLICATIONS`
+  deliberately refuses to count. **Not demoted**: `sipx register` is a command users run, documented in
+  the CLI reference and asserted by `tests/cli.rs`, so calling it `Experimental` would make this
+  repository say something false. What was actually wrong is that the *basis* was unstated and this
+  checker read "reached by `sipx-app`" as the justification. `cli_cited_but_uncalled` now checks the
+  citation instead of trusting it, `sipx-ua` says which application backs its claim, and the limit names
+  the case. **Why the predicate is still worth calling met:** it measures the call-reachable surface,
+  and registration is not call-reachable in principle rather than by omission — it happens before and
+  outside any call. A claim measured by the wrong instrument is a bug; a claim measured by *nothing* is
+  what these checks exist to find, and there is no longer one of those.
+- **The maturity report asserted something false and it reached `main`.** It rendered "`implemented` now
+  means the code exists in a crate the shipped application depends on". RFC 8996 is `implemented` citing
+  `docs/specs/sip-tls.md` and no crate, and the sentence handed a load-bearing word a second definition
+  conflicting with the schema table `rfc-report.py` enforces — two meanings across the two documents a
+  reader consults. The report now *reads* the definition from `docs/rfc/README.md` rather than restating
+  it, and says what `X-38` actually changed, which is the reachability column.
+- **Two mechanism defects found alongside**: `code()` truncated each file at its first `#[cfg(test)]`,
+  discarding 30.2% of `crates/*/src`, and module gates keyed on the bare module name so two same-named
+  modules under different parents collided. Modules are now keyed by their path from the crate root,
+  which is also what a caller writes. Neither was hiding anything at the time, which is the point: both
+  would have failed printing nothing.
+- **Prose corrected to match the mechanism**: the rule says a feature no shipped binary *enables*, not
+  one it *cannot* enable. `resolve` reads the features the applications ship with, so building with
+  `--features opus` is not what widens a surface — changing what the binary enables is.
+- **Outside the Acceptance, kept deliberately**: `.gitignore` now ignores `__pycache__`, because
+  importing a checker to read a value out of it drops one beside the script and two had reached
+  branches.
 - **Known limit, stated rather than left to be found.** Assertion 1 runs at crate granularity, because
   that is the granularity the `# Stability` declarations have. A supported *module* that nothing in the
   closure names is not caught. Per-module declarations would let it tighten; that is a successor and
   not something to fake by parsing English.
 - Filed at `X-37`'s close, which reconsidered the predicate rather than build the check its
   predecessors named as a *successor* — read its Notes for why.
-- **Gate: 22 steps, all green, on `55ad8f5`** (`./scripts/gate.py`, exit 0). That is 20 steps as
-  inherited from `main` plus the two this story adds, `app surface tests` and `app surface`, both of
-  which ran. An earlier run of this branch was red on `fmt`, `clippy` and `test` — all three inherited
-  steps failing on this branch's own code, fixed in `07a072c`, and none of them the two new ones. The
-  `maturity` step was green throughout, so the `X-39` defect did not arise here.
-- **Failing-first, re-verified against the merge base with the final checker.** Copying
+- **Gate: 22 steps, all green, on `6af754f`** (`./scripts/gate.py`, exit 0), and the `test` step now
+  runs `crates/sipx-app/tests/host.rs`. That is 20 steps as inherited from `main` plus the two this
+  story adds, `app surface tests` and `app surface`, both of which ran. Two earlier runs of this branch
+  were red, both on inherited steps failing on this branch's own code and never on the two new ones:
+  `fmt`, `clippy` and `test` before `07a072c`, and `fmt` alone before `6af754f`. The `maturity` step was
+  green throughout, so the `X-39` defect did not arise here.
+- **Failing-first, re-verified against the merge base with the reworked checker.** Copying
   `scripts/check-app-surface.py` into a clean `cffb6ed` tree and running `--check` exits 1 and names six
   crates — `sipx-audio`, `sipx-call`, `sipx-media`, `sipx-rtp`, `sipx-sdp`, `sipx-ua` — each declaring
   `Supported` surface no application reaches. On this branch it exits 0. The failure is the missing

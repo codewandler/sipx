@@ -135,14 +135,28 @@ no path from that application reaches, or when the application starts selecting 
 same limit: a path is satisfied by citing a file whose relevant branch is dead. An application has no
 dead branch to cite.
 
+**Two applications ship, and a claim says which one backs it.** The call-reachable surface is what
+[`crates/sipx-app`](crates/sipx-app) uses; `sipx-cli`'s promise is its command-line surface, documented
+in [the CLI reference](website/docs/reference/cli.md) and asserted by its own tests. Most of
+[`sipx-ua`](crates/sipx-ua)'s supported surface is the second kind: `sipx register --outbound` calls it
+and the host does not, because registration happens before and outside any call. That is why the crate
+says which application backs its claim, and why `check-app-surface.py` verifies the citation rather
+than trusting it. A claim measured by the wrong instrument is a bug; a claim measured by **nothing** is
+what these checks exist to find.
+
 **A Cargo feature is part of being selectable.** A capability behind a feature that no shipped binary
-can turn on is *Experimental*, however thoroughly it is implemented and tested and whatever
+*enables* is *Experimental*, however thoroughly it is implemented and tested and whatever
 `--all-features` compiles. Opus is the worked example: it is complete, it has vectors, RFC 6716 and
 7587 are cited against it, and it sits behind `sipx-audio/opus`, which links libopus. `sipx-cli` has
 no flag for it and no `[features]` table to forward one, and the host does not enable it, because
 linking a C library is a deployment decision rather than something a default should make for you. So
 Opus is reachable from the library and from no application, and it says so on its own page. This is
 the distinction three earlier attempts could not draw, because every *path* to Opus is real.
+
+*Enables*, not *can enable*: the check resolves each application with the features it ships with, so
+turning a feature on at the command line is not what widens the surface — changing what the shipped
+binary enables is, and that comes with a `CHANGELOG.md` entry. Building with a non-default feature is
+opting into the experimental half knowingly, which is exactly what the word is there to tell you.
 
 **The rule runs in both directions.**
 

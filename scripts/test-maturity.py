@@ -131,6 +131,45 @@ class ThePredicateRule(unittest.TestCase):
                 )
 
 
+class TheStatusVocabulary(unittest.TestCase):
+    """One definition of each status word, in the file that defines it (`X-38` rework).
+
+    The report asserted "`implemented` now means the code exists in a crate the shipped application
+    depends on". That was false — RFC 8996 is `implemented` citing `docs/specs/sip-tls.md` and no crate
+    — and it gave a load-bearing word a second meaning conflicting with the schema table that
+    `rfc-report.py` actually enforces. Two definitions across the two documents a reader consults is the
+    drift this repository keeps closing, so the report now reads the definition instead of restating it.
+    """
+
+    def test_the_definition_is_read_from_the_schema_table(self):
+        self.assertEqual(
+            maturity.status_definition("implemented"),
+            "Behaviour present and tested for the roles listed",
+        )
+
+    def test_a_word_the_schema_does_not_define_is_an_error(self):
+        """A reader that silently returned nothing would render an empty definition."""
+        with self.assertRaises(SystemExit):
+            maturity.status_definition("invented")
+
+    def test_the_report_quotes_the_schema_rather_than_redefining_it(self):
+        self.assertIn(maturity.status_definition("implemented"), maturity.render())
+
+    def test_the_report_does_not_redefine_implemented(self):
+        """The false sentence, as a test.
+
+        Deliberately asserted on the report and **not** on the registry. RFC 8996 is the row the false
+        sentence was caught by — `implemented` on the evidence of `docs/specs/sip-tls.md` and no crate —
+        and `X-43` is open to re-evidence exactly that row and to decide whether `implemented` should
+        require a `crates/` path at all. A test that pinned 8996's evidence, or that required some
+        spec-only row to exist, would fail the moment `X-43` lands and would be a landmine in someone
+        else's story. What this report must not do is define the word, whatever the registry holds.
+        """
+        report = maturity.render()
+        self.assertNotIn("the code exists in a crate", report)
+        self.assertNotIn("`implemented` now means", report)
+
+
 class TheReport(unittest.TestCase):
     def test_the_committed_report_is_what_the_sources_say(self):
         """`--check`'s subject, asserted here too so a stale report fails the suite as well."""

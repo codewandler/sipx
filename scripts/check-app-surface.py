@@ -44,9 +44,31 @@ register the project has already paid for twice (`X-22`'s gate list, `X-24`'s po
 ## Its limits, stated because a check that hides them is the thing it replaced
 
 - **Assertion 1 runs at crate granularity, because that is the granularity the declarations have.**
-  Outside the seven module markers, a `# Stability` section is prose about a crate. So a crate enters
-  the surface whole, and a supported *module* nothing reaches is not caught. Per-module declarations
-  would let this tighten; that is a successor, not a thing to fake here by parsing English.
+  Outside the module markers, a `# Stability` section is prose about a crate. So a crate enters the
+  surface whole, and a supported *module* nothing reaches is not caught. Per-module declarations would
+  let this tighten; that is a successor, not a thing to fake here by parsing English.
+- **The case that limit carries, named rather than left to be found: `sipx-ua`'s registration
+  surface.** `sipx-ua` enters the closure on one line of `host.rs`, and the host uses only its
+  answering half — `agent_config` names the listener's own address as a registrar that nothing ever
+  sends to, and `register` is not called. Its `Supported` declaration is registration leases, digest
+  authentication, Path, Service-Route, one Outbound flow and push, and every one of those is justified
+  in its own documentation by `sipx register --outbound` and `--push-provider`: by `sipx-cli`, the
+  caller `APPLICATIONS` deliberately refuses to count. So the largest supported claim in the tree is
+  backed by an application this predicate does not read.
+
+  **That claim is not unmeasured, and it is not demoted.** `sipx register` ships, is documented in
+  `website/docs/reference/cli.md`, and `A-8` settled that the CLI's promise is its command-line
+  surface, asserted by `tests/cli.rs`. Declaring it `Experimental` would make this repository say
+  something false about a command users run today. What was actually wrong is that the *basis* was
+  unstated: the declaration cites CLI commands and this checker silently read "reached by `sipx-app`"
+  as the justification. `cli_cited_but_uncalled` now checks the citation instead of trusting it — a
+  crate whose declaration rests on the CLI has to be a crate the CLI's code really calls into.
+
+  **Why the predicate is still worth calling met.** It measures the *call*-reachable surface, which is
+  what the alpha claims, and registration is not call-reachable in principle rather than by omission:
+  it happens before and outside any call. A registration claim is measured by the instrument that can
+  see it, and a call claim by this one. What would make the predicate hollow is a claim measured by
+  *nothing*, and that is the state this check exists to detect.
 - **A reference is attributed to the crate that contains it, not to the branch that runs it.** Inside
   the closure this inherits exactly the dead-branch weakness `X-30` recorded. What is different is
   the root: the closure starts at a program, so nothing reaches the surface without an application
@@ -154,24 +176,54 @@ def manifest(crate: str) -> dict:
     return tomllib.loads((CRATES / crate / "Cargo.toml").read_text(encoding="utf-8"))
 
 
+def workspace_manifest() -> dict:
+    return tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+
+
+def workspace_dependency_table() -> dict:
+    """The root `[workspace.dependencies]` table.
+
+    **This is where a feature would naturally be set, and reading only the per-crate tables made the
+    checker blind to it** (`X-38` rework). Every crate in this workspace writes `foo.workspace = true`,
+    so `sipx-audio = { path = …, features = ["opus"] }` in the root manifest is the one-line change that
+    genuinely makes the shipped binary link libopus — and a checker that never opened this file called
+    that fine while its own docstring claimed the roots were resolved as shipped. Opus is the example
+    `README.md` leans on, so a one-line reversal reported as green is the predicate failing, not a gap.
+    """
+    return workspace_manifest().get("workspace", {}).get("dependencies", {})
+
+
 def dependency_edges(crate: str) -> list[Edge]:
     """The workspace's own crates that `crate` depends on to build.
 
     `[dev-dependencies]` are excluded, and that exclusion is the point rather than an oversight: what
     the test suite reaches is what a test reaches, and this predicate is about callers. That is why
     the suite could never settle this predicate itself.
+
+    An edge written `foo.workspace = true` inherits the root table's `features` and `default-features`,
+    and a per-crate `features` list *adds* to the inherited one rather than replacing it — which is
+    Cargo's rule, and the reason both tables have to be read to know what an edge actually asks for.
     """
+    inherited = workspace_dependency_table()
     edges = []
     for name, spec in manifest(crate).get("dependencies", {}).items():
         if not name.startswith("sipx-"):
             continue
         table = spec if isinstance(spec, dict) else {}
+        root = inherited.get(name, {}) if table.get("workspace") else {}
+        if not isinstance(root, dict):
+            root = {}
+        features = tuple(root.get("features", ())) + tuple(table.get("features", ()))
+        # `default-features = false` anywhere on the edge drops the default feature.
+        default_features = bool(root.get("default-features", True)) and bool(
+            table.get("default-features", True)
+        )
         edges.append(
             Edge(
                 name=name,
                 optional=bool(table.get("optional", False)),
-                default_features=bool(table.get("default-features", True)),
-                features=tuple(table.get("features", ())),
+                default_features=default_features,
+                features=features,
             )
         )
     return edges
@@ -240,8 +292,11 @@ def resolve(roots: tuple[str, ...]) -> dict[str, set[str]]:
     implemented, tested and compiled by the gate, and no shipped binary can turn it on. A surface
     defined by what `--all-features` builds would have called it reachable, which is the over-claim.
 
-    So the roots are resolved as they are *shipped* — with their default features — and a capability
-    behind a feature no application enables is not on the surface. Reaching for `cargo metadata`
+    So the roots are resolved as they are *shipped* — with their default features, and with the root
+    `[workspace.dependencies]` table read too — and a capability behind a feature no application
+    enables is not on the surface. Note the word: *enables*, not *can enable*. Someone can always build
+    with `--features opus`, and that is not what widens a surface; changing what the shipped binary
+    enables is, and that comes with a `CHANGELOG.md` entry. Reaching for `cargo metadata`
     would be more authoritative, but the CI job this runs in installs no Rust toolchain, and a check
     that silently degrades when its oracle is missing is worse than one that reads the manifests.
     """
@@ -278,25 +333,77 @@ def closure(roots: tuple[str, ...]) -> set[str]:
 
 
 def code(text: str) -> str:
-    """A source file with its test module cut off.
+    """A source file with its `#[cfg(test)]` modules cut out.
 
-    The same cut `check-audio-claims.py` makes, for the same reason and one more: a test naming
-    `sipx_media::bridge` is a test, and reading it as a caller would let the suite promote its own
-    fixtures into the supported surface.
+    A test naming `sipx_media::bridge` is a test, and reading it as a caller would let the suite
+    promote its own fixtures into the supported surface.
+
+    **Each test module is removed by matching its braces, rather than truncating the file at the first
+    `#[cfg(test)]`** (`X-38` rework). Truncating was how this started, and it discarded 30.2% of
+    `crates/*/src` — everything after the first test module in every file that has one. Nothing real
+    was hidden at the time, which is exactly the problem: one test helper moved to the middle of a file
+    would have blinded the rest of it, and the checker would have gone on reporting success.
     """
-    return text.partition("#[cfg(test)]")[0]
+    out = []
+    rest = text
+    while True:
+        head, marker, tail = rest.partition("#[cfg(test)]")
+        if not marker:
+            out.append(rest)
+            return "".join(out)
+        out.append(head)
+        opened = tail.find("{")
+        if opened < 0:
+            return "".join(out)
+        depth = 0
+        for index, character in enumerate(tail[opened:], start=opened):
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    rest = tail[index + 1 :]
+                    break
+        else:
+            # Unbalanced: drop the remainder rather than read a half-parsed tail as code.
+            return "".join(out)
+
+
+def rust_code_only(text: str) -> str:
+    """`text` with its comments removed, so a *mention* cannot satisfy a caller check.
+
+    `M-30` closed this same hole in `rfc-report.py`; this is the same fix, because it is the same
+    mistake. A substring search over raw source cannot tell `use sipx_app_protocol::Envelope;` from
+    `//! one day we might use sipx_app_protocol::Envelope here`, and in this repository the prose is
+    long and names symbols constantly, so the false positive is the likely case rather than a contrived
+    one. It fires both ways: a comment mentioning `sipx_ua::subscribe` would otherwise raise a spurious
+    demand that an experimental module graduate.
+
+    Crude on purpose, exactly as `M-30`'s is: it does not understand a `//` inside a string literal and
+    does not need to, because a symbol in a string literal calls nothing either.
+    """
+    without_blocks = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    return "\n".join(line.split("//")[0] for line in without_blocks.splitlines())
 
 
 def sources(crate: str) -> dict[pathlib.Path, str]:
-    """A crate's library sources, test modules removed.
+    """A crate's library sources, test modules removed, comments intact.
 
     `tests/`, `examples/` and `benches/` are outside `src/` and so are absent here by construction.
     An example is documentation and a test is a test; neither is the application.
+
+    Comments are kept because the `**Experimental** (`A-8`)` markers live in `//!` documentation. Use
+    `caller_sources` to ask whether something is *called*.
     """
     found = {}
     for path in sorted((CRATES / crate / "src").rglob("*.rs")):
         found[path] = code(path.read_text(encoding="utf-8"))
     return found
+
+
+def caller_sources(crate: str) -> dict[pathlib.Path, str]:
+    """A crate's library sources as the compiler sees them: no test modules, no comments."""
+    return {path: rust_code_only(text) for path, text in sources(crate).items()}
 
 
 def entry(crate: str) -> pathlib.Path:
@@ -362,10 +469,14 @@ def experimental_modules() -> dict[tuple[str, str], pathlib.Path]:
     """
     found = {}
     for crate in published():
+        root = CRATES / crate / "src"
         for path, text in sources(crate).items():
             if not _MARKER.search(text):
                 continue
-            module = path.parent.name if path.name == "mod.rs" else path.stem
+            module = module_path(path, root)
+            if not module:
+                # The crate root, not a module of it. `wholly_experimental` reads that.
+                continue
             found[(crate, module)] = path
     return found
 
@@ -403,51 +514,147 @@ def unreached_supported(reached: set[str]) -> list[str]:
                 f"from an application, or mark it `Experimental`: a supported surface with no "
                 f"caller is the claim this check exists to refuse"
             )
-            continue
-        # A manifest edge is not use. Without this, adding a line to `Cargo.toml` would be enough
-        # to launder a claim that no code backs.
-        if crate in APPLICATIONS:
-            continue
-        callers = [
-            other
-            for other in sorted(reached)
-            if other != crate
-            and any(names_crate(text, crate) for text in sources(other).values())
-        ]
-        if not callers:
-            problems.append(
-                f"{crate} declares part of itself `Supported` and is depended on but never named: "
-                f"no source in the closure writes `{crate_path(crate)}::`. A manifest entry is not "
-                f"a caller"
-            )
     return problems
 
 
-#: A `pub mod` declaration and the feature gating it, if any.
+def callers_of(crate: str, reached: set[str]) -> list[str]:
+    """Crates in the closure whose *code* names `crate`."""
+    return [
+        other
+        for other in sorted(reached)
+        if other != crate
+        and any(names_crate(text, crate) for text in caller_sources(other).values())
+    ]
+
+
+def unused_edges(reached: set[str]) -> list[str]:
+    """Crates the closure depends on and that no code in it names.
+
+    **A manifest edge is not use, and this now says so for every crate rather than only for the ones
+    claiming `Supported`** (`X-38` rework). The narrow version left a laundering route open: adding
+    `sipx-app-protocol` to the host's manifest put it in the closure, which silently dropped the
+    experimental-crate count from 1 to 0 — assertion 3's list emptying itself — with no code using the
+    crate and nothing reported. Whether a dependency is *declared* is a fact about a file; whether it is
+    *used* is the question this predicate asks, and only the second one can widen a surface.
+
+    An unused workspace dependency is worth reporting in its own right, so this is not only a plug.
+    """
+    problems = []
+    for crate in sorted(reached):
+        if crate in APPLICATIONS or not has_library(crate):
+            continue
+        if callers_of(crate, reached):
+            continue
+        claim = (
+            " It also declares part of itself `Supported`, which nothing in the closure backs."
+            if declares_supported(crate)
+            else ""
+        )
+        problems.append(
+            f"{crate} is depended on but never named: no source in the closure writes "
+            f"`{crate_path(crate)}::`. A manifest entry is not a caller — drop the dependency, or "
+            f"use it.{claim}"
+        )
+    return problems
+
+
+#: A `pub mod` declaration and the whole `cfg` attribute above it, if any.
 _GATED_MODULE = re.compile(
-    r'(?:#\[cfg\(feature = "(?P<feature>[\w-]+)"\)\]\s*\n\s*)?pub mod (?P<name>\w+);'
+    r"(?:#\[cfg\((?P<cfg>.*?)\)\]\s*\n\s*)?pub mod (?P<name>\w+);", re.S
 )
 
+#: Every `feature = "x"` atom inside a `cfg` predicate.
+_FEATURE_ATOM = re.compile(r'feature\s*=\s*"(?P<feature>[\w-]+)"')
 
-def module_gates(crate: str) -> dict[str, str]:
-    """Each module of a crate, and the feature its declaration is gated by.
 
-    Empty string when a module is unconditional. This is what tells the difference between a module
-    the application could select and one it could not: `sipx_audio::opus` is declared behind
-    `#[cfg(feature = "opus")]`, so no amount of naming it makes it reachable from a binary that does
-    not enable the feature.
+class Gate(NamedTuple):
+    """The features a module's `cfg` requires, and how they combine.
+
+    `mode` is `"all"` or `"any"`. An unconditional module is `("all", frozenset())`, which every
+    feature set satisfies.
     """
-    gates = {}
-    for text in sources(crate).values():
+
+    mode: str
+    features: frozenset
+
+    def satisfied_by(self, enabled: set[str]) -> bool:
+        if not self.features:
+            return True
+        if self.mode == "any":
+            return bool(self.features & enabled)
+        return self.features <= enabled
+
+
+def read_gate(cfg: str | None) -> Gate:
+    """Read a `cfg` predicate as the set of features it requires.
+
+    **A compound `cfg` used to read as unconditional** (`X-38` rework): the pattern matched only
+    `#[cfg(feature = "x")]` alone on its line, so `#[cfg(all(feature = "opus", not(doc)))]` returned no
+    gate at all — after which the `**Experimental**` marker could be deleted from `opus.rs` and the
+    check would still pass, printing nothing. All eight gates in the tree today are the simple form, so
+    this was latent, and a latent hole that fails silently is the one worth closing.
+
+    Atoms that are not features — `doc`, `test`, `target_os`, and anything else — are ignored rather
+    than guessed at. This checker's question is only ever "which *features* does this need", and a
+    `not(doc)` says nothing about that. `any(...)` is read as a disjunction and everything else as a
+    conjunction, which is the reading that treats `all(feature = "a", feature = "b")` as needing both.
+    """
+    if not cfg:
+        return Gate("all", frozenset())
+    features = frozenset(match.group("feature") for match in _FEATURE_ATOM.finditer(cfg))
+    mode = "any" if cfg.strip().startswith("any(") else "all"
+    return Gate(mode, features)
+
+
+def module_gates(crate: str) -> dict[str, Gate]:
+    """Each module of a crate, keyed by its path from the crate root, and the `cfg` gating it.
+
+    Keyed by path — `dtls::openssl`, not `openssl` — because a bare name collides: two modules of the
+    same name under different parents are different modules, and `setdefault` on the bare name gave
+    whichever was read first. That is also the name a caller writes, so it is the name the messages
+    should use.
+    """
+    gates: dict[str, Gate] = {}
+    root = CRATES / crate / "src"
+    for path, text in sources(crate).items():
+        parent = module_path(path, root)
         for match in _GATED_MODULE.finditer(text):
-            gates.setdefault(match.group("name"), match.group("feature") or "")
+            name = match.group("name")
+            key = f"{parent}::{name}" if parent else name
+            gates[key] = read_gate(match.group("cfg"))
     return gates
 
 
+def module_path(path: pathlib.Path, root: pathlib.Path) -> str:
+    """The module path of the file that declares things, relative to the crate root.
+
+    `src/lib.rs` declares at the root, `src/dtls/mod.rs` declares inside `dtls`, and `src/dtls.rs`
+    declares inside `dtls` too — a module's children are named under it however its file is spelled.
+    """
+    relative = path.relative_to(root)
+    if relative.name in ("lib.rs", "main.rs"):
+        parts = relative.parts[:-1]
+    elif relative.name == "mod.rs":
+        parts = relative.parts[:-1]
+    else:
+        parts = relative.parts[:-1] + (relative.stem,)
+    return "::".join(parts)
+
+
 def selectable(crate: str, module: str, enabled: dict[str, set[str]]) -> bool:
-    """Whether an application could turn this module on at all."""
-    gate = module_gates(crate).get(module, "")
-    return not gate or gate in enabled.get(crate, set())
+    """Whether an application could turn this module on at all.
+
+    A module inherits its ancestors' gates: `dtls::openssl` is unreachable when `dtls` is off, whatever
+    `openssl`'s own declaration says.
+    """
+    gates = module_gates(crate)
+    features = enabled.get(crate, set())
+    parts = module.split("::")
+    for depth in range(1, len(parts) + 1):
+        gate = gates.get("::".join(parts[:depth]))
+        if gate is not None and not gate.satisfied_by(features):
+            return False
+    return True
 
 
 def reached_experimental(enabled: dict[str, set[str]]) -> list[str]:
@@ -466,7 +673,7 @@ def reached_experimental(enabled: dict[str, set[str]]) -> list[str]:
         for other in sorted(reached):
             if other == crate:
                 continue
-            for source, text in sources(other).items():
+            for source, text in caller_sources(other).items():
                 if not names_module(text, crate, module):
                     continue
                 problems.append(
@@ -495,22 +702,124 @@ def unselectable_and_unmarked(enabled: dict[str, set[str]]) -> list[str]:
     it is experimental, and it stops having to the moment an application enables the feature.
     """
     problems = []
-    marked = {(crate, module) for crate, module in experimental_modules()}
+    marked = set(experimental_modules())
     for crate in sorted(enabled):
         if not has_library(crate):
             continue
         for module, gate in sorted(module_gates(crate).items()):
-            if not gate or gate in enabled[crate]:
+            if gate.satisfied_by(enabled[crate]):
                 continue
             if (crate, module) in marked:
                 continue
+            wanted = ", ".join(f"`{feature}`" for feature in sorted(gate.features))
             problems.append(
-                f"`{crate_path(crate)}::{module}` is behind the `{gate}` feature, which no "
-                f"application enables, and its module documentation does not mark it "
-                f"**Experimental** (`A-8`). It is reachable from a library and from no shipped "
-                f"binary, so no caller has constrained its shape — say so at the module, or enable "
-                f"`{gate}` from an application and mean it"
+                f"`{crate_path(crate)}::{module}` is behind {wanted}, which no application enables, "
+                f"and its module documentation does not mark it **Experimental** (`A-8`). It is "
+                f"reachable from a library and from no shipped binary, so no caller has constrained "
+                f"its shape — say so at the module, or enable it from an application and mean it"
             )
+    return problems
+
+
+#: The other application in the workspace, and the other basis a `Supported` claim can rest on.
+#:
+#: Not in `APPLICATIONS` — a surface defined by it would have been satisfied before this story started,
+#: which is the point `APPLICATIONS` makes at length. But a declaration is allowed to cite it, because
+#: `A-8` settled that its promise is its command-line surface and `tests/cli.rs` holds it to that. What
+#: is not allowed is citing it without its code backing the citation.
+CLI = "sipx-cli"
+
+#: A crate documentation citing the CLI as the caller of something: `` `sipx-cli` `` or `` `sipx foo` ``.
+_CITES_CLI = re.compile(r"`sipx-cli`|`sipx [a-z][\w-]*")
+
+
+def cli_cited_but_uncalled() -> list[str]:
+    """Crates whose `Supported` claim cites the CLI as its caller, where the CLI does not call them.
+
+    **The basis of a claim has to be checked, not trusted** (`X-38` rework). `sipx-ua` is the case:
+    it enters this closure on one line of `host.rs`, the host uses only its answering half, and its
+    whole `Supported` declaration — registration leases, digest authentication, Path, Service-Route,
+    one Outbound flow, push — is justified in its own documentation by `sipx register --outbound` and
+    `--push-provider`. That is a real caller and a shipped one, and it is not the application this
+    predicate reads, so the largest supported claim in the tree rested on a citation nothing verified.
+
+    Verifying it is cheap and worth doing: a declaration may not name the CLI as its caller unless the
+    CLI's own code names the crate. Demoting the claim instead would have been the wrong move — `sipx
+    register` is a command users run, documented in `website/docs/reference/cli.md` and asserted by
+    `tests/cli.rs`, so calling it `Experimental` would make this repository say something false.
+    """
+    problems = []
+    if not (CRATES / CLI / "src").exists():
+        return [f"{CLI} is not in the workspace, so no declaration can cite it as a caller"]
+    cli_code = caller_sources(CLI)
+    for crate in published():
+        if not has_library(crate) or not declares_supported(crate):
+            continue
+        if not _CITES_CLI.search(crate_doc(crate)):
+            continue
+        if any(names_crate(text, crate) for text in cli_code.values()):
+            continue
+        problems.append(
+            f"{crate} cites the command line as the caller of its `Supported` surface, and no source "
+            f"in {CLI} writes `{crate_path(crate)}::`. A citation is not a caller — name the "
+            f"application that really uses it, or mark the surface `Experimental`"
+        )
+    return problems
+
+
+def wholly_experimental() -> list[str]:
+    """Crates whose own documentation declares the *whole crate* experimental.
+
+    Recognised by an `# Experimental` heading in the crate documentation, which is how
+    `sipx-app-protocol` says it and the only place in the tree that says it. The heading and not the
+    bare word: six library crates write `**Experimental**` in their crate-root prose while listing which
+    of their *modules* are, and reading that as a whole-crate declaration would report almost the entire
+    workspace.
+    """
+    return sorted(
+        crate
+        for crate in published()
+        if has_library(crate)
+        and crate not in APPLICATIONS
+        and re.search(r"^\s*//!\s*#\s+Experimental\s*$", crate_doc(crate), re.M)
+    )
+
+
+def reached_experimental_crates(enabled: dict[str, set[str]]) -> list[str]:
+    """Whole crates marked experimental that an application has started to select.
+
+    **`README.md` promises this and nothing was checking it** (`X-38` rework). `reached_experimental`
+    walks modules only, so adding `sipx-app-protocol` to the host's manifest and one
+    `use sipx_app_protocol::Envelope;` passed — and silently dropped the experimental crate count from 1
+    to 0, which is the assertion-3 list quietly emptying itself. The rule in `README.md` says the build
+    fails "when the application starts selecting something still marked *Experimental*"; without this
+    that sentence was false for the crate-sized case.
+
+    Not hypothetical: `A-2`, `A-4` and `A-5` wire exactly that crate into the host, and its own
+    documentation says it settles only "when two dissimilar applications have been written against it".
+    When that happens this fires, and the answer is to graduate the crate deliberately — which is the
+    conversation the check exists to force.
+    """
+    problems = []
+    for crate in wholly_experimental():
+        if crate not in enabled:
+            continue
+        for other in sorted(enabled):
+            if other == crate:
+                continue
+            for source, text in caller_sources(other).items():
+                if not names_crate(text, crate):
+                    continue
+                problems.append(
+                    f"{crate} declares its whole self **Experimental** and {where(source)} — "
+                    f"reachable from {' or '.join(APPLICATIONS)} — selects it. A caller has now "
+                    f"constrained its shape, so it graduates: say what it now guarantees and add a "
+                    f"CHANGELOG.md entry (README.md's stability rule). Do not stop the caller"
+                )
+                break
+            else:
+                continue
+            break
     return problems
 
 
@@ -536,7 +845,10 @@ def report() -> tuple[list[str], set[str], dict[tuple[str, str], pathlib.Path]]:
     experimental = experimental_modules()
     problems = (
         unreached_supported(reached)
+        + unused_edges(reached)
+        + cli_cited_but_uncalled()
         + reached_experimental(enabled)
+        + reached_experimental_crates(enabled)
         + unselectable_and_unmarked(enabled)
     )
 
