@@ -46,9 +46,34 @@ security depends on every deployment getting a flag right.
 
 ### 3.2 Configurable
 
-- The trust anchors. Default: the system roots.
-- A client certificate to present (§3.4).
-- The minimum protocol version, at or above the floor in §3.5.
+Each entry names the API that provides it, and `crates/sipx-transport/tests/tls_spec.rs` holds it
+to that: an entry naming nothing, or naming something that has since been renamed, fails the build.
+A list of knobs is the one part of a spec that can be checked against the code mechanically, and
+until `X-46` this one was not — it listed a minimum protocol version no type has ever taken (the
+paragraph after the list), and nothing about the entry looked different from the two real ones.
+
+- **The trust anchors** — `TrustAnchors`, given to `ClientTls::new`. `TrustAnchors::system` is the
+  platform's own store; `TrustAnchors::only` with `TrustAnchors::add_pem` is a set named
+  certificate by certificate. There is no implicit default, because the anchors are an argument
+  rather than a field: trusting nothing is a configuration error refused at construction, not a
+  silent refusal of every peer at handshake time.
+- **A client certificate to present** (§3.4) — `ClientTls::with_identity`, from `Identity::from_pem`.
+
+**[sipx] The protocol version is not one of them, and the floor is not sipx's to set.** Neither
+`ClientTls` nor `ServerTls` takes a version and nothing above them names one: what is offered is
+the TLS library's default version set, `{1.3, 1.2}`. So 1.0 and 1.1 are excluded because there is
+nothing older to select, not because sipx refuses them — the floor is a **dependency** property,
+which §3.5 states, `tls.rs`'s module documentation states, `tests/tls_versions.rs` pins with
+`the_library_offers_nothing_below_the_floor`, and RFC 8996's registry row says in the same words.
+Restated in each of them deliberately (`X-43`), so that a change of TLS backend cannot move the
+floor in one place only.
+
+The knob was not built instead, for two reasons. Its only representable value above the default is
+"1.3 only" — the library offers no third version, and RFC 8996 makes anything below 1.2
+unrepresentable — so it would be a knob whose one setting is a deployment policy nobody has asked
+for. And an API that selects versions is the thing whose *absence* is currently the evidence for
+RFC 8996 and RFC 8446: adding one would replace a claim that cannot be got wrong with a claim that
+has to be tested at every call site.
 
 **[sipx] There is no "skip verification" option.** Test code that needs to trust a fixture CA
 adds that CA as a trust anchor, which is a different operation with a different shape: it says
@@ -88,7 +113,8 @@ produces logs that look like authentication and are not.
 
 **[sipx] TLS 1.2 is the floor; 1.3 is preferred.** 1.0 and 1.1 are deprecated (RFC 8996) and
 excluded. This will lock out some old SBCs, which is the point of a floor — the alternative is
-that every sipx deployment inherits their weaknesses.
+that every sipx deployment inherits their weaknesses. It is not configurable in either direction,
+and §3.2 says what governs it instead.
 
 **[sipx]** sipx offers 1.3 and 1.2 and lets the server choose. A server that rejects the offer
 outright rather than selecting 1.2 is misconfigured, not old — Kamailio's default `tls_method`

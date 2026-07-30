@@ -41,7 +41,35 @@ document stops describing an option nobody can set.
       guard is in scope or its own story.
 
 ## Progress
-- Not started. Filed from `X-43`'s ADJACENT finding 1.
+- Filed from `X-43`'s ADJACENT finding 1.
+- **The claim was corrected, not built.** `docs/specs/sip-tls.md` §3.2 no longer lists a minimum
+  protocol version; it states that the version is not configurable and that the floor is the TLS
+  library's, pointing at the same fact §3.5, `tls.rs`'s module documentation, `tests/tls_versions.rs`
+  and RFC 8996's registry row already state. The knob was declined because its only representable
+  value above the default is "1.3 only" — rustls offers `{1.3, 1.2}` and RFC 8996 makes anything
+  lower unrepresentable — and because RFC 8996's and 8446's evidence is currently *the absence* of a
+  version-selecting API (`docs/rfc/README.md`: "proved by the absence of an API"). Building one would
+  have falsified three documents to satisfy a fourth.
+- **The guard is in scope and is the failing-first evidence.**
+  `crates/sipx-transport/tests/tls_spec.rs::every_configurable_entry_names_a_real_api` requires every
+  §3.2 entry to name a public item of `src/tls.rs`, resolving `Type::method` as a pair. At the merge
+  base all three entries failed it, the false one indistinguishable from the two true ones. A second
+  test, `no_tls_version_is_named_in_the_crate`, is the tripwire for the other direction: it goes red
+  the day sipx does select a version, naming the four documents that must move with it.
+- **Sweep of §3.2, three entries checked, one false and one imprecise.** The trust anchors and the
+  client certificate are real (`TrustAnchors`/`ClientTls::new`, `ClientTls::with_identity`); the
+  minimum version was false; and "Default: the system roots" was imprecise — there is no default at
+  all, the anchors are a required argument and `ClientTls::new` refuses an empty set at construction.
+  Both surviving entries now name their API.
+- **Not touched:** `docs/rfc/registry.toml`. What sipx supports did not change, and the RFC 8996 row
+  already said the opposite of the deleted claim ("1.2 is the floor and is not configurable
+  downward… sipx implements no TLS and names no version"), which is part of why the spec was the
+  wrong side of the discrepancy.
+- **Adjacent, not fixed:** §3.4's server half — "as a server, sipx requests a client certificate only
+  when configured to, and when it does, an unverifiable one is refused" — describes behaviour with no
+  API behind it either. `ServerTls` exposes only `new` and `acceptor`, and `new` builds the config
+  with `with_no_client_auth()`, so sipx can never be configured to request one. Same defect class,
+  different section, and outside this story's Acceptance; it wants its own story.
 
 ## Notes
 - **Found by `X-43`**, which cited `crates/sipx-transport/src/tls.rs` as evidence for RFC 8996 and read
