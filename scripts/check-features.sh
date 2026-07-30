@@ -68,6 +68,34 @@ for features in "${media_combinations[@]}"; do
     rm -f /tmp/sipx-features.$$
 done
 
+# `sipx-call` re-exports `sipx-media`'s codec choice as a feature of its own (`M-30`), and the
+# variant it adds is `#[cfg]`-gated: `Codecs::Opus` does not exist with the feature off. Every arm
+# that names it, and every test that selects it, therefore has to be gated to match — which is a
+# thing you get wrong silently, because `--all-features` compiles all of it and CI builds nothing
+# else.
+#
+# `--all-targets`, unlike the checks above, because this crate's exposure is in its *tests*: the
+# codec table in `call.rs`'s test module and all of `tests/opus.rs` are conditional, and a `cfg`
+# that disagrees with the feature is invisible to a check that only builds the library.
+call_combinations=(
+    ""
+    "opus"
+)
+
+for features in "${call_combinations[@]}"; do
+    label="sipx-call ${features:-<none>}"
+    printf '  %-24s ' "$label"
+    if cargo check --quiet -p sipx-call --all-targets --no-default-features \
+        ${features:+--features "$features"} 2>/tmp/sipx-features.$$; then
+        echo "ok"
+    else
+        echo "FAILED"
+        cat /tmp/sipx-features.$$
+        status=1
+    fi
+    rm -f /tmp/sipx-features.$$
+done
+
 # `sipx-media` reuses `sipx_transport::stun` for RFC 5389's header, and takes it with
 # `default-features = false` — twenty bytes of header layout must not drag rustls, a WebSocket
 # stack and a DNS client behind them into every crate that plays audio. Nothing about the build

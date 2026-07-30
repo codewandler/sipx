@@ -528,17 +528,26 @@ note = "Events 0-15, with the payload type read from the negotiation rather than
 number = 6716
 title = "Definition of the Opus Audio Codec"
 layer = "media"
-status = "partial"
-evidence = ["crates/sipx-audio/src/opus.rs"]
-note = "**Missing: a call. No call can select Opus**, which is why this row is no longer `implemented` — every offer and answer path in `sipx-call` builds `Capabilities::g711` (six sites), no `sipx-call` entry point takes caller-supplied `Capabilities`, `Capabilities::with_opus` has no caller outside `sipx-sdp`'s own tests, and `Codec::from_payload_type` deliberately never returns Opus because a dynamic payload number means whatever `a=rtpmap` said. So no INVITE sipx sends offers Opus and no offer of it is ever answered. What *is* implemented and tested, in the crate: encode and decode through the `opus` feature, off by default because it links a C library. `sipx-media` forwards the feature and nothing above turns it on: `sipx-call` and `sipx-cli` do not mention it, so the codec is absent from every default build — and present but unreachable under `--all-features`, which is how the gate builds. `X-33` lowered the status, which the reachability check had not been asking of a row that claims no role. The gap has **no story**: `M-13` is `done` and it built the codec, not the wiring."
+status = "implemented"
+evidence = [
+  "crates/sipx-audio/src/opus.rs",
+  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/tests/opus.rs",
+]
+note = "Encode and decode, and **a call can now select it** — `M-30` built the selection `M-13` left out, which is what `X-33` demoted this row for lacking. `Codecs` is the choice: `DialOptions::with_codecs` on the offering side, `answer_with`, `answer_ringing_with`, `answer_replacing_with`, `Invitation::answer_with` and `ring_early_with` on the answering side, and `Call` carries the set so a re-INVITE does not narrow to G.711 mid-call. `sipx-call/tests/opus.rs` places a call with Opus selected and asserts 111 in the offer with its `a=rtpmap`, both ends settling on `Codec::Opus`, and 300 ms of a 48 kHz tone arriving sample-for-sample — a count only an Opus encode and decode can produce, since a G.711 read of an Opus packet yields a sample per byte. Behind `sipx-call`'s `opus` feature, **off by default**, because it links a C library through `sipx-audio`; the default set stays the mandatory-to-implement G.711 pair, so the codec cannot become the default by accident. One deliberate limit, and one plain gap. Deliberate: negotiation refuses to settle outside the selected set, so an Opus offer reaching a G.711 call is answered G.711 rather than silently upgraded, never quietly better than what was asked for. The gap: **the `sipx` binary cannot select Opus by any route** — `sipx-cli` takes no flag for it, and declares no `[features]` of its own, so it could not forward `sipx-call/opus` even if a flag existed. The codec is reachable from the library and not from the binary."
 
 [[rfc]]
 number = 7587
 title = "RTP Payload Format for the Opus Speech and Audio Codec"
 layer = "media"
-status = "partial"
-evidence = ["crates/sipx-audio/src/opus.rs", "crates/sipx-media/tests/opus.rs"]
-note = "**Missing: a call**, for the same reason as RFC 6716 — the payload format is exercised by `sipx-media`'s own tests and by nothing above them, so no call has ever put an Opus payload on the wire. What *is* implemented and tested: the 48000 RTP clock whatever the sample rate, and negotiation by encoding name rather than by payload type number. `X-33` lowered the status."
+status = "implemented"
+evidence = [
+  "crates/sipx-audio/src/opus.rs",
+  "crates/sipx-media/tests/opus.rs",
+  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/tests/opus.rs",
+]
+note = "The payload format, and **a call now puts it on the wire** — `X-33` demoted this row because nothing above `sipx-media`'s own tests could, and `M-30` built the selection that can. Implemented and tested: the 48000 RTP clock whatever the sample rate (§7), the mandatory `opus/48000/2` rtpmap regardless of the channel count actually sent, mono audio which is §7.1's `stereo=0` default, and matching by encoding name rather than by payload number — a format is read from its `a=rtpmap`, so 111 is Opus only because the description said so, and the number the far end assigned travels with the codec on `Config::payload_type` instead of being reassumed. `sipx-call/tests/opus.rs` carries live Opus packets across a call in both `Codecs::Opus` directions of the negotiation. **No `a=fmtp` for Opus, in either direction**: `maxaveragebitrate`, `useinbandfec`, `usedtx`, `maxplaybackrate`, `cbr` and the `stereo` pair are §7.1's optional parameters, and sipx neither offers them nor reads one a peer offered — so a peer that asks for a bitrate ceiling or in-band FEC is not refused, it is simply not accommodated. Everything the format *requires* is here; everything it lets a receiver ask for is not."
 
 [[rfc]]
 number = 3711

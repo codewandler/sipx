@@ -23,10 +23,21 @@
 //! **Supported**: the call lifecycle — dial, answer, early dialogs, hold and resume, both transfer
 //! flavours, DTMF, playback, recording, session timers.
 //!
+//! **Experimental**: choosing what a call offers — [`Codecs`], [`DialOptions::with_codecs`], and
+//! the answering entry points that take a set ([`answer_with`], [`answer_ringing_with`],
+//! [`answer_replacing_with`], [`Invitation::answer_with`], [`ring_early_with`]). New in `M-30` and
+//! not yet used in anger, so the shape may still move.
+//!
+//! The set is the G.711 pair unless a call says otherwise, and `Codecs::Opus` exists only when this
+//! crate is built with its `opus` feature — which links libopus. So the variants a `match` on
+//! [`Codecs`] can see depend on the features it is compiled with, and it wants a `_` arm for that
+//! reason alone. Opus is reachable from this library and *not* from `sipx-cli`, which has no flag
+//! for it.
+//!
 //! Absent rather than experimental, so that nobody looks for it: **multi-party**. Bridging and
 //! conferencing exist in `sipx-media` over sessions you own, and this crate does not expose its
 //! `MediaSession`, so two `Call`s cannot be joined (`C-6`). A call also cannot answer an
-//! authentication challenge (`S-28`) or select a codec other than G.711 (`M-30`).
+//! authentication challenge (`S-28`).
 //!
 //! [`Error`] is **not** `#[non_exhaustive]` and went from 13 variants to 16 in one release, breaking
 //! every downstream exhaustive `match`. Treat it as though it were: carry a `_` arm.
@@ -43,12 +54,13 @@ pub mod transfer;
 mod update;
 
 pub use call::{
-    Call, DialOptions, Dialing, answer, answer_early, answer_replacing, answer_ringing, dial,
-    dial_early, dial_once, serve,
+    Call, Codecs, DialOptions, Dialing, answer, answer_early, answer_replacing,
+    answer_replacing_with, answer_ringing, answer_ringing_with, answer_with, dial, dial_early,
+    dial_once, serve,
 };
 pub use dialog::{Dialog, DialogId, Role};
 pub use dispatch::{Calls, DispatchCounts, Dispatched, Dispatcher, Invitation};
 pub use error::{Error, Result};
 pub use event::{CallEvent, CallEvents, EndCause};
-pub use rel::{Ringing, ring, ring_early};
+pub use rel::{Ringing, ring, ring_early, ring_early_with};
 pub use transfer::{Referral, Replaces, Transfer, TransferState};
