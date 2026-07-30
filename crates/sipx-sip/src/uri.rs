@@ -700,7 +700,7 @@ fn parse_hostport(hostport: &Bytes) -> Result<(Host, Option<u16>), UriError> {
             .ok_or(UriError::Ipv6Reference)?;
         let inner = hostport.slice(1..close);
         let text = std::str::from_utf8(&inner).map_err(|_| UriError::Host)?;
-        let ip: Ipv6Addr = text.parse().map_err(|_| UriError::Host)?;
+        let ip = parse_ipv6_reference(text)?;
         let tail = hostport.slice(close + 1..);
         let port = parse_port_suffix(&tail)?;
         return Ok((Host::Ip(IpAddr::V6(ip)), port));
@@ -727,6 +727,59 @@ fn parse_hostport(hostport: &Bytes) -> Result<(Host, Option<u16>), UriError> {
         );
 
     Ok((host, port))
+}
+
+/// Parse the text between an IPv6 reference's `[` and `]`.
+///
+/// RFC 4291 §2.2 is the address grammar, and `Ipv6Addr`'s own parser implements it. Almost
+/// everything goes through that parser untouched; this function exists for the one construct
+/// RFC 4291 forbids and sipx must accept anyway.
+///
+/// RFC 3261 §25.1 inherited its `IPv6address` production from the obsoleted RFC 2373:
+///
+/// ```abnf
+/// IPv6address = hexpart [ ":" IPv4address ]
+/// hexpart     = hexseq / hexseq "::" [ hexseq ] / "::" [ hexseq ]
+/// ```
+///
+/// `hexpart` may end in `"::"`, and the grammar then appends `":" IPv4address` — so RFC 3261's
+/// own ABNF derives `2001:db8:::192.0.2.1`, with three colons before an embedded IPv4 address.
+/// RFC 4291 corrected the grammar, but senders had already been written against RFC 3261, and
+/// RFC 5118 §4.10 is normative about the consequence: "following the Robustness Principle
+/// [RFC1122], an implementation must tolerate both of the above constructs."
+///
+/// # The rule, and why it is this narrow
+///
+/// `:::` reads as `::` **only** immediately before an embedded IPv4 address that ends the
+/// reference — the one position the derivation above can produce it. Everywhere else `:::` stays
+/// `UriError::Host`. See `docs/specs/sip-parser.md` §4.8.
+///
+/// The tolerance is a rewrite of one `:::` into `::` followed by a **retry through the same
+/// RFC 4291 parser**, never a parser of its own. So the language accepted is exactly RFC 4291
+/// plus that single derivation: `2001:db8::1:::192.0.2.1` rewrites to a reference with two `::`
+/// runs and is still rejected, `[2001:db8:::10]` has no embedded IPv4 address and is still
+/// rejected, and `::::192.0.2.1` leaves a leading colon on the tail and is still rejected.
+/// Widening the address grammar instead would trade one unmet MUST for an unmeasured surface on
+/// unauthenticated input.
+fn parse_ipv6_reference(text: &str) -> Result<Ipv6Addr, UriError> {
+    if let Ok(ip) = text.parse::<Ipv6Addr>() {
+        return Ok(ip);
+    }
+
+    // RFC 5118 §4.10. `split_once` takes the *first* `:::`, which is what makes the check below
+    // sufficient rather than merely indicative: a second `:::`, or a fourth colon, leaves a tail
+    // that is not an `IPv4address`, and an embedded IPv4 address is by definition the end of the
+    // reference. So there is no second occurrence to reason about separately.
+    let (hexpart, embedded) = text.split_once(":::").ok_or(UriError::Host)?;
+    if embedded.parse::<Ipv4Addr>().is_err() {
+        return Err(UriError::Host);
+    }
+
+    let mut corrected = String::with_capacity(text.len());
+    corrected.push_str(hexpart);
+    corrected.push_str("::");
+    corrected.push_str(embedded);
+    corrected.parse::<Ipv6Addr>().map_err(|_| UriError::Host)
 }
 
 fn parse_port_suffix(tail: &Bytes) -> Result<Option<u16>, UriError> {
@@ -1052,6 +1105,75 @@ mod tests {
 
         let u = uri("sip:alice@[2001:db8::1]:5061");
         assert_eq!(u.port(), Some(5061));
+    }
+
+    /// RFC 5118 §4.10: the three-colon reference RFC 3261's ABNF derives must be tolerated, and
+    /// must mean the address its two-colon twin means.
+    #[test]
+    fn tolerates_three_colons_before_an_embedded_ipv4_address() {
+        let buggy = uri("sip:user@[2001:db8:::192.0.2.1]");
+        let correct = uri("sip:user@[2001:db8::192.0.2.1]");
+        let expected = "2001:db8::192.0.2.1"
+            .parse::<IpAddr>()
+            .expect("a valid RFC 4291 address");
+
+        for (u, what) in [(&buggy, "three-colon"), (&correct, "two-colon")] {
+            match u.host() {
+                Some(Host::Ip(ip)) => assert_eq!(*ip, expected, "{what} form"),
+                other => panic!("{what} form should be an IPv6 literal, got {other:?}"),
+            }
+        }
+
+        // Tolerated, not normalised: the reference goes back on the wire as it arrived.
+        assert_eq!(
+            buggy.to_bytes(),
+            Bytes::from_static(b"sip:user@[2001:db8:::192.0.2.1]")
+        );
+
+        // The tolerance reaches a `Via` sent-by too, because both go through `parse_hostport` —
+        // RFC 3261's ABNF derives the construct wherever `IPv6reference` appears, so a rule that
+        // held only in the Request-URI would be a second, narrower grammar nobody could cite.
+        let (host, port) =
+            Host::parse_hostport(&Bytes::from_static(b"[2001:db8:::192.0.2.1]:5060"))
+                .expect("a Via sent-by holds an IPv6reference too");
+        assert!(matches!(host, Host::Ip(ip) if ip == expected));
+        assert_eq!(port, Some(5060));
+    }
+
+    /// The narrowness is the story: `:::` is read as `::` in exactly one position, and every other
+    /// place it can appear stays a typed error rather than an address parsed on a guess.
+    #[test]
+    fn three_colons_anywhere_but_before_an_embedded_ipv4_address_stay_rejected() {
+        let rejected = [
+            // No embedded IPv4 address at all — the derivation cannot produce ':::' here.
+            "sip:user@[2001:db8:::10]",
+            "sip:user@[2001:db8:::]",
+            "sip:user@[:::]",
+            // ':::' before something that only looks like one.
+            "sip:user@[2001:db8:::192.0.2]",
+            "sip:user@[2001:db8:::192.0.2.1.5]",
+            "sip:user@[2001:db8:::192.0.2.256]",
+            "sip:user@[2001:db8:::0192.0.2.1]",
+            // A fourth colon is not the derivation; it leaves a colon on the tail.
+            "sip:user@[2001:db8::::192.0.2.1]",
+            "sip:user@[::::192.0.2.1]",
+            // Two occurrences, and a '::' run already spent — the rewrite must not create a
+            // second one and have it accepted.
+            "sip:user@[2001:db8:::192.0.2.1:::192.0.2.2]",
+            "sip:user@[2001:db8::1:::192.0.2.1]",
+            // ':::' in the middle rather than before the embedded address.
+            "sip:user@[2001:::db8:192.0.2.1]",
+            // The tolerance must not leak into the unbracketed host rule.
+            "sip:user@2001:db8:::192.0.2.1",
+        ];
+        for input in rejected {
+            let got = Uri::parse(Bytes::from(input.to_owned()));
+            assert!(
+                got.is_err(),
+                "{input:?} is not RFC 5118 §4.10's construct and must stay a typed error, \
+                 got {got:?}"
+            );
+        }
     }
 
     #[test]

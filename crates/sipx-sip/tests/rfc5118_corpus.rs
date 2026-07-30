@@ -170,8 +170,8 @@ fn no_valid_message_in_the_corpus_is_rejected() {
     );
 
     // Guard the guard. The assertion above gets weaker every time a case is moved out of its
-    // scope, so state how many messages it is actually covering: eleven valid messages, of which
-    // one has a recorded deviation, leaves ten that must parse.
+    // scope, so state how many messages it is actually covering: eleven valid messages, none of
+    // them excepted by a recorded deviation, leaves eleven that must parse.
     assert_eq!(
         rfc5118::expecting(Expect::ParseOk).count(),
         11,
@@ -179,15 +179,15 @@ fn no_valid_message_in_the_corpus_is_rejected() {
     );
     assert_eq!(
         rfc5118::DEVIATIONS.len(),
-        1,
-        "one recorded deviation; a new one needs a deliberate decision, not a silent skip"
+        0,
+        "no recorded deviation; a new one needs a deliberate decision, not a silent skip"
     );
     assert_eq!(
         rfc5118::conforming()
             .filter(|c| matches!(c.expect, Expect::ParseOk))
             .count(),
-        10,
-        "so ten valid messages are covered by the assertion above"
+        11,
+        "so all eleven valid messages are covered by the assertion above"
     );
 }
 
@@ -443,13 +443,9 @@ fn ipv4_mapped_addresses_parse_in_signalling() {
 /// the grammar, but RFC 5118 requires tolerance of both: "following the Robustness Principle
 /// [RFC1122], an implementation must tolerate both of the above constructs."
 ///
-/// The corpus found a defect here, and this is the honest half of §4.10: the correct two-colon
-/// construct parses, and the embedded IPv4 address inside an IPv6 reference is read properly.
-///
-/// The three-colon half is **not** tolerated by sipx today. That is recorded as the single entry
-/// in [`rfc5118::DEVIATIONS`] and asserted by `recorded_deviations_still_hold`, rather than
-/// asserted here as if it worked. See the deviation's own text for what the RFC requires and why
-/// closing the gap is a defect story rather than part of this measurement.
+/// This is the half of §4.10 that was never in doubt: the correct two-colon construct parses, and
+/// the embedded IPv4 address inside an IPv6 reference is read properly. The three-colon half is
+/// `abnf_bug_reference_is_tolerated`.
 #[test]
 fn the_correct_abnf_reference_with_an_embedded_ipv4_address_parses() {
     let correct = rfc5118::case("ipv6-correct-abnf-2-colons").expect("in corpus");
@@ -472,6 +468,50 @@ fn the_correct_abnf_reference_with_an_embedded_ipv4_address_parses() {
         buggy.lossy().replace(":::", "::"),
         correct.lossy(),
         "§4.10's buggy message is the correct one with ':::' for '::'"
+    );
+}
+
+/// §4.10 — the tolerance, and the assertion `S-31` exists to make.
+///
+/// `[2001:db8:::192.0.2.1]` is not a valid address under RFC 4291 §2.2, and sipx rejected it with
+/// `StartLine(Uri(Host))` until this test was written. It is valid under the `IPv6address`
+/// production RFC 3261 §25.1 inherited from the obsoleted RFC 2373, whose `hexpart` may end in
+/// `"::"` before the grammar appends `":" IPv4address` — so senders following RFC 3261's own ABNF
+/// emit the third colon, and RFC 5118 §4.10 is normative that "an implementation must tolerate
+/// both of the above constructs".
+///
+/// Two things are asserted, and the second is the point. sipx reads the three-colon form as the
+/// address the sender meant — the same address its two-colon twin yields, which is the strongest
+/// available statement that the extra colon was tolerated rather than absorbed into some other
+/// group. And sipx does **not** rewrite it on the way out: RFC 5118 permits re-serializing the
+/// three-colon form as two, but a parser that normalises unasked has altered a message it was
+/// only forwarding. The narrow rule this rests on is `docs/specs/sip-parser.md` §4.8.
+#[test]
+fn abnf_bug_reference_is_tolerated() {
+    let buggy = rfc5118::case("ipv6-bug-abnf-3-colons").expect("in corpus");
+    let correct = rfc5118::case("ipv6-correct-abnf-2-colons").expect("in corpus");
+
+    assert_eq!(
+        request_uri_ip(buggy),
+        ip("2001:db8::192.0.2.1"),
+        "§4.10: ':::' before an embedded IPv4 address must read as '::' (RFC 5118 §4.10)"
+    );
+    assert_eq!(
+        request_uri_ip(buggy),
+        request_uri_ip(correct),
+        "§4.10: the pair differs only by a colon the RFC says to tolerate, so both name one host"
+    );
+
+    // Tolerated, not normalised. The bytes out are the bytes in, extra colon included.
+    let msg = parse(buggy).expect("§4.10's three-colon form must parse");
+    assert_eq!(
+        msg.to_bytes().as_ref(),
+        buggy.wire().as_ref(),
+        "§4.10: sipx must forward the three-colon reference unchanged, not rewrite it as two"
+    );
+    assert!(
+        msg.to_bytes().windows(3).any(|w| w == b":::"),
+        "§4.10: the ':::' the sender wrote is still there"
     );
 }
 

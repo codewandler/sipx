@@ -62,14 +62,14 @@ note = "The whole corpus, recovered bit-exactly from the RFC's own archive and c
 number = 5118
 title = "SIP Torture Test Messages for IPv6"
 layer = "wire"
-status = "partial"
+status = "implemented"
 roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-testkit/src/rfc5118.rs",
   "crates/sipx-sip/tests/rfc5118_corpus.rs",
   "crates/sipx-sdp/tests/rfc5118_sdp.rs",
 ]
-note = "All twelve Appendix A messages, recovered bit-exactly from the RFC's own archive and classified by which layer must object, asserted at the SIP layer and — for the SDP bodies of §4.6, §4.8 and §4.9 — at the SDP layer too. Missing: §4.10's three-colon IPv6 reference, which the RFC says an implementation must tolerate and sipx rejects as a malformed address. That one gap is recorded as the sole entry in `rfc5118::DEVIATIONS` and asserted, so closing it fails the test that records it."
+note = "All twelve Appendix A messages, recovered bit-exactly from the RFC's own archive and classified by which layer must object, asserted at the SIP layer and — for the SDP bodies of §4.6, §4.8 and §4.9 — at the SDP layer too. §4.10's three-colon reference is tolerated as the narrow carve-out in `sip-parser.md` §4.8: `:::` reads as `::` only immediately before an embedded IPv4 address, the one position RFC 3261's inherited ABNF derives it. `rfc5118::DEVIATIONS` is empty."
 
 [[rfc]]
 number = 3986

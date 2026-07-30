@@ -16,8 +16,8 @@ compliance document usually becomes untrue.
 
 | | Meaning | Count |
 |---|---|---|
-| ✅ implemented | Behaviour present and tested for the roles listed | 31 |
-| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 23 |
+| ✅ implemented | Behaviour present and tested for the roles listed | 32 |
+| 🟡 partial | Some of the normative behaviour; the note says which part is missing | 22 |
 | 🔤 syntax only | The parser represents it; nothing acts on it | 6 |
 | ⬜ not started | Tracked as a target, not started | 9 |
 | — superseded | Obsoleted by a later RFC that is tracked instead | 1 |
@@ -37,9 +37,9 @@ behaviour is not implemented even when the UA half is — the `Roles` column say
 |---|---|---|---|---|---|
 | [2606](https://www.rfc-editor.org/rfc/rfc2606) | Reserved Top Level DNS Names | ✅ implemented | — | — | `.invalid` for the sent-by a WebSocket client invents, which RFC 7118 §5.2 requires never to resolve. |
 | [4475](https://www.rfc-editor.org/rfc/rfc4475) | SIP Torture Test Messages | ✅ implemented | uac, uas | — | The whole corpus, recovered bit-exactly from the RFC's own archive and classified by which layer must object to each message. |
+| [5118](https://www.rfc-editor.org/rfc/rfc5118) | SIP Torture Test Messages for IPv6 | ✅ implemented | uac, uas | — | All twelve Appendix A messages, recovered bit-exactly from the RFC's own archive and classified by which layer must object, asserted at the SIP layer and — for the SDP bodies of §4.6, §4.8 and §4.9 — at the SDP layer too. §4.10's three-colon reference is tolerated as the narrow carve-out in `sip-parser.md` §4.8: `:::` reads as `::` only immediately before an embedded IPv4 address, the one position RFC 3261's inherited ABNF derives it. `rfc5118::DEVIATIONS` is empty. |
 | [3261](https://www.rfc-editor.org/rfc/rfc3261) | SIP: Session Initiation Protocol | 🟡 partial | uac, uas | — | Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2). |
 | [3986](https://www.rfc-editor.org/rfc/rfc3986) | Uniform Resource Identifier: Generic Syntax | 🟡 partial | — | — | The SIP and SIPS subset. Percent-encoding and the reserved sets are handled; the general grammar is not. |
-| [5118](https://www.rfc-editor.org/rfc/rfc5118) | SIP Torture Test Messages for IPv6 | 🟡 partial | uac, uas | — | All twelve Appendix A messages, recovered bit-exactly from the RFC's own archive and classified by which layer must object, asserted at the SIP layer and — for the SDP bodies of §4.6, §4.8 and §4.9 — at the SDP layer too. Missing: §4.10's three-colon IPv6 reference, which the RFC says an implementation must tolerate and sipx rejects as a malformed address. That one gap is recorded as the sole entry in `rfc5118::DEVIATIONS` and asserted, so closing it fails the test that records it. |
 | [3966](https://www.rfc-editor.org/rfc/rfc3966) | The tel URI for Telephone Numbers | 🔤 syntax only | — | — | Represented and round-tripped. Nothing normalises or routes on a tel URI. |
 
 ## Transport — how a message travels, and how the far end is found
