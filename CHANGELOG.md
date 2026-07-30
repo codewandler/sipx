@@ -7,6 +7,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-alpha.2] — 2026-07-30
+
+**ICE stops being a library capability and becomes a call one.** `1.0.0-alpha` shipped a complete,
+tested ICE agent that no call could reach; this release gives a call the choice, makes the session
+survive a mid-call restart, and repairs a re-offer path that had been quietly telling peers ICE was
+over. The default is unchanged and stays unchanged: a call that does not ask for ICE offers no
+candidates, sends no checks, runs no timers, and is carried by symmetric RTP exactly as before.
+
+It also repairs the measurement itself. Two CI jobs had been red on every commit and every pull
+request, both accusing the maturity report's own journal of a discrepancy it did not have — the
+history they compared it against was one commit deep. A green gate that cannot be reproduced in CI
+is the failure this project keeps writing checks against, and it had become true of the checks.
+
+The alpha's seven predicates still read 7 of 7, computed rather than asserted. v1's first predicate
+asks for that to hold **across** a release rather than at the moment one is cut, and this is the
+first release since `1.0.0-alpha` on which it does.
+
 ### Fixed
 
 - **CI stopped checking the board against a history it had not fetched (`X-49`)** — `gate consistency`
@@ -2087,7 +2104,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.2...HEAD
+[1.0.0-alpha.2]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha...v1.0.0-alpha.2
 [1.0.0-alpha]: https://github.com/codewandler/sipx/compare/v0.12.0...v1.0.0-alpha
 [0.12.0]: https://github.com/codewandler/sipx/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/codewandler/sipx/compare/v0.10.0...v0.11.0

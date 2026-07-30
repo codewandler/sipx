@@ -9,7 +9,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 [![RFC compliance](https://img.shields.io/badge/RFC-compliance-blue)](docs/compliance.md)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-alpha<!-- END generated:workspace-version -->.** The public site documents `main`, which can move ahead of the latest
+> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-alpha.2<!-- END generated:workspace-version -->.** The public site documents `main`, which can move ahead of the latest
 > tag. Public APIs are not frozen. Start with the tagged install below when reproducibility matters.
 
 ## Does it fit?
@@ -35,11 +35,11 @@ deployment shape.
 
 ## Try the CLI
 
-The <!-- BEGIN generated:release-tag -->v1.0.0-alpha<!-- END generated:release-tag --> release needs
+The <!-- BEGIN generated:release-tag -->v1.0.0-alpha.2<!-- END generated:release-tag --> release needs
 Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```sh
-cargo install --locked --git https://github.com/codewandler/sipx --tag v1.0.0-alpha sipx-cli
+cargo install --locked --git https://github.com/codewandler/sipx --tag v1.0.0-alpha.2 sipx-cli
 sipx version
 ```
 
@@ -66,8 +66,8 @@ Until the crates are published, pin Git dependencies to the same tag:
 
 ```toml
 [dependencies]
-sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha" }
-sipx-transport = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha" }
+sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.2" }
+sipx-transport = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.2" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
