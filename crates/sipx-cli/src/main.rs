@@ -187,6 +187,69 @@ fn apply_capture(args: &Args<'_>, config: &mut sipx_transport::Config) {
     }
 }
 
+/// Record what the far end sends, for at most `within`, stopping once it has been quiet for `idle`.
+///
+/// Two questions, two bounds. That is the whole point of this function existing, and `X-40` is what
+/// established it needed to (`docs/stories/X-40-*.md` carries the measurement).
+///
+/// How long the stream takes to **start** is a property of the machine — two jitter buffers filling,
+/// a scheduler that is busy elsewhere — so it is bounded only by the call's own duration. How long a
+/// gap means the far end has **stopped talking** is a property of the conversation, so it keeps a
+/// short window. Both commands used to spend one 500 ms window on both questions, via
+/// `MediaSession::record_until_idle(500ms)`, and under load the first frame arrived after it: the
+/// loop ended before its first iteration and a call that carried audio was written out as a valid WAV
+/// with **zero** samples. `MediaSession::record_at_least`'s "Why this exists (`X-28`)" predicted this
+/// exactly — "a recording of zero samples — not a degraded one" — and this is the same cure applied
+/// to the callers that were left on the old primitive. Widening the one window would only have moved
+/// the cliff, which is why there are two.
+///
+/// This lives here rather than in `answer` or `dial` because both need it and it is the kind of
+/// arithmetic that drifts once it is written twice — `answer` was the reported failure and `dial`
+/// records with the same code.
+///
+/// **Whatever arrived is returned, including nothing.** A recording cut short by `within` is still
+/// the audio the call carried, and both callers used to reach it through
+/// `timeout(duration, ..).unwrap_or_default()`, which replaced a partial recording with silence at
+/// the moment the cap fired — losing the whole thing to save none of it. The bound is enforced in
+/// here so that there is no timed-out future left for a caller to unwrap.
+/// Takes the `Call` rather than the `MediaSession` only because `sipx-media` is not a direct
+/// dependency of this crate and the session type is not re-exported; the audio is all this touches.
+async fn record(
+    call: &sipx_call::Call,
+    within: std::time::Duration,
+    idle: std::time::Duration,
+) -> Vec<i16> {
+    let media = call.media();
+    let deadline = tokio::time::Instant::now() + within;
+    let mut recorded = Vec::new();
+
+    // The stream starting. Bounded by the call and by nothing tighter, because there is no gap to
+    // measure yet — a far end that has not spoken is not a far end that has stopped.
+    match tokio::time::timeout_at(deadline, media.recv()).await {
+        Ok(Some(frame)) => recorded.extend_from_slice(&frame),
+        // Nothing ever came, or the call ended first. Either way there is no stream whose end to
+        // wait for, and an empty recording is the honest answer.
+        Ok(None) | Err(_) => return recorded,
+    }
+
+    // The rest of it. Now that audio is flowing, a gap of `idle` does mean the far end has finished,
+    // and the call's deadline still caps a peer that never stops talking.
+    loop {
+        let next = tokio::time::Instant::now() + idle;
+        match tokio::time::timeout_at(next.min(deadline), media.recv()).await {
+            Ok(Some(frame)) => recorded.extend_from_slice(&frame),
+            // The far end went quiet, the call ended, or its time is up. All three mean this is
+            // everything there is — and it is kept.
+            Ok(None) | Err(_) => return recorded,
+        }
+    }
+}
+
+/// How long a gap in the audio means the far end has stopped talking.
+///
+/// Shared by both commands so the two cannot come to disagree about it.
+const RECORD_IDLE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Shared argument parsing.
 ///
 /// Deliberately small rather than a dependency: sipx needs flags and one positional, and a

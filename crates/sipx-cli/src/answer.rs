@@ -97,20 +97,21 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     let duration = Duration::from_secs(args.number("duration").unwrap_or(30));
     let media = call.media();
 
+    // The recording bounds itself, and keeps whatever arrived (`X-40`). It used to be
+    // `timeout(duration, media.record_until_idle(500ms))`, which spent one 500 ms window on both
+    // "has the stream started" and "has it ended" — so a first frame delayed past it recorded
+    // nothing at all — and then `unwrap_or_default` threw away any partial recording the cap cut
+    // short. `crate::record` separates the two bounds and returns what it got.
     let ((), recorded, digits) = tokio::join!(
         async {
             if let Some(clip) = &clip {
                 let _ = tokio::time::timeout(duration, media.play(&clip.samples, 160)).await;
             }
         },
-        tokio::time::timeout(
-            duration,
-            media.record_until_idle(Duration::from_millis(500))
-        ),
+        crate::record(&call, duration, crate::RECORD_IDLE),
         tokio::time::timeout(duration, media.collect_digits(Duration::from_millis(800))),
     );
 
-    let recorded = recorded.unwrap_or_default();
     let digits = digits.unwrap_or_default();
 
     let mut report = Report::new()
