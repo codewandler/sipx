@@ -134,10 +134,28 @@ async fn start_answerer_in(
 /// Its stderr comes along because a status on its own says a process failed without saying why, and
 /// the whole point of reading the status is diagnosis.
 async fn answerer_exits_cleanly(answerer: &mut tokio::process::Child) {
+    let complaint = drain_stderr(answerer).await;
+    exits_cleanly(answerer, &complaint).await;
+}
+
+/// Everything the answerer has written to stderr, read to end of stream.
+async fn drain_stderr(answerer: &mut tokio::process::Child) -> String {
     let mut complaint = Vec::new();
     if let Some(mut stderr) = answerer.stderr.take() {
         let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut complaint).await;
     }
+    String::from_utf8_lossy(&complaint).into_owned()
+}
+
+/// The waiting half of [`answerer_exits_cleanly`], for callers that have already read stderr.
+///
+/// It is split out because a caller that wants *both* of the answerer's streams has to read them
+/// concurrently — a process whose stderr goes unread while its stdout is drained to end of stream
+/// can block on a full pipe and reach neither — so it cannot let this function do the reading.
+async fn exits_cleanly(
+    answerer: &mut tokio::process::Child,
+    complaint: &str,
+) -> std::process::ExitStatus {
     let status = tokio::time::timeout(Duration::from_secs(30), answerer.wait())
         .await
         .expect("the answerer exits rather than hanging")
@@ -145,9 +163,9 @@ async fn answerer_exits_cleanly(answerer: &mut tokio::process::Child) {
     assert!(
         status.success(),
         "the answerer exited with {status}, so anything asserted about what it recorded, heard or \
-         captured describes a process that failed: {}",
-        String::from_utf8_lossy(&complaint)
+         captured describes a process that failed: {complaint}"
     );
+    status
 }
 
 /// Certificate material written where the CLI can consume it through its public file flags.
@@ -911,21 +929,99 @@ async fn a_refusal_carries_a_to_tag() {
     let _ = answerer.kill().await;
 }
 
-/// Logging must never reach stdout, or one `-vv` turns every JSON result into a parse error at
-/// the far end of a pipe.
+/// Logging must never reach stdout, or one verbosity flag turns every JSON result into a parse
+/// error at the far end of a pipe.
+///
+/// **This test used to be unable to observe its own name (`X-53`).** It ran
+/// `dial sip:bob@example.com --json -vv`, an invocation refused as a usage error before any socket
+/// is bound, so the process emitted no log record at all and `stdout.is_empty()` held exactly as
+/// well with logging writing to stdout as to stderr. Making `init_logging` write to stdout — the
+/// one defect it exists to catch — left it green. It is the same shape `X-45` fixed one story
+/// earlier, and `X-36` before that: an assertion about the absence of a side effect, in a run that
+/// never enters the code that would produce it.
+///
+/// So the subject is now a process that logs. That is the **answerer** rather than the caller: a
+/// caller that completes a call emits no record at any verbosity, while the answerer does, and the
+/// answerer's stdout carries JSON result lines — which is precisely the pipe this test protects.
+/// A real call is placed against it, and:
+///
+/// - its **stderr carries log records**, which is what makes the rest mean anything. Without that
+///   control, "no records on stdout" is equally consistent with logging being broken outright,
+///   which is the failure a test named for logging can least afford to miss;
+/// - the **same call run quietly carries none**, so those records are attributable to the verbosity
+///   flag and not to something that would have been logged regardless;
+/// - **stdout carries results only**, in both runs, asserted line by line as well as by record; and
+/// - the **exit code is asserted**, which the old test never did. It silently depended on being
+///   refused; an invocation that started or stopped being refused would have moved it to another
+///   code path without failing.
+///
+/// The verbose spelling is `-v -v` and not `-vv`, which is not a stylistic choice: verbosity is
+/// counted as the number of arguments beginning with `-v`, so `-vv` counts once and reaches INFO,
+/// and nothing on a call's path logs at INFO. That the documented `-vv` cannot reach DEBUG is a
+/// separate defect, reported rather than fixed here.
 #[tokio::test]
 async fn verbose_logging_stays_off_stdout() {
-    let output = sipx()
-        .args(["dial", "sip:bob@example.com", "--json", "-vv"])
-        .output()
-        .await
-        .expect("runs");
+    let dir = scratch("verbose-logging");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let loud = place_a_call(&dir, &["-v", "-v"]).await;
+    // The negative comes before its own control, deliberately: writing records to stdout empties
+    // stderr as a side effect, so both assertions fire together on that one defect and the first to
+    // panic is the one that gets to name it.
+    let loud_stdout = loud.answerer_stdout.join("\n");
+    let on_stdout = log_records(&loud_stdout);
     assert!(
-        stdout.is_empty(),
-        "stdout must carry results only, got: {stdout}"
+        on_stdout.is_empty(),
+        "stdout must carry results only, got the log records {on_stdout:?}"
     );
+    assert!(
+        !log_records(&loud.answerer_stderr).is_empty(),
+        "the verbose answerer logged nothing, so the clean stdout above is equally consistent with \
+         logging being broken outright: {}",
+        loud.answerer_stderr
+    );
+    assert!(
+        loud.answerer_stdout
+            .iter()
+            .all(|line| line.starts_with('{') && line.ends_with('}')),
+        "every line on stdout has to be a JSON result a pipe can parse: {:?}",
+        loud.answerer_stdout
+    );
+    assert_eq!(
+        loud.answerer_status.code(),
+        Some(0),
+        "the verbose answerer has to have taken the path that answers a call: {}",
+        loud.answerer_stderr
+    );
+    assert_eq!(
+        loud.caller.status.code(),
+        Some(0),
+        "the verbose run has to have been a completed call: {}",
+        String::from_utf8_lossy(&loud.caller.stderr)
+    );
+
+    let quiet = place_a_call(&dir, &[]).await;
+    assert!(
+        !log_records(&quiet.answerer_stderr)
+            .iter()
+            .any(|record| record.contains("DEBUG")),
+        "an answerer nobody asked for verbosity logged at DEBUG anyway, so the records above say \
+         nothing about the flag: {}",
+        quiet.answerer_stderr
+    );
+    let quiet_written = quiet.answerer_stdout.join("\n");
+    let quiet_stdout = log_records(&quiet_written);
+    assert!(
+        quiet_stdout.is_empty(),
+        "stdout must carry results only, got the log records {quiet_stdout:?}"
+    );
+    assert_eq!(
+        quiet.answerer_status.code(),
+        Some(0),
+        "the quiet answerer has to have taken the same path as the verbose one: {}",
+        quiet.answerer_stderr
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// DTMF sent by the caller is reported by the answering side.
@@ -1280,20 +1376,40 @@ async fn a_valued_flag_given_no_value_is_refused_by_every_command() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// What one completed call left behind, for the tests that assert about it afterwards.
+struct Placed {
+    /// Every line the answerer wrote to stdout after the one announcing its port.
+    answerer_stdout: Vec<String>,
+    /// Everything the answerer wrote to stderr.
+    answerer_stderr: String,
+    /// How the answerer exited. [`place_a_call`] has already held it to success; it is carried so a
+    /// test can say which code path it depends on rather than inheriting it silently (`X-53`).
+    answerer_status: std::process::ExitStatus,
+    /// The caller's streams and status, likewise already held to success.
+    caller: std::process::Output,
+}
+
 /// Place one real call against a fresh answerer, both processes running in `dir`, and return only
 /// once the answerer has exited cleanly.
 ///
-/// The two capture tests below need exactly the same thing and must not disagree about what it is.
-/// A capture records signalling, so a test about capture that places no call has no subject; and the
-/// answerer's *exit* is what flushes the writer, so nothing may be read before it. `X-45` factored
-/// this out of the positive test rather than give the negative one a harness of its own, because two
+/// The three tests below need exactly the same thing and must not disagree about what it is. A
+/// capture records signalling, so a test about capture that places no call has no subject; a process
+/// that is refused before it binds a socket logs nothing, so a test about logging that never places
+/// a call has none either (`X-45`, `X-53`); and the answerer's *exit* is what flushes both the
+/// capture writer and its streams, so nothing may be read before it. `X-45` factored this out of the
+/// positive capture test rather than give the negative one a harness of its own, because two
 /// harnesses drift and a pair that has drifted is no longer a pair.
 ///
-/// Every wait here is causal — the answerer announces its port, the caller exits, the answerer
-/// prints its result line, the answerer exits — and the durations are bounds on failure, not
+/// Every wait here is causal — the answerer announces its port, the caller exits, the answerer's
+/// streams reach end of stream, the answerer exits — and the durations are bounds on failure, not
 /// measurements (`X-28`, `X-29`). The exception is `--duration 1`, which is neither: it is how long
 /// the call lasts before either end hangs up.
-async fn place_a_call(dir: &std::path::Path, answerer_flags: &[&str]) {
+///
+/// Both of the answerer's streams are read concurrently and to the end, rather than one line of
+/// stdout being taken and the rest discarded: a caller can only assert that stdout carries results
+/// *only* if it has all of stdout, and a process left writing into an unread pipe while the other is
+/// drained can block forever.
+async fn place_a_call(dir: &std::path::Path, answerer_flags: &[&str]) -> Placed {
     let mut args = vec!["--duration", "1"];
     args.extend_from_slice(answerer_flags);
     let (mut answerer, address, mut lines) = start_answerer_in(Some(dir), &args).await;
@@ -1325,17 +1441,63 @@ async fn place_a_call(dir: &std::path::Path, answerer_flags: &[&str]) {
         String::from_utf8_lossy(&caller.stderr)
     );
 
-    let answered = tokio::time::timeout(Duration::from_secs(25), lines.next_line())
-        .await
-        .expect("no timeout")
-        .expect("a line")
-        .expect("the result line");
+    let mut stderr = answerer.stderr.take();
+    let (answerer_stdout, answerer_stderr) = tokio::time::timeout(Duration::from_secs(25), async {
+        tokio::join!(
+            async {
+                let mut written = Vec::new();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    written.push(line);
+                }
+                written
+            },
+            async {
+                let mut complaint = Vec::new();
+                if let Some(stderr) = stderr.as_mut() {
+                    let _ = tokio::io::AsyncReadExt::read_to_end(stderr, &mut complaint).await;
+                }
+                String::from_utf8_lossy(&complaint).into_owned()
+            }
+        )
+    })
+    .await
+    .expect("the answerer closes its streams rather than holding them open");
+
+    // Scanned rather than taken from the head of the list: a sabotaged build that writes log records
+    // to stdout would put one ahead of the result line, and that must fail the test that is *about*
+    // records on stdout, with the diagnosis that test gives — not this one.
     assert!(
-        answered.contains("\"status\":\"answered\""),
-        "the call has to have happened for anything below to be about a call: {answered}"
+        answerer_stdout
+            .iter()
+            .any(|line| line.contains("\"status\":\"answered\"")),
+        "the call has to have happened for anything below to be about a call: {answerer_stdout:?}"
     );
 
-    answerer_exits_cleanly(&mut answerer).await;
+    let answerer_status = exits_cleanly(&mut answerer, &answerer_stderr).await;
+
+    Placed {
+        answerer_stdout,
+        answerer_stderr,
+        answerer_status,
+        caller,
+    }
+}
+
+/// The lines of `stream` that are `tracing` log records.
+///
+/// Recognised by shape — a level word beside one of our own crate targets — rather than by message
+/// text. What is under test is which stream a record lands on, not what any subsystem chose to say,
+/// and matching a message would turn a reworded log line into a logging regression.
+fn log_records(stream: &str) -> Vec<&str> {
+    stream
+        .lines()
+        .filter(|line| {
+            line.contains("sipx_")
+                && ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]
+                    .iter()
+                    .any(|level| line.contains(level))
+        })
+        .collect()
 }
 
 /// **`X-18`'s command-line half.** `--capture <path>` records the signalling of a real call.

@@ -35,6 +35,22 @@ currently observe should be able to fail when that property is violated.
 - Filed 2026-07-30 by `X-45`'s implementor, which swept all five files under `crates/sipx-cli/tests/`
   for this shape and found exactly two genuine instances. It fixed `no_capture_flag_means_no_file`
   and left this one rather than widen its diff, which was the right call.
+- Rewritten on `impl/X-53`. The blindness was demonstrated first, in `X-45`'s shape: with
+  `init_logging` writing to stdout instead of stderr, the old test passed in 0.00s — it never bound a
+  socket, so there was no record to misplace.
+- The subject moved from the caller to the **answerer**. A caller that completes a call logs nothing
+  at any verbosity, so it can never be a positive control; the answerer emits DEBUG records during a
+  real call *and* carries JSON results on stdout, which is the pipe the test protects. The call comes
+  from `X-45`'s `place_a_call`, extended to return both of the answerer's streams and its exit status
+  rather than reading one line and discarding the rest — a test cannot assert stdout carries results
+  *only* without all of stdout.
+- Asserted now: no log records on stdout, every stdout line a parseable JSON object, records present
+  on stderr (the control), none at DEBUG in the same call run quietly (so the records are
+  attributable to the flag), and both processes' exit codes.
+- **A defect found while doing this, not fixed here:** verbosity is counted as
+  `args.filter(|a| a.starts_with("-v")).count()`, so the documented `-vv` counts *once* and reaches
+  INFO, not DEBUG — and nothing on a call's path logs at INFO. Reaching DEBUG needs `-v -v`, which
+  is what the test uses. `crates/sipx-cli/src/main.rs:74` against the `-v, -vv` line in `USAGE`.
 
 ## Notes
 - **Reads with `X-45`** and `X-36` — the same defect class three times now: an assertion about the
