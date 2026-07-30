@@ -27,6 +27,9 @@ WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 BUILD_DOCS = ROOT / "scripts" / "build-docs.sh"
 DOCS_LINKS = ROOT / "scripts" / "check-docs-links.py"
 SITE_CONFIG = ROOT / "website" / "docusaurus.config.js"
+# The dead-anchor probe `build-docs.sh` writes to prove the site's anchor guard is armed. Named
+# here because three tests below are about the file rather than about the check.
+PROBE_PREFIX = "website/docs/zz-anchor-guard-probe-"
 
 _gate = None
 
@@ -569,7 +572,7 @@ class TheDocsSiteStep(unittest.TestCase):
         because deleting those lines is the cheap way to make this whole story evaporate.
         """
         self.assertIn(
-            "zz-anchor-guard-probe.md",
+            PROBE_PREFIX,
             self.script,
             "build-docs.sh no longer builds a page with a dead anchor to check that the guard "
             "is armed, so the step is back to trusting a config setting it never exercises",
@@ -578,6 +581,67 @@ class TheDocsSiteStep(unittest.TestCase):
             "BUILT SUCCESSFULLY",
             self.script,
             "build-docs.sh does not fail when the dead-anchor probe builds cleanly",
+        )
+
+    # -- and the probe cannot cost the next run anything ----------------------------------------
+    #
+    # The guard needs a page with a dead anchor, and Docusaurus only builds pages under
+    # `website/docs`, so the probe lands in a tracked directory. A `kill -9` runs no `trap`, which
+    # leaves two ways for a check about gate integrity to damage gate integrity: the leftover gets
+    # committed, or it reddens every later run with no defect in the tree. Both are closed, and
+    # both are asserted, because the closing is invisible from the diff that needs it.
+
+    def test_a_leftover_probe_cannot_be_committed(self):
+        """Asserted through `git check-ignore`, not by reading the pattern.
+
+        The pattern is not the property. What matters is that `git add -A` — which is exactly what
+        the integrating agent runs after a gate run — cannot stage a broken page into the published
+        site.
+        """
+        probe = ROOT / f"{PROBE_PREFIX}31337.md"
+        done = subprocess.run(
+            ["git", "check-ignore", "-v", str(probe.relative_to(ROOT))],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            0,
+            done.returncode,
+            f"nothing ignores {probe.relative_to(ROOT)}, so a probe left behind by a killed gate "
+            f"run is committable, and `git add -A` would put a page with a dead anchor into the "
+            f"site. git said: {done.stdout or done.stderr!r}",
+        )
+
+    def test_the_stale_probe_sweep_runs_before_the_site_build(self):
+        """Order is the whole fix, and it is invisible unless something checks it.
+
+        A leftover probe makes the *real* site build fail — correctly, it is a dead anchor in the
+        tree. Under `set -e` that aborts the script, so a cleanup placed next to the probe never
+        runs and the gate stays red on every later run until a human deletes a gitignored file
+        they cannot see in `git status`. Sweeping first is what makes a killed run cost nothing.
+        """
+        sweep = self.script.index("rm -f $PROBE_GLOB")
+        build = self.script.index("npm run build 2>&1 | tee")
+        self.assertLess(
+            sweep,
+            build,
+            "the stale-probe sweep is after the site build, so a probe left by a killed run "
+            "reddens the gate forever: the build aborts on it before the cleanup is reached",
+        )
+
+    def test_concurrent_runs_in_one_checkout_do_not_share_a_probe_path(self):
+        """One run's cleanup must not delete another run's live probe and fake a "not armed" red."""
+        self.assertIn(
+            'PROBE="website/docs/zz-anchor-guard-probe-$$.md"',
+            self.script,
+            "the probe path is fixed, so two runs in one checkout race on it",
+        )
+        self.assertIn(
+            'rm -f "$PROBE"',
+            self.script,
+            "the end-of-guard removal uses the glob rather than this run's own path, which would "
+            "delete a concurrent run's live probe",
         )
 
     def test_the_step_treats_a_site_build_warning_as_a_defect(self):
@@ -689,6 +753,90 @@ class TheInternalDocsLinkCheck(unittest.TestCase):
                 }
             ),
         )
+
+    def test_underscore_emphasis_is_consumed_like_any_other_markup(self):
+        """`_(six stories, M10)_` contributes `six-stories-m10`, not `_six-stories-m10_`.
+
+        `_` survives the punctuation strip because it is a word character, so leaving emphasis
+        underscores in changes the id. Three headings in `docs/roadmap.md` have this shape.
+        """
+        self.assertEqual(
+            [],
+            self.problems(
+                {
+                    "docs/a.md": "# A\n\n[x](b.md#ice--ice-six-stories-m10)\n",
+                    "docs/b.md": "# B\n\n### ICE — `ice` _(six stories, M10)_\n",
+                }
+            ),
+        )
+
+    def test_an_underscore_inside_a_word_is_not_emphasis(self):
+        """The other direction, and the reason the rule is flanked rather than greedy.
+
+        `on_failure` and `snake_case` are identifiers. Consuming their underscores would break
+        every anchor that names one, which is most of what the specs' headings are.
+        """
+        self.assertEqual(
+            [],
+            self.problems(
+                {
+                    "docs/a.md": "# A\n\n[x](b.md#the-on_failure-table)\n",
+                    "docs/b.md": "# B\n\n## The on_failure table\n",
+                }
+            ),
+        )
+
+    def test_markup_inside_a_code_span_is_not_markup(self):
+        """``[listener.<name>]`` in a code span is characters, not an HTML tag.
+
+        This slugged as `42-listener` while it was being written, because backticks were stripped
+        before tags were and `<name>` was eaten as a tag. Four headings in
+        `docs/specs/host-config.md` have the shape. Code spans are held out of every markup rule
+        now, so the answer cannot depend on the order those rules happen to run in.
+        """
+        self.assertEqual(
+            [],
+            self.problems(
+                {
+                    "docs/a.md": "# A\n\n[x](b.md#42-listenername) [y](b.md#45-appnameon_failure-n4)\n",
+                    "docs/b.md": "# B\n\n### 4.2 `[listener.<name>]`\n\n"
+                    "### 4.5 `[app.<name>.on_failure]` (N4)\n",
+                }
+            ),
+        )
+
+    def test_the_headings_in_the_tree_with_these_shapes_slug_as_the_renderer_does(self):
+        """The seven real headings the shapes above were found in, held against the real files.
+
+        A fixture proves the rule; these prove the rule is about this repository. None of them is
+        linked today, so none of them can redden the gate yet — which is exactly why they would
+        otherwise go on diverging unnoticed until someone links one.
+        """
+        expected = {
+            "ICE — `ice` _(six stories, M10)_": "ice--ice-six-stories-m10",
+            "Endpoint discovery — `discovery` _(four stories)_": (
+                "endpoint-discovery--discovery-four-stories"
+            ),
+            "Edge / B2BUA — `edge` _(one story, in M9)_": "edge--b2bua--edge-one-story-in-m9",
+            "4.2 `[listener.<name>]`": "42-listenername",
+            "4.3 `[app.<name>]`": "43-appname",
+            "4.5 `[app.<name>.on_failure]` (N4)": "45-appnameon_failure-n4",
+            "4.6 `[app.<name>.grants]` (N5)": "46-appnamegrants-n5",
+        }
+        headings = set()
+        for name in ("docs/roadmap.md", "docs/specs/host-config.md"):
+            for line in (ROOT / name).read_text(encoding="utf-8").splitlines():
+                if line.startswith("#"):
+                    headings.add(line.lstrip("#").strip())
+        for heading, anchor in expected.items():
+            with self.subTest(heading=heading):
+                self.assertIn(
+                    heading,
+                    headings,
+                    "this heading has been reworded; re-derive its anchor rather than deleting "
+                    "the case, or the shape goes back to being unchecked",
+                )
+                self.assertEqual(anchor, self.mod.slug(heading))
 
     def test_an_explicit_id_wins_over_the_heading_text(self):
         self.assertEqual(

@@ -42,3 +42,11 @@ __pycache__/
 # its own, so this has to match every peer — a pattern naming one of them silently commits the
 # next one's key.
 /tests/interop/*/tls/
+
+# `scripts/build-docs.sh` writes a page with a deliberately dead anchor here and deletes it again,
+# to prove the site's broken-anchor guard is armed rather than trusting a config setting (X-41).
+# Docusaurus only builds pages under `website/docs`, so the probe has to live in a tracked
+# directory, and a `kill -9` runs no `trap` — an agent running `git add -A` after a killed gate run
+# would commit a broken page into the published site. Globbed because the name carries the run's
+# pid, so concurrent runs in one checkout do not delete each other's probe.
+/website/docs/zz-anchor-guard-probe-*.md

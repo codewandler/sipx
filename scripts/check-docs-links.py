@@ -14,6 +14,14 @@ now checked to the same depth.
 Anchors are resolved the way GitHub renders them, because GitHub is where these pages are read:
 a heading becomes its text lowercased with punctuation dropped and spaces hyphenated, a repeated
 heading gets `-1`, `-2`, … and an explicit `{#id}` or an `id="…"` on inline HTML wins outright.
+`slug` documents the three places that rule is subtler than it sounds, each of which cost a live
+link before it was found.
+
+Two known limits, both deliberate, because each can only produce a false *negative* — a dead
+anchor this accepts — and never a red gate for a link that works. No heading in the tree has an
+emoji, and GitHub's own rewriting of an author-supplied `id=` is unquantified without a live
+render. If either ever matters, it will matter as an anchor nobody noticed was dead, which is what
+the site's own `onBrokenAnchors` catches for the published half.
 
 Usage:
     ./scripts/check-docs-links.py            # the repository this script lives in
@@ -32,6 +40,11 @@ EXPLICIT_ID = re.compile(r"\{#([\w:.-]+)\}\s*$")
 HTML_ID = re.compile(r"""<[^>]*\sid=["']([^"']+)["']""")
 HTML_NAME = re.compile(r"""<a[^>]*\sname=["']([^"']+)["']""")
 LINK = re.compile(r"\]\(([^)\s]+)\)")
+CODE_SPAN = re.compile(r"`([^`]*)`")
+# Underscore emphasis, only where a renderer would read it: `_` cannot open or close emphasis when
+# it is flanked by word characters, which is what keeps `on_failure` and `snake_case` intact.
+STRONG_UNDERSCORE = re.compile(r"(?<!\w)__([^_]+)__(?!\w)")
+EM_UNDERSCORE = re.compile(r"(?<!\w)_([^_]+)_(?!\w)")
 
 # A fragment on a link to one of these is a line range or a source-file anchor, not a heading we
 # can resolve from markdown. The file's existence is still checked; the fragment is not.
@@ -63,21 +76,46 @@ def strip_code(text: str) -> str:
 def slug(heading: str) -> str:
     """The id a renderer emits for a heading's text.
 
-    Inline markup is removed before slugging, so ``## The `Via` header`` anchors as
-    `the-via-header` rather than keeping the backticks.
+    Every divergence from the renderer costs the same thing in the same direction: a live link a
+    human can follow, reported dead, reddening the gate with no defect in the tree. So the three
+    that have been found are written down here rather than left to be rediscovered.
 
-    Spaces map to hyphens **one for one**, not run-for-one, and that is not a detail: dropping a
-    character between two spaces leaves both spaces behind, so `### Application SDK — `app-sdk``
-    anchors as `application-sdk--app-sdk` with two hyphens where the em dash was. Collapsing
-    runs here reports two live links in `docs/roadmap.md` as dead, which is how this was found.
+    1. **Spaces map to hyphens one for one, not run for one.** Dropping a character between two
+       spaces leaves both spaces behind, so the `Application SDK` heading in `docs/roadmap.md`
+       anchors as `application-sdk--app-sdk`, with two hyphens where its em dash was. Collapsing
+       runs reports its two live links as dead.
+    2. **Emphasis is markup, and `_underscores_` are emphasis too.** `_(six stories, M10)_` in that
+       same file contributes `six-stories-m10`, not `_six-stories-m10_` — the underscores are
+       consumed, and `_` survives the punctuation strip so leaving them in changes the id. Only
+       where a renderer would read emphasis: `on_failure` inside a word is not, which is why the
+       rule is flanked rather than greedy.
+    3. **A code span's content is literal, so markup inside it is not markup.** `<name>` inside
+       ``[listener.<name>]`` is four characters, not an HTML tag — and this used to delete it,
+       because backticks were stripped before tags were, leaving `42-listener` where the renderer
+       gives `42-listenername`. Four headings in `docs/specs/host-config.md` have that shape. The
+       fix is not an ordering tweak: code spans are held out of every markup rule and put back
+       just before the punctuation strip, which is the only way "literal" stays true whatever
+       rules are added above.
     """
-    text = heading
+    held: list[str] = []
+
+    def hold(match: re.Match) -> str:
+        held.append(match.group(1))
+        return f"\x00{len(held) - 1}\x00"
+
+    # Rule 3. `\x00` cannot appear in a heading and matches none of the patterns below, so a code
+    # span is inert for the rest of this function.
+    text = CODE_SPAN.sub(hold, heading)
+
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)  # links and images, label kept
-    text = re.sub(r"`([^`]*)`", r"\1", text)
     text = re.sub(r"\*\*([^*]*)\*\*", r"\1", text)
-    text = re.sub(r"__([^_]*)__", r"\1", text)
+    text = STRONG_UNDERSCORE.sub(r"\1", text)
     text = re.sub(r"\*([^*]*)\*", r"\1", text)
+    text = EM_UNDERSCORE.sub(r"\1", text)
     text = re.sub(r"<[^>]+>", "", text)
+
+    text = re.sub(r"\x00(\d+)\x00", lambda m: held[int(m.group(1))], text)
+
     text = re.sub(r"\s", " ", text.lower().strip())
     text = re.sub(r"[^\w\- ]", "", text)
     return text.replace(" ", "-")

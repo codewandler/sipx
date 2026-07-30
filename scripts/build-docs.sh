@@ -44,10 +44,35 @@
 # `set -euo pipefail` below is load-bearing for all of it: without `pipefail`, piping the site
 # build into a log to inspect its output would discard the build's own exit code, which is how a
 # step grows this defect back by accident.
+#
+# -- and the guard's probe cannot cost the next run anything -----------------------------------
+#
+# Check 6 needs a page with a dead anchor, and Docusaurus only builds pages under `website/docs`,
+# so the probe is written into a tracked directory. That is a hazard with two halves, and both are
+# closed here rather than trusted to a `trap`, because a `kill -9` runs no trap:
+#
+#   * `git add -A` must not be able to commit it. The path is in the root `.gitignore`, beside the
+#     three other entries there for exactly this class of generated file.
+#   * a leftover must not redden the next run. The sweep runs *before* the site build rather than
+#     beside the probe. Placed after the probe it could not help: the site build would abort on the
+#     leftover under `set -e` and never reach the cleanup, leaving the gate red on every later run
+#     with no defect in the tree — the exact opposite of what this step exists to say, and a
+#     violation of the predicate this story carries.
+#   * the name carries `$$`, so two runs in one checkout cannot delete each other's live probe.
+#     That is why the sweep is a glob and the removal at the end is not, and why nothing else may
+#     use the `zz-anchor-guard-probe-` prefix.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
+
+# This run's probe, and the pattern that matches every run's.
+PROBE="website/docs/zz-anchor-guard-probe-$$.md"
+PROBE_GLOB="website/docs/zz-anchor-guard-probe-*.md"
+
+# Before anything reads `website/docs`. `rm -f` on a glob that matches nothing is a silent success,
+# so this costs a clean tree nothing and says nothing on the happy path.
+rm -f $PROBE_GLOB
 
 # Docusaurus warnings that are deliberately not failures. Empty, and it should stay that way:
 # anything added here needs a reason on the line and a story against it, because every entry is
@@ -109,18 +134,19 @@ fi
 # `h1` as the page header and gives it no id — and require the build to fail.
 #
 # It runs after the real build so a genuine site defect is reported as itself, and it reuses the
-# warm Docusaurus cache in `website/`, so it costs seconds rather than another cold build.
+# warm Docusaurus cache in `website/`, so it costs seconds rather than another cold build. Building
+# a throwaway copy of `website/` instead would keep the probe out of the tree entirely; it was
+# measured at 2m31s for the cold cache and it failed for the wrong reason, so the probe stays here
+# and its leakage is closed at the top of this script instead.
 echo "==> checking a dead anchor still fails the build"
-probe="website/docs/zz-anchor-guard-probe.md"
 guard_log="$(mktemp)"
 guard_out="$(mktemp -d)"
-trap 'rm -rf "$site_log" "$guard_log" "$guard_out" "$probe"' EXIT
-rm -f "$probe"  # a run killed mid-probe leaves this behind; it must not become a real page
-cat > "$probe" <<'PROBEEOF'
+trap 'rm -rf "$site_log" "$guard_log" "$guard_out" "$PROBE"' EXIT
+cat > "$PROBE" <<'PROBEEOF'
 ---
 title: anchor guard probe
-description: Written by scripts/build-docs.sh and deleted again. If you are reading this in a
-  commit, the build was killed mid-check — delete the file.
+description: Written by scripts/build-docs.sh and deleted again. It is gitignored, and the next
+  run of that script deletes it before building, so a copy left by a killed run costs nothing.
 ---
 
 # anchor guard probe
@@ -133,7 +159,7 @@ check into a false "not armed" rather than leaving it with nothing to trip on:
 PROBEEOF
 guard_status=0
 (cd website && npm run build --silent -- --out-dir "$guard_out") >"$guard_log" 2>&1 || guard_status=$?
-rm -f "$probe"
+rm -f "$PROBE"
 if [ "$guard_status" -eq 0 ]; then
     echo >&2
     echo "a page linking to an anchor no page emits BUILT SUCCESSFULLY." >&2

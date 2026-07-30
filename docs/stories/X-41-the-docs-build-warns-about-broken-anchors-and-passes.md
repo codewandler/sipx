@@ -91,6 +91,47 @@ What was done:
   deprecated top-level spelling, and that the probe check and the warning guard are still in the step)
   and `TheInternalDocsLinkCheck` (the anchor resolver, on trees the test writes).
 
+### Rework round 1 — the probe was a gate-integrity defect of its own
+
+The review was right and it is the ugliest kind of finding: the check written to defend
+`predicate: 3` could violate it. The probe page lands in `website/docs/`, a tracked directory,
+because that is the only place Docusaurus builds pages from — and a `kill -9` runs no `trap`. Two
+consequences, both reproduced by the reviewer:
+
+- Nothing ignored it, so `git add -A` after a killed gate run would have committed a page with a
+  dead anchor into the published site. The integrating agent is the `git add -A`.
+- The cleanup could not run in the case it existed for. It sat *after* the real site build, and a
+  leftover probe makes that build fail — correctly, it is a dead anchor in the tree. Under `set -e`
+  the script aborted there and never reached the cleanup, so the gate stayed red on every later run
+  with no defect in the tree, until a human deleted a file `git status` was about to stop showing
+  them.
+
+Fixed by placement rather than by more cleanup:
+
+- The stale-probe sweep is now the first thing the script does, before anything reads
+  `website/docs`. A probe from a killed run is gone before the build that would trip on it.
+- The path is in the root `.gitignore`, with the reasoning, beside the three other entries there
+  for this class of file. Asserted through `git check-ignore` rather than by matching the pattern,
+  because the property is "`git add -A` cannot stage it", not "a line exists".
+- The name carries `$$`, so two runs in one checkout cannot delete each other's live probe. The
+  sweep is a glob; the end-of-run removal is this run's own path.
+
+A throwaway copy of `website/` would have kept the probe out of the tree altogether, and it was
+tried: **2m31s** for the cold cache, and it failed for the wrong reason. Not worth it on every gate
+run against a fix that is three lines and a `.gitignore` entry.
+
+Also from the review, `slug()` diverged from GitHub on two shapes present in the tree today —
+`_emphasis_` left unconsumed (3 headings in `docs/roadmap.md`) and `<name>` inside a code span
+eaten as an HTML tag because backticks were stripped first (4 headings in
+`docs/specs/host-config.md`). Neither could fire yet, because none of the 7 is linked. Fixed, and
+the fix is not an ordering tweak: code spans are held out of every markup rule and restored just
+before the punctuation strip, so "a code span is literal" survives whatever rule is added next.
+There is a test over the 7 real headings as well as the fixtures.
+
+Still not addressed, deliberately: two concurrent `build-docs.sh` runs in **one checkout** collide
+on `website/build` and `website/.docusaurus`, which they did before this story and still do. The
+probe no longer adds to that. Cross-worktree is unaffected — each has its own path.
+
 One trap for whoever touches the slug rule: spaces map to hyphens **one for one, not run for one**.
 The `Application SDK` heading in `docs/roadmap.md` carries an em dash, and the em dash is dropped
 while both spaces around it survive — so it anchors as `application-sdk--app-sdk`, with two hyphens.
