@@ -87,6 +87,25 @@ SDP half; nothing built the **selection**, so no call has ever carried an Opus p
   `useinbandfec`, `usedtx`, `maxplaybackrate`, `cbr`, `stereo`/`sprop-stereo` — are neither offered
   nor read; and `sipx-cli` still takes no flag for Opus, so the codec is reachable from the library
   and not from the binary.
+- **Gate: 20 steps, all green**, from a real run on this branch after the final commit. The first
+  run failed 5 steps and every one was mine, not the merge base: `fmt`, `clippy`
+  (`too_many_arguments` on the eighth parameter, `too_many_lines` on `dial_with`, and
+  `push_str(&format!(..))` in the new test module), `maturity`/`maturity tests` (`docs/maturity.md`
+  needed regenerating for the registry move), and `rfc report tests` — see below.
+- **`X-33` left a guard that this story had to invert, and that is the intended interaction.**
+  `scripts/test-rfc-report.py` asserted RFC 6716 and 7587 were `partial` *by number*, so promoting
+  them failed the suite. It was rewritten to hold the rule instead of the verdict: the rows may say
+  `implemented` only while they cite the call layer, `sipx-call` actually calls
+  `Capabilities::with_opus`, and 7587's note still states the `a=fmtp` boundary. The guard keeps its
+  teeth — it now fails a reversal *and* a hollow promotion.
+- **`main` moved while this was parked, and merging needs one hand resolution.** `S-25` landed on
+  `main` and rewrote `Dialing::adopt_early_answer` to return `Result<()>`, propagating through `?`
+  rather than logging and returning; this story added a third argument to `settle_answer`. Both
+  intents compose, but they touch the same lines, so `git merge` reports one conflict in
+  `crates/sipx-call/src/call.rs`. **Resolution: take `main`'s body and add the argument** —
+  `settle_answer(self.capabilities.crypto.as_slice(), &answer, self.options.codecs)?`. Nothing else
+  in the file conflicts. `docs/maturity.md` also conflicts, in its generated burn-down row only;
+  run `./scripts/maturity.py` after the merge and it settles.
 
 ## Notes
 - **This is the sixth instance of the project's recurring defect**, after ICE (`M-27`), UPDATE
