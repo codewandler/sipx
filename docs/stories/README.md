@@ -53,7 +53,6 @@ _This is the layer applications actually program against, so it is the one that 
 ### Conformance
 - [X-39 — Stop the maturity report from making the gate red for something that is not a defect](X-39-the-maturity-report-cannot-be-green-in-the-commit-that-moves-a-story.md) · Build · alpha predicate 3 — `maturity.py --check` cannot pass in the commit that files or closes a story, because Filed/Closed for today come from git history and the fact does not exist until the commit does; regenerated twice on 2026-07-30 for no defect either time
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
-- [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
 - [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 
@@ -206,6 +205,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-13 — Publish the API documentation](X-13-publish-the-api-documentation.md) · Build · track: docs · after X-12 in the same crate-free track
 - [X-14 — Generalize the timer queue and ship the loopback link the testkit promises](X-14-testkit-timer-queue-and-loopback-link.md) · Build · M7 · a timer queue and a lossy loopback link, both useful to sipx on their own
 - [X-15 — Consider requirement-grain rows in the RFC registry](X-15-requirement-grain-registry.md) · Build · track: docs · an offer, not a dependency — decide whether per-RFC grain is enough
+- [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
 - [X-17 — Interoperate against a second independent implementation](X-17-second-interop-peer.md) · Build · M12 · one interop peer is a sample of one, and no peer has ever answered a sipx call
 - [X-19 — Fuzz the transaction driver, not only the parser](X-19-fuzz-the-transaction-driver.md) · Build · M12 · four fuzz targets, all of them parsers; the timing half of the north star is untested
 - [X-20 — Let a caller take the digest primitives without taking a runtime](X-20-digest-without-a-runtime.md) · Build · sipx-ua pulls tokio unconditionally, so sans-IO code cannot use S-16's Authenticator

@@ -2,7 +2,7 @@
 id: X-16
 title: Assert against the RFC 5118 IPv6 torture corpus
 pillar: Build
-status: in-progress
+status: done
 priority: 12
 design:
 epic: conformance

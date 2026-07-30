@@ -43,6 +43,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The RFC 5118 IPv6 torture corpus is asserted against, at both layers (`X-16`)** — all twelve
+  messages from Appendix A, recovered by `scripts/import-rfc5118-corpus.sh` rather than retyped, with
+  `--check` re-deriving them from the RFC so the fixtures cannot drift from their source. Asserted in
+  `sipx-sip` and, for the three messages carrying a session description, in `sipx-sdp`.
+  - **It found a conformance defect, and the defect is recorded rather than hidden.** RFC 5118 §4.10
+    requires a parser to tolerate `[2001:db8:::192.0.2.1]` — the three-colon form RFC 3261's ABNF can
+    produce, inherited from the obsoleted RFC 2373 — and sipx rejects it. That is an unmet normative
+    MUST, so the row is `partial` and not `implemented`, and the gap is one typed entry in
+    `rfc5118::DEVIATIONS` saying what the RFC requires, what sipx does, and why it stands.
+  - **A new failure cannot be absorbed silently.** The converse assertion requires every message the
+    RFC calls valid to parse, and is guarded by hard counts — eleven valid, one recorded deviation, ten
+    covered — so admitting a second deviation means editing a number in a diff rather than quietly
+    widening a skip. A recorded deviation is also asserted to still reproduce, and prints
+    delete-this-entry instructions when it stops.
+  - **No source changed.** This story is the measurement; the §4.10 fix is its own story.
+  - Two defects in the RFC's own archive are handled and documented: the files are bare-LF terminated
+    with no CR anywhere, and all three SDP messages declare a `Content-Length` matching neither the LF
+    nor the CRLF body. The corpus stays bit-exact and `Case::wire()` applies three stated
+    transformations, with a test proving nothing else moved.
+
 - **A registration can be placed over an Outbound flow, and woken by a push (`S-29`)** — `sipx-ua`'s
   RFC 5626 and 8599 support had no caller above its own tests, which is the eighth instance of the
   same defect: a capability that exists in a crate and cannot be selected from a call. `sipx register`
