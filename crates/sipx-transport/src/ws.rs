@@ -202,10 +202,15 @@ fn offers_sip(headers: &HeaderMap) -> bool {
 
 /// Handshake as a client and then pump, reporting a failure the same way a refused connection
 /// is reported — because to everything upstream that is what it is.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the generation travels beside the existing connection identity and pump policy"
+)]
 pub(crate) async fn dial<S>(
     stream: S,
     authority: &str,
     key: ConnectionKey,
+    id: u64,
     outgoing: mpsc::Receiver<Bytes>,
     events: mpsc::Sender<Event>,
     limits: Limits,
@@ -217,12 +222,9 @@ pub(crate) async fn dial<S>(
     // The resource travels on the key rather than beside it, because it is part of what makes
     // this connection this connection — see [`ConnectionKey`].
     match connect(stream, authority, key.ws_path(), secure).await {
-        Ok(socket) => pump(socket, key, outgoing, events, limits, keepalive).await,
+        Ok(socket) => pump(socket, key, id, outgoing, events, limits, keepalive).await,
         Err(error) => {
             tracing::warn!(%error, peer = %key.peer, "websocket handshake failed");
-            // discard: the driver has stopped, so there is no longer anyone to tell that a
-            // connection closed.
-            let _ = events.send(Event::Closed { key }).await;
         }
     }
 }
@@ -231,6 +233,7 @@ pub(crate) async fn dial<S>(
 pub(crate) async fn pump<S>(
     socket: Socket<S>,
     key: ConnectionKey,
+    id: u64,
     mut outgoing: mpsc::Receiver<Bytes>,
     events: mpsc::Sender<Event>,
     limits: Limits,
@@ -270,6 +273,7 @@ pub(crate) async fn pump<S>(
                                 message: Box::new(message),
                                 source: peer,
                                 transport,
+                                id,
                             })
                             .await
                             .is_err()
@@ -308,9 +312,6 @@ pub(crate) async fn pump<S>(
     // discard: a best-effort close on a connection that is already going. Failure means the
     // peer has gone, which is the very state being reported on the next line.
     let _ = sink.close().await;
-    // discard: the driver has stopped, so there is no longer anyone to tell that a
-    // connection closed.
-    let _ = events.send(Event::Closed { key }).await;
 }
 
 /// Parse exactly one SIP message out of one WebSocket message.

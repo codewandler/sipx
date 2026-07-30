@@ -296,6 +296,44 @@ async fn a_refused_connection_fails_its_transaction_promptly() {
     assert!(saw_error, "a refused connection is a transport error");
 }
 
+/// X17: endpoint shutdown owns its accepted connection tasks and closes quiet sockets.
+#[tokio::test]
+async fn endpoint_shutdown_closes_a_quiet_accepted_connection() {
+    let (server, mut incoming) = endpoint().await;
+    let address = server.local_addr();
+    let mut peer = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connects");
+    peer.write_all(
+        b"OPTIONS sip:a@b.com SIP/2.0\r\n\
+          Via: SIP/2.0/TCP 127.0.0.1:5555;branch=z9hG4bKshutdown\r\n\
+          To: <sip:a@b.com>\r\n\
+          From: <sip:c@d.net>;tag=1\r\n\
+          Call-ID: shutdown@example.net\r\n\
+          CSeq: 1 OPTIONS\r\n\
+          Max-Forwards: 70\r\n\
+          Content-Length: 0\r\n\r\n",
+    )
+    .await
+    .expect("writes an admission probe");
+    incoming.recv().await.expect("connection is admitted");
+
+    let other_shutdown_caller = server.clone();
+    tokio::join!(server.shutdown(), other_shutdown_caller.shutdown());
+
+    // Returning from shutdown is the completion barrier, so no sleep or retry is needed before
+    // observing the closed connection and reclaiming both transports on the endpoint's port.
+    let mut byte = [0u8; 1];
+    assert_eq!(peer.read(&mut byte).await.expect("read completes"), 0);
+    let udp = tokio::net::UdpSocket::bind(address)
+        .await
+        .expect("UDP address is reusable when shutdown returns");
+    let tcp = tokio::net::TcpListener::bind(address)
+        .await
+        .expect("TCP address is reusable when shutdown returns");
+    drop((udp, tcp));
+}
+
 /// RFC 3261 §18.2.2: when the connection a request arrived on is gone, the response is sent by
 /// opening a connection to the `received` address "using the port in the `sent-by` value, or
 /// the default port for that transport". The source port is an ephemeral one the peer dialled

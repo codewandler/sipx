@@ -5,8 +5,10 @@
 //! pooled and reused, because opening one per request is both slow and, for a peer behind a
 //! NAT, impossible in the reverse direction.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -14,6 +16,8 @@ use sipx_sip::{Limits, Message, StreamParser};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
 use crate::target::{ConnectionKey, TransportKind};
@@ -31,6 +35,8 @@ pub enum Event {
         /// share every line of framing below; only this distinguishes them, and a message that
         /// arrived over TLS must not be reported as cleartext.
         transport: TransportKind,
+        /// Which incarnation delivered it.
+        id: u64,
     },
     /// Framing was lost, so the connection is being closed and everything in flight with it.
     ///
@@ -54,6 +60,8 @@ pub enum Event {
     Pong {
         /// Which connection it arrived on.
         key: ConnectionKey,
+        /// Which incarnation received it, so an old queued pong cannot answer a new flow.
+        id: u64,
     },
     /// The connection is gone.
     ///
@@ -64,6 +72,8 @@ pub enum Event {
         /// Which connection closed. The whole key, not just the peer: two connections to one
         /// address are ordinary now, and removing the wrong one is worse than removing none.
         key: ConnectionKey,
+        /// Which incarnation of the key closed, so a retiring task cannot remove its replacement.
+        id: u64,
     },
 }
 
@@ -105,17 +115,55 @@ pub enum Origin {
 #[derive(Debug)]
 struct Pooled {
     writer: mpsc::Sender<Bytes>,
+    cancel: CancellationToken,
+    id: u64,
     origin: Origin,
     last_used: Instant,
+    active: bool,
+}
+
+type ConnectionTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+struct Pending {
+    key: ConnectionKey,
+    id: u64,
+    cancel: CancellationToken,
+    task: ConnectionTask,
+}
+
+struct Registration {
+    writer: mpsc::Receiver<Bytes>,
+    cancel: CancellationToken,
+    id: u64,
+    start_now: bool,
 }
 
 /// A pool of stream connections.
-#[derive(Debug)]
 pub struct Pool {
     connections: HashMap<ConnectionKey, Pooled>,
     config: PoolConfig,
     events: mpsc::Sender<Event>,
     limits: Limits,
+    tasks: JoinSet<()>,
+    next_id: u64,
+    shutdown: CancellationToken,
+    /// Generations deliberately retired but still entitled to one final close notification.
+    retiring: HashSet<(ConnectionKey, u64)>,
+    /// Replacement work that owns a logical pool slot but cannot start until its victim exits.
+    pending: VecDeque<Pending>,
+}
+
+impl std::fmt::Debug for Pool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Pool")
+            .field("connections", &self.connections)
+            .field("config", &self.config)
+            .field("tasks", &self.tasks.len())
+            .field("retiring", &self.retiring.len())
+            .field("pending", &self.pending.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Pool {
@@ -127,25 +175,34 @@ impl Pool {
             config,
             events,
             limits,
+            tasks: JoinSet::new(),
+            next_id: 1,
+            shutdown: CancellationToken::new(),
+            retiring: HashSet::new(),
+            pending: VecDeque::new(),
         }
     }
 
     /// How many connections are held.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.connections.len()
+        self.tasks.len()
     }
 
     /// Whether the pool is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.connections.is_empty()
+        self.tasks.is_empty()
     }
 
     /// Adopt a connection a peer opened.
     pub fn accept(&mut self, stream: TcpStream, peer: SocketAddr) {
         let key = ConnectionKey::new(peer, TransportKind::Tcp);
-        self.insert_stream(stream, key, Origin::Inbound);
+        if self.insert_stream(stream, key, Origin::Inbound).is_err() {
+            // discard: a retiring task still owns the last live slot, so admitting this socket
+            // would exceed the configured bound. The peer may retry after termination.
+            tracing::debug!(%peer, "refused inbound TCP connection at capacity");
+        }
     }
 
     /// Send to a peer, connecting if there is no usable connection.
@@ -156,13 +213,22 @@ impl Pool {
     /// nothing to do with this peer, so the connection is established inside its own task and
     /// the bytes wait in the channel until it is up.
     pub async fn send(&mut self, key: &ConnectionKey, bytes: Bytes) -> Result<()> {
+        self.send_generation(key, bytes).await.map(|_| ())
+    }
+
+    pub(crate) async fn send_generation(
+        &mut self,
+        key: &ConnectionKey,
+        bytes: Bytes,
+    ) -> Result<u64> {
         if !self.reusable(key) {
             // Either there is nothing here, the writer is gone, or policy forbids reusing an
             // inbound connection for our own requests. All three mean: open our own.
-            self.connections.remove(key);
-            self.dial(key.clone());
+            self.dial(key.clone())?;
         }
-        self.queue(key, bytes).await
+        self.queue(key, bytes).await?;
+        self.generation(key)
+            .ok_or(crate::error::Error::EndpointClosed)
     }
 
     /// Adopt a TLS connection a peer opened, once the handshake has completed.
@@ -173,7 +239,14 @@ impl Pool {
         peer: SocketAddr,
     ) {
         let key = ConnectionKey::new(peer, TransportKind::Tls);
-        self.insert_stream(stream, key, Origin::Inbound);
+        if self
+            .insert_stream(stream, key.clone(), Origin::Inbound)
+            .is_err()
+        {
+            // discard: a retiring task still owns the last live slot, so admitting this socket
+            // would exceed the configured bound. The peer may retry after termination.
+            tracing::debug!(peer = %key.peer, "refused inbound TLS connection at capacity");
+        }
     }
 
     /// Send to a peer over TLS, connecting and verifying if there is no usable connection.
@@ -189,11 +262,25 @@ impl Pool {
         client: &crate::tls::ClientTls,
         bytes: Bytes,
     ) -> Result<()> {
+        self.send_tls_generation(key, verification_name, client, bytes)
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) async fn send_tls_generation(
+        &mut self,
+        key: &ConnectionKey,
+        verification_name: &str,
+        client: &crate::tls::ClientTls,
+        bytes: Bytes,
+    ) -> Result<u64> {
         if !self.reusable(key) {
-            self.connections.remove(key);
             self.dial_tls(key.clone(), verification_name, client)?;
         }
-        self.queue(key, bytes).await
+        self.queue(key, bytes).await?;
+        self.generation(key)
+            .ok_or(crate::error::Error::EndpointClosed)
     }
 
     /// Adopt a WebSocket connection a peer opened, once the handshake has completed.
@@ -206,7 +293,12 @@ impl Pool {
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        self.spawn_ws(ws, key, Origin::Inbound, keepalive);
+        let peer = key.peer;
+        if self.spawn_ws(ws, key, Origin::Inbound, keepalive).is_err() {
+            // discard: a retiring task still owns the last live slot, so admitting this socket
+            // would exceed the configured bound. The peer may retry after termination.
+            tracing::debug!(%peer, "refused inbound WebSocket connection at capacity");
+        }
     }
 
     /// Send to a peer over WebSocket, doing the handshake if there is no usable connection.
@@ -222,8 +314,28 @@ impl Pool {
         #[cfg(feature = "wss")] client: Option<&crate::tls::ClientTls>,
         bytes: Bytes,
     ) -> Result<()> {
+        self.send_ws_generation(
+            key,
+            authority,
+            keepalive,
+            #[cfg(feature = "wss")]
+            client,
+            bytes,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    #[cfg(feature = "ws")]
+    pub(crate) async fn send_ws_generation(
+        &mut self,
+        key: &ConnectionKey,
+        authority: &str,
+        keepalive: Duration,
+        #[cfg(feature = "wss")] client: Option<&crate::tls::ClientTls>,
+        bytes: Bytes,
+    ) -> Result<u64> {
         if !self.reusable(key) {
-            self.connections.remove(key);
             self.dial_ws(
                 key.clone(),
                 authority,
@@ -232,12 +344,32 @@ impl Pool {
                 client,
             )?;
         }
-        self.queue(key, bytes).await
+        self.queue(key, bytes).await?;
+        self.generation(key)
+            .ok_or(crate::error::Error::EndpointClosed)
     }
 
     /// Forget a connection that has closed.
-    pub fn remove(&mut self, key: &ConnectionKey) {
-        self.connections.remove(key);
+    pub fn remove(&mut self, key: &ConnectionKey, id: u64) -> bool {
+        let removed = if self
+            .connections
+            .get(key)
+            .is_some_and(|pooled| pooled.id == id)
+        {
+            self.connections.remove(key);
+            true
+        } else {
+            self.retiring.remove(&(key.clone(), id))
+        };
+        self.reap_finished();
+        self.activate_pending();
+        removed
+    }
+
+    /// The generation currently routing traffic for this key, including a reserved replacement.
+    #[must_use]
+    pub(crate) fn generation(&self, key: &ConnectionKey) -> Option<u64> {
+        self.connections.get(key).map(|pooled| pooled.id)
     }
 
     /// Whether this connection is held.
@@ -253,15 +385,21 @@ impl Pool {
     ///
     /// [`Via`]: sipx_sip::headers::Via
     pub async fn send_on_existing(&mut self, key: &ConnectionKey, bytes: Bytes) -> bool {
-        let Some(pooled) = self.connections.get_mut(key) else {
-            return false;
-        };
+        self.send_on_existing_generation(key, bytes).await.is_some()
+    }
+
+    pub(crate) async fn send_on_existing_generation(
+        &mut self,
+        key: &ConnectionKey,
+        bytes: Bytes,
+    ) -> Option<u64> {
+        let pooled = self.connections.get_mut(key)?;
         if pooled.writer.send(bytes).await.is_err() {
-            self.connections.remove(key);
-            return false;
+            self.retire(key);
+            return None;
         }
         pooled.last_used = Instant::now();
-        true
+        Some(pooled.id)
     }
 
     /// Close connections idle for longer than the configured timeout.
@@ -275,7 +413,7 @@ impl Pool {
             .map(|(key, _)| key.clone())
             .collect();
         for key in &evicted {
-            self.connections.remove(key);
+            self.retire(key);
         }
         evicted
     }
@@ -301,41 +439,136 @@ impl Pool {
             .map_err(|_| crate::error::Error::EndpointClosed)
     }
 
-    /// Make room, then take the writer half of a connection whose task is about to be spawned.
+    /// Reserve a live-task slot and take the writer half of a connection about to be spawned.
     ///
     /// The writer exists before the socket does, so bytes queue in the channel rather than in
     /// the caller while a connection is still being established.
-    fn register(&mut self, key: ConnectionKey, origin: Origin) -> mpsc::Receiver<Bytes> {
-        if self.connections.len() >= self.config.max_connections {
+    fn register(&mut self, key: ConnectionKey, origin: Origin) -> Result<Registration> {
+        self.reap_finished();
+        self.activate_pending();
+        // One admission may retire one connection. Replacing this exact key retires that
+        // generation; a new key at capacity retires the LRU. Doing both would evict unrelated
+        // connection B merely because replacement A still occupies its slot while cancelling.
+        if self.connections.contains_key(&key) {
+            self.retire(&key);
+        } else if self.connections.len() >= self.config.max_connections {
             self.evict_least_recently_used();
         }
+        self.reap_finished();
+        self.activate_pending();
+        if self.connections.len() >= self.config.max_connections {
+            return Err(crate::error::Error::ConnectionCapacity {
+                max: self.config.max_connections,
+            });
+        }
         let (writer_tx, writer_rx) = mpsc::channel::<Bytes>(64);
+        let cancel = CancellationToken::new();
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
         self.connections.insert(
             key,
             Pooled {
                 writer: writer_tx,
+                cancel: cancel.clone(),
+                id,
                 origin,
                 last_used: Instant::now(),
+                active: self.tasks.len() < self.config.max_connections,
             },
         );
-        writer_rx
+        Ok(Registration {
+            writer: writer_rx,
+            cancel,
+            id,
+            start_now: self.tasks.len() < self.config.max_connections,
+        })
     }
 
-    fn dial(&mut self, key: ConnectionKey) {
-        let writer_rx = self.register(key.clone(), Origin::Outbound);
+    fn launch<F>(
+        &mut self,
+        key: ConnectionKey,
+        id: u64,
+        cancel: CancellationToken,
+        start_now: bool,
+        task: F,
+    ) where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if start_now {
+            self.track(key, id, cancel, task);
+        } else {
+            self.pending.push_back(Pending {
+                key,
+                id,
+                cancel,
+                task: Box::pin(task),
+            });
+        }
+    }
+
+    fn activate_pending(&mut self) {
+        while self.tasks.len() < self.config.max_connections {
+            let Some(pending) = self.pending.pop_front() else {
+                break;
+            };
+            let is_current = self
+                .connections
+                .get_mut(&pending.key)
+                .filter(|pooled| pooled.id == pending.id);
+            let Some(pooled) = is_current else {
+                continue;
+            };
+            pooled.active = true;
+            self.track(pending.key, pending.id, pending.cancel, pending.task);
+        }
+    }
+
+    fn track<F>(&mut self, key: ConnectionKey, id: u64, cancel: CancellationToken, task: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         let events = self.events.clone();
-        let limits = self.limits;
-        tokio::spawn(async move {
-            match TcpStream::connect(key.peer).await {
-                Ok(stream) => pump(stream, key, writer_rx, events, limits).await,
-                Err(error) => {
-                    tracing::debug!(%error, peer = %key.peer, "connect failed");
-                    // discard: the driver has stopped, so there is no longer anyone to tell that a
-                    // connection closed.
-                    let _ = events.send(Event::Closed { key }).await;
+        let shutdown = self.shutdown.clone();
+        self.tasks.spawn(async move {
+            let report = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => false,
+                () = cancel.cancelled() => true,
+                () = task => true,
+            };
+            if report {
+                // discard: the endpoint driver may already be gone. The tracked task still ends
+                // and releases its live slot, which is the resource guarantee this path owns.
+                tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => {}
+                    result = events.send(Event::Closed { key, id }) => {
+                        let _ = result;
+                    }
                 }
             }
         });
+    }
+
+    fn dial(&mut self, key: ConnectionKey) -> Result<()> {
+        let Registration {
+            writer: writer_rx,
+            cancel,
+            id,
+            start_now,
+        } = self.register(key.clone(), Origin::Outbound)?;
+        let events = self.events.clone();
+        let limits = self.limits;
+        let task_key = key.clone();
+        self.launch(key, id, cancel, start_now, async move {
+            match TcpStream::connect(task_key.peer).await {
+                Ok(stream) => pump(stream, task_key, id, writer_rx, events, limits).await,
+                Err(error) => {
+                    tracing::debug!(%error, peer = %task_key.peer, "connect failed");
+                }
+            }
+        });
+        Ok(())
     }
 
     #[cfg(feature = "tls")]
@@ -347,31 +580,31 @@ impl Pool {
     ) -> Result<()> {
         let name = crate::tls::verification_name(verification_name)?;
         let connector = client.connector();
-        let writer_rx = self.register(key.clone(), Origin::Outbound);
+        let Registration {
+            writer: writer_rx,
+            cancel,
+            id,
+            start_now,
+        } = self.register(key.clone(), Origin::Outbound)?;
         let events = self.events.clone();
         let limits = self.limits;
+        let task_key = key.clone();
 
-        tokio::spawn(async move {
-            let stream = match TcpStream::connect(key.peer).await {
+        self.launch(key, id, cancel, start_now, async move {
+            let stream = match TcpStream::connect(task_key.peer).await {
                 Ok(stream) => stream,
                 Err(error) => {
-                    tracing::debug!(%error, peer = %key.peer, "connect failed");
-                    // discard: the driver has stopped, so there is no longer anyone to tell that a
-                    // connection closed.
-                    let _ = events.send(Event::Closed { key }).await;
+                    tracing::debug!(%error, peer = %task_key.peer, "connect failed");
                     return;
                 }
             };
             match connector.connect(name, stream).await {
-                Ok(tls) => pump(tls, key, writer_rx, events, limits).await,
+                Ok(tls) => pump(tls, task_key, id, writer_rx, events, limits).await,
                 Err(error) => {
                     // Every verification failure arrives here, with the reason attached. It is
                     // logged rather than swallowed, and the connection simply does not exist —
                     // there is no fallback to cleartext.
-                    tracing::warn!(%error, peer = %key.peer, "TLS handshake failed");
-                    // discard: the driver has stopped, so there is no longer anyone to tell that a
-                    // connection closed.
-                    let _ = events.send(Event::Closed { key }).await;
+                    tracing::warn!(%error, peer = %task_key.peer, "TLS handshake failed");
                 }
             }
         });
@@ -406,18 +639,21 @@ impl Pool {
         };
 
         let authority = authority.to_owned();
-        let writer_rx = self.register(key.clone(), Origin::Outbound);
+        let Registration {
+            writer: writer_rx,
+            cancel,
+            id,
+            start_now,
+        } = self.register(key.clone(), Origin::Outbound)?;
         let events = self.events.clone();
         let limits = self.limits;
+        let task_key = key.clone();
 
-        tokio::spawn(async move {
-            let stream = match TcpStream::connect(key.peer).await {
+        self.launch(key, id, cancel, start_now, async move {
+            let stream = match TcpStream::connect(task_key.peer).await {
                 Ok(stream) => stream,
                 Err(error) => {
-                    tracing::debug!(%error, peer = %key.peer, "connect failed");
-                    // discard: the driver has stopped, so there is no longer anyone to tell that a
-                    // connection closed.
-                    let _ = events.send(Event::Closed { key }).await;
+                    tracing::debug!(%error, peer = %task_key.peer, "connect failed");
                     return;
                 }
             };
@@ -426,35 +662,47 @@ impl Pool {
             if let Some((connector, name)) = secure {
                 match connector.connect(name, stream).await {
                     Ok(tls) => {
-                        crate::ws::dial(tls, &authority, key, writer_rx, events, limits, keepalive)
-                            .await;
+                        crate::ws::dial(
+                            tls, &authority, task_key, id, writer_rx, events, limits, keepalive,
+                        )
+                        .await;
                     }
                     Err(error) => {
-                        tracing::warn!(%error, peer = %key.peer, "TLS handshake failed");
-                        // discard: the driver has stopped, so there is no longer anyone to tell that a
-                        // connection closed.
-                        let _ = events.send(Event::Closed { key }).await;
+                        tracing::warn!(%error, peer = %task_key.peer, "TLS handshake failed");
                     }
                 }
                 return;
             }
 
             crate::ws::dial(
-                stream, &authority, key, writer_rx, events, limits, keepalive,
+                stream, &authority, task_key, id, writer_rx, events, limits, keepalive,
             )
             .await;
         });
         Ok(())
     }
 
-    fn insert_stream<S>(&mut self, stream: S, key: ConnectionKey, origin: Origin)
+    fn insert_stream<S>(&mut self, stream: S, key: ConnectionKey, origin: Origin) -> Result<()>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
-        let writer_rx = self.register(key.clone(), origin);
+        let Registration {
+            writer: writer_rx,
+            cancel,
+            id,
+            start_now,
+        } = self.register(key.clone(), origin)?;
         let events = self.events.clone();
         let limits = self.limits;
-        tokio::spawn(pump(stream, key, writer_rx, events, limits));
+        let task_key = key.clone();
+        self.launch(
+            key,
+            id,
+            cancel,
+            start_now,
+            pump(stream, task_key, id, writer_rx, events, limits),
+        );
+        Ok(())
     }
 
     #[cfg(feature = "ws")]
@@ -464,15 +712,58 @@ impl Pool {
         key: ConnectionKey,
         origin: Origin,
         keepalive: Duration,
-    ) where
+    ) -> Result<()>
+    where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let writer_rx = self.register(key.clone(), origin);
+        let Registration {
+            writer: writer_rx,
+            cancel,
+            id,
+            start_now,
+        } = self.register(key.clone(), origin)?;
         let events = self.events.clone();
         let limits = self.limits;
-        tokio::spawn(crate::ws::pump(
-            ws, key, writer_rx, events, limits, keepalive,
-        ));
+        let task_key = key.clone();
+        self.launch(
+            key,
+            id,
+            cancel,
+            start_now,
+            crate::ws::pump(ws, task_key, id, writer_rx, events, limits, keepalive),
+        );
+        Ok(())
+    }
+
+    fn retire(&mut self, key: &ConnectionKey) {
+        if let Some(pooled) = self.connections.remove(key) {
+            pooled.cancel.cancel();
+            if pooled.active {
+                self.retiring.insert((key.clone(), pooled.id));
+            } else if let Some(index) = self
+                .pending
+                .iter()
+                .position(|pending| pending.key == *key && pending.id == pooled.id)
+            {
+                self.pending.remove(index);
+            }
+        }
+    }
+
+    fn reap_finished(&mut self) {
+        while self.tasks.try_join_next().is_some() {}
+    }
+
+    /// Cancel every connection and wait until every tracked task has released its socket.
+    pub async fn shutdown(&mut self) {
+        self.shutdown.cancel();
+        for pooled in self.connections.values() {
+            pooled.cancel.cancel();
+        }
+        self.connections.clear();
+        self.pending.clear();
+        self.retiring.clear();
+        while self.tasks.join_next().await.is_some() {}
     }
 
     fn evict_least_recently_used(&mut self) {
@@ -484,7 +775,19 @@ impl Pool {
         else {
             return;
         };
-        self.connections.remove(&victim);
+        self.retire(&victim);
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        for pooled in self.connections.values() {
+            pooled.cancel.cancel();
+        }
+        self.pending.clear();
+        // Dropping the JoinSet aborts any task that has not observed cancellation yet. This is
+        // the synchronous fallback for a runtime teardown that cannot await `Pool::shutdown`.
     }
 }
 
@@ -496,6 +799,7 @@ impl Pool {
 async fn pump<S>(
     stream: S,
     key: ConnectionKey,
+    id: u64,
     mut outgoing: mpsc::Receiver<Bytes>,
     events: mpsc::Sender<Event>,
     limits: Limits,
@@ -518,7 +822,14 @@ async fn pump<S>(
                             // Before the messages: a pong can arrive in the same chunk as an
                             // unrelated request, and the flow is alive either way.
                             for _ in 0..parser.take_keepalives() {
-                                if events.send(Event::Pong { key: key.clone() }).await.is_err() {
+                                if events
+                                    .send(Event::Pong {
+                                        key: key.clone(),
+                                        id,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
                                     return;
                                 }
                             }
@@ -528,6 +839,7 @@ async fn pump<S>(
                                         message: Box::new(message),
                                         source: peer,
                                         transport,
+                                        id,
                                     })
                                     .await
                                     .is_err()
@@ -563,10 +875,6 @@ async fn pump<S>(
             else => break,
         }
     }
-
-    // discard: the driver has stopped, so there is no longer anyone to tell that a
-    // connection closed.
-    let _ = events.send(Event::Closed { key }).await;
 }
 
 /// Accept connections on a listener, adding each to the pool.
@@ -578,6 +886,38 @@ pub async fn accept_loop(listener: TcpListener, incoming: mpsc::Sender<(TcpStrea
             Ok((stream, peer)) => {
                 if incoming.send((stream, peer)).await.is_err() {
                     return;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "accept failed");
+                return;
+            }
+        }
+    }
+}
+
+/// Accept connections until endpoint cancellation or listener failure.
+pub(crate) async fn accept_loop_until(
+    listener: TcpListener,
+    incoming: mpsc::Sender<(TcpStream, SocketAddr)>,
+    cancel: CancellationToken,
+) {
+    loop {
+        let accepted = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return,
+            accepted = listener.accept() => accepted,
+        };
+        match accepted {
+            Ok((stream, peer)) => {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return,
+                    result = incoming.send((stream, peer)) => {
+                        if result.is_err() {
+                            return;
+                        }
+                    }
                 }
             }
             Err(error) => {
@@ -616,6 +956,20 @@ mod tests {
 
     fn tcp(peer: SocketAddr) -> ConnectionKey {
         ConnectionKey::new(peer, TransportKind::Tcp)
+    }
+
+    async fn wait_until_no_live_tasks(pool: &mut Pool) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                pool.reap_finished();
+                if pool.is_empty() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection tasks terminate");
     }
 
     /// X5: the property a stream transport lives or dies by.
@@ -754,7 +1108,7 @@ mod tests {
         let before = pool.len();
         let _ = pool.send(&tcp(peer), Bytes::from_static(b"y")).await;
         assert!(
-            pool.len() <= before,
+            pool.connections.len() <= before,
             "the inbound connection must not have been adopted for outbound use"
         );
     }
@@ -763,7 +1117,7 @@ mod tests {
     async fn idle_connections_are_evicted() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
         let addr = listener.local_addr().expect("has an address");
-        let (tx, _rx) = mpsc::channel(64);
+        let (tx, mut rx) = mpsc::channel(64);
         let mut pool = Pool::new(
             PoolConfig {
                 idle_timeout: Duration::ZERO,
@@ -774,13 +1128,437 @@ mod tests {
         );
 
         let accepted = tokio::spawn(async move { listener.accept().await.expect("accepts") });
-        let _client = TcpStream::connect(addr).await.expect("connects");
+        let mut client = TcpStream::connect(addr).await.expect("connects");
         let (stream, peer) = accepted.await.expect("accepted");
         pool.accept(stream, peer);
         assert_eq!(pool.len(), 1);
 
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert_eq!(pool.evict_idle().len(), 1);
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(2), client.read(&mut byte))
+            .await
+            .expect("eviction closes promptly")
+            .expect("read reports EOF");
+        assert_eq!(read, 0, "the evicted peer must observe EOF");
+        let closed = rx.recv().await.expect("connection reports completion");
+        let Event::Closed { key, id } = closed else {
+            panic!("expected a close event, got {closed:?}");
+        };
+        pool.remove(&key, id);
+        wait_until_no_live_tasks(&mut pool).await;
+        assert!(pool.is_empty(), "the live task releases its pool slot");
+    }
+
+    #[tokio::test]
+    async fn capacity_eviction_closes_the_socket_before_reusing_its_slot() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+        let addr = listener.local_addr().expect("has an address");
+        let (tx, mut events) = mpsc::channel(64);
+        let mut pool = Pool::new(
+            PoolConfig {
+                max_connections: 1,
+                ..PoolConfig::default()
+            },
+            Limits::stream(),
+            tx,
+        );
+
+        let mut first = TcpStream::connect(addr).await.expect("first connects");
+        let (first_server, first_peer) = listener.accept().await.expect("first accepts");
+        pool.accept(first_server, first_peer);
+
+        let mut replacement = TcpStream::connect(addr).await.expect("second connects");
+        let (second_server, second_peer) = listener.accept().await.expect("second accepts");
+        pool.accept(second_server, second_peer);
+        assert_eq!(pool.len(), 1, "a retiring task still owns the sole slot");
+
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), first.read(&mut byte))
+                .await
+                .expect("eviction closes promptly")
+                .expect("first read completes"),
+            0
+        );
+        let Event::Closed { key, id } = events.recv().await.expect("close reported") else {
+            panic!("expected close");
+        };
+        assert!(pool.remove(&key, id));
+        assert_eq!(
+            pool.len(),
+            1,
+            "the reserved replacement takes the released slot"
+        );
+        assert!(
+            pool.send_on_existing(&tcp(second_peer), Bytes::from_static(b"r"))
+                .await
+        );
+        assert_eq!(
+            replacement
+                .read(&mut byte)
+                .await
+                .expect("replacement reads"),
+            1
+        );
+        pool.shutdown().await;
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn idle_websocket_eviction_closes_the_peer_and_finishes_the_task() {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let (server_io, client_io) = tokio::io::duplex(1024);
+        let server = crate::ws::Socket::from_raw_socket(server_io, Role::Server, None).await;
+        let mut client = crate::ws::Socket::from_raw_socket(client_io, Role::Client, None).await;
+        let (tx, mut events) = mpsc::channel(64);
+        let mut pool = Pool::new(
+            PoolConfig {
+                idle_timeout: Duration::ZERO,
+                ..PoolConfig::default()
+            },
+            Limits::stream(),
+            tx,
+        );
+        let key = ConnectionKey::new(
+            "127.0.0.1:5090".parse().expect("address"),
+            TransportKind::Ws,
+        );
+        pool.accept_ws(server, key, Duration::from_secs(60));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(pool.evict_idle().len(), 1);
+
+        let peer_end = tokio::time::timeout(Duration::from_secs(2), client.next())
+            .await
+            .expect("WebSocket eviction closes promptly");
+        assert!(
+            peer_end.is_none()
+                || matches!(
+                    peer_end,
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+                )
+                || matches!(peer_end, Some(Err(_)))
+        );
+        let Event::Closed { key, id } = events.recv().await.expect("close reported") else {
+            panic!("expected close");
+        };
+        pool.remove(&key, id);
+        wait_until_no_live_tasks(&mut pool).await;
         assert!(pool.is_empty());
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn capacity_eviction_closes_websocket_peers_without_exceeding_the_live_limit() {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let (first_server_io, first_client_io) = tokio::io::duplex(1024);
+        let first_server =
+            crate::ws::Socket::from_raw_socket(first_server_io, Role::Server, None).await;
+        let mut first_client =
+            crate::ws::Socket::from_raw_socket(first_client_io, Role::Client, None).await;
+        let (second_server_io, second_client_io) = tokio::io::duplex(1024);
+        let second_server =
+            crate::ws::Socket::from_raw_socket(second_server_io, Role::Server, None).await;
+        let mut second_client =
+            crate::ws::Socket::from_raw_socket(second_client_io, Role::Client, None).await;
+        let (tx, mut events) = mpsc::channel(64);
+        let mut pool = Pool::new(
+            PoolConfig {
+                max_connections: 1,
+                ..PoolConfig::default()
+            },
+            Limits::stream(),
+            tx,
+        );
+        let first_key = ConnectionKey::new(
+            "127.0.0.1:5091".parse().expect("address"),
+            TransportKind::Ws,
+        );
+        let second_key = ConnectionKey::new(
+            "127.0.0.1:5092".parse().expect("address"),
+            TransportKind::Ws,
+        );
+        pool.accept_ws(first_server, first_key, Duration::from_secs(60));
+        pool.accept_ws(second_server, second_key, Duration::from_secs(60));
+        assert_eq!(pool.len(), 1, "the retiring WebSocket still owns the slot");
+
+        let first_end = tokio::time::timeout(Duration::from_secs(2), first_client.next())
+            .await
+            .expect("eviction closes the first WebSocket");
+        assert!(
+            first_end.is_none()
+                || matches!(&first_end, Some(Err(_)))
+                || matches!(
+                    &first_end,
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+                )
+        );
+        let Event::Closed { key, id } = events.recv().await.expect("close reported") else {
+            panic!("expected close");
+        };
+        assert!(pool.remove(&key, id));
+        assert_eq!(pool.len(), 1, "the WebSocket reservation activates");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), second_client.next())
+                .await
+                .is_err(),
+            "the replacement remains live rather than being refused"
+        );
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn quiet_connection_churn_never_exceeds_the_live_task_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+        let addr = listener.local_addr().expect("address");
+        let (tx, mut events) = mpsc::channel(64);
+        let mut pool = Pool::new(
+            PoolConfig {
+                max_connections: 2,
+                ..PoolConfig::default()
+            },
+            Limits::stream(),
+            tx,
+        );
+
+        for _ in 0..24 {
+            let client = TcpStream::connect(addr).await.expect("connects");
+            let (server, peer) = listener.accept().await.expect("accepts");
+            pool.accept(server, peer);
+            assert!(pool.len() <= 2, "live tasks exceeded the configured limit");
+            if !pool.holds(&tcp(peer)) {
+                drop(client);
+                if let Some(Event::Closed { key, id }) = events.recv().await {
+                    pool.remove(&key, id);
+                }
+                if let Some(joined) = pool.tasks.join_next().await {
+                    joined.expect("evicted task exits");
+                }
+            }
+        }
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stale_close_generation_cannot_remove_or_fail_its_live_replacement() {
+        let (first_socket, mut first_peer) = tokio::io::duplex(1024);
+        let (replacement_socket, _replacement_peer) = tokio::io::duplex(1024);
+        let (tx, mut events) = mpsc::channel(8);
+        let mut pool = Pool::new(PoolConfig::default(), Limits::stream(), tx);
+        let key = tcp("127.0.0.1:5093".parse().expect("address"));
+
+        pool.insert_stream(first_socket, key.clone(), Origin::Inbound)
+            .expect("first generation starts");
+        let old_id = pool.connections.get(&key).expect("registered").id;
+        pool.retire(&key);
+        let mut byte = [0u8; 1];
+        assert_eq!(first_peer.read(&mut byte).await.expect("EOF"), 0);
+        let Event::Closed { id, .. } = events.recv().await.expect("old close arrives") else {
+            panic!("expected old close");
+        };
+        assert_eq!(id, old_id);
+
+        pool.insert_stream(replacement_socket, key.clone(), Origin::Inbound)
+            .expect("replacement starts after old task exits");
+        let replacement_id = pool.connections.get(&key).expect("replacement held").id;
+        assert_ne!(replacement_id, old_id);
+
+        // Retired generations remain entitled to exactly one close acknowledgement. Side effects
+        // are generation-scoped by the driver, so acknowledging this one cannot touch replacement.
+        assert!(pool.remove(&key, old_id), "the retirement is acknowledged");
+        assert!(
+            !pool.remove(&key, old_id),
+            "the acknowledgement is exactly once"
+        );
+        assert!(pool.holds(&key), "the replacement remains routable");
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn same_key_replacement_at_capacity_does_not_evict_an_unrelated_connection() {
+        let (a_socket, mut a_peer) = tokio::io::duplex(1024);
+        let (b_socket, mut b_peer) = tokio::io::duplex(1024);
+        let (replacement_socket, _replacement_peer) = tokio::io::duplex(1024);
+        let (tx, mut events) = mpsc::channel(8);
+        let mut pool = Pool::new(
+            PoolConfig {
+                max_connections: 2,
+                ..PoolConfig::default()
+            },
+            Limits::stream(),
+            tx,
+        );
+        let a = tcp("127.0.0.1:5094".parse().expect("address"));
+        let b = tcp("127.0.0.1:5095".parse().expect("address"));
+        pool.insert_stream(a_socket, a.clone(), Origin::Inbound)
+            .expect("A starts");
+        pool.insert_stream(b_socket, b.clone(), Origin::Inbound)
+            .expect("B starts");
+
+        pool.insert_stream(replacement_socket, a, Origin::Inbound)
+            .expect("A replacement is reserved while the old task retires");
+
+        let mut byte = [0u8; 1];
+        assert_eq!(a_peer.read(&mut byte).await.expect("A closes"), 0);
+        let Event::Closed { key, id } = events.recv().await.expect("A close arrives") else {
+            panic!("expected close");
+        };
+        assert!(pool.remove(&key, id));
+        assert!(pool.holds(&b), "B must not be selected as a second victim");
+        assert!(
+            pool.send_on_existing(&b, Bytes::from_static(b"b")).await,
+            "B remains writable"
+        );
+        assert_eq!(b_peer.read(&mut byte).await.expect("B receives"), 1);
+        assert_eq!(byte[0], b'b');
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn public_send_reserves_same_key_replacement_without_evicting_b() {
+        let (a_socket, mut a_peer) = tokio::io::duplex(1024);
+        let (b_socket, mut b_peer) = tokio::io::duplex(1024);
+        let (events, mut closed) = mpsc::channel(8);
+        let mut pool = Pool::new(
+            PoolConfig {
+                max_connections: 2,
+                ..PoolConfig::default()
+            },
+            Limits::stream(),
+            events,
+        );
+        let a = tcp("127.0.0.1:59991".parse().expect("address"));
+        let b = tcp("127.0.0.1:59992".parse().expect("address"));
+        pool.insert_stream(a_socket, a.clone(), Origin::Inbound)
+            .expect("A starts inbound");
+        pool.insert_stream(b_socket, b.clone(), Origin::Inbound)
+            .expect("B starts inbound");
+        let old_a = pool.generation(&a).expect("A generation");
+
+        pool.send(&a, Bytes::from_static(b"replacement"))
+            .await
+            .expect("public send reserves outbound A");
+        let replacement = pool.generation(&a).expect("replacement generation");
+        assert_ne!(replacement, old_a);
+        assert!(pool.holds(&b), "B is not selected as a second victim");
+        let mut byte = [0u8; 1];
+        assert_eq!(a_peer.read(&mut byte).await.expect("old A closes"), 0);
+        let Event::Closed { key, id } = closed.recv().await.expect("old A reports close") else {
+            panic!("expected close");
+        };
+        assert_eq!((&key, id), (&a, old_a));
+        assert!(pool.remove(&key, id));
+        assert!(pool.send_on_existing(&b, Bytes::from_static(b"b")).await);
+        assert_eq!(b_peer.read(&mut byte).await.expect("B reads"), 1);
+        pool.shutdown().await;
+    }
+
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn public_send_tls_reserves_same_key_replacement_without_evicting_b() {
+        use sipx_testkit::certs::Ca;
+
+        use crate::tls::{ClientTls, TrustAnchors};
+
+        let ca = Ca::new();
+        let mut anchors = TrustAnchors::only();
+        anchors.add_pem(ca.pem().as_bytes()).expect("CA loads");
+        let client = ClientTls::new(&anchors).expect("TLS client");
+        let (a_socket, mut a_peer) = tokio::io::duplex(1024);
+        let (b_socket, _b_peer) = tokio::io::duplex(1024);
+        let (events, _closed) = mpsc::channel(8);
+        let mut pool = Pool::new(
+            PoolConfig {
+                max_connections: 2,
+                ..PoolConfig::default()
+            },
+            Limits::stream(),
+            events,
+        );
+        let a = ConnectionKey::new(
+            "127.0.0.1:59993".parse().expect("address"),
+            TransportKind::Tls,
+        );
+        let b = tcp("127.0.0.1:59994".parse().expect("address"));
+        pool.insert_stream(a_socket, a.clone(), Origin::Inbound)
+            .expect("A starts inbound");
+        pool.insert_stream(b_socket, b.clone(), Origin::Inbound)
+            .expect("B starts inbound");
+
+        pool.send_tls(&a, "localhost", &client, Bytes::from_static(b"replacement"))
+            .await
+            .expect("public TLS send reserves outbound A");
+        assert!(pool.holds(&b));
+        let mut byte = [0u8; 1];
+        assert_eq!(a_peer.read(&mut byte).await.expect("old A closes"), 0);
+        pool.shutdown().await;
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn public_send_ws_reserves_same_key_replacement_without_evicting_b() {
+        let (a_socket, mut a_peer) = tokio::io::duplex(1024);
+        let (b_socket, _b_peer) = tokio::io::duplex(1024);
+        let (events, _closed) = mpsc::channel(8);
+        let mut pool = Pool::new(
+            PoolConfig {
+                max_connections: 2,
+                ..PoolConfig::default()
+            },
+            Limits::stream(),
+            events,
+        );
+        let a = ConnectionKey::new(
+            "127.0.0.1:59995".parse().expect("address"),
+            TransportKind::Ws,
+        );
+        let b = tcp("127.0.0.1:59996".parse().expect("address"));
+        pool.insert_stream(a_socket, a.clone(), Origin::Inbound)
+            .expect("A starts inbound");
+        pool.insert_stream(b_socket, b.clone(), Origin::Inbound)
+            .expect("B starts inbound");
+
+        pool.send_ws(
+            &a,
+            "localhost",
+            Duration::from_secs(60),
+            #[cfg(feature = "wss")]
+            None,
+            Bytes::from_static(b"replacement"),
+        )
+        .await
+        .expect("public WebSocket send reserves outbound A");
+        assert!(pool.holds(&b));
+        let mut byte = [0u8; 1];
+        assert_eq!(a_peer.read(&mut byte).await.expect("old A closes"), 0);
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_a_final_close_blocked_on_a_full_event_channel() {
+        let (events, _unread) = mpsc::channel(1);
+        events
+            .send(Event::FramingFailed {
+                key: tcp("127.0.0.1:59997".parse().expect("address")),
+            })
+            .await
+            .expect("fills event channel");
+        let (socket, mut peer) = tokio::io::duplex(1024);
+        let mut pool = Pool::new(PoolConfig::default(), Limits::stream(), events);
+        let key = tcp("127.0.0.1:59998".parse().expect("address"));
+        pool.insert_stream(socket, key.clone(), Origin::Inbound)
+            .expect("connection starts");
+        pool.retire(&key);
+        let mut byte = [0u8; 1];
+        assert_eq!(peer.read(&mut byte).await.expect("retirement closes"), 0);
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(Duration::from_secs(1), pool.shutdown())
+            .await
+            .expect("shutdown cancels the blocked final event sender");
     }
 }

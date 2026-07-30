@@ -5,6 +5,14 @@ use thiserror::Error;
 /// What can go wrong in the transport layer.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// Endpoint configuration cannot create a bounded, live runtime.
+    #[error("invalid endpoint configuration `{field}`: {reason}")]
+    InvalidConfig {
+        /// The public configuration field that is invalid.
+        field: &'static str,
+        /// Its required range.
+        reason: &'static str,
+    },
     /// A socket operation failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -54,6 +62,12 @@ pub enum Error {
     /// A transport that is declared but not yet implemented.
     #[error("the {0} transport is not implemented yet")]
     UnsupportedTransport(&'static str),
+    /// Every configured live connection slot is still occupied.
+    #[error("the connection pool's {max} live slots are occupied")]
+    ConnectionCapacity {
+        /// The configured live-task limit.
+        max: usize,
+    },
     /// A capture file could not be opened (`docs/specs/sip-transport.md` §13).
     ///
     /// Reported from `bind` rather than swallowed, because the alternative is an endpoint that

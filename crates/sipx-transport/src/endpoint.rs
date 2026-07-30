@@ -8,13 +8,17 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use sipx_sip::transaction::{Dispatch, Output, Timer, TransactionKey, TransactionLayer, TuEvent};
 use sipx_sip::{Header, HeaderName, Limits, Message, Request, Response, Timers, parse_datagram};
 use tokio::net::{TcpListener, UdpSocket};
+#[cfg(any(feature = "tls", feature = "ws"))]
+use tokio::sync::Semaphore;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::capture::{Capture, CaptureConfig, Direction};
 use crate::counters::{Counters, Meters, ShedCounts};
@@ -46,6 +50,10 @@ pub struct Config {
     pub limits: Limits,
     /// How many events may queue for the application before new transactions are refused.
     pub capacity: usize,
+    /// Most incomplete inbound TLS, WebSocket and secure-WebSocket handshakes at once.
+    pub handshake_limit: usize,
+    /// How long an inbound handshake may remain incomplete.
+    pub handshake_timeout: std::time::Duration,
     /// The largest datagram sipx will put on an unreliable transport.
     ///
     /// RFC 3261 §18.1.1 says a request approaching the path MTU must go over a
@@ -115,6 +123,8 @@ impl Config {
             timers: Timers::default(),
             limits: Limits::datagram(),
             capacity: 1024,
+            handshake_limit: 64,
+            handshake_timeout: std::time::Duration::from_secs(10),
             mtu: 1300,
             tcp: true,
             #[cfg(feature = "tls")]
@@ -131,6 +141,132 @@ impl Config {
             unanswered_limit: std::time::Duration::from_secs(180),
             pool: PoolConfig::default(),
         }
+    }
+
+    fn validate(&self) -> Result<()> {
+        let nonzero = |field| Error::InvalidConfig {
+            field,
+            reason: "must be non-zero",
+        };
+        if self.capacity == 0 {
+            return Err(nonzero("capacity"));
+        }
+        if self.pool.max_connections == 0 {
+            return Err(nonzero("pool.max_connections"));
+        }
+        if self.handshake_limit == 0 {
+            return Err(nonzero("handshake_limit"));
+        }
+        if self.handshake_timeout.is_zero() {
+            return Err(nonzero("handshake_timeout"));
+        }
+        #[cfg(feature = "ws")]
+        if self.ws_keepalive.is_zero() {
+            return Err(nonzero("ws_keepalive"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct Background {
+    cancel: CancellationToken,
+    tasks: TaskTracker,
+    owns_lifetime: bool,
+}
+
+#[derive(Debug, Default)]
+struct ShutdownState {
+    complete: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl ShutdownState {
+    async fn wait(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.complete.load(Ordering::SeqCst) {
+            notified.await;
+        }
+    }
+
+    fn complete(&self) {
+        self.complete.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+}
+
+impl Clone for Background {
+    fn clone(&self) -> Self {
+        Self {
+            cancel: self.cancel.clone(),
+            tasks: self.tasks.clone(),
+            owns_lifetime: false,
+        }
+    }
+}
+
+impl Background {
+    fn new() -> Self {
+        Self {
+            cancel: CancellationToken::new(),
+            tasks: TaskTracker::new(),
+            owns_lifetime: true,
+        }
+    }
+
+    fn spawn<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.tasks.spawn(future);
+    }
+
+    async fn shutdown(&self) {
+        self.cancel.cancel();
+        self.tasks.close();
+        self.tasks.wait().await;
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        if self.owns_lifetime {
+            // This also covers a later bind failing after an earlier optional listener started.
+            // Cloned task handles do not own the lifetime and therefore cannot cancel siblings.
+            self.cancel.cancel();
+            self.tasks.close();
+        }
+    }
+}
+
+#[cfg(any(feature = "tls", feature = "ws"))]
+#[derive(Debug, Clone)]
+struct HandshakeRuntime {
+    deadline: std::time::Duration,
+    permits: Arc<Semaphore>,
+    owner: Background,
+    #[cfg(test)]
+    observations: Option<mpsc::UnboundedSender<HandshakeObservation>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandshakeObservation {
+    Admitted,
+    Refused,
+}
+
+#[cfg(test)]
+fn observe_handshake(
+    observations: Option<&mpsc::UnboundedSender<HandshakeObservation>>,
+    observation: HandshakeObservation,
+) {
+    if let Some(observations) = observations {
+        // discard: observations exist only as a unit-test barrier and the test may already have
+        // ended while endpoint cleanup is still unwinding.
+        let _ = observations.send(observation);
     }
 }
 
@@ -231,6 +367,7 @@ enum Command {
     WatchUnmatched(mpsc::Sender<Unmatched>),
     /// How much state the driver is holding, for a soak test to assert on.
     Outstanding(oneshot::Sender<usize>),
+    /// Stop the driver after every listener, handshake and pooled connection has terminated.
     Shutdown,
 }
 
@@ -258,6 +395,7 @@ pub struct Unmatched {
 #[derive(Debug, Clone)]
 pub struct Handle {
     commands: mpsc::Sender<Command>,
+    shutdown: Arc<ShutdownState>,
     local_addr: SocketAddr,
     /// Every counter, shared with the driver so they can be read while the driver is busy —
     /// which is the only time they are interesting (§12).
@@ -587,9 +725,12 @@ impl Handle {
 
     /// Stop the endpoint.
     pub async fn shutdown(&self) {
-        // discard: the endpoint is shutting down. A closed command channel means the loop has
-        // already stopped, which is exactly the outcome being asked for.
-        let _ = self.commands.send(Command::Shutdown).await;
+        if !self.shutdown.complete.load(Ordering::SeqCst) {
+            // discard: a closed command channel means shutdown has already begun. The shared
+            // durable barrier below still waits for cleanup, including for callers arriving late.
+            let _ = self.commands.send(Command::Shutdown).await;
+            self.shutdown.wait().await;
+        }
     }
 }
 
@@ -607,8 +748,22 @@ pub fn new_branch() -> String {
 /// Bind an endpoint and start its loop.
 ///
 /// Returns a handle for sending, and a receiver of the requests that arrive.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered assembly keeps validation, every bind and task ownership auditable"
+)]
 pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> {
+    config.validate()?;
     let (socket, listener, local_addr) = bind_matching_ports(&config).await?;
+    let background = Background::new();
+    #[cfg(any(feature = "tls", feature = "ws"))]
+    let handshakes = HandshakeRuntime {
+        deadline: config.handshake_timeout,
+        permits: Arc::new(Semaphore::new(config.handshake_limit)),
+        owner: background.clone(),
+        #[cfg(test)]
+        observations: None,
+    };
     // Port 0 in the configuration means the same as absent: it is a request for any port,
     // not an advertisement of port zero.
     let sent_by_port = match config.sent_by_port {
@@ -626,14 +781,23 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
 
     #[cfg(feature = "tls")]
     let secure_addr = match config.tls_server.clone() {
-        Some((server, port)) => Some(listen_tls(config.bind.ip(), port, server, &adopt_tx).await?),
+        Some((server, port)) => {
+            Some(listen_tls(config.bind.ip(), port, server, &adopt_tx, &handshakes).await?)
+        }
         None => None,
     };
     #[cfg(feature = "ws")]
     let upgrade_addr = match config.ws_server {
-        Some(port) => {
-            Some(listen_ws(config.bind.ip(), port, config.ws_keepalive, &adopt_tx).await?)
-        }
+        Some(port) => Some(
+            listen_ws(
+                config.bind.ip(),
+                port,
+                config.ws_keepalive,
+                &adopt_tx,
+                &handshakes,
+            )
+            .await?,
+        ),
         None => None,
     };
     #[cfg(feature = "wss")]
@@ -645,6 +809,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
                 server,
                 config.ws_keepalive,
                 &adopt_tx,
+                &handshakes,
             )
             .await?,
         ),
@@ -653,10 +818,12 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
 
     let (commands_tx, commands_rx) = mpsc::channel(config.capacity);
     let (incoming_tx, incoming_rx) = mpsc::channel(config.capacity);
+    let shutdown = Arc::new(ShutdownState::default());
 
     let meters = Arc::new(Meters::default());
     let handle = Handle {
         commands: commands_tx,
+        shutdown: Arc::clone(&shutdown),
         local_addr,
         meters: Arc::clone(&meters),
         #[cfg(feature = "tls")]
@@ -686,7 +853,8 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     let (net_tx, net_rx) = mpsc::channel(config.capacity);
     let (accept_tx, accept_rx) = mpsc::channel(64);
     if let Some(listener) = listener {
-        tokio::spawn(tcp::accept_loop(listener, accept_tx));
+        let cancel = background.cancel.clone();
+        background.spawn(tcp::accept_loop_until(listener, accept_tx, cancel));
     }
 
     let driver = Driver {
@@ -694,6 +862,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         layer: TransactionLayer::new(config.timers),
         timers: TimerQueue::new(),
         destinations: HashMap::new(),
+        transaction_generations: HashMap::new(),
         handed_over: HashMap::new(),
         reconnect: HashMap::new(),
         unanswered_limit: config.unanswered_limit,
@@ -717,6 +886,8 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         unmatched: None,
         stun_waiters: HashMap::new(),
         pong_waiters: HashMap::new(),
+        background,
+        shutdown,
     };
     tokio::spawn(driver.run());
 
@@ -734,20 +905,58 @@ async fn listen_tls(
     port: u16,
     server: crate::tls::ServerTls,
     adopt: &mpsc::Sender<Adopt>,
+    runtime: &HandshakeRuntime,
 ) -> Result<SocketAddr> {
     let listener = TcpListener::bind(SocketAddr::new(ip, port)).await?;
     let addr = listener.local_addr()?;
-    let (raw_tx, mut raw_rx) = mpsc::channel(64);
-    tokio::spawn(tcp::accept_loop(listener, raw_tx));
-
     let adopt = adopt.clone();
-    tokio::spawn(async move {
-        while let Some((stream, peer)) = raw_rx.recv().await {
+    let owner = runtime.owner.clone();
+    let cancel = owner.cancel.clone();
+    let permits = Arc::clone(&runtime.permits);
+    let deadline = runtime.deadline;
+    #[cfg(test)]
+    let observations = runtime.observations.clone();
+    runtime.owner.spawn(async move {
+        loop {
+            let accepted = tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                accepted = listener.accept() => accepted,
+            };
+            let (stream, peer) = match accepted {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    tracing::warn!(%error, "TLS accept failed");
+                    break;
+                }
+            };
+            let permit = Arc::clone(&permits).try_acquire_owned();
+            #[cfg(test)]
+            observe_handshake(
+                observations.as_ref(),
+                if permit.is_ok() {
+                    HandshakeObservation::Admitted
+                } else {
+                    HandshakeObservation::Refused
+                },
+            );
+            let Ok(permit) = permit else {
+                // discard: the configured no-queue admission policy closes excess unauthenticated
+                // sockets immediately; retaining one here would defeat the handshake bound.
+                tracing::debug!(%peer, "refused inbound TLS handshake at capacity");
+                continue;
+            };
             let acceptor = server.acceptor();
             let adopt = adopt.clone();
-            tokio::spawn(async move {
-                match acceptor.accept(stream).await {
-                    Ok(tls) => {
+            let cancel = cancel.clone();
+            owner.spawn(async move {
+                let outcome = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => None,
+                    result = tokio::time::timeout(deadline, acceptor.accept(stream)) => Some(result),
+                };
+                match outcome {
+                    Some(Ok(Ok(tls))) => {
                         // Discarded deliberately, with the reason §12.1 asks for rather than a
                         // counter: a send on this channel fails only when the driver has already
                         // stopped, so the connection has nothing left to be adopted *into*. The
@@ -755,12 +964,21 @@ async fn listen_tls(
                         // and this runs in a task spawned before the driver exists, so there is no
                         // counter in scope to reach for anyway.
                         // discard: see the reason below.
-                        let _ = adopt
-                            .send(Box::new(move |pool: &mut Pool| pool.accept_tls(tls, peer)))
-                            .await;
+                        tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => {}
+                            result = adopt.send(Box::new(move |pool: &mut Pool| pool.accept_tls(tls, peer))) => {
+                                let _ = result;
+                            }
+                        }
                     }
-                    Err(error) => tracing::debug!(%error, %peer, "inbound TLS handshake failed"),
+                    Some(Ok(Err(error))) => {
+                        tracing::debug!(%error, %peer, "inbound TLS handshake failed");
+                    }
+                    Some(Err(_)) => tracing::debug!(%peer, "inbound TLS handshake timed out"),
+                    None => {}
                 }
+                drop(permit);
             });
         }
     });
@@ -774,25 +992,64 @@ async fn listen_ws(
     port: u16,
     keepalive: std::time::Duration,
     adopt: &mpsc::Sender<Adopt>,
+    runtime: &HandshakeRuntime,
 ) -> Result<SocketAddr> {
     let listener = TcpListener::bind(SocketAddr::new(ip, port)).await?;
     let addr = listener.local_addr()?;
-    let (raw_tx, mut raw_rx) = mpsc::channel(64);
-    tokio::spawn(tcp::accept_loop(listener, raw_tx));
-
     let adopt = adopt.clone();
-    tokio::spawn(async move {
-        while let Some((stream, peer)) = raw_rx.recv().await {
+    let owner = runtime.owner.clone();
+    let cancel = owner.cancel.clone();
+    let permits = Arc::clone(&runtime.permits);
+    let deadline = runtime.deadline;
+    #[cfg(test)]
+    let observations = runtime.observations.clone();
+    runtime.owner.spawn(async move {
+        loop {
+            let accepted = tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                accepted = listener.accept() => accepted,
+            };
+            let (stream, peer) = match accepted {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    tracing::warn!(%error, "WebSocket accept failed");
+                    break;
+                }
+            };
+            let permit = Arc::clone(&permits).try_acquire_owned();
+            #[cfg(test)]
+            observe_handshake(
+                observations.as_ref(),
+                if permit.is_ok() {
+                    HandshakeObservation::Admitted
+                } else {
+                    HandshakeObservation::Refused
+                },
+            );
+            let Ok(permit) = permit else {
+                // discard: the configured no-queue admission policy closes excess unauthenticated
+                // sockets immediately; retaining one here would defeat the handshake bound.
+                tracing::debug!(%peer, "refused inbound WebSocket handshake at capacity");
+                continue;
+            };
             let adopt = adopt.clone();
-            tokio::spawn(async move {
-                adopt_upgraded(
-                    crate::ws::accept(stream, peer).await,
-                    peer,
-                    TransportKind::Ws,
-                    keepalive,
-                    &adopt,
-                )
-                .await;
+            let cancel = cancel.clone();
+            owner.spawn(async move {
+                let upgraded = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => None,
+                    result = tokio::time::timeout(deadline, crate::ws::accept(stream, peer)) => Some(result),
+                };
+                match upgraded {
+                    Some(Ok(result)) => {
+                        adopt_upgraded(result, peer, TransportKind::Ws, keepalive, &adopt, &cancel)
+                            .await;
+                    }
+                    Some(Err(_)) => tracing::debug!(%peer, "inbound WebSocket handshake timed out"),
+                    None => {}
+                }
+                drop(permit);
             });
         }
     });
@@ -811,33 +1068,78 @@ async fn listen_wss(
     server: crate::tls::ServerTls,
     keepalive: std::time::Duration,
     adopt: &mpsc::Sender<Adopt>,
+    runtime: &HandshakeRuntime,
 ) -> Result<SocketAddr> {
     let listener = TcpListener::bind(SocketAddr::new(ip, port)).await?;
     let addr = listener.local_addr()?;
-    let (raw_tx, mut raw_rx) = mpsc::channel(64);
-    tokio::spawn(tcp::accept_loop(listener, raw_tx));
-
     let adopt = adopt.clone();
-    tokio::spawn(async move {
-        while let Some((stream, peer)) = raw_rx.recv().await {
+    let owner = runtime.owner.clone();
+    let cancel = owner.cancel.clone();
+    let permits = Arc::clone(&runtime.permits);
+    let deadline = runtime.deadline;
+    #[cfg(test)]
+    let observations = runtime.observations.clone();
+    runtime.owner.spawn(async move {
+        loop {
+            let accepted = tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                accepted = listener.accept() => accepted,
+            };
+            let (stream, peer) = match accepted {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    tracing::warn!(%error, "WSS accept failed");
+                    break;
+                }
+            };
+            let permit = Arc::clone(&permits).try_acquire_owned();
+            #[cfg(test)]
+            observe_handshake(
+                observations.as_ref(),
+                if permit.is_ok() {
+                    HandshakeObservation::Admitted
+                } else {
+                    HandshakeObservation::Refused
+                },
+            );
+            let Ok(permit) = permit else {
+                // discard: the configured no-queue admission policy closes excess unauthenticated
+                // sockets immediately; retaining one here would defeat the handshake bound.
+                tracing::debug!(%peer, "refused inbound WSS handshake at capacity");
+                continue;
+            };
             let acceptor = server.acceptor();
             let adopt = adopt.clone();
-            tokio::spawn(async move {
-                let tls = match acceptor.accept(stream).await {
-                    Ok(tls) => tls,
-                    Err(error) => {
-                        tracing::debug!(%error, %peer, "inbound WSS handshake failed");
-                        return;
-                    }
+            let cancel = cancel.clone();
+            owner.spawn(async move {
+                let upgraded = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => None,
+                    result = tokio::time::timeout(deadline, async move {
+                        let tls = acceptor.accept(stream).await.map_err(|error| error.to_string())?;
+                        crate::ws::accept(tls, peer).await.map_err(|error| error.to_string())
+                    }) => Some(result),
                 };
-                adopt_upgraded(
-                    crate::ws::accept(tls, peer).await,
-                    peer,
-                    TransportKind::Wss,
-                    keepalive,
-                    &adopt,
-                )
-                .await;
+                match upgraded {
+                    Some(Ok(Ok(socket))) => {
+                        adopt_upgraded(
+                            Ok(socket),
+                            peer,
+                            TransportKind::Wss,
+                            keepalive,
+                            &adopt,
+                            &cancel,
+                        )
+                        .await;
+                    }
+                    Some(Ok(Err(error))) => {
+                        tracing::debug!(%error, %peer, "inbound WSS handshake failed");
+                    }
+                    Some(Err(_)) => tracing::debug!(%peer, "inbound WSS handshake timed out"),
+                    None => {}
+                }
+                drop(permit);
             });
         }
     });
@@ -852,6 +1154,7 @@ async fn adopt_upgraded<S>(
     transport: TransportKind,
     keepalive: std::time::Duration,
     adopt: &mpsc::Sender<Adopt>,
+    cancel: &CancellationToken,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -862,11 +1165,15 @@ async fn adopt_upgraded<S>(
             // send here means the driver has stopped, and a connection with no driver to be adopted
             // into is closed by dropping it.
             // discard: see the reason below.
-            let _ = adopt
-                .send(Box::new(move |pool: &mut Pool| {
-                    pool.accept_ws(socket, key, keepalive);
-                }))
-                .await;
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {}
+                result = adopt.send(Box::new(move |pool: &mut Pool| {
+                        pool.accept_ws(socket, key, keepalive);
+                    })) => {
+                    let _ = result;
+                }
+            }
         }
         Err(error) => tracing::debug!(%error, %peer, "inbound websocket handshake failed"),
     }
@@ -925,6 +1232,8 @@ struct Driver {
     layer: TransactionLayer,
     timers: TimerQueue<(TransactionKey, Timer)>,
     destinations: HashMap<TransactionKey, Target>,
+    /// Exact stream incarnation carrying each transaction; UDP transactions have no entry.
+    transaction_generations: HashMap<TransactionKey, ConnectionGeneration>,
     /// When each server transaction was handed to the application, so one it never answers can
     /// be abandoned rather than held for the life of the process.
     handed_over: HashMap<TransactionKey, tokio::time::Instant>,
@@ -974,9 +1283,19 @@ struct Driver {
     /// A queue per connection rather than one slot: nothing stops a caller pinging twice, and
     /// pongs are indistinguishable from each other, so the only honest match is first-in-first-out.
     pong_waiters: HashMap<
-        ConnectionKey,
+        ConnectionGeneration,
         std::collections::VecDeque<oneshot::Sender<Result<Option<SocketAddr>>>>,
     >,
+    /// Listener and pre-pool handshake tasks owned by this endpoint.
+    background: Background,
+    /// Durable completion barrier shared with callers that arrive after command closure.
+    shutdown: Arc<ShutdownState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ConnectionGeneration {
+    key: ConnectionKey,
+    id: u64,
 }
 
 /// Proof that [`Endpoint::perform`] ran to completion.
@@ -1033,7 +1352,7 @@ impl Driver {
                     self.on_timers().await;
                 }
                 command = self.commands.recv() => match command {
-                    Some(Command::Shutdown) | None => return,
+                    Some(Command::Shutdown) | None => break,
                     Some(command) => self.on_command(command).await,
                 },
                 Some(event) = self.net.recv() => self.on_net_event(event).await,
@@ -1047,6 +1366,14 @@ impl Driver {
                 }
             }
         }
+        self.commands.close();
+        self.background.shutdown().await;
+        self.pool.shutdown().await;
+        // The acknowledgement must be the driver's final observable action: dropping `self`
+        // first releases the UDP socket, command receiver and every remaining channel owner.
+        let shutdown = Arc::clone(&self.shutdown);
+        drop(self);
+        shutdown.complete();
     }
 
     async fn on_datagram(&mut self, datagram: Bytes, source: SocketAddr) {
@@ -1063,7 +1390,10 @@ impl Driver {
         });
 
         match parse_datagram(datagram, &self.limits) {
-            Ok(message) => self.on_message(message, source, TransportKind::Udp).await,
+            Ok(message) => {
+                self.on_message(message, source, TransportKind::Udp, None)
+                    .await;
+            }
             Err(error) => {
                 // One malformed packet must not disturb the socket. The alternative is a
                 // trivial denial of service.
@@ -1097,7 +1427,7 @@ impl Driver {
             let id = crate::stun::new_transaction_id();
             let request = Bytes::from(crate::stun::binding_request(&id));
             match self.transmit_raw(request, &target).await {
-                Ok(()) => {
+                Ok(_) => {
                     self.stun_waiters.insert(id, answered);
                 }
                 Err(error) => {
@@ -1111,16 +1441,19 @@ impl Driver {
 
         // §4.4.1: CRLFCRLF is the ping, and the pong is a lone CRLF the peer's parser is
         // otherwise told to ignore.
-        let key = target.connection();
         match self
             .transmit_raw(Bytes::from_static(b"\r\n\r\n"), &target)
             .await
         {
-            Ok(()) => {
+            Ok(Some(generation)) => {
                 self.pong_waiters
-                    .entry(key)
+                    .entry(generation)
                     .or_default()
                     .push_back(answered);
+            }
+            Ok(None) => {
+                // A connection-oriented target always reports its pool generation.
+                let _ = answered.send(Err(Error::ConnectionClosed));
             }
             Err(error) => {
                 // discard: the caller stopped waiting. A dropped receiver means nobody is listening
@@ -1163,6 +1496,7 @@ impl Driver {
                 message,
                 source,
                 transport,
+                id,
             } => {
                 // Re-serialised rather than raw: framing happened in the connection's task and the
                 // stream bytes are not retained, so §13.2 records that a stream capture is not
@@ -1170,7 +1504,7 @@ impl Driver {
                 // `to_bytes` re-serialises and allocates, so it is inside the closure: with no
                 // capture configured it never runs.
                 self.observe(source, transport, Direction::In, || message.to_bytes());
-                self.on_message(*message, source, transport).await;
+                self.on_message(*message, source, transport, Some(id)).await;
             }
             tcp::Event::FramingFailed { key } => {
                 // The stream half of a parse failure, counted against the transport that carried it
@@ -1179,10 +1513,11 @@ impl Driver {
                 // until now was a `tracing::debug!` and nothing else.
                 self.meters.parse_failure(key.transport);
             }
-            tcp::Event::Pong { key } => {
+            tcp::Event::Pong { key, id } => {
                 // First waiter for this connection, or nobody — a peer is entitled to send a
                 // CRLF we did not ask for, and RFC 3261 §7.5 says to ignore it.
-                if let Some(queue) = self.pong_waiters.get_mut(&key)
+                let generation = ConnectionGeneration { key, id };
+                if let Some(queue) = self.pong_waiters.get_mut(&generation)
                     && let Some(waiter) = queue.pop_front()
                 {
                     // discard: the caller stopped waiting. A dropped receiver means nobody is listening
@@ -1190,18 +1525,27 @@ impl Driver {
                     let _ = waiter.send(Ok(None));
                 }
             }
-            tcp::Event::Closed { key } => {
-                self.pool.remove(&key);
+            tcp::Event::Closed { key, id } => {
+                // A retiring generation can report after a replacement with the same key has
+                // already joined. Every side effect below belongs to the generation that closed,
+                // so a stale report must not fail the replacement's transactions or keep-alives.
+                if !self.pool.remove(&key, id) {
+                    return;
+                }
+                let generation = ConnectionGeneration {
+                    key: key.clone(),
+                    id,
+                };
                 // A flow whose connection has gone is a failed flow, and saying so now beats
                 // making the caller wait out its own timeout for something already known.
-                if let Some(queue) = self.pong_waiters.remove(&key) {
+                if let Some(queue) = self.pong_waiters.remove(&generation) {
                     for waiter in queue {
                         // discard: the caller stopped waiting. A dropped receiver means nobody is listening
                         // for this answer, so nothing is lost and there is nothing worth counting.
                         let _ = waiter.send(Err(Error::ConnectionClosed));
                     }
                 }
-                self.fail_transactions_on(&key).await;
+                self.fail_transactions_on(&generation).await;
             }
         }
     }
@@ -1210,11 +1554,11 @@ impl Driver {
     ///
     /// The alternative is letting them time out, which means waiting up to 32 seconds to
     /// discover something already known — a bad experience and a resource leak.
-    async fn fail_transactions_on(&mut self, closed: &ConnectionKey) {
+    async fn fail_transactions_on(&mut self, closed: &ConnectionGeneration) {
         let affected: Vec<TransactionKey> = self
-            .destinations
+            .transaction_generations
             .iter()
-            .filter(|(_, target)| &target.connection() == closed)
+            .filter(|(_, generation)| *generation == closed)
             // A server transaction that knows where the peer listens is not failed by the loss
             // of the connection its request arrived on: RFC 3261 §18.2.2 has it open a new one
             // to the advertised port, and the response is still deliverable.
@@ -1227,7 +1571,13 @@ impl Driver {
         }
     }
 
-    async fn on_message(&mut self, message: Message, source: SocketAddr, transport: TransportKind) {
+    async fn on_message(
+        &mut self,
+        message: Message,
+        source: SocketAddr,
+        transport: TransportKind,
+        generation: Option<u64>,
+    ) {
         // The one site inbound messages are counted, whichever transport carried them here: a
         // datagram arrives through `on_datagram` and a stream message through `on_net_event`, and
         // both funnel into this method (§12).
@@ -1265,6 +1615,15 @@ impl Driver {
         match self.layer.receive(message, transport.reliability()) {
             Dispatch::Created { key, outputs } => {
                 self.destinations.insert(key.clone(), reply_to);
+                if let Some(id) = generation {
+                    self.transaction_generations.insert(
+                        key.clone(),
+                        ConnectionGeneration {
+                            key: ConnectionKey::new(source, transport),
+                            id,
+                        },
+                    );
+                }
                 self.handed_over
                     .insert(key.clone(), tokio::time::Instant::now());
                 // §18.2.2's fallback only arises on a transport that has a connection to lose.
@@ -1407,6 +1766,7 @@ impl Driver {
             }
             self.timers.forget_matching(|(k, _)| k == &key);
             self.destinations.remove(&key);
+            self.transaction_generations.remove(&key);
             // `reconnect` too. It is removed nowhere else but `Output::Terminated`, which an
             // abandoned transaction never reaches — so leaving it here would trade one
             // unbounded map for another.
@@ -1490,7 +1850,7 @@ impl Driver {
             } => {
                 let bytes = Message::Request(*request).to_bytes();
                 self.observe_out(&bytes, &target, false);
-                let result = self.transmit(bytes, target, false, None).await;
+                let result = self.transmit(bytes, target, false, None).await.map(|_| ());
                 // discard: the caller stopped waiting. A dropped receiver means nobody is listening
                 // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = sent.send(result);
@@ -1515,6 +1875,7 @@ impl Driver {
                     clients
                         + servers
                         + self.destinations.len()
+                        + self.transaction_generations.len()
                         + self.reconnect.len()
                         + self.handed_over.len(),
                 );
@@ -1547,11 +1908,19 @@ impl Driver {
                     let addr = target.addr;
                     self.observe_out(&bytes, &target, is_response);
                     let fallback = self.reconnect.get(key).cloned();
-                    if let Err(error) = self.transmit(bytes, target, is_response, fallback).await {
-                        self.meters.discard_send_failure();
-                        tracing::warn!(%error, %addr, "send failed");
-                        let outputs = self.layer.on_transport_error(key);
-                        return Box::pin(self.perform(key, outputs, origin)).await;
+                    match self.transmit(bytes, target, is_response, fallback).await {
+                        Ok(Some(generation)) => {
+                            self.transaction_generations.insert(key.clone(), generation);
+                        }
+                        Ok(None) => {
+                            self.transaction_generations.remove(key);
+                        }
+                        Err(error) => {
+                            self.meters.discard_send_failure();
+                            tracing::warn!(%error, %addr, "send failed");
+                            let outputs = self.layer.on_transport_error(key);
+                            return Box::pin(self.perform(key, outputs, origin)).await;
+                        }
                     }
                 }
                 // The clock is read *here*, by the driver, and handed to the queue. That is what
@@ -1565,6 +1934,7 @@ impl Driver {
                 Output::Terminated(_) => {
                     self.timers.forget_matching(|(k, _)| k == key);
                     self.destinations.remove(key);
+                    self.transaction_generations.remove(key);
                     self.handed_over.remove(key);
                     self.reconnect.remove(key);
                     // Dropping the sender closes the application's response stream, which is
@@ -1620,7 +1990,11 @@ impl Driver {
     /// header is 20 bytes), no transaction, no `Via`. It reuses [`Driver::transmit`] so a flow's
     /// ping travels over the *same connection* its requests do — which is the whole of RFC 5626
     /// §4.4, since a ping on a second connection tests a flow nobody is using.
-    async fn transmit_raw(&mut self, bytes: Bytes, target: &Target) -> Result<()> {
+    async fn transmit_raw(
+        &mut self,
+        bytes: Bytes,
+        target: &Target,
+    ) -> Result<Option<ConnectionGeneration>> {
         self.transmit(bytes, target.clone(), true, None).await
     }
 
@@ -1637,7 +2011,7 @@ impl Driver {
         target: Target,
         is_response: bool,
         fallback: Option<Target>,
-    ) -> Result<()> {
+    ) -> Result<Option<ConnectionGeneration>> {
         match target.transport {
             TransportKind::Udp => {
                 // RFC 3261 §18.1.1. Refusing by name beats sending something that will be
@@ -1656,12 +2030,17 @@ impl Driver {
                     });
                 }
                 self.socket.send_to(&bytes, target.addr).await?;
-                Ok(())
+                Ok(None)
             }
             TransportKind::Tcp => {
                 let key = target.connection();
-                if is_response && self.pool.send_on_existing(&key, bytes.clone()).await {
-                    return Ok(());
+                if is_response
+                    && let Some(id) = self
+                        .pool
+                        .send_on_existing_generation(&key, bytes.clone())
+                        .await
+                {
+                    return Ok(Some(ConnectionGeneration { key, id }));
                 }
                 // The connection is gone. RFC 3261 §18.2.2 sends the response to the address
                 // the request came from at the port the sender said it listens on — not back
@@ -1670,7 +2049,8 @@ impl Driver {
                     (true, Some(advertised)) => advertised.connection(),
                     _ => key,
                 };
-                self.pool.send(&key, bytes).await
+                let id = self.pool.send_generation(&key, bytes).await?;
+                Ok(Some(ConnectionGeneration { key, id }))
             }
             #[cfg(feature = "tls")]
             TransportKind::Tls => {
@@ -1678,8 +2058,13 @@ impl Driver {
                 // no client configuration at all — a pure TLS server has no reason to hold
                 // one, and requiring it would leave such a server unable to reply.
                 let key = target.connection();
-                if is_response && self.pool.send_on_existing(&key, bytes.clone()).await {
-                    return Ok(());
+                if is_response
+                    && let Some(id) = self
+                        .pool
+                        .send_on_existing_generation(&key, bytes.clone())
+                        .await
+                {
+                    return Ok(Some(ConnectionGeneration { key, id }));
                 }
                 // Only opening a *new* connection needs somewhere to verify against.
                 let Some(client) = self.tls_client.clone() else {
@@ -1693,7 +2078,11 @@ impl Driver {
                     .verify_as
                     .as_deref()
                     .map_or_else(|| target.addr.ip().to_string(), str::to_owned);
-                self.pool.send_tls(&key, &name, &client, bytes).await
+                let id = self
+                    .pool
+                    .send_tls_generation(&key, &name, &client, bytes)
+                    .await?;
+                Ok(Some(ConnectionGeneration { key, id }))
             }
             #[cfg(feature = "ws")]
             TransportKind::Ws | TransportKind::Wss => {
@@ -1704,15 +2093,20 @@ impl Driver {
                 // outbound requests over an inbound connection" rule protects against traffic
                 // being routed through a peer that connected to us; here the peer *is* the
                 // destination, so there is nothing to route through and nothing to protect.
-                if self.pool.send_on_existing(&key, bytes.clone()).await {
-                    return Ok(());
+                if let Some(id) = self
+                    .pool
+                    .send_on_existing_generation(&key, bytes.clone())
+                    .await
+                {
+                    return Ok(Some(ConnectionGeneration { key, id }));
                 }
                 let authority = target.verify_as.as_deref().map_or_else(
                     || target.addr.to_string(),
                     |name| format!("{name}:{}", target.addr.port()),
                 );
-                self.pool
-                    .send_ws(
+                let id = self
+                    .pool
+                    .send_ws_generation(
                         &key,
                         &authority,
                         self.ws_keepalive,
@@ -1720,7 +2114,8 @@ impl Driver {
                         self.tls_client.as_ref(),
                         bytes,
                     )
-                    .await
+                    .await?;
+                Ok(Some(ConnectionGeneration { key, id }))
             }
             #[allow(unreachable_patterns)]
             other => Err(Error::UnsupportedTransport(other.as_str())),
@@ -1819,5 +2214,560 @@ async fn sleep_until(deadline: Option<tokio::time::Instant>) {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         // Never resolves; the `if` guard in `select!` keeps this branch disabled anyway.
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::net::TcpStream;
+    #[cfg(any(feature = "tls", feature = "ws"))]
+    use tokio::sync::Semaphore;
+    use tokio::sync::mpsc;
+
+    #[cfg(any(feature = "tls", feature = "ws"))]
+    use super::{Adopt, HandshakeObservation, HandshakeRuntime};
+    use super::{Background, Driver, Message, ShutdownState, Target, TransportKind};
+
+    async fn driver_with_pool(
+        pool: crate::tcp::Pool,
+        net: mpsc::Receiver<crate::tcp::Event>,
+    ) -> Driver {
+        let socket = Arc::new(
+            tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("UDP binds"),
+        );
+        let local_addr = socket.local_addr().expect("local address");
+        let (_commands_tx, commands) = mpsc::channel(8);
+        let (incoming, _incoming_rx) = mpsc::channel(8);
+        let (_accepts_tx, accepts) = mpsc::channel(8);
+        let (adopt, adopts) = mpsc::channel(8);
+        Driver {
+            socket,
+            layer: sipx_sip::transaction::TransactionLayer::new(sipx_sip::Timers::default()),
+            timers: crate::timers::TimerQueue::new(),
+            destinations: std::collections::HashMap::new(),
+            transaction_generations: std::collections::HashMap::new(),
+            handed_over: std::collections::HashMap::new(),
+            reconnect: std::collections::HashMap::new(),
+            unanswered_limit: Duration::from_secs(60),
+            clients: std::collections::HashMap::new(),
+            incoming,
+            commands,
+            net,
+            accepts,
+            adopts,
+            _adopt: adopt,
+            #[cfg(feature = "tls")]
+            tls_client: None,
+            #[cfg(feature = "ws")]
+            ws_keepalive: Duration::from_secs(60),
+            pool,
+            limits: sipx_sip::Limits::stream(),
+            mtu: 1300,
+            meters: Arc::new(crate::counters::Meters::default()),
+            capture: None,
+            local_addr,
+            unmatched: None,
+            stun_waiters: std::collections::HashMap::new(),
+            pong_waiters: std::collections::HashMap::new(),
+            background: Background::new(),
+            shutdown: Arc::new(ShutdownState::default()),
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_close_does_not_fail_a_transaction_on_the_live_generation() {
+        use sipx_sip::transaction::Reliability;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("TCP binds");
+        let address = listener.local_addr().expect("listener address");
+        let peer_socket = TcpStream::connect(address).await.expect("peer connects");
+        let (server_socket, peer) = listener.accept().await.expect("connection accepts");
+        let key = crate::ConnectionKey::new(peer, TransportKind::Tcp);
+        let (net_tx, net_rx) = mpsc::channel(8);
+        let mut pool = crate::tcp::Pool::new(
+            crate::tcp::PoolConfig::default(),
+            sipx_sip::Limits::stream(),
+            net_tx,
+        );
+        pool.accept(server_socket, peer);
+        assert!(pool.holds(&key), "the live generation is installed");
+
+        let mut driver = driver_with_pool(pool, net_rx).await;
+        let parsed = sipx_sip::parse_datagram(
+            bytes::Bytes::from_static(
+                b"OPTIONS sip:a@example.com SIP/2.0\r\n\
+                  Via: SIP/2.0/TCP 127.0.0.1:5555;branch=z9hG4bKstale\r\n\
+                  To: <sip:a@example.com>\r\n\
+                  From: <sip:b@example.net>;tag=1\r\n\
+                  Call-ID: stale-close@example.net\r\n\
+                  CSeq: 1 OPTIONS\r\n\
+                  Max-Forwards: 70\r\n\
+                  Content-Length: 0\r\n\r\n",
+            ),
+            &sipx_sip::Limits::datagram(),
+        )
+        .expect("request parses");
+        let Message::Request(request) = parsed else {
+            panic!("expected a request");
+        };
+        let (transaction, _outputs) = driver
+            .layer
+            .send_request(request, Reliability::Reliable)
+            .expect("transaction starts");
+        driver
+            .destinations
+            .insert(transaction.clone(), Target::new(peer, TransportKind::Tcp));
+        let live_id = driver.pool.generation(&key).expect("live generation");
+        driver.transaction_generations.insert(
+            transaction.clone(),
+            super::ConnectionGeneration {
+                key: key.clone(),
+                id: live_id,
+            },
+        );
+        let (client_events, mut received) = mpsc::channel(8);
+        driver.clients.insert(transaction.clone(), client_events);
+
+        // Generation zero predates every real pool entry (IDs begin at one), modelling an old
+        // task's delayed close after the current generation and transaction were installed.
+        driver
+            .on_net_event(crate::tcp::Event::Closed {
+                key: key.clone(),
+                id: 0,
+            })
+            .await;
+
+        assert!(driver.pool.holds(&key), "the live connection survives");
+        assert_eq!(driver.layer.len(), (1, 0), "the transaction stays live");
+        assert!(driver.destinations.contains_key(&transaction));
+        assert!(driver.clients.contains_key(&transaction));
+        assert!(
+            matches!(received.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "the client receives no stale transport error"
+        );
+        driver.pool.shutdown().await;
+        drop(peer_socket);
+    }
+
+    #[tokio::test]
+    async fn retiring_current_generation_fails_its_transaction_and_pong_waiter_once() {
+        use sipx_sip::transaction::Reliability;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("TCP binds");
+        let address = listener.local_addr().expect("listener address");
+        let peer_socket = TcpStream::connect(address).await.expect("peer connects");
+        let (server_socket, peer) = listener.accept().await.expect("connection accepts");
+        let key = crate::ConnectionKey::new(peer, TransportKind::Tcp);
+        let (net_tx, net_rx) = mpsc::channel(8);
+        let mut pool = crate::tcp::Pool::new(
+            crate::tcp::PoolConfig {
+                idle_timeout: Duration::ZERO,
+                ..crate::tcp::PoolConfig::default()
+            },
+            sipx_sip::Limits::stream(),
+            net_tx,
+        );
+        pool.accept(server_socket, peer);
+        let id = pool.generation(&key).expect("generation");
+        let mut driver = driver_with_pool(pool, net_rx).await;
+        let parsed = sipx_sip::parse_datagram(
+            bytes::Bytes::from_static(
+                b"OPTIONS sip:a@example.com SIP/2.0\r\n\
+                  Via: SIP/2.0/TCP 127.0.0.1:5555;branch=z9hG4bKretire\r\n\
+                  To: <sip:a@example.com>\r\n\
+                  From: <sip:b@example.net>;tag=1\r\n\
+                  Call-ID: retire@example.net\r\n\
+                  CSeq: 1 OPTIONS\r\n\
+                  Max-Forwards: 70\r\n\
+                  Content-Length: 0\r\n\r\n",
+            ),
+            &sipx_sip::Limits::datagram(),
+        )
+        .expect("request parses");
+        let Message::Request(request) = parsed else {
+            panic!("expected request");
+        };
+        let (transaction, _outputs) = driver
+            .layer
+            .send_request(request, Reliability::Reliable)
+            .expect("transaction starts");
+        driver
+            .destinations
+            .insert(transaction.clone(), Target::new(peer, TransportKind::Tcp));
+        let generation = super::ConnectionGeneration {
+            key: key.clone(),
+            id,
+        };
+        driver
+            .transaction_generations
+            .insert(transaction.clone(), generation.clone());
+        let (client_events, mut received) = mpsc::channel(8);
+        driver.clients.insert(transaction, client_events);
+        let (pong, pong_result) = tokio::sync::oneshot::channel();
+        driver
+            .pong_waiters
+            .entry(generation)
+            .or_default()
+            .push_back(pong);
+
+        assert_eq!(driver.pool.evict_idle(), vec![key.clone()]);
+        driver
+            .on_net_event(crate::tcp::Event::Closed {
+                key: key.clone(),
+                id,
+            })
+            .await;
+        assert!(matches!(
+            received.recv().await,
+            Some(sipx_sip::transaction::TuEvent::TransportError)
+        ));
+        assert!(matches!(
+            pong_result.await,
+            Ok(Err(crate::Error::ConnectionClosed))
+        ));
+        assert!(!driver.pool.holds(&key));
+
+        // A duplicated close is stale after the first acknowledgement and has no second effect.
+        driver
+            .on_net_event(crate::tcp::Event::Closed { key, id })
+            .await;
+        driver.pool.shutdown().await;
+        drop(peer_socket);
+    }
+
+    #[tokio::test]
+    async fn queued_old_pong_cannot_answer_the_replacement_generation_waiter() {
+        let (events, net_rx) = mpsc::channel(8);
+        let pool = crate::tcp::Pool::new(
+            crate::tcp::PoolConfig::default(),
+            sipx_sip::Limits::stream(),
+            events,
+        );
+        let mut driver = driver_with_pool(pool, net_rx).await;
+        let key = crate::ConnectionKey::new(
+            "127.0.0.1:59999".parse().expect("address"),
+            TransportKind::Tcp,
+        );
+        let replacement_id = 2;
+        let (answered, mut answer) = tokio::sync::oneshot::channel();
+        driver
+            .pong_waiters
+            .entry(super::ConnectionGeneration {
+                key: key.clone(),
+                id: replacement_id,
+            })
+            .or_default()
+            .push_back(answered);
+
+        driver
+            .on_net_event(crate::tcp::Event::Pong {
+                key: key.clone(),
+                id: 1,
+            })
+            .await;
+        assert!(matches!(
+            answer.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        driver
+            .on_net_event(crate::tcp::Event::Pong {
+                key,
+                id: replacement_id,
+            })
+            .await;
+        assert!(matches!(answer.await, Ok(Ok(None))));
+        driver.pool.shutdown().await;
+    }
+
+    fn handle_with_shutdown_barrier(
+        commands: mpsc::Sender<super::Command>,
+        shutdown: Arc<ShutdownState>,
+    ) -> super::Handle {
+        super::Handle {
+            commands,
+            shutdown,
+            local_addr: "127.0.0.1:5060".parse().expect("address"),
+            meters: Arc::new(crate::counters::Meters::default()),
+            #[cfg(feature = "tls")]
+            tls_addr: None,
+            #[cfg(feature = "ws")]
+            ws_addr: None,
+            #[cfg(feature = "wss")]
+            wss_addr: None,
+            #[cfg(feature = "ws")]
+            ws_sent_by: Arc::from("shutdown.invalid"),
+            sent_by: Arc::new("127.0.0.1".to_owned()),
+            sent_by_port: 5060,
+        }
+    }
+
+    #[tokio::test]
+    async fn caller_arriving_after_command_closure_still_waits_for_cleanup_completion() {
+        let (commands, mut received) = mpsc::channel(8);
+        let shutdown = Arc::new(ShutdownState::default());
+        let handle = handle_with_shutdown_barrier(commands, Arc::clone(&shutdown));
+        let (receiver_closed, closed) = tokio::sync::oneshot::channel();
+        let (release_cleanup, cleanup_released) = tokio::sync::oneshot::channel();
+        let driver = tokio::spawn(async move {
+            assert!(matches!(
+                received.recv().await,
+                Some(super::Command::Shutdown)
+            ));
+            received.close();
+            receiver_closed.send(()).expect("test remains present");
+            cleanup_released.await.expect("cleanup is released");
+            shutdown.complete();
+        });
+
+        let first = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.shutdown().await })
+        };
+        closed.await.expect("driver closed command receiver");
+        let late = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.shutdown().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !late.is_finished(),
+            "late caller waits on the durable barrier after send fails"
+        );
+
+        release_cleanup.send(()).expect("driver remains present");
+        first.await.expect("first shutdown returns after cleanup");
+        late.await.expect("late shutdown returns after cleanup");
+        driver.await.expect("driver completes");
+    }
+
+    #[cfg(any(feature = "tls", feature = "ws"))]
+    const DEADLINE: Duration = Duration::from_millis(150);
+
+    #[cfg(any(feature = "tls", feature = "ws"))]
+    fn handshake_runtime(
+        limit: usize,
+    ) -> (
+        Background,
+        HandshakeRuntime,
+        mpsc::UnboundedReceiver<HandshakeObservation>,
+    ) {
+        let owner = Background::new();
+        let (observations, observed) = mpsc::unbounded_channel();
+        let runtime = HandshakeRuntime {
+            deadline: DEADLINE,
+            permits: Arc::new(Semaphore::new(limit)),
+            owner: owner.clone(),
+            observations: Some(observations),
+        };
+        (owner, runtime, observed)
+    }
+
+    async fn wait_for_observation(
+        observed: &mut mpsc::UnboundedReceiver<HandshakeObservation>,
+        expected: HandshakeObservation,
+    ) {
+        assert_eq!(
+            observed.recv().await.expect("listener remains alive"),
+            expected
+        );
+    }
+
+    #[cfg(any(feature = "tls", feature = "ws"))]
+    async fn wait_for_available(runtime: &HandshakeRuntime, expected: usize) {
+        for _ in 0..512 {
+            if runtime.permits.available_permits() == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(runtime.permits.available_permits(), expected);
+    }
+
+    #[cfg(any(feature = "tls", feature = "ws"))]
+    async fn wait_for_eof(stream: &TcpStream) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut byte = [0u8; 1];
+            loop {
+                stream.readable().await.expect("socket remains readable");
+                match stream.try_read(&mut byte) {
+                    Ok(0) => return,
+                    Ok(_) => panic!("a refused incomplete handshake produced bytes"),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::BrokenPipe
+                        ) =>
+                    {
+                        return;
+                    }
+                    Err(error) => panic!("unexpected read error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("peer closes within the configured handshake deadline");
+    }
+
+    /// X18: incomplete upgrades have one endpoint-wide budget and an observed admission barrier.
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn websocket_handshake_budget_has_deterministic_admission_and_reclamation() {
+        let (owner, runtime, mut observed) = handshake_runtime(2);
+        let (adopt, mut adopted) = mpsc::channel::<Adopt>(8);
+        let address = super::listen_ws(
+            "127.0.0.1".parse().expect("loopback"),
+            0,
+            Duration::from_secs(60),
+            &adopt,
+            &runtime,
+        )
+        .await
+        .expect("listener binds");
+
+        let first = TcpStream::connect(address).await.expect("first connects");
+        wait_for_observation(&mut observed, HandshakeObservation::Admitted).await;
+        wait_for_available(&runtime, 1).await;
+        let second = TcpStream::connect(address).await.expect("second connects");
+        wait_for_observation(&mut observed, HandshakeObservation::Admitted).await;
+        wait_for_available(&runtime, 0).await;
+
+        for _ in 0..16 {
+            let refused = TcpStream::connect(address).await.expect("excess connects");
+            wait_for_observation(&mut observed, HandshakeObservation::Refused).await;
+            wait_for_eof(&refused).await;
+        }
+
+        wait_for_eof(&first).await;
+        wait_for_eof(&second).await;
+        wait_for_available(&runtime, 2).await;
+
+        let stream = TcpStream::connect(address)
+            .await
+            .expect("connects after deadline");
+        let socket = crate::ws::connect(stream, &address.to_string(), "/", false)
+            .await
+            .expect("released permit admits an upgrade");
+        let adoption = adopted.recv().await.expect("upgraded socket is adopted");
+        drop(adoption);
+        drop(socket);
+        owner.shutdown().await;
+    }
+
+    /// X18: TLS and WebSocket listeners draw from the same directly observed permit.
+    #[cfg(all(feature = "tls", feature = "ws"))]
+    #[tokio::test]
+    async fn tls_and_websocket_share_one_deterministic_handshake_budget() {
+        use sipx_testkit::certs::Ca;
+
+        use crate::tls::{Identity, ServerTls};
+
+        let ca = Ca::new();
+        let (certificate, key) = ca.issue_for("localhost");
+        let identity =
+            Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("an identity");
+        let (owner, runtime, mut observed) = handshake_runtime(1);
+        let (adopt, mut adopted) = mpsc::channel::<Adopt>(8);
+        let tls_address = super::listen_tls(
+            "127.0.0.1".parse().expect("loopback"),
+            0,
+            ServerTls::new(identity).expect("a server"),
+            &adopt,
+            &runtime,
+        )
+        .await
+        .expect("TLS listener binds");
+        let ws_address = super::listen_ws(
+            "127.0.0.1".parse().expect("loopback"),
+            0,
+            Duration::from_secs(60),
+            &adopt,
+            &runtime,
+        )
+        .await
+        .expect("WebSocket listener binds");
+
+        let partial_tls = TcpStream::connect(tls_address).await.expect("TLS connects");
+        wait_for_observation(&mut observed, HandshakeObservation::Admitted).await;
+        wait_for_available(&runtime, 0).await;
+        let refused_ws = TcpStream::connect(ws_address)
+            .await
+            .expect("WebSocket TCP connects");
+        wait_for_observation(&mut observed, HandshakeObservation::Refused).await;
+        wait_for_eof(&refused_ws).await;
+
+        wait_for_eof(&partial_tls).await;
+        wait_for_available(&runtime, 1).await;
+
+        let stream = TcpStream::connect(ws_address)
+            .await
+            .expect("connects after deadline");
+        let socket = crate::ws::connect(stream, &ws_address.to_string(), "/", false)
+            .await
+            .expect("released shared permit admits WebSocket");
+        let adoption = adopted.recv().await.expect("upgraded socket is adopted");
+        drop(adoption);
+        drop(socket);
+        owner.shutdown().await;
+    }
+
+    /// X18: WSS keeps its single permit across both TLS and HTTP upgrade phases.
+    #[cfg(feature = "wss")]
+    #[tokio::test]
+    async fn wss_handshake_budget_has_deterministic_admission_and_reclamation() {
+        use sipx_testkit::certs::Ca;
+
+        use crate::tls::{Identity, ServerTls};
+
+        let ca = Ca::new();
+        let (certificate, key) = ca.issue_for("localhost");
+        let identity =
+            Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("an identity");
+        let (owner, runtime, mut observed) = handshake_runtime(1);
+        let (adopt, _adopted) = mpsc::channel::<Adopt>(8);
+        let address = super::listen_wss(
+            "127.0.0.1".parse().expect("loopback"),
+            0,
+            ServerTls::new(identity).expect("a server"),
+            Duration::from_secs(60),
+            &adopt,
+            &runtime,
+        )
+        .await
+        .expect("WSS listener binds");
+
+        let first = TcpStream::connect(address).await.expect("first connects");
+        wait_for_observation(&mut observed, HandshakeObservation::Admitted).await;
+        wait_for_available(&runtime, 0).await;
+        let refused = TcpStream::connect(address).await.expect("second connects");
+        wait_for_observation(&mut observed, HandshakeObservation::Refused).await;
+        wait_for_eof(&refused).await;
+
+        wait_for_eof(&first).await;
+        wait_for_available(&runtime, 1).await;
+
+        let admitted = TcpStream::connect(address).await.expect("third connects");
+        wait_for_observation(&mut observed, HandshakeObservation::Admitted).await;
+        wait_for_available(&runtime, 0).await;
+        owner.shutdown().await;
+        wait_for_eof(&admitted).await;
     }
 }

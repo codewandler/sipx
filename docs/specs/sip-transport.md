@@ -1,6 +1,6 @@
 # Spec: Transport layer
 
-**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4 · **Design:**
+**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4, T-25 … T-27 · **Design:**
 [sip-transport](../designs/sip-transport.md)
 
 ## 1. Normative references
@@ -139,6 +139,24 @@ Why each field is in the key — which is an argument, not a list, and so is not
 (default 5 minutes). Eviction is least-recently-used, and a connection with a live transaction
 is never evicted.
 
+The bound is on live connection tasks and sockets, not only entries in the routing map. Every
+pooled connection has an endpoint-owned cancellation signal and occupies one pool slot until its
+task has terminated. Idle or least-recently-used eviction signals cancellation, which interrupts a
+task blocked on a read, closes the socket, and reports the connection closed. A replacement is not
+started while the cancelled task still occupies the last live-task slot. Instead it reserves its
+own generation and bounded writer queue, then starts when the retiring task reports completion. One
+replacement therefore retires only the generation with the same key; it never consumes a second
+victim or evicts an unrelated connection merely because cancellation has not completed yet.
+
+Every message, pong, transaction destination and close event on a stream carries the generation
+that produced it. A deliberately retired generation remains eligible for exactly one close event,
+which fails only its own transactions and keep-alive waiters. Once a replacement is current, queued
+events from the old generation cannot remove it or answer its waiters. Endpoint shutdown follows the
+same cancellation path and waits for its tracked connection tasks, so dropping routing metadata
+never detaches the resource it described. A final close report blocked by a full event channel is
+cancellable by shutdown; completion cannot depend on a driver which has stopped draining that
+channel.
+
 **[sipx]** When a connection closes, every transaction bound to it is given a transport error
 rather than being left to time out. Waiting 32 seconds to discover something we already know
 is a bad experience and a resource leak.
@@ -165,6 +183,29 @@ Blocking the loop would stop timers, which turns a slow application into a stack
 retransmitting and drops calls it had already established. Dropping events silently loses
 requests. Answering 503 is what the status code is for, and it tells the peer something true.
 
+## 10.1 Configuration and pre-pool admission
+
+**[sipx] Endpoint configuration is validated before any socket is bound or background task is
+started.** The application event/command capacity, pool connection limit, inbound handshake limit,
+inbound handshake timeout and WebSocket keepalive interval must all be non-zero. The minimum valid
+value for a count is one; the minimum valid duration is any duration greater than zero. Invalid
+values return a typed configuration error naming the field. Values are never silently clamped.
+
+The default inbound handshake budget is 64 live handshakes per endpoint and the default deadline is
+10 seconds. The budget is shared across TLS, WebSocket and secure WebSocket listeners. An accepted
+socket must acquire a permit without waiting before a handshake task is spawned. If no permit is
+available, the new socket is closed immediately; there is no pre-handshake wait queue. TLS followed
+by a WebSocket upgrade is one secure-WebSocket handshake and has one deadline for both phases.
+
+Timeout, protocol failure, successful adoption and endpoint shutdown each close or transfer the
+socket and release exactly one permit. Listener loops and handshake tasks are endpoint-owned:
+shutdown cancels them and waits for their completion.
+
+`Handle::shutdown` waits on a durable endpoint completion barrier. This includes a caller whose
+shutdown command loses a race with command-receiver closure: command closure means cleanup has
+started, not that it has finished. The barrier becomes complete only after listeners, handshake
+tasks, pooled connections and endpoint sockets have been released.
+
 ## 11. Test vectors
 
 | # | Scenario | Expected |
@@ -185,6 +226,14 @@ requests. Answering 503 is what the status code is for, and it tells the peer so
 | X14 | `Authorization` with a digest `response`, capture on | `realm` and `nonce` survive; the `response` value does not (§13.3) |
 | X15 | SDP `a=crypto` in a captured body | Tag and suite survive; the key after `inline:` does not (§13.3) |
 | X16 | Capture off | No file is opened, and the snapshot's capture counters stay zero |
+| X17 | Quiet TCP and WebSocket peers are idle- or capacity-evicted | Peer observes EOF and the live task releases its pool slot |
+| X18 | More partial TLS/WS/WSS handshakes than the configured budget | No more than the budget run; excess sockets close without queuing; deadlines reclaim every permit |
+| X19 | Zero event capacity, pool limit, handshake limit/deadline or WebSocket keepalive | Typed configuration error before any configured address is bound |
+| X20 | Replace connection A at a full pool containing A and B | A replacement is reserved under a new generation; B remains live; the live-task bound is never exceeded |
+| X21 | Idle/LRU cancellation followed by that generation's close | Its transactions and pong waiters fail exactly once; a replacement generation is untouched |
+| X22 | Final close report blocks behind a full event channel during shutdown | Shutdown cancellation releases the reporting task and completion does not hang |
+| X23 | A shutdown caller arrives after command-receiver closure | It still waits until the durable cleanup barrier completes |
+| X24 | An old generation's pong is queued ahead of a replacement pong | The old pong answers no replacement waiter; the matching generation's pong does |
 
 ## 12. Counters
 
