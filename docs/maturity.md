@@ -24,7 +24,7 @@ repository and are recorded when they happen rather than computed.
 
 **6 of 7 predicates met.** A predicate is met when every story named for it is `done` — the stories are the definition, so this table cannot drift from the board.
 
-- **Predicate 1 is attested, not computed.** Mechanical as far as a path check can go, which is not far: `unreachable_claims` covers `media` and `security` and was measured and declined for `transport`. The rest is attested by shipping an application whose every dependency is visible — `X-38` — because a capability that exists but cannot be selected is a question of use, and use is observed, not grepped.
+- **Predicate 1 is computed, not attested.** Computed, but the thing computed is a *definition* rather than a search. `X-38` ships an application (`sipx-app`) and defines the reachable-from-a-call surface as what it uses; `scripts/check-app-surface.py` holds every crate's `Supported` claim against that application's real dependency closure, and the gate is red when the two disagree. The three path checks before it could only find capabilities that were *mentioned* — a path is satisfied by citing a file whose relevant branch is dead — and none of them could say whether a capability was worth selecting. An application answers that by needing it or not. What this does **not** say is that every row of a layer is individually reached: the declarations it checks are per crate, so the surface is entered per crate.
 - **Predicate 4 is attested, not computed.** Cannot be computed: a defect nobody has found leaves no trace in either source. What is reported is the absence of *open* stories describing one.
 - **Predicate 6 is attested, not computed.** Met at filing and not re-derived here: it is a property of the CLI's test suite, which the gate runs.
 
@@ -32,16 +32,16 @@ repository and are recorded when they happen rather than computed.
 
 No aggregate percentage is given. `media` and `core` differ in size and in how much of each is reachable, and one number would call them the same. **`partial` is counted as `partial`** and never as a fraction of done.
 
-| Layer | RFCs | implemented | partial | none | other | Reachability checked |
+| Layer | RFCs | implemented | partial | none | other | Reachability basis |
 |---|---|---|---|---|---|---|
-| core | 9 | 5 | 2 | 0 | 2 | **no** |
-| media | 15 | 3 | 11 | 0 | 1 | yes |
-| security | 11 | 7 | 0 | 3 | 1 | yes |
-| services | 15 | 5 | 5 | 3 | 2 | **no** |
-| transport | 14 | 7 | 4 | 3 | 0 | **no** |
-| wire | 6 | 2 | 2 | 1 | 1 | **no** |
+| core | 9 | 5 | 2 | 0 | 2 | application |
+| media | 15 | 3 | 11 | 0 | 1 | application + path check |
+| security | 11 | 7 | 0 | 3 | 1 | application + path check |
+| services | 15 | 5 | 5 | 3 | 2 | application |
+| transport | 14 | 7 | 4 | 3 | 0 | application |
+| wire | 6 | 2 | 2 | 1 | 1 | application |
 
-70 RFCs tracked. Outside the layers marked *yes*, `implemented` means the code exists and has **not** been checked against a caller above the implementing crate — see `X-37`.
+70 RFCs tracked. **`implemented` now means the code exists in a crate the shipped application depends on** — that is the definition `X-38` put in place of the caveat this table carried for `core`, `services`, `transport` and `wire`, and `scripts/check-app-surface.py` fails the gate when a crate claims supported surface no application reaches. The two layers that also say *path check* carry `rfc-report.py`'s per-row check on top; the others are entered per crate, so a single row of them is not individually attested.
 
 ## Open work, per pillar
 
@@ -71,7 +71,7 @@ Filed is a story file being added; closed is a `status: done` line appearing, so
 
 ## What this cannot see
 
-- **`implemented` outside `media` and `security` is unverified against callers.** `X-30` demoted three rows the day it landed and `X-33` two more, all for capabilities no call could select. The check was measured and *declined* for `transport`, because that layer mixes selected capabilities with plumbing every call runs. `X-37` is the successor that would close this; until it lands, treat those counts as an upper bound.
+- **The reachable surface is one application's opinion, and it is entered per crate.** `X-38` replaced *unverified against callers* with a definition: what `sipx-app` uses is the surface. That is a real caller rather than a grep, and it is also a single one — so a supported *module* that the application's crates never name is not caught, because the declarations being checked are per crate. A second application disagreeing is the intended way this widens, and the rule for it is in `README.md`: an experimental item that something outside this repository depends on graduates, with a `CHANGELOG.md` entry.
 - **A predicate here is only as good as its story list.** Predicate 4 in particular reports the absence of open stories describing a known-wrong path, which is not the same as there being none. `S-27` — a `sips:` URI dialled in cleartext — was found on the day it was filed, not by this report.
 - **Nothing here measures whether the tests are good**, only that they pass. Predicate 3 exists because a test can be green and assert nothing: `X-36` found one that could not detect the reversal of the invariant it was named for.
 

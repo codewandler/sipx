@@ -127,6 +127,22 @@ is what freezes an API, and its predicates are in [`docs/roadmap.md`](docs/roadm
 mark part of their surface experimental for the same reason: it is implemented and tested and nothing
 above it selects it yet, so no caller has ever constrained its shape.
 
+**Which surface is which is not a judgement, it is a measurement.** The reachable-from-a-call surface
+is *defined* as what the shipped application in [`crates/sipx-app`](crates/sipx-app) uses, and
+`./scripts/check-app-surface.py --check` fails the build when a crate claims *Supported* surface that
+no path from that application reaches, or when the application starts selecting something still marked
+*Experimental*. Three earlier attempts checked this by reading evidence paths and each recorded the
+same limit: a path is satisfied by citing a file whose relevant branch is dead. An application has no
+dead branch to cite.
+
+**An experimental item graduates when a second implementation depends on it.** If something outside
+this repository needs one, that is not a mistake to be corrected at the caller — a second caller is
+exactly what constrains a shape, and nothing else can. The item moves to *Supported* with a
+`CHANGELOG.md` entry recording that it did, and the surface is wider than it was. Without this clause
+the paragraph above would be a freeze on everything one application happens to need, rather than a
+measurement of it, so **please open an issue saying what you depend on** — that is the mechanism
+working, not a complaint.
+
 The table is exactly the crates that publish, and `./scripts/check-audio-claims.py --check` holds
 it to that: a published crate no table describes has no front door anyone can be held to. The
 workspace also contains `sipx-testkit` — the torture corpus, the fixture CA and the load and soak
