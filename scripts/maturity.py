@@ -26,6 +26,7 @@ against callers, so every count below inherits that limit and says so.
 
 import argparse
 import collections
+import datetime
 import pathlib
 import re
 import subprocess
@@ -150,21 +151,39 @@ ALPHA = (
 )
 
 
+#: Files under `docs/stories` that are not stories however they are shaped. `_TEMPLATE.md` carries a
+#: frontmatter `id:` of its own, so the frontmatter test below does *not* subsume this list — both
+#: halves are load-bearing, which is why they live together in one function.
+NOT_STORIES = {"README.md", "_TEMPLATE.md"}
+
+
+def story_fields(path):
+    """One story's frontmatter, or `None` when the file is not a board story.
+
+    **The single definition of "is a story"**, because there were briefly two. `discovery_rate` used
+    to decide it from the file name alone, which made a scratch `notes.md` in `docs/stories` count as
+    a story filed today — a red gate for no defect, this story's own failure mode reached from a new
+    direction. A name is not enough and neither is frontmatter alone: the board's template has an
+    `id:` too. A story is a file this list does not name, carrying a frontmatter block with an `id`.
+    """
+    if path.name in NOT_STORIES:
+        return None
+    match = re.match(r"---\n(.*?)\n---", path.read_text(encoding="utf-8"), re.S)
+    if not match:
+        return None
+    fields = {}
+    for line in match.group(1).splitlines():
+        key, _, value = line.partition(":")
+        fields[key.strip()] = value.strip()
+    return fields if "id" in fields else None
+
+
 def stories():
     """Every story's frontmatter, by id."""
     found = {}
     for path in sorted(STORIES.glob("*.md")):
-        if path.name in {"README.md", "_TEMPLATE.md"}:
-            continue
-        text = path.read_text()
-        match = re.match(r"---\n(.*?)\n---", text, re.S)
-        if not match:
-            continue
-        fields = {}
-        for line in match.group(1).splitlines():
-            key, _, value = line.partition(":")
-            fields[key.strip()] = value.strip()
-        if "id" in fields:
+        fields = story_fields(path)
+        if fields is not None:
             found[fields["id"]] = fields
     return found
 
@@ -190,8 +209,97 @@ def git_lines(args):
     return done.stdout.splitlines()
 
 
+#: The frontmatter line that closes a story. What is counted is the *event* of a story closing, and
+#: the event is this line appearing — so it is matched as a line rather than parsed as frontmatter.
+CLOSING_LINE = "status: done"
+
+
+def closes_a_story(line):
+    """Whether one line of a story file closes it.
+
+    **One reader for this line, not two.** The two halves of the union used to disagree: history
+    matched `startswith`, the working tree matched equality, and a closing line with a trailing space
+    was therefore counted by history and not by the working tree — so the row moved under its own
+    commit and `X-39`'s flap survived on malformed frontmatter. `M-31` is the same shape and the same
+    fix: one reader decides, and both callers ask it.
+
+    Trailing whitespace is tolerated because the frontmatter parser tolerates it — `story_fields`
+    strips values, so a story whose line reads `status: done ` *is* closed on the board, and a day row
+    that disagreed with the board about that would be wrong rather than merely inconsistent. Leading
+    whitespace is not tolerated: frontmatter keys sit at column zero, and an indented line is inside
+    something else.
+    """
+    return line.rstrip() == CLOSING_LINE
+
+
+def uncommitted_story_facts():
+    """Filed and closed counts that exist in the working tree and not yet in any commit.
+
+    **Why the working tree is a source at all** (`X-39`). `Filed` and `Closed` come from git history,
+    so the count the report must contain for the current day is created *by the commit that contains
+    the report*: regenerate then commit and the report is one short, commit then regenerate and the
+    report is uncommitted. No ordering satisfies it, and the gate's `maturity` step was therefore red
+    in every commit that filed or closed a story — most commits — and never for a defect. It was
+    regenerated twice on 2026-07-30 with nothing wrong either time.
+
+    **The fix is the third of the three options `X-39` lists**: the day rows come from a source that
+    does not move under the commit that writes them, rather than the check tolerating the in-flight
+    day or the report marking it provisional. History *union* the working tree is that source —
+    `git commit` only relocates a fact from the second half to the first, leaving the union alone —
+    and it was chosen because the other two only move the flap. A tolerated day row is unchecked
+    while it is today and strictly checked tomorrow, so it goes red on some later commit that
+    touched nothing; a provisional row has the same problem or stops carrying numbers at all, and
+    the crossover date is the number to watch.
+
+    A clean tree contributes nothing, so CI and every commit that touches no story see exactly the
+    history-only answer they saw before, and `--check` stays as strict as it was.
+
+    `None` when git cannot answer, matching `discovery_rate`: an unavailable rate is reported as
+    unavailable and never as zero.
+    """
+    added = git_lines(["diff", "HEAD", "--diff-filter=A", "--name-only", "--", "docs/stories"])
+    untracked = git_lines(["ls-files", "--others", "--exclude-standard", "--", "docs/stories"])
+    changed = git_lines(["diff", "HEAD", "--unified=0", "--", "docs/stories"])
+    if added is None or untracked is None or changed is None:
+        return None
+
+    def is_story(line):
+        """A new file in the working tree that the board would read as a story.
+
+        Decided by `story_fields`, the same test `stories()` applies, because the file is on disk here
+        and can simply be read. A name-only test counted a scratch `notes.md` as a story filed today,
+        which made `--check` red on a correct tree and — worse — green in the tree holding the scratch
+        file and red on a clean checkout of the same commit, since the file is never committed. Local
+        green with CI red is the `X-22` failure class, so a name is not enough.
+
+        An undecodable file is not a story rather than a crash: a stray binary somebody left in the
+        directory is not this script's business, whereas a *tracked* story that cannot be read is, and
+        `stories()` still fails loudly on that.
+        """
+        path = ROOT / line.strip()
+        if path.suffix != ".md" or not path.is_file():
+            return False
+        try:
+            return story_fields(path) is not None
+        except (OSError, UnicodeDecodeError):
+            return False
+
+    untracked_stories = [line.strip() for line in untracked if is_story(line)]
+    filed = len([line for line in added if is_story(line)]) + len(untracked_stories)
+
+    # Tracked edits are read from the diff, which is what `git log -p` will show once committed.
+    closed = len([line for line in changed if line.startswith("+") and closes_a_story(line[1:])])
+    # An untracked file is absent from that diff, and committing it shows its whole body as `+`
+    # lines — so a story filed already closed has to be counted from its content or the two halves
+    # of the union would disagree about it.
+    for name in untracked_stories:
+        lines = (ROOT / name).read_text(encoding="utf-8").splitlines()
+        closed += len([line for line in lines if closes_a_story(line)])
+    return filed, closed
+
+
 def discovery_rate():
-    """Stories filed and closed per day, from git.
+    """Stories filed and closed per day, from git and the working tree.
 
     The least obvious output here and the most useful. Burn-down is not a maturity signal while
     discovery outpaces closure: a shrinking board means the authors have stopped being surprised,
@@ -200,6 +308,10 @@ def discovery_rate():
 
     Filed is a story file being added. Closed is a `status: done` line appearing — so a story that
     is reopened and closed again counts twice, which is the honest reading of "closed on that day".
+
+    Committed history gives every past day. Today's row adds what the working tree holds and no
+    commit does yet, so that the row does not change when that tree is committed — see
+    `uncommitted_story_facts`, and `X-39` for the gate step this repaired.
     """
     filed = collections.Counter()
     lines = git_lines(
@@ -213,7 +325,7 @@ def discovery_rate():
             day = line[2:].strip()
         elif line.strip().endswith(".md") and day:
             name = pathlib.PurePosixPath(line.strip()).name
-            if name not in {"README.md", "_TEMPLATE.md"}:
+            if name not in NOT_STORIES:
                 filed[day] += 1
 
     closed = collections.Counter()
@@ -226,8 +338,20 @@ def discovery_rate():
     for line in lines:
         if line.startswith("C "):
             day = line[2:].strip()
-        elif line.startswith("+status: done") and day:
+        elif line.startswith("+") and closes_a_story(line[1:]) and day:
             closed[day] += 1
+
+    pending = uncommitted_story_facts()
+    if pending is None:
+        return None
+    pending_filed, pending_closed = pending
+    today = datetime.date.today().isoformat()
+    # Guarded, because `Counter[key] += 0` creates the key: an unconditional bump would print a
+    # 0/0 row for today on every clean tree and give the table a day that nothing happened on.
+    if pending_filed:
+        filed[today] += pending_filed
+    if pending_closed:
+        closed[today] += pending_closed
     return filed, closed
 
 
@@ -472,6 +596,18 @@ def render():
             "Filed is a story file being added; closed is a `status: done` line appearing, so a story "
             "reopened and closed again counts twice — which is the honest reading of *closed that day*."
         )
+        lines.append("")
+        lines.append(
+            "Both are read from committed history **union the working tree**, and that union is what "
+            "makes today's row hold still: `git commit` moves a fact from the second source to the "
+            "first without changing the count, so the commit that files or closes a story can carry a "
+            "report of itself. It could not before `X-39`, when the day rows came from history alone "
+            "and the count the report needed was created by the commit containing the report — which "
+            "made the gate's `maturity` step red in most commits and never for a defect. The row is "
+            "not tolerated or marked provisional, because either of those leaves it unchecked today "
+            "and strictly checked tomorrow; the crossover date is the number to watch, so it is the "
+            "source that changed."
+        )
     lines.append("")
 
     # ---- the limits, last, because a reader who stops early should still have seen the table
@@ -503,6 +639,15 @@ def render():
         "the absence of open stories describing a known-wrong path, which is not the same as there "
         "being none. `S-27` — a `sips:` URI dialled in cleartext — was found on the day it was filed, "
         "not by this report."
+    )
+    lines.append(
+        "- **Today's row is a working answer, not yet a historical one.** It counts uncommitted story "
+        "files as filed and uncommitted `status: done` lines as closed, which is what lets the commit "
+        "that moves the table contain the table (`X-39`). A story here means what the board means by "
+        "one — a file carrying frontmatter with an `id` — so a scratch note left in the directory is "
+        "not a story filed today. So a dirty tree reports a day git history does not show yet: the "
+        "next commit makes it true, and `--check` calls it drift if that commit does not carry the "
+        "regenerated report. Every earlier day is history alone and cannot move."
     )
     lines.append(
         "- **Nothing here measures whether the tests are good**, only that they pass. Predicate 3 "
