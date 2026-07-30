@@ -168,11 +168,17 @@ impl std::error::Error for Error {
 }
 
 pub(crate) fn run(raw: &[String], format: Format) -> Exit {
-    let args = Args::new(raw);
-    if args.flag("help") || raw.iter().any(|a| a == "-h") {
+    if crate::wants_help(raw) {
         print!("{HELP}");
         return Exit::Success;
     }
+
+    // A `--book` with no path is refused rather than silently falling through to the environment
+    // and reporting whichever book happens to be there (`S-30`).
+    let args = match Args::new(raw) {
+        Ok(args) => args,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
 
     let peers = match load(args.value("book")) {
         Ok(peers) => peers,

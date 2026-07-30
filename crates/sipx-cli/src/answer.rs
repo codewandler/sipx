@@ -29,11 +29,17 @@ OPTIONS:
 ";
 
 pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    let args = Args::new(raw);
-    if args.flag("help") || raw.iter().any(|a| a == "-h") {
+    if crate::wants_help(raw) {
         print!("{HELP}");
         return Exit::Success;
     }
+
+    // Refused before the socket is bound, so a dropped flag cannot become an answerer that
+    // reports `listening` and then records nothing (`S-30`).
+    let args = match Args::new(raw) {
+        Ok(args) => args,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
 
     let clip = match args.value("play").map(read_clip) {
         Some(Ok(clip)) => Some(clip),

@@ -37,11 +37,18 @@ OPTIONS:
 ";
 
 pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    let args = Args::new(raw);
-    if args.flag("help") || raw.iter().any(|a| a == "-h") {
+    if crate::wants_help(raw) {
         print!("{HELP}");
         return Exit::Success;
     }
+
+    // Before the address of record, and before any socket: a valued flag that was given no value
+    // cannot be honoured, and reading it as absent is what let `--instance` register a device
+    // identity nobody chose (`S-30`).
+    let args = match Args::new(raw) {
+        Ok(args) => args,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
 
     let Some(aor) = args.positional() else {
         eprint!("{HELP}");
@@ -446,7 +453,8 @@ mod tests {
 
     fn parsed(items: &[&str]) -> Result<Reachability, String> {
         let raw: Vec<String> = items.iter().map(|item| (*item).to_owned()).collect();
-        reachability(&Args::new(&raw))
+        let args = Args::new(&raw).expect("a well formed argument list");
+        reachability(&args)
     }
 
     /// The flags build the config they select: the flow, the push parameters, and the wake.
