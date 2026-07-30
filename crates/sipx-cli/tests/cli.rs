@@ -817,3 +817,118 @@ async fn a_non_numeric_timeout_is_a_usage_error() {
     assert!(stderr.contains("--timeout"), "{stderr}");
     assert!(stderr.contains("whole number"), "{stderr}");
 }
+
+/// The flags a help text documents as taking a value: a flag whose line shows a `<PLACEHOLDER>`
+/// after it.
+///
+/// Derived from the binary's own `--help` rather than listed here, so a flag added later is swept
+/// in without anyone remembering to add it. `main.rs`'s
+/// `every_valued_flag_in_the_help_text_is_registered` holds the help text and `VALUED_FLAGS` to
+/// each other, which is what makes "documented with a placeholder" and "registered as valued" the
+/// same set.
+fn documented_valued_flags(help: &str) -> Vec<String> {
+    let mut flags = Vec::new();
+    for line in help.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("--") else {
+            continue;
+        };
+        let Some((flag, tail)) = rest.split_once(char::is_whitespace) else {
+            continue;
+        };
+        if tail.trim_start().starts_with('<') {
+            flags.push(format!("--{flag}"));
+        }
+    }
+    flags
+}
+
+/// A valued flag that was given no value is a usage error naming the flag — for every such flag,
+/// in every command, in both of the ways a value goes missing.
+///
+/// `Args::value` answered `None` both for "the flag was last, so nothing followed it" and for "the
+/// flag was absent", so every caller took its absent-branch and the command ran on a default that
+/// was never asked for: `sipx register sip:alice@example.com --outbound --instance` exited 0 having
+/// generated an instance URN nobody typed (`S-30`). The empty right-hand side is the same mistake
+/// wearing a shell's clothes — `--target "$ADDR"` with `ADDR` unset arrives as `--target ""`.
+///
+/// The extra arguments per command exist only to make the *old* behaviour cheap to observe: with
+/// the flag honoured this exits before opening a socket, but a run against the defect places a real
+/// call, and `--timeout 1`/`--wait 1` keep that to a second instead of the transaction layer's 32.
+#[tokio::test]
+async fn a_valued_flag_given_no_value_is_refused_by_every_command() {
+    let dir = scratch("valueless-flags");
+    let book = dir.join("peers");
+    std::fs::write(&book, "alice sip:alice@192.0.2.17:5060\n").expect("writes");
+
+    let cases: [(&str, &[&str]); 4] = [
+        ("register", &["sip:alice@example.com", "--json"]),
+        (
+            "dial",
+            &[
+                "sip:bob@192.0.2.1:5060",
+                "--local",
+                "127.0.0.1:0",
+                "--timeout",
+                "1",
+                "--json",
+            ],
+        ),
+        (
+            "answer",
+            &["--local", "127.0.0.1:0", "--wait", "1", "--json"],
+        ),
+        ("peers", &["--json"]),
+    ];
+
+    for (command, extra) in cases {
+        let help = sipx()
+            .args([command, "--help"])
+            .output()
+            .await
+            .expect("runs");
+        let help = String::from_utf8_lossy(&help.stdout).into_owned();
+        let flags = documented_valued_flags(&help);
+        assert!(
+            !flags.is_empty(),
+            "{command} documents no valued flags, so this asserts nothing:\n{help}"
+        );
+
+        for flag in &flags {
+            // Nothing after the flag at all, then an empty right-hand side.
+            for trailing in [flag.clone(), format!("{flag}=")] {
+                let mut args: Vec<&str> = vec![command];
+                args.extend(extra.iter().copied());
+                args.push(trailing.as_str());
+
+                let output = sipx()
+                    .args(&args)
+                    // `peers` falls back through the environment when `--book` is absent, and
+                    // whether this machine has a peer book must not decide the result.
+                    .env("SIPX_PEERS", &book)
+                    .output()
+                    .await
+                    .expect("runs");
+
+                let rendered = args.join(" ");
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert_eq!(
+                    output.status.code(),
+                    Some(2),
+                    "`sipx {rendered}` must be a usage error, not a run on a default: {stderr}"
+                );
+                assert!(
+                    stderr.contains(flag.as_str()),
+                    "`sipx {rendered}` must name {flag} in its refusal: {stderr}"
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).is_empty(),
+                    "`sipx {rendered}` refused, so nothing may reach stdout where it would be \
+                     parsed as a result: {:?}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
