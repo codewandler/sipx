@@ -4397,4 +4397,234 @@ mod tests {
             Err(Error::NoCommonCodec)
         ));
     }
+
+    /// One row of the agreement table: an offer, and the set the application selected.
+    ///
+    /// The property is in [`tests::the_answer_and_the_negotiated_codec_agree`]. The rows exist so
+    /// it is held against a *class* of rtpmap spellings rather than the one spelling that happened
+    /// to be found — `M-31` was filed because a fix aimed at `08000` alone would leave the shape
+    /// in place.
+    struct Agreement {
+        /// Why this row is in the table. Quoted in every failure, because a table-driven
+        /// assertion that only prints the values makes the reader guess what was being tested.
+        why: &'static str,
+        /// The `m=audio` format list, in the offerer's preference order.
+        formats: &'static str,
+        /// The offer's `a=rtpmap` attribute values.
+        rtpmaps: &'static [&'static str],
+        /// The set the application selected for this call.
+        codecs: Codecs,
+    }
+
+    /// The offers the agreement must hold over.
+    ///
+    /// Derived from `docs/specs/sdp-format-identity.md` §4's vectors.
+    fn agreement_table() -> Vec<Agreement> {
+        #[allow(unused_mut)]
+        let mut table = vec![
+            Agreement {
+                why: "a clock rate with a leading zero is the same rate — `08000` and `8000` are \
+                      numerically equal and textually different, which is the split M-31 was \
+                      filed for",
+                formats: "0 8",
+                rtpmaps: &["0 PCMU/08000", "8 PCMA/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "the same split in the *channel* field, so a fix aimed at the clock rate \
+                      alone does not close the story",
+                formats: "0 8",
+                rtpmaps: &["0 PCMU/8000/01", "8 PCMA/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "an offer that puts a codec sipx does not carry first: both rules must skip \
+                      it and settle further down the list, not refuse the stream",
+                formats: "18 0",
+                rtpmaps: &["18 G729/8000", "0 PCMU/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "a dynamic number carrying a codec sipx does have — 96 means PCMU here only \
+                      because this offer said so (RFC 8866 §6.6), and both rules must read the \
+                      map rather than the number",
+                formats: "96 0",
+                rtpmaps: &["96 PCMU/8000", "0 PCMU/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "a bare static type, the one case with no rtpmap for either rule to read",
+                formats: "0",
+                rtpmaps: &[],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "mono spelled out where RFC 8866 §6.6 would have let it be implied",
+                formats: "0",
+                rtpmaps: &["0 PCMU/8000/1"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "stereo G.711 is a different format from mono G.711, and neither rule may \
+                      settle on it",
+                formats: "0 8",
+                rtpmaps: &["0 PCMU/8000/2", "8 PCMA/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "a signed clock rate is not a decimal digit string, so it identifies nothing \
+                      for either rule",
+                formats: "0 8",
+                rtpmaps: &["0 PCMU/+8000", "8 PCMA/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "a clock rate that overflows u32 — hostile input, and a non-match for both \
+                      rules rather than a panic in either",
+                formats: "0 8",
+                rtpmaps: &["0 PCMU/99999999999999", "8 PCMA/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "an rtpmap with no clock rate at all identifies nothing",
+                formats: "0 8",
+                rtpmaps: &["0 PCMU", "8 PCMA/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "an empty clock rate is not zero and is not 8000",
+                formats: "0 8",
+                rtpmaps: &["0 PCMU/", "8 PCMA/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "whitespace inside the value: a rate neither rule can read, and both must \
+                      fail to read it the same way",
+                formats: "0 8",
+                rtpmaps: &["0 PCMU/ 8000", "8 PCMA/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "a fourth field is outside RFC 8866 §6.6's grammar, so the value identifies \
+                      nothing — and must do so for both rules rather than one silently ignoring it",
+                formats: "0 8",
+                rtpmaps: &["0 PCMU/8000/1/9", "8 PCMA/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "an Opus-first offer reaching a call that selected G.711: the M-30 case, and \
+                      true in both feature configurations — with `opus` off no rtpmap can name it, \
+                      with it on the set does not carry it",
+                formats: "111 0",
+                rtpmaps: &["111 opus/48000/2", "0 PCMU/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "a dynamic number with no rtpmap is uninterpretable whatever the number, so \
+                      the stream is refused rather than guessed at",
+                formats: "111",
+                rtpmaps: &[],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "a stream offering only telephone-event is not a call: the answer rejects it \
+                      and negotiation must refuse it too",
+                formats: "101",
+                rtpmaps: &["101 telephone-event/8000"],
+                codecs: Codecs::G711,
+            },
+            Agreement {
+                why: "an offer of nothing sipx carries at all — both rules refuse, and the \
+                      agreement holds on the refusing side as well",
+                formats: "18",
+                rtpmaps: &["18 G729/8000"],
+                codecs: Codecs::G711,
+            },
+        ];
+
+        #[cfg(feature = "opus")]
+        table.extend([
+            Agreement {
+                why: "Opus on the set that carries it, on the number this offer assigned",
+                formats: "111 0",
+                rtpmaps: &["111 opus/48000/2", "0 PCMU/8000"],
+                codecs: Codecs::Opus,
+            },
+            Agreement {
+                why: "the leading-zero split on Opus's own clock rate, so the class is closed in \
+                      the gated path too and not only for G.711",
+                formats: "111 0",
+                rtpmaps: &["111 opus/048000/2", "0 PCMU/8000"],
+                codecs: Codecs::Opus,
+            },
+            Agreement {
+                why: "Opus at a rate RFC 7587 §7 does not assign is nothing sipx has, whatever \
+                      number is beside it",
+                formats: "111 0",
+                rtpmaps: &["111 opus/16000/2", "0 PCMU/8000"],
+                codecs: Codecs::Opus,
+            },
+        ]);
+
+        table
+    }
+
+    /// The answer sipx puts on the wire and the codec it configures the media session with must
+    /// name the same format. **`M-31`'s failing-first test.**
+    ///
+    /// This is the assertion that fails while the two rules disagree: with the answer comparing an
+    /// rtpmap clock rate as text and `codec_named` parsing it to `u32`, an offer of
+    /// `a=rtpmap:0 PCMU/08000` settles on `Pcmu` at payload type 0 while the answer names only
+    /// `8`. sipx would then send µ-law on a number the answer never offered *and* decode the
+    /// peer's PCMA through a µ-law session — audible garbage rather than silence, with nothing in
+    /// the stack reporting an error.
+    ///
+    /// The property is a biconditional, not a one-way check, because both halves are reachable
+    /// defects: a codec the answer never named is a session the far end cannot read, and a stream
+    /// the answer accepted while negotiation refused it is a call that fails after the 200 OK went
+    /// out. `wire_payload_type` is the value compared because that is the byte that leaves —
+    /// `Some(0)` and `None` are two descriptions of the same PCMU.
+    #[test]
+    fn the_answer_and_the_negotiated_codec_agree() {
+        let local: IpAddr = "192.0.2.9".parse().expect("a literal address");
+
+        for row in agreement_table() {
+            let offer = offered(row.formats, row.rtpmaps);
+            let answered = sipx_sdp::answer(&offer, &row.codecs.capabilities(local, 40000));
+            let audio = answered
+                .media
+                .iter()
+                .find(|stream| stream.media == "audio")
+                .expect("the answer has one m= line per offered stream");
+
+            match negotiated(&offer, row.codecs) {
+                Ok(settled) => {
+                    assert!(
+                        !audio.is_rejected(),
+                        "{}: negotiation settled on {:?} while the answer rejected the stream",
+                        row.why,
+                        settled.codec,
+                    );
+                    let wire = settled.wire_payload_type().to_string();
+                    assert!(
+                        audio.formats.contains(&wire),
+                        "{}: negotiation settled on {:?} at payload type {wire}, which the answer \
+                         never named ({:?})",
+                        row.why,
+                        settled.codec,
+                        audio.formats,
+                    );
+                }
+                Err(error) => {
+                    assert!(
+                        audio.is_rejected(),
+                        "{}: negotiation refused the stream ({error}) while the answer accepted it \
+                         with formats {:?}",
+                        row.why,
+                        audio.formats,
+                    );
+                }
+            }
+        }
+    }
 }
