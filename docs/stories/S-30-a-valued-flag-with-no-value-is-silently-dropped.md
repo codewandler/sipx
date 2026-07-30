@@ -2,7 +2,7 @@
 id: S-30
 title: Refuse a valued flag that was given no value, instead of ignoring it
 pillar: Signalling
-status: in-progress
+status: done
 priority: 5
 design: docs/designs/sip-core.md
 epic: sip-core
