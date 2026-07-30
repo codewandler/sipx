@@ -63,7 +63,7 @@ pub struct Case {
 impl Case {
     /// The archive bytes turned into on-the-wire SIP.
     ///
-    /// Two transformations, both forced by the archive rather than chosen:
+    /// Three transformations, all forced by the archive rather than chosen:
     ///
     /// 1. **LF becomes CRLF.** RFC 3261 §7 terminates every start line and header field with
     ///    CRLF. The archive holds none, so without this every message is one unterminated
@@ -73,9 +73,29 @@ impl Case {
     ///    truncated message, so a parser is right to refuse it — see how RFC 4475's `baddn` is
     ///    classified in [`crate::rfc4475`]. Refusing it here would test the archive's
     ///    formatting, not sipx's IPv6 handling.
+    /// 3. **`Content-Length` is set to the actual body length.** The three messages that carry
+    ///    SDP declare a length that matches neither the LF-terminated body in the archive nor
+    ///    the CRLF-terminated one:
     ///
-    /// Neither touches an octet inside an IPv6 reference, a URI, or a body. What the corpus is
-    /// for survives intact.
+    ///    | case | declared | archive body (LF) | wire body (CRLF) |
+    ///    | --- | --- | --- | --- |
+    ///    | §4.6 `ipv6-in-sdp` | 268 | 242 | 251 |
+    ///    | §4.8 `mult-ip-in-sdp` | 181 | 180 | 189 |
+    ///    | §4.9 `ipv4-mapped-ipv6` | 236 | 236 | 245 |
+    ///
+    ///    No single convention reconciles those, so the declared values are simply wrong — and
+    ///    RFC 5118 has one verified erratum, on §4.3's wording, which does not mention them. A
+    ///    parser is *right* to refuse §4.6 as truncated and right to discard the tail of the
+    ///    other two, but doing so here would measure the RFC's arithmetic instead of sipx's
+    ///    IPv6 handling, and would cut §4.8's and §4.9's SDP off mid-body before `sipx-sdp`
+    ///    ever saw the `c=` lines the sections exist to exercise.
+    ///
+    ///    Framing is covered thoroughly by RFC 4475, which has cases built for it
+    ///    (`clerr`, `ncl`, `mcl01`) and correct lengths everywhere else.
+    ///
+    /// None of the three touches an octet inside an IPv6 reference, a URI, or a body — only line
+    /// terminators and the digits of one header value. What the corpus is for survives intact,
+    /// and `wire_changes_only_terminators_and_content_length` holds that claim.
     #[must_use]
     pub fn wire(&self) -> Bytes {
         let mut out = Vec::with_capacity(self.bytes.len() + self.bytes.len() / 8 + 2);
@@ -88,7 +108,37 @@ impl Case {
         if !out.windows(4).any(|w| w == b"\r\n\r\n") {
             out.extend_from_slice(b"\r\n");
         }
-        Bytes::from(out)
+
+        let Some(separator) = out.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return Bytes::from(out);
+        };
+        let (headers, body) = out.split_at(separator + 4);
+        let body_len = body.len();
+
+        // Rewrite only the digits of the Content-Length value. The field name, its case and the
+        // separator are left exactly as they arrived, so nothing about how the header is spelled
+        // is quietly normalised on the way through.
+        let mut result = Vec::with_capacity(out.len() + 8);
+        for (i, line) in headers.split(|&b| b == b'\n').enumerate() {
+            if i > 0 {
+                result.push(b'\n');
+            }
+            let name_len = line.iter().position(|&b| b == b':');
+            let is_content_length = name_len
+                .and_then(|c| line.get(..c))
+                .is_some_and(|name| name.eq_ignore_ascii_case(b"Content-Length"));
+            match name_len.filter(|_| is_content_length) {
+                Some(colon) => {
+                    result.extend_from_slice(line.get(..=colon).unwrap_or(line));
+                    result.push(b' ');
+                    result.extend_from_slice(body_len.to_string().as_bytes());
+                    result.push(b'\r');
+                }
+                None => result.extend_from_slice(line),
+            }
+        }
+        result.extend_from_slice(body);
+        Bytes::from(result)
     }
 
     /// The message as a lossy string, for assertion messages.
@@ -207,9 +257,71 @@ corpus! {
     "ipv6-correct-abnf-2-colons" => "4.10", "IPv6 Reference Bug in RFC 3261 ABNF", ParseOk;
 }
 
+/// A place where sipx currently departs from what RFC 5118 requires.
+///
+/// The [`Case`] table above records what the *RFC* says, always — a classification that drifted
+/// towards what sipx happens to do would stop being a measurement. This is the separate, explicit
+/// record of the gap, so that neither fact has to be softened to accommodate the other.
+///
+/// Keeping the gap in a typed list rather than a comment is deliberate. The harness asserts that
+/// each deviation still behaves exactly as described, so the moment the underlying defect is
+/// fixed the assertion fails and whoever fixed it is told to delete the entry. A deviation
+/// recorded in prose would instead quietly become false.
+#[derive(Debug, Clone, Copy)]
+pub struct Deviation {
+    /// The case that deviates.
+    pub case: &'static str,
+    /// What RFC 5118 requires, quoted or closely paraphrased.
+    pub rfc_requires: &'static str,
+    /// What sipx does instead, in enough detail to assert on.
+    pub sipx_does: &'static str,
+    /// Why this story records the gap rather than closing it.
+    pub why_recorded: &'static str,
+}
+
+/// Every known departure from RFC 5118. One, at the time of writing.
+pub static DEVIATIONS: &[Deviation] = &[Deviation {
+    case: "ipv6-bug-abnf-3-colons",
+    rfc_requires: "§4.10: \"following the Robustness Principle [RFC1122], an implementation must \
+                   tolerate both of the above constructs\" — the two-colon reference \
+                   [2001:db8::192.0.2.1] and the three-colon [2001:db8:::192.0.2.1] that RFC \
+                   3261's ABNF permits by accident, having inherited it from the obsoleted RFC \
+                   2373.",
+    sipx_does: "Rejects the message with ParseError::StartLine(UriError::Host): the three-colon \
+                form is not a valid IPv6 address under RFC 4291, which is the grammar sipx's \
+                address parser implements.",
+    why_recorded: "Tolerating it means accepting a construct no current address grammar allows, \
+                   narrowly enough that ':::' is read as '::' only where an embedded IPv4 address \
+                   follows — the one position the RFC 3261 ABNF derivation can produce it. That is \
+                   a change to how a published crate parses hostile input, and it belongs to a \
+                   defect story with its own review rather than to the story that measures the \
+                   corpus. X-16 is the measurement.",
+}];
+
+/// The recorded deviation for a case, if it has one.
+#[must_use]
+pub fn deviation(name: &str) -> Option<&'static Deviation> {
+    DEVIATIONS.iter().find(|d| d.case == name)
+}
+
+/// Whether a case is one sipx is known to handle contrary to the RFC.
+#[must_use]
+pub fn deviates(name: &str) -> bool {
+    deviation(name).is_some()
+}
+
 /// Every case the parser tests assert on.
 pub fn classified() -> impl Iterator<Item = &'static Case> {
     CASES.iter().filter(|c| c.is_classified())
+}
+
+/// Cases that behave as RFC 5118 requires — every case except the recorded deviations.
+///
+/// This is what the conformance assertions iterate. It is deliberately *not* a filter on
+/// `expect`: the classification says what the RFC requires, and subtracting the deviations from it
+/// is what keeps "what the RFC says" and "what sipx does" as two separate, comparable facts.
+pub fn conforming() -> impl Iterator<Item = &'static Case> {
+    CASES.iter().filter(|c| !deviates(c.name))
 }
 
 /// Cases matching a given expectation.
@@ -292,6 +404,31 @@ mod tests {
         );
     }
 
+    /// A deviation must name a real case, and must not be recorded for a case the RFC itself
+    /// calls invalid — "sipx rejects a message the RFC says to reject" is conformance, not a gap.
+    #[test]
+    fn deviations_name_real_and_valid_cases() {
+        for d in DEVIATIONS {
+            let c = case(d.case).unwrap_or_else(|| panic!("{} is not in the corpus", d.case));
+            assert_eq!(
+                c.expect,
+                ParseOk,
+                "{}: a deviation only makes sense for a message the RFC calls valid",
+                d.case
+            );
+            assert!(
+                !d.rfc_requires.is_empty() && !d.sipx_does.is_empty() && !d.why_recorded.is_empty(),
+                "{}: a deviation has to say what the RFC wants, what sipx does, and why it stands",
+                d.case
+            );
+        }
+        assert_eq!(
+            conforming().count() + DEVIATIONS.len(),
+            CASES.len(),
+            "every case is either conforming or a recorded deviation"
+        );
+    }
+
     #[test]
     fn case_names_are_unique() {
         let names: HashSet<_> = CASES.iter().map(|c| c.name).collect();
@@ -365,20 +502,133 @@ mod tests {
     }
 
     /// The transformation must not touch anything the corpus is *for*. Strip line terminators
-    /// from both forms and they must be identical — which is exactly the claim that no IPv6
-    /// reference, URI or body octet was altered.
+    /// and the Content-Length line from both forms and they must be identical — which is exactly
+    /// the claim that no IPv6 reference, URI or body octet was altered.
     #[test]
-    fn wire_changes_only_line_terminators() {
+    fn wire_changes_only_terminators_and_content_length() {
         for c in CASES {
-            let strip = |b: &[u8]| -> Vec<u8> {
-                b.iter().copied().filter(|&b| b != b'\r' && b != b'\n').collect()
+            // Trailing blank lines are dropped from both sides: adding the header-section
+            // terminator the archive omits for §4.10 is transformation 2, and comparing with it
+            // in place would flag the very thing `wire` documents. Every other line, in order,
+            // must be identical.
+            let reduce = |b: &[u8]| -> Vec<Vec<u8>> {
+                let mut lines: Vec<Vec<u8>> = b
+                    .split(|&b| b == b'\n')
+                    .map(|line| {
+                        line.iter()
+                            .copied()
+                            .filter(|&b| b != b'\r')
+                            .collect::<Vec<u8>>()
+                    })
+                    .filter(|line| !starts_with_ignore_case(line, b"Content-Length:"))
+                    .collect();
+                while lines.last().is_some_and(Vec::is_empty) {
+                    lines.pop();
+                }
+                lines
             };
             assert_eq!(
-                strip(&c.wire()),
-                strip(c.bytes),
-                "{}: wire altered more than line terminators",
+                reduce(&c.wire()),
+                reduce(c.bytes),
+                "{}: wire altered more than line terminators and the Content-Length value",
                 c.name
             );
         }
+    }
+
+    fn starts_with_ignore_case(line: &[u8], prefix: &[u8]) -> bool {
+        line.get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    }
+
+    /// `wire`'s Content-Length must describe the body it actually ships, or the SDP cases get cut
+    /// off mid-body before `sipx-sdp` sees the `c=` lines they exist to exercise.
+    #[test]
+    fn wire_content_length_matches_the_body_it_ships() {
+        for c in CASES {
+            let wire = c.wire();
+            let separator = wire
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .expect("wire terminates the header section");
+            let body_len = wire.len() - (separator + 4);
+
+            let declared: Option<usize> = wire
+                .get(..separator)
+                .unwrap_or(&[])
+                .split(|&b| b == b'\n')
+                .find(|line| starts_with_ignore_case(line, b"Content-Length:"))
+                .and_then(|line| {
+                    let value = line.split(|&b| b == b':').nth(1)?;
+                    std::str::from_utf8(value).ok()?.trim().parse().ok()
+                });
+
+            assert_eq!(
+                declared,
+                Some(body_len),
+                "{}: wire's Content-Length must match its body",
+                c.name
+            );
+        }
+    }
+
+    /// The RFC's own arithmetic, recorded rather than papered over.
+    ///
+    /// RFC 5118's three SDP-bearing messages declare a Content-Length that matches neither the
+    /// archive's LF-terminated body nor a CRLF-terminated one, and the RFC's single verified
+    /// erratum (1311, on §4.3's wording) does not mention it. This test states the discrepancy as
+    /// a fact about the corpus, so that a future re-import which silently "fixed" the archive
+    /// would be noticed rather than absorbed.
+    #[test]
+    fn the_rfc_declares_wrong_content_lengths_for_its_sdp_messages() {
+        let declared_in_archive = |c: &Case| -> Option<usize> {
+            c.bytes
+                .split(|&b| b == b'\n')
+                .find(|line| starts_with_ignore_case(line, b"Content-Length:"))
+                .and_then(|line| {
+                    let value = line.split(|&b| b == b':').nth(1)?;
+                    std::str::from_utf8(value).ok()?.trim().parse().ok()
+                })
+        };
+
+        // (case, what the RFC declares, the archive's actual LF-terminated body length)
+        for (name, declared, actual) in [
+            ("ipv6-in-sdp", 268, 242),
+            ("mult-ip-in-sdp", 181, 180),
+            ("ipv4-mapped-ipv6", 236, 236),
+        ] {
+            let c = case(name).expect("in corpus");
+            assert_eq!(
+                declared_in_archive(c),
+                Some(declared),
+                "{name}: RFC 5118 declares Content-Length {declared}"
+            );
+
+            let separator = c
+                .bytes
+                .windows(2)
+                .position(|w| w == b"\n\n")
+                .expect("an SDP-bearing message has a body");
+            assert_eq!(
+                c.bytes.len() - (separator + 2),
+                actual,
+                "{name}: the archive's body is {actual} bytes as shipped"
+            );
+        }
+
+        // §4.9 is the only one whose declared length happens to match the LF form, and it still
+        // needs correcting for the wire form, because CRLF makes the body nine bytes longer.
+        // Stating that keeps the table above from reading as if §4.9 were fine.
+        let mapped = case("ipv4-mapped-ipv6").expect("in corpus");
+        let wire = mapped.wire();
+        let separator = wire
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("terminated");
+        assert_eq!(
+            wire.len() - (separator + 4),
+            245,
+            "§4.9's body is 245 bytes once CRLF-terminated, not the 236 it declares"
+        );
     }
 }

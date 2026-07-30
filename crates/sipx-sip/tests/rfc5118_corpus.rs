@@ -37,17 +37,33 @@ fn ip(literal: &str) -> IpAddr {
     literal.parse().expect("test literal is a valid address")
 }
 
-/// The address a request's R-URI names, or a description of why it does not name one.
-fn request_uri_host(case: &Case) -> Host {
+/// The address inside a [`Host`].
+///
+/// `Host` deliberately implements no `PartialEq` — RFC 3261 equivalence is not transitive, and
+/// `sipx-sip` documents that at the type — so the assertions here compare the `IpAddr` it holds.
+/// That is the stronger assertion anyway: it fails both when the address is wrong *and* when the
+/// bracketed reference was mistaken for an ordinary hostname, which is the exact failure mode
+/// RFC 5118 was written to catch.
+fn host_ip(host: &Host, what: &str) -> IpAddr {
+    match host {
+        Host::Ip(ip) => *ip,
+        Host::Name(_) => {
+            panic!("{what}: expected an IPv6 literal, but it parsed as the hostname {host}")
+        }
+    }
+}
+
+/// The address a request's R-URI names.
+fn request_uri_ip(case: &Case) -> IpAddr {
     let msg = parse(case).unwrap_or_else(|e| panic!("RFC 5118 {} must parse: {e:?}", case.name));
     let request = msg
         .as_request()
         .unwrap_or_else(|| panic!("RFC 5118 {} is a request", case.name));
-    request
+    let host = request
         .uri
         .host()
-        .cloned()
-        .unwrap_or_else(|| panic!("RFC 5118 {} R-URI must name a host", case.name))
+        .unwrap_or_else(|| panic!("RFC 5118 {} R-URI must name a host", case.name));
+    host_ip(host, case.name)
 }
 
 /// The story's named assertion, and the one that decides whether this corpus is being run at
@@ -71,6 +87,13 @@ fn every_rfc5118_message_is_classified_and_behaves_as_the_rfc_says() {
             case.section,
             case.name
         );
+
+        // A case with a recorded deviation is asserted by `recorded_deviations_still_hold`
+        // instead. The classification above still says what the RFC requires; skipping it here
+        // is what stops the record of sipx's behaviour from overwriting the record of the RFC's.
+        if rfc5118::deviates(case.name) {
+            continue;
+        }
 
         match case.expect {
             Expect::ParseOk => {
@@ -131,18 +154,70 @@ fn every_rfc5118_message_is_classified_and_behaves_as_the_rfc_says() {
 /// fails by being too strict far more often than by being too lax.
 #[test]
 fn no_valid_message_in_the_corpus_is_rejected() {
-    let refused: Vec<_> = rfc5118::expecting(Expect::ParseOk)
+    let refused: Vec<_> = rfc5118::conforming()
+        .filter(|c| matches!(c.expect, Expect::ParseOk))
         .filter_map(|c| parse(c).err().map(|e| (c.section, c.name, e)))
         .collect();
     assert!(
         refused.is_empty(),
         "RFC 5118 messages the RFC calls valid were rejected: {refused:?}"
     );
+
+    // Guard the guard. The assertion above gets weaker every time a case is moved out of its
+    // scope, so state how many messages it is actually covering: eleven valid messages, of which
+    // one has a recorded deviation, leaves ten that must parse.
     assert_eq!(
         rfc5118::expecting(Expect::ParseOk).count(),
         11,
-        "eleven of the twelve are valid; if this drops, the assertion above got easier"
+        "RFC 5118 calls eleven of its twelve messages valid"
     );
+    assert_eq!(
+        rfc5118::DEVIATIONS.len(),
+        1,
+        "one recorded deviation; a new one needs a deliberate decision, not a silent skip"
+    );
+    assert_eq!(
+        rfc5118::conforming()
+            .filter(|c| matches!(c.expect, Expect::ParseOk))
+            .count(),
+        10,
+        "so ten valid messages are covered by the assertion above"
+    );
+}
+
+/// Every recorded deviation must still deviate, in exactly the way it is recorded.
+///
+/// This is the test that stops [`rfc5118::DEVIATIONS`] from rotting into a lie. Fix the defect and
+/// this test fails, which is the intended outcome: it tells whoever fixed it to delete the entry
+/// and let the conformance assertions take over.
+#[test]
+fn recorded_deviations_still_hold() {
+    for d in rfc5118::DEVIATIONS {
+        let case = rfc5118::case(d.case).expect("a deviation names a real case");
+        assert_eq!(
+            case.expect,
+            Expect::ParseOk,
+            "{}: recorded as a deviation from a requirement to accept",
+            d.case
+        );
+
+        let err = parse(case).err().unwrap_or_else(|| {
+            panic!(
+                "RFC 5118 {} ({}) now parses, so this deviation is fixed.\n\n\
+                 The RFC requires: {}\n\n\
+                 It was recorded because: {}\n\n\
+                 Delete the entry from rfc5118::DEVIATIONS — the conformance assertions will \
+                 then cover this case, which is what should happen.",
+                case.section, d.case, d.rfc_requires, d.why_recorded
+            )
+        });
+        assert_eq!(
+            fault_of(&err),
+            Some(Fault::StartLine),
+            "{}: recorded as rejected in the Request-URI, got {err:?}",
+            d.case
+        );
+    }
 }
 
 /// §4.1 — the baseline. Correctly delimited references in the R-URI, the Via and the Contact.
@@ -150,8 +225,8 @@ fn no_valid_message_in_the_corpus_is_rejected() {
 fn valid_ipv6_references_are_read_from_every_position() {
     let case = rfc5118::case("ipv6-good").expect("in corpus");
     assert_eq!(
-        request_uri_host(case),
-        Host::Ip(ip("2001:db8::10")),
+        request_uri_ip(case),
+        ip("2001:db8::10"),
         "§4.1 R-URI holds an IPv6 reference"
     );
 
@@ -162,8 +237,8 @@ fn valid_ipv6_references_are_read_from_every_position() {
         .expect("Via present")
         .expect("Via parses");
     assert_eq!(
-        via.host,
-        Host::Ip(ip("2001:db8::9:1")),
+        host_ip(&via.host, "§4.1 Via"),
+        ip("2001:db8::9:1"),
         "§4.1 Via sent-by holds an IPv6 reference"
     );
     assert_eq!(via.port, None, "§4.1 Via states no port");
@@ -216,10 +291,11 @@ fn port_ambiguous_uri_takes_the_port_into_the_address() {
     let case = rfc5118::case("port-ambiguous").expect("in corpus");
     let msg = parse(case).expect("§4.3 is well-formed from a parsing perspective");
     let uri = &msg.as_request().expect("a REGISTER").uri;
+    let host = host_ip(uri.host().expect("§4.3 R-URI names a host"), "§4.3 R-URI");
 
     assert_eq!(
-        uri.host().cloned(),
-        Some(Host::Ip(ip("2001:db8::10:5070"))),
+        host,
+        ip("2001:db8::10:5070"),
         "§4.3: the whole bracketed reference is the address — 5070 is its last group"
     );
     assert_eq!(
@@ -231,8 +307,8 @@ fn port_ambiguous_uri_takes_the_port_into_the_address() {
     // Reversal guard. The decision above is only meaningful if the *other* reading is a
     // different answer, so state what sipx must NOT have decided.
     assert_ne!(
-        uri.host().cloned(),
-        Some(Host::Ip(ip("2001:db8::10"))),
+        host,
+        ip("2001:db8::10"),
         "§4.3: the port must not have been split out of the reference"
     );
     assert_ne!(uri.port(), Some(5070), "§4.3: 5070 is address, not port");
@@ -247,18 +323,17 @@ fn port_unambiguous_uri_splits_host_from_port() {
     let uri = &msg.as_request().expect("a REGISTER").uri;
 
     assert_eq!(
-        uri.host().cloned(),
-        Some(Host::Ip(ip("2001:db8::10"))),
+        host_ip(uri.host().expect("§4.4 R-URI names a host"), "§4.4 R-URI"),
+        ip("2001:db8::10"),
         "§4.4: the address ends at the ']'"
     );
     assert_eq!(uri.port(), Some(5070), "§4.4: the port follows the ']'");
 
     // The two sections differ by two characters and must not resolve alike.
     let ambiguous = rfc5118::case("port-ambiguous").expect("in corpus");
-    let ambiguous_uri_host = request_uri_host(ambiguous);
     assert_ne!(
-        ambiguous_uri_host,
-        Host::Ip(ip("2001:db8::10")),
+        request_uri_ip(ambiguous),
+        ip("2001:db8::10"),
         "§4.3 and §4.4 must not parse to the same host, or the ']' is being ignored"
     );
 }
@@ -288,8 +363,8 @@ fn via_received_is_accepted_with_and_without_delimiters() {
             .unwrap_or_else(|e| panic!("§4.5 {name}: the topmost Via must parse: {e:?}"));
 
         assert_eq!(
-            via.host,
-            Host::Ip(ip("2001:db8::9:1")),
+            host_ip(&via.host, "§4.5 Via sent-by"),
+            ip("2001:db8::9:1"),
             "§4.5 {name}: sent-by is a bracketed reference in both messages"
         );
         assert_eq!(
@@ -314,18 +389,18 @@ fn mixed_ipv4_and_ipv6_via_list_parses_every_hop() {
         .collect();
 
     assert_eq!(hops.len(), 3, "§4.7 carries three Via header fields");
-    assert_eq!(hops[0].host, Host::Ip(ip("2001:db8::9:1")));
+    assert_eq!(host_ip(&hops[0].host, "§4.7 hop 1"), ip("2001:db8::9:1"));
     assert_eq!(
         hops[0].port,
         Some(6050),
         "§4.7 hop 1 states a port outside the ']'"
     );
     assert_eq!(
-        hops[1].host,
-        Host::Ip(ip("192.0.2.1")),
+        host_ip(&hops[1].host, "§4.7 hop 2"),
+        ip("192.0.2.1"),
         "§4.7 hop 2 is IPv4"
     );
-    assert_eq!(hops[2].host, Host::Ip(ip("2001:db8::9:255")));
+    assert_eq!(host_ip(&hops[2].host, "§4.7 hop 3"), ip("2001:db8::9:255"));
     assert_eq!(
         hops[2].received(),
         Some(&b"192.0.2.200"[..]),
@@ -348,12 +423,15 @@ fn ipv4_mapped_addresses_parse_in_signalling() {
 
     assert_eq!(hops.len(), 2, "§4.9 carries two Via header fields");
     assert_eq!(
-        hops[0].host,
-        Host::Ip(ip("::ffff:192.0.2.10")),
+        host_ip(&hops[0].host, "§4.9 hop 1"),
+        ip("::ffff:192.0.2.10"),
         "§4.9 hop 1 is an IPv4-mapped address"
     );
     assert_eq!(hops[0].port, Some(19823), "§4.9 hop 1 states a port");
-    assert_eq!(hops[1].host, Host::Ip(ip("::ffff:192.0.2.2")));
+    assert_eq!(
+        host_ip(&hops[1].host, "§4.9 hop 2"),
+        ip("::ffff:192.0.2.2")
+    );
     assert_eq!(hops[1].port, None);
 }
 
@@ -362,26 +440,35 @@ fn ipv4_mapped_addresses_parse_in_signalling() {
 /// the grammar, but RFC 5118 requires tolerance of both: "following the Robustness Principle
 /// [RFC1122], an implementation must tolerate both of the above constructs."
 ///
-/// Both messages must parse, and both must name the *same* address — the extra colon is noise,
-/// not a different host. That second assertion is the one with teeth: a parser that accepted the
-/// three-colon form but read a different address out of it would satisfy "tolerate" while
-/// silently routing somewhere else.
+/// The corpus found a defect here, and this is the honest half of §4.10: the correct two-colon
+/// construct parses, and the embedded IPv4 address inside an IPv6 reference is read properly.
+///
+/// The three-colon half is **not** tolerated by sipx today. That is recorded as the single entry
+/// in [`rfc5118::DEVIATIONS`] and asserted by `recorded_deviations_still_hold`, rather than
+/// asserted here as if it worked. See the deviation's own text for what the RFC requires and why
+/// closing the gap is a defect story rather than part of this measurement.
 #[test]
-fn the_rfc_3261_abnf_bug_reference_is_tolerated() {
-    let expected = Host::Ip(ip("2001:db8::192.0.2.1"));
-
+fn the_correct_abnf_reference_with_an_embedded_ipv4_address_parses() {
     let correct = rfc5118::case("ipv6-correct-abnf-2-colons").expect("in corpus");
     assert_eq!(
-        request_uri_host(correct),
-        expected,
-        "§4.10: the two-colon form is the correct construct"
+        request_uri_ip(correct),
+        ip("2001:db8::192.0.2.1"),
+        "§4.10: the two-colon form is the correct construct and must parse"
     );
 
+    // The two §4.10 messages differ only by the extra colon, which appears twice — once in the
+    // Request-URI and once in the To header. Stating that localises the defect precisely:
+    // everything else about the rejected message is byte-for-byte the message that parses.
     let buggy = rfc5118::case("ipv6-bug-abnf-3-colons").expect("in corpus");
     assert_eq!(
-        request_uri_host(buggy),
-        expected,
-        "§4.10: the three-colon form must be tolerated and resolve to the same address"
+        buggy.bytes.len(),
+        correct.bytes.len() + 2,
+        "§4.10's pair differs by exactly the two extra colons"
+    );
+    assert_eq!(
+        buggy.lossy().replace(":::", "::"),
+        correct.lossy(),
+        "§4.10's buggy message is the correct one with ':::' for '::'"
     );
 }
 
@@ -391,7 +478,7 @@ fn the_rfc_3261_abnf_bug_reference_is_tolerated() {
 /// colon away, but a parser that does it unasked has changed a message it was only forwarding.
 #[test]
 fn valid_messages_reserialize_byte_exactly() {
-    for case in rfc5118::expecting(Expect::ParseOk) {
+    for case in rfc5118::conforming().filter(|c| matches!(c.expect, Expect::ParseOk)) {
         let wire = case.wire();
         let msg = parse(case).unwrap_or_else(|e| panic!("{} must parse: {e:?}", case.name));
         assert_eq!(
@@ -407,7 +494,7 @@ fn valid_messages_reserialize_byte_exactly() {
 /// However a message is chopped up, it parses the same.
 #[test]
 fn stream_framing_is_independent_of_chunk_boundaries() {
-    for case in rfc5118::expecting(Expect::ParseOk) {
+    for case in rfc5118::conforming().filter(|c| matches!(c.expect, Expect::ParseOk)) {
         let wire = case.wire();
         let mut whole = StreamParser::new(Limits::stream());
         let Ok(reference) = whole.push(&wire) else {
