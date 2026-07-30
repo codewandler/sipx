@@ -12,6 +12,10 @@ How bytes become the types in [sip-message.md](sip-message.md).
   quoted strings), §25 (ABNF).
 - RFC 5234 (ABNF).
 - RFC 4475 (acceptance corpus).
+- RFC 4291 §2.2 (IPv6 address text representation), which obsoletes the RFC 2373 grammar
+  RFC 3261 §25.1 embedded — see §4.8.
+- RFC 5118 (IPv6 acceptance corpus), §4.10 normatively requiring tolerance of the construct
+  RFC 3261's inherited grammar derives.
 
 **Out of scope:** header *value* grammars (in `sip-message.md` §5 and implemented per header),
 and transport behaviour on rejection (in `sip-transport.md`).
@@ -153,6 +157,81 @@ Note that stray separators *within* a header value are not a structural fault: `
 line and violates only the `Via` grammar. The identical value under an unknown header name is
 legal — `wsinv`, a valid message, carries `UnknownHeaderWithUnusualValue: ;;,,;;,;`. The fault
 is therefore unreachable without knowing which header it is, and belongs to the typed layer.
+
+### 4.8 IPv6 references
+
+Where a `host` may be an IPv6 reference — a Request-URI, a `Via` sent-by, any URI in an address
+header — the text between `[` and `]` is an address and nothing else.
+
+**[sipx] The `]` is what the parser keys on.** Everything inside the brackets is the address; a
+port is read only *after* the `]`. So `sip:[2001:db8::10:5070]` names host `2001:db8::10:5070`
+with **no** port, not host `2001:db8::10` on port 5070 — `5070` is the reference's last group
+once `::` expands. RFC 5118 §4.3 states the sender will not get what it meant and that this is
+nonetheless not a parse error: "From a parsing perspective, the request below is well-formed.
+However, from a semantic point of view, it will not yield the desired result." §4.4 is the
+contrast, `sip:[2001:db8::10]:5070`, where both halves are read. Any other reading collapses the
+two sections into one.
+
+**[RFC] The address grammar is RFC 4291 §2.2**, including embedded IPv4 (`::ffff:192.0.2.2`,
+RFC 5118 §4.9). A reference that is not an RFC 4291 address is `UriError::Host`, with one
+exception, below. In particular a reference with no `]` is `UriError::Ipv6Reference`, and an
+undelimited IPv6 address in a Request-URI — `sip:2001:db8::10`, RFC 5118 §4.2 — is a start-line
+fault, the only message in that corpus the RFC titles invalid.
+
+**[RFC] `:::` is tolerated immediately before an embedded IPv4 address, and nowhere else.**
+RFC 3261 §25.1 took its `IPv6address` production from the obsoleted RFC 2373:
+
+```abnf
+IPv6address = hexpart [ ":" IPv4address ]
+hexpart     = hexseq / hexseq "::" [ hexseq ] / "::" [ hexseq ]
+```
+
+`hexpart` may end in `"::"` before the grammar appends `":" IPv4address`, so RFC 3261's own ABNF
+derives `[2001:db8:::192.0.2.1]` — three colons. RFC 4291 corrected the grammar, but senders were
+written against RFC 3261 and emit the third colon, and RFC 5118 §4.10 is normative that
+"following the Robustness Principle [RFC1122], an implementation must tolerate both of the above
+constructs."
+
+sipx tolerates it as a **single documented carve-out**, not by relaxing the host rule. Both of
+RFC 2373's `hexpart` productions that can end in `"::"` are covered, and nothing else is:
+
+| `host` | Result | Why |
+|---|---|---|
+| `[2001:db8::192.0.2.1]` | `2001:db8::192.0.2.1` | RFC 4291, the correct construct |
+| `[2001:db8:::192.0.2.1]` | `2001:db8::192.0.2.1` | carve-out, `hexpart = hexseq "::"` |
+| `[1:2:3:4:5:::192.0.2.1]` | `1:2:3:4:5::192.0.2.1` | carve-out, the same production at full width |
+| `[:::192.0.2.1]` | `::192.0.2.1` | carve-out, `hexpart = "::"` with an empty `hexseq` |
+| `[2001:db8:::10]` | `UriError::Host` | no embedded IPv4 address, so not the derivation |
+| `[2001:db8::::192.0.2.1]` | `UriError::Host` | four colons is not the derivation |
+| `[2001:db8::1:::192.0.2.1]` | `UriError::Host` | the rewrite would need two `::` runs |
+| `2001:db8:::192.0.2.1` | `UriError::Port` | unbracketed — see below |
+| `2001:db8::192.0.2.1` | `UriError::Port` | unbracketed, and *valid* under RFC 4291 |
+
+Every row is pinned by `three_colon_table_rows_parse_exactly_as_the_spec_says` in
+`crates/sipx-sip/tests/ipv6_reference_tolerance.rs`, asserting the exact `Ok` address or the exact
+`UriError` variant. A table of checkable claims that nothing checks is the failure mode
+`check-pool-key.py` exists to prevent, and this table is small enough to hold to the same standard.
+
+**[sipx]** The last two rows fail for a reason that is *not* the carve-out declining to apply, and
+the pair is in the table to say so. An unbracketed `host` is split at its **first** `:` and
+everything after it is a port, so `db8:::192.0.2.1` is rejected by the port rule and the text never
+reaches an address parser at all. The valid two-colon address fails identically. That is the
+bracket requirement doing its job — RFC 3261 §19.1.1 requires `[` `]` around an IPv6 address in a
+URI, and RFC 5118 §4.2 is the message that omits them, the one message in that corpus the RFC
+titles invalid.
+
+**[sipx]** The mechanism is what keeps the three `UriError::Host` rows honest: one `:::` is
+rewritten to `::` and **retried through the same RFC 4291 parser**, which still has to accept the
+result. There is no second address grammar, so the accepted language is exactly RFC 4291 plus that
+one derivation — enumerated and asserted, not merely intended, by
+`the_tolerance_admits_nothing_but_the_rfc2373_derivation` in the same file. Rationale: reaching for
+a more permissive address parser would trade one unmet MUST for an unmeasured surface on
+unauthenticated input, and sipx's posture is typed errors on network input.
+
+**[sipx] Tolerated is not normalised.** RFC 5118 §4.10 permits re-serializing the three-colon form
+as two; sipx does not. A parsed URI keeps its verbatim bytes (`Uri::raw`), so a message forwarded
+through sipx carries the reference its sender wrote. A parser that rewrote it unasked would have
+altered a message it was only relaying.
 
 ## 5. Streaming
 

@@ -286,24 +286,18 @@ pub struct Deviation {
     pub why_recorded: &'static str,
 }
 
-/// Every known departure from RFC 5118. One, at the time of writing.
-pub static DEVIATIONS: &[Deviation] = &[Deviation {
-    case: "ipv6-bug-abnf-3-colons",
-    rfc_requires: "§4.10: \"following the Robustness Principle [RFC1122], an implementation must \
-                   tolerate both of the above constructs\" — the two-colon reference \
-                   [2001:db8::192.0.2.1] and the three-colon [2001:db8:::192.0.2.1] that RFC \
-                   3261's ABNF permits by accident, having inherited it from the obsoleted RFC \
-                   2373.",
-    sipx_does: "Rejects the message with ParseError::StartLine(UriError::Host): the three-colon \
-                form is not a valid IPv6 address under RFC 4291, which is the grammar sipx's \
-                address parser implements.",
-    why_recorded: "Tolerating it means accepting a construct no current address grammar allows, \
-                   narrowly enough that ':::' is read as '::' only where an embedded IPv4 address \
-                   follows — the one position the RFC 3261 ABNF derivation can produce it. That is \
-                   a change to how a published crate parses hostile input, and it belongs to a \
-                   defect story with its own review rather than to the story that measures the \
-                   corpus. X-16 is the measurement.",
-}];
+/// Every known departure from RFC 5118. None: sipx conforms to all twelve messages.
+///
+/// The list held one entry from `X-16`, which imported this corpus, until `S-31` closed it —
+/// §4.10's three-colon reference `[2001:db8:::192.0.2.1]`, which sipx rejected as a malformed
+/// address where the RFC requires tolerance. It is now parsed under the narrow rule in
+/// `docs/specs/sip-parser.md` §4.8, so the conformance assertions cover the case and there is
+/// nothing left to except from them.
+///
+/// Empty is the state this list is supposed to be in, and it stays declared rather than deleted:
+/// the next corpus that measures before it fixes needs the same machinery, and an empty list is
+/// the honest way to say "measured, nothing outstanding".
+pub static DEVIATIONS: &[Deviation] = &[];
 
 /// The recorded deviation for a case, if it has one.
 #[must_use]
