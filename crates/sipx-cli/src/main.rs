@@ -219,6 +219,10 @@ const VALUED_FLAGS: &[&str] = &[
     "--local",
     "--target",
     "--book",
+    "--instance",
+    "--push-provider",
+    "--push-prid",
+    "--push-param",
 ];
 
 #[cfg(test)]
