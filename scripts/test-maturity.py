@@ -155,27 +155,19 @@ class TheStatusVocabulary(unittest.TestCase):
     def test_the_report_quotes_the_schema_rather_than_redefining_it(self):
         self.assertIn(maturity.status_definition("implemented"), maturity.render())
 
-    def test_the_report_does_not_claim_implemented_requires_a_crate(self):
-        """The false sentence, as a test. RFC 8996 is the counterexample and it is in the registry."""
+    def test_the_report_does_not_redefine_implemented(self):
+        """The false sentence, as a test.
+
+        Deliberately asserted on the report and **not** on the registry. RFC 8996 is the row the false
+        sentence was caught by — `implemented` on the evidence of `docs/specs/sip-tls.md` and no crate —
+        and `X-43` is open to re-evidence exactly that row and to decide whether `implemented` should
+        require a `crates/` path at all. A test that pinned 8996's evidence, or that required some
+        spec-only row to exist, would fail the moment `X-43` lands and would be a landmine in someone
+        else's story. What this report must not do is define the word, whatever the registry holds.
+        """
         report = maturity.render()
         self.assertNotIn("the code exists in a crate", report)
-        spec_only = [
-            row
-            for row in maturity.registry()
-            if row.get("status") == "implemented"
-            and row.get("evidence")
-            and all(not str(item).startswith("crates/") for item in row["evidence"])
-        ]
-        self.assertTrue(
-            spec_only,
-            "if no `implemented` row rested on a specification alone, the sentence this test "
-            "guards against would have been true and this test is the thing to revisit",
-        )
-        self.assertIn(
-            8996,
-            [row["number"] for row in spec_only],
-            "RFC 8996 is the counterexample the rework was found by",
-        )
+        self.assertNotIn("`implemented` now means", report)
 
 
 class TheReport(unittest.TestCase):

@@ -348,9 +348,9 @@ def render():
         f"which said no caller had been found. `{SURFACE_CHECKER}` fails the gate when a crate claims "
         f"supported surface no application reaches. The two layers that also say *path check* carry "
         f"`rfc-report.py`'s per-row check on top; the others are entered per crate, so a single row of "
-        f"them is not individually attested — and a row can be `implemented` on the evidence of a "
-        f"specification alone, as RFC 8996 is, so the column is about reachability rather than about "
-        f"which crate holds the code."
+        f"them is not individually attested. The column is about reachability, not about which crate "
+        f"holds the code: what a row must cite is `docs/rfc/README.md`'s business, and `X-43` is where "
+        f"the one row citing no code is being weighed."
     )
     lines.append("")
 
