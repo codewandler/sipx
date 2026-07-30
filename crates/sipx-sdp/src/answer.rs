@@ -390,12 +390,17 @@ fn rejected(offered: &MediaDescription) -> MediaDescription {
 /// static number — so an explicit rtpmap is authoritative whatever the number. Only a bare
 /// static type (0–95) is matched by number alone; comparing numbers when a map disagrees is
 /// how a stack agrees to a codec it cannot decode.
+///
+/// Whether two rtpmaps name the same format is [`crate::rtpmap::same_format`]'s question and not
+/// this function's. It used to be answered here too, with the clock rate compared as text while
+/// `sipx-call` parsed the same field to a number — two rules for one question, which disagreed on
+/// every spelling that is numerically equal and textually different (`M-31`).
 fn supports(capabilities: &Capabilities, offered: &MediaDescription, format: &str) -> bool {
     if let Some(offered_map) = offered.rtpmap(format) {
         return capabilities
             .rtpmaps
             .iter()
-            .any(|(_, mapping)| rtpmap_matches(offered_map, mapping));
+            .any(|(_, mapping)| crate::rtpmap::same_format(offered_map, mapping));
     }
 
     let is_dynamic = format
@@ -406,28 +411,6 @@ fn supports(capabilities: &Capabilities, offered: &MediaDescription, format: &st
         return false;
     }
     capabilities.audio_formats.iter().any(|f| f == format)
-}
-
-/// Whether two `rtpmap` values name the same format.
-///
-/// RFC 8866 §6.6: the value is `<name>/<clock rate>[/<channels>]`. The name compares
-/// case-insensitively, the clock rate is part of the format's identity — the same codec at
-/// two rates is two formats — and an omitted channel count means one channel.
-fn rtpmap_matches(offered: &str, local: &str) -> bool {
-    let mut offered_parts = offered.split('/');
-    let mut local_parts = local.split('/');
-    let names_match = match (offered_parts.next(), local_parts.next()) {
-        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
-        _ => false,
-    };
-    let rates_match = match (offered_parts.next(), local_parts.next()) {
-        (Some(a), Some(b)) => a == b,
-        // A value with no clock rate identifies nothing, so it matches nothing.
-        _ => false,
-    };
-    names_match
-        && rates_match
-        && offered_parts.next().unwrap_or("1") == local_parts.next().unwrap_or("1")
 }
 
 fn encoding_of(rtpmap: &str) -> &str {

@@ -33,6 +33,7 @@ pub mod crypto;
 pub mod fingerprint;
 pub mod ice;
 pub mod parse;
+pub mod rtpmap;
 pub mod session;
 
 pub use answer::{Capabilities, answer, negotiate_direction};
