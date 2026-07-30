@@ -305,7 +305,7 @@ async fn reading_the_statistics_twice_reports_the_same_window() {
     let session_addr = port.local_addr();
     let mut config = Config::new(peer_addr, Codec::Pcmu);
     config.rtcp_interval = None;
-    let session = port.start(config);
+    let session = port.start(config).expect("valid media setup");
 
     // Ten sequence numbers with two withheld, so the window has loss in it: against an emptied
     // window a clean one is indistinguishable from a correct one.
@@ -386,7 +386,7 @@ async fn reports_hold_to_their_own_intervals(polling: Polling) {
     // boundaries the timer draws, the more intervals get checked, and a boundary landing mid-stream
     // is now a case this test covers rather than one it loses to.
     config.rtcp_interval = Some(Duration::from_millis(120));
-    let session = port.start(config);
+    let session = port.start(config).expect("valid media setup");
 
     let injected: Vec<u16> = (1..=LAST)
         .filter(|sequence| !WITHHELD.contains(sequence))
