@@ -62,7 +62,6 @@ _This is the layer applications actually program against, so it is the one that 
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-30 — Let a call select Opus, or stop shipping a codec nothing can reach](M-30-a-call-cannot-select-opus.md) · Media · M-13 built the codec, not the selection — sipx-call hardcodes G.711 at six sites and Codec::from_payload_type deliberately never returns Opus, so X-33 demoted RFC 6716 and 7587 to partial
 - [M-31 — Make the answer and the negotiated codec agree, once](M-31-the-answer-and-the-negotiated-codec-can-disagree.md) · Media · found by M-30's review — `sipx-sdp/src/answer.rs:423-427` compares an rtpmap clock rate as a string while `codec_named` parses it to `u32`, so an offer with `a=rtpmap:0 PCMU/08000` settles on PCMU while the answer names only `8`
 - [M-28 — Offer DTLS-SRTP from a call, and stop claiming it until then](M-28-dtls-srtp-unreachable-from-a-call.md) · Media · found by X-27 — dial hardcodes SDES, so sipx cannot offer DTLS-SRTP at all, while RFC 5763 and 5764 are both marked implemented with both roles
 
@@ -145,6 +144,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [M-25 — Specify SRTP and its two keyings, after the fact](M-25-srtp-spec.md) · Media · found by X-25 — M-14 and M-15 shipped without the spec non-negotiable 4 requires
 - [M-26 — Echo and verify the SDES tag, which RFC 4568 requires twice](M-26-sdes-tag-neither-echoed-nor-verified.md) · Media · found by M-25 — RFC 4568 §5.1.2 and §5.1.3 are both MUSTs and sipx honours neither
 - [M-29 — Make a live call run the SDES answer check it already owns](M-29-call-layer-pairs-srtp-keys-unchecked.md) · Media · found by M-26 — verify_answer and SrtpKeys::from_answer exist and sipx-call calls neither, so a live call still keys on an answer nobody checked
+- [M-30 — Let a call select Opus, or stop shipping a codec nothing can reach](M-30-a-call-cannot-select-opus.md) · Media · M-13 built the codec, not the selection — sipx-call hardcodes G.711 at six sites and Codec::from_payload_type deliberately never returns Opus, so X-33 demoted RFC 6716 and 7587 to partial
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone

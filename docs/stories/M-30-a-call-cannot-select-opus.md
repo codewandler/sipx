@@ -2,7 +2,7 @@
 id: M-30
 title: Let a call select Opus, or stop shipping a codec nothing can reach
 pillar: Media
-status: in-progress
+status: done
 priority: 4
 design: docs/designs/media.md
 epic: media
