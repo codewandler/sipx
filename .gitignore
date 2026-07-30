@@ -13,6 +13,13 @@ Cargo.lock.orig
 # than to /.claude so that tracked settings under it stay committable.
 /.claude/worktrees/
 
+# Python bytecode. The gate's checkers are scripts under `scripts/`, and importing one — which the
+# `test-*.py` suites do, and so does anyone reading a value out of a checker by hand — drops a
+# `__pycache__` beside it. The suites set `sys.dont_write_bytecode`, but an ad-hoc `python3 -c` import
+# does not, so a committed `.pyc` has already reached a branch twice.
+__pycache__/
+*.pyc
+
 # Local research and scratch material — must never be committed.
 /notes/
 /research/

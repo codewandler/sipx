@@ -22,7 +22,7 @@ proxy or a registrar: it does not fork requests or hold other people's registrat
 | | |
 |---|---|
 | **Calls** | Place and answer, SDP offer/answer, hold and resume, blind and attended transfer |
-| **Audio** | G.711 µ-law and A-law, DTMF, play and record WAV. Opus is in `sipx-audio` behind the `opus` feature; a call offers G.711 only |
+| **Audio** | G.711 µ-law and A-law, DTMF, play and record WAV. Opus too, behind `sipx-call`'s `opus` feature: a call offers G.711 unless it selects Opus, and the default never moves |
 | **Signalling security** | TLS and secure WebSocket, with certificate verification that **cannot be turned off** |
 | **Media security** | SRTP with SDES keying, negotiated automatically when the signalling is secure |
 | **Transports** | UDP, TCP, TLS, WebSocket, secure WebSocket |
@@ -126,6 +126,40 @@ breaks; *Experimental* means it may change shape or be removed without one. Neit
 is what freezes an API, and its predicates are in [`docs/roadmap.md`](docs/roadmap.md). Several crates
 mark part of their surface experimental for the same reason: it is implemented and tested and nothing
 above it selects it yet, so no caller has ever constrained its shape.
+
+**Which surface is which is not a judgement, it is a measurement.** The reachable-from-a-call surface
+is *defined* as what the shipped application in [`crates/sipx-app`](crates/sipx-app) uses, and
+`./scripts/check-app-surface.py --check` fails the build when a crate claims *Supported* surface that
+no path from that application reaches, or when the application starts selecting something still marked
+*Experimental*. Three earlier attempts checked this by reading evidence paths and each recorded the
+same limit: a path is satisfied by citing a file whose relevant branch is dead. An application has no
+dead branch to cite.
+
+**A Cargo feature is part of being selectable.** A capability behind a feature that no shipped binary
+can turn on is *Experimental*, however thoroughly it is implemented and tested and whatever
+`--all-features` compiles. Opus is the worked example: it is complete, it has vectors, RFC 6716 and
+7587 are cited against it, and it sits behind `sipx-audio/opus`, which links libopus. `sipx-cli` has
+no flag for it and no `[features]` table to forward one, and the host does not enable it, because
+linking a C library is a deployment decision rather than something a default should make for you. So
+Opus is reachable from the library and from no application, and it says so on its own page. This is
+the distinction three earlier attempts could not draw, because every *path* to Opus is real.
+
+**The rule runs in both directions.**
+
+- **Graduation.** If something outside this repository depends on an experimental item, that is not a
+  mistake to be corrected at the caller — a second caller is exactly what constrains a shape, and
+  nothing else can. The item moves to *Supported* with a `CHANGELOG.md` entry, and the surface is
+  wider than it was. **Please open an issue saying what you depend on**: that is the mechanism
+  working, not a complaint.
+- **Demotion.** If the application stops using a capability — a feature switched off, a dependency
+  dropped, a call path removed — it returns to *Experimental*, with a `CHANGELOG.md` entry saying so.
+  The same sentence has to be sayable in both directions or the measurement is a ratchet: a surface
+  that can only grow is a freeze arriving one item at a time. A row of
+  [`docs/rfc/registry.toml`](docs/rfc/registry.toml) that claimed a role on the strength of the
+  removed path is demoted in the same commit, exactly as `X-30` and `X-33` demoted theirs.
+
+Without these two clauses the definition above would freeze the stack at whatever one application
+happens to need, instead of measuring it.
 
 The table is exactly the crates that publish, and `./scripts/check-audio-claims.py --check` holds
 it to that: a published crate no table describes has no front door anyone can be held to. The

@@ -43,6 +43,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A call can select its codec set, and Opus is reachable through it (`M-30`)** — `M-13` built the
+  Opus encoder, decoder and SDP half, and nothing built the *selection*, so no call had ever carried an
+  Opus packet. `Codecs` (default `G711`) is now the application's choice, taken by `DialOptions::with_codecs`,
+  `answer_with`, `answer_ringing_with`, `answer_replacing_with`, `Invitation::answer_with` and
+  `ring_early_with`. Behind the off-by-default `opus` feature, since it links libopus.
+  - **Six hardcoded `Capabilities::g711` sites are gone.** All construction now goes through
+    `Codecs::capabilities`, including the early-dialog and answer paths — plumbing one level up instead
+    would have moved the hardcode rather than removed it, and a half-reachable codec is how this defect
+    recurs.
+  - **`Codec::from_payload_type` still refuses Opus, and that refusal is correct.** RFC 7587 §7 assigns
+    Opus no static payload type, so returning Opus for 111 would decode someone else's G.729 as Opus.
+    The way in is the `a=rtpmap`, with the negotiated number carried on `Config::payload_type`.
+  - **RFC 6716 and 7587 return to `implemented`**, the rows `X-33` demoted for having no caller. The
+    notes state the boundaries at full weight: RFC 7587 §7.1's optional parameters are neither offered
+    nor read, and Opus is reachable from the library and **not** from `sipx-cli`, which has no flag for
+    it and no `[features]` block to forward one.
+  - **The guard that would have blocked a false promotion was rebuilt, not just inverted.** `X-33`
+    asserted the selector symbol was *absent*, which is conclusive; asserting *presence* is not, because
+    a sentence naming a symbol satisfies a substring search. The check now reads Rust with comments
+    stripped, and additionally requires the feature to be declared and the codec set to be exported —
+    facts prose cannot fake. `X-33`'s `sipx-cli` absence check, dropped by the inversion, is restored,
+    and it is what holds the note's claim about the binary.
+  - **`check-features.sh` now builds `sipx-call` with the feature off and on**, with `--all-targets`
+    because the conditional code is in its tests. A new optional feature on a published crate with no
+    combination covering it is exactly how `tls` came to be broken for a release.
+  - Fixed on the way: negotiation applied its selected-set filter *after* choosing a format rather than
+    during the search, so an Opus-first offer to a default G.711 call failed outright while the answer
+    on the wire named the PCMU further down the same list — invisible in the default build, live under
+    `--all-features`. And a redundant `a=rtpmap` for a static payload type no longer restarts the media
+    session, which was an audible gap on a merely re-worded SDP.
+
 - **The RFC 5118 IPv6 torture corpus is asserted against, at both layers (`X-16`)** — all twelve
   messages from Appendix A, recovered by `scripts/import-rfc5118-corpus.sh` rather than retyped, with
   `--check` re-deriving them from the RFC so the fixtures cannot drift from their source. Asserted in
@@ -86,6 +117,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     each flag's value is registered so it can never be misread as the address of record.
 
 ### Fixed
+
+- **A valued flag given no value is now refused instead of read as absent (`S-30`)** —
+  `sipx register sip:alice@example.com --outbound --instance` used to exit 0 having generated an
+  instance URN nobody asked for. `Args::value` returned the same `None` for "the flag was last on the
+  line" and "the flag was never given", so every caller took its absent-branch and ran on a default.
+  - **Fixed once, in the constructor.** `Args::new` is now fallible, so holding an `Args` means every
+    valued flag on the line was given a non-empty value — `value`'s `None` therefore means *absent* and
+    nothing else. No call site re-checks anything, and the fifteen-odd `value`/`number` call sites are
+    untouched. The rejected alternative, returning a `Result` from `value`, would have pushed the
+    decision to every caller and let any of them write `.ok().flatten()`.
+  - **Every flag in `VALUED_FLAGS` is covered**, with the test iterating that registry rather than an
+    enumeration, so a flag added later is protected without a new case.
+  - **An empty value is refused too**, for every flag and in both spellings (`--flag=` and `--flag ""`).
+    Nothing here has a meaningful empty value, and omitting a flag is already how a caller asks for the
+    default — so an empty value can only be the accident a shell produces from an unset variable.
+  - The four subcommands ended up *simpler*: they now share one prologue, and each `run` opens with four
+    lines where it had five. `--help` is answered before validation, so `sipx dial --help --play` still
+    documents the command.
 
 - **A refused early answer now ends the invitation instead of hanging it (`S-25`)** — the one
   place an RFC 4568 §5.1.3 refusal was reported nowhere: an answer arriving in a reliable

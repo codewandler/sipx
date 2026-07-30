@@ -68,6 +68,9 @@ pub struct Call {
     ended: bool,
     /// Where this side receives media, so a re-offer can name the same address.
     media_address: IpAddr,
+    /// The codec set this call was placed or answered with, so a re-offer offers the same
+    /// set — a re-INVITE that silently narrowed to G.711 would move an Opus call mid-call.
+    codecs: Codecs,
     /// What the running session negotiated, for comparison against a re-offer.
     current: Negotiated,
     /// Whether the call is on hold, and which way.
@@ -599,11 +602,13 @@ impl Call {
         let Ok(offer) = sipx_sdp::parse(&String::from_utf8_lossy(body)) else {
             return Ok(None);
         };
-        let Ok(renegotiated) = negotiated(&offer) else {
+        let Ok(renegotiated) = negotiated(&offer, self.codecs) else {
             return Ok(None);
         };
 
-        let capabilities = Capabilities::g711(self.media_address, self.media.local_addr().port());
+        let capabilities = self
+            .codecs
+            .capabilities(self.media_address, self.media.local_addr().port());
         let answer_sdp = sipx_sdp::answer(&offer, &capabilities);
         if answer_sdp
             .media
@@ -748,8 +753,9 @@ impl Call {
             });
         }
 
-        let mut capabilities =
-            Capabilities::g711(self.media_address, self.media.local_addr().port());
+        let mut capabilities = self
+            .codecs
+            .capabilities(self.media_address, self.media.local_addr().port());
         capabilities.direction = direction;
         // As for a re-INVITE: the version must increase with each modified offer, so the far
         // end can tell a changed description from a repeated one.
@@ -775,7 +781,7 @@ impl Call {
         self.peer_allows_update = update::peer_allows(&response.headers);
 
         if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
-            && let Ok(renegotiated) = negotiated(&answer)
+            && let Ok(renegotiated) = negotiated(&answer, self.codecs)
         {
             self.move_media_if_changed(renegotiated).await?;
         }
@@ -926,7 +932,18 @@ impl Call {
     /// Restarting an unchanged session would drop packets for no reason on every re-INVITE, and
     /// some peers send one every thirty seconds as a keep-alive.
     async fn move_media_if_changed(&mut self, to: Negotiated) -> Result<()> {
-        if to.remote != self.current.remote || to.codec != self.current.codec {
+        // The payload type is the codec's number on the wire: a re-offer can move Opus from
+        // 111 to 96 and leave the codec unchanged, and a session not rebuilt for that goes on
+        // sending on the number the far end just reassigned.
+        //
+        // Compared as the *wire* number, not as the raw `Option`. A peer may add or drop the
+        // redundant `a=rtpmap:0 PCMU/8000` between two descriptions of the same static codec, and
+        // `Some(0)` against `None` would read as a change when nothing changed — rebuilding the
+        // session, and dropping audio, on a re-INVITE that only reworded the SDP.
+        if to.remote != self.current.remote
+            || to.codec != self.current.codec
+            || to.wire_payload_type() != self.current.wire_payload_type()
+        {
             let port = MediaPort::bind(SocketAddr::new(self.media_address, 0))
                 .await
                 .map_err(Error::Io)?;
@@ -951,8 +968,9 @@ impl Call {
         let (local, remote) = self.dialog.local_and_remote();
         let cseq = self.dialog.next_cseq();
 
-        let mut capabilities =
-            Capabilities::g711(self.media_address, self.media.local_addr().port());
+        let mut capabilities = self
+            .codecs
+            .capabilities(self.media_address, self.media.local_addr().port());
         capabilities.direction = direction;
         // The session version must increase with each modified offer, so the far end can tell
         // a changed description from a repeated one.
@@ -1047,7 +1065,7 @@ impl Call {
         send_ack(&self.endpoint, &self.dialog, self.target.clone()).await?;
 
         if let Ok(answer) = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
-            && let Ok(renegotiated) = negotiated(&answer)
+            && let Ok(renegotiated) = negotiated(&answer, self.codecs)
         {
             self.move_media_if_changed(renegotiated).await?;
         }
@@ -1642,6 +1660,56 @@ fn bye_request(dialog: &Dialog, cseq: u32) -> Result<Request> {
     Ok(add_routes(builder, &routes)?.build())
 }
 
+/// Which codecs a call offers and accepts, in preference order (`M-30`).
+///
+/// The default is the G.711 pair: it is mandatory-to-implement (RFC 3551 §4.5.14), needs no C
+/// library, and is what practically every endpoint accepts. Opus is better on a lossy network
+/// but links libopus, so it sits behind the `opus` feature and can never become the default by
+/// accident — selecting it is always a decision the application made.
+///
+/// Whichever set is chosen, G.711 stays in the offer alongside anything better: an endpoint
+/// that offered only Opus would fail to call most of the telephone network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Codecs {
+    /// PCMU and PCMA, plus RFC 4733 DTMF.
+    #[default]
+    G711,
+    /// Opus (RFC 6716, carried per RFC 7587) first, then the G.711 pair, then DTMF.
+    ///
+    /// Order matters in an offer — it is how this side says what it would rather use. Answering
+    /// still honours the offerer's order (RFC 3264 §6.1), so a peer that puts G.711 first is
+    /// answered G.711 first.
+    #[cfg(feature = "opus")]
+    Opus,
+}
+
+impl Codecs {
+    /// What this side offers or answers with.
+    fn capabilities(self, address: IpAddr, audio_port: u16) -> Capabilities {
+        match self {
+            Self::G711 => Capabilities::g711(address, audio_port),
+            #[cfg(feature = "opus")]
+            Self::Opus => Capabilities::with_opus(address, audio_port),
+        }
+    }
+
+    /// Whether this set carries a codec, so negotiation never settles on one the application
+    /// did not select — an Opus offer answered from a G.711 set is answered G.711, not Opus.
+    /// Each arm lists what [`Self::capabilities`] actually offers, rather than the `Opus` arm
+    /// answering `true`. `true` is correct only for as long as every [`Codec`] variant happens to
+    /// be in `Capabilities::with_opus`; the day a codec is added to `sipx-media` that this set does
+    /// not offer, `true` would let negotiation settle on it and build a session for a codec the
+    /// answer never named. Listing them means a new variant is simply not carried until someone
+    /// says it is, which is the safe direction to fail in.
+    fn carries(self, codec: Codec) -> bool {
+        match self {
+            Self::G711 => matches!(codec, Codec::Pcmu | Codec::Pcma),
+            #[cfg(feature = "opus")]
+            Self::Opus => matches!(codec, Codec::Pcmu | Codec::Pcma | Codec::Opus),
+        }
+    }
+}
+
 /// How a call is placed.
 #[derive(Debug, Clone)]
 pub struct DialOptions {
@@ -1669,6 +1737,13 @@ pub struct DialOptions {
     /// registration says outbound requests must traverse proxies. Without it, a call placed
     /// through a registration reaches a proxy holding no state for it.
     pub service_route: Vec<String>,
+    /// Which codecs the call offers, most preferred first.
+    ///
+    /// [`Codecs::G711`] by default, and the default is deliberate: G.711 is
+    /// mandatory-to-implement and links no C library, while Opus links libopus and is behind
+    /// the `opus` feature — so the better codec is always a choice, never an accident of the
+    /// build.
+    pub codecs: Codecs,
 }
 
 impl DialOptions {
@@ -1681,7 +1756,18 @@ impl DialOptions {
             timeout: None,
             session_expires: None,
             service_route: Vec::new(),
+            codecs: Codecs::default(),
         }
+    }
+
+    /// Offer these codecs, most preferred first.
+    ///
+    /// [`Codecs::Opus`] puts Opus ahead of the G.711 pair in the offer; the far end's answer
+    /// decides what the call carries, and a peer without Opus still gets G.711.
+    #[must_use]
+    pub fn with_codecs(mut self, codecs: Codecs) -> Self {
+        self.codecs = codecs;
+        self
     }
 
     /// Traverse these proxies on the way out, outermost first (RFC 3608).
@@ -1720,12 +1806,18 @@ impl DialOptions {
 ///
 /// A key is offered only when the transport protects it: SDES puts the master key in the SDP
 /// body, so offering one over cleartext SIP publishes it (RFC 4568 §7.1).
+///
+/// Both the receive address and the codec set come from the caller's [`DialOptions`], so they are
+/// taken as one rather than passed apart: they are two halves of the same decision about what this
+/// side is offering, and splitting them invites a call site that reads the set from somewhere else.
 fn offered_media(
-    media_address: IpAddr,
+    options: &DialOptions,
     port: &MediaPort,
     transport: TransportKind,
 ) -> (Capabilities, SessionDescription) {
-    let capabilities = Capabilities::g711(media_address, port.local_addr().port())
+    let capabilities = options
+        .codecs
+        .capabilities(options.media_address, port.local_addr().port())
         .with_srtp(transport.is_secure());
     let offer = offer_from(&capabilities);
     (capabilities, offer)
@@ -1921,7 +2013,7 @@ async fn open_invitation(
         .await
         .map_err(Error::Io)?;
 
-    let (capabilities, offer) = offered_media(options.media_address, &port, target.transport);
+    let (capabilities, offer) = offered_media(options, &port, target.transport);
 
     // The `Via` is built here rather than left to the transport, because a CANCEL has to carry
     // the *same* branch as the INVITE it cancels — that identity is what matches the two at the
@@ -2061,13 +2153,9 @@ async fn dial_with(
     // From here the far end believes a dialog exists, so *every* path must acknowledge.
     // Returning an error without one leaves it retransmitting its 200 for 32 seconds and then
     // streaming media at a port we have closed.
-    match establish(
-        &invite,
-        &response,
-        target.clone(),
-        port,
-        capabilities.crypto.as_slice(),
-    ) {
+    // Where in-dialog requests go if the 2xx carries no `Contact` to refresh the target with.
+    let fallback = target.clone();
+    match establish(&invite, &response, fallback, port, &capabilities, options) {
         Ok((dialog, media, in_dialog, settled)) => {
             let ack = build_ack(endpoint, &dialog, &in_dialog)?;
             endpoint
@@ -2095,6 +2183,7 @@ async fn dial_with(
                 awaiting_ack: None,
                 ended: false,
                 media_address,
+                codecs: options.codecs,
                 current: settled.negotiated,
                 encrypted: settled.srtp.is_some(),
                 hold: Direction::SendRecv,
@@ -2132,16 +2221,21 @@ async fn dial_with(
 }
 
 /// Everything after a 2xx that can fail, kept together so the caller can ACK on either path.
+///
+/// `offered` and `options` are taken whole rather than as the two fields read out of them, because
+/// both are the same question asked twice — what this side put in the offer — and a call site that
+/// passed a crypto list from one place and a codec set from another could pass two that disagree.
 fn establish(
     invite: &Request,
     response: &Response,
     fallback: Target,
     port: MediaPort,
-    offered: &[sipx_sdp::crypto::Crypto],
+    offered: &Capabilities,
+    options: &DialOptions,
 ) -> Result<(Dialog, MediaSession, Target, Settled)> {
     let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    let settled = settle_answer(offered, &answer)?;
+    let settled = settle_answer(offered.crypto.as_slice(), &answer, options.codecs)?;
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
     let media = port.start(settled.media_config());
@@ -2158,6 +2252,7 @@ fn establish(
 fn settle_answer(
     offered: &[sipx_sdp::crypto::Crypto],
     answer: &SessionDescription,
+    codecs: Codecs,
 ) -> Result<Settled> {
     // Both halves or neither, *and* the two halves have to be the ones the two ends agreed on:
     // a stream keyed at one end only is a call that connects and carries silence, and one keyed
@@ -2165,7 +2260,7 @@ fn settle_answer(
     // worth having, so both come back as `Error::Sdp` rather than as a quietly plain call.
     let answered = answered_crypto(answer);
     Ok(Settled {
-        negotiated: negotiated(answer)?,
+        negotiated: negotiated(answer, codecs)?,
         srtp: srtp_keys(offered, answered.as_ref())?,
     })
 }
@@ -2176,8 +2271,35 @@ fn settle_answer(
 /// `sipx-sip`'s server transaction moves to `Accepted` and absorbs retransmissions of the
 /// *request*, but it does not resend the response. Over UDP one lost 200 means the caller
 /// gives up while this side holds an established call, so this is not optional.
+///
+/// Answers from the default codec set, [`Codecs::G711`]. [`answer_with`] takes a selection.
 pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAddr) -> Result<Call> {
-    answer_tagged(endpoint, incoming, media_address, &token(), None).await
+    answer_tagged(
+        endpoint,
+        incoming,
+        media_address,
+        &token(),
+        None,
+        Codecs::default(),
+    )
+    .await
+}
+
+/// [`answer`], from a chosen codec set rather than the default one (`M-30`).
+///
+/// The answering counterpart of [`DialOptions::with_codecs`]. `codecs` bounds what the answer may
+/// settle on, and no more than that: RFC 3264 §6.1 gives the *order* to the offerer, so a caller
+/// offering G.711 first is answered G.711 first even from [`Codecs::Opus`]. What the selection
+/// decides is whether Opus is on the table at all — an offer of it answered from
+/// [`Codecs::G711`] is answered G.711, because a call must never settle on a codec the
+/// application did not ask to carry.
+pub async fn answer_with(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    codecs: Codecs,
+) -> Result<Call> {
+    answer_tagged(endpoint, incoming, media_address, &token(), None, codecs).await
 }
 
 /// The same, with the `To` tag chosen by the caller rather than freshly minted.
@@ -2194,13 +2316,24 @@ pub(crate) async fn answer_tagged(
     media_address: IpAddr,
     tag: &str,
     claim: Option<Claim<'_>>,
+    codecs: Codecs,
 ) -> Result<Call> {
     // Ahead of the claim, deliberately: an offer that cannot be read fails here with nothing
     // sent, and an invitation that was never taken is one a CANCEL can still end.
     let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
     // No provisional was sent on this path, so there is nothing to report as `Ringing`.
-    answer_negotiated(endpoint, incoming, media_address, offer, tag, None, claim).await
+    answer_negotiated(
+        endpoint,
+        incoming,
+        media_address,
+        offer,
+        tag,
+        None,
+        claim,
+        codecs,
+    )
+    .await
 }
 
 /// The media an invitation has bound, and what the far end has said about it.
@@ -2668,7 +2801,18 @@ impl Dialing {
         // The same vocabulary the 2xx path uses: `settle_from` runs this exact function on the
         // final response, and a refusal that arrived early is the same refusal. Naming it
         // differently here would ask an application to match on two errors for one fault.
-        let settled = settle_answer(self.capabilities.crypto.as_slice(), &answer)?;
+        //
+        // `M-30` added the selected codec set to this call. It widens what can be refused here:
+        // an early answer naming a codec outside the set now fails where it previously could
+        // not, and `S-25` turns that failure into a CANCEL. Our own offer only names codecs in
+        // the set, so a conformant answer cannot trip it — an answer that does is naming
+        // something we never offered, which is exactly what `S-25` exists to refuse rather than
+        // hang on.
+        let settled = settle_answer(
+            self.capabilities.crypto.as_slice(),
+            &answer,
+            self.options.codecs,
+        )?;
         let Some(EarlyMedia::Offered(port)) = self.media.take() else {
             return Ok(());
         };
@@ -2677,6 +2821,7 @@ impl Dialing {
             capabilities: self.capabilities.clone(),
             settled,
             media_address: self.options.media_address,
+            codecs: self.options.codecs,
         })));
         self.negotiation.received_answer();
         Ok(())
@@ -2784,6 +2929,7 @@ impl Dialing {
                     awaiting_ack: None,
                     ended: false,
                     media_address: self.options.media_address,
+                    codecs: self.options.codecs,
                     current: settled.negotiated,
                     encrypted: settled.srtp.is_some(),
                     hold: self.hold,
@@ -2865,7 +3011,11 @@ impl Dialing {
     fn settle_from(&mut self, response: &Response) -> Result<Settled> {
         let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
             .map_err(|error| Error::Sdp(error.to_string()))?;
-        let settled = settle_answer(self.capabilities.crypto.as_slice(), &answer)?;
+        let settled = settle_answer(
+            self.capabilities.crypto.as_slice(),
+            &answer,
+            self.options.codecs,
+        )?;
         // Our INVITE's offer is answered here rather than in a provisional, so the exchange
         // closes now. Without this the first UPDATE on the confirmed call would be refused as
         // glare against an offer that has in fact been answered.
@@ -2906,6 +3056,10 @@ pub(crate) struct Early {
     pub(crate) capabilities: Capabilities,
     pub(crate) settled: Settled,
     pub(crate) media_address: IpAddr,
+    /// The codec set the provisional's answer was built from, kept because the exchange is not
+    /// over: an UPDATE may reoffer before the 200, and it has to be answered from the same set
+    /// rather than from the default one.
+    pub(crate) codecs: Codecs,
 }
 
 impl Early {
@@ -2914,13 +3068,15 @@ impl Early {
         media_address: IpAddr,
         secure: bool,
         offer: &SessionDescription,
+        codecs: Codecs,
     ) -> Result<(Self, SessionDescription)> {
-        let negotiated = negotiated(offer)?;
+        let negotiated = negotiated(offer, codecs)?;
         let port = MediaPort::bind(SocketAddr::new(media_address, 0))
             .await
             .map_err(Error::Io)?;
-        let capabilities =
-            Capabilities::g711(media_address, port.local_addr().port()).with_srtp(secure);
+        let capabilities = codecs
+            .capabilities(media_address, port.local_addr().port())
+            .with_srtp(secure);
         let answer = sipx_sdp::answer(offer, &capabilities);
         if answer
             .media
@@ -2939,6 +3095,7 @@ impl Early {
                 capabilities,
                 settled,
                 media_address,
+                codecs,
             },
             answer,
         ))
@@ -2951,7 +3108,7 @@ impl Early {
     /// accepted something, and guessing which of our formats it meant is worse than keeping
     /// what the last completed exchange settled.
     pub(crate) fn adopt_answer(&mut self, answer: &SessionDescription) {
-        if let Ok(negotiated) = negotiated(answer) {
+        if let Ok(negotiated) = negotiated(answer, self.codecs) {
             self.settled.negotiated = negotiated;
         }
     }
@@ -2965,7 +3122,7 @@ impl Early {
     /// already has, and changing it because *their* description changed would ask them to
     /// renegotiate again to learn where we went.
     pub(crate) fn reanswer(&mut self, offer: &SessionDescription) -> Option<SessionDescription> {
-        let negotiated = negotiated(offer).ok()?;
+        let negotiated = negotiated(offer, self.codecs).ok()?;
         let answer = sipx_sdp::answer(offer, &self.capabilities);
         if answer
             .media
@@ -2989,11 +3146,37 @@ impl Early {
 /// what this side's tag is (RFC 3261 §12.1.1); a 200 with a different one creates a *second*
 /// dialog. The caller ACKs the dialog it knows about, this side waits for an ACK to the other,
 /// and the 200 is retransmitted for 32 seconds into a call that is actually up.
+///
+/// Answers from the default codec set, [`Codecs::G711`]. [`answer_ringing_with`] takes a
+/// selection.
 pub async fn answer_ringing(
     endpoint: &Handle,
     incoming: &Incoming,
     media_address: IpAddr,
     ringing: &crate::Ringing,
+) -> Result<Call> {
+    answer_ringing_with(
+        endpoint,
+        incoming,
+        media_address,
+        ringing,
+        Codecs::default(),
+    )
+    .await
+}
+
+/// [`answer_ringing`], from a chosen codec set rather than the default one (`M-30`).
+///
+/// The selection is made here rather than at [`ring`](crate::ring) because `ring` sends a
+/// bodiless provisional: nothing about the session has been said yet when it goes out, so the
+/// answer this builds is still the first one. That is exactly what separates this from
+/// [`answer_early`], where the answer left in the 183 and the choice had to be made with it.
+pub async fn answer_ringing_with(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    ringing: &crate::Ringing,
+    codecs: Codecs,
 ) -> Result<Call> {
     // RFC 3262 §3 and §5: a 2xx must not go out while a reliable provisional carrying a session
     // description is unacknowledged. This path never puts a description in one — `ring` sends a
@@ -3014,6 +3197,7 @@ pub async fn answer_ringing(
         ringing.tag(),
         Some(ringing.is_reliable()),
         None,
+        codecs,
     )
     .await
 }
@@ -3114,6 +3298,7 @@ pub async fn answer_early(
         awaiting_ack: Some(acked),
         ended: false,
         media_address: early.media_address,
+        codecs: early.codecs,
         current: early.settled.negotiated,
         hold: Direction::SendRecv,
         encrypted: early.settled.is_encrypted(),
@@ -3203,6 +3388,14 @@ pub(crate) type Claim<'a> = &'a (dyn Fn() -> Result<()> + Send + Sync);
 /// [`answer`] path) means there is no ringing to report at all.
 ///
 /// `claim` is the dispatcher's, and is invoked at one specific line below; see [`Claim`].
+///
+/// `codecs` is what this side is willing to carry. It bounds the answer at both ends of the one
+/// exchange: [`negotiated`] may not settle outside it, and [`Codecs::capabilities`] builds the
+/// answer from it — so the codec the session starts on is always one the answer named.
+// Eight, and every one of them is a distinct fact about *this* answer that the caller holds and
+// this does not. Bundling them into a struct would be a struct with one construction site per
+// caller and no behaviour, which moves the argument list rather than shortening it.
+#[allow(clippy::too_many_arguments)]
 async fn answer_negotiated(
     endpoint: &Handle,
     incoming: &Incoming,
@@ -3211,8 +3404,9 @@ async fn answer_negotiated(
     tag: &str,
     reliable_ringing: Option<bool>,
     claim: Option<Claim<'_>>,
+    codecs: Codecs,
 ) -> Result<Call> {
-    let negotiated = negotiated(&offer)?;
+    let negotiated = negotiated(&offer, codecs)?;
 
     // The port is bound before the session starts, because the answer has to name it *and* the
     // session has to be created with the keys that answer settles on. Starting the session first
@@ -3221,7 +3415,8 @@ async fn answer_negotiated(
         .await
         .map_err(Error::Io)?;
 
-    let capabilities = Capabilities::g711(media_address, port.local_addr().port())
+    let capabilities = codecs
+        .capabilities(media_address, port.local_addr().port())
         .with_srtp(incoming.transport.is_secure());
     let answer_sdp = sipx_sdp::answer(&offer, &capabilities);
     if answer_sdp
@@ -3336,6 +3531,7 @@ async fn answer_negotiated(
         awaiting_ack: Some(acked),
         ended: false,
         media_address,
+        codecs,
         current: settled.negotiated,
         hold: Direction::SendRecv,
         encrypted: settled.srtp.is_some(),
@@ -3681,6 +3877,12 @@ pub(crate) fn offer_from(capabilities: &Capabilities) -> SessionDescription {
 pub(crate) struct Negotiated {
     remote: SocketAddr,
     codec: Codec,
+    /// The payload type to send `codec` with, when the description gave it a number.
+    ///
+    /// `None` only for a bare static type matched by number. Anything an rtpmap touched —
+    /// Opus always, a remapped static possibly — has no number of its own that means anything:
+    /// 111 is convention, and what the far end listens for is the number *it* assigned.
+    payload_type: Option<u8>,
     /// The payload type the far end uses for `telephone-event`, if it offered one.
     ///
     /// Taken from the description rather than assumed, because it is a *dynamic* type: 101 is
@@ -3698,8 +3900,20 @@ pub(crate) struct Settled {
 }
 
 impl Negotiated {
+    /// The number this codec actually goes out with: the one the description assigned, or the
+    /// codec's own when it is a static type nothing remapped.
+    ///
+    /// Mirrors [`sipx_media::Config::wire_payload_type`], which is what the session reads — so this
+    /// is the value to compare when asking whether the wire changed. The raw [`Self::payload_type`]
+    /// is not: `Some(0)` and `None` are two descriptions of PCMU and the same byte on the wire.
+    fn wire_payload_type(&self) -> u8 {
+        self.payload_type
+            .unwrap_or_else(|| self.codec.payload_type())
+    }
+
     fn media_config(self) -> sipx_media::Config {
         let mut config = sipx_media::Config::new(self.remote, self.codec);
+        config.payload_type = self.payload_type;
         config.dtmf_payload_type = self.dtmf;
         config
     }
@@ -3800,7 +4014,11 @@ fn telephone_event_payload_type(audio: &sipx_sdp::MediaDescription) -> Option<u8
 }
 
 /// Where to send media, and in what codec, from a description.
-pub(crate) fn negotiated(sdp: &SessionDescription) -> Result<Negotiated> {
+///
+/// `codecs` is the set this side offered or answered from: negotiation may only settle on a
+/// codec the application selected, so an Opus offer answered from a G.711 set settles on
+/// G.711, not on a codec the answer never named.
+pub(crate) fn negotiated(sdp: &SessionDescription, codecs: Codecs) -> Result<Negotiated> {
     let audio = sdp
         .media
         .iter()
@@ -3816,18 +4034,89 @@ pub(crate) fn negotiated(sdp: &SessionDescription) -> Result<Negotiated> {
     let address = sdp.address_for(audio).ok_or(Error::NoCommonCodec)?;
 
     // The first format both sides can carry. The list is already in the offerer's preference
-    // order, so the first playable one is the one to use.
-    let codec = audio
+    // order, so the first playable one is the one to use. Playable is judged by what the
+    // format's rtpmap says, never by a dynamic number alone — which is also the reason
+    // `Codec::from_payload_type` deliberately never returns Opus: 111 is Opus here only because
+    // this description said so.
+    //
+    // `sipx_sdp::answer` decides the same question when it builds the answer that goes on the
+    // wire, and the two *must* agree: this settles what the session sends, and the answer is what
+    // the far end was told to expect. They are not one implementation, though — the rule is
+    // written here and again in `answer.rs`, and nothing yet tests that the two readings match.
+    // They are already known to differ on a detail (`answer.rs` compares the clock rate as text
+    // where this parses it), which is filed rather than fixed here.
+    //
+    // `carries` is part of the search and not a test applied to its result. Rejecting afterwards
+    // would stop at the offerer's first choice and refuse the whole description if that one
+    // format is outside our set — so an Opus-first offer reaching a G.711 call would come back
+    // `NoCommonCodec` while the answer this side builds happily names the PCMU further down the
+    // same list.
+    let (codec, payload_type) = audio
         .formats
         .iter()
-        .find_map(|format| format.parse::<u8>().ok().and_then(Codec::from_payload_type))
+        .find_map(|format| codec_of(audio, format).filter(|(codec, _)| codecs.carries(*codec)))
         .ok_or(Error::NoCommonCodec)?;
 
     Ok(Negotiated {
         remote: SocketAddr::new(address, audio.port),
         codec,
+        payload_type,
         dtmf: telephone_event_payload_type(audio),
     })
+}
+
+/// The codec a format names, and the payload type to put on the wire for it.
+///
+/// A format with an rtpmap is matched by the map: RFC 8866 §6.6 makes it authoritative even
+/// for a static number, which is how an offer of `8` meaning iLBC is not read as PCMA. The
+/// number is then *dynamic in meaning* — the map could have hung any name on it — so it goes
+/// home with the codec rather than being reassumed from [`Codec::payload_type`]. Only a bare
+/// static type, with no map at all, is matched by number.
+fn codec_of(audio: &sipx_sdp::MediaDescription, format: &str) -> Option<(Codec, Option<u8>)> {
+    let payload = format.parse::<u8>().ok()?;
+    if let Some(rtpmap) = audio.rtpmap(format) {
+        return codec_named(rtpmap).map(|codec| (codec, Some(payload)));
+    }
+    Codec::from_payload_type(payload).map(|codec| (codec, None))
+}
+
+/// The codec an rtpmap value names, if it is one we carry.
+///
+/// The clock rate and channel count are part of the format's identity (RFC 8866 §6.6), so the
+/// accepted shapes are exactly the ones [`Codecs::capabilities`] can have offered:
+/// `PCMU/8000` and `PCMA/8000` mono, and — with the `opus` feature — `opus/48000/2`, the only
+/// rtpmap RFC 7587 §7 assigns. `opus/16000` is nothing we have, whatever the number beside it.
+fn codec_named(rtpmap: &str) -> Option<Codec> {
+    let mut parts = rtpmap.split('/');
+    let name = parts.next()?;
+    let clock = parts.next()?.parse::<u32>().ok()?;
+    // RFC 8866 §6.6: an omitted channel count means one channel.
+    let channels = parts.next().map_or(Ok(1), str::parse::<u32>).ok()?;
+    if clock == 8_000 && channels == 1 {
+        if name.eq_ignore_ascii_case("pcmu") {
+            return Some(Codec::Pcmu);
+        }
+        if name.eq_ignore_ascii_case("pcma") {
+            return Some(Codec::Pcma);
+        }
+    }
+    opus_named(name, clock, channels)
+}
+
+/// Opus, if the feature and the rtpmap both say so — one place the gated name is read, so the
+/// default build has nothing to compile out of a match arm.
+#[cfg(feature = "opus")]
+fn opus_named(name: &str, clock: u32, channels: u32) -> Option<Codec> {
+    // RFC 7587 §7 fixes the RTP clock at 48000 and the rtpmap's channel count at 2 whatever
+    // the audio actually is, so those are the name's identity rather than parameters to accept.
+    (name.eq_ignore_ascii_case("opus") && clock == Codec::Opus.clock_rate() && channels == 2)
+        .then_some(Codec::Opus)
+}
+
+/// The default build carries no Opus, so no rtpmap can name it.
+#[cfg(not(feature = "opus"))]
+fn opus_named(_name: &str, _clock: u32, _channels: u32) -> Option<Codec> {
+    None
 }
 
 /// The `Contact` this endpoint should advertise for a dialog on this transport.
@@ -3868,11 +4157,35 @@ pub fn contact_for(endpoint: &Handle, transport: TransportKind) -> String {
 /// On success the replaced call is hung up and its media torn down. On failure the new INVITE
 /// is refused and the existing call is left exactly as it was: a replacement that cannot be
 /// honoured must not cost the user the call they already had.
+///
+/// Answers from the default codec set, [`Codecs::G711`]. [`answer_replacing_with`] takes a
+/// selection.
 pub async fn answer_replacing(
     endpoint: &Handle,
     incoming: &Incoming,
     media_address: IpAddr,
     replaced: &mut Call,
+) -> Result<Call> {
+    answer_replacing_with(
+        endpoint,
+        incoming,
+        media_address,
+        replaced,
+        Codecs::default(),
+    )
+    .await
+}
+
+/// [`answer_replacing`], from a chosen codec set rather than the default one (`M-30`).
+///
+/// `codecs` applies to the *replacement*, which is the only call being negotiated here. The one
+/// being replaced is hung up, and nothing renegotiates it on the way out.
+pub async fn answer_replacing_with(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    replaced: &mut Call,
+    codecs: Codecs,
 ) -> Result<Call> {
     let Some(asked_for) = Replaces::of(&incoming.request) else {
         refuse_request(endpoint, incoming, 400, "Bad Request").await?;
@@ -3889,7 +4202,7 @@ pub async fn answer_replacing(
 
     // Answer first. If this fails the old call is untouched, which is the right way round:
     // hanging up first and then failing to answer would leave the user with no call at all.
-    let taken_over = answer(endpoint, incoming, media_address).await?;
+    let taken_over = answer_with(endpoint, incoming, media_address, codecs).await?;
 
     // Then end the one being replaced (RFC 3891 §3). Its media stops with it.
     let _ = replaced.hang_up().await;
@@ -3910,4 +4223,178 @@ async fn refuse_request(
     let response = ResponseBuilder::to_request(&incoming.request, code, reason)?.build();
     endpoint.respond(&incoming.key, response).await?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use std::fmt::Write as _;
+
+    use super::*;
+
+    /// An audio description with the given formats and rtpmaps, as a peer would send it.
+    fn offered(formats: &str, rtpmaps: &[&str]) -> SessionDescription {
+        let mut body = format!(
+            "v=0\r\n\
+             o=- 1 1 IN IP4 192.0.2.1\r\n\
+             s=-\r\n\
+             c=IN IP4 192.0.2.1\r\n\
+             t=0 0\r\n\
+             m=audio 40000 RTP/AVP {formats}\r\n"
+        );
+        for rtpmap in rtpmaps {
+            let _ = write!(body, "a=rtpmap:{rtpmap}\r\n");
+        }
+        sipx_sdp::parse(&body).expect("a description this test wrote")
+    }
+
+    /// The default is the G.711 pair, in every build. The `opus` feature adds a variant to
+    /// [`Codecs`]; it must never move which one `Default` produces, or turning the feature on to
+    /// get the *option* of Opus would silently change what every existing call offers.
+    #[test]
+    fn the_default_codec_set_is_g711() {
+        assert_eq!(Codecs::default(), Codecs::G711);
+        let capabilities = Codecs::default().capabilities("192.0.2.9".parse().unwrap(), 40000);
+        assert!(
+            !capabilities
+                .rtpmaps
+                .iter()
+                .any(|(_, value)| value.to_ascii_lowercase().contains("opus")),
+            "the default offer names no Opus: {:?}",
+            capabilities.rtpmaps
+        );
+    }
+
+    /// RFC 8866 §6.6 makes the rtpmap authoritative even over a static number. This is the rule
+    /// that lets an Opus offer arrive at all — 111 means Opus only because the description said
+    /// so — and the same rule refuses to read an offer of `8` remapped to something else as PCMA.
+    #[test]
+    fn a_format_is_read_from_its_rtpmap_and_not_from_its_number() {
+        let remapped = offered("8 0", &["8 iLBC/8000", "0 PCMU/8000"]);
+        let settled = negotiated(&remapped, Codecs::G711).expect("PCMU is common");
+        assert_eq!(settled.codec, Codec::Pcmu);
+        assert_eq!(
+            settled.payload_type,
+            Some(0),
+            "the number the far end assigned travels with the codec"
+        );
+    }
+
+    /// A bare static type with no rtpmap at all is the one case matched by number, which is what
+    /// keeps every G.711-only peer that sends `m=audio … 0 8` and nothing else working.
+    #[test]
+    fn a_bare_static_type_is_still_matched_by_number() {
+        let settled = negotiated(&offered("0", &[]), Codecs::G711).expect("PCMU is static");
+        assert_eq!(settled.codec, Codec::Pcmu);
+        assert_eq!(
+            settled.payload_type, None,
+            "nothing named it, so nothing overrides `Codec::payload_type`"
+        );
+    }
+
+    /// The clock rate and channel count are part of a format's identity (RFC 8866 §6.6), so a
+    /// name sipx knows at a rate it does not is not a match.
+    #[test]
+    fn a_known_name_at_an_unknown_clock_rate_is_not_a_match() {
+        assert_eq!(codec_named("PCMU/16000"), None);
+        assert_eq!(codec_named("opus/16000/2"), None);
+        assert_eq!(codec_named("PCMU/8000"), Some(Codec::Pcmu));
+        assert_eq!(codec_named("pcma/8000"), Some(Codec::Pcma));
+    }
+
+    /// The default build has no Opus, so an offer of it is not a codec that build can carry —
+    /// and the offer is answered from what *is* common rather than refused. This is the promise
+    /// the `opus` feature is off by default in order to make: `tests/opus.rs` is gated on the
+    /// feature and cannot assert anything about the build that lacks it.
+    #[cfg(not(feature = "opus"))]
+    #[test]
+    fn a_default_build_does_not_carry_an_offered_opus() {
+        assert_eq!(codec_named("opus/48000/2"), None);
+        let opus_first = offered("111 0", &["111 opus/48000/2", "0 PCMU/8000"]);
+        let settled = negotiated(&opus_first, Codecs::G711).expect("G.711 is still offered");
+        assert_eq!(settled.codec, Codec::Pcmu, "the first format sipx carries");
+    }
+
+    /// Selecting a set is what puts a codec on the table, and negotiation may not step outside
+    /// it. An Opus offer answered from [`Codecs::G711`] settles on G.711 — not because Opus is
+    /// absent from the build, but because the answer this side builds never named it, and a
+    /// session started on a codec no answer named sends packets the far end cannot place.
+    #[cfg(feature = "opus")]
+    #[test]
+    fn negotiation_does_not_settle_outside_the_selected_set() {
+        assert_eq!(codec_named("opus/48000/2"), Some(Codec::Opus));
+        let opus_first = offered("111 0", &["111 opus/48000/2", "0 PCMU/8000"]);
+
+        let from_g711 = negotiated(&opus_first, Codecs::G711).expect("G.711 is still offered");
+        assert_eq!(from_g711.codec, Codec::Pcmu);
+
+        let from_opus = negotiated(&opus_first, Codecs::Opus).expect("Opus is on the table");
+        assert_eq!(from_opus.codec, Codec::Opus);
+        assert_eq!(
+            from_opus.payload_type,
+            Some(111),
+            "on the number this offer assigned, not on a number 111 means by itself"
+        );
+    }
+
+    /// A peer may spell a static type either way — `m=audio … 0` alone, or the same thing with a
+    /// redundant `a=rtpmap:0 PCMU/8000` — and RFC 8866 §6.6 allows both for the same codec.
+    ///
+    /// So moving between the two spellings is not a *change*, and [`Call::move_media_if_changed`]
+    /// must not rebuild the session for it: rebuilding costs an audible gap, and some peers
+    /// re-INVITE every thirty seconds as a keep-alive. `negotiated` does record the difference —
+    /// `Some(0)` against `None`, which is a true fact about what the description said — so the
+    /// comparison is on [`Negotiated::wire_payload_type`], where the two collapse to the one byte
+    /// that actually goes out.
+    #[test]
+    fn a_redundant_rtpmap_for_a_static_type_is_not_a_change() {
+        let mapped = negotiated(&offered("0", &["0 PCMU/8000"]), Codecs::G711).expect("PCMU");
+        let bare = negotiated(&offered("0", &[]), Codecs::G711).expect("PCMU");
+
+        assert_eq!(mapped.codec, bare.codec);
+        assert_eq!(mapped.payload_type, Some(0), "the rtpmap named it");
+        assert_eq!(bare.payload_type, None, "nothing named it");
+        assert_eq!(
+            mapped.wire_payload_type(),
+            bare.wire_payload_type(),
+            "the same byte goes on the wire either way, so the session must not move",
+        );
+    }
+
+    /// An *answer* naming a codec outside the selected set is refused, so nothing keys a session
+    /// on it.
+    ///
+    /// Pinned separately from `negotiated` because of where the refusal lands rather than what it
+    /// returns. It is a failure mode `M-30` adds to `settle_answer`, which had no codec opinion
+    /// before; on this branch an early answer that trips it is swallowed by
+    /// `Dialing::adopt_early_answer`, but that function propagates on `main` after `S-25`, so once
+    /// the two are merged this same refusal ends the invitation over a CANCEL. That is a call
+    /// termination neither branch produces alone, which is why the precondition is worth holding
+    /// here rather than waiting for the merge to discover it.
+    ///
+    /// True in both feature configurations for two different reasons: with `opus` off no rtpmap can
+    /// name Opus at all, and with it on `Codecs::G711` does not carry it.
+    #[test]
+    fn an_answer_outside_the_selected_set_is_refused() {
+        let opus_only = offered("111", &["111 opus/48000/2"]);
+        assert!(matches!(
+            settle_answer(&[], &opus_only, Codecs::G711),
+            Err(Error::NoCommonCodec)
+        ));
+    }
+
+    /// An offer with nothing sipx carries is refused rather than answered on a guess.
+    #[test]
+    fn an_offer_of_nothing_we_carry_has_no_common_codec() {
+        let g729 = offered("18", &["18 G729/8000"]);
+        assert!(matches!(
+            negotiated(&g729, Codecs::G711),
+            Err(Error::NoCommonCodec)
+        ));
+    }
 }

@@ -44,10 +44,20 @@ END = "<!-- END maturity -->"
 #: dependency is distance, not progress, and calling it anything else is how a board flatters itself.
 OPEN = {"ready", "backlog", "blocked", "in-progress"}
 
-#: Layers where a role claim is checked against a caller above the implementing crate. Kept in step
-#: with `ROLE_REACHABILITY_LAYERS` in `rfc-report.py` — the point of naming it here is that every
-#: count outside these layers carries a caveat, so if that set widens this text must follow.
+#: Layers where a role claim is checked against a caller above the implementing crate by the *path*
+#: check. Kept in step with `ROLE_REACHABILITY_LAYERS` in `rfc-report.py`.
+#:
+#: This set is deliberately **not** widened by `X-38`. Widening it would turn on the per-row path check
+#: for layers `X-33` measured and declined it for, and that check is the one whose limit started this
+#: whole lineage: it is satisfied by citing a file whose relevant branch is dead. `X-38` did not build
+#: a better version of it — it changed what the question means, which is why the basis below is a
+#: second column rather than more rows in this one.
 REACHABILITY_CHECKED = {"media", "security"}
+
+#: What now decides reachability for every layer: the shipped application, and the gate step that
+#: holds the declared surface against it. `X-38`, and alpha predicate 1.
+SURFACE_CHECKER = "scripts/check-app-surface.py"
+SURFACE_APPLICATION = "sipx-app"
 
 
 class Predicate:
@@ -74,12 +84,17 @@ ALPHA = (
     Predicate(
         1,
         "No claim outlives its caller, at any layer",
-        "attested",
+        "computed",
         ["X-30", "X-33", "X-37", "X-38"],
-        "Mechanical as far as a path check can go, which is not far: `unreachable_claims` covers "
-        "`media` and `security` and was measured and declined for `transport`. The rest is attested "
-        "by shipping an application whose every dependency is visible — `X-38` — because a capability "
-        "that exists but cannot be selected is a question of use, and use is observed, not grepped.",
+        "Computed, but the thing computed is a *definition* rather than a search. `X-38` ships an "
+        f"application (`{SURFACE_APPLICATION}`) and defines the reachable-from-a-call surface as what "
+        f"it uses; `{SURFACE_CHECKER}` holds every crate's `Supported` claim against that "
+        "application's real dependency closure, and the gate is red when the two disagree. The three "
+        "path checks before it could only find capabilities that were *mentioned* — a path is "
+        "satisfied by citing a file whose relevant branch is dead — and none of them could say "
+        "whether a capability was worth selecting. An application answers that by needing it or not. "
+        "What this does **not** say is that every row of a layer is individually reached: the "
+        "declarations it checks are per crate, so the surface is entered per crate.",
     ),
     Predicate(2, "Adversarial input and adversarial timing are both fuzzed", "computed", ["X-19", "X-31"]),
     Predicate(3, "A red gate means a defect", "computed", ["X-28", "X-29", "X-34", "X-36"]),
@@ -261,9 +276,17 @@ def render():
         "is `done` — the stories are the definition, so this table cannot drift from the board."
     )
     lines.append("")
+    # The label follows the kind. An earlier version printed "is attested, not computed" over every
+    # note, which would have described predicate 1's mechanical check as an attestation — the exact
+    # confusion this file's docstring says it exists to avoid, one level up.
     for predicate in ALPHA:
-        if predicate.detail:
-            lines.append(f"- **Predicate {predicate.number} is attested, not computed.** {predicate.detail}")
+        if not predicate.detail:
+            continue
+        if predicate.kind == "attested":
+            label = f"Predicate {predicate.number} is attested, not computed."
+        else:
+            label = f"Predicate {predicate.number} is computed, not attested."
+        lines.append(f"- **{label}** {predicate.detail}")
     lines.append("")
 
     # ---- RFCs per layer. One aggregate percentage would call unlike layers alike.
@@ -275,21 +298,32 @@ def render():
         "and never as a fraction of done."
     )
     lines.append("")
-    lines.append("| Layer | RFCs | implemented | partial | none | other | Reachability checked |")
+    lines.append("| Layer | RFCs | implemented | partial | none | other | Reachability basis |")
     lines.append("|---|---|---|---|---|---|---|")
     summary = layer_counts(rows)
     for layer in sorted(summary):
         counts = summary[layer]
-        checked = "yes" if layer in REACHABILITY_CHECKED else "**no**"
+        # Every layer now has an application under it, which is what `X-38` changed. Two of them also
+        # have the per-row path check, and that is strictly more than the others have — so the column
+        # says which, rather than flattening both into "yes".
+        basis = (
+            "application + path check"
+            if layer in REACHABILITY_CHECKED
+            else "application"
+        )
         lines.append(
             f"| {layer} | {counts['total']} | {counts['implemented']} | {counts['partial']} | "
-            f"{counts['none']} | {counts['other']} | {checked} |"
+            f"{counts['none']} | {counts['other']} | {basis} |"
         )
     total = len(rows)
     lines.append("")
     lines.append(
-        f"{total} RFCs tracked. Outside the layers marked *yes*, `implemented` means the code exists "
-        "and has **not** been checked against a caller above the implementing crate — see `X-37`."
+        f"{total} RFCs tracked. **`implemented` now means the code exists in a crate the shipped "
+        f"application depends on** — that is the definition `X-38` put in place of the caveat this "
+        f"table carried for `core`, `services`, `transport` and `wire`, and `{SURFACE_CHECKER}` fails "
+        f"the gate when a crate claims supported surface no application reaches. The two layers that "
+        f"also say *path check* carry `rfc-report.py`'s per-row check on top; the others are entered "
+        f"per crate, so a single row of them is not individually attested."
     )
     lines.append("")
 
@@ -343,11 +377,13 @@ def render():
     lines.append("## What this cannot see")
     lines.append("")
     lines.append(
-        "- **`implemented` outside `media` and `security` is unverified against callers.** `X-30` "
-        "demoted three rows the day it landed and `X-33` two more, all for capabilities no call could "
-        "select. The check was measured and *declined* for `transport`, because that layer mixes "
-        "selected capabilities with plumbing every call runs. `X-37` is the successor that would close "
-        "this; until it lands, treat those counts as an upper bound."
+        "- **The reachable surface is one application's opinion, and it is entered per crate.** "
+        f"`X-38` replaced *unverified against callers* with a definition: what `{SURFACE_APPLICATION}` "
+        "uses is the surface. That is a real caller rather than a grep, and it is also a single one — "
+        "so a supported *module* that the application's crates never name is not caught, because the "
+        "declarations being checked are per crate. A second application disagreeing is the intended "
+        "way this widens, and the rule for it is in `README.md`: an experimental item that something "
+        "outside this repository depends on graduates, with a `CHANGELOG.md` entry."
     )
     lines.append(
         "- **A predicate here is only as good as its story list.** Predicate 4 in particular reports "

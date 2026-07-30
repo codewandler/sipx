@@ -2,7 +2,7 @@
 id: M-30
 title: Let a call select Opus, or stop shipping a codec nothing can reach
 pillar: Media
-status: ready
+status: done
 priority: 4
 design: docs/designs/media.md
 epic: media
@@ -17,7 +17,7 @@ Make the Opus codec reachable from a call. `M-13` is `done` and built the encode
 SDP half; nothing built the **selection**, so no call has ever carried an Opus packet.
 
 ## Acceptance
-- [ ] **A call can offer and answer Opus.** Four locks have to come off, and all four are verified:
+- [x] **A call can offer and answer Opus.** Four locks have to come off, and all four are verified:
       1. `sipx-call` hardcodes `Capabilities::g711` at `call.rs:606, 752, 955, 1728, 2860, 3161`, so
          payload type 111 is never offered.
       2. `Codec::from_payload_type` (`sipx-media/src/session.rs:115-124`) **deliberately** never
@@ -29,23 +29,112 @@ SDP half; nothing built the **selection**, so no call has ever carried an Opus p
          `answer`, `answer_ringing`, `answer_early`, nor any of `DialOptions`' builders — and
          `crates/sipx-call/Cargo.toml` has no `[features]` block at all, so the `opus` feature cannot
          even be turned on through it.
-- [ ] **Which codec a call offers is the application's choice, with a stated default.** The default
+- [x] **Which codec a call offers is the application's choice, with a stated default.** The default
       stays G.711: it is mandatory-to-implement and needs no C library. Opus links one and is off by
       default, so it cannot become the default by accident.
-- [ ] **RFC 6716 and 7587 go back to `implemented` in the same commit that makes them true**, and the
+- [x] **RFC 6716 and 7587 go back to `implemented` in the same commit that makes them true**, and the
       published table's counts move with it. `X-33` demoted both to `partial` because nothing could
       reach them; the demotion is the honest state until this closes, and reversing it without the
       code would be the exact defect that check exists to catch.
-- [ ] **The public docs move in the same commit too.** `X-35` scoped every Opus mention to the crates
+- [x] **The public docs move in the same commit too.** `X-35` scoped every Opus mention to the crates
       — `README.md`, `website/docs/intro.md`, `does-this-fit.md`, `website/src/pages/index.js` — and
       `check-audio-claims.py` now holds all 44 front doors to agreement. When a call can select Opus
       those sentences become under-claims, and the guard will not catch an under-claim.
-- [ ] Failing-first test: a call placed with Opus selected offers payload type 111 and carries Opus
+- [x] Failing-first test: a call placed with Opus selected offers payload type 111 and carries Opus
       packets. It cannot pass today because there is no selector. Name it.
 
 ## Progress
-- Not started. Filed at `X-33`'s integration, from its explicit request: *"it wants a story, and so
-  does wiring Opus to a call — `M-13` is `done` and built the codec, not the selection."*
+- Filed at `X-33`'s integration, from its explicit request: *"it wants a story, and so does wiring
+  Opus to a call — `M-13` is `done` and built the codec, not the selection."*
+- **Done, on `impl/M-30`.** A first implementor was killed mid-flight by an infrastructure error
+  and left `f9f322e` — a `Codecs` enum, the `[features]` block, `tests/opus.rs`, and roughly half
+  the call sites converted. That work was kept and finished rather than restarted; its design
+  decisions were sound and are recorded below.
+- **The selector is `Codecs`**, `G711` by default and `Opus` behind `sipx-call`'s new `opus`
+  feature. Offering side: `DialOptions::with_codecs`, which reaches `dial`, `dial_once` and
+  `dial_early`. Answering side: `answer_with`, `answer_ringing_with`, `answer_replacing_with`,
+  `Invitation::answer_with` and `ring_early_with`. `Call` and `Early` carry the set, so a re-INVITE
+  or a pre-200 UPDATE is answered from the set the call was placed with instead of narrowing to
+  G.711 mid-call.
+- **Lock 2 came off without changing the door, and that was the right call.** The story said to
+  read `Codec::from_payload_type`'s refusal comment first because "the reason may still be good".
+  It is good: RFC 7587 §7 assigns Opus no static type, so 111 alone means nothing and returning
+  Opus for it would decode somebody else's G.729 as Opus. The lock is therefore opened one level
+  up — `negotiated` matches a format by its `a=rtpmap` (RFC 8866 §6.6 makes the map authoritative
+  even over a static number), and the number the far end assigned travels with the codec on
+  `Config::payload_type` rather than being reassumed. `from_payload_type` still refuses Opus and
+  should. A side effect worth having: an offer of `8` remapped to iLBC is no longer read as PCMA.
+- **`negotiated` will not settle outside the selected set.** An Opus offer reaching a G.711 call is
+  answered G.711, because the answer this side builds never named Opus and a session started on a
+  codec no answer named sends packets the far end cannot place.
+- **The `carries` check had to be inside the search, not applied to its result.** The interrupted
+  WIP filtered after `find_map`, which stopped at the offerer's first choice and refused the whole
+  description when that one format was outside our set: an Opus-first offer to a default G.711 call
+  came back `NoCommonCodec` while the answer on the wire named the PCMU further down the same list.
+  Invisible in the default build — where no rtpmap can name Opus at all — and live under
+  `--all-features`, which is how the gate builds. Caught by
+  `negotiation_does_not_settle_outside_the_selected_set`, added for exactly this reason.
+- **Both feature configurations are built and tested by the *gate*, not just by hand.** The first
+  version of this note claimed the former while only the latter was true: every gate step and every
+  CI job is `--all-features`, and `check-features.sh` enumerated `sipx-transport`, `sipx-media` and
+  `sipx-ua` — not `sipx-call`. Creating an optional feature on a published crate and leaving the
+  matrix alone is how `tls` broke for a release, which `AGENTS.md` names. `check-features.sh` now
+  builds `sipx-call` with the feature off and on, `--all-targets` because this crate's conditional
+  code is in its tests: the codec table in `call.rs`'s test module and all of `tests/opus.rs`.
+- **Registry**: 6716 and 7587 restored to `implemented`, citing `sipx-call/src/call.rs` and
+  `sipx-call/tests/opus.rs`, and `docs/compliance.md` regenerated — implemented 29 → 31, partial
+  24 → 22. Neither row claims `roles`, deliberately: they never did, and adding a role claim is a
+  new assertion this story did not ask for. Worth a look if the coordinator disagrees — both roles
+  are in fact exercised, in the same one-direction shape RFC 3711's note already describes.
+- **What is still not true, and is now written into the rows rather than left implied**: there is
+  no Opus `a=fmtp` in either direction, so §7.1's optional parameters — `maxaveragebitrate`,
+  `useinbandfec`, `usedtx`, `maxplaybackrate`, `cbr`, `stereo`/`sprop-stereo` — are neither offered
+  nor read; and `sipx-cli` still takes no flag for Opus, so the codec is reachable from the library
+  and not from the binary.
+- **Gate: 20 steps, all green**, from a real run on this branch after the final commit. The first
+  run failed 5 steps and every one was mine, not the merge base: `fmt`, `clippy`
+  (`too_many_arguments` on the eighth parameter, `too_many_lines` on `dial_with`, and
+  `push_str(&format!(..))` in the new test module), `maturity`/`maturity tests` (`docs/maturity.md`
+  needed regenerating for the registry move), and `rfc report tests` — see below.
+- **`X-33` left a guard that this story had to invert, and inverting it cost a tooth that had to be
+  put back.** `scripts/test-rfc-report.py` asserted RFC 6716 and 7587 were `partial` *by number*, so
+  promoting them failed the suite. It was rewritten to hold the rule instead of the verdict: the
+  rows may say `implemented` only while they cite the call layer, `sipx-call` actually calls
+  `Capabilities::with_opus`, and 7587's note still states the `a=fmtp` boundary.
+- **The asymmetry in that inversion is the thing to understand.** `X-33` asserted the *absence* of
+  `with_opus`, and absence is conclusive — a symbol that appears nowhere is called nowhere.
+  Presence is not: the first rewrite searched raw file text, so a comment naming the symbol
+  satisfied it, and the whole pre-`M-30` `sipx-call` plus one comment passed all 31 tests. The
+  check now reads code with comments stripped and adds two facts prose cannot fake — the crate
+  declares the `opus` feature, and `Codecs` is exported — and `X-33`'s `sipx-cli` absence check is
+  restored, because a note in the 6716 row claims the binary cannot reach Opus and something has to
+  hold that. Verified by reconstructing the hollow promotion (`5363747`'s `sipx-call/src` and
+  `Cargo.toml`, this story's registry, one comment mentioning `with_opus`): the guard fails it on
+  the code assertion. It is still a proxy in the same way `reaches_the_call_layer` is — a dead call
+  behind `if false` would pass — and that limit belongs to
+  `docs/designs/rfc-registry-grain.md`'s successor check, not to this test.
+- **`main` moved while this was parked, and merging needs one hand resolution.** `S-25` landed on
+  `main` and rewrote `Dialing::adopt_early_answer` to return `Result<()>`, propagating through `?`
+  rather than logging and returning; this story added a third argument to `settle_answer`. Both
+  intents compose, but they touch the same lines, so `git merge` reports one conflict in
+  `crates/sipx-call/src/call.rs`. **It needs two edits, not one** — an earlier version of this note
+  said one, and taking `main`'s body alone is `E0063`:
+  1. `settle_answer(self.capabilities.crypto.as_slice(), &answer, self.options.codecs)?` — the
+     argument this story added.
+  2. the `Early { … }` built just below it gains a fifth field, `codecs: self.options.codecs`.
+     `main` builds it with four (`call.rs:2675-2680`); this branch with five.
+
+  `docs/maturity.md` also conflicts, in its generated burn-down row only; run
+  `./scripts/maturity.py` after the merge and it settles.
+- **The merge creates a call-termination path neither branch has alone, and it looks correct.**
+  `S-25` made `adopt_early_answer` propagate instead of logging; this story gave `settle_answer` a
+  codec opinion it did not have. Composed, an early answer naming a codec outside the selected set
+  now *ends the invitation* over `S-25`'s CANCEL, where before the merge it was either impossible
+  (no codec opinion) or swallowed (no propagation). Desirable — a provisional whose answer we cannot
+  key is not a call — but new behaviour on a protocol state machine. The half that can be pinned
+  without the merge is pinned: `an_answer_outside_the_selected_set_is_refused` holds the refusal
+  `settle_answer` now produces, in both feature configurations. The termination itself needs both
+  branches and is the integrator's to verify.
 
 ## Notes
 - **This is the sixth instance of the project's recurring defect**, after ICE (`M-27`), UPDATE

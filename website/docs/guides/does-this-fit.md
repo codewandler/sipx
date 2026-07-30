@@ -16,8 +16,8 @@ registers and transfers. It does not route other people's calls.
   flow the client opened (RFC 5626 Outbound), with `Path` and `Service-Route` honoured, with a
   GRUU for one instance of the registration, and with a binding refreshed when a push wakes the
   client.
-- **Carry real audio**: G.711 both ways, DTMF, playback and recording. Not Opus — it is in
-  `sipx-audio` behind a feature and no call offers it; see below.
+- **Carry real audio**: G.711 both ways, DTMF, playback and recording. Opus too, behind
+  `sipx-call`'s `opus` feature — a call offers G.711 unless it selects Opus.
 - **Build on the pieces**: a SIP parser and transaction machines with no async runtime at all,
   or SDP offer/answer as a pure function.
 - **Encrypt a call end to end**, signalling and media, without a way to accidentally turn the
@@ -36,10 +36,10 @@ registers and transfers. It does not route other people's calls.
 - **Media through NAT that symmetric RTP cannot solve.** `rport`, symmetric RTP and Outbound
   cover the registered-phone case; there is no ICE yet, so the paths only a relay or
   connectivity checks would fix are not fixed.
-- **Opus on a call.** `sipx-audio` encodes and decodes it behind the `opus` feature, and nothing
-  above it can select it: every `sipx-call` entry point builds a G.711-only offer, none of them
-  accepts capabilities from you, and the payload-type reader refuses Opus deliberately rather
-  than guess a codec from a dynamic number.
+- **A codec beyond G.711 and Opus.** Those two are what `sipx-audio` implements, and `Codecs` is
+  the whole of the choice — there is no G.722, no G.729, and no way to hand a call a codec sipx
+  does not have. Opus needs `sipx-call`'s `opus` feature, which links a C library; G.711 is the
+  default and needs nothing.
 - **Bridging or conferencing two *calls*.** `sipx-media` implements both, over media sessions you
   hold. A `Call` owns its media session outright and lends only a reference, so two calls cannot
   be handed to a bridge — that is `C-6`, and the [migration

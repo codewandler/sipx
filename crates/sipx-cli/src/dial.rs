@@ -35,11 +35,12 @@ OPTIONS:
 ";
 
 pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    let args = Args::new(raw);
-    if args.flag("help") || raw.iter().any(|a| a == "-h") {
-        print!("{HELP}");
-        return Exit::Success;
-    }
+    // Help, then any flag given no value — refused before the URI is even looked at, so a dropped
+    // `--play` or `--record` cannot turn into a call that carries no audio (`S-30`).
+    let args = match crate::arguments(raw, HELP, format) {
+        Ok(args) => args,
+        Err(exit) => return exit,
+    };
 
     let Some(uri) = args.positional() else {
         eprint!("{HELP}");
