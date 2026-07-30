@@ -43,6 +43,22 @@ to be made again by whoever asks next.
 
 ## Progress
 - Filed 2026-07-30 while closing `M-23`, the fifth of the ICE epic's six children.
+- 2026-07-30: **decided — the `Done when` sentence governs, and M10 does not require TURN.** Both
+  texts in `docs/roadmap.md` now say that once: the M10 section states the sentence is the only exit
+  criterion and gives three grounds for it, and the ICE epic heading lost its `(six stories, M10)`
+  parenthetical and gained a paragraph saying `M-24` is in the epic and in no milestone. The grounds
+  are that `M-27`'s test demonstrates the third clause without a relay, that the M10 table and
+  `rfc-roadmap.md` group 2 both enumerate M10 as RFC 8445 + 8839 and never 8656,
+  and that this roadmap ranks a deployability gap above a feature — a relay widens the coverage of a
+  capability M10 delivers rather than delivering one M10 lacks.
+- The third clause is settled in writing as **some** such endpoints, not any: host and reflexive
+  candidates connect many NAT pairs, both ends behind symmetric NAT are connected by neither, and
+  that residue is precisely what `M-24` buys.
+- **M10 is still not recorded as reached, and the reason is not TURN.** Checking the evidence rather
+  than the statuses: `T-20`'s test is an `OPTIONS` to one agent's GRUU, not two registrations of one
+  address of record each taking a call, and `T-21`'s test stops when the INVITE arrives — nothing
+  answers it. Only the ICE clause is demonstrated as written. The roadmap now says so, and says the
+  remaining distance is one composing demonstration. That wants its own story.
 
 ## Notes
 - **Reads with `M-24`**, which is the only thing standing between the two readings. If `M-24` lands
