@@ -71,6 +71,7 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
 - [S-29 — Register over an Outbound flow, and let a registration wake on push](S-29-register-over-an-outbound-flow-and-push.md) · Signalling · with_outbound and with_push have no caller outside sipx-ua's own tests — the eighth instance of the recurring defect — so X-37 demoted RFC 5626 and 8599 to no roles; wiring them is what makes the roles honest again
 - [S-28 — Answer a 401 or 407 on an outbound INVITE](S-28-a-call-cannot-answer-an-authentication-challenge.md) · Signalling · found while closing P-7 — sipx-call has no credential type and no 401/407 path at all, so a challenged call fails outright; the digest machinery exists in sipx-ua and nothing above the registration path can reach it
+- [S-30 — Refuse a valued flag that was given no value, instead of ignoring it](S-30-a-valued-flag-with-no-value-is-silently-dropped.md) · Signalling · found by S-29's review — `Args::value` cannot tell "--flag was last" from "--flag was absent", so a trailing valued flag is accepted and dropped; CLI-wide, and it defeats the accepted-and-dropped rule S-29 asserted for its own six flags
 
 ### Transport layer
 _The transport layer is the only place in the signalling stack that touches the network, which_

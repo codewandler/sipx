@@ -47,13 +47,13 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Signalling | 10 |
+| Signalling | 11 |
 | Media | 7 |
 | Application | 6 |
 | Build | 3 |
 | Phone | 1 |
 | Transport | 1 |
-| **total** | **28** |
+| **total** | **29** |
 
 113 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
