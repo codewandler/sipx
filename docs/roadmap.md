@@ -321,6 +321,16 @@ practical necessities of NAT — `rport`, sent-by rewriting. Done when a message
 and received over each transport, with a loopback harness proving the core is driven
 correctly. See [design](designs/sip-transport.md).
 
+### Bounded transport lifetimes — `bounded-transports`
+
+The resource-safety repair for the running transport stack: pool eviction closes the task and socket
+it evicts (`T-25`), incomplete unauthenticated handshakes have concurrency and time budgets (`T-26`),
+and unusable endpoint capacities or keepalive intervals are rejected before binding (`T-27`). The
+common invariant is that a configured limit bounds live resources, not merely entries in a map after
+tasks have detached from it. Done when churn and partial-handshake tests observe socket and task
+termination across TCP, TLS, WebSocket and secure WebSocket endpoints. See
+[design](designs/bounded-transports.md).
+
 ### User agent — `sip-ua`
 
 The roles applications use: a client that issues requests, a server that dispatches by
@@ -334,6 +344,15 @@ SDP (RFC 8866) with offer/answer (RFC 3264) as a pure function; RTP and RTCP wit
 buffer and reception statistics; G.711, with Opus behind a feature; symmetric-RTP address
 learning. Done when two sipx endpoints exchange audio that survives a bit-exactness check.
 See [design](designs/media.md).
+
+### Media runtime safety — `media-runtime-safety`
+
+The lifecycle and construction boundary around media workers: dropping a conference stops every
+participant collector (`M-35`), zero packet/report/mix intervals are rejected before work starts
+(`M-36`), and codec construction can never substitute a different wire codec under a negotiated
+payload type (`M-37`). Done when invalid setup starts no worker, conference destruction retains no
+participant session, and packet-level tests prove every active payload type uses its negotiated codec.
+See [design](designs/media-runtime-safety.md).
 
 ### Call framework — `call`
 
@@ -410,3 +429,12 @@ separate product consuming `sipx-call` as a library — is answered: separate. W
 primitive underneath it, two dialogs driven as one call (`C-1`, M9). Transports, endpoints, routes,
 a registrar and session-border policy are a thing built *with* sipx, which is what the
 [vision](vision.md) already says about routing engines. See [design](designs/edge.md).
+
+### Commit-stable generated measurements — `commit-snapshot`
+
+The maturity report must describe the commit that carries it and give the same answer in the
+originating worktree and a clean checkout. `X-39` owns the full contract: the ordinary all-changes
+path already works, while selective staging and stable date attribution remain open after the
+2026-07-30 repository review. Done when all-changes, selective, midnight-boundary and retained-date
+amend fixtures stay green across the commit boundary without making real report drift invisible. See
+[design](designs/commit-snapshot.md).

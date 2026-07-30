@@ -45,12 +45,21 @@ _None._
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
 - [A-9 — Make the published crates safe to freeze — `#[non_exhaustive]` and a README per crate](A-9-freeze-what-a-published-crate-can-add.md) · Application · A-8 stated the promise and left the two mechanical halves — every public error enum outside sipx-app-protocol is exhaustive, so it promises never to add a variant, and ten of eleven crates will publish to crates.io with no README at all
 
+### bounded transport lifetimes
+_The endpoint exposes connection and queue limits, but those numbers do not currently bound every_
+- [T-25 — Make pool eviction close the live connection it evicts](T-25-make-pool-eviction-close-the-live-connection-it-evicts.md) · Signalling · R-01 in the 2026-07-30 repository review — map removal drops the writer but leaves the socket task blocked on reads, so the configured pool bound is not a live-connection bound
+- [T-26 — Bound unauthenticated TLS and WebSocket handshakes](T-26-bound-unauthenticated-tls-and-websocket-handshakes.md) · Signalling · R-02 in the 2026-07-30 repository review — accepted stream handshakes are spawned before pool admission with no deadline or concurrency budget
+- [T-27 — Reject invalid endpoint runtime configuration before binding](T-27-reject-invalid-endpoint-runtime-configuration-before-binding.md) · Signalling · R-06 and the WebSocket part of R-07 in the 2026-07-30 repository review — zero public capacities panic and zero keepalive terminates the task
+
 ### Call framework
 _This is the layer applications actually program against, so it is the one that decides whether_
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
-### Conformance
+### commit-stable generated measurements
+_A generated measurement that is green only in the worktree where it was written is not a gate. The_
 - [X-39 — Stop the maturity report from making the gate red for something that is not a defect](X-39-the-maturity-report-cannot-be-green-in-the-commit-that-moves-a-story.md) · Build · alpha predicate 3 — `maturity.py --check` cannot pass in the commit that files or closes a story, because Filed/Closed for today come from git history and the fact does not exist until the commit does; regenerated twice on 2026-07-30 for no defect either time
+
+### Conformance
 - [X-40 — Stop asserting on recorded audio without waiting for it](X-40-a-recording-assertion-fails-when-the-machine-is-busy.md) · Build · alpha predicate 3, third instance after X-28 and X-29 — `dial_plays_a_file_and_records_the_far_end` waits for the call and then asserts on a real-time side effect, so under load it reads a valid WAV with zero samples; observed once, not reproducible in isolation
 - [X-41 — Make a broken anchor fail the docs build instead of warning inside a green gate](X-41-the-docs-build-warns-about-broken-anchors-and-passes.md) · Build · alpha predicate 3 — the `docs site` step printed a broken anchor and exited 0, because Docusaurus defaults `onBrokenAnchors` to warn; found by S-30, which only caught it by reading the step's output instead of trusting its exit code
 - [X-44 — Guard the fixed-sleep rule mechanically, because the sweep did not hold](X-44-the-fixed-sleep-rule-is-swept-for-not-guarded.md) · Build · found while integrating the X-39/X-40/M-33 wave — `X-29` swept the workspace and `0.12.0` claims "no test in the workspace now asserts after a fixed sleep", but nothing enforces it and two new instances appeared within the same wave
@@ -70,6 +79,12 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 - [M-33 — Settle whether reading a report block consumes the reporting window](M-33-two-comments-disagree-about-consuming-a-reporting-window.md) · Media · found by X-18 — `session.rs:1404-1410` and `:1364-1367` carry contradictory comments about whether `report_block()` consumes a reporting window; one is wrong, and which one decides whether `MediaSession::stats()` is safe to poll
 - [M-34 — Give `collect_digits` a start deadline separate from its inter-digit gap](M-34-collect-digits-conflates-the-start-deadline-with-the-gap.md) · Media · found by X-40's implementor — `crates/sipx-media/src/session.rs:1117` has the identical one-window shape that made `sipx answer` record zero samples, so the DTMF test is the same flake waiting
 - [M-28 — Offer DTLS-SRTP from a call, and stop claiming it until then](M-28-dtls-srtp-unreachable-from-a-call.md) · Media · found by X-27 — dial hardcodes SDES, so sipx cannot offer DTLS-SRTP at all, while RFC 5763 and 5764 are both marked implemented with both roles
+
+### media runtime safety
+_Media setup crosses three boundaries where a public value becomes a long-lived worker: ownership,_
+- [M-35 — Make dropping a conference stop every participant collector](M-35-make-dropping-a-conference-stop-every-participant-collector.md) · Media · R-05 in the 2026-07-30 repository review — Conference Drop aborts only the mixer while detached collectors retain participant sessions
+- [M-36 — Reject zero media worker intervals before starting](M-36-reject-zero-media-worker-intervals-before-starting.md) · Media · media portion of R-07 in the 2026-07-30 repository review — zero packet and mix periods kill tasks while a zero RTCP interval can hot-loop
+- [M-37 — Never put a fallback codec under a negotiated payload type](M-37-never-put-a-fallback-codec-under-a-negotiated-payload-type.md) · Media · R-08 in the 2026-07-30 repository review — failed Opus setup constructs Direct PCMU state while retaining the negotiated Opus payload type
 
 ### Quic
 - [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11

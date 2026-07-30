@@ -17,12 +17,12 @@ repository and are recorded when they happen rather than computed.
 | 1 | No claim outlives its caller, at any layer | met | — |
 | 2 | Adversarial input and adversarial timing are both fuzzed | met | — |
 | 3 | A red gate means a defect | open | `X-39`, `X-40`, `X-41` |
-| 4 | No known-wrong shipped path | met (attested) | — |
+| 4 | No known-wrong shipped path | open | `M-35`, `M-36`, `M-37`, `T-25`, `T-26`, `T-27` |
 | 5 | The public API says what it guarantees | met | — |
 | 6 | Testable from a shell for everything the CLI exposes | met (attested) | — |
 | 7 | The distance to v1 is generated, not asserted | met | — |
 
-**6 of 7 predicates met.** A predicate is met when every story declaring it is `done`. **A story declares its predicate itself**, in its own `predicate:` frontmatter field, so there is no list of predicate stories kept here to fall behind the board — which is what happened, and is `X-42`.
+**5 of 7 predicates met.** A predicate is met when every story declaring it is `done`. **A story declares its predicate itself**, in its own `predicate:` frontmatter field, so there is no list of predicate stories kept here to fall behind the board — which is what happened, and is `X-42`.
 
 - **Predicate 1 is computed, not attested.** Computed, but the thing computed is a *definition* rather than a search. `X-38` ships an application (`sipx-app`) and defines the reachable-from-a-call surface as what it uses; `scripts/check-app-surface.py` holds every crate's `Supported` claim against that application's real dependency closure, and the gate is red when the two disagree. The three path checks before it could only find capabilities that were *mentioned* — a path is satisfied by citing a file whose relevant branch is dead — and none of them could say whether a capability was worth selecting. An application answers that by needing it or not. What this does **not** say is that every row of a layer is individually reached: the declarations it checks are per crate, so the surface is entered per crate.
 - **Predicate 4 is attested, not computed.** Cannot be computed: a defect nobody has found leaves no trace in either source. What is reported is the absence of *open* stories describing one.
@@ -47,13 +47,13 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Signalling | 11 |
-| Media | 9 |
+| Signalling | 14 |
+| Media | 12 |
 | Build | 7 |
 | Application | 6 |
 | Phone | 1 |
 | Transport | 1 |
-| **total** | **35** |
+| **total** | **41** |
 
 122 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
@@ -65,7 +65,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 |---|---|---|---|
 | 2026-07-28 | 95 | 58 | -37 |
 | 2026-07-29 | 43 | 47 | +4 |
-| 2026-07-30 | 15 | 16 | +1 |
+| 2026-07-30 | 26 | 16 | -10 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

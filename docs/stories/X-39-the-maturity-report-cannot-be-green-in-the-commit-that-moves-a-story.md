@@ -2,10 +2,10 @@
 id: X-39
 title: Stop the maturity report from making the gate red for something that is not a defect
 pillar: Build
-status: in-progress
+status: ready
 priority: 3
-design: docs/roadmap.md
-epic: conformance
+design: docs/designs/commit-snapshot.md
+epic: commit-snapshot
 areas: [docs]
 predicate: 3
 note: alpha predicate 3 — `maturity.py --check` cannot pass in the commit that files or closes a story, because Filed/Closed for today come from git history and the fact does not exist until the commit does; regenerated twice on 2026-07-30 for no defect either time
@@ -46,6 +46,15 @@ says nothing about the code.
       it: this story closing will itself move the table.
 - [x] Failing-first test: extend `test-maturity` with a case that files a story, regenerates, commits
       and asserts `--check` is green. Name it. It must fail before the fix.
+- [ ] **A selective commit reports the snapshot that will enter history, not the rest of the local
+      tree.** Stage one new or closing story and the generated report while leaving another story
+      unstaged or untracked; the local check and a clean checkout of the resulting commit must agree.
+      Add a failing-first test that would count the second story with the current working-tree union.
+- [ ] **A fact keeps the same day key across generation and commit.** Specify one date source that is
+      knowable before the commit and remains the committed fact's date after midnight and when an old
+      commit is amended without changing its author date. Add failing-first tests for both boundaries.
+- [ ] Regenerate the report in the commit that closes this reopened story and prove `--check` in a
+      clean checkout of that exact commit, not only in its originating worktree.
 
 ## Notes
 - **Found while integrating `S-29`**, not by the suite, and found twice before it was understood: the
@@ -149,3 +158,16 @@ frontmatter, so predicate 3 went `open` the moment these three were filed agains
 Left for the coordinator: the story's Notes float writing the trailing-regeneration dance into
 `AGENTS.md` as an interim workaround. Deliberately not done — the workaround is what this removes, and
 `AGENTS.md` is outside this story's write set.
+
+### Reopened by the 2026-07-30 repository review
+
+The working-tree union fixes the ordinary all-changes commit, but it does not yet establish the
+snapshot invariant this story needs. `uncommitted_story_facts` reads the complete index, working tree
+and untracked story set, so a selectively staged report can include a story absent from the commit.
+It also assigns every pending fact the wall-clock day, while history groups facts by the commit's
+author date. A midnight boundary or an amended older commit can therefore move a fact between rows.
+
+These are R-03 and R-04 in
+`docs/reviews/2026-07-30T07-50-49+02-00-repository-review.md`. They are extensions of X-39's contract,
+not new backlog items, so the story returns to `ready` until the selective-snapshot and stable-date
+acceptance cases are satisfied.
