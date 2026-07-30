@@ -30,6 +30,12 @@ use std::time::Duration;
 ///
 /// A soak measured over a shorter period is measuring the RFC, and the result of measuring the
 /// RFC is a failing test that somebody eventually deletes.
+///
+/// This is a **definition of silence** in the sense `docs/designs/media.md` gives the term: how
+/// long a hole has to be before "everything that was going to end has ended" is true, so that what
+/// is still resident afterwards is a leak rather than the specification. It is not a bound on
+/// failure and it is not a measurement — a run that settles for longer is more trustworthy, not
+/// less, which is why the constant is a floor (`X-44`).
 pub const SETTLE_PAST_TIMERS: Duration = Duration::from_secs(40);
 
 /// A reading of the things that must not grow.

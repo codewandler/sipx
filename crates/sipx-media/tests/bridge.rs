@@ -264,6 +264,10 @@ async fn dropping_a_bridge_stops_the_forwarding() {
 
     let bridge = Bridge::connect(Arc::new(left), Arc::clone(&right));
     drop(bridge);
+    // Ordering a stimulus: the forwarding task has to notice the drop before the clip below is
+    // played, or the recording would be empty for the wrong reason. Dropping the handle sets no
+    // flag a test can read and sends nothing, so there is nothing to poll for — and load
+    // lengthening this window only makes the ordering surer (`X-44`).
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Nothing crosses any more.

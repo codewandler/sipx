@@ -295,6 +295,18 @@ jobs:
         # modifications are both checked (X-31), as the RFC 4475 corpus check has always done.
         run: ./scripts/check-corpus-untouched.sh
 
+  # `docs/designs/media.md` has said since X-28 that a fixed wall-clock duration may bound a
+  # failure or define silence and may not stand in for a happens-before. It was swept for twice and
+  # enforced by nothing, so two fresh violations landed in the wave after the sweep that declared
+  # the workspace clean — one of them in production code. This reads the shape rather than the
+  # word `sleep`, over `src/` as well as `tests/`, and needs no toolchain to do it.
+  fixed-sleep:
+    name: fixed-sleep rule
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-fixed-sleep.py --check
+
   provenance:
     name: provenance
     runs-on: ubuntu-latest

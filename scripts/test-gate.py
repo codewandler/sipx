@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for the gate entry point, its drift check, its disk guard and the `docs site` step's own
-contract (stories `X-22`, `X-34`, `X-41`).
+"""Tests for the gate entry point, its drift check, its disk guard, the `docs site` step's own
+contract and the fixed-sleep rule (stories `X-22`, `X-34`, `X-41`, `X-44`).
 
 The gate is the contract for "before marking any story done", and for five days it was a list of
 commands that omitted one CI runs. Every documented command passed, the `msrv` job was red, and
@@ -12,6 +12,10 @@ of the list and falls behind, `X-34`'s red result that was never about the tree 
 `X-41`'s green result that was — a step that printed a dead link in the published site and exited
 0. Nearly all of it is asserted about real repository files rather than about fixtures, because a
 check that only ever sees its own fixtures is the same class of mistake one level up.
+
+`X-44` adds the fourth of those: a rule the project had written down normatively, swept for twice,
+and never made executable — so two fresh violations of it landed in the wave after the sweep that
+declared the workspace clean.
 """
 
 import importlib.util
@@ -26,6 +30,7 @@ AGENTS = ROOT / "AGENTS.md"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 BUILD_DOCS = ROOT / "scripts" / "build-docs.sh"
 DOCS_LINKS = ROOT / "scripts" / "check-docs-links.py"
+FIXED_SLEEP = ROOT / "scripts" / "check-fixed-sleep.py"
 SITE_CONFIG = ROOT / "website" / "docusaurus.config.js"
 # The dead-anchor probe `build-docs.sh` writes to prove the site's anchor guard is armed. Named
 # here because three tests below are about the file rather than about the check.
@@ -904,6 +909,499 @@ class TheInternalDocsLinkCheck(unittest.TestCase):
         )
         self.assertNotEqual(0, done.returncode, "a dead anchor was printed and exited 0")
         self.assertIn("nope", done.stderr + done.stdout)
+
+
+class TheFixedSleepRule(unittest.TestCase):
+    """`X-44`: `docs/designs/media.md`'s rule, made executable.
+
+    The rule is normative and old: *a fixed wall-clock duration may bound a failure, or define
+    silence. It may not stand in for a happens-before.* `X-28` cleared the media path of
+    violations, `X-29` swept the rest of the workspace, and `0.12.0`'s changelog says "no test in
+    the workspace now asserts after a fixed sleep". Nothing enforced any of it, so the sentence was
+    true on the day it was written and by nothing afterwards — and two violations landed inside the
+    very next wave, both caught by a human reading a diff.
+
+    What is asserted here is the property that makes the guard worth having rather than the
+    property that makes it look like it works:
+
+    * a planted violation is refused, in a fixture tree, at a path that looks exactly like a real
+      one — so nothing can be passing because of where it sits;
+    * **a rename cannot get past it.** `sleep` is one spelling of a wall-clock wait and the guard
+      is not allowed to be a grep for it;
+    * the legitimate categories cost nothing, because a guard that reddens correct code is deleted
+      rather than fixed;
+    * and the repository itself is clean, which is the claim `0.12.0` made and could not keep.
+    """
+
+    #: The shape of the defect: something is stimulated, a fixed duration passes, and the test
+    #: asserts the stimulus arrived. What load does to it is fail the assertion, which is why this
+    #: family is re-run rather than read.
+    VIOLATION = """\
+#[tokio::test]
+async fn a_packet_is_forwarded() {
+    let peer = start().await;
+    peer.send(&packet()).await;
+    %s
+    assert_eq!(peer.received(), 1, "the packet must have been forwarded");
+}
+"""
+
+    #: Six ways to write the same wait. The guard has to see the shape, not the word — a check that
+    #: greps `sleep(` invites the next author to write the identical defect in the next row down,
+    #: which is the "rule fitted to the data it was tested on" failure this project keeps warning
+    #: about.
+    SPELLINGS = {
+        "tokio::time::sleep": "tokio::time::sleep(Duration::from_millis(150)).await;",
+        "std::thread::sleep": "std::thread::sleep(Duration::from_millis(150));",
+        "sleep_until": (
+            "tokio::time::sleep_until(tokio::time::Instant::now() "
+            "+ Duration::from_millis(150)).await;"
+        ),
+        "an interval tick": "interval.tick().await;",
+        "a hand-rolled deadline loop": (
+            "let deadline = std::time::Instant::now() + Duration::from_millis(150);\n"
+            "    while std::time::Instant::now() < deadline {}"
+        ),
+        # A private helper that wraps a bare wait is a rename with an extra step, and the one a
+        # grep for `sleep` is guaranteed to miss.
+        "a locally renamed wrapper": "settle_for_a_moment().await;",
+    }
+
+    #: The helper the last spelling above hides behind, appended to that fixture.
+    WRAPPER = """
+async fn settle_for_a_moment() {
+    tokio::time::sleep(Duration::from_millis(150)).await;
+}
+"""
+
+    def setUp(self):
+        """Per test rather than per class, so each case below reports its own absence.
+
+        A `setUpClass` that raised would collapse eight distinct claims into one line, and the
+        first thing anybody does with this suite is read which of them is red.
+        """
+        self.assertTrue(
+            FIXED_SLEEP.exists(),
+            f"{FIXED_SLEEP.relative_to(ROOT)} does not exist, so nothing in this repository "
+            f"enforces docs/designs/media.md's rule — a fixed wall-clock duration may bound a "
+            f"failure or define silence, and may not stand in for a happens-before. The rule has "
+            f"been swept for twice and held by nobody since (X-44)",
+        )
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("check_fixed_sleep", FIXED_SLEEP)
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    def tree(self, files: dict) -> pathlib.Path:
+        """A throwaway workspace, so a fixture cannot be satisfied by the real repository."""
+        import tempfile
+
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, root, True)
+        for name, text in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return root
+
+    def problems(self, body: str, where: str = "crates/sipx-call/tests/call.rs") -> list:
+        return self.mod.check(self.tree({where: body})).problems
+
+    # -- the defect ----------------------------------------------------------------------------
+
+    def test_a_fixed_sleep_before_an_assertion_is_refused(self):
+        """The failing-first assertion, and the shape of both regressions this story was filed for.
+
+        Planted at a path that is a real file in this repository, so a guard that passed by knowing
+        which files are allowed to sleep would fail here.
+        """
+        problems = self.problems(self.VIOLATION % self.SPELLINGS["tokio::time::sleep"])
+        self.assertTrue(
+            problems,
+            "a test that sleeps for a fixed duration and then asserts the thing it was waiting "
+            "for arrived was accepted; that is the defect docs/designs/media.md forbids, and it "
+            "is what `0.12.0` claimed the workspace no longer contained",
+        )
+
+    def test_a_rename_does_not_get_past_it(self):
+        """The guard identifies the wait by its shape. Every spelling is the same defect."""
+        for name, spelling in self.SPELLINGS.items():
+            with self.subTest(spelling=name):
+                body = self.VIOLATION % spelling
+                if "settle_for_a_moment" in spelling:
+                    body += self.WRAPPER
+                self.assertTrue(
+                    self.problems(body),
+                    f"the same defect written as `{name}` was accepted, so the guard is a grep "
+                    f"for one spelling and the next author only has to write it differently",
+                )
+
+    def test_the_rule_covers_production_code_as_well_as_tests(self):
+        """`X-40` proved the defect can live in `src/`, and most of this workspace's tests do too.
+
+        `crates/sipx-media/src/session.rs` holds more fixed-duration waits than any file under a
+        `tests/` directory, because the media suite lives in `#[cfg(test)]` modules beside the code
+        it tests. A guard that read `tests/` would have covered less than half of the suite it is
+        for, and none of the production code `X-40`'s defect was written in.
+        """
+        self.assertTrue(
+            self.problems(
+                self.VIOLATION % self.SPELLINGS["tokio::time::sleep"],
+                where="crates/sipx-media/src/session.rs",
+            ),
+            "a fixed-sleep assertion inside `src/` was accepted; the rule would not have covered "
+            "`record_until_idle`, which is where X-40's instance of it was written",
+        )
+
+    def test_a_reason_that_classifies_nothing_is_still_refused(self):
+        """Prose is not the requirement — a *classification* is.
+
+        The rule names the questions a fixed duration is allowed to answer. A comment that says
+        the author waited, without saying which question the duration answers, leaves the next
+        reader exactly where the unannotated version did.
+        """
+        body = self.VIOLATION % (
+            "// Give the far end a moment to catch up.\n"
+            "    tokio::time::sleep(Duration::from_millis(150)).await;"
+        )
+        self.assertTrue(
+            self.problems(body),
+            "a comment that describes the wait rather than classifying the duration was accepted "
+            "as the reason at the call site",
+        )
+
+    # -- the categories that are allowed to stay -----------------------------------------------
+
+    def test_a_bound_on_failure_is_not_refused(self):
+        """`record_at_least`'s `within`, `DELIVERY_BOUND`, `collect_digits`' `within`.
+
+        The duration is how long this side waits before concluding the thing is not coming. It is
+        checked structurally as well as by name: the completion condition is the event, not the
+        clock, so the wait is not a bare one at all.
+        """
+        self.assertEqual(
+            [],
+            self.problems(
+                """\
+#[tokio::test]
+async fn a_packet_is_forwarded() {
+    let peer = start().await;
+    peer.send(&packet()).await;
+    // A bound on failure: how long before we conclude the packet is not coming.
+    let got = tokio::time::timeout(DELIVERY_BOUND, peer.recv()).await;
+    assert!(got.is_ok(), "the packet must have been forwarded");
+}
+"""
+            ),
+        )
+
+    def test_a_definition_of_silence_is_not_refused(self):
+        """The idle window: how long a hole has to be to mean the far end stopped.
+
+        `X-40` is the caveat, not the exception — an idle window must not also be a start
+        deadline. What the site has to say is which of the two it is.
+        """
+        self.assertEqual(
+            [],
+            self.problems(
+                """\
+#[tokio::test]
+async fn a_stopped_session_sends_nothing() {
+    let peer = start().await;
+    let before = peer.sent();
+    // A definition of silence: how long a hole has to be before "it stopped" is true. The
+    // assertion is negative, so load lengthens the window and can only make it fail.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(peer.sent(), before, "a stopped session sends nothing");
+}
+"""
+            ),
+        )
+
+    def test_a_clock_that_is_the_measurement_is_not_refused(self):
+        """`X-29`'s third category, and `crates/sipx-cli/tests/cli.rs`'s `elapsed() < 12s`.
+
+        The assertion is about *which* duration elapsed — 3 s or 64*T1's 32 s — so the clock is
+        not standing in for anything. Load can only push the number up, which is the direction
+        that fails.
+        """
+        self.assertEqual(
+            [],
+            self.problems(
+                """\
+#[tokio::test]
+async fn it_gives_up_on_its_own_schedule() {
+    let started = std::time::Instant::now();
+    let output = run_the_dial().await;
+    assert_eq!(output.code(), Some(5));
+    // The clock is the measurement: the whole claim is which of two schedules fired, and the
+    // only way to read that is the clock. 12 s separates our 3 s from 64*T1's 32 s.
+    assert!(started.elapsed() < Duration::from_secs(12), "{:?}", started.elapsed());
+}
+"""
+            ),
+        )
+
+    def test_a_causal_wait_costs_a_correct_test_nothing(self):
+        """Neither shape needs a word written about it, because neither waits on a clock.
+
+        A guard that made the correct thing more expensive than the wrong one would be switched
+        off by whoever hit it second. Waiting for the event, and polling until the condition
+        holds, are the two fixes the rule asks for — so both are recognised by their shape.
+        """
+        self.assertEqual(
+            [],
+            self.problems(
+                """\
+async fn until(bound: Duration, what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + bound;
+    loop {
+        if ready() {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_packet_is_forwarded() {
+    let peer = start().await;
+    peer.send(&packet()).await;
+    until(SIGNALLING_BOUND, "the packet never arrived", || peer.received() == 1).await;
+    assert_eq!(peer.received(), 1);
+}
+"""
+            ),
+        )
+
+    #: `X-40`'s defect, as it stood in `crates/sipx-cli/tests/interop_media/mod.rs` before the fix:
+    #: one 600 ms window answering both "how long may the echo take to start" and "how long a gap
+    #: means it has ended". A late first packet left the payload empty, and the harness reported
+    #: "no audio came back" on a call that carried it.
+    ONE_WINDOW_TWO_QUESTIONS = """\
+async fn echo_round_trip(media: &Media) -> Echoed {
+    let mut echoed = Echoed::new();
+    // Stop when the far end goes quiet, not after a fixed count.
+    while let Ok(Some(packet)) =
+        tokio::time::timeout(Duration::from_millis(600), media.recv_encoded()).await
+    {
+        echoed.push(packet);
+    }
+    echoed
+}
+"""
+
+    def test_one_duration_answering_two_questions_is_refused(self):
+        """The other regression the story was filed for, and the one a sleep-grep cannot see.
+
+        There is no `sleep` here at all. What makes it the same defect is that a *relative* timeout
+        restarts on every pass, so the first pass's window is a start deadline and every later one
+        is an inter-arrival gap — two questions, one duration, and whichever is tighter on the day
+        loses. The result is an empty collection rather than a short one, because the loop ends
+        before its first iteration.
+        """
+        self.assertTrue(
+            self.problems(
+                self.ONE_WINDOW_TWO_QUESTIONS, where="crates/sipx-cli/tests/interop_media/mod.rs"
+            ),
+            "a loop spending one window on `has it started` and `has it ended` was accepted — "
+            "that is X-40 exactly, and it shipped",
+        )
+
+    def test_the_fix_for_it_costs_nothing(self):
+        """Both halves of `X-40`'s remedy, recognised structurally rather than apologised for.
+
+        A variable the body reassigns after the first arrival is two durations spelled
+        economically; an absolute `timeout_at` bounds the whole loop once, which is a bound on
+        failure and what `record_at_least` was written to be. A guard that charged for its own
+        remedy would be the reason the next author does not apply it.
+        """
+        reassigned = """\
+async fn echo_round_trip(media: &Media) -> Echoed {
+    let mut echoed = Echoed::new();
+    let mut window = Duration::from_secs(10);
+    while let Ok(Some(packet)) = tokio::time::timeout(window, media.recv_encoded()).await {
+        echoed.push(packet);
+        window = Duration::from_millis(600);
+    }
+    echoed
+}
+"""
+        absolute = """\
+async fn record_at_least(media: &Media, samples: usize, within: Duration) -> Vec<i16> {
+    let deadline = tokio::time::Instant::now() + within;
+    let mut recorded = Vec::new();
+    while recorded.len() < samples {
+        match tokio::time::timeout_at(deadline, media.recv()).await {
+            Ok(Some(frame)) => recorded.extend_from_slice(&frame),
+            _ => break,
+        }
+    }
+    recorded
+}
+"""
+        for name, body in (("a reassigned window", reassigned), ("an absolute deadline", absolute)):
+            with self.subTest(fix=name):
+                self.assertEqual([], self.problems(body))
+
+    def test_a_deadline_loop_that_waits_on_an_event_is_a_poll_and_not_a_spin(self):
+        """The same head opens the defect and its fix, so the body is what decides.
+
+        `while now < deadline { … }` is a spin when it awaits nothing and leaves on nothing, and a
+        poll with a bound on failure when it awaits the event and breaks on it —
+        `a_cancel_waits_for_a_late_provisional_rather_than_being_abandoned` is the second, and
+        reporting it would have asked an author to apologise for writing the fix.
+        """
+        self.assertEqual(
+            [],
+            self.problems(
+                """\
+#[tokio::test]
+async fn the_cancel_follows_the_provisional() {
+    let peer = start().await;
+    let mut cancelled = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, peer.recv()).await {
+            Ok(Ok(message)) => {
+                if message.starts_with("CANCEL ") {
+                    cancelled = true;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(cancelled, "the CANCEL must follow the provisional it was waiting for");
+}
+"""
+            ),
+        )
+
+    def test_a_signature_with_no_body_does_not_swallow_the_rest_of_the_file(self):
+        """A reader that loses its place reports nothing, which looks exactly like a clean tree.
+
+        A trait's `fn ready(&self) -> bool;` opens no block. Treating it as a function stretching to
+        the end of the file would put every later function inside it, and the violation below —
+        which is the whole point — would be read as belonging to a span that never ends.
+        """
+        self.assertTrue(
+            self.problems(
+                """\
+trait Peer {
+    fn ready(&self) -> bool;
+    fn received(&self) -> usize;
+}
+
+"""
+                + self.VIOLATION % self.SPELLINGS["tokio::time::sleep"]
+            ),
+            "a violation after a body-less signature was missed, so the reader had lost its place",
+        )
+
+    def test_a_paused_clock_is_not_a_wall_clock(self):
+        """`#[tokio::test(start_paused = true)]` has no wall clock to race.
+
+        Time only moves when the runtime is asked to move it, so `advance` is deterministic and
+        the whole family of failures this rule is about cannot occur. Reporting it would teach
+        implementors that the honest fix — a virtual clock — costs them a comment.
+        """
+        self.assertEqual(
+            [],
+            self.problems(
+                """\
+#[tokio::test(start_paused = true)]
+async fn the_session_expires() {
+    let call = connected().await;
+    tokio::time::advance(Duration::from_secs(61)).await;
+    assert!(call.is_ended(), "the session timer must have fired");
+}
+"""
+            ),
+        )
+
+    # -- no suppression list, under any name ---------------------------------------------------
+
+    def test_the_guard_knows_no_path(self):
+        """`X-35`'s standard, applied here: the reason lives at the call site or nowhere.
+
+        Asserted by planting the same violation under four different real-looking paths and
+        requiring all four to be refused. A list of blessed files is the thing that makes a guard
+        stop being a guard, and it is usually added one entry at a time by someone in a hurry.
+        """
+        for where in (
+            "crates/sipx-call/tests/call.rs",
+            "crates/sipx-cli/tests/interop_media/mod.rs",
+            "crates/sipx-media/src/session.rs",
+            "crates/sipx-testkit/src/soak.rs",
+        ):
+            with self.subTest(path=where):
+                self.assertTrue(
+                    self.problems(
+                        self.VIOLATION % self.SPELLINGS["tokio::time::sleep"], where=where
+                    ),
+                    f"the violation was accepted at {where}, so some path is exempt",
+                )
+
+    def test_every_category_states_what_it_means(self):
+        """A marker with no explanation is a password, and passwords get typed without thinking."""
+        self.assertTrue(self.mod.CATEGORIES, "the guard recognises no categories at all")
+        for category in self.mod.CATEGORIES.values():
+            with self.subTest(category=category.name):
+                self.assertTrue(category.written, f"{category.name} has no spelling to look for")
+                self.assertTrue(category.means.strip(), f"{category.name} says nothing about itself")
+
+    # -- the repository itself -----------------------------------------------------------------
+
+    def test_the_repository_itself_has_no_unclassified_fixed_wait(self):
+        """The claim `0.12.0` made about the workspace, asserted instead of asserted-to.
+
+        This is the case that fails on the commit this story starts from, and it is the reason the
+        guard exists rather than a third sweep: the property has to be checked by something that
+        runs, not by whoever last looked.
+        """
+        report = self.mod.check(ROOT)
+        self.assertEqual([], report.problems)
+        self.assertGreater(
+            report.waits, 0, "the guard found no wall-clock wait anywhere, so it proves nothing"
+        )
+        self.assertGreater(
+            report.classified,
+            0,
+            "the guard found no classified duration, so the reasons it demands are not being read",
+        )
+
+    def test_the_script_exits_non_zero_on_a_problem(self):
+        """The exit code is what the gate step reads, so the exit code is asserted."""
+        root = self.tree(
+            {
+                "crates/sipx-call/tests/call.rs": self.VIOLATION
+                % self.SPELLINGS["tokio::time::sleep"]
+            }
+        )
+        done = subprocess.run(
+            [sys.executable, str(FIXED_SLEEP), "--check", "--root", str(root)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(0, done.returncode, "a fixed-sleep assertion was printed and exited 0")
+        self.assertIn("call.rs", done.stderr + done.stdout)
+
+    def test_the_gate_runs_it_and_ci_does_too(self):
+        """A check nothing runs is a file. `X-22`'s property, for this step."""
+        steps = gate().gate_steps("1.0.0")
+        mine = [step for step in steps if "check-fixed-sleep.py" in " ".join(step.command)]
+        self.assertEqual(
+            1, len(mine), "the fixed-sleep guard is not a gate step, so nothing runs it locally"
+        )
+        jobs = gate().parse_workflow(WORKFLOW.read_text())
+        self.assertIn(
+            mine[0].ci_job,
+            jobs,
+            f"gate step `{mine[0].name}` names CI job `{mine[0].ci_job}`, which ci.yml does not "
+            f"define",
+        )
 
 
 if __name__ == "__main__":

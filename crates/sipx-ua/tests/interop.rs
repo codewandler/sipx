@@ -229,6 +229,10 @@ async fn refuses_a_real_server_presenting_the_wrong_name() {
     outcome
         .expect("verification failure is immediate, not a timeout")
         .expect_err("a certificate for another name must not be accepted");
+    // The clock is the measurement here: the claim is *which* schedule ended the register, a
+    // handshake rejection in milliseconds or the 15 s timeout above, and the only way to read that
+    // is the elapsed time. Load can only push the number up, which is the direction that fails
+    // (`X-44`).
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "a refusal took {:?}; that is a timeout wearing a refusal's clothes",
@@ -251,6 +255,9 @@ async fn a_real_server_is_refused_when_its_issuer_is_unknown() {
         .await
         .expect("verification failure is immediate, not a timeout")
         .expect_err("an unknown issuer must not be accepted");
+    // The clock is the measurement, as in the test above: a refusal that took the whole timeout is
+    // a hang wearing a refusal's clothes, and elapsed time is the only thing that tells them apart
+    // (`X-44`).
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 

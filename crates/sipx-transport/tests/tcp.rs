@@ -207,6 +207,10 @@ async fn a_body_arriving_after_its_headers_is_framed_by_content_length() {
 
     stream.write_all(headers.as_bytes()).await.expect("writes");
     stream.flush().await.expect("flushes");
+    // Ordering a stimulus: the point of this test is that the headers and the body arrive as two
+    // separate reads, which is what a split TCP message looks like on the wire. Both writes are
+    // this test's, the server publishes nothing between them — a half-read message is not an
+    // event — and load lengthening this gap only makes the split surer (`X-44`).
     tokio::time::sleep(Duration::from_millis(50)).await;
     stream.write_all(body.as_bytes()).await.expect("writes");
 
@@ -375,6 +379,11 @@ async fn a_response_reconnects_to_the_sent_by_port_not_the_source_port() {
     // The peer goes away before the answer is ready, as a peer that has finished dialling out
     // routinely does.
     drop(stream);
+    // Ordering a stimulus: the connection has to be *gone* before the answer is written, or the
+    // response goes back down it and this test never exercises the advertised port at all. Both
+    // the drop and the response are this test's; a peer disappearing is observed by the server
+    // only when it next writes, which is the very thing being ordered, so there is nothing to
+    // poll for and load can only make the gap surer (`X-44`).
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let response = ok_for(&incoming.request);

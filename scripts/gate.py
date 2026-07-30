@@ -125,6 +125,11 @@ def gate_steps(msrv: str) -> list[Step]:
                 ),
             ),
         ),
+        # X-44: `docs/designs/media.md` states the rule normatively — a fixed wall-clock duration
+        # may bound a failure or define silence, and may not stand in for a happens-before — and
+        # nothing ran it. Two sweeps declared the workspace clean and two violations landed in the
+        # wave after the second one. Cheap, needs no toolchain, and reads `src/` as well as tests.
+        Step("fixed sleeps", "fixed-sleep", ("./scripts/check-fixed-sleep.py", "--check")),
         Step("rfc compliance", "docs", ("./scripts/rfc-report.py", "--check")),
         # X-24: the connection pool key was described in three specs and had been wrong in one of
         # them through two changes to the type. The list is generated from `ConnectionKey` now,

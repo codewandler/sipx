@@ -243,6 +243,11 @@ async fn an_expired_entry_is_asked_for_again() {
     resolver.srv("_sip._udp.sipx.test").await.or_empty();
     let after_first = queries.load(std::sync::atomic::Ordering::SeqCst);
 
+    // Ordering a stimulus: both lookups are this test's, and the second has to be issued after
+    // the 200 ms ceiling above has passed. A cache entry expiring is not an event — nothing is
+    // evicted, nothing is signalled, the entry is simply not honoured next time — so there is
+    // nothing to poll for, and load lengthening this window only puts the second lookup further
+    // past the expiry (`X-44`).
     tokio::time::sleep(Duration::from_millis(300)).await;
     resolver.srv("_sip._udp.sipx.test").await.or_empty();
     assert!(
@@ -327,6 +332,9 @@ async fn single_flight_does_not_outlive_the_lookup_it_shares() {
     );
 
     let _ = resolver.addresses("slow.sipx.test").await;
+    // Ordering a stimulus, as in `an_expired_entry_is_asked_for_again`: the second lookup has to
+    // be issued after the 1 ms ceiling above has passed, an expiry is not an event to wait for,
+    // and load can only put the second lookup further past it (`X-44`).
     tokio::time::sleep(Duration::from_millis(20)).await;
     let _ = resolver.addresses("slow.sipx.test").await;
 

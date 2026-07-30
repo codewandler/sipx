@@ -200,8 +200,8 @@ async fn stopping_a_playback_lands_within_the_stated_bound() {
     let at_stop = caller.media().packets_sent();
     // The window stays, deliberately (`X-29`). Both assertions on `settled` below are *negative*
     // — that no more than the bound went out, and that the whole clip did not — so this is a
-    // window to look in rather than a deadline to beat. Load lengthens it, and a longer window can
-    // only send the count up, which is the direction that fails. There is nothing to poll for:
+    // definition of silence rather than a deadline to beat. Load lengthens it, and a longer
+    // window can only send the count up, which is the direction that fails. Nothing to poll for:
     // the thing being asserted is that nothing further happens.
     tokio::time::sleep(Duration::from_millis(600)).await;
     let settled = caller.media().packets_sent();
@@ -257,9 +257,10 @@ async fn an_interrupting_digit_lands_within_the_stated_bound() {
 
     let at_interrupt = caller.media().packets_sent();
     // Left as a fixed window, for the reason given in
-    // `stopping_a_playback_lands_within_the_stated_bound` (`X-29`): both assertions below are
-    // negative — nothing beyond the bound went out — so load can only make them pass, and there is
-    // no arrival to wait for. This test has no positive counterpart to poll for.
+    // `stopping_a_playback_lands_within_the_stated_bound` (`X-29`): a definition of silence, since
+    // both assertions below are negative — nothing beyond the bound went out — so load can only
+    // make them pass, and there is no arrival to wait for. This test has no positive counterpart
+    // to poll for.
     tokio::time::sleep(Duration::from_millis(600)).await;
     let settled = caller.media().packets_sent();
 

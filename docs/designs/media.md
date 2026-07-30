@@ -239,6 +239,23 @@ bound a failure, or define silence. It may not stand in for a happens-before.** 
 exists, wait for the count. Widening the window instead moves the cliff rather than removing it,
 and leaves a test everyone re-runs instead of reading.
 
+### The rule is enforced rather than swept for
+
+That paragraph was normative from the day it was written and held by nobody. `X-28` cleared the
+media path of violations, `X-29` swept the rest of the workspace, `0.12.0`'s changelog says "no test
+in the workspace now asserts after a fixed sleep" — and two fresh violations landed in the wave
+after that sweep, one of them in production code. Both were found by a human reading a diff.
+
+`scripts/check-fixed-sleep.py` is that reader, run by the gate and by CI (`X-44`). It identifies the
+**shape** — a suspension whose only completion condition is a clock reading a fixed duration,
+however it is spelled — and reports it when an assertion depends on it. A wait whose completion
+condition is the event (a `timeout`, a `select!` arm beside another arm, a poll loop that re-tests
+its condition) is not reported at all, because those are the fixes this section asks for and a guard
+that charged for them would be switched off. The remedy for anything it does report is to wait for
+the thing, or to say **at the call site** which question the duration answers. The script's module
+documentation is the list of questions and the argument for each; this paragraph is the rule they
+implement, and stays the normative one.
+
 ### The same two questions, for digits
 
 `M-34` found the rule broken one call along, in production rather than in a test.
