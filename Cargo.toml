@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 # Raised from 1.85 by the DNS client needed to clear RUSTSEC-2026-0119. The alternative was
 # shipping a known denial of service in a parser that eats untrusted network data.
@@ -18,16 +18,16 @@ categories = ["network-programming", "multimedia"]
 
 [workspace.dependencies]
 # Internal crates
-sipx-sip = { path = "crates/sipx-sip", version = "0.11.0" }
-sipx-sdp = { path = "crates/sipx-sdp", version = "0.11.0" }
-sipx-rtp = { path = "crates/sipx-rtp", version = "0.11.0" }
-sipx-audio = { path = "crates/sipx-audio", version = "0.11.0" }
-sipx-media = { path = "crates/sipx-media", version = "0.11.0" }
-sipx-transport = { path = "crates/sipx-transport", version = "0.11.0" }
-sipx-ua = { path = "crates/sipx-ua", version = "0.11.0" }
-sipx-call = { path = "crates/sipx-call", version = "0.11.0" }
-sipx-app = { path = "crates/sipx-app", version = "0.11.0" }
-sipx-testkit = { path = "crates/sipx-testkit", version = "0.11.0" }
+sipx-sip = { path = "crates/sipx-sip", version = "0.12.0" }
+sipx-sdp = { path = "crates/sipx-sdp", version = "0.12.0" }
+sipx-rtp = { path = "crates/sipx-rtp", version = "0.12.0" }
+sipx-audio = { path = "crates/sipx-audio", version = "0.12.0" }
+sipx-media = { path = "crates/sipx-media", version = "0.12.0" }
+sipx-transport = { path = "crates/sipx-transport", version = "0.12.0" }
+sipx-ua = { path = "crates/sipx-ua", version = "0.12.0" }
+sipx-call = { path = "crates/sipx-call", version = "0.12.0" }
+sipx-app = { path = "crates/sipx-app", version = "0.12.0" }
+sipx-testkit = { path = "crates/sipx-testkit", version = "0.12.0" }
 
 # Core
 bytes = "1"
