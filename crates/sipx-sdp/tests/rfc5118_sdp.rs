@@ -13,7 +13,13 @@
 //! reaching outside its own directory would not survive being packaged. The classification for
 //! the corpus, and the `sipx-sip` half of the harness, live in `sipx-testkit`.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// A test that cannot read its own fixtures should fail loudly — AGENTS.md non-negotiable 3.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use std::net::IpAddr;
 
@@ -47,8 +53,8 @@ fn ip(literal: &str) -> IpAddr {
 }
 
 /// §4.6 — "SIP Request with IPv6 Addresses in Session Description Protocol (SDP) Body". The RFC
-/// calls the request "valid and well-formed", and notes explicitly: "the IPv6 addresses in the
-/// SDP [RFC4566] body do not have the delimiting '[' and ']'".
+/// calls the request "valid and well-formed", and notes explicitly that the IPv6 addresses in the
+/// SDP body do not have the delimiting `[` and `]`.
 #[test]
 fn ipv6_in_session_level_origin_and_connection() {
     let sdp = parse("ipv6-in-sdp");

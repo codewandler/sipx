@@ -10,7 +10,13 @@
 //! accident. So the load-bearing assertion here is the converse one: nothing valid is refused.
 //! A corpus that only proves rejections is half a test.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// A test that cannot read its own fixtures should fail loudly — AGENTS.md non-negotiable 3.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use std::net::IpAddr;
 
@@ -273,7 +279,7 @@ fn undelimited_ipv6_in_the_request_uri_is_refused() {
 
 /// §4.3 — the ambiguity, and the decision.
 ///
-/// `sip:[2001:db8::10:5070]`. The sender meant "host 2001:db8::10, port 5070" and put the port
+/// `sip:[2001:db8::10:5070]`. The sender meant host `2001:db8::10` on port 5070, and put the port
 /// inside the `]`, where `::` expansion swallows it: the reference is a complete, legal IPv6
 /// address whose last group is `5070`. The RFC is explicit that this is not a parse error —
 /// "From a parsing perspective, the request below is well-formed. However, from a semantic point
@@ -341,9 +347,9 @@ fn port_unambiguous_uri_splits_host_from_port() {
 /// §4.5 — a `received` parameter with and without the delimiters. RFC 3261's `via-received`
 /// production takes a bare `IPv6address`, while `sent-by` takes a bracketed `IPv6reference`;
 /// implementations split about 50/50 on what they sent. RFC 5118's instruction is the Robustness
-/// Principle: "be liberal in accepting a 'received' parameter with or without the delimiting '['
-/// and ']' tokens", and "A SIP implementation receiving either of these messages must parse them
-/// successfully."
+/// Principle: be liberal in accepting a `received` parameter with or without the delimiting
+/// `[` and `]` tokens, and "A SIP implementation receiving either of these messages must parse
+/// them successfully."
 ///
 /// The bracketed form is the interesting half: it is *invalid* under a strict reading of the
 /// grammar and must be accepted anyway. That is the one place in either corpus where "must
@@ -428,10 +434,7 @@ fn ipv4_mapped_addresses_parse_in_signalling() {
         "§4.9 hop 1 is an IPv4-mapped address"
     );
     assert_eq!(hops[0].port, Some(19823), "§4.9 hop 1 states a port");
-    assert_eq!(
-        host_ip(&hops[1].host, "§4.9 hop 2"),
-        ip("::ffff:192.0.2.2")
-    );
+    assert_eq!(host_ip(&hops[1].host, "§4.9 hop 2"), ip("::ffff:192.0.2.2"));
     assert_eq!(hops[1].port, None);
 }
 

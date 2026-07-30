@@ -19,10 +19,14 @@
 //! twelve — and the two §4.10 files carry no terminating blank line at all. SIP requires CRLF
 //! (RFC 3261 §7), so the archived bytes are not a legal SIP message as shipped.
 //!
+//! On top of that, the three messages carrying SDP declare a `Content-Length` that matches no
+//! convention — see [`Case::wire`] for the numbers.
+//!
 //! The corpus on disk is kept bit-exact anyway, because that is what `--check` verifies against
-//! the RFC. [`Case::wire`] performs the one documented transformation needed to get on-the-wire
-//! bytes, and [`Case::bytes`] remains the archive's own content. The transformation touches
-//! only line terminators; every octet of every IPv6 reference is the RFC's.
+//! the RFC. [`Case::wire`] performs the documented transformations needed to get on-the-wire
+//! bytes, and [`Case::bytes`] remains the archive's own content. Those transformations touch only
+//! line terminators and the digits of one header value; every octet of every IPv6 reference,
+//! URI and body is the RFC's.
 //!
 //! # What the classification is for
 //!
@@ -158,7 +162,10 @@ impl Case {
     /// harness as well as the `sipx-sip` half.
     #[must_use]
     pub fn has_sdp(&self) -> bool {
-        matches!(self.name, "ipv6-in-sdp" | "mult-ip-in-sdp" | "ipv4-mapped-ipv6")
+        matches!(
+            self.name,
+            "ipv6-in-sdp" | "mult-ip-in-sdp" | "ipv4-mapped-ipv6"
+        )
     }
 }
 
@@ -347,7 +354,9 @@ pub fn case(name: &str) -> Option<&'static Case> {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    // Counting newlines in a 600-byte fixture does not warrant a dependency.
+    clippy::naive_bytecount
 )]
 mod tests {
     use super::*;
@@ -359,13 +368,21 @@ mod tests {
     #[test]
     fn corpus_is_complete() {
         assert_eq!(CASES.len(), 12, "Appendix A's archive holds 12 files");
-        assert_eq!(classified().count(), 12, "every file is referenced by a section");
+        assert_eq!(
+            classified().count(),
+            12,
+            "every file is referenced by a section"
+        );
 
         let sections: HashSet<_> = CASES.iter().map(|c| c.section).collect();
         assert_eq!(sections.len(), 10, "RFC 5118 section 4 has ten subsections");
 
         for n in 1..=10 {
-            let section = if n == 10 { "4.10".to_owned() } else { format!("4.{n}") };
+            let section = if n == 10 {
+                "4.10".to_owned()
+            } else {
+                format!("4.{n}")
+            };
             assert!(
                 CASES.iter().any(|c| c.section == section),
                 "no case for RFC 5118 section {section}"
@@ -411,8 +428,7 @@ mod tests {
         for d in DEVIATIONS {
             let c = case(d.case).unwrap_or_else(|| panic!("{} is not in the corpus", d.case));
             assert_eq!(
-                c.expect,
-                ParseOk,
+                c.expect, ParseOk,
                 "{}: a deviation only makes sense for a message the RFC calls valid",
                 d.case
             );
@@ -451,7 +467,10 @@ mod tests {
         let mut in_table: Vec<String> = CASES.iter().map(|c| c.name.to_owned()).collect();
         in_table.sort();
 
-        assert_eq!(on_disk, in_table, "corpus directory and case table disagree");
+        assert_eq!(
+            on_disk, in_table,
+            "corpus directory and case table disagree"
+        );
     }
 
     /// The archive's own shape, asserted so the [`Case::wire`] transformation stays justified.
