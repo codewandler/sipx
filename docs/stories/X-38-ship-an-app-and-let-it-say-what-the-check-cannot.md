@@ -116,6 +116,16 @@ until a second application disagrees.
   not something to fake by parsing English.
 - Filed at `X-37`'s close, which reconsidered the predicate rather than build the check its
   predecessors named as a *successor* — read its Notes for why.
+- **Gate: 22 steps, all green, on `55ad8f5`** (`./scripts/gate.py`, exit 0). That is 20 steps as
+  inherited from `main` plus the two this story adds, `app surface tests` and `app surface`, both of
+  which ran. An earlier run of this branch was red on `fmt`, `clippy` and `test` — all three inherited
+  steps failing on this branch's own code, fixed in `07a072c`, and none of them the two new ones. The
+  `maturity` step was green throughout, so the `X-39` defect did not arise here.
+- **Failing-first, re-verified against the merge base with the final checker.** Copying
+  `scripts/check-app-surface.py` into a clean `cffb6ed` tree and running `--check` exits 1 and names six
+  crates — `sipx-audio`, `sipx-call`, `sipx-media`, `sipx-rtp`, `sipx-sdp`, `sipx-ua` — each declaring
+  `Supported` surface no application reaches. On this branch it exits 0. The failure is the missing
+  application and not a broken reader: the same script, unchanged, produces both results.
 
 ## Notes
 - **Why `X-37` filed this instead of the caller-check.** Both `X-30` and `X-33` said the cross-crate
