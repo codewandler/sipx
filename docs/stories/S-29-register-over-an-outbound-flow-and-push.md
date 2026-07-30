@@ -84,7 +84,19 @@ again on the strength of a registration that actually uses them.
   "Discovery versus closure" table's row for **today**, a whole-board daily Filed/Closed aggregate
   that every concurrent story perturbs — regenerating it here would bake in a snapshot that is
   stale the moment the next story lands, and would collide with the sibling implementor on the same
-  line. It belongs to whoever integrates, not to one story.
+  line. It belongs to whoever integrates, not to one story. (Resolved on `main` in `cffb6ed`, after
+  this branch's base — CI's docs job had indeed been failing independently of any story.)
+- **Review round 1: the notes under-disclosed what Outbound still lacks a caller for.** The code was
+  confirmed good; the fix was entirely in what the claims say. RFC 5626's `uac` is earned by the
+  *registration* — `+sip.instance`, `reg-id`, the `outbound` option tag, and §6 acceptance read back
+  — and by nothing more. Verified by grep that three parts of the UA side remain reached only from
+  `sipx-ua`'s own tests: `UserAgent::keepalive_after` (§4.4, `agent.rs:281`), `Flows`/`Attempt`
+  (§4.5 backoff and one registration per proxy) and `UserAgent::dialog_contact`'s `ob` (§4.3). The
+  registry note now separates "has a caller" from "implemented and reached by nothing above the
+  crate" instead of listing both as the UA side, and `sipx-ua`'s `# Stability` section names that
+  remainder Experimental under the crate's own rule rather than letting one `Supported` line cover
+  it. `website/docs/reference/cli.md`'s refusal list gained the non-URN `--instance` case it had
+  omitted. No behaviour changed in this pass.
 
 ## Notes
 - **The eighth instance of the recurring defect** — after ICE (`M-27`), UPDATE (`S-22`), DTLS-SRTP

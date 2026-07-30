@@ -89,7 +89,8 @@ report line with `status: "woken"` and, when the registrar assigned one, `purr`.
 
 Combinations that cannot work are usage errors (exit 2), never parsed and dropped: half a push
 pair, `--push-param` alone, `--wake` without the push flags, `--instance` without `--outbound`,
-and a `--push-prid` that a URI parameter cannot hold.
+an `--instance` that is not a URN (RFC 5626 §4.1's grammar is `instance-val = urn`), and a
+`--push-prid` that a URI parameter cannot hold.
 
 ## `sipx peers`
 

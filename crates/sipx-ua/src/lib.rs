@@ -28,16 +28,24 @@
 //!   you are prepared to follow it.
 //!
 //!
-//! **Supported**: registration leases, digest authentication, Path, Service-Route, Outbound and
-//! push. The last two earned the word in `S-29`, when `sipx register --outbound` and
-//! `--push-provider`/`--push-prid` became their first callers above this crate — until then they
-//! were public and tested with nothing selecting them, which is the Experimental rule below, and
-//! `X-37` demoted their compliance rows to say so.
+//! **Supported**: registration leases, digest authentication, Path, Service-Route, registering as
+//! one Outbound flow, and push. `S-29` is what gives the last two a caller above this crate —
+//! `sipx register --outbound` and `--push-provider`/`--push-prid` — and it is why `X-37` had
+//! demoted their compliance rows in the first place. Push is earned in full: the `pn-*` parameters,
+//! §8.2's answer read back, and §4.1.3's refresh through `UserAgent::woken`. Outbound is earned
+//! only as far as the registration goes, which is what the wording above says and no further.
 //!
 //! **Experimental**: `presence`, `subscribe` and `packages`. They are public, tested and reachable from
 //! nothing above this crate — no `sipx-cli` command subscribes or publishes, and nothing in the
 //! workspace receives a SUBSCRIBE or PUBLISH off a socket. Their shape has never been constrained by a
 //! caller, which is exactly when an API is still soft.
+//!
+//! By that same rule, and named here rather than left for a reader to discover: the rest of
+//! Outbound is experimental too. `Flows` and `Attempt` — one registration per outbound proxy,
+//! each flow failing independently under §4.5's backoff — plus `UserAgent::keepalive_after`
+//! (§4.4) and `UserAgent::dialog_contact`'s `ob` parameter (§4.3) are exercised by this crate's
+//! own tests and by nothing above them. `sipx register` places a single flow and does not hold it
+//! open, so those shapes have never been constrained by a caller either.
 
 #[cfg(feature = "runtime")]
 pub mod agent;
