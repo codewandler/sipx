@@ -96,6 +96,38 @@ async fn start_answerer(
     (child, address, lines)
 }
 
+/// Wait for the answerer to exit, and hold it to a clean exit.
+///
+/// Every one of these tests used to end `let _ = answerer.wait().await`, which threw the exit
+/// status away and made every assertion after it ambiguous (`X-40`): "the callee recorded nothing"
+/// could not distinguish media that never flowed from an answerer that died before it could record
+/// anything, and the second is a different defect with a different fix. Whatever the assertions
+/// below are about, they are about a process that ran to completion — so that is asserted rather
+/// than assumed.
+///
+/// The wait is bounded, so an answerer that never exits is a named failure instead of a suite that
+/// hangs until the harness kills it. Thirty seconds is a bound on failure and not a measurement:
+/// every answerer here is started with a `--wait`/`--duration` well inside it.
+///
+/// Its stderr comes along because a status on its own says a process failed without saying why, and
+/// the whole point of reading the status is diagnosis.
+async fn answerer_exits_cleanly(answerer: &mut tokio::process::Child) {
+    let mut complaint = Vec::new();
+    if let Some(mut stderr) = answerer.stderr.take() {
+        let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut complaint).await;
+    }
+    let status = tokio::time::timeout(Duration::from_secs(30), answerer.wait())
+        .await
+        .expect("the answerer exits rather than hanging")
+        .expect("waits");
+    assert!(
+        status.success(),
+        "the answerer exited with {status}, so anything asserted about what it recorded, heard or \
+         captured describes a process that failed: {}",
+        String::from_utf8_lossy(&complaint)
+    );
+}
+
 /// The first header line with this name, without its terminator.
 fn header_line<'a>(message: &'a str, name: &str) -> &'a str {
     let prefix = format!("{name}:");
@@ -465,12 +497,26 @@ async fn dial_plays_a_file_and_records_the_far_end() {
         .expect("a line")
         .expect("the result line");
     assert!(answered.contains("\"status\":\"answered\""), "{answered}");
-    let _ = answerer.wait().await;
+
+    // The answerer's own account of the audio, read before the file, because it is what tells the
+    // two failures apart (`X-40`). `heard_audio` is false when the media path delivered nothing to
+    // record; a false here with a non-empty file, or a true here with an empty one, is a defect in
+    // the writing rather than in the carrying. "The callee recorded nothing" said neither.
+    let heard_audio = answered.contains("\"heard_audio\":true");
+    answerer_exits_cleanly(&mut answerer).await;
 
     // The recording contains the tone, not silence of the right length.
     let heard =
         read_wav(std::fs::File::open(&heard_by_callee_path).expect("opens")).expect("reads");
-    assert!(!heard.samples.is_empty(), "the callee recorded nothing");
+    assert!(
+        heard_audio,
+        "the answerer reports it heard no audio at all during the call, so the recording has \
+         nothing in it to assert on: {answered}"
+    );
+    assert!(
+        !heard.samples.is_empty(),
+        "the answerer reported audio and then wrote an empty recording: {answered}"
+    );
     let peak = heard
         .samples
         .iter()
@@ -519,7 +565,7 @@ async fn a_busy_answer_gives_the_caller_the_busy_exit_code() {
         "a failure must not land on stdout"
     );
 
-    let _ = answerer.wait().await;
+    answerer_exits_cleanly(&mut answerer).await;
 }
 
 /// A final response to an INVITE must carry a To tag (RFC 3261 §8.2.6.2): the tag is what
@@ -632,7 +678,7 @@ async fn digits_sent_by_the_caller_are_reported_by_the_answerer() {
         answered.contains("\"dtmf\":\"1234\""),
         "the keypresses must be reported: {answered}"
     );
-    let _ = answerer.wait().await;
+    answerer_exits_cleanly(&mut answerer).await;
 }
 
 /// Calling something that never answers gives up on the caller's schedule rather than on the
@@ -670,6 +716,16 @@ async fn a_call_that_is_never_answered_times_out_on_schedule() {
         Some(5),
         "timeout has its own exit code"
     );
+    // `X-40`'s sweep left this clock deliberately, and this is the reason at the site that `X-29`
+    // asks for. The elapsed time here is not a wait standing in for an arrival — it *is* the
+    // measurement, which is `X-29`'s third category: the whole claim is *which* schedule fired, and
+    // the only way to read that is the clock. There is nothing to poll for, because the thing under
+    // test is which of two durations elapsed.
+    //
+    // What keeps it out of the flaky family is the width of the gap it has to resolve: it separates
+    // our 3 s from 64*T1's 32 s, so anything comfortably between them does, and 12 s is four times
+    // the schedule that should fire. Load can only push the number up, and the 20 s timeout above is
+    // the next bound in the same direction — so a starved run fails here rather than passing wrongly.
     assert!(
         started.elapsed() < Duration::from_secs(12),
         "gave up after {:?}, which is the transaction's schedule rather than ours",
@@ -989,7 +1045,11 @@ async fn the_capture_flag_records_the_signalling_of_a_call() {
         .expect("a line")
         .expect("the result line");
     assert!(answered.contains("\"status\":\"answered\""), "{answered}");
-    let _ = answerer.wait().await;
+
+    // The capture is read only after the answerer has exited, which is what flushes it — and the
+    // exit is now asserted rather than discarded, so an empty capture cannot be an answerer that
+    // died holding it (`X-40`).
+    answerer_exits_cleanly(&mut answerer).await;
 
     let bytes = std::fs::read(&capture).expect("the capture the flag asked for exists");
     assert!(

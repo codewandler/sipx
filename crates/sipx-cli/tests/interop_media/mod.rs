@@ -109,11 +109,20 @@ pub(crate) async fn echo_round_trip(call: &Call) -> (Vec<u8>, Echoed) {
         };
         // Stop when the far end goes quiet, not after a fixed count: how many packets an echo
         // returns is the far end's business.
-        while let Ok(Some(packet)) =
-            tokio::time::timeout(Duration::from_millis(600), media.recv_encoded()).await
-        {
+        //
+        // Two different questions, and `X-40`'s sweep found them sharing one window here. How long
+        // the far end takes to *start* echoing is a bound on failure — two jitter buffers filling,
+        // a container starting a channel, a loaded runner — while how long a gap means the echo has
+        // *ended* is a property of the stream. A single 600 ms window answered both, so a first
+        // packet that arrived late left `payload` empty and `assert_echo` reported "no audio came
+        // back" on a call that carried it. That is `MediaSession::record_at_least`'s lesson
+        // (`X-28`) in the interop harness: widening the one window would only have moved the cliff,
+        // so the start gets its own generous deadline and the gap keeps the tight one.
+        let mut window = Duration::from_secs(10);
+        while let Ok(Some(packet)) = tokio::time::timeout(window, media.recv_encoded()).await {
             echoed.payload_types.push(packet.payload_type);
             echoed.payload.extend_from_slice(&packet.payload);
+            window = Duration::from_millis(600);
         }
         echoed
     })
