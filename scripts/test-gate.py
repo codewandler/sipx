@@ -813,7 +813,11 @@ class TheInternalDocsLinkCheck(unittest.TestCase):
         otherwise go on diverging unnoticed until someone links one.
         """
         expected = {
-            "ICE — `ice` _(six stories, M10)_": "ice--ice-six-stories-m10",
+            # `X-50` removed this heading's `_(six stories, M10)_` parenthetical, because it was a
+            # second statement of M10's exit criterion. Re-derived rather than deleted, per the
+            # assertion below: the em-dash-plus-backticks shape is what this case is here for, and
+            # the two entries under it still cover the parenthetical half.
+            "ICE — `ice`": "ice--ice",
             "Endpoint discovery — `discovery` _(four stories)_": (
                 "endpoint-discovery--discovery-four-stories"
             ),
