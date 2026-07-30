@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for the gate entry point, its drift check and its disk guard (stories `X-22`, `X-34`).
+"""Tests for the gate entry point, its drift check, its disk guard and the `docs site` step's own
+contract (stories `X-22`, `X-34`, `X-41`).
 
 The gate is the contract for "before marking any story done", and for five days it was a list of
 commands that omitted one CI runs. Every documented command passed, the `msrv` job was red, and
@@ -7,13 +8,15 @@ two releases shipped that did not build on the Rust version they advertise.
 
 So the thing under test here is not "does the gate run". It is the ways a gate stops being worth
 believing: a CI job the gate never learns about, an `AGENTS.md` gate block that grows its own copy
-of the list and falls behind, and — `X-34` — a red result that was never about the tree at all.
-All three are assertions about real repository files rather than about fixtures, because a check
-that only ever sees its own fixtures is the same class of mistake one level up.
+of the list and falls behind, `X-34`'s red result that was never about the tree at all, and
+`X-41`'s green result that was — a step that printed a dead link in the published site and exited
+0. Nearly all of it is asserted about real repository files rather than about fixtures, because a
+check that only ever sees its own fixtures is the same class of mistake one level up.
 """
 
 import importlib.util
 import pathlib
+import subprocess
 import sys
 import tomllib
 import unittest
@@ -21,6 +24,9 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 AGENTS = ROOT / "AGENTS.md"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+BUILD_DOCS = ROOT / "scripts" / "build-docs.sh"
+DOCS_LINKS = ROOT / "scripts" / "check-docs-links.py"
+SITE_CONFIG = ROOT / "website" / "docusaurus.config.js"
 
 _gate = None
 
@@ -449,6 +455,303 @@ class TheDiskGuard(unittest.TestCase):
             "the gate does not record a decision on sharing one target directory between "
             "worktrees, so the next person out of disk has to re-derive it",
         )
+
+
+class TheDocsSiteStep(unittest.TestCase):
+    """`X-41`: the `docs site` step printed a dead link in the published site and exited 0.
+
+    Docusaurus reports broken links, broken anchors, broken relative Markdown links and duplicate
+    routes through four settings that default *independently*, and three of the four default to
+    `warn` — print it, and exit 0. `onBrokenAnchors` was the one nobody had stated, so a link to
+    `#cli-reference` (an id Docusaurus does not emit for a page's `h1`) produced
+
+        [WARNING] Docusaurus found broken anchors! … [SUCCESS] Generated static files in "build".
+
+    and the gate reported twenty-two steps green. `S-30` only found it by reading the step's
+    output instead of its exit code.
+
+    This class is the reversal detector for that. It is deliberately not the only one: the real
+    end-to-end case — write a page linking to an anchor no page emits, and require the build to
+    *fail* — lives in `build-docs.sh`, because the `gate` CI job has no node and a check that
+    skips itself on the machine where it matters is the disease, not the cure. What is asserted
+    here is the decision that check obeys, and that the check is still in the step at all.
+    """
+
+    HANDLERS = {
+        "onBrokenLinks": "a link to a page the site does not publish",
+        "onBrokenAnchors": "a link to an #anchor no page emits — the X-41 defect",
+        "onDuplicateRoutes": "two routes claiming one path, so one page becomes unreachable",
+        "onBrokenMarkdownLinks": "a relative Markdown link that resolves to no file",
+    }
+
+    def setUp(self):
+        self.config = SITE_CONFIG.read_text(encoding="utf-8")
+        self.script = BUILD_DOCS.read_text(encoding="utf-8")
+
+    def handler(self, name: str):
+        """The value the config states for a reporting handler, or `None` if it states none.
+
+        Read out of the source rather than by importing the config: the config `require`s the
+        search theme, so importing it needs `website/node_modules`, and this suite runs in a CI
+        job that has no node at all.
+        """
+        import re
+
+        found = re.search(rf"^\s*{name}:\s*'([a-z]+)'", self.config, re.MULTILINE)
+        return found.group(1) if found else None
+
+    # -- the four handlers, audited together ---------------------------------------------------
+
+    def test_a_dead_anchor_is_a_build_failure_not_a_warning(self):
+        """The defect, stated as a test. Fails on the commit this story starts from."""
+        self.assertEqual(
+            "throw",
+            self.handler("onBrokenAnchors"),
+            "onBrokenAnchors is not `throw` in website/docusaurus.config.js, so Docusaurus's "
+            "default applies: a link to an anchor no page emits is printed and the build exits "
+            "0. The `docs site` gate step is read by its exit code, so that is a green gate with "
+            "a dead link in the published site (X-41)",
+        )
+
+    def test_every_reporting_handler_is_stated_rather_than_inherited(self):
+        """`X-41`'s second half: fixing only anchors leaves three more defaults nobody read.
+
+        Three of the four default to `warn`. A config that states one of them is a config whose
+        reader cannot tell which of the other three were decided and which were forgotten.
+        """
+        for name, what in self.HANDLERS.items():
+            with self.subTest(handler=name):
+                value = self.handler(name)
+                self.assertIsNotNone(
+                    value,
+                    f"{name} is not stated in website/docusaurus.config.js, so its Docusaurus "
+                    f"default decides what happens to: {what}",
+                )
+                self.assertEqual(
+                    "throw",
+                    value,
+                    f"{name} is `{value}`, so this is printed and the build exits 0: {what}",
+                )
+
+    def test_every_handler_carries_its_reason(self):
+        """A value with no reason is the next person's judgement call, made without the history."""
+        for name in self.HANDLERS:
+            with self.subTest(handler=name):
+                before = self.config.split(f"{name}:")[0]
+                comment = [
+                    line
+                    for line in before.splitlines()[-8:]
+                    if line.strip().startswith("//") and len(line.strip()) > 4
+                ]
+                self.assertTrue(
+                    comment,
+                    f"{name} is set with no comment above it saying what it catches and why it "
+                    f"throws; a bare value is what gets relaxed by the next person in a hurry",
+                )
+
+    def test_the_markdown_link_handler_is_not_in_its_deprecated_place(self):
+        """Docusaurus 3 moved it under `markdown.hooks`; the old spelling only warns about itself."""
+        self.assertEqual(1, self.config.count("onBrokenMarkdownLinks:"))
+        self.assertLess(
+            self.config.index("hooks:"),
+            self.config.index("onBrokenMarkdownLinks:"),
+            "onBrokenMarkdownLinks is set at the top level, which Docusaurus 3 deprecates — it "
+            "prints a deprecation warning and will stop being read in v4",
+        )
+
+    # -- the step cannot print a defect and exit 0 ---------------------------------------------
+
+    def test_the_step_proves_its_anchor_guard_is_armed(self):
+        """"The config says throw" and "a dead anchor fails this build" are two claims.
+
+        The second is the one the gate rests on, so the step makes it itself: it writes a page
+        linking to an id no page emits and requires that build to exit non-zero. Asserted here
+        because deleting those lines is the cheap way to make this whole story evaporate.
+        """
+        self.assertIn(
+            "zz-anchor-guard-probe.md",
+            self.script,
+            "build-docs.sh no longer builds a page with a dead anchor to check that the guard "
+            "is armed, so the step is back to trusting a config setting it never exercises",
+        )
+        self.assertIn(
+            "BUILT SUCCESSFULLY",
+            self.script,
+            "build-docs.sh does not fail when the dead-anchor probe builds cleanly",
+        )
+
+    def test_the_step_treats_a_site_build_warning_as_a_defect(self):
+        """The general form of the defect, for the handler Docusaurus adds next.
+
+        Four handlers are audited above. A fifth in some later version would print and exit 0
+        under a heading nobody here has read yet, so the step fails on any `[WARNING]` from the
+        site build, with a named list for the exceptions rather than a deleted check.
+        """
+        self.assertIn("[WARNING]", self.script)
+        self.assertIn("WARNING_EXCEPTIONS", self.script)
+
+    def test_the_exceptions_list_is_empty(self):
+        """Every entry would be a defect the step chooses to print and exit 0 about."""
+        self.assertIn(
+            "WARNING_EXCEPTIONS=()",
+            self.script,
+            "the site build has warnings it is excusing; each one needs a reason on the line and "
+            "a story against it, because each one is X-41 again",
+        )
+
+    def test_the_step_cannot_lose_an_exit_code_down_a_pipe(self):
+        """It pipes the build into a log to read it. Without `pipefail` that discards the result."""
+        self.assertIn("set -euo pipefail", self.script)
+        self.assertIn("| tee", self.script, "the step no longer captures the site build's output")
+
+
+class TheInternalDocsLinkCheck(unittest.TestCase):
+    """`check-docs-links.py`: the unpublished half of the docs, checked to the same depth.
+
+    Docusaurus never sees `docs/`, so its link graph is checked by this script or by nothing. Its
+    predecessor — a heredoc inside `build-docs.sh` — split every link on `#` and threw the
+    fragment away, so a link to a missing *file* failed the build and a link to a missing
+    *heading* was invisible. That is `X-41` one directory over, and it is why the fixtures below
+    are about anchors.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("check_docs_links", DOCS_LINKS)
+        cls.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.mod)
+
+    def tree(self, pages: dict) -> pathlib.Path:
+        """A throwaway docs tree, so a fixture cannot be satisfied by the real repository."""
+        import tempfile
+
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, root, True)
+        for name, text in pages.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        (root / "docs").mkdir(exist_ok=True)
+        return root
+
+    def problems(self, pages: dict) -> list:
+        return self.mod.check(self.tree(pages)).problems
+
+    # -- the repository itself -----------------------------------------------------------------
+
+    def test_the_repository_has_no_dead_link_or_anchor(self):
+        report = self.mod.check(ROOT)
+        self.assertEqual([], report.problems)
+        self.assertGreater(report.links, 0, "the checker found no links, so it proves nothing")
+        self.assertGreater(report.anchor_links, 0, "the checker found no anchors to check")
+
+    # -- anchors ------------------------------------------------------------------------------
+
+    def test_a_link_to_a_nonexistent_anchor_is_reported(self):
+        """The failing-first assertion for the `docs/` half of X-41."""
+        problems = self.problems(
+            {
+                "docs/a.md": "# A\n\nSee [b](b.md#no-such-heading).\n",
+                "docs/b.md": "# B\n\n## Real heading\n",
+            }
+        )
+        self.assertTrue(
+            any("no-such-heading" in p for p in problems),
+            f"a link to a heading that does not exist was accepted; problems={problems}",
+        )
+
+    def test_a_link_to_a_real_anchor_is_accepted(self):
+        """The guard must cost a correct link nothing, or it gets deleted rather than fixed."""
+        self.assertEqual(
+            [],
+            self.problems(
+                {
+                    "docs/a.md": "# A\n\nSee [b](b.md#real-heading) and [self](#a).\n",
+                    "docs/b.md": "# B\n\n## Real heading\n",
+                }
+            ),
+        )
+
+    def test_a_dropped_character_between_two_spaces_leaves_two_hyphens(self):
+        """The rule that made two live links in `docs/roadmap.md` look dead while this was written.
+
+        `### Application SDK — `app-sdk`` anchors as `application-sdk--app-sdk`: the em dash is
+        removed and both spaces around it survive as hyphens. A slugger that collapses runs of
+        whitespace reports the real link as broken, and the next person "fixes" a correct link.
+        """
+        self.assertEqual(
+            [],
+            self.problems(
+                {
+                    "docs/a.md": "# A\n\n[x](b.md#application-sdk--app-sdk)\n",
+                    "docs/b.md": "# B\n\n### Application SDK — `app-sdk`\n",
+                }
+            ),
+        )
+
+    def test_an_explicit_id_wins_over_the_heading_text(self):
+        self.assertEqual(
+            [],
+            self.problems(
+                {
+                    "docs/a.md": "# A\n\n[x](b.md#chosen) and [y](b.md#anchored)\n",
+                    "docs/b.md": '# B\n\n## Some heading {#chosen}\n\n<a name="anchored"></a>\n',
+                }
+            ),
+        )
+
+    def test_a_repeated_heading_gets_the_numbered_form(self):
+        problems = self.problems(
+            {
+                "docs/a.md": "# A\n\n[first](b.md#notes) [second](b.md#notes-1) [third](b.md#notes-2)\n",
+                "docs/b.md": "# B\n\n## Notes\n\n## Notes\n",
+            }
+        )
+        self.assertTrue(
+            any("notes-2" in p for p in problems),
+            f"a third `## Notes` that does not exist was accepted; problems={problems}",
+        )
+        self.assertFalse(
+            any("notes-1" in p for p in problems),
+            f"the second `## Notes` was not given its `-1` form; problems={problems}",
+        )
+
+    def test_a_fragment_on_something_that_is_not_markdown_is_left_alone(self):
+        """`file.rs#L42` is a line range. The file's existence is ours; the fragment is not."""
+        self.assertEqual(
+            [],
+            self.problems({"docs/a.md": "# A\n\n[code](b.rs#L42)\n", "docs/b.rs": "fn main() {}\n"}),
+        )
+
+    def test_a_link_inside_a_fenced_block_is_not_a_link(self):
+        """`docs/` is full of sample markdown; its illustrations are not navigation."""
+        self.assertEqual(
+            [],
+            self.problems(
+                {"docs/a.md": "# A\n\n```md\nSee [nothing](gone.md#nowhere).\n```\n"}
+            ),
+        )
+
+    # -- the file half, which must not regress -------------------------------------------------
+
+    def test_a_link_to_a_missing_file_is_still_reported(self):
+        problems = self.problems({"docs/a.md": "# A\n\n[gone](gone.md)\n"})
+        self.assertTrue(
+            any("gone.md" in p for p in problems),
+            f"the check this script inherited was lost in the move; problems={problems}",
+        )
+
+    def test_the_script_exits_non_zero_on_a_problem(self):
+        """The exit code is what the gate step reads, so the exit code is asserted."""
+        root = self.tree({"docs/a.md": "# A\n\n[x](b.md#nope)\n", "docs/b.md": "# B\n"})
+        done = subprocess.run(
+            [sys.executable, str(DOCS_LINKS), "--root", str(root)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(0, done.returncode, "a dead anchor was printed and exited 0")
+        self.assertIn("nope", done.stderr + done.stdout)
 
 
 if __name__ == "__main__":
