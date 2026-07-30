@@ -947,7 +947,7 @@ impl Call {
             let port = MediaPort::bind(SocketAddr::new(self.media_address, 0))
                 .await
                 .map_err(Error::Io)?;
-            let replacement = port.start(to.media_config());
+            let replacement = port.start(to.media_config())?;
             // Mute is a property of the call, not of the session that happens to be carrying it
             // (`M-18`). Without this a re-INVITE that moves the media — the far end changing
             // address or codec, which this side did not ask for and cannot refuse — unmutes the
@@ -2238,7 +2238,7 @@ fn establish(
     let settled = settle_answer(offered.crypto.as_slice(), &answer, options.codecs)?;
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
-    let media = port.start(settled.media_config());
+    let media = port.start(settled.media_config())?;
     Ok((dialog, media, target, settled))
 }
 
@@ -3003,7 +3003,7 @@ impl Dialing {
             Some(EarlyMedia::Offered(port)) => (port, self.settle_from(response)?),
             None => return Err(Error::NoDialog),
         };
-        let media = port.start(settled.media_config());
+        let media = port.start(settled.media_config())?;
         Ok((dialog, media, settled))
     }
 
@@ -3276,7 +3276,7 @@ pub async fn answer_early(
     }
     let response = response.build();
 
-    let media = early.port.start(early.settled.media_config());
+    let media = early.port.start(early.settled.media_config())?;
     endpoint.respond(&incoming.key, response.clone()).await?;
 
     let acked = Arc::new(tokio::sync::Notify::new());
@@ -3432,7 +3432,7 @@ async fn answer_negotiated(
         negotiated,
         srtp: srtp_keys_answering(capabilities.crypto.as_ref(), offer_crypto(&offer)),
     };
-    let media = port.start(settled.media_config());
+    let media = port.start(settled.media_config())?;
 
     let to_with_tag = {
         let existing = incoming

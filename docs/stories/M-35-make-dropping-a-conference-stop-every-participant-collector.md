@@ -2,7 +2,7 @@
 id: M-35
 title: Make dropping a conference stop every participant collector
 pillar: Media
-status: ready
+status: in-progress
 priority: 4
 design: docs/designs/media-runtime-safety.md
 epic: media-runtime-safety

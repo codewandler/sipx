@@ -81,6 +81,56 @@ pub enum Codec {
     Opus,
 }
 
+/// Which half of a negotiated codec could not be constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodecDirection {
+    /// The encoder for media sent to the peer.
+    Encoder,
+    /// The decoder for media received from the peer.
+    Decoder,
+}
+
+impl std::fmt::Display for CodecDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encoder => f.write_str("encoder"),
+            Self::Decoder => f.write_str("decoder"),
+        }
+    }
+}
+
+/// A negotiated media session that cannot be constructed safely.
+#[derive(Debug, thiserror::Error)]
+pub enum SetupError {
+    /// Packet pacing cannot represent a frame shorter than one millisecond.
+    #[error("packet duration must be at least 1 ms, got {0:?}")]
+    PacketDurationTooShort(Duration),
+    /// A configured RTCP timer must make forward progress.
+    #[error("RTCP interval must be at least 1 ms, got {0:?}")]
+    RtcpIntervalTooShort(Duration),
+    /// The codec agreed through SDP could not create one of its stateful directions.
+    #[error("cannot construct {codec:?} {direction}: {reason}")]
+    Codec {
+        /// The negotiated wire codec.
+        codec: Codec,
+        /// Whether setup failed for sending or receiving.
+        direction: CodecDirection,
+        /// The codec library's diagnostic. It contains no media or key material.
+        reason: String,
+    },
+}
+
+/// Binding or constructing a media session failed.
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    /// A socket could not be bound.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    /// The negotiated session could not be constructed.
+    #[error(transparent)]
+    Setup(#[from] SetupError),
+}
+
 impl Codec {
     /// The static payload type.
     #[must_use]
@@ -157,22 +207,21 @@ enum Encoding {
 }
 
 impl Encoding {
-    fn for_codec(codec: Codec, channels: usize) -> Self {
+    #[cfg_attr(not(feature = "opus"), allow(clippy::unnecessary_wraps))]
+    fn for_codec(codec: Codec, channels: usize) -> Result<Self, SetupError> {
         match codec {
             #[cfg(feature = "opus")]
             Codec::Opus => match sipx_audio::opus::Encoder::new(channels) {
-                Ok(encoder) => Self::Opus(Box::new(encoder)),
-                Err(error) => {
-                    // Falling back would send µ-law on the payload type the far end agreed was
-                    // Opus, which it would decode as noise. Sending nothing is the honest
-                    // failure, and it is loud in the log rather than in someone's ear.
-                    tracing::error!(%error, "no Opus encoder; this session will send nothing");
-                    Self::Direct(Codec::Pcmu)
-                }
+                Ok(encoder) => Ok(Self::Opus(Box::new(encoder))),
+                Err(error) => Err(SetupError::Codec {
+                    codec,
+                    direction: CodecDirection::Encoder,
+                    reason: error.to_string(),
+                }),
             },
             other => {
                 let _ = channels;
-                Self::Direct(other)
+                Ok(Self::Direct(other))
             }
         }
     }
@@ -205,19 +254,21 @@ enum Decoding {
 }
 
 impl Decoding {
-    fn for_codec(codec: Codec, channels: usize) -> Self {
+    #[cfg_attr(not(feature = "opus"), allow(clippy::unnecessary_wraps))]
+    fn for_codec(codec: Codec, channels: usize) -> Result<Self, SetupError> {
         match codec {
             #[cfg(feature = "opus")]
             Codec::Opus => match sipx_audio::opus::Decoder::new(channels) {
-                Ok(decoder) => Self::Opus(Box::new(decoder)),
-                Err(error) => {
-                    tracing::error!(%error, "no Opus decoder; this session will hear nothing");
-                    Self::Direct(Codec::Pcmu)
-                }
+                Ok(decoder) => Ok(Self::Opus(Box::new(decoder))),
+                Err(error) => Err(SetupError::Codec {
+                    codec,
+                    direction: CodecDirection::Decoder,
+                    reason: error.to_string(),
+                }),
             },
             other => {
                 let _ = channels;
-                Self::Direct(other)
+                Ok(Self::Direct(other))
             }
         }
     }
@@ -262,7 +313,8 @@ pub struct Config {
     /// either" — because a session that falls back to cleartext when a packet fails to
     /// authenticate is a session an attacker can downgrade by sending one bad packet.
     pub srtp: Option<SrtpKeys>,
-    /// How much audio each packet carries. 20 ms is universal.
+    /// How much audio each packet carries. 20 ms is universal; values below 1 ms are rejected
+    /// by [`Self::validate`] and every session-start API.
     pub packet_duration: Duration,
     /// Samples per second. G.711 is always 8000.
     pub clock_rate: u32,
@@ -275,7 +327,8 @@ pub struct Config {
     /// too shallow is audible and being too deep is not — but the ceiling is a real ceiling: a
     /// call with a quarter-second of delay is still a call, and one with three seconds is not.
     pub jitter_max_depth: Option<usize>,
-    /// How often to send RTCP receiver reports. `None` disables RTCP entirely.
+    /// How often to send RTCP receiver reports. `None` disables RTCP entirely; a configured
+    /// interval must be at least 1 ms.
     ///
     /// RFC 3550 §6.2 scales the interval with the session's bandwidth and membership; for a
     /// two-party call that arithmetic lands at the five-second minimum, so sipx uses it
@@ -290,6 +343,8 @@ pub struct Config {
 }
 
 impl Config {
+    const MIN_INTERVAL: Duration = Duration::from_millis(1);
+
     /// The payload type this session puts on the wire.
     #[must_use]
     pub fn wire_payload_type(&self) -> u8 {
@@ -320,6 +375,41 @@ impl Config {
     pub fn samples_per_packet(&self) -> usize {
         let millis = u64::try_from(self.packet_duration.as_millis()).unwrap_or(20);
         usize::try_from(u64::from(self.clock_rate) * millis / 1000).unwrap_or(160)
+    }
+
+    /// Check the values used by worker timers before any worker or socket starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetupError::PacketDurationTooShort`] or
+    /// [`SetupError::RtcpIntervalTooShort`] for a duration below one millisecond.
+    pub fn validate(&self) -> Result<(), SetupError> {
+        if self.packet_duration < Self::MIN_INTERVAL {
+            return Err(SetupError::PacketDurationTooShort(self.packet_duration));
+        }
+        if let Some(interval) = self.rtcp_interval
+            && interval < Self::MIN_INTERVAL
+        {
+            return Err(SetupError::RtcpIntervalTooShort(interval));
+        }
+        Ok(())
+    }
+}
+
+/// Everything that can fail before a session's first worker is spawned.
+struct Prepared {
+    encoding: Encoding,
+    decoding: Decoding,
+}
+
+impl Prepared {
+    fn new(config: &Config) -> Result<Self, SetupError> {
+        config.validate()?;
+        // Construct both directions before spawning either. A half-started negotiated codec is
+        // not a media session, and substituting another codec would break the payload contract.
+        let encoding = Encoding::for_codec(config.codec, config.channels)?;
+        let decoding = Decoding::for_codec(config.codec, config.channels)?;
+        Ok(Self { encoding, decoding })
     }
 }
 
@@ -506,7 +596,7 @@ pub(crate) struct Stop {
 }
 
 impl Stop {
-    fn stop(&self) {
+    pub(crate) fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
     }
@@ -516,10 +606,15 @@ impl Stop {
     }
 
     pub(crate) async fn wait(&self) {
-        if self.is_stopped() {
-            return;
+        // Register before reading the durable flag. The opposite order has a lost-wake window:
+        // `stop` can set the flag and notify after the check but before `notified()` registers,
+        // leaving this future asleep forever despite the flag saying it is stopped.
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_stopped() {
+            notified.await;
         }
-        self.notify.notified().await;
     }
 }
 
@@ -896,9 +991,23 @@ impl MediaPort {
     }
 
     /// Start carrying media, now that negotiation has said where and in what.
-    #[must_use]
-    pub fn start(self, config: Config) -> MediaSession {
-        MediaSession::on_socket(&self.socket, self.rtcp, self.local_addr, config, None)
+    ///
+    /// Validation and construction finish before the first worker is spawned. On error this
+    /// consumes and releases the bound port.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetupError`] when timing is invalid or the negotiated codec cannot be built.
+    pub fn start(self, config: Config) -> Result<MediaSession, SetupError> {
+        let prepared = Prepared::new(&config)?;
+        Ok(MediaSession::on_socket(
+            &self.socket,
+            self.rtcp,
+            self.local_addr,
+            config,
+            None,
+            prepared,
+        ))
     }
 
     /// Start carrying media with ICE driving the path (`docs/specs/ice.md` §2, §11).
@@ -908,18 +1017,35 @@ impl MediaPort {
     /// or RFC 8839 §5.3's `ice-mismatch` applies — no agent is driven and this is
     /// [`Self::start`]: no check is sent, no timer runs, and the stream is carried by symmetric
     /// RTP exactly as it is today.
-    #[must_use]
-    pub fn start_with_ice(self, config: Config, local: ice::LocalDescription) -> MediaSession {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetupError`] before starting ICE or media workers when session construction is
+    /// invalid.
+    pub fn start_with_ice(
+        self,
+        config: Config,
+        local: ice::LocalDescription,
+    ) -> Result<MediaSession, SetupError> {
+        let prepared = Prepared::new(&config)?;
         if !local.running() {
-            return self.start(config);
+            return Ok(MediaSession::on_socket(
+                &self.socket,
+                self.rtcp,
+                self.local_addr,
+                config,
+                None,
+                prepared,
+            ));
         }
-        MediaSession::on_socket(
+        Ok(MediaSession::on_socket(
             &self.socket,
             self.rtcp,
             self.local_addr,
             config,
             Some(local),
-        )
+            prepared,
+        ))
     }
 }
 
@@ -928,9 +1054,24 @@ impl MediaSession {
     ///
     /// Only for callers that already know the far end — an answerer, which has the offer in
     /// hand. A caller making the offer needs [`MediaPort`] instead.
-    pub async fn start(bind: SocketAddr, config: Config) -> std::io::Result<Self> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StartError::Setup`] before binding for invalid timing or codec construction,
+    /// and [`StartError::Io`] if the media sockets cannot be bound.
+    pub async fn start(bind: SocketAddr, config: Config) -> Result<Self, StartError> {
+        // Validation and stateful codec setup happen before binding, so a rejected setup never
+        // occupies even a temporary port and can never leave a worker behind.
+        let prepared = Prepared::new(&config)?;
         let port = MediaPort::bind(bind).await?;
-        Ok(port.start(config))
+        Ok(Self::on_socket(
+            &port.socket,
+            port.rtcp,
+            port.local_addr,
+            config,
+            None,
+            prepared,
+        ))
     }
 
     fn on_socket(
@@ -939,6 +1080,7 @@ impl MediaSession {
         local_addr: SocketAddr,
         config: Config,
         ice: Option<ice::LocalDescription>,
+        prepared: Prepared,
     ) -> Self {
         let samples_per_packet = config.samples_per_packet();
         let packet_duration = config.packet_duration;
@@ -988,6 +1130,7 @@ impl MediaSession {
                 muted: Arc::clone(&shared.muted),
                 ice: ice.clone(),
                 stop: Arc::clone(&shared.stop),
+                encoding: prepared.encoding,
             },
         ));
         let clips_tx = spawn_playback_queue(&outgoing_tx, &shared.stop);
@@ -1008,6 +1151,7 @@ impl MediaSession {
                 symmetric: ice.is_none(),
                 ice: ice.clone(),
                 stop: Arc::clone(&shared.stop),
+                decoding: prepared.decoding,
             },
         ));
 
@@ -1661,6 +1805,8 @@ struct Sending {
     /// pair that has actually been quiet for Tr.
     ice: Option<crate::ice::driver::Handle>,
     stop: Arc<Stop>,
+    /// Constructed before this worker is spawned, so startup cannot fail inside the task.
+    encoding: Encoding,
 }
 
 async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, sending: Sending) {
@@ -1673,8 +1819,8 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         muted,
         ice,
         stop,
+        mut encoding,
     } = sending;
-    let mut encoding = Encoding::for_codec(config.codec, config.channels);
     let mut clock = SendClock::new();
     // One context, owned by this loop. SRTP keeps a rollover counter and a replay window per
     // stream, and a context behind a lock would put a mutex in the packet path for state exactly
@@ -2010,6 +2156,8 @@ struct Inbound {
     /// Where a STUN datagram goes (RFC 5764 §5.1.2), when ICE is running.
     ice: Option<crate::ice::driver::Handle>,
     stop: Arc<Stop>,
+    /// Constructed before this worker is spawned, so startup cannot fail inside the task.
+    decoding: Decoding,
 }
 
 /// Split a datagram arriving on a port that carries media three ways (RFC 5764 §5.1.2).
@@ -2178,12 +2326,12 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
         symmetric,
         ice,
         stop,
+        mut decoding,
     } = inbound;
     let mut buffer = match config.jitter_max_depth {
         Some(max) => JitterBuffer::adaptive(config.jitter_depth, max),
         None => JitterBuffer::new(config.jitter_depth),
     };
-    let mut decoding = Decoding::for_codec(config.codec, config.channels);
     let mut unprotect = srtp_context(config.srtp.as_ref().map(|keys| &keys.remote));
     let mut datagram = vec![0u8; 2048];
     let mut dtmf = sipx_rtp::dtmf::Receiver::new();
@@ -3221,6 +3369,100 @@ mod tests {
         let mut ten_ms = config.clone();
         ten_ms.packet_duration = Duration::from_millis(10);
         assert_eq!(ten_ms.samples_per_packet(), 80);
+    }
+
+    #[tokio::test]
+    async fn zero_packet_duration_is_rejected_before_binding_or_spawning() {
+        let reservation = UdpSocket::bind(any()).await.expect("reserves a port");
+        let address = reservation.local_addr().expect("has an address");
+        drop(reservation);
+
+        let mut config = Config::new("127.0.0.1:9".parse().expect("valid"), Codec::Pcmu);
+        config.packet_duration = Duration::ZERO;
+        let error = MediaSession::start(address, config)
+            .await
+            .expect_err("zero cannot pace a worker");
+        assert!(matches!(
+            error,
+            StartError::Setup(SetupError::PacketDurationTooShort(Duration::ZERO))
+        ));
+
+        let rebound = UdpSocket::bind(address)
+            .await
+            .expect("rejected setup left no socket behind");
+        drop(rebound);
+    }
+
+    #[tokio::test]
+    async fn zero_rtcp_interval_is_rejected_before_binding_or_spawning() {
+        let reservation = UdpSocket::bind(any()).await.expect("reserves a port");
+        let address = reservation.local_addr().expect("has an address");
+        drop(reservation);
+
+        let mut config = Config::new("127.0.0.1:9".parse().expect("valid"), Codec::Pcmu);
+        config.rtcp_interval = Some(Duration::ZERO);
+        let error = MediaSession::start(address, config)
+            .await
+            .expect_err("zero cannot schedule reports");
+        assert!(matches!(
+            error,
+            StartError::Setup(SetupError::RtcpIntervalTooShort(Duration::ZERO))
+        ));
+
+        let rebound = UdpSocket::bind(address)
+            .await
+            .expect("rejected setup left no socket behind");
+        drop(rebound);
+    }
+
+    #[tokio::test]
+    async fn one_millisecond_media_and_report_intervals_keep_running() {
+        let peer = UdpSocket::bind(any()).await.expect("binds peer");
+        let mut config = Config::new(peer.local_addr().expect("has an address"), Codec::Pcmu);
+        config.packet_duration = Duration::from_millis(1);
+        config.rtcp_interval = Some(Duration::from_millis(1));
+        let samples = config.samples_per_packet();
+        let session = MediaSession::start(any(), config)
+            .await
+            .expect("minimum intervals are valid");
+
+        assert!(session.send(vec![0; samples]).await);
+        let mut datagram = vec![0u8; 2048];
+        tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut datagram))
+            .await
+            .expect("the pacing worker remains alive")
+            .expect("receives a packet");
+        session.stop();
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn refused_opus_encoder_has_no_fallback_pipeline() {
+        let error =
+            Encoding::for_codec(Codec::Opus, 3).expect_err("Opus carries at most two channels");
+        assert!(matches!(
+            error,
+            SetupError::Codec {
+                codec: Codec::Opus,
+                direction: CodecDirection::Encoder,
+                ..
+            }
+        ));
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn refused_opus_decoder_has_no_fallback_pipeline() {
+        let error =
+            Decoding::for_codec(Codec::Opus, 3).expect_err("Opus carries at most two channels");
+        assert!(matches!(
+            error,
+            SetupError::Codec {
+                codec: Codec::Opus,
+                direction: CodecDirection::Decoder,
+                ..
+            }
+        ));
     }
 
     /// The RTP timestamp must advance by the samples actually sent. Advancing by the

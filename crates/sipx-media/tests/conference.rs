@@ -49,8 +49,8 @@ async fn party() -> Party {
     near_config.rtcp_interval = None;
 
     Party {
-        far: far_port.start(far_config),
-        near: Arc::new(near_port.start(near_config)),
+        far: far_port.start(far_config).expect("valid media setup"),
+        near: Arc::new(near_port.start(near_config).expect("valid media setup")),
     }
 }
 
@@ -96,7 +96,7 @@ async fn no_participant_hears_their_own_audio() {
     let bob = party().await;
     let carol = party().await;
 
-    let conference = Conference::narrowband();
+    let conference = Conference::narrowband().expect("valid conference timing");
     conference.join(Arc::clone(&alice.near)).await;
     conference.join(Arc::clone(&bob.near)).await;
     conference.join(Arc::clone(&carol.near)).await;
@@ -138,7 +138,7 @@ async fn a_participant_hears_everyone_else_at_once() {
     let bob = party().await;
     let carol = party().await;
 
-    let conference = Conference::narrowband();
+    let conference = Conference::narrowband().expect("valid conference timing");
     conference.join(Arc::clone(&alice.near)).await;
     conference.join(Arc::clone(&bob.near)).await;
     conference.join(Arc::clone(&carol.near)).await;
@@ -171,7 +171,7 @@ async fn participants_join_and_leave_without_disturbing_the_others() {
     let bob = party().await;
     let carol = party().await;
 
-    let conference = Conference::narrowband();
+    let conference = Conference::narrowband().expect("valid conference timing");
     conference.join(Arc::clone(&alice.near)).await;
     let bob_id = conference.join(Arc::clone(&bob.near)).await;
 
@@ -226,7 +226,7 @@ async fn someone_who_has_left_is_no_longer_mixed_in() {
     let alice = party().await;
     let bob = party().await;
 
-    let conference = Conference::narrowband();
+    let conference = Conference::narrowband().expect("valid conference timing");
     let alice_id = conference.join(Arc::clone(&alice.near)).await;
     conference.join(Arc::clone(&bob.near)).await;
 
@@ -250,7 +250,7 @@ async fn someone_who_has_left_is_no_longer_mixed_in() {
 #[tokio::test]
 async fn a_lone_participant_hears_silence() {
     let alice = party().await;
-    let conference = Conference::narrowband();
+    let conference = Conference::narrowband().expect("valid conference timing");
     conference.join(Arc::clone(&alice.near)).await;
 
     let voice = tone(440.0, 400, 12_000.0);
@@ -265,4 +265,78 @@ async fn a_lone_participant_hears_silence() {
     );
 
     conference.close().await;
+}
+
+#[test]
+fn zero_mix_interval_is_a_typed_error_before_spawn() {
+    let error = Conference::new(160, Duration::ZERO).expect_err("zero cannot drive a mixer");
+    assert!(matches!(
+        error,
+        sipx_media::ConferenceError::IntervalTooShort(Duration::ZERO)
+    ));
+}
+
+#[tokio::test]
+async fn the_smallest_mix_interval_starts_and_closes_idempotently() {
+    let conference =
+        Conference::new(8, Duration::from_millis(1)).expect("one millisecond is the runtime floor");
+    tokio::task::yield_now().await;
+    conference.close().await;
+    conference.close().await;
+}
+
+#[tokio::test]
+async fn dropping_a_conference_releases_blocked_collectors_and_sessions() {
+    let port = MediaPort::bind("127.0.0.1:0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let session = Arc::new(
+        port.start(Config::new(
+            "127.0.0.1:9".parse().expect("valid"),
+            Codec::Pcmu,
+        ))
+        .expect("valid media setup"),
+    );
+    let weak = Arc::downgrade(&session);
+    let conference = Conference::narrowband().expect("valid conference timing");
+    conference.join(Arc::clone(&session)).await;
+
+    // Leave the collector blocked in `recv`: shutdown must wake it without another frame.
+    drop(session);
+    drop(conference);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while weak.strong_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drop cancels every collector and releases its session");
+    assert!(weak.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn repeated_close_releases_participants_once_and_waits_for_collectors() {
+    let port = MediaPort::bind("127.0.0.1:0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let session = Arc::new(
+        port.start(Config::new(
+            "127.0.0.1:9".parse().expect("valid"),
+            Codec::Pcmu,
+        ))
+        .expect("valid media setup"),
+    );
+    let weak = Arc::downgrade(&session);
+    let conference = Conference::narrowband().expect("valid conference timing");
+    conference.join(Arc::clone(&session)).await;
+    drop(session);
+
+    conference.close().await;
+    conference.close().await;
+
+    assert!(
+        weak.upgrade().is_none(),
+        "close waits for collectors and clears the member map"
+    );
 }

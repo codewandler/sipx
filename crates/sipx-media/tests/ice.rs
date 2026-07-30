@@ -146,8 +146,12 @@ async fn a_nominated_candidate_pair_carries_audio_when_the_host_candidates_canno
 
     // And where each side would send without ICE: the peer's default destination, which is the
     // address that does not work.
-    let alice = alice_port.start_with_ice(Config::new(bob_unreachable, Codec::Pcmu), alice_local);
-    let bob = bob_port.start_with_ice(Config::new(alice_unreachable, Codec::Pcmu), bob_local);
+    let alice = alice_port
+        .start_with_ice(Config::new(bob_unreachable, Codec::Pcmu), alice_local)
+        .expect("valid media setup");
+    let bob = bob_port
+        .start_with_ice(Config::new(alice_unreachable, Codec::Pcmu), bob_local)
+        .expect("valid media setup");
 
     let samples = alice.samples_per_packet();
     let speaker = tokio::spawn(async move {
@@ -262,14 +266,16 @@ async fn a_check_and_a_media_packet_are_demultiplexed_on_one_port() {
     description_in.agent.timers = timers();
     let mut ours = port.gather(&description_in).await;
     assert!(ours.accept(&read(&description(unreachable, peer_address, "bbbb"))));
-    let session = port.start_with_ice(
-        {
-            let mut config = Config::new(unreachable, Codec::Pcmu);
-            config.rtcp_interval = None;
-            config
-        },
-        ours,
-    );
+    let session = port
+        .start_with_ice(
+            {
+                let mut config = Config::new(unreachable, Codec::Pcmu);
+                config.rtcp_interval = None;
+                config
+            },
+            ours,
+        )
+        .expect("valid media setup");
 
     // A check from the peer, keyed as §11.2 requires: our ufrag first, and our password.
     let peering = Peering::new(credentials("bbbb"), credentials("aaaa"));
@@ -343,14 +349,16 @@ async fn a_selected_pair_is_kept_alive_with_a_binding_indication() {
     let local = port.local_addr();
     let mut ours = port.gather(&gathering("aaaa", true)).await;
     assert!(ours.accept(&read(&description(peer_address, peer_address, "bbbb"))));
-    let session = port.start_with_ice(
-        {
-            let mut config = Config::new(peer_address, Codec::Pcmu);
-            config.rtcp_interval = None;
-            config
-        },
-        ours,
-    );
+    let session = port
+        .start_with_ice(
+            {
+                let mut config = Config::new(peer_address, Codec::Pcmu);
+                config.rtcp_interval = None;
+                config
+            },
+            ours,
+        )
+        .expect("valid media setup");
 
     // Answer whatever checks arrive, so that a pair becomes valid and is nominated, and watch for
     // the first thing that is not a request.
@@ -438,14 +446,16 @@ async fn an_ice_mismatch_is_reported_and_the_stream_falls_back() {
     let peer = UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
         .await
         .unwrap();
-    let session = port.start_with_ice(
-        {
-            let mut config = Config::new(advertised, Codec::Pcmu);
-            config.rtcp_interval = None;
-            config
-        },
-        ours,
-    );
+    let session = port
+        .start_with_ice(
+            {
+                let mut config = Config::new(advertised, Codec::Pcmu);
+                config.rtcp_interval = None;
+                config
+            },
+            ours,
+        )
+        .expect("valid media setup");
     let local = session.local_addr();
 
     let packet = sipx_rtp::Packet::new(

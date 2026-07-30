@@ -1,6 +1,6 @@
 # Design: media runtime safety
 
-**Status:** proposed · **Pillar:** Media · **Epic:** `media-runtime-safety` · **Stories:** M-35,
+**Status:** accepted · **Pillar:** Media · **Epic:** `media-runtime-safety` · **Stories:** M-35,
 M-36, M-37
 
 ## Why
@@ -23,8 +23,9 @@ payload type. These paths are narrow, but each breaks a public contract silently
   different codec under the same payload type.
 - Tests observe worker and strong-reference termination, not only functional audio on the happy path.
 
-The media packet formats and negotiation rules remain in their existing specs. Any public constructor
-shape changed by these stories is specified there before implementation.
+The normative startup, ownership, timing, and codec-failure contract is in
+[`docs/specs/media-runtime.md`](../specs/media-runtime.md). Media packet formats and negotiation rules
+remain in their existing specs.
 
 ## Alternatives considered
 

@@ -65,7 +65,10 @@ async fn pair(srtp: bool) -> (MediaSession, MediaSession) {
         config_two.srtp = Some(two_keys);
     }
 
-    (one.start(config_one), two.start(config_two))
+    (
+        one.start(config_one).expect("valid media setup"),
+        two.start(config_two).expect("valid media setup"),
+    )
 }
 
 /// M-14's exit criterion. What leaves the socket must not be the audio that went in.
@@ -82,7 +85,7 @@ async fn media_on_a_secure_call_is_not_readable_from_the_wire() {
     let mut config = Config::new(tap_addr, Codec::Pcmu);
     config.rtcp_interval = None;
     config.srtp = Some(local_keys);
-    let session = port.start(config);
+    let session = port.start(config).expect("valid media setup");
 
     let audio = recognisable();
     let expected_code = sipx_audio::g711::ulaw_encode(audio[0]);
@@ -164,7 +167,7 @@ async fn a_session_expecting_srtp_refuses_plain_rtp() {
     let mut config = Config::new(peer_addr, Codec::Pcmu);
     config.rtcp_interval = None;
     config.srtp = Some(local_keys);
-    let session = port.start(config);
+    let session = port.start(config).expect("valid media setup");
 
     // A perfectly well-formed *plain* RTP packet.
     let plain = sipx_rtp::Packet::new(
@@ -201,7 +204,7 @@ async fn a_packet_under_the_wrong_key_is_refused() {
     let mut config = Config::new(peer_addr, Codec::Pcmu);
     config.rtcp_interval = None;
     config.srtp = Some(local_keys);
-    let session = port.start(config);
+    let session = port.start(config).expect("valid media setup");
 
     // Encrypted, but by somebody else.
     let mut stranger = sipx_rtp::SrtpContext::new(&[0xEE; 16], &[0xDD; 14]).expect("a context");

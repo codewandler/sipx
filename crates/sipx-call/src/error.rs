@@ -8,6 +8,9 @@ pub enum Error {
     /// A socket failed.
     #[error("io: {0}")]
     Io(#[source] std::io::Error),
+    /// Negotiated media could not be constructed safely.
+    #[error("media: {0}")]
+    Media(#[from] sipx_media::SetupError),
     /// The transport failed.
     #[error("transport: {0}")]
     Transport(#[from] sipx_transport::Error),

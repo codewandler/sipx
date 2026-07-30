@@ -41,9 +41,9 @@ pub mod ice;
 pub mod session;
 
 pub use bridge::Bridge;
-pub use conference::Conference;
+pub use conference::{Conference, ConferenceError};
 pub use dtls::{Arriving, Handshake, Profile, Role};
 pub use session::{
-    Codec, Config, Encoded, Interrupt, MediaPort, MediaSession, Playback, PlaybackEnd, PlaybackId,
-    SrtpKeys,
+    Codec, CodecDirection, Config, Encoded, Interrupt, MediaPort, MediaSession, Playback,
+    PlaybackEnd, PlaybackId, SetupError, SrtpKeys, StartError,
 };

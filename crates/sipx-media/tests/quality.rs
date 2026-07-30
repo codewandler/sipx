@@ -32,7 +32,11 @@ async fn session_and_peer() -> (MediaSession, UdpSocket, SocketAddr) {
 
     let mut config = Config::new(peer_addr, Codec::Pcmu);
     config.rtcp_interval = Some(Duration::from_millis(100));
-    (port.start(config), peer, session_addr)
+    (
+        port.start(config).expect("valid media setup"),
+        peer,
+        session_addr,
+    )
 }
 
 /// Wait until something has happened, rather than sleeping and assuming it has (`X-29`).
@@ -181,8 +185,8 @@ async fn two_sessions_measure_the_round_trip_between_them() {
     let mut config_two = Config::new(one_addr, Codec::Pcmu);
     config_two.rtcp_interval = Some(Duration::from_millis(120));
 
-    let one = one.start(config_one);
-    let two = two.start(config_two);
+    let one = one.start(config_one).expect("valid media setup");
+    let two = two.start(config_two).expect("valid media setup");
 
     // Both must be sending, or neither sends a sender report and there is no NTP timestamp to
     // echo — which is precisely the case that used to make the round trip unmeasurable.
@@ -248,7 +252,7 @@ async fn polling_the_quality_does_not_empty_the_report_window() {
     let session_addr = port.local_addr();
     let mut config = Config::new(peer_addr, Codec::Pcmu);
     config.rtcp_interval = None;
-    let session = port.start(config);
+    let session = port.start(config).expect("valid media setup");
 
     for sequence in 1..=30u16 {
         if sequence % 3 == 0 {
@@ -302,7 +306,7 @@ async fn our_reports_echo_the_peers_sender_report_and_our_own_delay() {
     let session_addr = port.local_addr();
     let mut config = Config::new(media_addr, Codec::Pcmu);
     config.rtcp_interval = Some(Duration::from_millis(150));
-    let session = port.start(config);
+    let session = port.start(config).expect("valid media setup");
 
     // Something to report on.
     for sequence in 1..=5u16 {

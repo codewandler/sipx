@@ -53,7 +53,10 @@ async fn pair(codec_one: Codec, codec_two: Codec) -> (MediaSession, MediaSession
     let mut config_two = Config::new(one_addr, codec_two);
     config_two.rtcp_interval = None;
 
-    (one.start(config_one), two.start(config_two))
+    (
+        one.start(config_one).expect("valid media setup"),
+        two.start(config_two).expect("valid media setup"),
+    )
 }
 
 /// M-11's exit criterion. `alice` and `bob` are the two far ends; `left` and `right` are the two

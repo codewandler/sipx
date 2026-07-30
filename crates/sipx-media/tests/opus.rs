@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use sipx_media::{Codec, Config, MediaPort, MediaSession};
+use sipx_media::{Codec, CodecDirection, Config, MediaPort, MediaSession, SetupError};
 
 /// 20 ms at Opus's 48 kHz.
 const FRAME: usize = 960;
@@ -78,9 +78,42 @@ async fn opus_pair(payload_type: u8) -> (MediaSession, MediaSession) {
         config
     };
     (
-        one.start(configure(two_addr)),
-        two.start(configure(one_addr)),
+        one.start(configure(two_addr)).expect("valid Opus setup"),
+        two.start(configure(one_addr)).expect("valid Opus setup"),
     )
+}
+
+#[tokio::test]
+async fn failed_opus_setup_returns_an_error_instead_of_a_wire_fallback() {
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let port = MediaPort::bind("127.0.0.1:0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let mut config = Config::new(peer.local_addr().expect("has an address"), Codec::Opus);
+    config.payload_type = Some(96);
+    config.channels = 3;
+
+    let error = port
+        .start(config)
+        .expect_err("Opus cannot construct three channels");
+    assert!(matches!(
+        error,
+        SetupError::Codec {
+            codec: Codec::Opus,
+            direction: CodecDirection::Encoder,
+            ..
+        }
+    ));
+
+    let mut datagram = [0u8; 2048];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), peer.recv_from(&mut datagram))
+            .await
+            .is_err(),
+        "failed Opus setup must emit no G.711 bytes under payload type 96"
+    );
 }
 
 /// M-13's exit criterion.
@@ -139,7 +172,7 @@ async fn opus_travels_on_the_negotiated_payload_type() {
     // 96, not the 111 sipx would have proposed.
     config.payload_type = Some(96);
     config.rtcp_interval = None;
-    let session = port.start(config);
+    let session = port.start(config).expect("valid Opus setup");
 
     let playing = tokio::spawn(async move {
         session.play(&tone(FRAME * 10, 440.0), FRAME).await;
@@ -184,7 +217,7 @@ async fn the_rtp_timestamp_advances_at_the_opus_clock() {
     config.payload_type = Some(111);
     config.rtcp_interval = None;
     assert_eq!(config.clock_rate, 48_000, "RFC 7587 §7");
-    let session = port.start(config);
+    let session = port.start(config).expect("valid Opus setup");
 
     let playing = tokio::spawn(async move {
         session.play(&tone(FRAME * 10, 440.0), FRAME).await;

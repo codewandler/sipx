@@ -2,7 +2,7 @@
 id: M-37
 title: Never put a fallback codec under a negotiated payload type
 pillar: Media
-status: ready
+status: in-progress
 priority: 7
 design: docs/designs/media-runtime-safety.md
 epic: media-runtime-safety
