@@ -5,6 +5,17 @@ All notable changes to sipx are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Conformance, capability and release readiness are assessed separately (`X-48`)** — the dated
+  repository review measures the SIP core, endpoint library, high-level call/media framework and
+  executable phone as distinct surfaces, so lower-layer code no longer earns product-level credit
+  merely by existing. It records the 70-row RFC registry and verification baseline, gives an
+  explicit per-use readiness verdict, and prioritizes the reachability and adoption gaps that must
+  close before sipx can claim broad library-and-phone capability.
+
 ## [1.0.0-alpha] — 2026-07-30
 
 **All seven `1.0.0-alpha` predicates are met**, computed rather than asserted, and
@@ -15,13 +26,6 @@ first predicate requires these seven to have held **across at least one release*
 moment one was cut, so this release starts that clock rather than stopping it.
 
 ### Changed
-
-- **Conformance, capability and release readiness are assessed separately (`X-48`)** — the dated
-  repository review measures the SIP core, endpoint library, high-level call/media framework and
-  executable phone as distinct surfaces, so lower-layer code no longer earns product-level credit
-  merely by existing. It records the 70-row RFC registry and verification baseline, gives an
-  explicit per-use readiness verdict, and prioritizes the reachability and adoption gaps that must
-  close before sipx can claim broad library-and-phone capability.
 
 - **The public docs are an adoption path rather than an internal status ledger (`X-47`)** — the
   README and website now lead with the shipped CLI and Rust workflows, state the WAV-only and
