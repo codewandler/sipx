@@ -408,6 +408,12 @@ Measured: **117 paths, and two are not `.rs`** — `docs/specs/sip-tls.md`, cite
 is the fourth crisp-sounding fact in this document's lineage to fail when run, which is why the story
 that fixed it was told to try falsifying its own sentences first. See below.
 
+*(Superseded as of `X-43`, and left standing because it is `X-33`'s measurement of `X-33`'s registry:
+both halves have moved again — the path total is now larger and 8996 no longer cites the spec, so RFC
+5922's citation is the only non-`.rs` occurrence left. This document no longer states either number
+anywhere, for the reason the paragraph above gives; the property is asserted in
+`scripts/test-rfc-report.py` instead. See "X-43" below.)*
+
 ### A third false justification, and the same shape again
 
 `X-30`'s replacement for its first false claim cited `crates/sipx-cli/tests/cli.rs:116` as exercising
@@ -563,7 +569,9 @@ list.)*
 - ~~**A path under `crates/` that is not code.**~~ **Closed by `X-33`.** The narrower version had the
   same hole one directory in: `crates/sipx-call/README.md` would have satisfied the check.
   `reaches_the_call_layer` now requires `.rs`. The measurement this was recorded with was itself
-  wrong — 117 paths, two of them not `.rs` — and the correction is under `X-33` above.
+  wrong — 117 paths, two of them not `.rs` — and the correction is under `X-33` above. Both of those
+  numbers have since moved again (`X-43`), which is why neither this document nor the script states a
+  count any more.
 
 ## X-43: what a citation has to be, and the one row that answered it
 
@@ -582,8 +590,14 @@ and no assertion about our own behaviour that could fail. The only evidence that
 **attempt**, so `crates/sipx-transport/tests/tls_versions.rs` makes one: it writes a `ClientHello`
 byte by byte at a real sipx TLS listener (`bind` with `tls_server` set) with `client_version` at
 1.0 and at 1.1 and no `supported_versions` extension, and requires a fatal `protocol_version`
-alert plus nothing reaching the application behind the listener. That is `docs/specs/sip-tls.md`
-§6 vector **L9**, which had been in the spec since T-7 and had never been run.
+alert and then the connection **closed** (§3.1: a failure closes it, no "continue anyway"). That is
+`docs/specs/sip-tls.md` §6 vector **L9**, which had been in the spec since T-7 and had never been run.
+
+The third assertion — that nothing reached the application behind the listener — is labelled weak in
+the test itself, because it is: a raw client sends no SIP message, so nothing would arrive whether
+the handshake was refused or accepted. It catches a refused connection being adopted into the pool
+anyway and nothing more. `closed` is the assertion that discriminates, and it was checked by asserting
+it of the 1.2 control, which fails: an accepted handshake leaves the socket open.
 
 Building the hello by hand is what makes this testable without a dependency: `ClientTls` cannot
 offer a deprecated version, which is the property under test, so it is no way to test it. The
@@ -592,8 +606,9 @@ one negative test.
 
 **The control is the load-bearing half.** A hand-built negative test passes for the wrong reason
 by default: refuse the hello for a missing `signature_algorithms` extension and it looks exactly
-like refusing it for its version. So the same bytes are offered again with two of them changed to
-1.2, and that hello is *accepted*. Only the version differs, so only the version can be the
+like refusing it for its version. So the same bytes are offered again with four of them changed to
+1.2 — the two version bytes in the record header and the two in `client_version` — and that hello is
+*accepted*. Only the version differs, so only the version can be the
 reason. (rustls does in fact demand `signature_algorithms` before it looks at the version at all,
 so the first draft of this test failed for that reason and would have "passed" as soon as the
 assertion was loosened to "refused".)
@@ -640,6 +655,15 @@ Three narrower or wider versions were weighed and declined:
   normative document. The `spec` key exists for the same purpose. The rule asks for code, not for
   the absence of prose.
 
+**The rule is written where registry authors read, not only here.** `docs/rfc/README.md` is the
+consumable contract — the schema table, and the enumerated list of everything `--check` fails on —
+and `scripts/maturity.py` machine-reads it for what `implemented` means. Raising the rule in
+`AGENTS.md` while leaving that file describing the weaker one would have left an author writing a
+spec-only row in the belief that it passes, which is the same class of defect as the row this story
+came from: the document that owns a question no longer answering it. So the `evidence` key
+description, the failure list and a new "Evidence must be able to fail" section all state the rule,
+following how `X-33` wrote up the `.rs` condition and the `security` scope in the same file.
+
 ### What this does not close
 
 `prose_only_claims` binds to a path, like every check in this file. A row can satisfy it by citing
@@ -658,7 +682,8 @@ and to naming rustls in the note, so neither can quietly go away.
 - The registry keeps one row per RFC, and gains an enforced key set.
 - A row claiming `implemented` or `partial` must cite Rust source in a workspace crate (`X-43`), so
   a claim can always be made to fail by changing the code. Prose alongside it is welcome; prose
-  alone is not evidence.
+  alone is not evidence. Written up in `docs/rfc/README.md` — the schema row, the failure list and
+  its own section — because that is the file a registry author and a downstream both read.
 - A `[[rfc.requirement]]` row is now a gate failure with a message naming this document, so the
   next person to want the grain finds the argument instead of rediscovering it.
 - `docs/rfc/README.md` documents the schema as a consumable contract, which is what a downstream

@@ -27,7 +27,7 @@ One `[[rfc]]` table per document. **These keys and no others.**
 | `title` | yes | string | The document's title. |
 | `layer` | yes | string | `wire`, `transport`, `core`, `security`, `media`, `services`. Groups the generated table. |
 | `status` | yes | string | See below. |
-| `evidence` | yes | list of strings | Repo-relative paths to the code or tests backing the claim. Every path must exist. May be empty only when nothing is claimed. |
+| `evidence` | yes | list of strings | Repo-relative paths to the code or tests backing the claim. Every path must exist. On an `implemented` or `partial` row, at least one must be Rust source in a workspace crate — a `crates/….rs` path: see below. A spec or a README alongside it is welcome and often useful; on its own it is not evidence. May be empty only when nothing is claimed. |
 | `note` | yes | string | Prose. For `partial`, it must name what is missing. |
 | `roles` | no | list of strings | Which roles the claim covers — `uac`, `uas`. Absent renders as an em dash. On a `media` or `security` row, at least one `evidence` path must be Rust source at or above `sipx-call`: see below. |
 | `headers` | no | list of strings | Header variants the entry claims. Each must be known to the parser's name table. |
@@ -55,6 +55,7 @@ PRACK, so both "we support RFC 3262" and "we reject it" would be false.
 - a `headers` or `methods` value the parser does not know;
 - an `evidence` path that does not exist;
 - an `implemented` or `partial` entry citing no evidence;
+- an `implemented` or `partial` entry whose every citation is prose — no `crates/….rs` path;
 - a duplicate RFC number;
 - an unknown `status` or `layer`;
 - a `spec` path that does not exist;
@@ -64,6 +65,36 @@ PRACK, so both "we support RFC 3262" and "we reject it" would be false.
   `media`;
 - `docs/compliance.md` differing from what the script would generate;
 - prose elsewhere in the repo stating an RFC count the registry no longer agrees with.
+
+### Evidence must be able to fail
+
+A row claiming `implemented` or `partial` must cite at least one **`crates/….rs`** path. The rule
+used to be that it cited *something*, and a document satisfied it — which is how RFC 8996 came to
+claim `implemented` against `docs/specs/sip-tls.md`, our own sentence saying TLS 1.2 is the floor.
+`--check` passed it and printed "every claim backed", correctly by its own rule: the file exists. A
+sentence cannot fail, so the claim would have outlived the behaviour, and nothing would have been
+red if the floor moved.
+
+It is the weakest useful thing a citation can be — something that compiles and that tests run over
+— and deliberately much weaker than the reachability rule below: *any* Rust file in *any* workspace
+crate counts, at every layer. "Is this a claim about code" and "can a call reach that code" are
+different questions, and only the second needed a scope.
+
+**Prose alongside code is welcome**, and is often the useful part: RFC 5922 cites
+`docs/specs/sip-tls.md` next to two Rust files, which is how a reader of the generated table finds
+the normative document, and the `spec` key exists for the same purpose. What is refused is a claim
+with *nothing but* prose behind it.
+
+Measured before it was turned on (`X-43`): of the 32 `implemented` and 22 `partial` rows, RFC 8996
+was the only one that did not already satisfy it. `syntax` is not held to the rule — that claim is
+about the parser's name table, and `headers`/`methods` bind to the table itself, which is stronger
+than any path could be. For a negative obligation such as RFC 8996's, the only citation that can
+fail is a **test that makes the attempt**: `crates/sipx-transport/tests/tls_versions.rs` offers 1.0
+and 1.1 to a listener and requires the refusal.
+
+Two limits, recorded rather than fixed. Like every check here it binds to a path, so a row can
+satisfy it by citing Rust nothing runs. And it cannot tell whether the cited code has anything to do
+with the RFC — only a reader can.
 
 ### Reachability: a claim may not outlive its caller
 

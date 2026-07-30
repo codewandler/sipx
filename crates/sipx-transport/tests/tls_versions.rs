@@ -64,13 +64,24 @@ impl Answer {
     }
 }
 
+/// What offering a version got: the answer, whether the listener then closed, and whether
+/// anything reached the application behind it.
+#[derive(Debug)]
+struct Outcome {
+    answer: Option<Answer>,
+    closed: bool,
+    /// Weak on purpose, and labelled so nobody reads more into it. A raw client sends no SIP
+    /// message, so nothing would arrive whether the handshake was refused or accepted — this
+    /// catches a refused connection being adopted into the pool anyway, and nothing else. The
+    /// alert and `closed` carry the claim.
+    reached_the_application: bool,
+}
+
 /// Offer this version to a sipx TLS listener and report what came back.
 ///
 /// The listener is the real one — `bind` with `tls_server` set, as `sipx-call` configures it — so
 /// this measures what a peer dialling a sipx endpoint gets, not what a bare acceptor would.
-///
-/// Returns the answer, and whether anything reached the application behind the listener.
-async fn offer(version: u16) -> (Option<Answer>, bool) {
+async fn offer(version: u16) -> Outcome {
     let ca = Ca::new();
     let (cert, key) = ca.issue(&[dns("localhost")], "localhost");
     let identity = Identity::from_pem(cert.as_bytes(), key.as_bytes()).expect("an identity");
@@ -110,7 +121,20 @@ async fn offer(version: u16) -> (Option<Answer>, bool) {
         Err(_) => None,
     };
 
-    (answer, inbound.try_recv().is_ok())
+    // And then does it close? `docs/specs/sip-tls.md` §3.1: a failure closes the connection — no
+    // retry, no "continue anyway". This is the half that cannot pass vacuously, because an
+    // accepted handshake leaves the socket open with the rest of the server's flight on it.
+    let mut rest = [0u8; 1];
+    let closed = matches!(
+        tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest)).await,
+        Ok(Ok(0))
+    );
+
+    Outcome {
+        answer,
+        closed,
+        reached_the_application: inbound.try_recv().is_ok(),
+    }
 }
 
 /// A `ClientHello` offering exactly one version, the way a client of that vintage would: in
@@ -191,14 +215,21 @@ fn extension(kind: u16, body: &[u8]) -> Vec<u8> {
 /// would also be satisfied by a hello this test built wrong.
 #[tokio::test]
 async fn tls_1_0_is_refused_as_a_version() {
-    let (answer, reached_the_application) = offer(TLS_1_0).await;
-    let answer = answer.expect("the listener says why rather than going quiet");
+    let outcome = offer(TLS_1_0).await;
+    let answer = outcome
+        .answer
+        .as_ref()
+        .expect("the listener says why rather than going quiet");
     assert!(
         answer.is_alert(FATAL, PROTOCOL_VERSION),
         "a 1.0 offer must draw a fatal protocol_version alert, not {answer:?}"
     );
     assert!(
-        !reached_the_application,
+        outcome.closed,
+        "a refused handshake closes the connection rather than leaving it usable"
+    );
+    assert!(
+        !outcome.reached_the_application,
         "nothing may cross a connection that was refused"
     );
 }
@@ -206,27 +237,35 @@ async fn tls_1_0_is_refused_as_a_version() {
 /// `docs/specs/sip-tls.md` §6, vector L9.
 #[tokio::test]
 async fn tls_1_1_is_refused_as_a_version() {
-    let (answer, reached_the_application) = offer(TLS_1_1).await;
-    let answer = answer.expect("the listener says why rather than going quiet");
+    let outcome = offer(TLS_1_1).await;
+    let answer = outcome
+        .answer
+        .as_ref()
+        .expect("the listener says why rather than going quiet");
     assert!(
         answer.is_alert(FATAL, PROTOCOL_VERSION),
         "a 1.1 offer must draw a fatal protocol_version alert, not {answer:?}"
     );
     assert!(
-        !reached_the_application,
+        outcome.closed,
+        "a refused handshake closes the connection rather than leaving it usable"
+    );
+    assert!(
+        !outcome.reached_the_application,
         "nothing may cross a connection that was refused"
     );
 }
 
 /// The control, and the reason the two tests above prove anything.
 ///
-/// The same bytes with two of them changed are accepted: the listener answers with a handshake
+/// The same bytes with four of them changed are accepted — the two version bytes in the record
+/// header and the two in `client_version`, and nothing else: the listener answers with a handshake
 /// record rather than an alert. So the refusals above are about the version offered and not about
 /// a `ClientHello` this file assembled wrong — which is the way a hand-built negative test usually
 /// passes for the wrong reason.
 #[tokio::test]
 async fn the_same_hello_at_1_2_is_accepted() {
-    let (answer, _) = offer(TLS_1_2).await;
+    let answer = offer(TLS_1_2).await.answer;
     let answer = answer.expect("the listener answers a 1.2 offer");
     assert_eq!(
         answer.content_type, HANDSHAKE,

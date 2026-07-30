@@ -104,4 +104,31 @@ report is the coordinator's to regenerate.
 **Left for someone else:** `docs/specs/sip-tls.md` §3.2 lists "the minimum protocol version, at or
 above the floor in §3.5" as *configurable*, and it is not — neither `ClientTls` nor `ServerTls` takes a
 version. Harmless in that it can only overstate what an operator may tighten, but the spec claims an
-option that does not exist. Not this story's to fix; `X-43` only widened the row's evidence.
+option that does not exist. Not this story's to fix; `X-43` only widened the row's evidence. Filed as
+`X-46` by the coordinator.
+
+### Review round 1
+
+**Blocking, fixed: the rule was raised in `AGENTS.md` and left weak in the document registry authors
+actually read.** `docs/rfc/README.md` is the consumable schema contract, and `scripts/maturity.py`
+machine-reads it for what `implemented` means — so an author following it would have written a
+spec-only row believing it passes. The `evidence` key description, the enumerated "`--check` fails on
+any of" list (which had eleven items and now has twelve) and a new "Evidence must be able to fail"
+section now all state the rule, following how `X-33` wrote up the `.rs` condition in the same file.
+Prose alongside code is stated as welcome in all three places.
+
+Four minors, all fixed:
+
+- "the same bytes with **two** of them changed" was wrong in the test and the design doc: it is four,
+  because `client_hello` writes the version into the record header as well as into `client_version`.
+  A crisp-sounding fact that fails when run, in the document whose `X-33` section exists to mock
+  exactly that.
+- The two stale counts left standing in `X-33`'s narrative (`117 paths, two not .rs`, `cited by 5922
+  and by 8996`) are now marked superseded, since the same stale count was deleted from two docstrings
+  in this diff — the inconsistency was the defect, not either number.
+- The secondary "nothing reached the application" assertion was timing-dependent and would have
+  passed vacuously: a raw client sends no SIP message, so nothing arrives either way. It is kept,
+  labelled weak in the code, and joined by one that discriminates — the refusal must **close** the
+  connection (§3.1). Verified by asserting `closed` of the 1.2 control, which fails, because an
+  accepted handshake leaves the socket open.
+- `AGENTS.md`'s wording read as if a spec citation were now forbidden. It is not; one clause fixed.
