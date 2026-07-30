@@ -228,6 +228,14 @@ async fn record(
 /// Shared by both commands so the two cannot come to disagree about it.
 const RECORD_IDLE: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How long a silence means the caller has stopped dialling (`M-34`).
+///
+/// The value `answer` has always used, and it now does only this one job: it used to be the wait
+/// for the *first* digit as well, so a caller who took longer than this to press anything had no
+/// digits reported at all. That bound is the call's own duration now, the same way
+/// [`record`] bounds the first frame of the recording.
+const DIGIT_GAP: std::time::Duration = std::time::Duration::from_millis(800);
+
 /// Shared argument parsing.
 ///
 /// Deliberately small rather than a dependency: sipx needs flags and one positional, and a

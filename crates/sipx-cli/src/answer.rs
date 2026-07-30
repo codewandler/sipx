@@ -146,6 +146,12 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // "has the stream started" and "has it ended" — so a first frame delayed past it recorded
     // nothing at all — and then `unwrap_or_default` threw away any partial recording the cap cut
     // short. `crate::record` separates the two bounds and returns what it got.
+    //
+    // The digits had both defects on one line too, and `M-34` split them the same way: the wait
+    // for the first keypress is the call's own duration — a caller cannot be quicker than the
+    // call — while `DIGIT_GAP` is left with the only question it can answer, whether the caller
+    // has stopped dialling. `collect_digits` enforces the cap itself, so there is no timed-out
+    // future left to `unwrap_or_default` the collected digits away.
     let ((), recorded, digits) = tokio::join!(
         async {
             if let Some(clip) = &clip {
@@ -153,10 +159,8 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             }
         },
         crate::record(&call, duration, crate::RECORD_IDLE),
-        tokio::time::timeout(duration, media.collect_digits(Duration::from_millis(800))),
+        media.collect_digits(duration, crate::DIGIT_GAP),
     );
-
-    let digits = digits.unwrap_or_default();
 
     let mut report = transport.report(
         Report::new()

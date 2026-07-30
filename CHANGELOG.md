@@ -7,6 +7,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — breaking
+
+- **`MediaSession::collect_digits` takes two durations instead of one (`M-34`)** — it was
+  `collect_digits(idle)`, and that single window was spent on two different questions: how long to
+  wait for the **first** keypress, and how long a silence means the caller has **stopped**. Whichever
+  was slower on the day won, and the result was not a short collection but an empty one, because the
+  loop ended before its first iteration. That is the identical shape `X-40` measured one layer up,
+  where it made `sipx answer` write a valid WAV containing zero samples.
+  - **Migration:** `collect_digits(idle)` becomes `collect_digits(within, gap)`. `within` bounds the
+    wait for the first digit and caps the whole collection — a bound on *failure*, so set it an order
+    of magnitude above the honest answer, typically the call's own duration. `gap` is the silence
+    that means dialling has finished, and is the only question a fixed window can answer here.
+    Passing the old value as both restores the old behaviour exactly, including the defect.
+  - An application that knows how many digits it expects should stop at that count with `recv_digit`
+    rather than wait for a silence at all.
+
+- **`sipx answer` now holds the call for its full `--duration` when no digits arrive** — a
+  consequence of the above, measured end-to-end at 1.06 s before and 10.0 s after with
+  `--duration 10`. This is closer to what `--duration` is documented to mean ("hang up after this
+  many seconds") than the old early return was, but scripts that relied on the answerer returning as
+  soon as the audio stopped will see calls last longer.
+
 ### Fixed
 
 - **`no_capture_flag_means_no_file` can now observe the flag it is named for (`X-45`)** — the test

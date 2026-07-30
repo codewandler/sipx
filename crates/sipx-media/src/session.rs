@@ -1318,14 +1318,79 @@ impl MediaSession {
         self.digits.lock().await.recv().await
     }
 
-    /// Collect digits until none arrives for `idle`.
-    pub async fn collect_digits(&self, idle: Duration) -> String {
+    /// Collect the digits the far end presses, for at most `within`, stopping once it has been
+    /// quiet for `gap`.
+    ///
+    /// Two questions, two bounds — the same split [`Self::record_at_least`] made on the audio
+    /// path, and the reason this takes two durations rather than one.
+    ///
+    /// `within` bounds the wait for the **first** digit, and with it the whole collection. It is a
+    /// **bound on failure**: how long this side is prepared to wait before concluding no digits
+    /// are coming, so it belongs an order of magnitude above the honest answer — a whole call's
+    /// worth, typically — rather than close to it. Nothing about it is a measurement: how long a
+    /// caller takes to press the first key is a property of the caller, and how long the keypress
+    /// takes to get here is a property of the machines between them.
+    ///
+    /// `gap` is a **definition of silence**: how long a caller has to leave a hole for the
+    /// dialling to be treated as finished. It is the only question a fixed window can answer here,
+    /// and it can only be asked once a digit has arrived, because a caller who has not dialled is
+    /// not a caller who has stopped dialling.
+    ///
+    /// Whatever was collected is returned, including nothing. A collection cut short by `within`
+    /// keeps the digits it already has.
+    ///
+    /// # Inferring the end of the dialling (`M-34`)
+    ///
+    /// RFC 4733 carries keypresses, not a completion signal: there is no "the caller is done"
+    /// event to wait for, so *the digits ended* is always this side's inference from silence, and
+    /// `gap` is the whole of that inference. What makes it safe to draw is that the input it draws
+    /// on is exact rather than approximate. A digit is delivered here **once**, when the first
+    /// packet carrying that tone's end bit arrives; the tone is identified by its own RTP
+    /// timestamp, which is constant across every packet of the tone, so the end retransmissions
+    /// RFC 4733 §2.5.1.3 asks for are absorbed rather than counted again, and "44" is told from a
+    /// single long "4" by the timestamp changing. So a `gap` that elapses means no *keypress*
+    /// completed in it — never that a packet was missed mid-tone.
+    ///
+    /// A digit that arrives a millisecond after `gap` expires is **not lost** — up to the 32 the
+    /// keypress channel holds, past which the receive loop drops rather than blocks, deliberately
+    /// and by the same reasoning as every other queue here. Within that bound it stays queued and
+    /// is the first digit the next [`Self::recv_digit`] or `collect_digits` yields. It is in the
+    /// wrong collection, though, and no wall clock can fix that — which is why `gap` is set past
+    /// any plausible scheduling delay rather than close to the spacing digits actually arrive
+    /// with, and why an application that knows how many digits it wants should stop at that count
+    /// with [`Self::recv_digit`] instead of waiting for a silence at all.
+    ///
+    /// # Why this takes two durations (`M-34`)
+    ///
+    /// It used to take one, spent on both questions, and that is the defect `X-40` measured one
+    /// layer up: a single window covering both "has it started" and "has it ended" is beaten by
+    /// whichever of the two is slower on the day, and the result is not a degraded collection but
+    /// an **empty** one, since the loop ends before its first iteration. `sipx answer` produced a
+    /// valid recording of zero samples that way. Widening the single window would have moved that
+    /// cliff rather than removed it, and left the same defect for a slower caller.
+    pub async fn collect_digits(&self, within: Duration, gap: Duration) -> String {
+        let deadline = tokio::time::Instant::now() + within;
         let mut out = String::new();
-        while let Ok(Some((digit, _duration))) = tokio::time::timeout(idle, self.recv_digit()).await
-        {
-            out.push(digit.as_char());
+
+        // The first digit. Nothing has been pressed yet, so there is no silence to interpret —
+        // only the caller's own bound on how long to wait for dialling that may never start.
+        match tokio::time::timeout_at(deadline, self.recv_digit()).await {
+            Ok(Some((digit, _held))) => out.push(digit.as_char()),
+            // The session ended, or the bound elapsed. Either way nobody dialled.
+            Ok(None) | Err(_) => return out,
         }
-        out
+
+        // The rest of the sequence. A gap now does mean the dialling has finished, and `within`
+        // still caps a far end that keeps pressing keys forever.
+        loop {
+            let next = tokio::time::Instant::now() + gap;
+            match tokio::time::timeout_at(next.min(deadline), self.recv_digit()).await {
+                Ok(Some((digit, _held))) => out.push(digit.as_char()),
+                // The caller stopped, the session ended, or the collection's time is up. All
+                // three mean this is every digit there is — and it is kept.
+                Ok(None) | Err(_) => return out,
+            }
+        }
     }
 
     /// The codec this session negotiated.
@@ -3318,8 +3383,83 @@ mod tests {
                 .await;
         }
 
-        let collected = left.collect_digits(Duration::from_millis(600)).await;
+        let collected = left.collect_digits(FIRST_DIGIT_BOUND, DIGIT_GAP).await;
         assert_eq!(collected, "1234");
+    }
+
+    /// How long a collection here waits for the **first** digit before calling it lost (`M-34`).
+    ///
+    /// A bound on failure, like [`DELIVERY_BOUND`], and for the same reason: how long a caller
+    /// takes to press the first key is a property of the caller and of the machine carrying the
+    /// call, never of the digits.
+    const FIRST_DIGIT_BOUND: Duration = Duration::from_secs(10);
+
+    /// How long a silence means the caller has stopped dialling, for the tests here (`M-34`).
+    ///
+    /// A definition of silence, so it is set past any scheduling delay rather than close to the
+    /// spacing the digits actually arrive with — fifty missed packet intervals, which is `X-28`'s
+    /// treatment of the windows that genuinely have to stay wall-clock.
+    const DIGIT_GAP: Duration = Duration::from_secs(1);
+
+    /// A first digit the caller is slow to press is still collected (`M-34`).
+    ///
+    /// The defect this pins: `collect_digits` spent one window on both "how long to wait for the
+    /// first digit" and "how long a gap means the digits ended", so a caller who took longer than
+    /// that window to press anything collected **nothing at all** — not a short sequence, an empty
+    /// one, because the loop ended before its first iteration. That is the same one-window shape
+    /// that made `sipx answer` write a valid WAV with zero samples (`X-40`), one layer down, and
+    /// the reproduction is the same: delay the first thing the far end sends.
+    #[tokio::test]
+    async fn a_first_digit_that_arrives_late_is_still_collected() {
+        let (left, right) = pair(Codec::Pcmu).await;
+
+        // Establish the stream first, so the only variable below is *when* the digits start.
+        right.play(&tone(160), 160).await;
+        let _ = left.record_at_least(160, DELIVERY_BOUND).await;
+
+        // Longer than the gap, so a collection that spends its gap on the first digit has already
+        // given up by the time the caller presses anything. Load can only push the digits later,
+        // which makes the pre-split failure more certain rather than less.
+        let late = Duration::from_secs(2);
+
+        let (collected, ()) =
+            tokio::join!(left.collect_digits(FIRST_DIGIT_BOUND, DIGIT_GAP), async {
+                tokio::time::sleep(late).await;
+                for c in "1234".chars() {
+                    right
+                        .send_digit(
+                            Digit::from_char(c).expect("a digit"),
+                            Duration::from_millis(80),
+                        )
+                        .await;
+                }
+            });
+
+        assert_eq!(
+            collected, "1234",
+            "a caller slow to press the first key has not finished dialling"
+        );
+    }
+
+    /// Digits that never arrive still end the collection, and end it empty (`M-34`).
+    ///
+    /// The other half of the split: separating the two bounds must not turn "nobody pressed
+    /// anything" into a wait that never ends, and it must not invent digits to return.
+    #[tokio::test]
+    async fn a_collection_with_no_digits_at_all_ends_empty() {
+        let (left, right) = pair(Codec::Pcmu).await;
+
+        right.play(&tone(160), 160).await;
+        let _ = left.record_at_least(160, DELIVERY_BOUND).await;
+
+        let collected = tokio::time::timeout(
+            DELIVERY_BOUND,
+            left.collect_digits(Duration::from_millis(300), Duration::from_millis(300)),
+        )
+        .await
+        .expect("the collection is bounded when no digit ever arrives");
+
+        assert_eq!(collected, "", "audio alone is not a keypress");
     }
 
     /// DTMF must not become audio and audio must not become digits.
