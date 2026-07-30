@@ -2,7 +2,9 @@
 //!
 //! `M-13` built the encoder, the decoder and the SDP half; this is the selection. The codec is
 //! behind the `opus` feature, so the whole file is too: without the feature there is no Opus to
-//! select, and the default build's promise — G.711 only — is asserted in `call.rs` instead.
+//! select, and what the *default* build promises — that no offer names Opus, and that an offer of
+//! it is answered G.711 rather than refused — is asserted by `call.rs`'s own test module, which
+//! runs in both builds.
 
 #![cfg(feature = "opus")]
 #![allow(

@@ -11,7 +11,7 @@ const CARDS = [
   },
   {
     title: 'Audio',
-    body: 'G.711 both ways. DTMF, WAV playback and recording, an adaptive jitter buffer, and mid-call quality statistics.',
+    body: 'G.711 both ways by default, Opus when a call selects it. DTMF, WAV playback and recording, an adaptive jitter buffer, and mid-call quality statistics.',
     to: '/docs/guides/answer-a-call',
   },
   {

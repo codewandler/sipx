@@ -17,7 +17,7 @@ a proxy or a registrar**: it does not fork requests or hold other people's regis
 | | |
 |---|---|
 | **Calls** | Place and answer, SDP offer/answer, hold and resume, blind and attended transfer, session timers |
-| **Audio** | G.711 µ-law and A-law, DTMF, play and record WAV. Opus is in `sipx-audio` behind the `opus` feature; a call offers G.711 only — see [the edges](#the-honest-version) |
+| **Audio** | G.711 µ-law and A-law, DTMF, play and record WAV. Opus too, behind `sipx-call`'s `opus` feature: a call offers G.711 unless it selects Opus — see [the edges](#the-honest-version) |
 | **Signalling security** | TLS and secure WebSocket, with certificate verification that **cannot be turned off** |
 | **Media security** | SRTP, keyed by SDES when the signalling is secure. DTLS-SRTP keying lives in `sipx-sdp` and `sipx-media`; no call and no CLI invocation offers it yet |
 | **Transports** | UDP, TCP, TLS, WebSocket, secure WebSocket |
@@ -56,11 +56,19 @@ gets you a DTLS-keyed call, and writing your own capabilities does not either; t
 tracked as `M-28`. What is also left is one transform and no rekeying, which is why [the
 table](reference/compliance.md) marks RFC 3711 *partial* rather than implemented.
 
-**Opus is in the workspace and not on offer.** `sipx-audio` encodes and decodes it behind the
-`opus` feature, and no call selects it: every entry point in `sipx-call` builds a G.711-only
-offer, none of them takes capabilities from you, and the payload-type reader refuses Opus
-deliberately — a dynamic number means whatever `a=rtpmap` said, so guessing Opus from 111 would
-decode somebody else's codec. If you need Opus on a call today, sipx is not that yet.
+**Opus is on offer, and off by default.** `M-30` built the selection: `DialOptions::with_codecs`
+on the offering side, `answer_with` and the other `_with` entry points on the answering side, and
+`Codecs::Opus` reaches both. It is behind `sipx-call`'s `opus` feature because Opus links a C
+library, and the default codec set stays the G.711 pair — mandatory-to-implement (RFC 3551
+§4.5.14), pure Rust, and accepted by practically every endpoint. So the better codec is always a
+choice you made and never one your build made for you, and an offer that selects it still carries
+G.711 alongside: an endpoint offering only Opus would fail to call most of the telephone network.
+
+What has *not* changed is how a payload type is read. A dynamic number means whatever `a=rtpmap`
+said, so nothing guesses Opus from 111 — a format is matched by its rtpmap, and the number the
+far end assigned travels with the codec rather than being reassumed. That is also why selecting
+Opus cannot pull it in through the back door: negotiation refuses to settle on a codec outside
+the set you selected, so an Opus offer arriving at a G.711 call is answered G.711.
 
 **Bridging and conferencing are library pieces, not call operations.** `sipx-media` has both, and
 they take a shared media session; a `Call` owns its media outright and lends only a reference, so

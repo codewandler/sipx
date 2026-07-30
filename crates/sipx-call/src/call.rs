@@ -3933,11 +3933,16 @@ pub(crate) fn negotiated(sdp: &SessionDescription, codecs: Codecs) -> Result<Neg
     // format's rtpmap says, never by a dynamic number alone — the same rule the answer was
     // built with, and the reason `Codec::from_payload_type` deliberately never returns Opus:
     // 111 is Opus here only because this description said so.
+    //
+    // `carries` is part of the search and not a test applied to its result. Rejecting afterwards
+    // would stop at the offerer's first choice and refuse the whole description if that one
+    // format is outside our set — so an Opus-first offer reaching a G.711 call would come back
+    // `NoCommonCodec` while the answer this side builds happily names the PCMU further down the
+    // same list. The two have to agree, and the answer is the one that went on the wire.
     let (codec, payload_type) = audio
         .formats
         .iter()
-        .find_map(|format| codec_of(audio, format))
-        .filter(|(codec, _)| codecs.carries(*codec))
+        .find_map(|format| codec_of(audio, format).filter(|(codec, _)| codecs.carries(*codec)))
         .ok_or(Error::NoCommonCodec)?;
 
     Ok(Negotiated {
@@ -4109,4 +4114,130 @@ async fn refuse_request(
     let response = ResponseBuilder::to_request(&incoming.request, code, reason)?.build();
     endpoint.respond(&incoming.key, response).await?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+
+    /// An audio description with the given formats and rtpmaps, as a peer would send it.
+    fn offered(formats: &str, rtpmaps: &[&str]) -> SessionDescription {
+        let mut body = format!(
+            "v=0\r\n\
+             o=- 1 1 IN IP4 192.0.2.1\r\n\
+             s=-\r\n\
+             c=IN IP4 192.0.2.1\r\n\
+             t=0 0\r\n\
+             m=audio 40000 RTP/AVP {formats}\r\n"
+        );
+        for rtpmap in rtpmaps {
+            body.push_str(&format!("a=rtpmap:{rtpmap}\r\n"));
+        }
+        sipx_sdp::parse(&body).expect("a description this test wrote")
+    }
+
+    /// The default is the G.711 pair, in every build. The `opus` feature adds a variant to
+    /// [`Codecs`]; it must never move which one `Default` produces, or turning the feature on to
+    /// get the *option* of Opus would silently change what every existing call offers.
+    #[test]
+    fn the_default_codec_set_is_g711() {
+        assert_eq!(Codecs::default(), Codecs::G711);
+        let capabilities = Codecs::default().capabilities("192.0.2.9".parse().unwrap(), 40000);
+        assert!(
+            !capabilities
+                .rtpmaps
+                .iter()
+                .any(|(_, value)| value.to_ascii_lowercase().contains("opus")),
+            "the default offer names no Opus: {:?}",
+            capabilities.rtpmaps
+        );
+    }
+
+    /// RFC 8866 §6.6 makes the rtpmap authoritative even over a static number. This is the rule
+    /// that lets an Opus offer arrive at all — 111 means Opus only because the description said
+    /// so — and the same rule refuses to read an offer of `8` remapped to something else as PCMA.
+    #[test]
+    fn a_format_is_read_from_its_rtpmap_and_not_from_its_number() {
+        let remapped = offered("8 0", &["8 iLBC/8000", "0 PCMU/8000"]);
+        let settled = negotiated(&remapped, Codecs::G711).expect("PCMU is common");
+        assert_eq!(settled.codec, Codec::Pcmu);
+        assert_eq!(
+            settled.payload_type,
+            Some(0),
+            "the number the far end assigned travels with the codec"
+        );
+    }
+
+    /// A bare static type with no rtpmap at all is the one case matched by number, which is what
+    /// keeps every G.711-only peer that sends `m=audio … 0 8` and nothing else working.
+    #[test]
+    fn a_bare_static_type_is_still_matched_by_number() {
+        let settled = negotiated(&offered("0", &[]), Codecs::G711).expect("PCMU is static");
+        assert_eq!(settled.codec, Codec::Pcmu);
+        assert_eq!(
+            settled.payload_type, None,
+            "nothing named it, so nothing overrides `Codec::payload_type`"
+        );
+    }
+
+    /// The clock rate and channel count are part of a format's identity (RFC 8866 §6.6), so a
+    /// name sipx knows at a rate it does not is not a match.
+    #[test]
+    fn a_known_name_at_an_unknown_clock_rate_is_not_a_match() {
+        assert_eq!(codec_named("PCMU/16000"), None);
+        assert_eq!(codec_named("opus/16000/2"), None);
+        assert_eq!(codec_named("PCMU/8000"), Some(Codec::Pcmu));
+        assert_eq!(codec_named("pcma/8000"), Some(Codec::Pcma));
+    }
+
+    /// The default build has no Opus, so an offer of it is not a codec that build can carry —
+    /// and the offer is answered from what *is* common rather than refused. This is the promise
+    /// the `opus` feature is off by default in order to make: `tests/opus.rs` is gated on the
+    /// feature and cannot assert anything about the build that lacks it.
+    #[cfg(not(feature = "opus"))]
+    #[test]
+    fn a_default_build_does_not_carry_an_offered_opus() {
+        assert_eq!(codec_named("opus/48000/2"), None);
+        let opus_first = offered("111 0", &["111 opus/48000/2", "0 PCMU/8000"]);
+        let settled = negotiated(&opus_first, Codecs::G711).expect("G.711 is still offered");
+        assert_eq!(settled.codec, Codec::Pcmu, "the first format sipx carries");
+    }
+
+    /// Selecting a set is what puts a codec on the table, and negotiation may not step outside
+    /// it. An Opus offer answered from [`Codecs::G711`] settles on G.711 — not because Opus is
+    /// absent from the build, but because the answer this side builds never named it, and a
+    /// session started on a codec no answer named sends packets the far end cannot place.
+    #[cfg(feature = "opus")]
+    #[test]
+    fn negotiation_does_not_settle_outside_the_selected_set() {
+        assert_eq!(codec_named("opus/48000/2"), Some(Codec::Opus));
+        let opus_first = offered("111 0", &["111 opus/48000/2", "0 PCMU/8000"]);
+
+        let from_g711 = negotiated(&opus_first, Codecs::G711).expect("G.711 is still offered");
+        assert_eq!(from_g711.codec, Codec::Pcmu);
+
+        let from_opus = negotiated(&opus_first, Codecs::Opus).expect("Opus is on the table");
+        assert_eq!(from_opus.codec, Codec::Opus);
+        assert_eq!(
+            from_opus.payload_type,
+            Some(111),
+            "on the number this offer assigned, not on a number 111 means by itself"
+        );
+    }
+
+    /// An offer with nothing sipx carries is refused rather than answered on a guess.
+    #[test]
+    fn an_offer_of_nothing_we_carry_has_no_common_codec() {
+        let g729 = offered("18", &["18 G729/8000"]);
+        assert!(matches!(
+            negotiated(&g729, Codecs::G711),
+            Err(Error::NoCommonCodec)
+        ));
+    }
 }

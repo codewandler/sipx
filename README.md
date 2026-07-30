@@ -22,7 +22,7 @@ proxy or a registrar: it does not fork requests or hold other people's registrat
 | | |
 |---|---|
 | **Calls** | Place and answer, SDP offer/answer, hold and resume, blind and attended transfer |
-| **Audio** | G.711 µ-law and A-law, DTMF, play and record WAV. Opus is in `sipx-audio` behind the `opus` feature; a call offers G.711 only |
+| **Audio** | G.711 µ-law and A-law, DTMF, play and record WAV. Opus too, behind `sipx-call`'s `opus` feature: a call offers G.711 unless it selects Opus, and the default never moves |
 | **Signalling security** | TLS and secure WebSocket, with certificate verification that **cannot be turned off** |
 | **Media security** | SRTP with SDES keying, negotiated automatically when the signalling is secure |
 | **Transports** | UDP, TCP, TLS, WebSocket, secure WebSocket |

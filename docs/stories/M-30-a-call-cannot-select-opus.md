@@ -17,7 +17,7 @@ Make the Opus codec reachable from a call. `M-13` is `done` and built the encode
 SDP half; nothing built the **selection**, so no call has ever carried an Opus packet.
 
 ## Acceptance
-- [ ] **A call can offer and answer Opus.** Four locks have to come off, and all four are verified:
+- [x] **A call can offer and answer Opus.** Four locks have to come off, and all four are verified:
       1. `sipx-call` hardcodes `Capabilities::g711` at `call.rs:606, 752, 955, 1728, 2860, 3161`, so
          payload type 111 is never offered.
       2. `Codec::from_payload_type` (`sipx-media/src/session.rs:115-124`) **deliberately** never
@@ -29,23 +29,64 @@ SDP half; nothing built the **selection**, so no call has ever carried an Opus p
          `answer`, `answer_ringing`, `answer_early`, nor any of `DialOptions`' builders — and
          `crates/sipx-call/Cargo.toml` has no `[features]` block at all, so the `opus` feature cannot
          even be turned on through it.
-- [ ] **Which codec a call offers is the application's choice, with a stated default.** The default
+- [x] **Which codec a call offers is the application's choice, with a stated default.** The default
       stays G.711: it is mandatory-to-implement and needs no C library. Opus links one and is off by
       default, so it cannot become the default by accident.
-- [ ] **RFC 6716 and 7587 go back to `implemented` in the same commit that makes them true**, and the
+- [x] **RFC 6716 and 7587 go back to `implemented` in the same commit that makes them true**, and the
       published table's counts move with it. `X-33` demoted both to `partial` because nothing could
       reach them; the demotion is the honest state until this closes, and reversing it without the
       code would be the exact defect that check exists to catch.
-- [ ] **The public docs move in the same commit too.** `X-35` scoped every Opus mention to the crates
+- [x] **The public docs move in the same commit too.** `X-35` scoped every Opus mention to the crates
       — `README.md`, `website/docs/intro.md`, `does-this-fit.md`, `website/src/pages/index.js` — and
       `check-audio-claims.py` now holds all 44 front doors to agreement. When a call can select Opus
       those sentences become under-claims, and the guard will not catch an under-claim.
-- [ ] Failing-first test: a call placed with Opus selected offers payload type 111 and carries Opus
+- [x] Failing-first test: a call placed with Opus selected offers payload type 111 and carries Opus
       packets. It cannot pass today because there is no selector. Name it.
 
 ## Progress
-- Not started. Filed at `X-33`'s integration, from its explicit request: *"it wants a story, and so
-  does wiring Opus to a call — `M-13` is `done` and built the codec, not the selection."*
+- Filed at `X-33`'s integration, from its explicit request: *"it wants a story, and so does wiring
+  Opus to a call — `M-13` is `done` and built the codec, not the selection."*
+- **Done, on `impl/M-30`.** A first implementor was killed mid-flight by an infrastructure error
+  and left `f9f322e` — a `Codecs` enum, the `[features]` block, `tests/opus.rs`, and roughly half
+  the call sites converted. That work was kept and finished rather than restarted; its design
+  decisions were sound and are recorded below.
+- **The selector is `Codecs`**, `G711` by default and `Opus` behind `sipx-call`'s new `opus`
+  feature. Offering side: `DialOptions::with_codecs`, which reaches `dial`, `dial_once` and
+  `dial_early`. Answering side: `answer_with`, `answer_ringing_with`, `answer_replacing_with`,
+  `Invitation::answer_with` and `ring_early_with`. `Call` and `Early` carry the set, so a re-INVITE
+  or a pre-200 UPDATE is answered from the set the call was placed with instead of narrowing to
+  G.711 mid-call.
+- **Lock 2 came off without changing the door, and that was the right call.** The story said to
+  read `Codec::from_payload_type`'s refusal comment first because "the reason may still be good".
+  It is good: RFC 7587 §7 assigns Opus no static type, so 111 alone means nothing and returning
+  Opus for it would decode somebody else's G.729 as Opus. The lock is therefore opened one level
+  up — `negotiated` matches a format by its `a=rtpmap` (RFC 8866 §6.6 makes the map authoritative
+  even over a static number), and the number the far end assigned travels with the codec on
+  `Config::payload_type` rather than being reassumed. `from_payload_type` still refuses Opus and
+  should. A side effect worth having: an offer of `8` remapped to iLBC is no longer read as PCMA.
+- **`negotiated` will not settle outside the selected set.** An Opus offer reaching a G.711 call is
+  answered G.711, because the answer this side builds never named Opus and a session started on a
+  codec no answer named sends packets the far end cannot place.
+- **The `carries` check had to be inside the search, not applied to its result.** The interrupted
+  WIP filtered after `find_map`, which stopped at the offerer's first choice and refused the whole
+  description when that one format was outside our set: an Opus-first offer to a default G.711 call
+  came back `NoCommonCodec` while the answer on the wire named the PCMU further down the same list.
+  Invisible in the default build — where no rtpmap can name Opus at all — and live under
+  `--all-features`, which is how the gate builds. Caught by
+  `negotiation_does_not_settle_outside_the_selected_set`, added for exactly this reason.
+- **Both feature configurations are built and tested**, not just `--all-features`. `call.rs`'s test
+  module runs in both and asserts the default build's promise; `tests/opus.rs` is gated on the
+  feature.
+- **Registry**: 6716 and 7587 restored to `implemented`, citing `sipx-call/src/call.rs` and
+  `sipx-call/tests/opus.rs`, and `docs/compliance.md` regenerated — implemented 29 → 31, partial
+  24 → 22. Neither row claims `roles`, deliberately: they never did, and adding a role claim is a
+  new assertion this story did not ask for. Worth a look if the coordinator disagrees — both roles
+  are in fact exercised, in the same one-direction shape RFC 3711's note already describes.
+- **What is still not true, and is now written into the rows rather than left implied**: there is
+  no Opus `a=fmtp` in either direction, so §7.1's optional parameters — `maxaveragebitrate`,
+  `useinbandfec`, `usedtx`, `maxplaybackrate`, `cbr`, `stereo`/`sprop-stereo` — are neither offered
+  nor read; and `sipx-cli` still takes no flag for Opus, so the codec is reachable from the library
+  and not from the binary.
 
 ## Notes
 - **This is the sixth instance of the project's recurring defect**, after ICE (`M-27`), UPDATE
