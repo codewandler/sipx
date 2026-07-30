@@ -14,6 +14,17 @@ categories.workspace = true
 # The harness schedules on the kernel's own timer queue, generic over its instant since `X-21` —
 # which is what lets it run on virtual time with no clock and no runtime.
 sipx-transport.workspace = true
+# The host process (`X-38`). These are the stack's public API as this application uses it, and that
+# use is the definition of the reachable-from-a-call surface — `scripts/check-app-surface.py` reads
+# this dependency closure rather than a list somebody keeps. Adding one here widens the surface on
+# purpose; it is not a detail.
+sipx-call.workspace = true
+sipx-sip.workspace = true
+# RFC 3261 §11: a call listener must answer an OPTIONS, and what answers one is a user agent — the
+# `Allow` list it sends is the one list saying what this stack does, so the host answers through it
+# rather than building a 200 of its own that would drift.
+sipx-ua.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 
 [lints]
 workspace = true
