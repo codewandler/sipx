@@ -48,12 +48,12 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 | Pillar | Open stories |
 |---|---|
 | Signalling | 11 |
-| Media | 7 |
+| Media | 9 |
 | Application | 6 |
 | Build | 6 |
 | Phone | 1 |
 | Transport | 1 |
-| **total** | **32** |
+| **total** | **34** |
 
 117 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
@@ -65,7 +65,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 |---|---|---|---|
 | 2026-07-28 | 95 | 58 | -37 |
 | 2026-07-29 | 43 | 47 | +4 |
-| 2026-07-30 | 12 | 11 | -1 |
+| 2026-07-30 | 14 | 11 | -3 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 
