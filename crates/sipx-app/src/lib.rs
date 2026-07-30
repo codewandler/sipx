@@ -48,6 +48,15 @@
 //! *Experimental* until a second application disagrees. `scripts/check-app-surface.py` holds the two
 //! together, and it reads the application's real dependencies rather than a list — so widening the
 //! surface means writing code here that needs it.
+//!
+//! **Which Cargo features this crate enables is therefore a statement about the stack, not a build
+//! detail.** It deliberately enables none of the optional codecs or keying backends. Opus
+//! (`sipx-audio/opus`) and the DTLS handshake (`sipx-media/dtls`) each link a C library, and whether
+//! to take that on is a deployment decision — a host that made it by default would be answering it
+//! for every operator, and would also promote both capabilities onto the supported surface on no
+//! evidence beyond a manifest line. They stay experimental and say so on their own pages. Enabling one
+//! here is the intended way to change that, and it is a decision with a `CHANGELOG.md` entry rather
+//! than a convenience.
 
 pub mod config;
 pub mod harness;

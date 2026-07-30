@@ -61,6 +61,7 @@ import pathlib
 import re
 import sys
 import tomllib
+from typing import NamedTuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CRATES = ROOT / "crates"
@@ -137,33 +138,143 @@ def published() -> list[str]:
     return found
 
 
-def workspace_dependencies(crate: str) -> set[str]:
+class Edge(NamedTuple):
+    """One workspace dependency, with what decides whether it is compiled at all."""
+
+    name: str
+    #: An optional dependency exists only if a feature turns it on.
+    optional: bool
+    #: Whether the edge takes the dependency's `default` feature.
+    default_features: bool
+    #: Features the edge asks for by name.
+    features: tuple[str, ...]
+
+
+def manifest(crate: str) -> dict:
+    return tomllib.loads((CRATES / crate / "Cargo.toml").read_text(encoding="utf-8"))
+
+
+def dependency_edges(crate: str) -> list[Edge]:
     """The workspace's own crates that `crate` depends on to build.
 
     `[dev-dependencies]` are excluded, and that exclusion is the point rather than an oversight: what
-    the test suite reaches is what a test reaches, and this predicate is about callers. Optional
-    dependencies *are* included, because the gate builds `--all-features` and an optional dependency
-    is compiled and reachable there.
+    the test suite reaches is what a test reaches, and this predicate is about callers. That is why
+    the suite could never settle this predicate itself.
     """
-    manifest = tomllib.loads((CRATES / crate / "Cargo.toml").read_text(encoding="utf-8"))
+    edges = []
+    for name, spec in manifest(crate).get("dependencies", {}).items():
+        if not name.startswith("sipx-"):
+            continue
+        table = spec if isinstance(spec, dict) else {}
+        edges.append(
+            Edge(
+                name=name,
+                optional=bool(table.get("optional", False)),
+                default_features=bool(table.get("default-features", True)),
+                features=tuple(table.get("features", ())),
+            )
+        )
+    return edges
+
+
+def feature_map(crate: str) -> dict[str, list[str]]:
+    """A crate's `[features]` table."""
+    return manifest(crate).get("features", {})
+
+
+def close_features(crate: str, wanted: set[str]) -> set[str]:
+    """A feature set closed under the crate's own feature table.
+
+    Only activations naming a feature of *this* crate are followed. `dep:x` turns a dependency on and
+    `x/y` turns a feature on in one, and neither is a feature of the crate doing the asking.
+    """
+    table = feature_map(crate)
+    enabled = set(wanted)
+    pending = list(enabled)
+    while pending:
+        feature = pending.pop()
+        for activation in table.get(feature, ()):
+            if activation.startswith("dep:") or "/" in activation:
+                continue
+            if activation not in enabled:
+                enabled.add(activation)
+                pending.append(activation)
+    return enabled
+
+
+def activated(crate: str, enabled: set[str], edge: Edge) -> bool:
+    """Whether a dependency is compiled at all, given the features enabled on `crate`."""
+    if not edge.optional:
+        return True
+    table = feature_map(crate)
+    # An optional dependency also creates an implicit feature of its own name.
+    if edge.name in enabled:
+        return True
+    for feature in enabled:
+        for activation in table.get(feature, ()):
+            if activation in (f"dep:{edge.name}", edge.name):
+                return True
+            if activation.startswith(f"{edge.name}/"):
+                return True
+    return False
+
+
+def asked_of(crate: str, enabled: set[str], name: str) -> set[str]:
+    """Features that `crate`'s own enabled features turn on in dependency `name` via `name/feature`."""
+    table = feature_map(crate)
     return {
-        name
-        for name in manifest.get("dependencies", {})
-        if name.startswith("sipx-")
+        activation.split("/", 1)[1]
+        for feature in enabled
+        for activation in table.get(feature, ())
+        if activation.startswith(f"{name}/")
     }
 
 
+def resolve(roots: tuple[str, ...]) -> dict[str, set[str]]:
+    """Every workspace crate the applications reach, and the features enabled on each.
+
+    **Features are part of selection, and that is the whole point of doing this properly** (`X-38`).
+    An earlier version of this walked dependency names and ignored features on the grounds that the
+    gate builds `--all-features`, so everything is compiled. That reasoning confused *compiled* with
+    *selectable*, and it is exactly the confusion alpha predicate 1 exists to remove: Opus is
+    implemented, tested and compiled by the gate, and no shipped binary can turn it on. A surface
+    defined by what `--all-features` builds would have called it reachable, which is the over-claim.
+
+    So the roots are resolved as they are *shipped* — with their default features — and a capability
+    behind a feature no application enables is not on the surface. Reaching for `cargo metadata`
+    would be more authoritative, but the CI job this runs in installs no Rust toolchain, and a check
+    that silently degrades when its oracle is missing is worse than one that reads the manifests.
+    """
+    enabled: dict[str, set[str]] = {}
+    for root in roots:
+        enabled[root] = close_features(root, {"default"} if "default" in feature_map(root) else set())
+
+    changed = True
+    while changed:
+        changed = False
+        for crate in list(enabled):
+            closed = close_features(crate, enabled[crate])
+            if closed != enabled[crate]:
+                enabled[crate] = closed
+                changed = True
+            for edge in dependency_edges(crate):
+                if not activated(crate, enabled[crate], edge):
+                    continue
+                wanted = set(edge.features) | asked_of(crate, enabled[crate], edge.name)
+                if edge.default_features and "default" in feature_map(edge.name):
+                    wanted.add("default")
+                if edge.name not in enabled:
+                    enabled[edge.name] = set()
+                    changed = True
+                if not wanted <= enabled[edge.name]:
+                    enabled[edge.name] |= wanted
+                    changed = True
+    return enabled
+
+
 def closure(roots: tuple[str, ...]) -> set[str]:
-    """Every workspace crate the applications reach through their manifests."""
-    reached: set[str] = set()
-    pending = list(roots)
-    while pending:
-        crate = pending.pop()
-        if crate in reached:
-            continue
-        reached.add(crate)
-        pending.extend(workspace_dependencies(crate))
-    return reached
+    """Every workspace crate the applications reach, as shipped."""
+    return set(resolve(roots))
 
 
 def code(text: str) -> str:
@@ -312,10 +423,46 @@ def unreached_supported(reached: set[str]) -> list[str]:
     return problems
 
 
-def reached_experimental(reached: set[str]) -> list[str]:
-    """Experimental modules that something on a path from an application selects."""
+#: A `pub mod` declaration and the feature gating it, if any.
+_GATED_MODULE = re.compile(
+    r'(?:#\[cfg\(feature = "(?P<feature>[\w-]+)"\)\]\s*\n\s*)?pub mod (?P<name>\w+);'
+)
+
+
+def module_gates(crate: str) -> dict[str, str]:
+    """Each module of a crate, and the feature its declaration is gated by.
+
+    Empty string when a module is unconditional. This is what tells the difference between a module
+    the application could select and one it could not: `sipx_audio::opus` is declared behind
+    `#[cfg(feature = "opus")]`, so no amount of naming it makes it reachable from a binary that does
+    not enable the feature.
+    """
+    gates = {}
+    for text in sources(crate).values():
+        for match in _GATED_MODULE.finditer(text):
+            gates.setdefault(match.group("name"), match.group("feature") or "")
+    return gates
+
+
+def selectable(crate: str, module: str, enabled: dict[str, set[str]]) -> bool:
+    """Whether an application could turn this module on at all."""
+    gate = module_gates(crate).get(module, "")
+    return not gate or gate in enabled.get(crate, set())
+
+
+def reached_experimental(enabled: dict[str, set[str]]) -> list[str]:
+    """Experimental modules that something on a path from an application selects.
+
+    A module behind a feature no application enables is skipped however loudly the closure names it.
+    `sipx-media` writes `sipx_audio::opus` under `#[cfg(feature = "opus")]`; a checker that read the
+    reference and not the gate would demand Opus graduate to `Supported` on the strength of code that
+    no shipped binary compiles.
+    """
+    reached = set(enabled)
     problems = []
     for (crate, module), path in sorted(experimental_modules().items()):
+        if not selectable(crate, module, enabled):
+            continue
         for other in sorted(reached):
             if other == crate:
                 continue
@@ -330,6 +477,40 @@ def reached_experimental(reached: set[str]) -> list[str]:
                     f"(README.md's stability rule). Do not stop the caller"
                 )
                 break
+    return problems
+
+
+def unselectable_and_unmarked(enabled: dict[str, set[str]]) -> list[str]:
+    """Modules behind a feature no application enables, that do not say they are experimental.
+
+    This is the direction the worked example needed. Opus (RFC 6716, 7587) is implemented, tested,
+    selectable from `sipx-call` and compiled by every `--all-features` run — and behind
+    `sipx-audio/opus`, which links libopus, is off by default, and which **no shipped binary can turn
+    on**: `sipx-cli` takes no flag for it and declares no `[features]` table to forward one, and
+    `sipx-app` deliberately does not enable it (see its `# Stability` section for why).
+
+    A capability that is library-reachable and binary-unreachable is the exact shape alpha predicate 1
+    is about, and the reason a path check could never settle it: every path is real. What settles it is
+    that no application selects it. So the rule is symmetric with graduation — such a module must say
+    it is experimental, and it stops having to the moment an application enables the feature.
+    """
+    problems = []
+    marked = {(crate, module) for crate, module in experimental_modules()}
+    for crate in sorted(enabled):
+        if not has_library(crate):
+            continue
+        for module, gate in sorted(module_gates(crate).items()):
+            if not gate or gate in enabled[crate]:
+                continue
+            if (crate, module) in marked:
+                continue
+            problems.append(
+                f"`{crate_path(crate)}::{module}` is behind the `{gate}` feature, which no "
+                f"application enables, and its module documentation does not mark it "
+                f"**Experimental** (`A-8`). It is reachable from a library and from no shipped "
+                f"binary, so no caller has constrained its shape — say so at the module, or enable "
+                f"`{gate}` from an application and mean it"
+            )
     return problems
 
 
@@ -350,9 +531,14 @@ def unreached(reached: set[str]) -> list[str]:
 
 def report() -> tuple[list[str], set[str], dict[tuple[str, str], pathlib.Path]]:
     """Every disagreement between the declared surface and the application's use of it."""
-    reached = closure(APPLICATIONS)
+    enabled = resolve(APPLICATIONS)
+    reached = set(enabled)
     experimental = experimental_modules()
-    problems = unreached_supported(reached) + reached_experimental(reached)
+    problems = (
+        unreached_supported(reached)
+        + reached_experimental(enabled)
+        + unselectable_and_unmarked(enabled)
+    )
 
     unreached_crates = unreached(reached)
     if not experimental and not unreached_crates:

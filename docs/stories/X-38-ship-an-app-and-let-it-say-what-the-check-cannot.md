@@ -81,6 +81,35 @@ until a second application disagrees.
 - **`test_the_report_states_its_blind_spot` was passing for the wrong reason** and was repinned. It
   asserted the string `unverified against callers`, which the replacement bullet quotes while saying it
   is gone — the `X-36` defect exactly, so it now asserts the new limit instead.
+- **The worked example, decided: RFC 6716/7587 (Opus) is `Experimental`, and the host does not enable
+  the feature.** Opus is implemented, has vectors, is cited against both RFCs, is selectable from
+  `sipx-call`, and is compiled by every `--all-features` run — and **no shipped binary can turn it
+  on**: `sipx-cli` takes no flag and declares no `[features]` table to forward one, and `sipx-app`
+  deliberately does not enable it, because linking libopus is a deployment decision and a host that
+  made it by default would answer it for every operator *and* promote the capability on no evidence
+  beyond a manifest line. Library-reachable and binary-unreachable is the exact shape predicate 1 is
+  about, and the reason no path check could ever settle it: every path to Opus is real.
+- **That decision exposed a hole in this story's own checker and closed it.** The first version walked
+  dependency *names* and ignored features, reasoning that the gate builds `--all-features` so
+  everything is compiled — which confuses *compiled* with *selectable*, the very confusion predicate 1
+  exists to remove. Selection is now feature-aware: the roots resolve with the features they ship with,
+  a reference behind an unenabled `#[cfg(feature)]` is not a caller, and a fourth assertion requires a
+  module behind a feature no application enables to say it is experimental.
+- **Two modules were silently over-claiming and now say so**: `sipx-audio::opus` and
+  `sipx-media::dtls::openssl`, both behind features nothing enables, neither previously marked. The
+  checker found both; neither was on anyone's list. `A-8`'s Progress had claimed Opus was marked, and
+  it was not.
+- **The registry consequence is stated, not applied.** This story's checker governs crate stability
+  declarations, not `docs/rfc/registry.toml`, whose bar is set by `rfc-report.py` at *a call* rather
+  than a binary. Under this story's definition a row resting only on a feature no binary enables is not
+  on the reachable surface — which bears directly on `M-30`'s promotion of 6716/7587 to `implemented`.
+  Those two rows were deliberately **not** edited here: `M-30` owns them in this wave, and two branches
+  moving the same rows in opposite directions is the collision the fence exists to prevent. Whoever
+  integrates both should decide the rows once, with `README.md`'s rule in hand.
+- **The demotion direction is written down**, in `README.md` beside graduation: a capability the
+  application stops using returns to `Experimental` with a `CHANGELOG.md` entry, and any registry row
+  that rested on the removed path is demoted in the same commit. A surface that can only widen is a
+  freeze arriving one item at a time.
 - **Known limit, stated rather than left to be found.** Assertion 1 runs at crate granularity, because
   that is the granularity the `# Stability` declarations have. A supported *module* that nothing in the
   closure names is not caught. Per-module declarations would let it tighten; that is a successor and

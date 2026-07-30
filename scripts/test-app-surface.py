@@ -52,24 +52,43 @@ class Workspace:
         self.crates.mkdir()
 
     def add(self, name, *, declares="", dependencies=(), dev_dependencies=(), modules=None,
-            publish=True, library=True):
+            publish=True, library=True, features=None, gated=None, entry_extra=""):
         directory = self.crates / name
         (directory / "src").mkdir(parents=True)
         manifest = [f'[package]\nname = "{name}"\n']
         if not publish:
             manifest.append("publish = false\n")
+        if features:
+            manifest.append("\n[features]\n")
+            for feature, activations in features.items():
+                rendered = ", ".join(f'"{item}"' for item in activations)
+                manifest.append(f"{feature} = [{rendered}]\n")
         manifest.append("\n[dependencies]\n")
         for dependency in dependencies:
-            manifest.append(f"{dependency}.workspace = true\n")
+            if isinstance(dependency, tuple):
+                who, table = dependency
+                manifest.append(f"{who} = {{ workspace = true, {table} }}\n")
+            else:
+                manifest.append(f"{dependency}.workspace = true\n")
         manifest.append("\n[dev-dependencies]\n")
         for dependency in dev_dependencies:
             manifest.append(f"{dependency}.workspace = true\n")
         (directory / "Cargo.toml").write_text("".join(manifest))
 
         entry = "lib.rs" if library else "main.rs"
-        (directory / "src" / entry).write_text(GLOSSARY + declares + "\n")
+        declarations = "".join(
+            f'#[cfg(feature = "{gate}")]\npub mod {module};\n'
+            for module, gate in (gated or {}).items()
+        )
+        (directory / "src" / entry).write_text(
+            GLOSSARY + declares + "\n" + entry_extra + declarations
+        )
         for module, text in (modules or {}).items():
             (directory / "src" / f"{module}.rs").write_text(text)
+        for module in gated or {}:
+            path = directory / "src" / f"{module}.rs"
+            if not path.exists():
+                path.write_text("//! A gated module.\n")
         return self
 
     def __enter__(self):
@@ -265,6 +284,163 @@ class TheAssertions(unittest.TestCase):
             self.assertEqual(surface.unreached_supported(surface.closure(("sipx-app",))), [])
 
 
+class FeaturesArePartOfSelection(unittest.TestCase):
+    """`X-38`'s worked example: a capability reachable from the library and from no binary.
+
+    The failure this prevents is an over-claim, and it is the subtlest one in the story. Opus is
+    implemented, tested, cited against RFC 6716 and 7587, selectable from `sipx-call`, and compiled by
+    every `--all-features` run — and no shipped binary can turn it on. A checker that walked dependency
+    names, or that read `--all-features` as "what is reachable", would call it supported.
+    """
+
+    def test_an_optional_dependency_no_feature_enables_is_not_reached(self):
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=[("sipx-extra", "optional = true")],
+            )
+            workspace.add("sipx-extra", declares="//! **Supported.** All of it.")
+            self.assertNotIn("sipx-extra", surface.closure(("sipx-app",)))
+
+    def test_a_feature_the_root_enables_carries_its_dependency_in(self):
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                features={"default": ["codec"], "codec": ["dep:sipx-extra"]},
+                dependencies=[("sipx-extra", "optional = true")],
+                modules={"host": "use sipx_extra::thing;\n"},
+            )
+            workspace.add("sipx-extra", declares="//! **Supported.** All of it.")
+            self.assertIn("sipx-extra", surface.closure(("sipx-app",)))
+
+    def test_a_feature_is_propagated_to_a_dependency(self):
+        """`sipx-media/opus = ["sipx-audio/opus"]` is this shape, and it has to reach two levels."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                features={"default": ["codec"], "codec": ["sipx-mid/codec"]},
+                dependencies=["sipx-mid"],
+                modules={"host": "use sipx_mid::thing;\n"},
+            )
+            workspace.add(
+                "sipx-mid",
+                declares="//! **Supported.** All of it.",
+                features={"default": [], "codec": ["sipx-deep/codec"]},
+                dependencies=["sipx-deep"],
+                modules={"inner": "use sipx_deep::thing;\n"},
+            )
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                features={"default": [], "codec": []},
+            )
+            enabled = surface.resolve(("sipx-app",))
+            self.assertIn("codec", enabled["sipx-mid"])
+            self.assertIn(
+                "codec",
+                enabled["sipx-deep"],
+                "a feature asked for through an intermediate crate must arrive",
+            )
+
+    def test_a_module_behind_an_unenabled_feature_must_say_it_is_experimental(self):
+        """The Opus case exactly: gated, unenabled, and silent about it."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-deep"],
+                modules={"host": "use sipx_deep::thing;\n"},
+            )
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                features={"default": [], "codec": []},
+                gated={"fancy": "codec"},
+                modules={"fancy": "//! A codec, and nothing says it is experimental.\n"},
+            )
+            problems = surface.unselectable_and_unmarked(surface.resolve(("sipx-app",)))
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn("sipx_deep::fancy", problems[0])
+            self.assertIn("`codec` feature", problems[0])
+
+    def test_marking_it_experimental_satisfies_the_rule(self):
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-deep"],
+                modules={"host": "use sipx_deep::thing;\n"},
+            )
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                features={"default": [], "codec": []},
+                gated={"fancy": "codec"},
+                modules={"fancy": "//! **Experimental** (`A-8`): nothing enables `codec`.\n"},
+            )
+            self.assertEqual(
+                surface.unselectable_and_unmarked(surface.resolve(("sipx-app",))), []
+            )
+
+    def test_a_gated_module_the_application_enables_is_not_asked_to_be_experimental(self):
+        """The demotion rule's mirror: enable the feature and the capability joins the surface."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                features={"default": ["codec"], "codec": ["sipx-deep/codec"]},
+                dependencies=["sipx-deep"],
+                modules={"host": "use sipx_deep::thing;\n"},
+            )
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                features={"default": [], "codec": []},
+                gated={"fancy": "codec"},
+                modules={"fancy": "//! A codec, and nothing says it is experimental.\n"},
+            )
+            self.assertEqual(
+                surface.unselectable_and_unmarked(surface.resolve(("sipx-app",))),
+                [],
+                "an enabled feature puts the module on the surface, so silence is correct",
+            )
+
+    def test_an_experimental_module_nothing_can_select_is_not_asked_to_graduate(self):
+        """A reference under a feature gate must not count as a caller.
+
+        `sipx-media` writes `sipx_audio::opus` under `#[cfg(feature = "opus")]`. Reading the reference
+        and not the gate would demand Opus graduate on the strength of code no binary compiles.
+        """
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-mid"],
+                modules={"host": "use sipx_mid::thing;\n"},
+            )
+            workspace.add(
+                "sipx-mid",
+                declares="//! **Supported.** All of it.",
+                dependencies=["sipx-deep"],
+                modules={"inner": "use sipx_deep::fancy::Thing;\n"},
+            )
+            workspace.add(
+                "sipx-deep",
+                declares="//! **Supported.** All of it.",
+                features={"default": [], "codec": []},
+                gated={"fancy": "codec"},
+                modules={"fancy": "//! **Experimental** (`A-8`): nothing enables `codec`.\n"},
+            )
+            self.assertEqual(
+                surface.reached_experimental(surface.resolve(("sipx-app",))),
+                [],
+                "a caller behind an unenabled feature gate is not a caller",
+            )
+
+
 class TheNonEmptyRule(unittest.TestCase):
     def test_an_application_that_needs_everything_is_reported(self):
         """Acceptance item 4: a shipped app that needs the whole stack is a claim, not a result."""
@@ -302,6 +478,28 @@ class TheRealWorkspace(unittest.TestCase):
         self.assertTrue(
             surface.unreached(reached),
             "every published crate is on the supported surface, which is itself a claim",
+        )
+
+    def test_opus_is_experimental_because_no_binary_can_select_it(self):
+        """`X-38`'s worked example, pinned against the real tree.
+
+        RFC 6716 and 7587 are implemented, tested and selectable from `sipx-call`, and Opus is behind
+        `sipx-audio/opus`, which links libopus. No shipped binary enables it: `sipx-cli` has no flag
+        and no `[features]` table, and `sipx-app` deliberately does not. So it is *Experimental* under
+        this story's definition, and this fails if someone enables the feature from the host without
+        moving the declaration, or removes the declaration without enabling it.
+        """
+        enabled = surface.resolve(surface.APPLICATIONS)
+        self.assertIn("sipx-audio", enabled, "the host reaches the codec crate")
+        self.assertNotIn(
+            "opus",
+            enabled["sipx-audio"],
+            "no application enables `opus`; if one now does, Opus graduates and this must change",
+        )
+        self.assertIn(
+            ("sipx-audio", "opus"),
+            surface.experimental_modules(),
+            "a capability no binary can select has to say so at the module",
         )
 
     def test_the_application_is_neither_the_test_suite_nor_the_cli(self):

@@ -1,5 +1,12 @@
 //! Opus (RFC 6716), behind the `opus` feature.
 //!
+//! **Experimental** (`A-8`): the `opus` feature links libopus and **no shipped binary enables it** —
+//! `sipx-cli` takes no flag for it and declares no `[features]` table that could forward one, and the
+//! host (`sipx-app`) deliberately does not turn it on. So this module is reachable from the library
+//! and from no application, and nothing above it has ever constrained its shape. That it is
+//! implemented, tested, and compiled by every `--all-features` run does not change the question,
+//! which is one of *use* (`X-38`). What settles it is an application that offers Opus on a real call.
+//!
 //! The only C dependency in the workspace, and the reason it is worth one: there is no
 //! pure-Rust Opus *encoder* of comparable quality, and a codec sipx can decode but not encode
 //! is not a codec a softphone can offer. Decoding alone would let sipx answer an Opus call and

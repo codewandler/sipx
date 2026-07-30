@@ -135,13 +135,31 @@ no path from that application reaches, or when the application starts selecting 
 same limit: a path is satisfied by citing a file whose relevant branch is dead. An application has no
 dead branch to cite.
 
-**An experimental item graduates when a second implementation depends on it.** If something outside
-this repository needs one, that is not a mistake to be corrected at the caller — a second caller is
-exactly what constrains a shape, and nothing else can. The item moves to *Supported* with a
-`CHANGELOG.md` entry recording that it did, and the surface is wider than it was. Without this clause
-the paragraph above would be a freeze on everything one application happens to need, rather than a
-measurement of it, so **please open an issue saying what you depend on** — that is the mechanism
-working, not a complaint.
+**A Cargo feature is part of being selectable.** A capability behind a feature that no shipped binary
+can turn on is *Experimental*, however thoroughly it is implemented and tested and whatever
+`--all-features` compiles. Opus is the worked example: it is complete, it has vectors, RFC 6716 and
+7587 are cited against it, and it sits behind `sipx-audio/opus`, which links libopus. `sipx-cli` has
+no flag for it and no `[features]` table to forward one, and the host does not enable it, because
+linking a C library is a deployment decision rather than something a default should make for you. So
+Opus is reachable from the library and from no application, and it says so on its own page. This is
+the distinction three earlier attempts could not draw, because every *path* to Opus is real.
+
+**The rule runs in both directions.**
+
+- **Graduation.** If something outside this repository depends on an experimental item, that is not a
+  mistake to be corrected at the caller — a second caller is exactly what constrains a shape, and
+  nothing else can. The item moves to *Supported* with a `CHANGELOG.md` entry, and the surface is
+  wider than it was. **Please open an issue saying what you depend on**: that is the mechanism
+  working, not a complaint.
+- **Demotion.** If the application stops using a capability — a feature switched off, a dependency
+  dropped, a call path removed — it returns to *Experimental*, with a `CHANGELOG.md` entry saying so.
+  The same sentence has to be sayable in both directions or the measurement is a ratchet: a surface
+  that can only grow is a freeze arriving one item at a time. A row of
+  [`docs/rfc/registry.toml`](docs/rfc/registry.toml) that claimed a role on the strength of the
+  removed path is demoted in the same commit, exactly as `X-30` and `X-33` demoted theirs.
+
+Without these two clauses the definition above would freeze the stack at whatever one application
+happens to need, instead of measuring it.
 
 The table is exactly the crates that publish, and `./scripts/check-audio-claims.py --check` holds
 it to that: a published crate no table describes has no front door anyone can be held to. The
