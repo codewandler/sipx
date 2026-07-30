@@ -7,6 +7,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`sip-tls.md` no longer claims a minimum-TLS-version knob that nobody built (`X-46`)** — §3.2
+  listed the minimum protocol version as configurable, and neither `ClientTls` nor `ServerTls` takes
+  a version. The spec was corrected rather than the knob built, for a reason worth recording: above
+  the floor its only representable value is "1.3 only", and the *absence* of a version-selecting API
+  is currently what evidences the RFC 8996 and 8446 rows — `docs/rfc/README.md` says those are
+  "proved by the absence of an API", so building the knob would have falsified three documents to
+  satisfy a fourth.
+  - The sweep of §3.2's other entries found a second inaccuracy: trust anchors were described as
+    defaulting to the system roots, when there is no default at all — anchors are required and an
+    empty set is refused at construction.
+  - **The claim is now guarded rather than merely corrected.** A new test holds every §3.2 entry
+    against the public surface of `tls.rs`, so a future entry naming an API that does not exist fails
+    the build. That is the difference between fixing this instance and fixing the class.
+
 ### Changed — breaking
 
 - **`MediaSession::collect_digits` takes two durations instead of one (`M-34`)** — it was
