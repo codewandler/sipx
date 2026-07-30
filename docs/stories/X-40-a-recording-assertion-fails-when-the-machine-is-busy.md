@@ -158,6 +158,31 @@ today.
   inter-packet gaps the same 600 ms window.
 - `cli.rs:719`'s clock assertion is left, with the reason at the site.
 
+### The symptom reproduced, in a real gate run
+
+The story records it as observed once and not reproducible. It reproduced here, on the second of two
+full `./scripts/gate.py` runs — in the `test` step, where `cargo test --workspace` has many test
+binaries running at once, which is the load the first report described. The first gate run was green in
+that step, so the rate is roughly one in two on this machine rather than the 15/15 the original report
+measured.
+
+```
+test dial_plays_a_file_and_records_the_far_end ... FAILED
+panicked at crates/sipx-cli/tests/cli.rs:511:5:
+the answerer reports it heard no audio at all during the call, so the recording has nothing in it to
+assert on: {"status":"answered",...,"duration_ms":801,"samples_recorded":0,"heard_audio":false,...}
+```
+
+`duration_ms: 801` — the same 801 the deliberate 1.5 s delay produces, against `--duration 10`. The
+answerer gave up at 0.8 s in both cases, because 0.8 s is where its window closes no matter how late
+the audio is. That is the diagnosis confirmed against the real failure and not only against the
+reproduction.
+
+Two things follow. The new message is doing its job: it named the cause and attached the answerer's own
+report, where the old one said "the callee recorded nothing" and left the reader to guess. And the
+flake is **not fixed** — this whole diff is inside `crates/sipx-cli/tests/`, and the test still fails,
+which is the same conclusion the first Acceptance item reaches by reading the code.
+
 ### Unrelated, and red at the merge base
 
 `./scripts/maturity.py --check` fails at `36d0b3f` with my work stashed — `docs/maturity.md` row
