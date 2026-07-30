@@ -29,7 +29,13 @@ tie-breaker when a design choice is unclear.
    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
    mod tests { … }
    ```
-5. **Never commit without an explicit instruction from the user.**
+5. **Background work must be bounded and cancellation-safe.** Never create CPU busy loops or
+   unbounded spinner processes to simulate load. Prefer a bounded, representative test workload.
+   If a background process is genuinely necessary, give it a finite timeout, arrange cleanup with
+   an `EXIT`/`INT`/`TERM` trap that terminates its entire process group, and wait for that cleanup
+   before reporting the task complete. A trailing `kill $pid` is not sufficient: an interrupted
+   shell leaves its children orphaned.
+6. **Never commit without an explicit instruction from the user.**
 
 ## The gate
 
