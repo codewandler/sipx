@@ -370,10 +370,13 @@ See [design](designs/call.md).
 
 ### Phone CLI — `phone`
 
-The `sipx` binary: dial, answer, register and load-test, with media sourced from files,
-devices or generators, and results emitted in a form a test can assert on. Done when a shell
-script can place a call, send DTMF, record the answer and verify it.
-See [design](designs/phone.md).
+The `sipx` diagnostic endpoint: dial, answer, register, interactive scenarios and bounded load,
+with all five released signalling transports, explicit codec/security/ICE policy, and media sourced
+from files, devices or deterministic generators. `P-8` … `P-13` turn lower-layer capability into a
+shell-reachable product surface; `A-10` publishes the resulting Linux binaries after `A-9` and the
+v1 predicates hold. Done when the [diagnostic-phone specification](specs/diagnostic-phone.md)'s
+matrix is reproducible from a shell and records what actually negotiated. See
+[design](designs/phone.md).
 
 ### Application SDK — `app-sdk`
 

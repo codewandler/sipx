@@ -1,35 +1,64 @@
-# Design: Phone CLI
+# Design: Diagnostic phone
 
-**Status:** outline · **Pillar:** Application · **Epic:** `phone` · **Stories:** _to be cut_
+**Status:** accepted · **Pillar:** Application · **Epic:** `phone` ·
+**Stories:** `P-1` … `P-4`, `P-7` … `P-13` ·
+**Spec:** [diagnostic-phone](../specs/diagnostic-phone.md)
 
 ## Why
 
 The phone is both the product's front door and its most demanding integration test. Vision
-principle 6 says a feature that cannot be asserted on from a script is not finished — the CLI
-is where that principle is cashed in, because a shell script that places a call, sends DTMF,
-records the answer and checks the samples exercises every layer at once.
+principle 6 says a feature that cannot be asserted from a script is not finished. The existing
+binary has a strong WAV-oriented shell contract, but it cannot select every transport, codec,
+security or NAT path already present in the libraries, cannot use a sound device, and exposes no
+bounded call-load command.
+
+This epic closes that reachability gap without turning the binary into a desktop softphone. The
+product is a diagnostic endpoint: deterministic when driven from files or generators, usable by a
+person through a sound device, and machine-readable in both cases.
 
 ## Approach
 
-_To be written when the epic starts. In outline: `sipx dial | answer | register | loadtest`;
-media sourced from and sunk to files, devices, generators or a log; DTMF with configurable
-timing; custom headers and response code override for testing servers; results emitted as
-structured records so a script can assert on them; load testing with ramped call rates and
-alarm thresholds on RTP and SIP metrics._
+[`diagnostic-phone.md`](../specs/diagnostic-phone.md) is the normative command and event contract.
+The implementation is one call-control path with interchangeable drivers:
 
-## Alternatives considered
+- signalling selects UDP, TCP, TLS, WS or WSS through the existing transport layer;
+- media selects an ordered codec set, media-security policy and ICE policy through one call-level
+  policy rather than command-specific booleans;
+- sources and sinks are files, devices, deterministic generators or null endpoints;
+- interactive automation is newline-delimited JSON with correlated commands and events; and
+- load generation reuses the bounded testkit model and always has a finite call or time budget.
 
-- **An interactive TUI first.** Rejected for now: scriptability is the north star for this
-  epic, and an interactive mode is easy to add on top of a scriptable core, not the reverse.
+Platform audio dependencies remain feature-gated in `sipx-cli`. They never enter `sipx-audio`,
+`sipx-media`, `sipx-sip` or `sipx-sdp`. The file-only binary continues to build without a system
+audio stack.
 
-## Risks & open questions
+## Decisions
 
-- Audio device access pulls in a platform dependency; it should be feature-gated so the binary
-  builds and its file-based modes work with no audio stack present.
-- What the structured output schema is, and how stable it needs to be — scripts will depend on
-  it immediately.
+- **Script protocol, not a TUI.** NDJSON is composable from a terminal, a pipe or a test harness and
+  does not introduce a second state model.
+- **Selection is explicit and fail closed.** A requested transport, codec or security mode either
+  becomes the negotiated path or produces a typed error. There is no silent downgrade.
+- **No sleeps in scenarios.** A scenario waits for a named event with a deadline. Wall-clock sleeps
+  cannot stand in for a causal signal.
+- **Custom does not mean transaction-owned.** A caller may add validated end-to-end or extension
+  headers, but cannot override Via, route-set, dialog-identity, sequence or framing fields owned by
+  the stack.
+- **Transcription is out.** It introduces model, privacy and service policy unrelated to proving a
+  SIP/media path.
+
+## Risks
+
+- Device enumeration and timing differ by platform. The coordinated operational baseline publishes
+  Linux binaries and compile-checks the device feature on macOS and Windows; deterministic release
+  proofs use a virtual loopback device rather than a human microphone.
+- Scripts will depend on the event schema immediately. The existing versioned JSON envelope and
+  additive evolution rules apply; the interactive mode does not invent a second schema.
+- A load tool can become an accidental denial-of-service tool. Concurrency, rate and total work are
+  explicit, finite and validated before the first call starts.
 
 ## Acceptance / done
 
-A shell script places a call to a third-party server, sends DTMF, records the far end and
-verifies the recording, using only documented CLI output.
+The union of `P-8` … `P-13`: one documented shell scenario selects every released signalling
+transport, G.711 or Opus, plain RTP or a supported SRTP keying, ICE where configured, WAV or live
+device audio, interactive in-call actions and bounded load; the structured result proves what was
+selected and what actually negotiated.

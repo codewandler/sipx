@@ -16,6 +16,13 @@ moment one was cut, so this release starts that clock rather than stopping it.
 
 ### Changed
 
+- **Conformance, capability and release readiness are assessed separately (`X-48`)** — the dated
+  repository review measures the SIP core, endpoint library, high-level call/media framework and
+  executable phone as distinct surfaces, so lower-layer code no longer earns product-level credit
+  merely by existing. It records the 70-row RFC registry and verification baseline, gives an
+  explicit per-use readiness verdict, and prioritizes the reachability and adoption gaps that must
+  close before sipx can claim broad library-and-phone capability.
+
 - **The public docs are an adoption path rather than an internal status ledger (`X-47`)** — the
   README and website now lead with the shipped CLI and Rust workflows, state the WAV-only and
   secure-transport boundaries at the decision point, and keep the experimental SDK out of the main
