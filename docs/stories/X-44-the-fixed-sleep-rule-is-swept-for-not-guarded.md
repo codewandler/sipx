@@ -2,7 +2,7 @@
 id: X-44
 title: Guard the fixed-sleep rule mechanically, because the sweep did not hold
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 design: docs/designs/media.md
 epic: conformance
