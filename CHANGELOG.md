@@ -5,7 +5,14 @@ All notable changes to sipx are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0-alpha] — 2026-07-30
+
+**All seven `1.0.0-alpha` predicates are met**, computed rather than asserted, and
+[`docs/maturity.md`](docs/maturity.md) is where that is read. The last two to close were predicate 3,
+*a red gate means a defect* (`X-39`, `X-40`, `X-41`), and predicate 4, *no known-wrong shipped path*
+(the six defects the 2026-07-30 repository review filed). This is not a claim that v1 is close: v1's
+first predicate requires these seven to have held **across at least one release** rather than at the
+moment one was cut, so this release starts that clock rather than stopping it.
 
 ### Changed
 
@@ -2021,7 +2028,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha...HEAD
+[1.0.0-alpha]: https://github.com/codewandler/sipx/compare/v0.12.0...v1.0.0-alpha
 [0.12.0]: https://github.com/codewandler/sipx/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/codewandler/sipx/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/codewandler/sipx/compare/v0.9.0...v0.10.0
