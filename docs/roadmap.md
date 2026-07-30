@@ -113,7 +113,10 @@ Four milestones, each independently demonstrable, each ordered by the same rule 
 [RFC roadmap](rfc-roadmap.md) uses: **a gap that changes what sipx can be deployed as beats a gap
 that adds a feature.** M9 to M12 are defined and their stories are cut. M10's are nearly all done and
 it is still not declared — [where M10 stands](#m10--reachable) says which clause of its exit criterion
-is short of the demonstration it is written as — and M9, M11 and M12 are unstarted. The in-progress
+is short of the demonstration it is written as. **M12's four stories are all closed** and whether its
+own **Done when** is met has never been checked against evidence — the question `X-51` was filed for,
+and the same one M10 turned out to have. M9 is a third done: `S-19` closed, `C-2` and `C-1` open.
+Only M11 is unstarted. The in-progress
 work is the [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host)
 epics below, which are not milestones because they are not RFC gaps.
 

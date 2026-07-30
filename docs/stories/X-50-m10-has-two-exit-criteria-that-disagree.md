@@ -2,7 +2,7 @@
 id: X-50
 title: Decide whether M10 requires TURN, because the roadmap says both
 pillar: Build
-status: ready
+status: done
 priority: 2
 epic: conformance
 areas: [docs]
@@ -16,28 +16,28 @@ Give M10 one exit criterion, so whether it is reached is a fact to be read rathe
 to be made again by whoever asks next.
 
 ## Acceptance
-- [ ] **The two statements are reconciled, not both kept.** `docs/roadmap.md`'s M10 section says
+- [x] **The two statements are reconciled, not both kept.** `docs/roadmap.md`'s M10 section says
       "**Done when** one of two registrations of the same address of record can be called
       individually, a push wakes a client that held no connection into an answered call, and a call
       passes audio between two endpoints that symmetric RTP alone cannot connect." The ICE epic
       further down the same file is headed "ICE — `ice` _(six stories, M10)_", and the six are
       `M-19`…`M-24`. Those are different claims about what M10 costs.
-- [ ] **State which reading wins and why.** As of 2026-07-30 all three Done-when clauses hold:
+- [x] **State which reading wins and why.** As of 2026-07-30 all three Done-when clauses hold:
       `T-20` (GRUU) and `T-21` (push) are done, and `M-27` closed the third with
       `a_call_uses_a_nominated_pair_when_both_host_candidates_are_silent`, which makes both SDP
       default destinations unusable and proves audio crosses the nominated pair. `M-24` — RFC 8656
       relayed candidates — is the only open child of `M-16`. So the Done-when reading declares M10
       today and the epic reading does not.
-- [ ] **Whichever is chosen, the other text changes in the same commit.** Declaring M10 means the
+- [x] **Whichever is chosen, the other text changes in the same commit.** Declaring M10 means the
       epic header stops calling `M-24` an M10 story and says where it does belong. Deferring M10
       means the Done-when sentence gains the clause that makes TURN part of it — and says what a
       relay buys that the three clauses do not already claim.
-- [ ] **The third clause is examined honestly either way.** "Endpoints that symmetric RTP alone
+- [x] **The third clause is examined honestly either way.** "Endpoints that symmetric RTP alone
       cannot connect" is satisfied by host and server-reflexive candidates for many NAT pairs and by
       neither for symmetric-NAT-on-both-sides, which is what a relay is for. Whether the sentence
       means "some such endpoints" or "any such endpoints" is the whole disagreement, and it should be
       written down rather than left to the reader.
-- [ ] No milestone is recorded as delivered until this is decided. `docs/maturity.md` reports
+- [x] No milestone is recorded as delivered until this is decided. `docs/maturity.md` reports
       predicates, not milestones, so nothing mechanical currently catches an M10 claim — which is
       why this is a story and not a check.
 
