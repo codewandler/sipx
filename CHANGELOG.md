@@ -41,6 +41,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A registration can be placed over an Outbound flow, and woken by a push (`S-29`)** — `sipx-ua`'s
+  RFC 5626 and 8599 support had no caller above its own tests, which is the eighth instance of the
+  same defect: a capability that exists in a crate and cannot be selected from a call. `sipx register`
+  now selects both.
+  - **`--outbound`** builds the Outbound config, putting `+sip.instance` (§4.1) and `reg-id` (§4.2) on
+    the REGISTER's `Contact` and offering the `outbound` option tag, and the command reports whether
+    the registrar accepted the flow by reading `Require: outbound` back off the 2xx (§6).
+  - **`--push-provider` / `--push-prid`** put RFC 8599 §4.1.2's parameters on the `Contact` URI and
+    report whether the registrar named the same service, read out of `Feature-Caps` (§8.2). `--wake`
+    drives `UserAgent::woken`, which is §4.1.3's ordering — the binding-refresh REGISTER goes out
+    *before* the pending request is expected — as a type rather than as a convention.
+  - **RFC 5626 and 8599 return to a `uac` role**, the roles `X-37` demoted for having no caller. Both
+    rows stay `partial`, and their notes now separate what has a caller above `sipx-ua` from what is
+    implemented and still reached by nothing: `ob` on a dialog-forming Contact (§4.3), §4.4
+    keep-alives, and multi-flow independent failure under §4.5 backoff. The CLI registers one flow per
+    invocation, so that half has no caller by construction.
+  - `sipx-ua`'s stability note narrows to match: **"registering as one Outbound flow"** is Supported;
+    `Flows`, `Attempt`, `keepalive_after` and `dialog_contact`'s `ob` are named Experimental under the
+    rule the same doc comment already stated, so the crate no longer contradicts itself.
+  - Every new flag is refused when malformed rather than accepted and dropped — six unit tests — and
+    each flag's value is registered so it can never be misread as the address of record.
+
 ### Fixed
 
 - **A refused early answer now ends the invitation instead of hanging it (`S-25`)** — the one

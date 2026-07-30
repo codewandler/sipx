@@ -69,7 +69,6 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
-- [S-29 — Register over an Outbound flow, and let a registration wake on push](S-29-register-over-an-outbound-flow-and-push.md) · Signalling · with_outbound and with_push have no caller outside sipx-ua's own tests — the eighth instance of the recurring defect — so X-37 demoted RFC 5626 and 8599 to no roles; wiring them is what makes the roles honest again
 - [S-28 — Answer a 401 or 407 on an outbound INVITE](S-28-a-call-cannot-answer-an-authentication-challenge.md) · Signalling · found while closing P-7 — sipx-call has no credential type and no 401/407 path at all, so a challenged call fails outright; the digest machinery exists in sipx-ua and nothing above the registration path can reach it
 - [S-30 — Refuse a valued flag that was given no value, instead of ignoring it](S-30-a-valued-flag-with-no-value-is-silently-dropped.md) · Signalling · found by S-29's review — `Args::value` cannot tell "--flag was last" from "--flag was absent", so a trailing valued flag is accepted and dropped; CLI-wide, and it defeats the accepted-and-dropped rule S-29 asserted for its own six flags
 
@@ -172,6 +171,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [S-25 — Give the early-dialog loop a way to fail](S-25-early-dialog-observation-has-no-error-channel.md) · Signalling · found by M-29 — adopt_early_answer returns (), so a parse failure, a negotiation failure and a refused a=crypto in a reliable provisional are all discarded identically
 - [S-26 — Match a response to the RFC 2543 client transaction that sent it](S-26-legacy-client-transaction-never-matches-its-response.md) · Signalling · found by X-19's fuzzer — from_sent_request derives the client key by §17.2.3's server rules, so a legacy key carries a Request-URI and To tag that from_response cannot, and every response is Unmatched
 - [S-27 — Refuse a `sips:` URI the CLI cannot honour securely, instead of sending it in the clear](S-27-a-sips-uri-is-dialled-in-plaintext.md) · Signalling · found by X-33's implementor — dial.rs:231 strips `sips:` exactly as `sip:` and defaults to port 5060, and dial.rs:49 only ever chooses UDP or TCP, so `sipx dial sips:…` sends the INVITE in cleartext and says nothing
+- [S-29 — Register over an Outbound flow, and let a registration wake on push](S-29-register-over-an-outbound-flow-and-push.md) · Signalling · with_outbound and with_push have no caller outside sipx-ua's own tests — the eighth instance of the recurring defect — so X-37 demoted RFC 5626 and 8599 to no roles; wiring them is what makes the roles honest again
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
