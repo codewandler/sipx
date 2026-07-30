@@ -935,9 +935,14 @@ impl Call {
         // The payload type is the codec's number on the wire: a re-offer can move Opus from
         // 111 to 96 and leave the codec unchanged, and a session not rebuilt for that goes on
         // sending on the number the far end just reassigned.
+        //
+        // Compared as the *wire* number, not as the raw `Option`. A peer may add or drop the
+        // redundant `a=rtpmap:0 PCMU/8000` between two descriptions of the same static codec, and
+        // `Some(0)` against `None` would read as a change when nothing changed — rebuilding the
+        // session, and dropping audio, on a re-INVITE that only reworded the SDP.
         if to.remote != self.current.remote
             || to.codec != self.current.codec
-            || to.payload_type != self.current.payload_type
+            || to.wire_payload_type() != self.current.wire_payload_type()
         {
             let port = MediaPort::bind(SocketAddr::new(self.media_address, 0))
                 .await
@@ -1690,11 +1695,17 @@ impl Codecs {
 
     /// Whether this set carries a codec, so negotiation never settles on one the application
     /// did not select — an Opus offer answered from a G.711 set is answered G.711, not Opus.
+    /// Each arm lists what [`Self::capabilities`] actually offers, rather than the `Opus` arm
+    /// answering `true`. `true` is correct only for as long as every [`Codec`] variant happens to
+    /// be in `Capabilities::with_opus`; the day a codec is added to `sipx-media` that this set does
+    /// not offer, `true` would let negotiation settle on it and build a session for a codec the
+    /// answer never named. Listing them means a new variant is simply not carried until someone
+    /// says it is, which is the safe direction to fail in.
     fn carries(self, codec: Codec) -> bool {
         match self {
             Self::G711 => matches!(codec, Codec::Pcmu | Codec::Pcma),
             #[cfg(feature = "opus")]
-            Self::Opus => true,
+            Self::Opus => matches!(codec, Codec::Pcmu | Codec::Pcma | Codec::Opus),
         }
     }
 }
@@ -3819,6 +3830,17 @@ pub(crate) struct Settled {
 }
 
 impl Negotiated {
+    /// The number this codec actually goes out with: the one the description assigned, or the
+    /// codec's own when it is a static type nothing remapped.
+    ///
+    /// Mirrors [`sipx_media::Config::wire_payload_type`], which is what the session reads — so this
+    /// is the value to compare when asking whether the wire changed. The raw [`Self::payload_type`]
+    /// is not: `Some(0)` and `None` are two descriptions of PCMU and the same byte on the wire.
+    fn wire_payload_type(&self) -> u8 {
+        self.payload_type
+            .unwrap_or_else(|| self.codec.payload_type())
+    }
+
     fn media_config(self) -> sipx_media::Config {
         let mut config = sipx_media::Config::new(self.remote, self.codec);
         config.payload_type = self.payload_type;
@@ -3943,15 +3965,22 @@ pub(crate) fn negotiated(sdp: &SessionDescription, codecs: Codecs) -> Result<Neg
 
     // The first format both sides can carry. The list is already in the offerer's preference
     // order, so the first playable one is the one to use. Playable is judged by what the
-    // format's rtpmap says, never by a dynamic number alone — the same rule the answer was
-    // built with, and the reason `Codec::from_payload_type` deliberately never returns Opus:
-    // 111 is Opus here only because this description said so.
+    // format's rtpmap says, never by a dynamic number alone — which is also the reason
+    // `Codec::from_payload_type` deliberately never returns Opus: 111 is Opus here only because
+    // this description said so.
+    //
+    // `sipx_sdp::answer` decides the same question when it builds the answer that goes on the
+    // wire, and the two *must* agree: this settles what the session sends, and the answer is what
+    // the far end was told to expect. They are not one implementation, though — the rule is
+    // written here and again in `answer.rs`, and nothing yet tests that the two readings match.
+    // They are already known to differ on a detail (`answer.rs` compares the clock rate as text
+    // where this parses it), which is filed rather than fixed here.
     //
     // `carries` is part of the search and not a test applied to its result. Rejecting afterwards
     // would stop at the offerer's first choice and refuse the whole description if that one
     // format is outside our set — so an Opus-first offer reaching a G.711 call would come back
     // `NoCommonCodec` while the answer this side builds happily names the PCMU further down the
-    // same list. The two have to agree, and the answer is the one that went on the wire.
+    // same list.
     let (codec, payload_type) = audio
         .formats
         .iter()
@@ -4240,6 +4269,30 @@ mod tests {
             from_opus.payload_type,
             Some(111),
             "on the number this offer assigned, not on a number 111 means by itself"
+        );
+    }
+
+    /// A peer may spell a static type either way — `m=audio … 0` alone, or the same thing with a
+    /// redundant `a=rtpmap:0 PCMU/8000` — and RFC 8866 §6.6 allows both for the same codec.
+    ///
+    /// So moving between the two spellings is not a *change*, and [`Call::move_media_if_changed`]
+    /// must not rebuild the session for it: rebuilding costs an audible gap, and some peers
+    /// re-INVITE every thirty seconds as a keep-alive. `negotiated` does record the difference —
+    /// `Some(0)` against `None`, which is a true fact about what the description said — so the
+    /// comparison is on [`Negotiated::wire_payload_type`], where the two collapse to the one byte
+    /// that actually goes out.
+    #[test]
+    fn a_redundant_rtpmap_for_a_static_type_is_not_a_change() {
+        let mapped = negotiated(&offered("0", &["0 PCMU/8000"]), Codecs::G711).expect("PCMU");
+        let bare = negotiated(&offered("0", &[]), Codecs::G711).expect("PCMU");
+
+        assert_eq!(mapped.codec, bare.codec);
+        assert_eq!(mapped.payload_type, Some(0), "the rtpmap named it");
+        assert_eq!(bare.payload_type, None, "nothing named it");
+        assert_eq!(
+            mapped.wire_payload_type(),
+            bare.wire_payload_type(),
+            "the same byte goes on the wire either way, so the session must not move",
         );
     }
 

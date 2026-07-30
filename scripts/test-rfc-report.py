@@ -39,6 +39,22 @@ def registry_entries():
     return tomllib.loads((ROOT / "docs" / "rfc" / "registry.toml").read_text())["rfc"]
 
 
+def rust_code_only(source):
+    """`source` with its comments removed, so a *mention* cannot satisfy a presence check.
+
+    A registry row that claims a symbol is called wants evidence the symbol is called. Searching
+    raw file text cannot tell that from a sentence about it — and in this repository the sentences
+    are long and name symbols constantly, so the false positive is the likely case rather than a
+    contrived one.
+
+    Crude on purpose: it does not understand a `//` inside a string literal, and does not need to.
+    The question is only whether a symbol occurs somewhere that compiles, and a symbol inside a
+    string literal calls nothing either.
+    """
+    without_blocks = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    return "\n".join(line.split("//")[0] for line in without_blocks.splitlines())
+
+
 def an_entry(**overrides):
     """A minimal well-formed entry, so a test can vary exactly one thing about it."""
     entry = {
@@ -619,16 +635,48 @@ class ClaimReachability(unittest.TestCase):
                 )
 
         # The inverse of what this asserted before `M-30`: `Capabilities::with_opus` now has a
-        # caller above `sipx-sdp`, and that caller is the selector. Held as a source fact because
-        # it is the one the registry note is really claiming.
+        # caller above `sipx-sdp`, and that caller is the selector.
+        #
+        # Read over code with comments stripped, which matters more here than it looks. `X-33`
+        # asserted this string was *absent*, and absence is conclusive: a symbol that appears
+        # nowhere is called nowhere. Inverting it to presence gives up that certainty, because a
+        # sentence naming the symbol satisfies a substring search over raw text — so the inverted
+        # form has to at least require the mention be code. It is still a proxy, of the same kind
+        # and for the same reason `reaches_the_call_layer` is (see `rfc-report.py`): a dead call
+        # behind a `if false` would pass. That limit is `docs/designs/rfc-registry-grain.md`'s to
+        # remove, not this test's.
         selectors = [
             path
             for path in (ROOT / "crates" / "sipx-call" / "src").rglob("*.rs")
-            if "with_opus" in path.read_text()
+            if "with_opus" in rust_code_only(path.read_text())
         ]
         self.assertNotEqual(
-            [], selectors, "something in sipx-call asks for Opus, or no call can carry it"
+            [], selectors, "something in sipx-call asks for Opus in code, not in a comment"
         )
+
+        # Two structural facts a comment cannot fake, so that the presence check above is not the
+        # only thing standing between a promoted row and an unreachable codec: the feature exists
+        # to turn the variant on, and the selector is public surface a caller can actually name.
+        self.assertIn(
+            "opus",
+            tomllib.loads((ROOT / "crates" / "sipx-call" / "Cargo.toml").read_text()).get(
+                "features", {}
+            ),
+            "sipx-call declares the feature that makes Codecs::Opus exist",
+        )
+        exported = rust_code_only((ROOT / "crates" / "sipx-call" / "src" / "lib.rs").read_text())
+        self.assertIn("Codecs", exported, "the codec set is exported, or no caller can select one")
+
+        # And the claim the `6716` note makes about the binary, which `X-33` held for both crates
+        # and the inversion dropped. Absence, so this one is still conclusive: while `sipx-cli`
+        # names Opus nowhere, no flag can reach it and the note stays true.
+        for path in (ROOT / "crates" / "sipx-cli" / "src").rglob("*.rs"):
+            with self.subTest(path=path.name):
+                self.assertNotIn(
+                    "with_opus",
+                    path.read_text(),
+                    "sipx-cli reaches Opus now, so the note saying it cannot is stale",
+                )
 
         # What has *not* changed, and must not be quietly dropped: RFC 7587 §7.1's optional
         # parameters are neither offered nor read, so the row states that boundary. An
