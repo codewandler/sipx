@@ -43,6 +43,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **sipx ships an application, and the reachable surface is what it uses (`X-38`)** — `crates/sipx-app`
+  gains a `sipx-host` binary that binds the listeners a `HostConfig` declares, admits invitations,
+  answers on `sipx-call`, and serves to the end. `scripts/check-app-surface.py` holds every crate's
+  `# Stability` declaration against that application's real, **feature-resolved** dependency closure,
+  and the gate is red when the two disagree. Two new gate steps, taking the gate to **22**.
+  - **This closes the last open `1.0.0-alpha` predicate.** Three earlier attempts checked reachability by
+    reading evidence *paths*, and each recorded the same limit: a path is satisfied by citing a file
+    whose relevant branch is dead. An application has no dead branch to cite — either it builds and runs
+    on the API or it does not. `docs/maturity.md` reports predicate 1 as **computed** rather than
+    attested, and the "unverified against callers" caveat is resolved by use rather than by a rule.
+  - **A Cargo feature is part of being selectable.** A capability behind a feature no shipped binary
+    enables is *Experimental*, however thoroughly it is implemented. Opus is the worked example: complete,
+    with vectors, RFC 6716 and 7587 cited against it, and reachable from the library and from no
+    application. The rule runs **both** directions — an outside caller graduates an item to `Supported`
+    with a changelog entry, and an application dropping a capability demotes it — because a surface that
+    can only grow is a freeze arriving one item at a time.
+  - **`dev-dependencies` are excluded: a test is not a caller.** That is why the suite could never settle
+    this predicate.
+  - Building the checker found **two modules silently over-claiming** — `sipx-audio::opus` and
+    `sipx-media::dtls::openssl`, neither on anyone's list — and the first version of the checker had the
+    very defect the predicate exists to remove: it walked dependency *names* and ignored features,
+    confusing *compiled* with *selectable*.
+  - `scripts/maturity.py` now **reads** each status word's definition out of `docs/rfc/README.md`'s
+    schema table instead of restating it, after a restatement produced a false sentence. There is exactly
+    one definition of each word and it cannot drift.
+
 - **A call can select its codec set, and Opus is reachable through it (`M-30`)** — `M-13` built the
   Opus encoder, decoder and SDP half, and nothing built the *selection*, so no call had ever carried an
   Opus packet. `Codecs` (default `G711`) is now the application's choice, taken by `DialOptions::with_codecs`,

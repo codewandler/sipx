@@ -2,7 +2,7 @@
 id: X-38
 title: Ship a real application, and let its reality say what a check cannot
 pillar: Build
-status: in-progress
+status: done
 priority: 4
 design: docs/vision.md
 epic: app-sdk
