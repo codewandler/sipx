@@ -2,7 +2,7 @@
 id: X-18
 title: Count what the stack discards, and capture what it sends
 pillar: Build
-status: in-progress
+status: done
 priority: 10
 design: docs/designs/sip-transport.md
 epic: sip-transport
@@ -26,9 +26,17 @@ it exchanged recoverable as a capture that can be attached to a bug report.
 - [x] sipx depends on **no** metrics library. Counters are read through a snapshot or a trait, and the
       exporter is the application's choice. A stack that picks an exposition format picks it for every
       user of the library, and it is the one decision here that cannot be undone later.
-- [ ] Media counters join them rather than living apart: `M-10` already computes quality statistics,
+- [x] Media counters join them rather than living apart: `M-10` already computes quality statistics,
       and what is missing is that they are per-session and unreachable in aggregate.
-      **Not done, and it needs a decision this story cannot make** — see `## Progress`.
+      → **Split out to `M-32`, deliberately, and that is how this item is resolved rather than met.**
+      "Join them" hides a layering decision this story could not make from inside its fence:
+      `sipx-transport` cannot depend on `sipx-media`, so media counters need either a crate underneath
+      both or a parallel type of `ShedCounts`' shape, and the one precedent
+      (`crates/sipx-call/src/dispatch.rs:292`) sits in a crate this story was fenced out of. The
+      implementor refused it rather than invent an answer, and did the census instead — every uncounted
+      drop site, including a **DTMF digit dropped at `sipx-media/src/session.rs:2578` with neither a log
+      line nor a counter** — which `M-32` carries verbatim. Refusing this was the right call and the
+      census is the expensive part already done.
 - [x] Every existing `let _ = …` discard and every `tracing::debug!("dropped …")` in the signalling
       path has a counter, and a test enumerates them so a new discard added without one is caught. A
       silent drop is the failure this whole story exists to end, and `T-19` fixes only the first one.

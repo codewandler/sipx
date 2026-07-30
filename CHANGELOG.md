@@ -43,6 +43,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Every transport discard is counted, and the signalling can be captured to a file (`X-18`)** — a
+  running sipx is now observable from outside: `Handle::counters` returns a snapshot over shared atomics
+  (the `shed()` shape, not the ask-the-loop shape, because a counter readable only by asking the loop is
+  unreadable in exactly the situation it describes), and `sipx dial/answer/register --capture <FILE>`
+  writes the signalling exchanged as pcapng for attaching to a bug report.
+  - **Credentials are redacted, and that claim was earned the hard way.** A security review defeated the
+    first implementation three ways and put a digest `response` into the file in cleartext — a header
+    folded onto a continuation line (RFC 3261 §7.3.1), `Authorization :` with whitespace before the colon
+    (HCOLON permits it), and a bare-LF message, which disabled redaction entirely. All three are
+    spellings sipx accepts and processes normally. Redaction is now **structural** — split on CRLF/LF/CR,
+    unfold continuations into one logical header, take the name as the bytes before the first colon — and
+    **redacts conservatively when a line has no determinable name**, because where structure is absent a
+    credential can be anywhere. Digest `response`/`nextnonce`/`rspauth`, opaque `Bearer`/`Basic`, every
+    `a=crypto` key (RFC 4568 §9.1 permits several per line), SDP `k=`, push tokens, instance URNs, and
+    credentials nested in `message/sipfrag` are all removed; challenge parameters are kept, because a
+    nonce with no response beside it is not a credential and a digest failure is unreadable without them.
+  - **Off by default, and now genuinely free when off** — the `getsockname(2)` per message and the
+    unconditional re-serialisation of every inbound stream message are gone, with a test asserting the
+    byte-producing closure never runs.
+  - **TLS and WSS are recorded decrypted, and the CLI says so** — along with what redaction cannot
+    remove: the file still says who called whom, when, and from where.
+  - Body redaction is length-preserving, because shortening an SDP line would leave every message
+    inconsistent with its own `Content-Length` and unparseable by the tool the capture exists to be read
+    in.
+  - Stream framing failures now report to the driver and are counted per transport, closing a
+    `parse_failures` counter that was structurally stuck at zero for four of five transports.
+
 - **sipx ships an application, and the reachable surface is what it uses (`X-38`)** — `crates/sipx-app`
   gains a `sipx-host` binary that binds the listeners a `HostConfig` declares, admits invitations,
   answers on `sipx-call`, and serves to the end. `scripts/check-app-surface.py` holds every crate's

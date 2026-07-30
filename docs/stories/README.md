@@ -76,10 +76,6 @@ _Everything above this layer inherits its correctness properties. SIP's genuinel
 - [S-28 — Answer a 401 or 407 on an outbound INVITE](S-28-a-call-cannot-answer-an-authentication-challenge.md) · Signalling · found while closing P-7 — sipx-call has no credential type and no 401/407 path at all, so a challenged call fails outright; the digest machinery exists in sipx-ua and nothing above the registration path can reach it
 - [S-32 — Refuse a numeric flag that was given something that is not a number](S-32-a-flag-given-a-non-number-is-ignored.md) · Signalling · found by S-30 — `Args::number` conflates "absent" with "not a number", so `sipx answer --wait notanumber` exits 0 after the default 60s; `dial::numeric` already fixed it for `dial` alone, which is the tell that it was patched per-command instead of at the source
 
-### Transport layer
-_The transport layer is the only place in the signalling stack that touches the network, which_
-- [X-18 — Count what the stack discards, and capture what it sends](X-18-counters-and-capture.md) · Build · M12 · nothing leaves the process but tracing; T-19 adds the first counter and has nowhere to put it
-
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
 - [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast
@@ -214,6 +210,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [X-15 — Consider requirement-grain rows in the RFC registry](X-15-requirement-grain-registry.md) · Build · track: docs · an offer, not a dependency — decide whether per-RFC grain is enough
 - [X-16 — Assert against the RFC 5118 IPv6 torture corpus](X-16-rfc5118-ipv6-torture-corpus.md) · Build · M12 · RFC 5118 · the IPv6 twin of the corpus X-2 already imported
 - [X-17 — Interoperate against a second independent implementation](X-17-second-interop-peer.md) · Build · M12 · one interop peer is a sample of one, and no peer has ever answered a sipx call
+- [X-18 — Count what the stack discards, and capture what it sends](X-18-counters-and-capture.md) · Build · M12 · nothing leaves the process but tracing; T-19 adds the first counter and has nowhere to put it
 - [X-19 — Fuzz the transaction driver, not only the parser](X-19-fuzz-the-transaction-driver.md) · Build · M12 · four fuzz targets, all of them parsers; the timing half of the north star is untested
 - [X-20 — Let a caller take the digest primitives without taking a runtime](X-20-digest-without-a-runtime.md) · Build · sipx-ua pulls tokio unconditionally, so sans-IO code cannot use S-16's Authenticator
 - [X-21 — Make the timer queue generic over its instant](X-21-timer-queue-generic-over-its-instant.md) · Build · the queue documents clock-independence its signature contradicts · additive, breaks nothing
