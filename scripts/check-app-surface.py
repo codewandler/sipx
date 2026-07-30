@@ -44,9 +44,31 @@ register the project has already paid for twice (`X-22`'s gate list, `X-24`'s po
 ## Its limits, stated because a check that hides them is the thing it replaced
 
 - **Assertion 1 runs at crate granularity, because that is the granularity the declarations have.**
-  Outside the seven module markers, a `# Stability` section is prose about a crate. So a crate enters
-  the surface whole, and a supported *module* nothing reaches is not caught. Per-module declarations
-  would let this tighten; that is a successor, not a thing to fake here by parsing English.
+  Outside the module markers, a `# Stability` section is prose about a crate. So a crate enters the
+  surface whole, and a supported *module* nothing reaches is not caught. Per-module declarations would
+  let this tighten; that is a successor, not a thing to fake here by parsing English.
+- **The case that limit carries, named rather than left to be found: `sipx-ua`'s registration
+  surface.** `sipx-ua` enters the closure on one line of `host.rs`, and the host uses only its
+  answering half — `agent_config` names the listener's own address as a registrar that nothing ever
+  sends to, and `register` is not called. Its `Supported` declaration is registration leases, digest
+  authentication, Path, Service-Route, one Outbound flow and push, and every one of those is justified
+  in its own documentation by `sipx register --outbound` and `--push-provider`: by `sipx-cli`, the
+  caller `APPLICATIONS` deliberately refuses to count. So the largest supported claim in the tree is
+  backed by an application this predicate does not read.
+
+  **That claim is not unmeasured, and it is not demoted.** `sipx register` ships, is documented in
+  `website/docs/reference/cli.md`, and `A-8` settled that the CLI's promise is its command-line
+  surface, asserted by `tests/cli.rs`. Declaring it `Experimental` would make this repository say
+  something false about a command users run today. What was actually wrong is that the *basis* was
+  unstated: the declaration cites CLI commands and this checker silently read "reached by `sipx-app`"
+  as the justification. `cli_cited_but_uncalled` now checks the citation instead of trusting it — a
+  crate whose declaration rests on the CLI has to be a crate the CLI's code really calls into.
+
+  **Why the predicate is still worth calling met.** It measures the *call*-reachable surface, which is
+  what the alpha claims, and registration is not call-reachable in principle rather than by omission:
+  it happens before and outside any call. A registration claim is measured by the instrument that can
+  see it, and a call claim by this one. What would make the predicate hollow is a claim measured by
+  *nothing*, and that is the state this check exists to detect.
 - **A reference is attributed to the crate that contains it, not to the branch that runs it.** Inside
   the closure this inherits exactly the dead-branch weakness `X-30` recorded. What is different is
   the root: the closure starts at a program, so nothing reaches the surface without an application
@@ -270,8 +292,11 @@ def resolve(roots: tuple[str, ...]) -> dict[str, set[str]]:
     implemented, tested and compiled by the gate, and no shipped binary can turn it on. A surface
     defined by what `--all-features` builds would have called it reachable, which is the over-claim.
 
-    So the roots are resolved as they are *shipped* — with their default features — and a capability
-    behind a feature no application enables is not on the surface. Reaching for `cargo metadata`
+    So the roots are resolved as they are *shipped* — with their default features, and with the root
+    `[workspace.dependencies]` table read too — and a capability behind a feature no application
+    enables is not on the surface. Note the word: *enables*, not *can enable*. Someone can always build
+    with `--features opus`, and that is not what widens a surface; changing what the shipped binary
+    enables is, and that comes with a `CHANGELOG.md` entry. Reaching for `cargo metadata`
     would be more authoritative, but the CI job this runs in installs no Rust toolchain, and a check
     that silently degrades when its oracle is missing is worse than one that reads the manifests.
     """
@@ -696,6 +721,52 @@ def unselectable_and_unmarked(enabled: dict[str, set[str]]) -> list[str]:
     return problems
 
 
+#: The other application in the workspace, and the other basis a `Supported` claim can rest on.
+#:
+#: Not in `APPLICATIONS` — a surface defined by it would have been satisfied before this story started,
+#: which is the point `APPLICATIONS` makes at length. But a declaration is allowed to cite it, because
+#: `A-8` settled that its promise is its command-line surface and `tests/cli.rs` holds it to that. What
+#: is not allowed is citing it without its code backing the citation.
+CLI = "sipx-cli"
+
+#: A crate documentation citing the CLI as the caller of something: `` `sipx-cli` `` or `` `sipx foo` ``.
+_CITES_CLI = re.compile(r"`sipx-cli`|`sipx [a-z][\w-]*")
+
+
+def cli_cited_but_uncalled() -> list[str]:
+    """Crates whose `Supported` claim cites the CLI as its caller, where the CLI does not call them.
+
+    **The basis of a claim has to be checked, not trusted** (`X-38` rework). `sipx-ua` is the case:
+    it enters this closure on one line of `host.rs`, the host uses only its answering half, and its
+    whole `Supported` declaration — registration leases, digest authentication, Path, Service-Route,
+    one Outbound flow, push — is justified in its own documentation by `sipx register --outbound` and
+    `--push-provider`. That is a real caller and a shipped one, and it is not the application this
+    predicate reads, so the largest supported claim in the tree rested on a citation nothing verified.
+
+    Verifying it is cheap and worth doing: a declaration may not name the CLI as its caller unless the
+    CLI's own code names the crate. Demoting the claim instead would have been the wrong move — `sipx
+    register` is a command users run, documented in `website/docs/reference/cli.md` and asserted by
+    `tests/cli.rs`, so calling it `Experimental` would make this repository say something false.
+    """
+    problems = []
+    if not (CRATES / CLI / "src").exists():
+        return [f"{CLI} is not in the workspace, so no declaration can cite it as a caller"]
+    cli_code = caller_sources(CLI)
+    for crate in published():
+        if not has_library(crate) or not declares_supported(crate):
+            continue
+        if not _CITES_CLI.search(crate_doc(crate)):
+            continue
+        if any(names_crate(text, crate) for text in cli_code.values()):
+            continue
+        problems.append(
+            f"{crate} cites the command line as the caller of its `Supported` surface, and no source "
+            f"in {CLI} writes `{crate_path(crate)}::`. A citation is not a caller — name the "
+            f"application that really uses it, or mark the surface `Experimental`"
+        )
+    return problems
+
+
 def wholly_experimental() -> list[str]:
     """Crates whose own documentation declares the *whole crate* experimental.
 
@@ -775,6 +846,7 @@ def report() -> tuple[list[str], set[str], dict[tuple[str, str], pathlib.Path]]:
     problems = (
         unreached_supported(reached)
         + unused_edges(reached)
+        + cli_cited_but_uncalled()
         + reached_experimental(enabled)
         + reached_experimental_crates(enabled)
         + unselectable_and_unmarked(enabled)

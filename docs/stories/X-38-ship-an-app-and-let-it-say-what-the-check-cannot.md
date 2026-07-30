@@ -110,6 +110,67 @@ until a second application disagrees.
   application stops using returns to `Experimental` with a `CHANGELOG.md` entry, and any registry row
   that rested on the removed path is demoted in the same commit. A surface that can only widen is a
   freeze arriving one item at a time.
+- **Review round 1: nine attacks, five caught, four through — and every one that got through failed
+  silently.** That is the signature this script's own docstrings name as the worst case, so each is now
+  a named test rather than a fix.
+  - **Features in `[workspace.dependencies]` were invisible.** Every crate writes `foo.workspace =
+    true`, so the root table is where a feature naturally goes; `features = ["opus"]` there genuinely
+    makes the shipped binary link libopus, and the checker called it green while its own docstring
+    claimed the roots were resolved as shipped. **Opus is the example `README.md` leans on, so this was
+    the predicate failing, not a gap.** Both tables are read now, with Cargo's rule that a per-crate
+    list adds to the inherited one.
+  - **A crate-level `**Experimental**` declaration was never read**, so wiring `sipx-app-protocol` into
+    the host passed *and* dropped the experimental-crate count from 1 to 0. `README.md` promised the
+    build fails in that case, so the rule as written was false for the crate-sized case. `A-2`, `A-4`
+    and `A-5` wire exactly that crate in, so this was days away rather than hypothetical.
+  - **A comment counted as a caller** — `M-30`'s hole, in this checker, closed with `M-30`'s fix. It
+    fired both ways: prose naming an experimental module raised a spurious graduation demand.
+  - **A compound `cfg` read as unconditional**, so `all(feature = "opus", not(doc))` un-gated Opus and
+    the marker could then be deleted with the gate still green.
+- **Generalising the manifest-edge guard mattered more than the comment fix.** It only protected crates
+  claiming `Supported`, so a manifest line alone still moved the reported surface. It now applies to
+  every crate, which makes an unused workspace dependency reportable in its own right.
+- **Nothing ran the application, which went at the centre of the argument rather than at the checker.**
+  `serve`, `admit`, `carry`, `answer_out_of_dialog` and `refuse` were executed by no test and no script;
+  there was no `crates/sipx-app/tests/`; `de61fc3` said "sipx-app answers a call" and nothing asserted
+  it; and acceptance item 1's named assertion checked that `host.rs` was on disk. A surface defined by
+  an application nobody runs rests on what compiles — **the same weakness as the path checks this
+  predicate replaced**, since the claim in `README.md` is that an application has no dead branch to
+  cite. `crates/sipx-app/tests/host.rs` now drives it over real sockets: an INVITE answered and held,
+  a `reject = 603` document refusing with the operator's status, an OPTIONS probe answered 200 through
+  the agent's own `Allow` list, a session-only document refusing to serve, and N11 asserted against a
+  call that happened. `Host::run` is now the bind plus `Host::serve`, because a document binds an
+  ephemeral port and nothing could otherwise learn the address to send to.
+- **`sipx-ua`'s registration surface: named, kept, and its basis now checked.** It enters the closure on
+  one line of `host.rs`; the host uses only its answering half and never calls `register`. Its whole
+  `Supported` claim — leases, digest auth, Path, Service-Route, one Outbound flow, push — is justified
+  in its own documentation by `sipx register --outbound`, i.e. by `sipx-cli`, which `APPLICATIONS`
+  deliberately refuses to count. **Not demoted**: `sipx register` is a command users run, documented in
+  the CLI reference and asserted by `tests/cli.rs`, so calling it `Experimental` would make this
+  repository say something false. What was actually wrong is that the *basis* was unstated and this
+  checker read "reached by `sipx-app`" as the justification. `cli_cited_but_uncalled` now checks the
+  citation instead of trusting it, `sipx-ua` says which application backs its claim, and the limit names
+  the case. **Why the predicate is still worth calling met:** it measures the call-reachable surface,
+  and registration is not call-reachable in principle rather than by omission — it happens before and
+  outside any call. A claim measured by the wrong instrument is a bug; a claim measured by *nothing* is
+  what these checks exist to find, and there is no longer one of those.
+- **The maturity report asserted something false and it reached `main`.** It rendered "`implemented` now
+  means the code exists in a crate the shipped application depends on". RFC 8996 is `implemented` citing
+  `docs/specs/sip-tls.md` and no crate, and the sentence handed a load-bearing word a second definition
+  conflicting with the schema table `rfc-report.py` enforces — two meanings across the two documents a
+  reader consults. The report now *reads* the definition from `docs/rfc/README.md` rather than restating
+  it, and says what `X-38` actually changed, which is the reachability column.
+- **Two mechanism defects found alongside**: `code()` truncated each file at its first `#[cfg(test)]`,
+  discarding 30.2% of `crates/*/src`, and module gates keyed on the bare module name so two same-named
+  modules under different parents collided. Modules are now keyed by their path from the crate root,
+  which is also what a caller writes. Neither was hiding anything at the time, which is the point: both
+  would have failed printing nothing.
+- **Prose corrected to match the mechanism**: the rule says a feature no shipped binary *enables*, not
+  one it *cannot* enable. `resolve` reads the features the applications ship with, so building with
+  `--features opus` is not what widens a surface — changing what the binary enables is.
+- **Outside the Acceptance, kept deliberately**: `.gitignore` now ignores `__pycache__`, because
+  importing a checker to read a value out of it drops one beside the script and two had reached
+  branches.
 - **Known limit, stated rather than left to be found.** Assertion 1 runs at crate granularity, because
   that is the granularity the `# Stability` declarations have. A supported *module* that nothing in the
   closure names is not caught. Per-module declarations would let it tighten; that is a successor and

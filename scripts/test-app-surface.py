@@ -692,6 +692,63 @@ class TheReviewFindings(unittest.TestCase):
             self.assertEqual(gates["first::shared"].features, frozenset({"one"}))
             self.assertEqual(gates["second::shared"].features, frozenset({"two"}))
 
+    def test_a_claim_citing_the_cli_must_be_a_claim_the_cli_backs(self):
+        """`B3`: the largest `Supported` claim in the tree rests on a citation nothing verified.
+
+        `sipx-ua`'s declaration justifies registration, digest auth, Path, Service-Route, Outbound and
+        push by `sipx register --outbound` — by the CLI, which `APPLICATIONS` refuses to count. That is
+        a real, shipped caller, so the claim is not demoted; what was missing is that the citation was
+        trusted. Now it is checked.
+        """
+        with Workspace() as workspace:
+            workspace.add("sipx-app", declares="//! **Experimental.**")
+            workspace.add(
+                "sipx-cli",
+                declares="//! The command line.",
+                library=False,
+                modules={"main": "fn main() {}\n"},
+            )
+            workspace.add(
+                "sipx-registrar",
+                declares="//! **Supported**: leases, driven by `sipx register`.",
+            )
+            problems = surface.cli_cited_but_uncalled()
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn("cites the command line", problems[0])
+
+    def test_a_citation_the_cli_really_backs_passes(self):
+        with Workspace() as workspace:
+            workspace.add("sipx-app", declares="//! **Experimental.**")
+            workspace.add(
+                "sipx-cli",
+                declares="//! The command line.",
+                library=False,
+                modules={"main": "use sipx_registrar::Lease;\nfn main() {}\n"},
+            )
+            workspace.add(
+                "sipx-registrar",
+                declares="//! **Supported**: leases, driven by `sipx register`.",
+            )
+            self.assertEqual(surface.cli_cited_but_uncalled(), [])
+
+    def test_a_claim_citing_no_application_is_not_asked_about_the_cli(self):
+        """Only a declaration that names the CLI is held to naming it truthfully."""
+        with Workspace() as workspace:
+            workspace.add(
+                "sipx-app",
+                declares="//! **Experimental.**",
+                dependencies=["sipx-quiet"],
+                modules={"host": "use sipx_quiet::thing;\n"},
+            )
+            workspace.add(
+                "sipx-cli",
+                declares="//! The command line.",
+                library=False,
+                modules={"main": "fn main() {}\n"},
+            )
+            workspace.add("sipx-quiet", declares="//! **Supported**: the parser.")
+            self.assertEqual(surface.cli_cited_but_uncalled(), [])
+
     def test_a_test_module_in_the_middle_of_a_file_does_not_blind_the_rest(self):
         """The minor: truncating at the first `#[cfg(test)]` discarded 30.2% of `crates/*/src`."""
         text = (
