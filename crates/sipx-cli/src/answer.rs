@@ -24,6 +24,7 @@ OPTIONS:
     --reject          Answer 603 Decline instead
     --busy            Answer 486 Busy Here instead
     --once            Exit after one call (default; kept for clarity in scripts)
+    --capture <FILE>  Record the signalling to this pcapng file (credentials redacted)
     --json            Report as JSON
 ";
 
@@ -50,6 +51,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     if local.ip().is_unspecified() {
         "127.0.0.1".clone_into(&mut config.sent_by);
     }
+    crate::apply_capture(&args, &mut config);
     let (handle, mut incoming) = match bind(config).await {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),

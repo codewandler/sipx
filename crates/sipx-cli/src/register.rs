@@ -33,6 +33,7 @@ OPTIONS:
     --push-prid <T>      The identifier that service knows this device by
     --push-param <X>     Service-specific extra, when the service needs one
     --wake               Act as though a push arrived: refresh the binding and report the PURR
+    --capture <FILE>     Record the signalling to this pcapng file (credentials redacted)
     --json               Report as JSON
 ";
 
@@ -100,6 +101,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // The `Via` sent-by names where *this* client expects responses (RFC 3261 §18.1.1); the
     // bound address may be 0.0.0.0, which names every interface and reaches none.
     config.sent_by = crate::advertise::reachable_ip(local, target.addr.ip()).to_string();
+    crate::apply_capture(&args, &mut config);
     let (handle, _incoming) = match bind(config).await {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),

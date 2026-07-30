@@ -45,12 +45,9 @@ it exchanged recoverable as a capture that can be attached to a bug report.
 - [x] TLS, WSS and any future encrypted transport capture the *decrypted* messages, since capturing
       ciphertext from inside the process would be strictly worse than capturing outside it. The story
       says plainly that the resulting file contains credentials and call content.
-- [ ] `sipx` gains a way to turn it on from the command line, because the
+- [x] `sipx` gains a way to turn it on from the command line, because the
       [vision](../vision.md)'s "testable from a shell" is what makes this usable in an incident rather
-      than only in a test.
-      **Not done: the `sipx` binary is `crates/sipx-cli`, which was outside this story's fence while
-      `S-30` was in flight there.** The library half it needs is finished — `Config::capture` plus
-      `CaptureConfig` — so the flag is a small change against a settled API rather than a design.
+      than only in a test. `--capture <FILE>` on `dial`, `answer` and `register`.
 - [x] Failing-first test: `a_shed_request_and_an_unmatched_response_both_appear_in_the_counter_snapshot`.
 
 ## Progress
@@ -76,6 +73,15 @@ it exchanged recoverable as a capture that can be attached to a bug report.
   and fails on a discard with neither a counter nor a `// discard: <reason>` above it. Two of its three
   tests exist to prove the detector can fail, because a guard whose detector is broken looks exactly
   like a clean codebase.
+- **The CLI flag landed after `S-30` merged.** `--capture <FILE>` on the three commands that bind an
+  endpoint, applied by one `apply_capture` helper in `main.rs` rather than three copies. It is in
+  `VALUED_FLAGS`, so it inherits `S-30`'s rule that a valued flag given nothing — or given an empty
+  value, which is what an unset shell variable expands to — is a usage error naming the flag rather
+  than a run on a default nobody typed. No exception was added for it. `cli.rs`'s
+  `a_valued_flag_given_no_value_is_refused_by_every_command` derives its cases from each command's
+  help text at run time, so registering the flag and documenting it was enough to cover it.
+  **There is deliberately no flag to turn redaction off**, though the library allows it: exposing that
+  would put "ship the credentials" one word away from someone debugging an incident at 3am.
 - **Media (Acceptance 3) is deliberately not done, and not merely unfinished.** "Join them" hides a
   design decision: `sipx-transport` cannot depend on `sipx-media`, so media counters either need a
   shared counters crate underneath both, or a parallel type of the same shape. The repo has already
