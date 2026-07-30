@@ -515,10 +515,15 @@ class ClaimReachability(unittest.TestCase):
         """The same hole one directory in, which `X-30` recorded and left open.
 
         `crates/sipx-call/README.md` would have satisfied a rule that only asked which crate the
-        path is in. Closing it costs one condition and nothing else: of the registry's 117 evidence
-        paths exactly two are not `.rs` files, both `docs/specs/sip-tls.md` (RFC 5922's and 8996's),
-        and both are outside `crates/`. (The design said "80 paths, exactly one" — measured here
-        rather than inherited, and both halves of that were stale.)
+        path is in. Closing it costs one condition and nothing else: exactly one evidence path in
+        the registry is not a `.rs` file — `docs/specs/sip-tls.md`, cited by RFC 5922 — and it is
+        outside `crates/` anyway.
+
+        No count is quoted here on purpose. The design said "80 paths, exactly one"; `X-33` ran it
+        and got 117 and two, the second being RFC 8996's citation of the same spec; `X-43` replaced
+        that one with code and the total had moved again. Three statements of one fact, each stale
+        when it was next read. What is worth asserting is the property, and
+        `ProseIsNotEvidence.test_no_claim_in_the_registry_rests_on_prose_alone` asserts it.
         """
         entry = self.a_media_entry(evidence=["crates/sipx-cli/Cargo.toml"])
         self.assertTrue(
@@ -699,6 +704,98 @@ class ClaimReachability(unittest.TestCase):
         for number in (5763, 5764, 8122, 8445, 8839):
             with self.subTest(rfc=number):
                 self.assertEqual([], by_number[number].get("roles", []))
+
+
+class ProseIsNotEvidence(unittest.TestCase):
+    """A row claiming behaviour must cite code, not only a document (`X-43`).
+
+    The rule before this one was that an `implemented` or `partial` row cites *something*, and a
+    document satisfied it. RFC 8996 was the row that showed the gap: `status = "implemented"`,
+    `evidence = ["docs/specs/sip-tls.md"]` — our own sentence saying TLS 1.2 is the floor. The gate
+    reported "70 RFCs, every claim backed" and by its own rule that was true, because the file
+    exists. A sentence cannot fail, so the claim would have outlived the behaviour.
+
+    Adopted after measuring, which is this file's standing requirement of itself: 8996 was the only
+    one of the 32 `implemented` and 22 `partial` rows citing no `crates/….rs` path. The rule costs
+    the row that prompted it and nothing else, and it is far weaker than `ClaimReachability` —
+    *any* Rust file in *any* workspace crate counts, so it has none of that rule's measured
+    false-positive problem and needs no layer scope.
+
+    `docs/designs/rfc-registry-grain.md` carries the decision, including why `syntax` is not held to
+    it and what was considered instead.
+    """
+
+    def test_a_claim_citing_only_a_document_is_rejected(self):
+        """The failing case, which is RFC 8996 as it stood in fixture form."""
+        entry = an_entry(status="implemented", evidence=["docs/specs/sip-tls.md"])
+        problems = report.check([entry])
+        self.assertTrue(
+            any("9999" in p and "prose" in p for p in problems),
+            f"a claim resting on our own prose was accepted; problems={problems}",
+        )
+
+    def test_a_partial_claim_is_held_to_it_too(self):
+        """`partial` is a claim about behaviour in the same table, so it cites code too.
+
+        The demotion the reachability rule uses must not become a way to keep a prose-only claim.
+        """
+        entry = an_entry(status="partial", evidence=["docs/specs/sip-tls.md"])
+        self.assertTrue(any("prose" in p for p in report.check([entry])))
+
+    def test_a_document_alongside_code_is_fine(self):
+        """The rule asks for code, not for the absence of prose.
+
+        RFC 5922 cites its spec next to two Rust files, and that citation is the useful kind: it is
+        how a reader of the table finds the normative document.
+        """
+        entry = an_entry(
+            status="implemented",
+            evidence=["crates/sipx-transport/src/tls.rs", "docs/specs/sip-tls.md"],
+        )
+        self.assertEqual([], [p for p in report.check([entry]) if "prose" in p])
+
+    def test_a_row_claiming_no_behaviour_is_not_asked_for_code(self):
+        """`none`, `n/a` and `syntax` are outside the rule, each for its own reason.
+
+        `none` and `n/a` cite nothing at all. `syntax` claims the parser represents something, and
+        `known_headers` checks that against the name table directly — a stronger test than any path
+        could be. Widening to `syntax` would cost nothing today (all six already cite code) and is
+        left undone rather than done cheaply, because the set the evidence rule already uses is the
+        one an author has to remember.
+        """
+        for status in ("none", "n/a", "syntax"):
+            with self.subTest(status=status):
+                entry = an_entry(status=status, evidence=["docs/specs/sip-tls.md"])
+                self.assertEqual([], [p for p in report.check([entry]) if "prose" in p])
+
+    def test_an_empty_evidence_list_keeps_its_own_message(self):
+        """Two different mistakes, two different remedies, so two different messages."""
+        entry = an_entry(status="implemented", evidence=[])
+        problems = [p for p in report.check([entry]) if "9999" in p]
+        self.assertTrue(any("no evidence cited" in p for p in problems), problems)
+        self.assertEqual([], [p for p in problems if "prose" in p])
+
+    def test_no_claim_in_the_registry_rests_on_prose_alone(self):
+        """The rule, measured against the registry it guards rather than against a fixture."""
+        for entry in registry_entries():
+            with self.subTest(rfc=entry["number"]):
+                self.assertEqual([], report.prose_only_claims(entry))
+
+    def test_the_row_that_prompted_the_rule_cites_its_refusal(self):
+        """RFC 8996 by number, because a negative obligation has only one kind of evidence.
+
+        The claim is that 1.0 and 1.1 are *not* offered, which nothing sipx does can demonstrate —
+        only an attempt that fails can. So the row must keep citing the handshake test, and the note
+        must keep saying whose property the floor actually is: rustls offers nothing below 1.2, and a
+        change of backend would move the claim without a line of sipx changing.
+        """
+        row = {e["number"]: e for e in registry_entries()}[8996]
+        self.assertIn("crates/sipx-transport/tests/tls_versions.rs", row["evidence"])
+        self.assertTrue(
+            (ROOT / "crates/sipx-transport/tests/tls_versions.rs").exists(),
+            "the refusal test is the whole evidence for a negative claim",
+        )
+        self.assertIn("rustls", row["note"])
 
 
 class TheRealRegistry(unittest.TestCase):

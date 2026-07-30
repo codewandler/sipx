@@ -439,8 +439,11 @@ number = 8996
 title = "Deprecating TLS 1.0 and TLS 1.1"
 layer = "security"
 status = "implemented"
-evidence = ["docs/specs/sip-tls.md"]
-note = "1.2 is the floor and is not configurable downward."
+evidence = [
+  "crates/sipx-transport/src/tls.rs",
+  "crates/sipx-transport/tests/tls_versions.rs",
+]
+note = "1.2 is the floor and is not configurable downward. A negative obligation, so the evidence is an attempt: `tls_versions.rs` writes a 1.0 and a 1.1 `ClientHello` at a sipx TLS listener and requires a fatal `protocol_version` alert, with the same hello at 1.2 accepted as the control (`docs/specs/sip-tls.md` §6, vector L9). **The property belongs to rustls, not to sipx**: sipx implements no TLS and names no version, so 1.0 and 1.1 are excluded because the library offers nothing below 1.2 to select — a change of TLS backend would move this claim without touching any sipx code, which is why the same test asserts the library's version set. `X-43` replaced the previous evidence, our own spec prose, which was the only `implemented` citation in the registry that could not fail."
 
 [[rfc]]
 number = 4474

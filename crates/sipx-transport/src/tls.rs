@@ -15,6 +15,14 @@
 //! **The name checked is the one sipx set out to reach**, not the name a SRV record led to.
 //! Checking the resolved name would let whoever can influence DNS choose which certificate is
 //! acceptable, and the verification becomes decorative.
+//!
+//! **The version floor is the library's, not ours** (§3.5, RFC 8996). Both configurations below
+//! are built from `rustls`'s default version set, and neither this file nor anything above it
+//! names a version — so 1.0 and 1.1 are excluded because the library has nothing older than 1.2
+//! to select, not because sipx refuses them. That makes the floor a *dependency* property: a
+//! backend that still spoke 1.0 would move it without a line changing here, which is why RFC
+//! 8996's registry row cites `tests/tls_versions.rs` — the refusal observed on the wire, plus the
+//! version set asserted — rather than the sentence in the spec.
 
 use std::sync::Arc;
 

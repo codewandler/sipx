@@ -1,7 +1,8 @@
 # Design: the grain of the RFC registry
 
 **Status:** decided · **Pillar:** Build · **Epic:** `conformance` · **Stories:** X-15 (X-7 built
-the registry this decides the grain of), X-30 and X-33 (the reachability rule the grain carries)
+the registry this decides the grain of), X-30 and X-33 (the reachability rule the grain carries),
+X-43 (what a citation has to be)
 
 ## The decision
 
@@ -407,6 +408,12 @@ Measured: **117 paths, and two are not `.rs`** — `docs/specs/sip-tls.md`, cite
 is the fourth crisp-sounding fact in this document's lineage to fail when run, which is why the story
 that fixed it was told to try falsifying its own sentences first. See below.
 
+*(Superseded as of `X-43`, and left standing because it is `X-33`'s measurement of `X-33`'s registry:
+both halves have moved again — the path total is now larger and 8996 no longer cites the spec, so RFC
+5922's citation is the only non-`.rs` occurrence left. This document no longer states either number
+anywhere, for the reason the paragraph above gives; the property is asserted in
+`scripts/test-rfc-report.py` instead. See "X-43" below.)*
+
 ### A third false justification, and the same shape again
 
 `X-30`'s replacement for its first false claim cited `crates/sipx-cli/tests/cli.rs:116` as exercising
@@ -562,11 +569,121 @@ list.)*
 - ~~**A path under `crates/` that is not code.**~~ **Closed by `X-33`.** The narrower version had the
   same hole one directory in: `crates/sipx-call/README.md` would have satisfied the check.
   `reaches_the_call_layer` now requires `.rs`. The measurement this was recorded with was itself
-  wrong — 117 paths, two of them not `.rs` — and the correction is under `X-33` above.
+  wrong — 117 paths, two of them not `.rs` — and the correction is under `X-33` above. Both of those
+  numbers have since moved again (`X-43`), which is why neither this document nor the script states a
+  count any more.
+
+## X-43: what a citation has to be, and the one row that answered it
+
+X-30 and X-33 asked whether a row's evidence points at something a *call* reaches. X-43 asks the
+question one step earlier: does it point at anything that can **stop being true**?
+
+RFC 8996 said no. `status = "implemented"`, `evidence = ["docs/specs/sip-tls.md"]` — our own
+sentence, in §3.5, saying TLS 1.2 is the floor. `rfc-report.py --check` passed it and printed "70
+RFCs, every claim backed", correctly by its own rule: the file exists. It was the only one of 70
+rows in that position, and it was found by reading all 70 rather than by anything mechanical.
+
+### A negative obligation has exactly one kind of evidence
+
+RFC 8996 says *do not offer* 1.0 and 1.1. No sipx code performs that; there is no function to cite
+and no assertion about our own behaviour that could fail. The only evidence that can fail is an
+**attempt**, so `crates/sipx-transport/tests/tls_versions.rs` makes one: it writes a `ClientHello`
+byte by byte at a real sipx TLS listener (`bind` with `tls_server` set) with `client_version` at
+1.0 and at 1.1 and no `supported_versions` extension, and requires a fatal `protocol_version`
+alert and then the connection **closed** (§3.1: a failure closes it, no "continue anyway"). That is
+`docs/specs/sip-tls.md` §6 vector **L9**, which had been in the spec since T-7 and had never been run.
+
+The third assertion — that nothing reached the application behind the listener — is labelled weak in
+the test itself, because it is: a raw client sends no SIP message, so nothing would arrive whether
+the handshake was refused or accepted. It catches a refused connection being adopted into the pool
+anyway and nothing more. `closed` is the assertion that discriminates, and it was checked by asserting
+it of the 1.2 control, which fails: an accepted handshake leaves the socket open.
+
+Building the hello by hand is what makes this testable without a dependency: `ClientTls` cannot
+offer a deprecated version, which is the property under test, so it is no way to test it. The
+alternative — a crate that drives an obsolete handshake — would have been a manifest change for
+one negative test.
+
+**The control is the load-bearing half.** A hand-built negative test passes for the wrong reason
+by default: refuse the hello for a missing `signature_algorithms` extension and it looks exactly
+like refusing it for its version. So the same bytes are offered again with four of them changed to
+1.2 — the two version bytes in the record header and the two in `client_version` — and that hello is
+*accepted*. Only the version differs, so only the version can be the
+reason. (rustls does in fact demand `signature_algorithms` before it looks at the version at all,
+so the first draft of this test failed for that reason and would have "passed" as soon as the
+assertion was loosened to "refused".)
+
+### The claim belongs to a dependency, and the row now says so
+
+sipx implements no TLS and names no version: both configurations in `crates/sipx-transport/src/tls.rs`
+are built from rustls's default version set, and that set is `{1.3, 1.2}` because the library has
+nothing older to select. The floor is therefore a **dependency property**, and a change of backend
+would move it without a line of sipx changing — the failure mode this registry exists to prevent,
+one level down from the code. Three things now say so where the claim is made: the row's note, the
+module documentation on the file the row cites, and a test asserting the library's version set
+directly, which is the thing that goes red when a backend grows a third, older version.
+
+### The rule: `implemented` and `partial` must cite code
+
+**Adopted.** `prose_only_claims` in `scripts/rfc-report.py` requires at least one
+`crates/….rs` path on every row whose status claims behaviour. Measured before adopting, as this
+file requires of itself: of 32 `implemented` and 22 `partial` rows, **8996 was the only one** that
+did not already satisfy it. The rule costs the row that prompted it and nothing else, and the next
+such row is caught on arrival instead of by auditing all 70 again.
+
+It is deliberately much weaker than `unreachable_claims`: any Rust file in any workspace crate
+counts. "Is this a claim about code" and "can a call reach that code" are different questions, and
+the second has a measured false-positive rate (19 of 22, above) that is why it is scoped to two
+layers. The first has none to scope around — a behaviour claim pointing at no code is not a claim
+anything can check — so it applies to every layer.
+
+Three narrower or wider versions were weighed and declined:
+
+- **Require a path containing `test`.** This is the mechanically appealing one, and it is wrong for
+  the reason this document keeps recording: it would reject a large set of honest rows. Fourteen
+  `implemented` rows cited no path containing `test` at the merge base (thirteen now, 8996 having
+  joined the other side). Every one is fine, because Rust keeps unit tests in an inline
+  `#[cfg(test)]` module in the file under test — RFC 3264's `crates/sipx-sdp/src/answer.rs` carries
+  28 `#[test]` functions in one such block. A check binding to a filename would call all fourteen
+  liars and catch nothing.
+- **Hold `syntax` to it too.** Free today — all six already cite code — and left undone. A `syntax`
+  claim is that the parser represents something, and `known_headers` checks that against the
+  parser's own name table, which is a stronger bind than any path. The rule follows the set the
+  evidence rule already uses so that there is one thing for an author to remember, not two.
+- **Require evidence to be *only* code.** No: RFC 5922 cites its spec alongside two Rust files, and
+  that is the useful kind of citation — it is how a reader of the generated table finds the
+  normative document. The `spec` key exists for the same purpose. The rule asks for code, not for
+  the absence of prose.
+
+**The rule is written where registry authors read, not only here.** `docs/rfc/README.md` is the
+consumable contract — the schema table, and the enumerated list of everything `--check` fails on —
+and `scripts/maturity.py` machine-reads it for what `implemented` means. Raising the rule in
+`AGENTS.md` while leaving that file describing the weaker one would have left an author writing a
+spec-only row in the belief that it passes, which is the same class of defect as the row this story
+came from: the document that owns a question no longer answering it. So the `evidence` key
+description, the failure list and a new "Evidence must be able to fail" section all state the rule,
+following how `X-33` wrote up the `.rs` condition and the `security` scope in the same file.
+
+### What this does not close
+
+`prose_only_claims` binds to a path, like every check in this file. A row can satisfy it by citing
+Rust that nothing runs, which is the dead-branch limit already recorded above and the case for the
+cross-crate caller check. And it says nothing about whether the cited code has anything to do with
+the RFC: only a human reading the row can tell that `tls.rs` is about TLS.
+
+The residual on the other side is worth naming too, because 8996 is the shape it takes: a claim
+whose property belongs to a dependency can only ever be evidenced by observing the dependency. The
+test does that, and if the observation is ever deleted the row's citation dies with it — which is
+the point. `test_the_row_that_prompted_the_rule_cites_its_refusal` holds the row to the citation
+and to naming rustls in the note, so neither can quietly go away.
 
 ## Consequences
 
 - The registry keeps one row per RFC, and gains an enforced key set.
+- A row claiming `implemented` or `partial` must cite Rust source in a workspace crate (`X-43`), so
+  a claim can always be made to fail by changing the code. Prose alongside it is welcome; prose
+  alone is not evidence. Written up in `docs/rfc/README.md` — the schema row, the failure list and
+  its own section — because that is the file a registry author and a downstream both read.
 - A `[[rfc.requirement]]` row is now a gate failure with a message naming this document, so the
   next person to want the grain finds the argument instead of rediscovering it.
 - `docs/rfc/README.md` documents the schema as a consumable contract, which is what a downstream

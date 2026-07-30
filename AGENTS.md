@@ -78,9 +78,12 @@ measured, and `scripts/gate.py` prints the threshold and the actual free space w
 
 `rfc-report.py` regenerates `docs/compliance.md` from `docs/rfc/registry.toml` and checks that
 its claims hold: a named header must be known to the parser, a cited file must exist, and an
-entry claiming implementation must cite something. **When a story changes what sipx supports,
-update the registry in the same commit.** The table is linked from the README as a measurement,
-and a measurement that lags the code is worse than no table at all.
+entry claiming implementation or partial support must cite Rust source in a workspace crate —
+prose alongside it is welcome, prose alone is not evidence. The rule was "cites something" until RFC
+8996 satisfied it with a spec paragraph saying TLS 1.2 is the floor: a citation that cannot fail
+(`X-43`). `docs/rfc/README.md` is the schema, and lists every way `--check` fails. **When a story
+changes what sipx supports, update the registry in the same commit.** The table is linked from the
+README as a measurement, and a measurement that lags the code is worse than no table at all.
 
 `check-pool-key.py` holds `docs/specs/sip-transport.md` §8 against `ConnectionKey`, whose fields
 the section lists in a generated region. The list used to be prose in three specs and was wrong
