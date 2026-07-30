@@ -5,6 +5,8 @@ All notable changes to sipx are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
 ### Added
 
 - **The distance to `1.0.0-alpha` is generated, not estimated (`X-32`)** — someone asked how far sipx
@@ -38,10 +40,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     caveat follows.
   - The check earned itself on its first run: closing `X-32`'s own story changed the answer and turned
     the gate red until the report was regenerated.
-
-## [Unreleased]
-
-### Added
 
 - **Every transport discard is counted, and the signalling can be captured to a file (`X-18`)** — a
   running sipx is now observable from outside: `Handle::counters` returns a snapshot over shared atomics
