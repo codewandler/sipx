@@ -46,6 +46,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     **falsified against a real mutation** rather than trusted for passing: selecting a binding by
     position instead of by `+sip.instance` makes both instances adopt one GRUU, and discarding RFC
     8599 §8.2's PURR fails the push test.
+  - **The GRUU demonstration assumes less than it first did.** As merged, the only thing keeping the
+    call away from the instance the GRUU does not name was the test's own routing double — so the
+    clause was held by the harness declining to deliver rather than by sipx declining to answer. Both
+    instances are passed to the call helper now, and the un-named one is asserted to refuse the
+    request even had the routing sent it there.
 
 ### Fixed
 
