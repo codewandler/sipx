@@ -2,7 +2,7 @@
 id: X-52
 title: Demonstrate M10's GRUU and push clauses as they are written
 pillar: Build
-status: in-progress
+status: done
 priority: 3
 epic: conformance
 areas: [sipx-call, sipx-ua, sipx-cli]
@@ -16,31 +16,62 @@ Close the gap `X-50` found between M10's first two clauses and the tests that ar
 demonstrate them, so the milestone can be recorded on evidence rather than on mechanism.
 
 ## Acceptance
-- [ ] **Two registrations of one address of record, and a call that reaches exactly one of them.**
+- [x] **Two registrations of one address of record, and a call that reaches exactly one of them.**
       M10's clause is "one of two registrations of the same address of record can be called
       individually". `T-20`'s `a_request_to_a_gruu_reaches_the_instance_that_registered_it` is an
       `OPTIONS` against one agent and a stub registrar — it demonstrates that a GRUU is recognised
       and that a wrong one is refused, which is the mechanism, not the clause. The new test registers
       two instances of one AOR and places a **call** at one instance's GRUU, asserting the other
       instance never sees it.
-- [ ] **A pushed client that answers.** `T-21`'s
+- [x] **A pushed client that answers.** `T-21`'s
       `a_push_wakes_a_client_that_refreshes_its_binding_before_the_invite` asserts RFC 8599 §4.1.3's
       ordering — push, binding-refresh REGISTER, then the INVITE — and stops when the INVITE arrives.
       The clause is "a push wakes a client that held no connection **into an answered call**". Carry
       it through to an answered call with audio, or state why the answered half is not testable here
       and what would make it so.
-- [ ] **Failing-first for both.** Each new test must be red before the work and green after, and the
+- [x] **Failing-first for both.** Each new test must be red before the work and green after, and the
       redness must come from the clause rather than from the harness — a test that fails because two
       registrations were never set up proves nothing about being individually callable.
-- [ ] **`docs/roadmap.md`'s "Where M10 stands" block is updated in the same commit**, and if this
+- [x] **`docs/roadmap.md`'s "Where M10 stands" block is updated in the same commit**, and if this
       closes the last gap, M10 moves to Delivered with the three tests named. `X-50` wrote that block
       and it becomes wrong the moment this lands.
-- [ ] No claim is made for a clause whose test does not demonstrate it. That substitution is the
+- [x] No claim is made for a clause whose test does not demonstrate it. That substitution is the
       whole reason this story exists.
 
 ## Progress
 - Filed 2026-07-30 by `X-50`, which checked M10's evidence rather than its statuses and found the ICE
   clause demonstrated and the other two not.
+- Closed 2026-07-31, and **M10 is delivered**. Both clauses are demonstrated in
+  `crates/sipx-cli/tests/reachable.rs`, beside the CLI's tests because this is the crate that already
+  depends on registration, signalling, media and audio at once — which is what a clause about being
+  *reached* is a claim about. Nothing calls the binary; the library is the subject.
+- **Both tests passed the first time they ran.** Nothing in the stack was broken: M10 was short of
+  evidence, not of behaviour. That makes the third Acceptance item unsatisfiable as written — there
+  was no defect to be red about — so it is satisfied by **falsification** instead, which is the
+  honest equivalent and is recorded as a deviation rather than as a pass:
+  - Making `Gruus::from_response` select a binding by position instead of by `+sip.instance` — the
+    failure that function's own doc comment names — has both instances adopt the same GRUU, and
+    `one_of_two_registrations_of_an_address_of_record_is_called_individually` fails naming it:
+    "two instances of one AOR were issued the same GRUU, which names neither".
+  - Discarding the PURR RFC 8599 §8.2 assigns the binding fails
+    `a_push_wakes_a_client_that_held_no_connection_into_an_answered_call` on the assertion that the
+    PURR names the binding the held request is released down.
+  - Both mutations were reverted and both tests confirmed green again, and both ran green inside the
+    full 25-step gate. The audio-carrying half of the push clause is asserted but was not
+    separately mutated: its controls are the clip's own loudness and G.711 equality both ways, so
+    silence of the right length cannot pass it.
+- The routing double reads the Request-URI and nothing else, through the library's own
+  `sipx_sip::gruu::gr_value` rather than by URI equality. RFC 5627 §5.4 warns that a public GRUU is
+  URI-equal to the address of record, so a double comparing URIs would fan every GRUU out to both
+  instances and pass while demonstrating the opposite of the clause.
+- `docs/roadmap.md` was updated in the **ledger commit** rather than in the implementor's commit, a
+  deliberate deviation from this story's fourth item: the roadmap is a shared ledger fenced out of
+  every implementor worktree, because otherwise two stories in one wave collide on it. The block
+  was written from the evidence this story produced.
+- The implementor was killed mid-run by an org monthly spend limit. Its work was rescued to
+  `impl/X-52`, and the falsification, the gate and the roadmap block were done at integration. It
+  never reached the gate, so `cargo fmt` had not run on the file; two call sites were rewrapped.
+  Reviewed by one context rather than two.
 
 ## Notes
 - **This is the whole remaining distance to M10** under the reading `X-50` settled: the third clause

@@ -106,18 +106,40 @@ question of what can be built on this stack without writing Rust. **M9** waits b
   - Where M8 stops: the packages produce documents, and joining them to a live dialog store or
     registration lease is the application's. A package reaching into the call layer would make
     `sipx-ua` depend on `sipx-call` and reverse the workspace's dependency direction.
+- **M10 — Reachable.** The three ways of being reached that M6 left open, each recorded against the
+  test its clause is *written* as rather than against the mechanism underneath it. `X-50` checked the
+  evidence rather than the statuses and found two of the three short; `X-52` closed that distance
+  without widening a clause:
+  - **One of two registrations of an address of record, called individually** —
+    `one_of_two_registrations_of_an_address_of_record_is_called_individually`. Two instances register
+    one AOR; a call placed at the first instance's GRUU is answered by that instance and carries audio
+    both ways, and the second, whose registration is equally current, never sees the INVITE. The
+    contrast is what carries the claim: the same routing applied to the address of record resolves to
+    *both* bindings, so being individually callable is a property of the GRUU and not of having
+    registered.
+  - **A push into an answered call** —
+    `a_push_wakes_a_client_that_held_no_connection_into_an_answered_call`. A client holding no
+    connection at all is woken, refreshes its binding, answers the call it was woken for, and carries
+    audio in both directions — asserted in RFC 8599 §4.1.3's order, because an answered call proves
+    nothing about a push if the client was reachable all along.
+  - **A nominated pair where symmetric RTP cannot reach** — `M-27`'s
+    `a_call_uses_a_nominated_pair_when_both_host_candidates_are_silent`, which already held and is
+    untouched by this story.
+  - **`M-16`'s open tracker is not M10's status.** It stays open for `M-24`'s relayed candidate,
+    which belongs to the ICE epic and to no milestone; reading the tracker as the milestone is the
+    substitution [the M10 section below](#m10--reachable) exists to refuse.
 
 ## Next
 
 Four milestones, each independently demonstrable, each ordered by the same rule the
 [RFC roadmap](rfc-roadmap.md) uses: **a gap that changes what sipx can be deployed as beats a gap
-that adds a feature.** M9 to M12 are defined and their stories are cut. M10's are nearly all done and
-it is still not declared — [where M10 stands](#m10--reachable) says which clause of its exit criterion
-is short of the demonstration it is written as. **M12's four stories are all closed and it is not
-declared either**: `X-51` checked its four **Done when** clauses against the tests and CI jobs meant
-to demonstrate them, and found three held and the fourth short in the same way M10's were —
-[where M12 stands](#m12--provable). M9 is a third done: `S-19` closed, `C-2` and `C-1` open.
-Only M11 is unstarted. The in-progress
+that adds a feature.** M9 to M12 are defined and their stories are cut. **M10 is delivered** as of
+`X-52` — its section stays below because the scoping argument in it is still load-bearing, and
+[where M10 stands](#m10--reachable) now records which test carries each of its three clauses.
+**M12's four stories are all closed and it is not declared**: `X-51` checked its four **Done when**
+clauses against the tests and CI jobs meant to demonstrate them, and found three held and the fourth
+short in the same way M10's two were — [where M12 stands](#m12--provable), and `X-54` is the distance
+left. M9 is a third done: `S-19` closed, `C-2` and `C-1` open. Only M11 is unstarted. The in-progress
 work is the [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host)
 epics below, which are not milestones because they are not RFC gaps.
 
@@ -197,28 +219,33 @@ What it buys is exactly the case the clause above excludes: both ends behind sym
 candidate type but a relayed one reaches. Until it lands, sipx's ICE is host and server-reflexive,
 and the [compliance table](compliance.md) says so — 8445 and 8839 are `partial`.
 
-**Where M10 stands, 2026-07-30.** All three mechanisms are built, and the milestone is **not recorded
-as reached**, because two of the three clauses are held by mechanism rather than by the demonstration
-they are written as:
+**Where M10 stands, 2026-07-31.** **Delivered.** All three clauses are now demonstrated by a test
+written as the clause is written, and the milestone is recorded in [Delivered](#delivered) against
+those three tests rather than against the statuses of the stories that built the mechanisms:
 
-- **GRUU** — `T-20`, done. `a_request_to_a_gruu_reaches_the_instance_that_registered_it` shows a
-  request addressed to one instance's GRUU recognised by that instance, and refused when it names the
-  address of record or another instance's GRUU. It is an `OPTIONS` against one agent and a stub
-  registrar, not two registrations of the same address of record each taking a call.
-- **Push** — `T-21`, done. `a_push_wakes_a_client_that_refreshes_its_binding_before_the_invite` shows
-  RFC 8599 §4.1.3's order: push, binding-refresh REGISTER, then the INVITE that could not have
-  arrived any earlier. It stops when the INVITE arrives; nothing answers it.
+- **GRUU** — `X-52`'s `one_of_two_registrations_of_an_address_of_record_is_called_individually`. Two
+  instances of one address of record, a call placed at one instance's GRUU, answered by that instance
+  with audio both ways, and the other instance never sees it. `T-20`'s
+  `a_request_to_a_gruu_reaches_the_instance_that_registered_it` remains what it always was — an
+  `OPTIONS` against one agent and a stub registrar, the mechanism this composes on top of — and is
+  not reopened.
+- **Push** — `X-52`'s `a_push_wakes_a_client_that_held_no_connection_into_an_answered_call`, which
+  carries `T-21`'s ordering through to the answered call and the audio on it. `T-21`'s
+  `a_push_wakes_a_client_that_refreshes_its_binding_before_the_invite` proved §4.1.3's order and
+  stopped at the INVITE, which was its whole Acceptance and is not reopened either.
 - **ICE** — `M-19`…`M-23` and `M-27`, done; `M-24` out of scope per above. Demonstrated in full by
   the test named in ground 1. The table's `M-16` row is the epic's tracker, and a tracker stays open
   until its last child lands — including `M-24`. **`M-16`'s status is therefore not M10's**, and
   reading it as M10's is the same substitution the ICE heading used to make.
 
-**The distance left is not TURN.** It is the first two clauses demonstrated as they are already
-written — nothing added to them: two registrations of one address of record where a call placed at
-one instance's GRUU is answered by that instance and not the other, and a pushed client that answers
-the call it was woken for. Recording M10 as delivered before that exists would be the defect `X-30`,
-`X-35` and `X-42` each found — a claim true of one reading of its evidence and false of the reading
-a reader would take.
+**What was demonstrated, and what was not repaired.** Both new tests passed the first time they ran:
+nothing in the stack was broken, and this milestone was short of *evidence* rather than of behaviour.
+That is a weaker claim than a red-then-green fix, so each test was falsified against a real mutation
+of the library instead of being trusted for passing. Making `Gruus::from_response` select a binding by
+position rather than by `+sip.instance` — the failure its own doc comment names — has both instances
+adopt the same GRUU and the first test says so by name; discarding the PURR that RFC 8599 §8.2 assigns
+the binding fails the second. Recording M10 as delivered on tests that had never been shown capable
+of failing would have been the defect `X-30`, `X-35` and `X-42` each found, one layer further out.
 
 ### M11 — Attestable
 

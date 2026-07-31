@@ -29,6 +29,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     by naming a constant documented in another crate — and both are closed, the second by deleting
     the cross-file lookup rather than narrowing it.
 
+- **M10 — Reachable is delivered, on evidence rather than on mechanism (`X-52`)** — `X-50` checked
+  M10's exit criterion against the tests meant to demonstrate it and found two of its three clauses
+  held by the mechanism underneath them: the GRUU test was an `OPTIONS` against one agent, and the
+  push test stopped when the INVITE arrived with nothing answering it. Both clauses are now
+  demonstrated as they are written, in `crates/sipx-cli/tests/reachable.rs`.
+  - **Two registrations of one address of record, called individually.** A call placed at one
+    instance's GRUU is answered by that instance with audio both ways, and the other instance — its
+    registration equally current — never sees the INVITE. The contrast carries it: the same routing
+    applied to the address of record resolves to *both* bindings.
+  - **A push into an answered call.** A client holding no connection is woken, refreshes its binding,
+    answers the call it was woken for, and carries audio both ways, in RFC 8599 §4.1.3's order.
+  - **Neither `T-20` nor `T-21` is reopened.** Each delivered the mechanism it was written for; this
+    is the composition on top, which was never in their Acceptance.
+  - Both tests passed on first run — M10 was short of evidence, not of behaviour — so each was
+    **falsified against a real mutation** rather than trusted for passing: selecting a binding by
+    position instead of by `+sip.instance` makes both instances adopt one GRUU, and discarding RFC
+    8599 §8.2's PURR fails the push test.
+
 ### Fixed
 
 - **Both RFC corpora are tamper-evident from the gate and from CI (`X-56`)** — each corpus is
