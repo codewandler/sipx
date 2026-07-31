@@ -142,6 +142,24 @@ async fn carried(from: &Call, to: &Call, samples: &[i16]) -> Vec<i16> {
     heard
 }
 
+/// Whether an INVITE is waiting at an endpoint, draining whatever else is.
+///
+/// `try_recv` and not a timed wait, because there is a happens-before to stand on: the call this is
+/// asked after was placed, routed, answered and carried audio, so anything this endpoint was ever
+/// going to be sent has been sent. A duration here would be a definition of silence standing in for
+/// that ordering, which is the substitution `docs/designs/media.md` forbids.
+///
+/// An INVITE and not "anything at all", because an endpoint that has already taken a call of its own
+/// has its ACK and its in-dialog traffic waiting here too. What the clause forbids is the *call*
+/// arriving at the wrong instance.
+fn saw_an_invite(arriving: &mut Receiver<Incoming>) -> bool {
+    let mut seen = false;
+    while let Ok(request) = arriving.try_recv() {
+        seen |= request.request.method == Method::Invite;
+    }
+    seen
+}
+
 /// Assert that `recorded` is the clip that was played, and not silence of the right length.
 ///
 /// G.711 is lossy, so the samples cannot be compared directly; the codec is idempotent on its own
@@ -273,19 +291,95 @@ async fn instance(registrar: Target) -> (UserAgent, Receiver<Incoming>) {
     (agent, arriving)
 }
 
+/// Place a call at `gruu`, carried to `flow`, and answer it at the instance the GRUU names.
+///
+/// Both ends of the call come back, because the clause is about a call that *works* and not about an
+/// INVITE that arrived; the caller asserts audio on the pair.
+///
+/// `other` is here so that the two halves of "individually" are asserted in one place: the instance
+/// the GRUU names claims the request, and the instance it does not name would have refused it even if
+/// the routing had sent it there. Splitting those apart is how a test comes to assert the first and
+/// quietly assume the second.
+async fn called_at(
+    caller: &Handle,
+    gruu: &Uri,
+    flow: SocketAddr,
+    mine: &UserAgent,
+    other: &UserAgent,
+    arriving: &mut Receiver<Incoming>,
+) -> (Call, Call) {
+    let dialing = tokio::spawn({
+        let (endpoint, to) = (caller.clone(), gruu.clone());
+        async move {
+            dial(
+                &endpoint,
+                Target::udp(flow),
+                &to,
+                &DialOptions::new("<sip:bob@sipx.test>", loopback()),
+            )
+            .await
+        }
+    });
+
+    let incoming = arriving
+        .recv()
+        .await
+        .expect("the INVITE reached the instance the GRUU names");
+    assert_eq!(incoming.request.method, Method::Invite);
+    assert!(
+        mine.sent_to_our_gruu(&incoming.request),
+        "the instance did not recognise the call as addressed to its own GRUU"
+    );
+    assert!(
+        !other.sent_to_our_gruu(&incoming.request),
+        "the other instance would have claimed a call addressed to this one's GRUU"
+    );
+
+    let callee = answer(mine.endpoint(), &incoming, loopback())
+        .await
+        .expect("the instance answers the call placed at its GRUU");
+    let caller = dialing
+        .await
+        .expect("the dialling task")
+        .expect("the call connects");
+    (caller, callee)
+}
+
+/// Carry a clip each way over a connected pair, and assert both ends heard what was played.
+async fn audio_passes(caller: &Call, callee: &Call, callee_name: &str) {
+    let from_caller = clip(200);
+    let from_callee: Vec<i16> = from_caller.iter().map(|sample| -sample).collect();
+    heard(
+        callee_name,
+        &from_caller,
+        &carried(caller, callee, &from_caller).await,
+    );
+    heard(
+        "the caller",
+        &from_callee,
+        &carried(callee, caller, &from_callee).await,
+    );
+}
+
 /// M10's first clause, as it is written: **one of two registrations of the same address of record
 /// can be called individually.**
 ///
-/// Two instances register one AOR. A call is placed at the first instance's GRUU and carried to
-/// wherever [`route`] resolves that GRUU — which is the only decision in this test that is allowed
-/// to know anything, and it knows the Request-URI. The first instance answers it and audio passes
-/// both ways; the second, whose registration is equally current, never sees it.
+/// Two instances register one AOR. Each is then called at its own GRUU, carried to wherever [`route`]
+/// resolves that GRUU — the only decision here allowed to know anything, and what it knows is the
+/// Request-URI. Each answers its own call and carries audio both ways, and neither ever sees the
+/// other's.
 ///
-/// The contrast is the assertion that makes the rest mean something: the same routing applied to the
-/// address of record resolves to *both* bindings. Being individually callable is not a property of
-/// having registered — it is a property of the GRUU, and this is where the two come apart.
+/// **Both calls, not one.** A single call reaching one instance while the other stays silent is also
+/// what a test would show if the second instance had never registered, or had registered and were
+/// unreachable — and `X-50` filed this story because that is exactly the kind of substitution M10's
+/// evidence had already made once. Calling *each* of them closes it: the second instance's silence
+/// during the first call cannot be its own brokenness, because the next thing it does is take a call.
+///
+/// The contrast that makes the GRUU load-bearing is the routing assertion: the same function applied
+/// to the address of record resolves to **both** bindings. Being individually callable is not a
+/// property of having registered — it is a property of the GRUU, and this is where the two come apart.
 #[tokio::test(flavor = "multi_thread")]
-async fn one_of_two_registrations_of_an_address_of_record_is_called_individually() {
+async fn each_of_two_registrations_of_an_address_of_record_is_called_individually() {
     let (registrar_target, bindings) = registrar().await;
     let (one, mut arriving_at_one) = instance(registrar_target.clone()).await;
     let (two, mut arriving_at_two) = instance(registrar_target).await;
@@ -316,73 +410,53 @@ async fn one_of_two_registrations_of_an_address_of_record_is_called_individually
     );
 
     // The address of record names both bindings, and that is exactly what a GRUU is for.
+    let fan_out = route(&bindings, &aor_uri());
     assert_eq!(
-        route(&bindings, &aor_uri()).len(),
+        fan_out.len(),
         2,
         "the AOR must reach every registration; if it reached one, the clause would be vacuous"
     );
-    let routed = route(&bindings, &gruu_of_one);
+    let (flow_of_one, flow_of_two) = (route(&bindings, &gruu_of_one), route(&bindings, &gruu_of_two));
     assert_eq!(
-        routed,
+        flow_of_one,
         vec![one.endpoint().local_addr()],
         "the GRUU must resolve to the one binding whose instance it names (RFC 5627 §5.2)"
     );
+    assert_eq!(flow_of_two, vec![two.endpoint().local_addr()]);
 
-    // The call. Its Request-URI is the GRUU; where the bytes go is what the routing decided.
     let (caller_endpoint, _caller_incoming) = local_endpoint().await;
-    let to = gruu_of_one.clone();
-    let target = Target::udp(routed[0]);
-    let dialing = tokio::spawn(async move {
-        dial(
-            &caller_endpoint,
-            target,
-            &to,
-            &DialOptions::new("<sip:bob@sipx.test>", loopback()),
-        )
-        .await
-    });
 
-    let incoming = arriving_at_one
-        .recv()
-        .await
-        .expect("the INVITE reached the instance the GRUU names");
-    assert_eq!(incoming.request.method, Method::Invite);
+    // The first instance's call, at the first instance's GRUU.
+    let (caller_one, callee_one) = called_at(
+        &caller_endpoint,
+        &gruu_of_one,
+        flow_of_one[0],
+        &one,
+        &two,
+        &mut arriving_at_one,
+    )
+    .await;
+    audio_passes(&caller_one, &callee_one, "the first instance").await;
     assert!(
-        one.sent_to_our_gruu(&incoming.request),
-        "the instance did not recognise the call as addressed to its own GRUU"
+        !saw_an_invite(&mut arriving_at_two),
+        "a call placed at the first instance's GRUU reached the second registration too"
     );
+
+    // And the second instance's call, at the second instance's GRUU. Same address of record, same
+    // registrar, different instance — which is the whole of "individually".
+    let (caller_two, callee_two) = called_at(
+        &caller_endpoint,
+        &gruu_of_two,
+        flow_of_two[0],
+        &two,
+        &one,
+        &mut arriving_at_two,
+    )
+    .await;
+    audio_passes(&caller_two, &callee_two, "the second instance").await;
     assert!(
-        !two.sent_to_our_gruu(&incoming.request),
-        "the other instance would have claimed a call addressed to this one's GRUU"
-    );
-
-    let callee = answer(one.endpoint(), &incoming, loopback())
-        .await
-        .expect("the instance answers the call placed at its GRUU");
-    let caller = dialing
-        .await
-        .expect("the dialling task")
-        .expect("the call connects");
-
-    let from_caller = clip(200);
-    let from_callee: Vec<i16> = from_caller.iter().map(|sample| -sample).collect();
-    heard(
-        "the instance",
-        &from_caller,
-        &carried(&caller, &callee, &from_caller).await,
-    );
-    heard(
-        "the caller",
-        &from_callee,
-        &carried(&callee, &caller, &from_callee).await,
-    );
-
-    // And the other registration never saw any of it. The answered call above is the happens-before
-    // this rests on: the INVITE was routed, answered and carried audio in both directions, so
-    // anything the second instance was ever going to be sent has been sent by now.
-    assert!(
-        arriving_at_two.try_recv().is_err(),
-        "the other registration of the same address of record saw the call"
+        !saw_an_invite(&mut arriving_at_one),
+        "a call placed at the second instance's GRUU reached the first registration too"
     );
 }
 
@@ -417,12 +491,15 @@ type Timeline = Arc<Mutex<Vec<&'static str>>>;
 /// A registrar that answers a binding-refresh REGISTER and, in answering it, releases the request
 /// it has been holding (RFC 8599 §5.6).
 ///
-/// The release is a signal rather than the request itself, because the request is a real call now
-/// and a real call is placed by a user agent. What §5.6 licenses is only the *moment*: before the
-/// refresh there is no flow, and a proxy that sent the INVITE any earlier would be sending it
-/// nowhere. The returned receiver fires after the 200 has gone out, so the ordering the clause rests
-/// on is a happens-before and not a wait.
-async fn push_registrar() -> (Target, Timeline, oneshot::Receiver<()>) {
+/// The release is a signal rather than the request itself, because the request is a real call now and
+/// a real call is placed by a user agent. What §5.6 licenses is only the *moment*.
+///
+/// **What the signal carries is the point.** It is the flow the binding was created on — the address
+/// the REGISTER arrived from — and that address does not exist anywhere in this stub until the
+/// REGISTER arrives. So the held call cannot be placed early even by mistake: there is nothing to
+/// address it to. That is the clause's "held no connection" as a fact about the test rather than a
+/// stipulation in a comment, and it is why the ordering here is a happens-before and not a wait.
+async fn push_registrar() -> (Target, Timeline, oneshot::Receiver<SocketAddr>) {
     let (handle, mut incoming) = local_endpoint().await;
     let target = Target::udp(handle.local_addr());
     let timeline: Timeline = Arc::new(Mutex::new(Vec::new()));
@@ -456,9 +533,10 @@ async fn push_registrar() -> (Target, Timeline, oneshot::Receiver<()>) {
             .expect("valid")
             .build();
             let _ = handle.respond(&request.key, response).await;
-            // Only now. The client has a flow; before the refresh there was nowhere to send this.
+            // Only now, and only down the flow this REGISTER arrived on. Before the refresh there
+            // was no binding, so there was no address to release the held request to.
             if let Some(release) = release.take() {
-                let _ = release.send(());
+                let _ = release.send(request.source);
             }
         }
     });
@@ -469,15 +547,15 @@ async fn push_registrar() -> (Target, Timeline, oneshot::Receiver<()>) {
 /// answered call.**
 ///
 /// `T-21` proved the ordering and stopped at the INVITE. This carries it the rest of the way: the
-/// woken client answers, and the call it was woken for carries audio in both directions. The
-/// ordering is still asserted, because the answered call is worthless if the client answered a
-/// request that was already reachable — the whole premise is that before the push there was no flow
-/// at all.
+/// woken client answers, and the call it was woken for carries audio in both directions. The ordering
+/// is still asserted, because an answered call proves nothing about push if the client was reachable
+/// all along — the premise of the whole mechanism is that before the push there was no flow at all,
+/// and here that premise is enforced rather than asserted: the held call is addressed to the flow the
+/// binding-refresh REGISTER created, and until it arrives there is no such address.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_wakes_a_client_that_held_no_connection_into_an_answered_call() {
     let (client, mut arriving) = local_endpoint().await;
-    let client_address = client.local_addr();
-    let contact = format!("<sip:alice@{client_address}>");
+    let contact = format!("<sip:alice@{}>", client.local_addr());
     let (registrar_target, timeline, released) = push_registrar().await;
 
     let device = Doorbell.device().expect("valid push parameters");
@@ -486,14 +564,14 @@ async fn a_push_wakes_a_client_that_held_no_connection_into_an_answered_call() {
     // The client holds no connection: it has not registered, and nothing is on its way.
     assert!(arriving.try_recv().is_err());
 
-    // The call the proxy is holding, which goes out the moment the binding is refreshed and not
-    // one moment earlier.
+    // The call §5.6's proxy is holding. It goes out the moment the binding is refreshed and cannot go
+    // out before: what it is addressed to is the flow that REGISTER created.
     let (caller_endpoint, _caller_incoming) = local_endpoint().await;
     let held = tokio::spawn(async move {
-        released.await.expect("the binding was refreshed");
+        let flow = released.await.expect("the binding was refreshed");
         dial(
             &caller_endpoint,
-            Target::udp(client_address),
+            Target::udp(flow),
             &aor_uri(),
             &DialOptions::new("<sip:bob@sipx.test>", loopback()),
         )
@@ -525,18 +603,7 @@ async fn a_push_wakes_a_client_that_held_no_connection_into_an_answered_call() {
         .expect("the call connects");
     timeline.lock().await.push("answered");
 
-    let from_caller = clip(200);
-    let from_callee: Vec<i16> = from_caller.iter().map(|sample| -sample).collect();
-    heard(
-        "the woken client",
-        &from_caller,
-        &carried(&caller, &callee, &from_caller).await,
-    );
-    heard(
-        "the caller",
-        &from_callee,
-        &carried(&callee, &caller, &from_callee).await,
-    );
+    audio_passes(&caller, &callee, "the woken client").await;
 
     assert_eq!(
         *timeline.lock().await,
