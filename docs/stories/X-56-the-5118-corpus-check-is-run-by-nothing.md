@@ -2,7 +2,7 @@
 id: X-56
 title: Run the RFC 5118 corpus check from the gate, as its RFC 4475 twin already is
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 epic: conformance
 areas: [scripts, ci]
