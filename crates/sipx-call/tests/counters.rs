@@ -71,12 +71,17 @@ fn callee_uri() -> Uri {
 
 /// A request naming a dialog that does not exist, built by hand so the test knows its exact bytes.
 fn raw(peer: &Handle, method: &Method, call_id: &str) -> Request {
+    raw_with_body(peer, method, call_id, None)
+}
+
+/// The same, with a body — the way to build a request too large for a datagram (RFC 3261 §18.1.1).
+fn raw_with_body(peer: &Handle, method: &Method, call_id: &str, body: Option<&str>) -> Request {
     let via = bytes::Bytes::from(format!(
         "SIP/2.0/UDP {};rport;branch={}",
         peer.sent_by_for(sipx_transport::TransportKind::Udp),
         sipx_transport::new_branch()
     ));
-    sipx_sip::build::RequestBuilder::new(method.clone(), callee_uri())
+    let builder = sipx_sip::build::RequestBuilder::new(method.clone(), callee_uri())
         .header(HeaderName::Via, via)
         .expect("via")
         .header(
@@ -93,8 +98,18 @@ fn raw(peer: &Handle, method: &Method, call_id: &str) -> Request {
         .expect("call-id")
         .cseq(1, method)
         .expect("cseq")
-        .max_forwards(70)
-        .build()
+        .max_forwards(70);
+    match body {
+        Some(body) => builder
+            .header(
+                HeaderName::ContentType,
+                bytes::Bytes::from_static(b"application/sdp"),
+            )
+            .expect("content-type")
+            .body(bytes::Bytes::from(body.to_owned()))
+            .build(),
+        None => builder.build(),
+    }
 }
 
 /// A dispatcher pumped by a task of its own, as a host uses one.
@@ -173,17 +188,21 @@ async fn a_discard_in_the_dialog_layer_is_counted_next_to_the_capture_of_the_req
     let _ = std::fs::remove_dir_all(path.parent().expect("a scratch directory"));
 }
 
-/// A BYE that never reaches the wire is counted, and counted as a **BYE**.
+/// A BYE the endpoint cannot put on the wire is counted, and counted as a **BYE**.
 ///
 /// The census `X-51` took found six sends whose result `sipx-call` discards, four of them on a
 /// teardown path (`crates/sipx-call/src/call.rs`). None was counted, and this is the number an
 /// operator asking "why did that call linger" is reaching for: a dialog the far end still believes
 /// is up, because the request that would have ended it never left.
 ///
-/// Counted at the hand-off rather than at the caller, because the caller is the one that discards
-/// it — see §12.3 and the `// discard:` comments at those six sites.
+/// **The stimulus is a real transmit failure, and that is the whole point of this test.** An
+/// over-MTU datagram is refused by name in `transmit` (RFC 3261 §18.1.1), which is *after*
+/// `Handle::send` has already returned `Ok` with the transaction key. The first version of this
+/// counter was incremented at that hand-off and could therefore never see this case — nor a refused
+/// connection, nor an unreachable peer — while its documentation claimed it did. So the assertion
+/// below is deliberately made on a send that **succeeds** at the call site and fails on the wire.
 #[tokio::test]
-async fn a_bye_that_never_reaches_the_wire_is_counted_as_a_bye() {
+async fn a_bye_the_endpoint_cannot_put_on_the_wire_is_counted_as_a_bye() {
     let (endpoint, _incoming) = plain().await;
     let peer = "127.0.0.1:9".parse::<SocketAddr>().expect("valid");
 
@@ -193,14 +212,20 @@ async fn a_bye_that_never_reaches_the_wire_is_counted_as_a_bye() {
         "nothing has failed to send yet"
     );
 
-    // An endpoint that has shut down cannot put anything on the wire, which is the one way to
-    // fail a send that does not depend on the network's cooperation.
-    endpoint.shutdown().await;
-    let bye = raw(&endpoint, &Method::Bye, "linger@sipx");
+    // Comfortably past the 1300-byte default MTU, so §18.1.1's refusal is certain.
+    let bulky = "x".repeat(4096);
+    let bye = raw_with_body(&endpoint, &Method::Bye, "linger@sipx", Some(&bulky));
     endpoint
         .send(bye, Target::udp(peer))
         .await
-        .expect_err("a shut-down endpoint cannot send");
+        .expect("the hand-off succeeds — the transaction is created before anything is sent");
+
+    until(
+        WRITING_BOUND,
+        "an over-MTU BYE was not counted as an unsent BYE",
+        async || endpoint.counters().unsent.bye > 0,
+    )
+    .await;
 
     let counts = SignallingCounts::of(&endpoint);
     assert_eq!(
@@ -209,14 +234,44 @@ async fn a_bye_that_never_reaches_the_wire_is_counted_as_a_bye() {
         counts.transport.unsent
     );
     assert_eq!(
-        counts.transport.unsent.total(),
-        1,
-        "and nothing else moved: {:?}",
+        counts.transport.unsent.invite
+            + counts.transport.unsent.ack
+            + counts.transport.unsent.cancel,
+        0,
+        "and against no other method: {:?}",
         counts.transport.unsent
     );
     assert!(
         counts.any_loss(),
         "a request that never left is loss, and the snapshot must say so"
+    );
+}
+
+/// An ordinary shutdown is not lost signalling.
+///
+/// The hand-off design counted a send that lost the race with `shutdown`, so a clean teardown
+/// raised a counter whose documentation said a request had failed to reach the wire. §12.2: a
+/// counter that overstates its own accuracy is worse than a missing one, because it will be used to
+/// rule a cause out.
+#[tokio::test]
+async fn a_send_refused_by_a_shut_down_endpoint_is_not_counted_as_unsent() {
+    let (endpoint, _incoming) = plain().await;
+    let peer = "127.0.0.1:9".parse::<SocketAddr>().expect("valid");
+
+    endpoint.shutdown().await;
+    endpoint
+        .send(
+            raw(&endpoint, &Method::Bye, "teardown@sipx"),
+            Target::udp(peer),
+        )
+        .await
+        .expect_err("a shut-down endpoint cannot accept a request");
+
+    assert_eq!(
+        endpoint.counters().unsent.total(),
+        0,
+        "a shut-down endpoint never tried the wire, so nothing failed to reach it: {:?}",
+        endpoint.counters().unsent
     );
 }
 

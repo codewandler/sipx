@@ -982,11 +982,20 @@ impl Dispatcher {
             .and_then(|builder| with_to_tag(builder, request, tag));
         let response = match built {
             Ok(builder) => builder.build(),
+            // discard: the refusal this dispatcher decided on is lost. **It reaches no counter**,
+            // and saying so is the point — `Calls::counted` has already recorded the *decision*
+            // (which kind of refusal was owed), so `DispatchCounts` will show the request as
+            // refused when in fact nothing was sent. The two numbers can therefore disagree with
+            // the wire, and an operator should know that before using them to rule a cause out
+            // (§12.2). The peer retransmits and its own transaction times out, so nothing hangs.
             Err(error) => {
                 tracing::warn!(%error, status, "could not build the response for a request");
                 return;
             }
         };
+        // discard: the same loss one step later and with the same gap — see above. Closing it
+        // needs a counter for responses the endpoint could not send, which belongs with
+        // `sipx_transport::Handle::respond` rather than here.
         if let Err(error) = self.endpoint.respond(key, response).await {
             tracing::warn!(%error, status, "could not send the response for a request");
         }

@@ -76,6 +76,10 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
     };
 
+    // Armed here, not at the end: the run that most needs the numbers is the one that fails, and
+    // every `return fail(…)` below now takes the counters file with it.
+    let export = crate::counters::Export::arm(&args, &handle);
+
     // Announce the port before waiting, so a script that started this in the background knows
     // where to call without guessing or racing.
     let Some(listening) = transport.listener_addr(&handle) else {
@@ -196,7 +200,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     }
 
     let _ = call.hang_up().await;
-    report = match crate::counters::attach(&args, &handle, report) {
+    report = match export.into_report(report) {
         Ok(report) => report,
         Err(message) => return fail(format, Exit::Failed, &message),
     };

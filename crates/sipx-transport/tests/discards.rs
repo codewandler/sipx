@@ -117,8 +117,17 @@ fn source_dir(crate_name: &str) -> PathBuf {
 }
 
 /// Every `.rs` file in one crate's `src`, sorted so a failure names them in a stable order.
-fn sources_of(crate_name: &str) -> Vec<PathBuf> {
+///
+/// `None` when the crate is not on disk at all, which happens in exactly one situation: this crate
+/// unpacked from a published `.crate` archive, where the sibling is a registry dependency rather
+/// than a directory. Panicking there would fail a packaged test run over the absence of a file the
+/// package was never going to contain. It is `None` rather than an empty list so that the caller
+/// can tell "not present" from "present and empty" — the second is a broken scan and still fails.
+fn sources_of(crate_name: &str) -> Option<Vec<PathBuf>> {
     let directory = source_dir(crate_name);
+    if !directory.is_dir() {
+        return None;
+    }
     let mut files: Vec<PathBuf> = std::fs::read_dir(&directory)
         .unwrap_or_else(|error| panic!("{crate_name} has a src directory: {error}"))
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -130,12 +139,31 @@ fn sources_of(crate_name: &str) -> Vec<PathBuf> {
         "the scan found almost no source files in {crate_name}, so it is looking in the wrong \
          place: {files:?}"
     );
-    files
+    Some(files)
 }
 
-/// Every source file the scan covers, across every crate in [`CRATES`].
+/// Every source file the scan covers, across every crate in [`CRATES`] that is on disk.
+///
+/// **This crate's own `src` is never optional.** If the scan cannot find the tree it is compiled
+/// from, it is not narrowed, it is broken — and a guard that silently scans nothing is
+/// indistinguishable from a codebase with nothing to find, which is `X-29`'s lesson and the reason
+/// [`the_scan_detects_an_unexplained_discard`] exists.
 fn sources() -> Vec<PathBuf> {
-    CRATES.iter().flat_map(|name| sources_of(name)).collect()
+    let own = env!("CARGO_PKG_NAME");
+    assert!(
+        CRATES.contains(&own),
+        "the scan must cover the crate it is compiled from, and {own} is not in CRATES"
+    );
+    let files: Vec<PathBuf> = CRATES
+        .iter()
+        .filter_map(|name| sources_of(name))
+        .flatten()
+        .collect();
+    assert!(
+        sources_of(own).is_some(),
+        "this crate's own src is missing, so the scan is broken rather than narrowed"
+    );
+    files
 }
 
 /// Where a file's test module starts, so the scan stops there.

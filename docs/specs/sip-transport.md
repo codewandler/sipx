@@ -352,19 +352,37 @@ and a zero cannot tell those apart. This is §12.2's first paragraph applied to 
 that overstates its own accuracy is worse than a missing one, because it will be used to rule a
 cause out.
 
-**Where a discarded *result* is counted: at the hand-off, not at the caller.** A request an
-application asks the endpoint to send and the endpoint does not put on the wire is counted once, in
-`UnsentCounts`, inside `Handle::send` and `Handle::send_directly`. It is split by method because the
-consequence is: an unsent CANCEL leaves a phone ringing, an unsent ACK leaves a 2xx retransmitting
-toward a closed port, an unsent BYE leaves a dialog up at the far end that no timer reaps. The
-caller is the wrong place for this counter precisely *because* the caller is the one that discards
-it — six of the seven sites `X-54` closed are `let _ = …` on a path that is already failing, where
-the error is genuinely unactionable and the *loss* is not. Counting at the hand-off covers those six
-and every one added later, without a counter having to be remembered at each new site.
+**Where a discarded *result* is counted: at the transmit, not at the caller and not at the
+hand-off.** A request the endpoint tries to put on the wire and cannot is counted in `UnsentCounts`,
+split by method because the consequence is: an unsent CANCEL leaves a phone ringing, an unsent ACK
+leaves a 2xx retransmitting toward a closed port, an unsent BYE leaves a dialog up at the far end
+that no timer reaps. The caller is the wrong place precisely *because* the caller is the one that
+discards the result — six of the seven sites `X-54` closed are `let _ = …` on a path that is already
+failing, where the error is genuinely unactionable and the *loss* is not. Counting below the caller
+covers those six and every one added later, without a counter having to be remembered at each new
+site.
 
-This is **not** `DiscardCounts::send_failures`, and the two never count the same event: that one is
-a send the endpoint initiated on a transaction's behalf inside the driver, this one is a send an
-application asked for and was told about.
+**The hand-off is the wrong place too, and this is the correction that matters.** `X-54` first put
+the increment inside `Handle::send` and `Handle::send_directly`, and the type's documentation then
+claimed something the code could not do. `Handle::send` returns as soon as the driver has created
+the transaction and replied with its key; the transmit happens afterwards, in `perform`. A counter
+at that hand-off therefore fires only when the endpoint refuses the request outright — a closed
+endpoint, or one with no usable `Via` — and **never** on a refused connection, an unreachable peer
+or an over-MTU datagram, which is the entire question it claims to answer. `send_directly` *does*
+await its transmit, so `ack` behaved one way while `bye` and `cancel` behaved another, with nothing
+in the spec or the type saying so. A counter that is wrong in a direction its own documentation
+conceals is worse than an absent one, and this section is the rule `M-32` extends: **count where the
+loss happens, not where it is reported.**
+
+Two consequences of counting at the transmit, both stated on `UnsentCounts` as §12.2 requires:
+
+- It **overlaps** `DiscardCounts::send_failures` for requests on the transaction path, and the two
+  are views rather than tallies — that field is the transaction path's aggregate over requests and
+  responses alike, this is the per-method breakdown over requests on any path. Neither adding nor
+  subtracting them means anything.
+- A send that loses the race with `shutdown` fails before any transmit is attempted and is **not**
+  counted, where the hand-off design counted it and made an ordinary teardown look like lost
+  signalling.
 
 **A loss whose only possible actor is one consumer is reported to that consumer.** A call event
 dropped because the application fell behind is counted by `CallEvents::dropped`, per call, and is

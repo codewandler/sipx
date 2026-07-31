@@ -77,6 +77,20 @@ can be recorded on evidence rather than on the clause being nearly true.
   is assembling a bug report and wants the numbers in the same bundle; whoever wants only the
   numbers must not be made to record call content (§13) to get them. The run names the file it
   wrote.
+- **Rework round 1 (review findings, both fixed).**
+  - *The counter did not count what it claimed.* `UnsentCounts` was incremented in `Handle::send`,
+    which returns as soon as the driver has created the transaction — the transmit happens later in
+    `perform`. So it could only fire on a closed endpoint or a missing `Via`, and **never** on a
+    refused connection, an unreachable peer or an over-MTU datagram, which is the whole of the
+    question its own docs said it answered; meanwhile `send_directly` *did* await its transmit, so
+    `ack` and `bye` meant different things with nothing saying so. The increment now sits at the two
+    places the socket is written. It no longer fires on an ordinary `shutdown` race, and it overlaps
+    `DiscardCounts::send_failures` for requests on the transaction path — stated on the type, per
+    §12.2. **§12.3 is the rule `M-32` extends, so the corrected rule is "count where the loss
+    happens, not where it is reported".**
+  - *The export skipped the run that needed it.* `attach` ran only after the call had succeeded, so a
+    dial that timed out wrote the capture and no counters. It is now an `Export` guard armed straight
+    after `bind`, so every `return fail(…)` takes the file with it.
 - **Left for the coordinator:** the last Acceptance item. `docs/roadmap.md` is fenced for this
   worktree, so the "Where M12 stands" replacement prose is in the handoff report under
   `ROADMAP_BLOCK:` rather than committed here. Nothing else in the story is outstanding.

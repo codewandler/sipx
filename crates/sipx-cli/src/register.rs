@@ -128,6 +128,10 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
     };
+
+    // Armed here, not at the end: the run that most needs the numbers is the one that fails, and
+    // every `return fail(…)` below now takes the counters file with it.
+    let export = crate::counters::Export::arm(&args, &handle);
     // The registrar stores this binding and routes every call to the address-of-record at it
     // (RFC 3261 §10.2.6), so it carries the advertised address — reachable host, real port —
     // not the bound one.
@@ -154,9 +158,6 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         ua_config = ua_config.with_push(device);
     }
 
-    // Kept before the handle is moved into the agent: the counters live behind it, and the
-    // export below is the only thing outside this crate's tests that reads them.
-    let endpoint = handle.clone();
     let mut agent = UserAgent::new(handle, ua_config);
 
     // Both reports name the address of record the same way: the normalised AOR, not the argument
@@ -185,7 +186,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
                 // everywhere except this field.
                 report = report.boolean("push", agent.push_support().supports(provider));
             }
-            report = match crate::counters::attach(&args, &endpoint, report) {
+            report = match export.into_report(report) {
                 Ok(report) => report,
                 Err(message) => return fail(format, Exit::Failed, &message),
             };
