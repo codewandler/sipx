@@ -59,15 +59,15 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:bef5b8c23f97b8c58929902abfd944c44b7cf47ac02b79eb5277db3cefedebb3","closed":{"2026-07-28":58,"2026-07-29":47,"2026-07-30":39},"filed":{"2026-07-28":95,"2026-07-29":43,"2026-07-30":44}} -->
+<!-- maturity-event-days: {"basis":"sha256:5158262dcab42e164ffe5a3d25b4195dfbb27cf0f08234845db00aa53f216510","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
 | Day | Filed | Closed | Net |
 |---|---|---|---|
 | 2026-07-28 | 95 | 58 | -37 |
-| 2026-07-29 | 43 | 47 | +4 |
-| 2026-07-30 | 44 | 39 | -5 |
+| 2026-07-29 | 42 | 48 | +6 |
+| 2026-07-30 | 44 | 40 | -4 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 
