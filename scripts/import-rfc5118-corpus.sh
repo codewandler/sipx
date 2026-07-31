@@ -37,24 +37,29 @@ url="https://www.rfc-editor.org/rfc/rfc5118.txt"
 readonly EX_USAGE=64
 readonly EX_UNREACHABLE=75
 
+refuse_argument() {
+    echo "unknown argument: $1" >&2
+    echo "usage: ${BASH_SOURCE[0]##*/} [--check]" >&2
+    exit "$EX_USAGE"
+}
+
 # X-58: this used to be `[[ "${1:-}" == "--check" ]] && check_only=1`, which made `--check=1`,
 # `-check` and every typo select the *other* branch — the one that overwrites the corpus with the
 # RFC's own bytes and exits 0. That is a green step that erases the hand edit the check exists to
 # catch, and `X-56` took the number of places the flag is spelled from one to five.
+#
+# Dispatched on `$#` rather than on `"${1:-}"`, because those two disagree on exactly one input:
+# `$1` present and empty. `case "${1:-}" in "")` reads an empty argument as "no argument given"
+# and falls through to the write path — so `"$flag"` with `flag` unset silently rewrites the
+# corpus and exits 0, which is the failure this whole item is about.
 check_only=0
-case "${1:-}" in
-    "") ;;
-    --check) check_only=1 ;;
-    *)
-        echo "unknown argument: $1" >&2
-        echo "usage: ${BASH_SOURCE[0]##*/} [--check]" >&2
-        exit "$EX_USAGE"
-        ;;
-esac
 if [[ $# -gt 1 ]]; then
-    echo "unknown argument: $2" >&2
-    echo "usage: ${BASH_SOURCE[0]##*/} [--check]" >&2
-    exit "$EX_USAGE"
+    refuse_argument "$2"
+elif [[ $# -eq 1 ]]; then
+    case "$1" in
+        --check) check_only=1 ;;
+        *) refuse_argument "$1" ;;
+    esac
 fi
 
 work="$(mktemp -d)"
@@ -73,10 +78,15 @@ echo "fetching $url"
 # reads as a step disclaiming its own run rather than reporting on the corpus (`X-58`). It is
 # still not a skip — a provenance check that *passes* when it could not reach the RFC is the MSRV
 # hole in a second place.
+#
+# A machine with no `curl` at all lands here too (127), and is deliberately reported the same way:
+# it is equally true that the RFC could not be read, and equally false that the corpus drifted.
+# The message names the tool as well as the network so the sentence is accurate either way.
 if ! curl -fsSL "$url" -o "$work/rfc5118.txt"; then
     echo "could not fetch $url — this says nothing about the committed RFC 5118 corpus, only" >&2
-    echo "that the RFC could not be reached to compare against it. Check the network and run" >&2
-    echo "this again; nothing here is a finding about the twelve committed messages." >&2
+    echo "that the RFC could not be read to compare against it. Check the network and that" >&2
+    echo "curl is installed, then run this again; nothing here is a finding about the twelve" >&2
+    echo "committed messages." >&2
     exit "$EX_UNREACHABLE"
 fi
 

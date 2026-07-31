@@ -90,10 +90,41 @@ to justify them.
 - The replaced assertion is gone: `startswith("if ! curl")` is now five behavioural cases — the
   failure names the host, it names the corpus, it never exits `0`, it exits `EX_TEMPFAIL`, and
   `gate.py`'s own summary and exit code are asserted. A body of `then true; fi` fails all of them.
-- **`CHANGELOG.md:71-73` still carries both false sentences** and is fenced from implementors. It
-  needs: the guard justified by naming the corpus and the host rather than by curl's silence; the
-  corpus steps described as network-dependent rather than as the first or only such steps; and the
-  disclaiming exit code recorded. `X-56`'s Progress note carries the same correction in full.
+- **`CHANGELOG.md:71-73` carried both false sentences** and is fenced from implementors; the
+  coordinator corrected it at integration (`2e25bf9`). `X-56`'s Progress note carries the same
+  correction in full.
+- **Reworked after review (round 1), and the review was right.** One of the eight new cases
+  repeated the exact mistake this story exists to remove. `test_an_unreachable_rfc_editor_names_
+  the_host_it_could_not_reach` asserted the host and the corpus number appeared in
+  `stdout + stderr` — but the importer prints `fetching <url>` unconditionally *before* the fetch,
+  on stdout, and that one line already contains both. A guard whose entire body is `exit 75` — no
+  sentence, no host, no corpus — passed. Measured both ways in a scratch copy:
+
+  | guard body | exit | stderr under a quiet curl | old assertion | new |
+  | --- | --- | --- | --- | --- |
+  | `exit 75` (silent) | 75 | `''` | **passes** | fails |
+  | `true` (no-op) | 1 | `awk: fatal: cannot open file …` | **passes** | fails |
+  | the real guard | 75 | names the host and the corpus | passes | passes |
+
+  The fix is to assert on **`stderr` only, under a curl that says nothing**: the `fetching` line is
+  on stdout and curl is mute, so the guard's own three messages are the only thing there. Proved
+  discriminating by swapping the silent variant into the worktree and running the suite against it
+  — `AssertionError: 'www.rfc-editor.org' not found in ''`, then restored and checksum-verified.
+  This mattered more than a normally weak test: `AGENTS.md` now names that sentence as the guard's
+  entire justification, having just deleted the false one.
+- Two smaller things the same review found, both fixed here: an **empty-string argument** still took
+  the write path (`case "${1:-}" in "")` cannot tell "no argument" from "an empty one", so
+  `./import-…sh ""` rewrote a tampered fixture and exited 0 — the argument dispatch is on `$#` now;
+  and the **precedence divergence had no test**, so `test_a_disclaimed_step_does_not_hide_a_step_
+  that_really_failed` drives `gate.run()` with synthetic steps and pins exit `1` with `1 of 2 steps
+  failed` naming only the red one.
+- A machine with **no `curl` at all** exits 127 into the guard and is reported as unreachable. Kept
+  deliberately — it is equally true that the RFC could not be read and equally false that the corpus
+  drifted — and the message now names the tool as well as the network, so the sentence is accurate
+  either way.
+- **My earlier report got one number wrong.** I wrote that a `then true; fi` guard exits 2 from
+  `awk`; it exits **1**, because under `pipefail` the pipeline takes `grep`'s 1, not `awk`'s 2.
+  Immaterial to the design — still not 75, so still caught — but the reasoning was wrong.
 
 ## Notes
 - **The wiring `X-56` shipped is sound and is not reopened.** Both corpus checks run from a gate step
