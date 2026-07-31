@@ -68,9 +68,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **The `fuzz` job keeps its own RFC 4475 check.** That one runs after the fuzzer, in the tree the
     fuzzer wrote to, and proves a campaign deposited none of its generated inputs into committed seed
     data — a claim a fresh checkout cannot make. The ordering is pinned by a test now.
-  - **The fetch is guarded**, because these are the gate's first network-dependent steps: `curl -f`
-    prints nothing, so an unreachable RFC editor used to surface as a bare exit code that read as a
-    corpus that had changed. It stays red rather than becoming a skip.
+  - **The fetch is guarded**, so a failure names the corpus and the host that could not be reached
+    rather than leaving curl's own exit code to be interpreted. These steps are network-dependent,
+    though not the first such: `build-docs.sh` has always run `npm ci` when the gitignored
+    `website/node_modules` is absent. An unreachable RFC editor is a **non-result, not a finding**
+    — see `X-58`, which corrected both the exit code and the false reason first given here.
 
 - **`-vv` reaches DEBUG, and `-v` has something to say (`X-57`)** — verbosity counted the number of
   *arguments* beginning with `-v`, so the documented `-vv` was a single match capped at INFO while
