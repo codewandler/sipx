@@ -111,7 +111,7 @@ question of what can be built on this stack without writing Rust. **M9** waits b
   evidence rather than the statuses and found two of the three short; `X-52` closed that distance
   without widening a clause:
   - **One of two registrations of an address of record, called individually** —
-    `one_of_two_registrations_of_an_address_of_record_is_called_individually`. Two instances register
+    `each_of_two_registrations_of_an_address_of_record_is_called_individually`. Two instances register
     one AOR; a call placed at the first instance's GRUU is answered by that instance and carries audio
     both ways, and the second, whose registration is equally current, never sees the INVITE. The
     contrast is what carries the claim: the same routing applied to the address of record resolves to
@@ -223,7 +223,7 @@ and the [compliance table](compliance.md) says so — 8445 and 8839 are `partial
 written as the clause is written, and the milestone is recorded in [Delivered](#delivered) against
 those three tests rather than against the statuses of the stories that built the mechanisms:
 
-- **GRUU** — `X-52`'s `one_of_two_registrations_of_an_address_of_record_is_called_individually`. Two
+- **GRUU** — `X-52`'s `each_of_two_registrations_of_an_address_of_record_is_called_individually`. Two
   instances of one address of record, a call placed at one instance's GRUU, answered by that instance
   with audio both ways, and the other instance never sees it. `T-20`'s
   `a_request_to_a_gruu_reaches_the_instance_that_registered_it` remains what it always was — an

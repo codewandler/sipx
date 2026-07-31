@@ -51,7 +51,7 @@ demonstrate them, so the milestone can be recorded on evidence rather than on me
   honest equivalent and is recorded as a deviation rather than as a pass:
   - Making `Gruus::from_response` select a binding by position instead of by `+sip.instance` — the
     failure that function's own doc comment names — has both instances adopt the same GRUU, and
-    `one_of_two_registrations_of_an_address_of_record_is_called_individually` fails naming it:
+    `each_of_two_registrations_of_an_address_of_record_is_called_individually` fails naming it:
     "two instances of one AOR were issued the same GRUU, which names neither".
   - Discarding the PURR RFC 8599 §8.2 assigns the binding fails
     `a_push_wakes_a_client_that_held_no_connection_into_an_answered_call` on the assertion that the
@@ -68,6 +68,19 @@ demonstrate them, so the milestone can be recorded on evidence rather than on me
   deliberate deviation from this story's fourth item: the roadmap is a shared ledger fenced out of
   every implementor worktree, because otherwise two stories in one wave collide on it. The block
   was written from the evidence this story produced.
+- **Strengthened after the story closed, 2026-07-31.** The implementor was resumed, kept working, and
+  was killed a second time with the result uncommitted in a worktree the harness had already
+  reclaimed once; it was rescued, brought current with `main`, formatted and gated. Its version is a
+  better answer to the last Acceptance item than what was first merged: the integrated test asserted
+  that the instance the GRUU does not name never sees the INVITE, but the only thing standing between
+  that instance and the call was the test's own routing double — so the clause was demonstrated by
+  the *harness* declining to deliver rather than by sipx declining to answer. Both instances are now
+  passed to the call helper and the un-named one is asserted to refuse the request even had the
+  routing sent it there. The arrival check is INVITE-specific rather than "did anything arrive",
+  because an instance that has taken a call of its own has its own ACK and in-dialog traffic waiting.
+  The test is renamed `each_of_two_registrations_of_an_address_of_record_is_called_individually`, and
+  the roadmap and this file were corrected to name it. Re-falsified by the same mutation, green
+  again, and green inside the full 25-step gate.
 - The implementor was killed mid-run by an org monthly spend limit. Its work was rescued to
   `impl/X-52`, and the falsification, the gate and the roadmap block were done at integration. It
   never reached the gate, so `cargo fmt` had not run on the file; two call sites were rewrapped.
