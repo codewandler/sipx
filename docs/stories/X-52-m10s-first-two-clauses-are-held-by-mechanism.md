@@ -2,7 +2,7 @@
 id: X-52
 title: Demonstrate M10's GRUU and push clauses as they are written
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 epic: conformance
 areas: [sipx-call, sipx-ua, sipx-cli]
