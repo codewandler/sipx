@@ -46,11 +46,27 @@ keeps holding rather than merely holding today.
   the new step exits 1 naming the file that differs; restored, it exits 0. Inside the real gate
   both steps pass over 50 RFC 4475 messages and 12 RFC 5118 messages, and `gate.py --check` reports
   25 steps over 17 CI jobs with none unaccounted for.
-- Both steps reach the network, which is new for the gate, so both importers now guard the fetch.
-  `curl -f` prints nothing, so an unguarded failure reported a bare exit code that reads as a
-  finding about the corpus — which an unreachable RFC editor is not. It stays red rather than
+- Both steps reach the network, so both importers guard the fetch. It stays a failure rather than
   becoming a skip: a provenance check that passes when it could not reach the RFC is the MSRV hole
   in a second place.
+- **Corrected by `X-58`, and the correction belongs here rather than only there.** Two sentences
+  written into this record were wrong, and one of them was copied into `AGENTS.md`, where it is
+  what the next agent reads as the why:
+  - "`curl -f` prints nothing" — the flags in use are `-fsSL`, and `-S` is *show errors*, so curl
+    prints `curl: (6) Could not resolve host: www.rfc-editor.org` and exits 6. One command
+    disproves it. The guard is still worth having, but for what it does: it names the corpus and
+    the host in a sentence, and it exits a code that means "not a result".
+  - "these are the gate's first network-dependent steps" — `docs site` has reached the network
+    since it existed. `scripts/build-docs.sh` runs `npm ci` whenever `website/node_modules` is
+    absent, and that directory is gitignored, so it is absent in every fresh worktree.
+  - And the guard exiting 1 put an unreachable RFC editor in the failed tally, so `gate.py` printed
+    `N of 25 steps failed` naming a corpus it had not read a byte of. `X-58` made it exit
+    `EX_TEMPFAIL`, which the gate reports as a non-result — `X-34`'s exit-code contract, which the
+    guard shipped here without honouring.
+
+  The wiring itself — two gate steps, a `corpus` CI job, `gate.py --check` accounting for both, a
+  tampered fixture caught — was reproduced independently and stands. The fetch guard was a
+  coordinator addition on top of this story's Acceptance, and it is the part that was wrong.
 - The implementor wrote the test cases and was then killed by an org monthly spend limit before
   writing any implementation. Its test was a precise specification and the coordinator implemented
   against it, so this story is `coordinator-implemented`: one pair of eyes, not two.

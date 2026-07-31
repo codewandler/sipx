@@ -115,19 +115,34 @@ written somewhere else is a suppression list with extra steps, and there is no s
 under any name. The rule had been swept for twice and enforced by nothing, and two violations landed
 in the wave after the second sweep (`X-44`).
 
-The two **RFC corpus steps** are the gate's only checks that reach the network, and they are the
-reason a red gate can mean "no route to the RFC editor". Neither corpus under
-`crates/sipx-testkit/corpus/` was transcribed: each is recovered from its RFC's own Appendix A
-archive by `import-rfc<n>-corpus.sh`, and `--check` re-recovers that archive and diffs it against the
-tree. That diff is the only thing that can tell a fixture edited by hand from the RFC's own bytes,
-because the suites read whatever is in the directory and pass. RFC 4475's check ran solely inside the
-`fuzz` job, which is in `NOT_RUN_LOCALLY`, and RFC 5118's ran nowhere at all — `ci.yml` did not
-mention 5118 (`X-56`). **A step per corpus**, so a red result names which one drifted, and the `fuzz`
-job keeps its own 4475 invocation because that one runs after the fuzzer in the tree the fuzzer wrote
-to: a different claim, and one a fresh checkout cannot make. Both importers guard the fetch, since
-`curl -f` prints nothing and a bare exit code reads as a corpus that changed rather than an RFC that
-could not be reached. It stays **red rather than skipped**: a provenance check that passes when it
-could not reach the RFC is the MSRV hole in a second place.
+The two **RFC corpus steps** reach the network, and they are the reason a gate run can end with "no
+route to the RFC editor". Neither corpus under `crates/sipx-testkit/corpus/` was transcribed: each
+is recovered from its RFC's own Appendix A archive by `import-rfc<n>-corpus.sh`, and `--check`
+re-recovers that archive and diffs it against the tree. That diff is the only thing that can tell a
+fixture edited by hand from the RFC's own bytes, because the suites read whatever is in the
+directory and pass. RFC 4475's check ran solely inside the `fuzz` job, which is in
+`NOT_RUN_LOCALLY`, and RFC 5118's ran nowhere at all — `ci.yml` did not mention 5118 (`X-56`).
+**A step per corpus**, so a result names which one drifted, and the `fuzz` job keeps its own 4475
+invocation because that one runs after the fuzzer in the tree the fuzzer wrote to: a different
+claim, and one a fresh checkout cannot make.
+
+They are **not** the only steps that reach the network, and `X-58` corrected that claim where it
+stood here: `docs site` runs `npm ci` whenever `website/node_modules` is absent, which is every
+fresh worktree, since it is gitignored. Behind a proxy that step goes first.
+
+**A gate that could not reach the RFC editor exits `2`, not `1`** — this run is not a result,
+`X-34`'s doctrine in a third place (`X-58`). A step that never read the archive knows nothing about
+the committed files, and a red tally saying `rfc 5118 corpus` claims otherwise. The importers say
+so themselves, by exiting `EX_TEMPFAIL` (75) from their fetch guard, which `gate.py` reads as the
+step disclaiming its own run; it reports those under a heading that is not a finding and keeps
+going, because an unreachable host says nothing about `cargo clippy` the way a vanished `target/`
+does. Anything genuinely red still wins the exit code — `2` would say "re-run", and a broken tree
+needs reading, not re-running. The guard earns its place by naming the
+corpus and the host in a sentence, not by breaking a silence: `curl -fsSL` says
+`curl: (6) Could not resolve host: www.rfc-editor.org` perfectly well, because `-S` is *show
+errors*. The claim that it is silent stood in this file for two stories, justified nothing it was
+cited for, and one command disproved it. It is still **never a skip**: a provenance check that
+passes when it could not reach the RFC is the MSRV hole in a second place.
 
 `check-features.sh` is not optional garnish. `--all-features` hides a whole class of breakage:
 an optional transport that does not compile with its feature turned off is invisible until a

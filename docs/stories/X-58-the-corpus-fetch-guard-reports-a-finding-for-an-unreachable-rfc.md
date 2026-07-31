@@ -17,7 +17,7 @@ Make the two corpus steps say "this run is not a result" when they cannot reach 
 to justify them.
 
 ## Acceptance
-- [ ] **An unreachable RFC editor exits `2`, not `1`.** `scripts/gate.py` defines the contract at
+- [x] **An unreachable RFC editor exits `2`, not `1`.** `scripts/gate.py` defines the contract at
       `:663-665` — `0` green, `1` the tree is wrong, `2` the run is not a result — and it exists
       because "a full disk and a broken diff used to leave the same exit code and print the same way,
       so nothing could tell a finding from a non-finding". Today a failed fetch exits 1, so
@@ -27,18 +27,19 @@ to justify them.
       failure's shape — decide which and say why. The two mechanisms are not the same: a distinct
       exit code is the script's own claim, and a pattern in `infrastructure_evidence` is the gate's
       inference about a step it does not control.
-- [ ] **The failing-first test is a fetch that cannot succeed**, not a string match on the source.
+- [x] **The failing-first test is a fetch that cannot succeed**, not a string match on the source.
       Point the importer at a host that cannot resolve — or otherwise force the fetch to fail —
       and assert what `gate.py` *reports*: the summary line and the exit code, not a sentence in the
       streamed output. That is where `X-34` put the property and it is the half the current test
       never reaches.
-- [ ] **Replace the shape assertion with a behavioural one.** `scripts/test-gate.py:1667-1677`
+- [x] **Replace the shape assertion with a behavioural one.** `scripts/test-gate.py:1667-1677`
       requires the fetch line to `startswith("if ! curl")`, which pins spelling rather than
       behaviour. Review proved it both ways: a guard whose body is `then true; fi` — no message, no
       exit, falling through to base64-decode a file that does not exist — **passes**, while an
       equivalent `curl … || { echo …; exit 1; }` **fails**. Assert the two properties the docstring
       claims instead: the failure says which host could not be reached, and it never becomes a skip.
-- [ ] **Delete the false reason, everywhere it was copied.** `AGENTS.md:128-129` says "`curl -f`
+- [x] **Delete the false reason, everywhere it was copied.** *(`CHANGELOG.md:71-73` excepted — a
+      fenced file the coordinator writes at integration; the wording it needs is in Progress.)* `AGENTS.md:128-129` says "`curl -f`
       prints nothing and a bare exit code reads as a corpus that changed". The flags in use are
       `-fsSL`, and `-S` is *show errors*: `curl -fsSL <bad-url> -o /tmp/x` prints
       `curl: (22) The requested URL returned error: 404` and exits 22. The guard may still be worth
@@ -47,11 +48,11 @@ to justify them.
       both `scripts/import-rfc*-corpus.sh` guard comments, `CHANGELOG.md` and `X-56`'s Progress.
       **`AGENTS.md` is the file every future agent reads as the why**, and a why that one command
       disproves is the defect this project keeps filing stories about.
-- [ ] **Correct "the gate's only checks that reach the network".** `AGENTS.md:118` claims it, and
+- [x] **Correct "the gate's only checks that reach the network".** *(same `CHANGELOG.md` exception.)* `AGENTS.md:118` claims it, and
       `scripts/build-docs.sh:111-113` runs `npm ci`/`npm install` whenever `website/node_modules` is
       absent — which is every fresh implementor worktree, since it is gitignored. The `docs site`
       step has always reached the network. Same overclaim in `CHANGELOG.md` and in `X-56`.
-- [ ] **An unrecognised flag must not take the write path.** `[[ "${1:-}" == "--check" ]] && check_only=1`
+- [x] **An unrecognised flag must not take the write path.** `[[ "${1:-}" == "--check" ]] && check_only=1`
       (`import-rfc5118-corpus.sh:31`, `import-rfc4475-corpus.sh:25`) means `--check=1`, `-check` or a
       typo silently selects rewrite mode, which would overwrite a tampered fixture with the RFC's own
       bytes and exit 0 — a green step that erased the evidence. Pre-existing, but `X-56` added four
@@ -62,6 +63,37 @@ to justify them.
   copies rather than reasoning about them: the no-op guard passing the suite, the `||` form failing
   it, curl's actual output at the actual flags, and `gate.py`'s classifier returning `None` for the
   fetch failure so the step lands in the red tally.
+- **The decision the first item asked for: a distinct exit code, not `infrastructure_evidence`.**
+  The importers are ours, so the disclaimer is a claim they are entitled to make about their own
+  run; `infrastructure_evidence` would be `gate.py` inferring it from a step's *text*. Three things
+  settle it. The pattern would have to match curl's wording for no route, no DNS, a timeout, a
+  proxy refusal and a 404, in whatever locale and curl version the machine has — a regex over
+  another program's prose, which is the spelling-not-behaviour mistake this story exists to remove.
+  `INFRASTRUCTURE_SHAPES` is global, so any pattern loose enough to catch "could not fetch" would
+  also excuse a `cargo` step that happened to print it. And `infrastructure_evidence` means "stop
+  the run", which is right for a vanished `target/` and wrong here: an unreachable host says
+  nothing about `cargo clippy`.
+- **The exit code is `75`** (`EX_TEMPFAIL`, sysexits(3)), not `2`: under `set -e`, `tar`, `diff` and
+  `grep` all exit `2` for real trouble and would hand the gate a disclaimer no script meant to make.
+  Steps opt in with `Step.not_a_result`, so the number is only read that way from scripts this
+  repository owns. `gate.py` still exits `2` — the doctrine's number — when a step disclaims.
+- **A disclaimed step does not end the run, and does not outrank a real finding.** With something
+  genuinely red alongside it the gate exits `1` and prints `1 of 2 steps failed` naming only the
+  red one, with the disclaimer above under its own heading. Exiting `2` there would tell an
+  implementor to re-run instead of to look, which is the disease `X-34` named rather than the cure.
+  This is the one place the design departs from the disk guard's shape, and deliberately.
+- **Failing-first, at the merge base `f5c18a1`:** `scripts/test-gate.py` with a `curl` on `PATH`
+  that answers `curl: (6) Could not resolve host: www.rfc-editor.org` and exits 6 — 20 failures and
+  1 error, the load-bearing one being `gate: 1 of 1 steps failed / rfc 5118 corpus: exit 1` at
+  exit code `1`. After: `gate: NOT A RESULT — these steps could not reach what they check, and did
+  not fail`, exit code `2`. The stub is why the suite still runs offline and costs no DNS timeout.
+- The replaced assertion is gone: `startswith("if ! curl")` is now five behavioural cases — the
+  failure names the host, it names the corpus, it never exits `0`, it exits `EX_TEMPFAIL`, and
+  `gate.py`'s own summary and exit code are asserted. A body of `then true; fi` fails all of them.
+- **`CHANGELOG.md:71-73` still carries both false sentences** and is fenced from implementors. It
+  needs: the guard justified by naming the corpus and the host rather than by curl's silence; the
+  corpus steps described as network-dependent rather than as the first or only such steps; and the
+  disclaiming exit code recorded. `X-56`'s Progress note carries the same correction in full.
 
 ## Notes
 - **The wiring `X-56` shipped is sound and is not reopened.** Both corpus checks run from a gate step

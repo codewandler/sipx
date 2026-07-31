@@ -13,6 +13,10 @@
 #
 # Usage: scripts/import-rfc4475-corpus.sh [--check]
 #          --check   verify the committed corpus matches the RFC; do not write
+#
+# Exit codes: 0 the corpus matches (or was written), 1 it differs from the RFC, 64 the arguments
+# were not understood, 75 the RFC editor could not be reached — see `check_only` and the fetch
+# guard below.
 
 set -euo pipefail
 
@@ -20,21 +24,54 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dest="$repo_root/crates/sipx-testkit/corpus/rfc4475"
 url="https://www.rfc-editor.org/rfc/rfc4475.txt"
 
+# `EX_USAGE` and `EX_TEMPFAIL` from sysexits(3). The second one is the contract with the gate:
+# `scripts/gate.py` reads it as "this step made no claim about the corpus" instead of putting the
+# step in the failed tally (`X-58`).
+readonly EX_USAGE=64
+readonly EX_UNREACHABLE=75
+
+# X-58: this used to be `[[ "${1:-}" == "--check" ]] && check_only=1`, which made `--check=1`,
+# `-check` and every typo select the *other* branch — the one that overwrites the corpus with the
+# RFC's own bytes and exits 0. That is a green step that erases the hand edit the check exists to
+# catch, and it matters most here: the `fuzz` job's invocation is what proves a campaign deposited
+# none of its generated inputs in the seed corpus, and the write path would launder exactly that.
 check_only=0
-[[ "${1:-}" == "--check" ]] && check_only=1
+case "${1:-}" in
+    "") ;;
+    --check) check_only=1 ;;
+    *)
+        echo "unknown argument: $1" >&2
+        echo "usage: ${BASH_SOURCE[0]##*/} [--check]" >&2
+        exit "$EX_USAGE"
+        ;;
+esac
+if [[ $# -gt 1 ]]; then
+    echo "unknown argument: $2" >&2
+    echo "usage: ${BASH_SOURCE[0]##*/} [--check]" >&2
+    exit "$EX_USAGE"
+fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 echo "fetching $url"
-# `curl -f` prints nothing, so an unguarded fetch reports a bare exit code — and a red corpus step
-# reads as a finding about the corpus, which an unreachable RFC editor is not (`X-56`). It stays a
-# failure rather than becoming a skip: a provenance check that passes when it could not reach the
-# RFC is the MSRV hole in a second place.
+# The guard is here to say two things curl does not, and to exit a code that means them.
+#
+# curl at these flags is not silent — `-S` in `-fsSL` is *show errors*, so it prints e.g.
+# `curl: (6) Could not resolve host: www.rfc-editor.org` on stderr. What it cannot say is which
+# corpus was being checked, or that the fifty committed files are not what failed. And its exit
+# code is about curl: 6, 7, 22, 28 all land in the gate's failed tally as `exit N` beside the
+# steps that really did find something wrong with the tree.
+#
+# So: one sentence naming the corpus and the host, and `EX_TEMPFAIL`, which `scripts/gate.py`
+# reads as a step disclaiming its own run rather than reporting on the corpus (`X-58`). It is
+# still not a skip — a provenance check that *passes* when it could not reach the RFC is the MSRV
+# hole in a second place.
 if ! curl -fsSL "$url" -o "$work/rfc4475.txt"; then
-    echo "could not fetch $url — this says nothing about the committed corpus, only that the RFC" >&2
-    echo "could not be reached to compare against it. Check the network and run this again." >&2
-    exit 1
+    echo "could not fetch $url — this says nothing about the committed RFC 4475 corpus, only" >&2
+    echo "that the RFC could not be reached to compare against it. Check the network and run" >&2
+    echo "this again; nothing here is a finding about the fifty committed messages." >&2
+    exit "$EX_UNREACHABLE"
 fi
 
 # Appendix A wraps the archive in "-- BEGIN/END MESSAGE ARCHIVE --". Everything between the
