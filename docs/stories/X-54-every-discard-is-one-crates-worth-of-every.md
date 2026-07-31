@@ -2,7 +2,7 @@
 id: X-54
 title: Count every discard in the signalling path, and let the numbers out beside the capture
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 design: docs/designs/sip-transport.md
 epic: sip-transport
