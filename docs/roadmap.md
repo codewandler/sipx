@@ -116,7 +116,13 @@ question of what can be built on this stack without writing Rust. **M9** waits b
     both ways, and the second, whose registration is equally current, never sees the INVITE. The
     contrast is what carries the claim: the same routing applied to the address of record resolves to
     *both* bindings, so being individually callable is a property of the GRUU and not of having
-    registered.
+    registered. **What is sipx's and what is the harness's, stated plainly:** RFC 5627 has a
+    *registrar* mint the GRUU and a *proxy* resolve it to one binding, and sipx is the UA half of
+    that RFC and implements neither — so the registrar and the resolution in that test are doubles,
+    and always were. What sipx holds, and what the test falsifies, is per-instance GRUU learning,
+    presentation, and recognition of a GRUU as its own. It does **not** refuse a call addressed to
+    another instance's GRUU that reaches it anyway; `sipx-call` reads no `gr` parameter, and `X-59`
+    is the story that decides whether it should.
   - **A push into an answered call** —
     `a_push_wakes_a_client_that_held_no_connection_into_an_answered_call`. A client holding no
     connection at all is woken, refreshes its binding, answers the call it was woken for, and carries
@@ -225,7 +231,11 @@ those three tests rather than against the statuses of the stories that built the
 
 - **GRUU** — `X-52`'s `each_of_two_registrations_of_an_address_of_record_is_called_individually`. Two
   instances of one address of record, a call placed at one instance's GRUU, answered by that instance
-  with audio both ways, and the other instance never sees it. `T-20`'s
+  with audio both ways, and the other instance never sees it — **because the test's routing double
+  sends it to one flow, which is the role a proxy plays and sipx does not.** The stack's own half is
+  that each instance learns, presents and recognises its own GRUU, and that is the half the
+  falsification attacks. An INVITE for one instance's GRUU delivered to the other's flow is still
+  answered (`X-59`). `T-20`'s
   `a_request_to_a_gruu_reaches_the_instance_that_registered_it` remains what it always was — an
   `OPTIONS` against one agent and a stub registrar, the mechanism this composes on top of — and is
   not reopened.

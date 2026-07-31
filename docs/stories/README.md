@@ -51,6 +51,8 @@ _This is the layer applications actually program against, so it is the one that 
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
+- [X-58 — Make an unreachable RFC editor a non-result rather than a finding, and delete the false reason for the guard](X-58-the-corpus-fetch-guard-reports-a-finding-for-an-unreachable-rfc.md) · Build · found by the independent review of X-56 — the fetch guard exits 1, so gate.py reports `1 of 25 steps failed` when the network is down, which is the exact confusion X-34 removed; and the rationale written into AGENTS.md for the guard is disproved by one command
+- [X-59 — Refuse an INVITE addressed to another instance's GRUU, or write down why answering it is right](X-59-a-call-answers-an-invite-addressed-to-another-instances-gruu.md) · Application · found by the independent review of X-52 — an INVITE whose Request-URI is instance one's public GRUU, delivered to instance two's flow, is answered by instance two and carries audio; `sent_to_our_gruu` is a predicate nothing but tests call, and `crates/sipx-call/src/` contains no GRUU reference at all
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503

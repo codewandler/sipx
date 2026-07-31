@@ -75,8 +75,11 @@ demonstrate them, so the milestone can be recorded on evidence rather than on me
   that the instance the GRUU does not name never sees the INVITE, but the only thing standing between
   that instance and the call was the test's own routing double — so the clause was demonstrated by
   the *harness* declining to deliver rather than by sipx declining to answer. Both instances are now
-  passed to the call helper and the un-named one is asserted to refuse the request even had the
-  routing sent it there. The arrival check is INVITE-specific rather than "did anything arrive",
+  passed to the call helper and the un-named one is asserted **not to recognise** the GRUU as its
+  own. It is not asserted to refuse a call so addressed — the independent review delivered that
+  INVITE to the un-named instance and it answered and carried audio, because `sipx-call` reads no
+  `gr` parameter at all (`X-59`). The claim first written here, that it would refuse, was false and
+  is corrected rather than left standing. The arrival check is INVITE-specific rather than "did anything arrive",
   because an instance that has taken a call of its own has its own ACK and in-dialog traffic waiting.
   The test is renamed `each_of_two_registrations_of_an_address_of_record_is_called_individually`, and
   the roadmap and this file were corrected to name it. Re-falsified by the same mutation, green
