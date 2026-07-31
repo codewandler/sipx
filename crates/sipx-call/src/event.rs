@@ -34,6 +34,8 @@
 //! half of playback — a queue, stopping, interrupting on a digit — and reports completion
 //! through the same variant rather than a new one, naming the playback it is about.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -183,7 +185,30 @@ pub enum EndCause {
 /// `Call::events` hands this out once and returns `None` on every call after, rather than a
 /// value anyone could clone a second reader from.
 #[derive(Debug)]
-pub struct CallEvents(mpsc::Receiver<CallEvent>);
+pub struct CallEvents {
+    rx: mpsc::Receiver<CallEvent>,
+    drops: Arc<Drops>,
+}
+
+impl CallEvents {
+    /// How many of this call's events were dropped because this consumer was behind (§12.1).
+    ///
+    /// **Per call, and reported to the consumer that lost them, rather than folded into an
+    /// endpoint-wide total.** The overflow policy above is deliberate — a slow consumer loses
+    /// history, not correctness — but §12.1's rule is that a discard is *counted*, and until
+    /// `X-54` this one was reported with a `tracing::debug!` and nothing else, which is the exact
+    /// failure that section names.
+    ///
+    /// It is not in [`SignallingCounts`](crate::SignallingCounts) because a crate-wide total would
+    /// say that some call somewhere lost some events, which is not something anyone can act on.
+    /// The party who can act is the one holding this receiver: it fell behind, and resynchronising
+    /// from the next event's snapshot is the documented recovery (`docs/specs/app-contract.md`
+    /// §5.1). Monotonic, and never reset by reading it.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.drops.get()
+    }
+}
 
 impl CallEvents {
     /// The next event, or `None` once the call has dropped its sender.
@@ -192,13 +217,33 @@ impl CallEvents {
     /// [`CallEvent::Ended`] — the sender is not dropped until the call's own destructor runs,
     /// which is after the last event has been queued.
     pub async fn recv(&mut self) -> Option<CallEvent> {
-        self.0.recv().await
+        self.rx.recv().await
     }
 
     /// The next event if one is already queued, without waiting.
     #[must_use]
     pub fn try_recv(&mut self) -> Option<CallEvent> {
-        self.0.try_recv().ok()
+        self.rx.try_recv().ok()
+    }
+}
+
+/// Events this call's consumer was too far behind to be given.
+///
+/// One atomic, shared by the sink, every [`Emitter`] it hands out, and the [`CallEvents`] that
+/// reads it — which is what lets the count be taken at the site that drops the event without
+/// threading anything through the call's construction. `Relaxed`, for the same reason
+/// `sipx-transport`'s meters are: nothing here guards data and no reader draws a conclusion from
+/// the order of two increments.
+#[derive(Debug, Default)]
+pub(crate) struct Drops(AtomicU64);
+
+impl Drops {
+    fn bump(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn get(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
     }
 }
 
@@ -229,6 +274,8 @@ pub(crate) struct EventSink {
     /// if the reservation itself could not be made, which does not happen in practice: `CAPACITY`
     /// is never zero, so a freshly built channel always has a free slot to reserve.
     ended_slot: Option<mpsc::OwnedPermit<CallEvent>>,
+    /// Shared with every [`Emitter`] and with the [`CallEvents`] that reads it.
+    drops: Arc<Drops>,
 }
 
 impl EventSink {
@@ -236,7 +283,15 @@ impl EventSink {
     pub(crate) fn new() -> (Self, CallEvents) {
         let (tx, rx) = mpsc::channel(CAPACITY);
         let ended_slot = tx.clone().try_reserve_owned().ok();
-        (Self { tx, ended_slot }, CallEvents(rx))
+        let drops = Arc::new(Drops::default());
+        (
+            Self {
+                tx,
+                ended_slot,
+                drops: Arc::clone(&drops),
+            },
+            CallEvents { rx, drops },
+        )
     }
 
     /// Emit an event other than `Ended` — use [`Self::end`] for that one.
@@ -257,7 +312,10 @@ impl EventSink {
     /// It cannot emit `Ended`: the reserved slot is not clonable, and a call's last word belongs
     /// to the call.
     pub(crate) fn emitter(&self) -> Emitter {
-        Emitter(self.tx.clone())
+        Emitter {
+            tx: self.tx.clone(),
+            drops: Arc::clone(&self.drops),
+        }
     }
 
     /// Emit `Ended`, through the capacity reserved for it at construction.
@@ -267,15 +325,22 @@ impl EventSink {
     pub(crate) fn end(&mut self, cause: EndCause) {
         match self.ended_slot.take() {
             Some(permit) => {
-                // `OwnedPermit::send` cannot fail — the capacity was already reserved — and
-                // hands back the `Sender`, which there is no further use for.
+                // discard: nothing is lost here. `OwnedPermit::send` cannot fail — the capacity
+                // was reserved at construction and is held until this moment — and what it returns
+                // is the `Sender`, not a result about the event. The event is delivered.
                 let _ = permit.send(CallEvent::Ended(cause));
             }
             // Only reachable if the reservation at construction failed, which a nonzero
             // `CAPACITY` never lets happen. Falling back to `try_send` rather than doing
             // nothing means this is still delivered whenever the queue happens to have room.
             None => {
-                let _ = self.tx.try_send(CallEvent::Ended(cause));
+                if self.tx.try_send(CallEvent::Ended(cause)).is_err() {
+                    // A call's last word, lost. Counted rather than reasoned away: this branch is
+                    // unreachable today, and a count is how anyone would ever learn that stopped
+                    // being true — which is precisely what a reason saying "cannot happen" cannot
+                    // do.
+                    self.drops.bump();
+                }
             }
         }
     }
@@ -287,7 +352,10 @@ impl EventSink {
 /// which is what makes it safe to hold in a spawned task: nothing about reporting a playback can
 /// park on whether anyone is reading the call's events.
 #[derive(Debug, Clone)]
-pub(crate) struct Emitter(mpsc::Sender<CallEvent>);
+pub(crate) struct Emitter {
+    tx: mpsc::Sender<CallEvent>,
+    drops: Arc<Drops>,
+}
 
 impl Emitter {
     pub(crate) fn emit(&self, event: CallEvent) {
@@ -295,7 +363,11 @@ impl Emitter {
             !matches!(event, CallEvent::Ended(_)),
             "Ended must go through `EventSink::end`, which spends the reserved slot"
         );
-        if self.0.try_send(event).is_err() {
+        if self.tx.try_send(event).is_err() {
+            // §12.1: a discard whose reason is logged but not counted is still a failure, because
+            // logs rotate and "how often" should not be answered with `grep | wc -l`. The count is
+            // read by the consumer that lost them, through `CallEvents::dropped`.
+            self.drops.bump();
             tracing::debug!("a call event was dropped: the consumer is behind");
         }
     }
@@ -331,6 +403,29 @@ mod tests {
             received,
             CAPACITY - 1,
             "the queue must hold exactly the ordinary capacity and no more"
+        );
+    }
+
+    /// §12.1: the drops the policy above permits are **counted**, not only logged.
+    ///
+    /// This was a `tracing::debug!` and nothing else until `X-54` — one of the seven dialog-layer
+    /// discards `X-51` found by hand, and the exact failure §12.1 names: a discard whose reason is
+    /// logged but not counted still leaves "how often" to be answered with `grep | wc -l`.
+    #[test]
+    fn dropped_events_are_counted_for_the_consumer_that_lost_them() {
+        let (sink, events) = EventSink::new();
+        assert_eq!(events.dropped(), 0, "nothing has been dropped yet");
+
+        const OVERRUN: usize = 8;
+        for _ in 0..CAPACITY + OVERRUN {
+            sink.emit(CallEvent::Answered);
+        }
+
+        assert_eq!(
+            events.dropped(),
+            OVERRUN as u64 + 1,
+            "every event past the ordinary capacity is one drop — and the reserved `Ended` slot \
+             is why there is one more of them than the overrun"
         );
     }
 

@@ -668,6 +668,12 @@ impl Call {
         // peer is a restart only if it differs from what was last seen, and an answer is a
         // description like any other.
         self.peer_ice_restarted(&peer);
+        // discard: this is the media path, and M12's clause is about the signalling one — the
+        // counters for a media session that could not apply a renegotiation are `M-32`, which is
+        // why `sipx-media` is not in the guard's `CRATES`. Nothing signalling is lost here in any
+        // case: the peer's ICE half was recorded on the line above, which is what the *next* offer
+        // is compared against, and a renegotiation that does not take leaves the candidate pair
+        // already carrying the call in use.
         let _ = self.media.renegotiate_ice(None, Some(&peer)).await;
     }
 
@@ -1041,10 +1047,16 @@ impl Call {
             });
         match built {
             Ok(builder) => {
+                // discard: the refusal is lost, and the server transaction it would have answered
+                // is then abandoned unanswered — which `sipx_transport::DiscardCounts::unanswered`
+                // counts, at the one site that sees every instance of it. Counting it a second
+                // time here would be two tallies of one event, which §12.3 refuses.
                 if let Err(error) = self.endpoint.respond(&incoming.key, builder.build()).await {
                     tracing::warn!(%error, code, "could not refuse an unclaimed request");
                 }
             }
+            // discard: the same loss one step earlier and with the same downstream count — a
+            // refusal that cannot be built is a refusal that is not sent.
             Err(error) => tracing::warn!(%error, code, "could not build the refusal"),
         }
     }
@@ -1634,6 +1646,11 @@ impl Call {
         let mut responses = self.endpoint.send(request, self.target.clone()).await?;
         // A NOTIFY the transferor never answers does not undo the transfer; the call it asked
         // for has already happened either way.
+        //
+        // discard: nothing is thrown away that anyone could act on. The NOTIFY itself was sent —
+        // a send that failed is counted by `sipx_transport::UnsentCounts` at the hand-off — and
+        // what is dropped here is only *waiting* for its answer. The bound is a bound on failure
+        // (`X-29`): the transfer's outcome does not depend on the reply arriving.
         let _ = tokio::time::timeout(Duration::from_secs(2), responses.final_response()).await;
         Ok(())
     }
@@ -1681,6 +1698,11 @@ impl Call {
         let mut responses = self.endpoint.send(bye, self.target.clone()).await?;
         // A BYE that is never answered still ends the call locally: the alternative is a call
         // that cannot be hung up because the far end has already gone.
+        //
+        // discard: the BYE was sent, and a BYE that could *not* be sent is counted as
+        // `sipx_transport::UnsentCounts::bye` — which is the number an operator asking "why did
+        // that call linger" needs. What is dropped here is only waiting for the 200, and this
+        // side has already ended the call either way. The bound is a bound on failure (`X-29`).
         let _ = tokio::time::timeout(Duration::from_secs(2), responses.final_response()).await;
         Ok(())
     }
@@ -1779,6 +1801,9 @@ fn escape_uri_header(value: &str) -> String {
             }
             _ => {
                 use std::fmt::Write as _;
+                // discard: nothing can be lost. `write!` into a `String` returns `fmt::Error`
+                // only if the formatter itself fails, and `String`'s never does — there is no
+                // I/O and no allocation failure path to report.
                 let _ = write!(out, "%{byte:02X}");
             }
         }
@@ -2440,6 +2465,12 @@ async fn withdraw(
     // running. So this waits rather than giving up on cancelling, bounded because a
     // peer that never answers at all would otherwise hold the call attempt open.
     if provisional {
+        // discard: counted, not ignored. A CANCEL that does not reach the wire leaves the far end
+        // ringing, which is exactly the loss §12.1 exists to make visible — so it is counted as
+        // `sipx_transport::UnsentCounts::cancel`, at the hand-off, which is the one place that
+        // sees every instance including this one. What is discarded *here* is the `Result`, and
+        // there is nothing this path can do with it: it is already the giving-up path, and the
+        // only remedy for a failed CANCEL is the ACK-then-BYE below, which runs regardless.
         let _ = send_cancel(endpoint, invite, via, target.clone()).await;
     }
 
@@ -2455,6 +2486,11 @@ async fn withdraw(
         if !late.status.is_final() {
             if !cancelled {
                 cancelled = true;
+                // discard: the same loss and the same counter as above —
+                // `sipx_transport::UnsentCounts::cancel`. This is the CANCEL that could not be
+                // sent before a provisional arrived, sent now that one has; the `Result` is
+                // discarded for the same reason, and `cancelled` is set either way so a second
+                // provisional does not produce a second CANCEL.
                 let _ = send_cancel(endpoint, invite, via, target.clone()).await;
             }
             continue;
@@ -2480,8 +2516,18 @@ async fn ack_then_bye(endpoint: &Handle, invite: &Request, response: &Response, 
         return;
     };
     let in_dialog = in_dialog_target(&dialog, target);
+    // discard: counted as `sipx_transport::UnsentCounts::ack`. An ACK for a 2xx that does not go
+    // out is the worst of the three — it has no transaction to retry it (RFC 3261 §13.2.2.4), so
+    // the far end retransmits its 2xx for thirty-two seconds and then streams at a port this side
+    // has closed. The `Result` is discarded because the BYE below is the only remedy and it is
+    // attempted whether or not the ACK landed; returning the error would only mask the failure
+    // that brought us here.
     let _ = send_ack(endpoint, &dialog, in_dialog.clone()).await;
     if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
+        // discard: counted as `sipx_transport::UnsentCounts::bye` — the number an operator asking
+        // "why did that call linger" needs, because a BYE that does not reach the wire leaves a
+        // dialog up at the far end that no timer reaps unless RFC 4028 session timers happen to be
+        // running. Nothing here can retry it: this is the failure path itself.
         let _ = endpoint.send(bye, in_dialog).await;
     }
 }
@@ -3398,8 +3444,14 @@ impl Dialing {
                     .or_else(|| Dialog::from_response(&self.invite, &response));
                 if let Some(dialog) = dialog {
                     let in_dialog = in_dialog_target(&dialog, self.target.clone());
+                    // discard: counted as `sipx_transport::UnsentCounts::ack`, exactly as in
+                    // `ack_then_bye` — the same two sends on the same failing path, written inline
+                    // here only because this one already holds the dialog.
                     let _ = send_ack(&self.endpoint, &dialog, in_dialog.clone()).await;
                     if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
+                        // discard: counted as `sipx_transport::UnsentCounts::bye`. The `Result` is
+                        // dropped so that the error which brought us into this branch is the one
+                        // the caller is given, rather than being masked by a teardown failure.
                         let _ = self.endpoint.send(bye, in_dialog).await;
                     }
                 }
@@ -4808,6 +4860,12 @@ pub async fn answer_replacing_with(
     let taken_over = answer_with(endpoint, incoming, media_address, codecs).await?;
 
     // Then end the one being replaced (RFC 3891 §3). Its media stops with it.
+    //
+    // discard: the BYE this sends is counted as `sipx_transport::UnsentCounts::bye` if it does not
+    // reach the wire. The `Result` is discarded because the takeover has already succeeded on the
+    // line above and reporting a teardown failure as the *transfer* failing would be false — the
+    // caller has the new call either way, and `Call::end` has already marked the old one ended
+    // locally before the BYE was ever built.
     let _ = replaced.hang_up().await;
 
     Ok(taken_over)

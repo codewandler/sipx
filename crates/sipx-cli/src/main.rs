@@ -25,6 +25,7 @@
 
 mod advertise;
 mod answer;
+mod counters;
 mod dial;
 mod output;
 mod peers;
@@ -419,6 +420,7 @@ const VALUED_FLAGS: &[&str] = &[
     "--push-prid",
     "--push-param",
     "--capture",
+    "--counters",
     "--transport",
     "--tls-server-name",
     "--tls-ca",

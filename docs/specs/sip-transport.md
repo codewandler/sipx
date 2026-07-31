@@ -315,6 +315,66 @@ Every counter is incremented at exactly one site with `Relaxed` ordering, which 
 the first limit the only ordering hazard: there is no path on which one event increments a
 counter twice, and none on which an increment is lost.
 
+### 12.3 The signalling path is two crates, and the numbers are two sets read as one
+
+**[sipx]** §12.1 says *every* discard in the signalling path is counted. This section says which
+crates that path is, where each counter lives, and why the storage is two sets while the reading is
+one. Added by `X-54`, because until then the rule was enforced over `sipx-transport` alone and the
+dialog layer had seven discards that nothing enumerated — found by hand, which is exactly the method
+the enumeration exists to replace.
+
+**The path is `sipx-transport` and `sipx-call`.** It does not stop at the socket: an ACK that
+reaches no call is lost as thoroughly as one that reached no socket, and it is the loss that leaks
+calls. `sipx-sip` and `sipx-sdp` are not in it because they discard nothing — the sans-IO core hands
+every failure back as a typed error. `sipx-media` and `sipx-rtp` are the *media* path and are
+deliberately outside: the milestone clause this serves says the **signalling** path, and media
+counters are their own work. The list is written once, in `CRATES` in
+`crates/sipx-transport/tests/discards.rs`, next to the one copy of the detector.
+
+**The storage is two sets, and the boundary is load-bearing.** `sipx-transport` cannot depend on
+`sipx-call` — the dependency runs the other way, and reversing it would put the dialog layer beneath
+the socket. So a single struct of atomics is not available at any price worth paying: it would have
+to live in the lower crate and carry fields for facts that crate cannot observe. A crate that
+*defines* a counter it cannot *increment* is where the second increment site eventually appears,
+and the one-site property above is what §12.2's promise rests on. Two sets, each incremented at one
+site, each checkable on its own.
+
+**The reading is one, because the crate boundary is not the operator's problem.** An operator
+holding a capture asks "what did this endpoint lose", not "which crate lost it".
+`sipx_call::SignallingCounts` is that one reading: it embeds `Handle::counters` and `Calls::counts`
+unaltered rather than re-deriving either, for the reason `Counters::shed` already gives about
+itself — two tallies of one event eventually disagree, and then neither can be trusted. It lives in
+`sipx-call` because that is the crate that already depends on both.
+
+**A half that was not measured reads as absent, not as zero.** `SignallingCounts::dispatch` is an
+`Option`. An endpoint with no dispatcher running has not dispatched nothing; it has not been asked,
+and a zero cannot tell those apart. This is §12.2's first paragraph applied to the join: a counter
+that overstates its own accuracy is worse than a missing one, because it will be used to rule a
+cause out.
+
+**Where a discarded *result* is counted: at the hand-off, not at the caller.** A request an
+application asks the endpoint to send and the endpoint does not put on the wire is counted once, in
+`UnsentCounts`, inside `Handle::send` and `Handle::send_directly`. It is split by method because the
+consequence is: an unsent CANCEL leaves a phone ringing, an unsent ACK leaves a 2xx retransmitting
+toward a closed port, an unsent BYE leaves a dialog up at the far end that no timer reaps. The
+caller is the wrong place for this counter precisely *because* the caller is the one that discards
+it — six of the seven sites `X-54` closed are `let _ = …` on a path that is already failing, where
+the error is genuinely unactionable and the *loss* is not. Counting at the hand-off covers those six
+and every one added later, without a counter having to be remembered at each new site.
+
+This is **not** `DiscardCounts::send_failures`, and the two never count the same event: that one is
+a send the endpoint initiated on a transaction's behalf inside the driver, this one is a send an
+application asked for and was told about.
+
+**A loss whose only possible actor is one consumer is reported to that consumer.** A call event
+dropped because the application fell behind is counted by `CallEvents::dropped`, per call, and is
+deliberately not in the joined snapshot. An endpoint-wide total would say that some call somewhere
+lost some events, which nobody can act on; the party who can act is the one holding that receiver.
+
+**How this extends.** A new crate joins the path by being added to `CRATES` and by growing a member
+on `SignallingCounts` — never by adding fields to another crate's struct, and never by a second
+tally of an event already counted. The media half is the next one.
+
 ## 13. Capture
 
 **[sipx]** An endpoint can record the signalling it exchanges to a file: every message sent

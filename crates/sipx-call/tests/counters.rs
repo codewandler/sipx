@@ -69,14 +69,14 @@ fn callee_uri() -> Uri {
     Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")))
 }
 
-/// An ACK naming a dialog that does not exist, built by hand so the test knows its exact bytes.
-fn stray_ack(peer: &Handle, call_id: &str) -> Request {
+/// A request naming a dialog that does not exist, built by hand so the test knows its exact bytes.
+fn raw(peer: &Handle, method: &Method, call_id: &str) -> Request {
     let via = bytes::Bytes::from(format!(
         "SIP/2.0/UDP {};rport;branch={}",
         peer.sent_by_for(sipx_transport::TransportKind::Udp),
         sipx_transport::new_branch()
     ));
-    sipx_sip::build::RequestBuilder::new(Method::Ack, callee_uri())
+    sipx_sip::build::RequestBuilder::new(method.clone(), callee_uri())
         .header(HeaderName::Via, via)
         .expect("via")
         .header(
@@ -91,7 +91,7 @@ fn stray_ack(peer: &Handle, call_id: &str) -> Request {
         .expect("from")
         .header(HeaderName::CallId, bytes::Bytes::from(call_id.to_owned()))
         .expect("call-id")
-        .cseq(1, &Method::Ack)
+        .cseq(1, method)
         .expect("cseq")
         .max_forwards(70)
         .build()
@@ -133,7 +133,7 @@ async fn a_discard_in_the_dialog_layer_is_counted_next_to_the_capture_of_the_req
     let calls = pump(&callee, callee_incoming);
 
     let (peer, _peer_incoming) = plain().await;
-    tell(&peer, callee_addr, stray_ack(&peer, CALL_ID)).await;
+    tell(&peer, callee_addr, raw(&peer, &Method::Ack, CALL_ID)).await;
 
     // One snapshot, asked once, covering both crates' loss.
     until(
@@ -171,6 +171,54 @@ async fn a_discard_in_the_dialog_layer_is_counted_next_to_the_capture_of_the_req
     .await;
 
     let _ = std::fs::remove_dir_all(path.parent().expect("a scratch directory"));
+}
+
+/// A BYE that never reaches the wire is counted, and counted as a **BYE**.
+///
+/// The census `X-51` took found six sends whose result `sipx-call` discards, four of them on a
+/// teardown path (`crates/sipx-call/src/call.rs`). None was counted, and this is the number an
+/// operator asking "why did that call linger" is reaching for: a dialog the far end still believes
+/// is up, because the request that would have ended it never left.
+///
+/// Counted at the hand-off rather than at the caller, because the caller is the one that discards
+/// it — see §12.3 and the `// discard:` comments at those six sites.
+#[tokio::test]
+async fn a_bye_that_never_reaches_the_wire_is_counted_as_a_bye() {
+    let (endpoint, _incoming) = plain().await;
+    let peer = "127.0.0.1:9".parse::<SocketAddr>().expect("valid");
+
+    assert_eq!(
+        endpoint.counters().unsent.total(),
+        0,
+        "nothing has failed to send yet"
+    );
+
+    // An endpoint that has shut down cannot put anything on the wire, which is the one way to
+    // fail a send that does not depend on the network's cooperation.
+    endpoint.shutdown().await;
+    let bye = raw(&endpoint, &Method::Bye, "linger@sipx");
+    endpoint
+        .send(bye, Target::udp(peer))
+        .await
+        .err()
+        .expect("a shut-down endpoint cannot send");
+
+    let counts = SignallingCounts::of(&endpoint);
+    assert_eq!(
+        counts.transport.unsent.bye, 1,
+        "a BYE that did not reach the wire must be counted as a BYE: {:?}",
+        counts.transport.unsent
+    );
+    assert_eq!(
+        counts.transport.unsent.total(),
+        1,
+        "and nothing else moved: {:?}",
+        counts.transport.unsent
+    );
+    assert!(
+        counts.any_loss(),
+        "a request that never left is loss, and the snapshot must say so"
+    );
 }
 
 /// The transport's half is in the same snapshot, and reads the same as `Handle::counters`.

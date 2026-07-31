@@ -479,7 +479,22 @@ impl Handle {
     ///
     /// A `Via` is added if the request has none — the transport owns that header, since only
     /// it knows the branch and where responses should come back to.
-    pub async fn send(&self, mut request: Request, target: Target) -> Result<Responses> {
+    /// A request that did not reach the wire is counted here and nowhere else (§12.3).
+    ///
+    /// Wrapped around the body rather than written at each `?`, because there are four ways out of
+    /// it and a counter that has to be remembered at four of them is a counter that will be
+    /// forgotten at the fifth. Most callers of this on a teardown path discard the error — see
+    /// `sipx-call`'s `ack_then_bye` — so this is the only place the loss can be seen at all.
+    pub async fn send(&self, request: Request, target: Target) -> Result<Responses> {
+        let method = request.method.clone();
+        let sent = self.send_inner(request, target).await;
+        if sent.is_err() {
+            self.meters.unsent(&method);
+        }
+        sent
+    }
+
+    async fn send_inner(&self, mut request: Request, target: Target) -> Result<Responses> {
         if request.headers.get(&HeaderName::Via).is_none() {
             let via = format!(
                 "SIP/2.0/{} {};rport;branch={}",
@@ -526,6 +541,17 @@ impl Handle {
     ///
     /// Returns once the bytes have been handed to the socket.
     pub async fn send_directly(&self, request: Request, target: Target) -> Result<()> {
+        let method = request.method.clone();
+        let sent = self.send_directly_inner(request, target).await;
+        if sent.is_err() {
+            // The same one increment site as [`Self::send`], for the one request that has no
+            // transaction: an ACK for a 2xx that does not go out is never retried by anything.
+            self.meters.unsent(&method);
+        }
+        sent
+    }
+
+    async fn send_directly_inner(&self, request: Request, target: Target) -> Result<()> {
         let (sent_tx, sent_rx) = oneshot::channel();
         self.commands
             .send(Command::Direct {

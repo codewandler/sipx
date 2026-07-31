@@ -38,6 +38,8 @@ OPTIONS:
     --stats           Report call quality on exit: loss, jitter, round trip, MOS estimate
     --capture <FILE>  Record signalling to this pcapng file. Credentials are redacted;
                       TLS is recorded decrypted. Still identifies who called whom
+    --counters <FILE> Write this run's signalling counters to this file, as JSON.
+                      Implied by --capture, as <capture>.counters.json
     --json            Report as JSON
 ";
 
@@ -192,6 +194,10 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         samples_recorded = recorded.len(),
         "hung up"
     );
+    report = match crate::counters::attach(&args, &handle, report) {
+        Ok(report) => report,
+        Err(message) => return fail(format, Exit::Failed, &message),
+    };
     report.emit(format);
     Exit::Success
 }

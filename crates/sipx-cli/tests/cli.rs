@@ -1614,6 +1614,63 @@ async fn the_capture_flag_records_the_signalling_of_a_call() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **`X-54`'s command-line half.** The counters come out of the process beside the capture.
+///
+/// M12's third clause asks for every discard in the signalling path to be counted **and exportable
+/// next to** a capture of the traffic that caused it. `X-18` built both halves and `X-51` found
+/// that nothing joined them: `Handle::counters` and `Calls::counts` were read by each crate's own
+/// tests and by nothing else, so from a shell — the [vision](../../../docs/vision.md)'s own measure
+/// of usable — the capture and the numbers were two features that existed separately.
+///
+/// So `--capture` implies the counters file rather than requiring a second flag: whoever took a
+/// capture is assembling a bug report, and the numbers explaining it belong in the same bundle.
+/// The run names the file it wrote, which is what keeps an implied file from being a surprise.
+#[tokio::test]
+async fn the_capture_flag_leaves_the_counters_beside_the_capture() {
+    let dir = scratch("counters-beside-capture");
+    let capture = dir.join("signalling.pcapng");
+    let counters = dir.join("signalling.pcapng.counters.json");
+
+    let placed = place_a_call(&dir, &["--capture", capture.to_str().expect("a path")], &[]).await;
+
+    let body = std::fs::read_to_string(&counters)
+        .expect("the counters file --capture implies exists beside the capture");
+
+    // Real traffic happened, so the transport half is populated rather than a zeroed template.
+    assert!(
+        body.contains("\"messages_in\""),
+        "the transport's own numbers are missing: {body}"
+    );
+    assert!(
+        !body.contains("\"messages_in\": 0,") && !body.contains("\"messages_in\":0,"),
+        "a call was placed, so messages_in cannot be zero: {body}"
+    );
+    // §12.1's fields are what the clause is about, and they are named even at zero — a discard
+    // counter that only appears once it fires cannot be used to rule a cause out.
+    for field in ["unsent_bye", "unsent_cancel", "discard_send_failures"] {
+        assert!(body.contains(field), "{field} is missing from {body}");
+    }
+    // §12.2 applied to the export: no `Dispatcher` runs in these commands, so the dialog layer's
+    // refusals are *unmeasured* here and the file says so rather than reporting zeros for them.
+    assert!(
+        body.contains("\"dispatch_measured\": false") || body.contains("\"dispatch_measured\":false"),
+        "an unasked question must not be exported as a negative answer: {body}"
+    );
+    assert!(
+        !body.contains("dispatch_acks"),
+        "a dispatcher that never ran must not contribute counts: {body}"
+    );
+
+    // The run said where it put it, so nothing appeared that the command did not mention.
+    let said = placed.answerer_stdout.join("\n");
+    assert!(
+        said.contains("signalling.pcapng.counters.json"),
+        "the answerer's report must name the counters file it wrote: {said}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Off unless asked for, at the command line as well as in the library: a real call, placed with no
 /// `--capture`, leaves nothing on disk.
 ///
