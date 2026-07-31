@@ -413,7 +413,10 @@ async fn each_of_two_registrations_of_an_address_of_record_is_called_individuall
         2,
         "the AOR must reach every registration; if it reached one, the clause would be vacuous"
     );
-    let (flow_of_one, flow_of_two) = (route(&bindings, &gruu_of_one), route(&bindings, &gruu_of_two));
+    let (flow_of_one, flow_of_two) = (
+        route(&bindings, &gruu_of_one),
+        route(&bindings, &gruu_of_two),
+    );
     assert_eq!(
         flow_of_one,
         vec![one.endpoint().local_addr()],
