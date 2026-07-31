@@ -413,10 +413,11 @@ mod tests {
     /// logged but not counted still leaves "how often" to be answered with `grep | wc -l`.
     #[test]
     fn dropped_events_are_counted_for_the_consumer_that_lost_them() {
+        const OVERRUN: usize = 8;
+
         let (sink, events) = EventSink::new();
         assert_eq!(events.dropped(), 0, "nothing has been dropped yet");
 
-        const OVERRUN: usize = 8;
         for _ in 0..CAPACITY + OVERRUN {
             sink.emit(CallEvent::Answered);
         }

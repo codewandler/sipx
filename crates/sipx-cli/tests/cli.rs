@@ -1653,7 +1653,8 @@ async fn the_capture_flag_leaves_the_counters_beside_the_capture() {
     // §12.2 applied to the export: no `Dispatcher` runs in these commands, so the dialog layer's
     // refusals are *unmeasured* here and the file says so rather than reporting zeros for them.
     assert!(
-        body.contains("\"dispatch_measured\": false") || body.contains("\"dispatch_measured\":false"),
+        body.contains("\"dispatch_measured\": false")
+            || body.contains("\"dispatch_measured\":false"),
         "an unasked question must not be exported as a negative answer: {body}"
     );
     assert!(

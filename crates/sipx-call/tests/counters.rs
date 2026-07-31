@@ -124,7 +124,7 @@ async fn tell(peer: &Handle, callee: SocketAddr, request: Request) {
 /// features that existed separately.
 #[tokio::test]
 async fn a_discard_in_the_dialog_layer_is_counted_next_to_the_capture_of_the_request_that_caused_it()
-{
+ {
     const CALL_ID: &str = "stray-ack-beside-its-capture@sipx";
 
     let path = capture_path("stray-ack");
@@ -200,8 +200,7 @@ async fn a_bye_that_never_reaches_the_wire_is_counted_as_a_bye() {
     endpoint
         .send(bye, Target::udp(peer))
         .await
-        .err()
-        .expect("a shut-down endpoint cannot send");
+        .expect_err("a shut-down endpoint cannot send");
 
     let counts = SignallingCounts::of(&endpoint);
     assert_eq!(

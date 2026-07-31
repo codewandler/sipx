@@ -75,10 +75,7 @@ pub(crate) fn report(counts: &SignallingCounts) -> Report {
         .number("shed_acks", cast(transport.shed.acks))
         .number("shed_unmatched", cast(transport.shed.unmatched))
         .number("unmatched_responses", cast(transport.unmatched_responses))
-        .number(
-            "retransmissions_sent",
-            cast(transport.retransmissions_sent),
-        )
+        .number("retransmissions_sent", cast(transport.retransmissions_sent))
         .number("timeout_b", cast(transport.timeouts.b))
         .number("timeout_f", cast(transport.timeouts.f))
         .number("timeout_h", cast(transport.timeouts.h))
