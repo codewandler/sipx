@@ -137,11 +137,20 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         options = options.with_timeout(attempt);
     }
 
+    // What `-v` is *for*, and what it used to be worth nothing on: a call's own progress. The
+    // workspace's only INFO records were a registration refresh and a transcoding bridge, so
+    // `sipx dial -v` said nothing whatsoever through a call that worked, and an operator reading the
+    // help text got silence from the level it documents (`X-57`). These three records are the
+    // lifecycle a shell already sees on stdout — placed, answered, ended — on the stream that is
+    // allowed to narrate it.
+    tracing::info!(peer = uri, transport = ?negotiated_transport, "calling");
+
     let started = std::time::Instant::now();
     let mut call = match sipx_call::dial(&handle, target, &to, &options).await {
         Ok(call) => call,
         Err(error) => return report_failure(format, &error),
     };
+    tracing::info!(peer = uri, setup = ?started.elapsed(), "answered");
 
     let duration = match numeric(&args, "duration", 30) {
         Ok(seconds) => Duration::from_secs(seconds),
@@ -177,6 +186,12 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     }
 
     let _ = call.hang_up().await;
+    tracing::info!(
+        peer = uri,
+        elapsed = ?started.elapsed(),
+        samples_recorded = recorded.len(),
+        "hung up"
+    );
     report.emit(format);
     Exit::Success
 }
