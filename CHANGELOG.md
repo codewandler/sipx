@@ -31,6 +31,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`-vv` reaches DEBUG, and `-v` has something to say (`X-57`)** — verbosity counted the number of
+  *arguments* beginning with `-v`, so the documented `-vv` was a single match capped at INFO while
+  `USAGE` promised DEBUG. Only the undocumented `-v -v` ever reached it, and `-v` alone was worse than
+  quiet: the workspace's only two `tracing::info!` sites are a registration refresh and a transcoding
+  bridge, so `sipx dial -v` narrated **nothing** through a call that worked.
+  - **Counted by `v` letter now**, so `-vv` and `-v -v` are one request and `-vvv` agrees with
+    `-v -v -v`. The ladder saturates at DEBUG, because the workspace has no `trace!` for a third `v`
+    to reach and documenting a level identical to `-vv` would restate the defect rather than fix it.
+  - **Only a cluster of `v`s is verbosity.** The old prefix match counted `-V` and `--verbose` too.
+  - **A call reports itself at INFO** — `calling`, `answered` and `hung up` on the dialling side,
+    `waiting for a call` on the answering side, all on stderr, and `USAGE` says what each level is
+    good for. A documented level that produces silence is the same shape as a capture you can only
+    switch on by editing code.
+
 - **A story closed inside a merge commit is counted (`X-55`)** — `maturity.py` read its story facts
   with `git log -p` and `git log --diff-filter=A --name-only`, and **neither emits anything for a
   merge commit** unless asked. A `status: done` line whose only appearance was a merge was therefore
