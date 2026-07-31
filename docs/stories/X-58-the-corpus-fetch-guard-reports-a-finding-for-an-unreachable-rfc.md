@@ -2,7 +2,7 @@
 id: X-58
 title: Make an unreachable RFC editor a non-result rather than a finding, and delete the false reason for the guard
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 epic: conformance
 areas: [scripts, ci]
