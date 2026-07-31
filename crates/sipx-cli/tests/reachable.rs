@@ -243,12 +243,9 @@ async fn registrar() -> (Target, Arc<Mutex<Vec<Binding>>>) {
 /// answer, and the reason a UA that read the first row would end up answering to another phone's
 /// address.
 fn registered(request: &Incoming, bindings: &[Binding]) -> sipx_sip::Response {
-    let mut builder = ResponseBuilder::to_request(
-        &request.request,
-        StatusCode::new(200).expect("valid"),
-        "OK",
-    )
-    .expect("builds");
+    let mut builder =
+        ResponseBuilder::to_request(&request.request, StatusCode::new(200).expect("valid"), "OK")
+            .expect("builds");
     for binding in bindings {
         let value = format!(
             "{};pub-gruu=\"{AOR};gr={}\";expires=3600",
@@ -481,7 +478,10 @@ async fn a_push_wakes_a_client_that_held_no_connection_into_an_answered_call() {
     let (registrar_target, timeline, released) = push_registrar().await;
 
     let device = Doorbell.device().expect("valid push parameters");
-    let mut agent = UserAgent::new(client, ua_config(contact, registrar_target).with_push(device));
+    let mut agent = UserAgent::new(
+        client,
+        ua_config(contact, registrar_target).with_push(device),
+    );
 
     // The client holds no connection: it has not registered, and nothing is on its way.
     assert!(arriving.try_recv().is_err());
