@@ -1537,5 +1537,145 @@ async fn the_session_expires() {
         )
 
 
+class TheCorpusProvenanceChecks(unittest.TestCase):
+    """`X-56`: a corpus whose provenance check nothing invokes is a conformance claim taken on trust.
+
+    Neither RFC corpus under `crates/sipx-testkit/corpus/` was transcribed. Each is recovered from
+    its RFC's own Appendix A archive by an importer, and each importer's `--check` re-recovers that
+    archive and diffs it against the tree — which is the only thing that can tell a fixture edited
+    by hand from the RFC's own bytes, because the test suites read whatever is in the directory and
+    pass. RFC 4475's check ran solely inside the `fuzz` job, which is not run locally; RFC 5118's
+    ran nowhere at all. `X-51` ran the 5118 one by hand while verifying M12's first clause, found it
+    passing, and noticed that nothing would ever notice if it stopped.
+
+    The corpora are discovered from the tree rather than listed here. That is the story's last
+    question answered in the place it has to hold: the rule for two of them lives in one CI job and
+    one class, so a third RFC corpus added to `corpus/` fails these until it is wired like the
+    other two.
+    """
+
+    CORPUS = ROOT / "crates" / "sipx-testkit" / "corpus"
+
+    def setUp(self):
+        self.gate = gate()
+        self.steps = self.gate.gate_steps("1.0.0")
+        self.jobs = self.gate.parse_workflow(WORKFLOW.read_text())
+
+    def corpora(self) -> list[str]:
+        """Every committed corpus that is recovered from an RFC, by the directory holding it."""
+        found = sorted(
+            path.name
+            for path in self.CORPUS.iterdir()
+            if path.is_dir() and path.name.startswith("rfc")
+        )
+        self.assertTrue(found, f"no RFC corpus under {self.CORPUS}, so these tests prove nothing")
+        return found
+
+    def importer(self, corpus: str) -> str:
+        return f"import-{corpus}-corpus.sh"
+
+    def test_every_rfc_corpus_can_be_rederived_from_its_rfc(self):
+        """A corpus with no importer is only as good as the commit that added it."""
+        for corpus in self.corpora():
+            with self.subTest(corpus=corpus):
+                script = ROOT / "scripts" / self.importer(corpus)
+                self.assertTrue(
+                    script.exists(),
+                    f"{corpus} has no importer, so nothing can say whether its files are still the "
+                    f"RFC's own bytes",
+                )
+                self.assertIn(
+                    "--check",
+                    script.read_text(),
+                    f"{script.name} can only rewrite the corpus, not verify the committed one",
+                )
+
+    def test_the_gate_runs_every_corpus_check_and_ci_does_too(self):
+        """The story, as a test — `X-22`'s property for a check that had neither half of it.
+
+        Being invoked by the `fuzz` job is not enough on its own: `fuzz` is in `NOT_RUN_LOCALLY`, so
+        nothing an implementor runs before pushing covers it. The 5118 check was not even that. Both
+        halves are asserted here, and the CI job must not be one the gate is excused from mirroring.
+        """
+        for corpus in self.corpora():
+            with self.subTest(corpus=corpus):
+                script = self.importer(corpus)
+                mine = [step for step in self.steps if script in " ".join(step.command)]
+                self.assertEqual(
+                    1,
+                    len(mine),
+                    f"`{script} --check` is not a gate step, so nothing verifies {corpus} before a "
+                    f"story is called done and a fixture edited by hand leaves the gate green",
+                )
+                self.assertIn(
+                    "--check",
+                    mine[0].command,
+                    f"gate step `{mine[0].name}` rewrites {corpus} instead of checking it",
+                )
+                job = mine[0].ci_job
+                self.assertIn(
+                    job,
+                    self.jobs,
+                    f"gate step `{mine[0].name}` names CI job `{job}`, which ci.yml does not define",
+                )
+                self.assertNotIn(
+                    job,
+                    self.gate.NOT_RUN_LOCALLY,
+                    f"CI job `{job}` is declared as run only in CI, so the drift check stops "
+                    f"reading it and the local step it is paired with is unenforced",
+                )
+                self.assertTrue(
+                    any(script in run for run in self.jobs[job].runs),
+                    f"CI job `{job}` does not run `{script}`",
+                )
+
+    def test_the_fuzz_job_still_verifies_its_seed_corpus_after_fuzzing(self):
+        """The RFC 4475 check has two callers now, and they are two different claims.
+
+        `fuzz`'s invocation runs after the fuzzer, in the workspace the fuzzer wrote to, and is the
+        only thing that can prove a campaign deposited none of its generated inputs in the seed
+        corpus it was handed. A step in another job checks out a fresh tree and cannot see that at
+        all. Folding both corpora into one place is the tempting way to lose this claim, so it is
+        held where it has to be: after the last fuzz target, in the job that ran it.
+        """
+        runs = self.jobs["fuzz"].runs
+        checked = [index for index, run in enumerate(runs) if "import-rfc4475-corpus.sh" in run]
+        self.assertEqual(
+            1, len(checked), "the fuzz job no longer verifies the corpus it fuzzed from"
+        )
+        fuzzed = [index for index, run in enumerate(runs) if "cargo fuzz run" in run]
+        self.assertTrue(fuzzed, "the fuzz job runs no fuzz target")
+        self.assertGreater(
+            checked[0],
+            max(fuzzed),
+            "the RFC 4475 corpus is verified before the last fuzz target runs, which proves "
+            "nothing about what that target wrote into it",
+        )
+
+    def test_a_fetch_that_fails_says_so_rather_than_leaving_a_bare_exit_code(self):
+        """These steps reach the network, which is new for the gate, so the failure has to speak.
+
+        `curl -f` prints nothing at all, so an unguarded fetch reports `rfc 5118 corpus: exit 6` on
+        a machine with no route to the RFC editor — a red step that reads as a finding about the
+        corpus and is not one, which is the shape `X-34` legislated against. It stays red rather
+        than becoming a skip: a corpus check that passes when it could not reach the RFC is the MSRV
+        hole in a second place.
+        """
+        for corpus in self.corpora():
+            with self.subTest(corpus=corpus):
+                script = ROOT / "scripts" / self.importer(corpus)
+                fetch = [
+                    line
+                    for line in script.read_text().splitlines()
+                    if "curl" in line and " -o " in line
+                ]
+                self.assertEqual(1, len(fetch), f"{script.name} does not fetch the RFC exactly once")
+                self.assertTrue(
+                    fetch[0].strip().startswith("if ! curl"),
+                    f"{script.name} leaves the fetch unguarded, so an unreachable RFC is reported "
+                    f"as a bare exit code and reads as a corpus that drifted",
+                )
+
+
 if __name__ == "__main__":
     sys.exit(0 if unittest.main(exit=False, verbosity=2).result.wasSuccessful() else 1)
