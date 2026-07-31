@@ -31,6 +31,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Both RFC corpora are tamper-evident from the gate and from CI (`X-56`)** — each corpus is
+  recovered from its RFC's own Appendix A archive rather than transcribed, and the importer's
+  `--check` re-recovers that archive and diffs it against the tree: the only thing that can tell a
+  fixture edited by hand from the RFC's own bytes, since the suites read whatever is in the directory
+  and pass. RFC 4475's check ran solely inside the `fuzz` job, which is in `NOT_RUN_LOCALLY`, so no
+  local run covered it; RFC 5118's ran **nowhere**, and `ci.yml` did not mention 5118 at all.
+  - A gate step and a CI job per corpus, so a red result names which corpus drifted. The gate is 25
+    steps over 17 CI jobs, and one byte flipped in an RFC 5118 message now fails it.
+  - **The `fuzz` job keeps its own RFC 4475 check.** That one runs after the fuzzer, in the tree the
+    fuzzer wrote to, and proves a campaign deposited none of its generated inputs into committed seed
+    data — a claim a fresh checkout cannot make. The ordering is pinned by a test now.
+  - **The fetch is guarded**, because these are the gate's first network-dependent steps: `curl -f`
+    prints nothing, so an unreachable RFC editor used to surface as a bare exit code that read as a
+    corpus that had changed. It stays red rather than becoming a skip.
+
 - **`-vv` reaches DEBUG, and `-v` has something to say (`X-57`)** — verbosity counted the number of
   *arguments* beginning with `-v`, so the documented `-vv` was a single match capped at INFO while
   `USAGE` promised DEBUG. Only the undocumented `-v -v` ever reached it, and `-v` alone was worse than
