@@ -19,6 +19,7 @@ declared the workspace clean.
 """
 
 import importlib.util
+import os
 import pathlib
 import subprocess
 import sys
@@ -1652,29 +1653,256 @@ class TheCorpusProvenanceChecks(unittest.TestCase):
             "nothing about what that target wrote into it",
         )
 
-    def test_a_fetch_that_fails_says_so_rather_than_leaving_a_bare_exit_code(self):
-        """These steps reach the network, which is new for the gate, so the failure has to speak.
+    # -- the fetch guard, run rather than read (`X-58`) -----------------------------------------
 
-        `curl -f` prints nothing at all, so an unguarded fetch reports `rfc 5118 corpus: exit 6` on
-        a machine with no route to the RFC editor — a red step that reads as a finding about the
-        corpus and is not one, which is the shape `X-34` legislated against. It stays red rather
-        than becoming a skip: a corpus check that passes when it could not reach the RFC is the MSRV
-        hole in a second place.
+    #: The host both importers fetch from, in the words the stub below fails with.
+    HOST = "www.rfc-editor.org"
+
+    #: What an importer exits when it could not reach the RFC editor. `EX_TEMPFAIL` from
+    #: `sysexits(3)` — "a temporary failure, indicating something that is not really an error" —
+    #: written here as well as in `gate.py` because these two agreeing is the contract, and the
+    #: test below asserts they do.
+    NOT_A_RESULT = 75
+
+    def unreachable_curl(self, quiet: bool = False) -> str:
+        """A `PATH` whose `curl` is a machine with no route to the RFC editor.
+
+        The guard is *run* rather than pattern-matched, because reading the source is exactly what
+        the assertion this replaces did: it required the fetch line to start with `if ! curl`,
+        which a body of `then true; fi` satisfies while doing nothing at all — falling through to
+        base64-decode a file that does not exist — and which an equivalent `curl … || { … }` fails.
+        Spelling is not the property.
+
+        Stubbing `curl` rather than taking the network away makes the failure deterministic, costs
+        no DNS timeout, and leaves the suite runnable offline. It is the same failure the real
+        thing produces: curl's own words on stderr and curl's own exit code.
+
+        `quiet` is the version that says nothing at all — the curl the disproved premise imagined.
+        Used where the assertion is about what *the importer* tells the reader, so that a passing
+        test cannot be curl's own chattiness being read back. Which is not a hypothetical: the
+        message depends on curl's version, its locale and whether a proxy answered.
+        """
+        import tempfile
+
+        directory = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, directory, True)
+        shim = directory / "curl"
+        complaint = "" if quiet else f'echo "curl: (6) Could not resolve host: {self.HOST}" >&2\n'
+        shim.write_text(f"#!/usr/bin/env bash\n{complaint}exit 6\n", encoding="utf-8")
+        shim.chmod(0o755)
+        return f"{directory}{os.pathsep}{os.environ['PATH']}"
+
+    def run_importer(
+        self, corpus: str, *arguments: str, quiet: bool = False
+    ) -> subprocess.CompletedProcess:
+        """The real importer, with a `curl` that cannot succeed. Never touches the network."""
+        environment = dict(os.environ, PATH=self.unreachable_curl(quiet))
+        return subprocess.run(
+            [str(ROOT / "scripts" / self.importer(corpus)), *arguments],
+            capture_output=True,
+            text=True,
+            env=environment,
+            cwd=ROOT,
+            check=False,
+        )
+
+    def test_the_gate_and_the_importers_agree_on_the_disclaiming_exit_code(self):
+        """One number, in two languages. If they drift, the gate reads a disclaimer as a finding."""
+        self.assertEqual(
+            self.NOT_A_RESULT,
+            self.gate.STEP_NOT_A_RESULT,
+            "gate.py and the importers no longer agree on the exit code that means `this run is "
+            "not a result`, so an unreachable RFC editor lands back in the red tally",
+        )
+
+    def test_an_unreachable_rfc_editor_names_the_host_it_could_not_reach(self):
+        """Turning an exit code into a sentence is the whole justification for the guard.
+
+        Not "curl prints nothing" — it prints `curl: (6) Could not resolve host: …` at these very
+        flags, because `-S` in `-fsSL` is *show errors*. What it does not print is which corpus was
+        being checked or that the committed files are not what failed, and that is what the guard
+        adds.
+
+        Asserted against a `curl` that says nothing, precisely so that curl saying it cannot be
+        what makes this pass. The importer has to name the host and the corpus on its own.
         """
         for corpus in self.corpora():
             with self.subTest(corpus=corpus):
-                script = ROOT / "scripts" / self.importer(corpus)
-                fetch = [
-                    line
-                    for line in script.read_text().splitlines()
-                    if "curl" in line and " -o " in line
-                ]
-                self.assertEqual(1, len(fetch), f"{script.name} does not fetch the RFC exactly once")
-                self.assertTrue(
-                    fetch[0].strip().startswith("if ! curl"),
-                    f"{script.name} leaves the fetch unguarded, so an unreachable RFC is reported "
-                    f"as a bare exit code and reads as a corpus that drifted",
+                result = self.run_importer(corpus, "--check", quiet=True)
+                output = result.stdout + result.stderr
+                self.assertIn(
+                    self.HOST,
+                    output,
+                    f"{self.importer(corpus)} failed without naming the host it could not reach, "
+                    f"so the reader cannot tell a network outage from a corpus that drifted",
                 )
+                self.assertIn(
+                    corpus.removeprefix("rfc"),
+                    output,
+                    f"{self.importer(corpus)} failed without naming which corpus was being "
+                    f"checked, which is the other half of what the guard is for",
+                )
+
+    def test_an_unreachable_rfc_editor_never_becomes_a_skip(self):
+        """A provenance check that passes when it could not reach the RFC is the MSRV hole again.
+
+        The MSRV step fails rather than skips for the same reason: a skipped check and a passing
+        one are indistinguishable afterwards, and that is how two releases shipped broken.
+        """
+        for corpus in self.corpora():
+            with self.subTest(corpus=corpus):
+                result = self.run_importer(corpus, "--check")
+                self.assertNotEqual(
+                    0,
+                    result.returncode,
+                    f"{self.importer(corpus)} exited green without reaching the RFC, so a corpus "
+                    f"edited by hand passes on any machine with no route to the RFC editor",
+                )
+
+    def test_an_unreachable_rfc_editor_disclaims_the_run_rather_than_failing_the_corpus(self):
+        """`X-58`, the defect: a step that could not reach the RFC knows nothing about the corpus.
+
+        The importer exits `EX_TEMPFAIL` instead of `1`, which is the script's own claim about its
+        own run. `1` put it in the red tally, where it read as a fixture that drifted.
+        """
+        for corpus in self.corpora():
+            with self.subTest(corpus=corpus):
+                result = self.run_importer(corpus, "--check")
+                self.assertEqual(
+                    self.NOT_A_RESULT,
+                    result.returncode,
+                    f"{self.importer(corpus)} exited {result.returncode} when it could not reach "
+                    f"the RFC editor; the gate reads anything but {self.NOT_A_RESULT} as a finding "
+                    f"about the committed corpus, which this run proved nothing about",
+                )
+
+    def test_the_gate_reports_an_unreachable_rfc_editor_as_a_non_result(self):
+        """The half the replaced assertion never reached: what `gate.py` *reports*.
+
+        `X-34` put the property in the summary line and the exit code — `0` green, `1` the tree is
+        wrong, `2` the run is not a result — because a sentence in the streamed output is not what
+        a human skims or a script reads. Before this story the summary said `gate: 1 of 25 steps
+        failed` and the exit code was `1`.
+        """
+        import contextlib
+        import io
+        from unittest import mock
+
+        for corpus in self.corpora():
+            with self.subTest(corpus=corpus):
+                script = self.importer(corpus)
+                step = [s for s in self.steps if script in " ".join(s.command)][0]
+                out, err = io.StringIO(), io.StringIO()
+                with (
+                    mock.patch.dict(os.environ, {"PATH": self.unreachable_curl()}),
+                    # The disk guard is `X-34`'s and has its own tests; this run must not depend
+                    # on how full the machine happens to be.
+                    mock.patch.object(
+                        self.gate, "free_bytes", return_value=self.gate.REQUIRED_FREE_BYTES * 4
+                    ),
+                    contextlib.redirect_stdout(out),
+                    contextlib.redirect_stderr(err),
+                ):
+                    code = self.gate.run([step])
+                summary = self.gate._ANSI.sub("", err.getvalue())
+                self.assertNotIn(
+                    "steps failed",
+                    summary,
+                    f"the gate counted `{step.name}` as a failed step when it could not reach the "
+                    f"RFC editor, so a network outage reads as a corpus that drifted:\n{summary}",
+                )
+                self.assertEqual(
+                    self.gate.EXIT_INFRASTRUCTURE,
+                    code,
+                    f"the gate exited {code} for a step that could not reach the RFC editor; "
+                    f"{self.gate.EXIT_RED} means the tree is wrong and this run did not look at "
+                    f"the tree",
+                )
+                self.assertIn(
+                    step.name,
+                    summary,
+                    "the non-result does not name the step that could not run",
+                )
+
+    def test_an_unrecognised_argument_is_refused_rather_than_taking_the_write_path(self):
+        """`[[ "${1:-}" == "--check" ]] && check_only=1` made every other spelling a rewrite.
+
+        `--check=1`, `-check` or a plain typo silently selected the write path, which overwrites
+        the committed corpus with the RFC's own bytes and exits `0` — a green step that erased the
+        very evidence the check exists to find. `X-56` added four invocation sites, so the number
+        of places that spelling can go wrong went from one to five.
+
+        Run with a `curl` that cannot succeed, so a regression here cannot actually rewrite the
+        corpus: the argument has to be refused *before* the fetch, and the exit code says which
+        happened.
+        """
+        for corpus in self.corpora():
+            for argument in ("--check=1", "-check", "--chekc", "--write", "check", "-c"):
+                with self.subTest(corpus=corpus, argument=argument):
+                    result = self.run_importer(corpus, argument)
+                    self.assertNotEqual(
+                        0,
+                        result.returncode,
+                        f"{self.importer(corpus)} accepted `{argument}` and exited green",
+                    )
+                    self.assertNotEqual(
+                        self.NOT_A_RESULT,
+                        result.returncode,
+                        f"{self.importer(corpus)} carried `{argument}` as far as the fetch, which "
+                        f"means it selected a path instead of refusing the argument — and the "
+                        f"path it selects for an unknown argument is the one that writes",
+                    )
+                    self.assertIn(
+                        argument,
+                        result.stderr,
+                        f"{self.importer(corpus)} refused `{argument}` without saying which "
+                        f"argument it did not understand",
+                    )
+
+    def test_no_document_repeats_the_disproved_reason_for_the_guard(self):
+        """"`curl -f` prints nothing" was false at the flags in use, and it was copied five times.
+
+        The flags are `-fsSL`, and `-S` is *show errors*:
+
+            $ curl -fsSL https://www.rfc-editor.org/rfc/rfc9999999.txt -o /tmp/x
+            curl: (22) The requested URL returned error: 404   (exit 22)
+
+        The guard is still worth having — it turns that into a sentence naming the corpus and the
+        host, and it is what makes the exit code a disclaimer rather than a finding — but it is
+        justified by what it does. `AGENTS.md` is where every future agent reads the why, and a why
+        that one command disproves is the defect this project keeps filing stories about.
+        """
+        sources = {"AGENTS.md": AGENTS, "gate.py": ROOT / "scripts" / "gate.py"}
+        for corpus in self.corpora():
+            sources[self.importer(corpus)] = ROOT / "scripts" / self.importer(corpus)
+        for name, path in sources.items():
+            with self.subTest(document=name):
+                self.assertNotIn(
+                    "prints nothing",
+                    path.read_text(encoding="utf-8"),
+                    f"{name} still justifies the fetch guard with `curl -f` printing nothing, "
+                    f"which one command disproves at the flags this repository actually uses",
+                )
+
+    def test_the_corpus_steps_are_not_claimed_to_be_the_only_network_checks(self):
+        """`docs site` has reached the network since it existed, on every fresh worktree.
+
+        `build-docs.sh` runs `npm ci` (or `npm install`) whenever `website/node_modules` is
+        absent, and that directory is gitignored — so it is absent in every implementor's fresh
+        checkout. Claiming the corpus steps are the gate's only network-dependent checks tells the
+        next reader to look in the wrong place when the gate goes red behind a proxy.
+        """
+        self.assertRegex(
+            BUILD_DOCS.read_text(encoding="utf-8"),
+            r"npm (ci|install)",
+            "build-docs.sh no longer installs node modules, so the claim below may be re-checked",
+        )
+        self.assertNotIn(
+            "only checks that reach the network",
+            AGENTS.read_text(encoding="utf-8"),
+            "AGENTS.md calls the corpus steps the gate's only network-dependent checks, and "
+            "`docs site` installs node modules over the network on every fresh worktree",
+        )
 
 
 if __name__ == "__main__":

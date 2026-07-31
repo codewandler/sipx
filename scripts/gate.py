@@ -72,6 +72,13 @@ class Step(NamedTuple):
     #: its absence has to be a failure, since a skipped MSRV check is indistinguishable from a
     #: passing one and that is precisely how this went unnoticed for five days.
     toolchain: str = ""
+    #: Why this step is allowed to disclaim its own run by exiting `STEP_NOT_A_RESULT`, or `""`
+    #: if it is not — the sentence the summary prints in place of a finding. Opt-in and per step
+    #: (`X-58`), because the disclaimer only means anything from a script this repository owns and
+    #: whose exit codes it therefore controls: a step whose command is `cargo` or `npm` exits what
+    #: it exits, and reading a number out of a third-party tool as "ignore this" is how a real
+    #: failure gets excused.
+    not_a_result: str = ""
 
 
 #: CI jobs that are deliberately not part of the local gate. Every job in `ci.yml` is either a
@@ -135,11 +142,27 @@ def gate_steps(msrv: str) -> list[Step]:
         # the only thing that can tell a fixture edited by hand from the RFC's own bytes, since the
         # suites read whatever is in the directory and pass. The 4475 check ran only inside `fuzz`,
         # which is in `NOT_RUN_LOCALLY`, so no local run covered it; the 5118 one ran nowhere.
-        # A step each, so a red result names which corpus drifted. These reach the network, which
-        # is why the importers guard the fetch: an unreachable RFC editor must not read as a corpus
-        # that changed.
-        Step("rfc 4475 corpus", "corpus", ("./scripts/import-rfc4475-corpus.sh", "--check")),
-        Step("rfc 5118 corpus", "corpus", ("./scripts/import-rfc5118-corpus.sh", "--check")),
+        # A step each, so a red result names which corpus drifted.
+        #
+        # X-58: both steps have to reach `rfc-editor.org` to say anything at all, and a step that
+        # could not reach it knows nothing about the corpus. So they disclaim rather than fail —
+        # X-34's doctrine in a third place, and the reason `not_a_result` exists. The importers
+        # own their own exit codes, which is what makes the claim theirs to make rather than
+        # something this script infers from their output.
+        Step(
+            "rfc 4475 corpus",
+            "corpus",
+            ("./scripts/import-rfc4475-corpus.sh", "--check"),
+            not_a_result="it could not reach the RFC editor, so it read nothing to compare the "
+            "committed corpus against",
+        ),
+        Step(
+            "rfc 5118 corpus",
+            "corpus",
+            ("./scripts/import-rfc5118-corpus.sh", "--check"),
+            not_a_result="it could not reach the RFC editor, so it read nothing to compare the "
+            "committed corpus against",
+        ),
         Step("rfc compliance", "docs", ("./scripts/rfc-report.py", "--check")),
         # X-24: the connection pool key was described in three specs and had been wrong in one of
         # them through two changes to the type. The list is generated from `ConnectionKey` now,
@@ -664,6 +687,17 @@ EXIT_GREEN = 0
 EXIT_RED = 1
 EXIT_INFRASTRUCTURE = 2
 
+#: What a step exits to tell the gate its own run was not a result — the same distinction one
+#: level down, spoken by the step instead of inferred about it (`X-58`).
+#:
+#: `EX_TEMPFAIL` from `sysexits(3)`: "a temporary failure, indicating something that is not really
+#: an error... the user is invited to retry". Deliberately not `2`: `tar`, `diff` and `grep` all
+#: exit `2` for real trouble, and under `set -e` any of them would hand the gate a disclaimer the
+#: script never meant to make. Nothing in this gate's toolchain exits `75` by accident.
+#:
+#: Only steps that declare `not_a_result` are read this way — see `Step.not_a_result`.
+STEP_NOT_A_RESULT = 75
+
 #: A path inside a cargo build directory. The marker is what makes the ENOENT shapes below safe to
 #: read as infrastructure: cargo saying it cannot find a file *it wrote itself* is a vanished
 #: `target/`, whereas the same message about a path under `crates/` is a real missing source.
@@ -770,6 +804,29 @@ def infrastructure_evidence(output: str) -> tuple[str, str] | None:
     return None
 
 
+def disclaimed_report(disclaimed: list[tuple[str, str]]) -> str:
+    """What to print for steps that told us their own runs were not results (`X-58`).
+
+    Deliberately not `infrastructure_report`, and deliberately not the end of the run. Once
+    `target/` is gone every later step fails for the same reason, so the disk guard stops; a step
+    that could not reach `rfc-editor.org` says nothing about `cargo clippy`, so the rest of the
+    gate still runs and still means what it says. What has to survive is only this step's silence
+    — it must not arrive in the summary as `N of M steps failed`, which is a claim about the tree
+    that nobody made.
+    """
+    lines = ["gate: NOT A RESULT — these steps could not reach what they check, and did not fail"]
+    lines.extend(f"  {name}: {why}" for name, why in disclaimed)
+    lines.extend(
+        (
+            "",
+            "Nothing above is a finding about your changes, and re-running the gate on a machine "
+            "that can reach\nthem is the whole fix. Every other step in this run means exactly "
+            "what it says.",
+        )
+    )
+    return "\n".join(lines)
+
+
 def infrastructure_report(step: str, evidence: str, why: str, free: int, required: int) -> str:
     """What to print instead of a red step, when the machine and not the tree ended the run.
 
@@ -851,6 +908,14 @@ def run(steps: list[Step]) -> int:
     step fails for the same reason and none of those failures is about the tree — continuing would
     manufacture the wall of misleading red that made a correct merge look broken. So a disk failure
     ends the run, and says so in different words from a red step.
+
+    A step that disclaims its own run (`Step.not_a_result`, X-58) gets the second half of that and
+    not the first: it is kept out of the red tally, because it made no claim about the tree, but
+    the run continues, because its reason does not generalise to the steps after it. If nothing
+    else is red the gate exits `EXIT_INFRASTRUCTURE` — this run was not a complete result. If
+    something else *is* red the gate exits `EXIT_RED`, because the tree demonstrably is wrong and
+    saying "not a result" there would tell an implementor to re-run instead of to look, which is
+    the disease X-34 named rather than the cure.
     """
     environment = dict(os.environ)
     for key, value in parse_workflow_env(WORKFLOW.read_text()).items():
@@ -868,6 +933,7 @@ def run(steps: list[Step]) -> int:
         return EXIT_INFRASTRUCTURE
 
     failed: list[tuple[str, str]] = []
+    disclaimed: list[tuple[str, str]] = []
     for step in steps:
         free = free_bytes(target)
         if free < FLOOR_FREE_BYTES:
@@ -892,14 +958,21 @@ def run(steps: list[Step]) -> int:
             continue
         if evidence is not None:
             return stop_without_a_result(step.name, *evidence, free_bytes(target), failed)
+        if step.not_a_result and code == STEP_NOT_A_RESULT:
+            disclaimed.append((step.name, step.not_a_result))
+            continue
         failed.append((step.name, f"exit {code}"))
 
     print()
+    if disclaimed:
+        print(f"\033[33m{disclaimed_report(disclaimed)}\033[0m", file=sys.stderr)
     if failed:
         print(f"\033[31mgate: {len(failed)} of {len(steps)} steps failed\033[0m", file=sys.stderr)
         for name, why in failed:
             print(f"  {name}: {why}", file=sys.stderr)
         return EXIT_RED
+    if disclaimed:
+        return EXIT_INFRASTRUCTURE
     print(f"\033[32mgate: {len(steps)} steps, all green\033[0m")
     return EXIT_GREEN
 
