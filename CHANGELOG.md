@@ -80,6 +80,40 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An unreachable RFC editor is a non-result, not a corpus finding (`X-58`)** — a failed fetch
+  exited `1`, so a gate run with no route printed `1 of 25 steps failed` naming `rfc 5118 corpus`:
+  a step that never read the archive claiming the committed messages had drifted. That is the exact
+  confusion `X-34` built the disk guard to remove, in a third place.
+  - **The importers disclaim their own run**, exiting `EX_TEMPFAIL` (75) from the fetch guard, which
+    `gate.py` reports under a heading that is not a finding before exiting `2`. A distinct exit code
+    rather than a pattern in `infrastructure_evidence`: the importers are ours, so the disclaimer is
+    a claim they are entitled to make, where the alternative is a regex over curl's prose in whatever
+    locale and version the machine has — the spelling-not-behaviour mistake this story removes.
+  - **A disclaimed step never outranks a real finding.** With something genuinely red beside it the
+    gate exits `1` and prints `1 of 2 steps failed` naming only the red one, disclaimer still shown.
+    Exiting `2` there would say "re-run", and a broken tree needs reading. The one deliberate
+    departure from the disk guard's shape, and pinned by a test so a refactor cannot flip it.
+  - **The false reason for the guard is deleted where it stood.** `AGENTS.md` said "`curl -f` prints
+    nothing and a bare exit code reads as a corpus that changed" — but the flags in use are `-fsSL`,
+    and `-S` is *show errors*: curl prints `curl: (22) …` and exits 22. The premise had been copied
+    into `gate.py`, both importers, this file and `X-56`. The guard is still worth having, and is now
+    justified by what it does: name the corpus and the host. `AGENTS.md` is the file every future
+    agent reads as the why, and a why that one command disproves is the defect this project keeps
+    filing stories about. The claim that the corpus steps were the gate's only network-reaching
+    checks went with it — `build-docs.sh` runs `npm ci` whenever the gitignored `website/node_modules`
+    is absent, which is every fresh worktree.
+  - **The shape assertion is replaced by a behavioural one.** The old test required the fetch line to
+    `startswith("if ! curl")`, which a guard whose body is `then true; fi` passes while an equivalent
+    `||` form fails. Review then caught its replacement repeating the mistake: the assertion read
+    `stdout + stderr`, and the importers print `fetching <url>` on stdout *before* the fetch — a line
+    already containing both the host and the corpus number, so a guard whose whole body was `exit 75`
+    passed. It reads stderr only, under a mute curl.
+  - **An unknown argument no longer takes the write path.** `[[ "${1:-}" == "--check" ]]` meant
+    `--check=1`, `-check` and every typo selected the branch that overwrites the corpus with the RFC's
+    own bytes and exits 0 — a green step that erases the hand edit the check exists to catch.
+    Dispatch is on `$#`, which closes the one input `"${1:-}"` disagrees on: an empty argument, read
+    as "no argument given", rewrote a tampered fixture and exited 0.
+
 - **Both RFC corpora are tamper-evident from the gate and from CI (`X-56`)** — each corpus is
   recovered from its RFC's own Appendix A archive rather than transcribed, and the importer's
   `--check` re-recovers that archive and diffs it against the tree: the only thing that can tell a

@@ -2,8 +2,7 @@
 id: X-58
 title: Make an unreachable RFC editor a non-result rather than a finding, and delete the false reason for the guard
 pillar: Build
-status: in-progress
-priority: 3
+status: done
 epic: conformance
 areas: [scripts, ci]
 note: found by the independent review of X-56 — the fetch guard exits 1, so gate.py reports `1 of 25 steps failed` when the network is down, which is the exact confusion X-34 removed; and the rationale written into AGENTS.md for the guard is disproved by one command
@@ -125,6 +124,13 @@ to justify them.
 - **My earlier report got one number wrong.** I wrote that a `then true; fi` guard exits 2 from
   `awk`; it exits **1**, because under `pipefail` the pipeline takes `grep`'s 1, not `awk`'s 2.
   Immaterial to the design — still not 75, so still caught — but the reasoning was wrong.
+- **Closed 2026-08-01.** The review round was merged as its own commit rather than folded into the
+  first merge, because two of its three findings were defects in *this story's own* new tests rather
+  than in the shipped behaviour — the kind of thing the history should show happening, not hide.
+  Verified on `main` at close: both false sentences are gone from `AGENTS.md` (the coordinator took
+  the `CHANGELOG.md` pair in `2e25bf9`), the disproved reason survives only in the two places that
+  exist to record it *as* disproved — `test-gate.py`'s own guard test and `X-56`'s Progress — and
+  `AGENTS.md` now says the corpus steps are not the only network-reaching ones, naming `docs site`.
 
 ## Notes
 - **The wiring `X-56` shipped is sound and is not reopened.** Both corpus checks run from a gate step
