@@ -226,8 +226,7 @@ struct Unsent {
     other: AtomicU64,
 }
 
-/// Requests handed to [`crate::Handle::send`] or [`crate::Handle::send_directly`] that never
-/// reached the wire, by method (§12.3).
+/// Requests the endpoint tried to put on the wire and could not, by method (§12.3).
 ///
 /// **Split by method because the consequence is.** A CANCEL that does not go out leaves the far end
 /// ringing; an ACK that does not go out leaves a 2xx retransmitting for thirty-two seconds and then
@@ -235,27 +234,46 @@ struct Unsent {
 /// at the far end that no timer will reap. One number would hide which of those happened, and they
 /// are the three questions an operator asking "why did that call linger" is choosing between.
 ///
-/// **Counted here rather than at the caller, deliberately.** The hand-off is the one place that
-/// sees every one of these, including the ones a caller discards with `let _ = …` — which is most
-/// of them, because these sends are made on paths that are already failing and have nothing to do
-/// with the error. §12.3 has the rest of the argument.
+/// # Where this is counted, and why not at the hand-off
 ///
-/// This is **not** [`DiscardCounts::send_failures`], which counts a *transaction's* send being
-/// refused inside the driver. The two never count the same event: that one is a send the endpoint
-/// initiated on a transaction's behalf, this one is a send an application asked for and was told
-/// about.
+/// **At the transmit, in the driver** — the two places the socket is actually written: a
+/// transaction's `Output::Send`, and the direct send that carries an ACK for a 2xx.
+///
+/// It was counted inside [`crate::Handle::send`] and [`crate::Handle::send_directly`] when `X-54`
+/// first wrote it, and that was **wrong in a way the type's own documentation concealed**.
+/// `Handle::send` returns as soon as the driver has created the transaction and handed back its
+/// key; the transmit happens afterwards. So a counter at that hand-off could only ever fire when
+/// the endpoint refused the request outright — a closed endpoint, or a request with no usable
+/// `Via` — and **never** on a refused connection, an unreachable peer or an over-MTU datagram,
+/// which is the whole of the question it claims to answer. `send_directly` did await the transmit,
+/// so `ack` behaved one way and `bye` and `cancel` another, with nothing saying so. Counting where
+/// the wire is missed makes all four mean the same thing.
+///
+/// # What this does and does not promise (§12.2)
+///
+/// - **Requests only.** A response that fails to transmit is counted by
+///   [`DiscardCounts::send_failures`] and not here, because these fields are methods and a response
+///   has none.
+/// - **This overlaps [`DiscardCounts::send_failures`] on purpose, and the two are views rather
+///   than tallies.** A *request* that fails on the transaction path increments both: that field is
+///   the transaction path's aggregate over requests and responses alike, this is the per-method
+///   breakdown over requests on any path. Adding them together is meaningless, and so is
+///   subtracting them — §12.2's rule against arithmetic across fields applies here in particular.
+/// - **An endpoint that is shutting down does not inflate this.** A send that loses the race with
+///   `shutdown` fails at the hand-off, before any transmit is attempted, and is not counted — the
+///   earlier design counted it, which made an ordinary teardown look like lost signalling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UnsentCounts {
-    /// INVITEs that did not reach the wire.
+    /// INVITEs the endpoint could not put on the wire.
     pub invite: u64,
-    /// ACKs that did not reach the wire — RFC 3261 §13.2.2.4's ACK for a 2xx, which has no
-    /// transaction to retry it.
+    /// ACKs the endpoint could not put on the wire — RFC 3261 §13.2.2.4's ACK for a 2xx, which has
+    /// no transaction to retry it.
     pub ack: u64,
-    /// BYEs that did not reach the wire. The one that leaves a call up at the far end.
+    /// BYEs the endpoint could not put on the wire. The one that leaves a call up at the far end.
     pub bye: u64,
-    /// CANCELs that did not reach the wire. The one that leaves a phone ringing.
+    /// CANCELs the endpoint could not put on the wire. The one that leaves a phone ringing.
     pub cancel: u64,
-    /// Every other method that did not reach the wire.
+    /// Every other method the endpoint could not put on the wire.
     pub other: u64,
 }
 
@@ -309,7 +327,10 @@ pub struct Counters {
     pub timeouts: TimeoutCounts,
     /// Discards that are not backpressure (§12.1).
     pub discards: DiscardCounts,
-    /// Requests the endpoint was asked to send and did not put on the wire (§12.3).
+    /// Requests the endpoint tried to put on the wire and could not, by method (§12.3).
+    ///
+    /// Overlaps [`DiscardCounts::send_failures`] for requests on the transaction path — see
+    /// [`UnsentCounts`], which states what that does and does not let you conclude.
     pub unsent: UnsentCounts,
     /// How the capture is faring, if one is running (§13).
     pub capture: CaptureCounts,
@@ -503,7 +524,10 @@ impl Meters {
         bump(&self.capture_errors);
     }
 
-    /// A request the endpoint was asked to send never reached the wire.
+    /// A request the endpoint tried to put on the wire and could not.
+    ///
+    /// Called from the driver, at the two places the socket is written — never from a `Handle`
+    /// method, which returns before the transmit happens (see [`UnsentCounts`]).
     ///
     /// A match rather than an index, so a new [`Method`] variant is a compile error here instead of
     /// silently landing in `other` — the same reason [`slot`] is a match.

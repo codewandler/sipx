@@ -479,22 +479,7 @@ impl Handle {
     ///
     /// A `Via` is added if the request has none — the transport owns that header, since only
     /// it knows the branch and where responses should come back to.
-    /// A request that did not reach the wire is counted here and nowhere else (§12.3).
-    ///
-    /// Wrapped around the body rather than written at each `?`, because there are four ways out of
-    /// it and a counter that has to be remembered at four of them is a counter that will be
-    /// forgotten at the fifth. Most callers of this on a teardown path discard the error — see
-    /// `sipx-call`'s `ack_then_bye` — so this is the only place the loss can be seen at all.
-    pub async fn send(&self, request: Request, target: Target) -> Result<Responses> {
-        let method = request.method.clone();
-        let sent = self.send_inner(request, target).await;
-        if sent.is_err() {
-            self.meters.unsent(&method);
-        }
-        sent
-    }
-
-    async fn send_inner(&self, mut request: Request, target: Target) -> Result<Responses> {
+    pub async fn send(&self, mut request: Request, target: Target) -> Result<Responses> {
         if request.headers.get(&HeaderName::Via).is_none() {
             let via = format!(
                 "SIP/2.0/{} {};rport;branch={}",
@@ -541,17 +526,6 @@ impl Handle {
     ///
     /// Returns once the bytes have been handed to the socket.
     pub async fn send_directly(&self, request: Request, target: Target) -> Result<()> {
-        let method = request.method.clone();
-        let sent = self.send_directly_inner(request, target).await;
-        if sent.is_err() {
-            // The same one increment site as [`Self::send`], for the one request that has no
-            // transaction: an ACK for a 2xx that does not go out is never retried by anything.
-            self.meters.unsent(&method);
-        }
-        sent
-    }
-
-    async fn send_directly_inner(&self, request: Request, target: Target) -> Result<()> {
         let (sent_tx, sent_rx) = oneshot::channel();
         self.commands
             .send(Command::Direct {
@@ -1926,9 +1900,17 @@ impl Driver {
                 target,
                 sent,
             } => {
+                let method = request.method.clone();
                 let bytes = Message::Request(*request).to_bytes();
                 self.observe_out(&bytes, &target, false);
                 let result = self.transmit(bytes, target, false, None).await.map(|_| ());
+                if result.is_err() {
+                    // The same fact as the transaction path's site above, on the one request that
+                    // has no transaction (§12.3). Deliberately *not* also
+                    // `discard_send_failure`: that field is the transaction path's aggregate, and
+                    // an ACK for a 2xx never had a transaction to fail.
+                    self.meters.unsent(&method);
+                }
                 // discard: the caller stopped waiting. A dropped receiver means nobody is listening
                 // for this answer, so nothing is lost and there is nothing worth counting.
                 let _ = sent.send(result);
@@ -1981,7 +1963,13 @@ impl Driver {
                         tracing::warn!("no destination for a message the transaction wants sent");
                         continue;
                     };
-                    let is_response = matches!(*message, Message::Response(_));
+                    // Kept before `to_bytes` consumes the message: a failed transmit is counted by
+                    // method (§12.3), and after this line the method is no longer reachable.
+                    let method = match &*message {
+                        Message::Request(request) => Some(request.method.clone()),
+                        Message::Response(_) => None,
+                    };
+                    let is_response = method.is_none();
                     let bytes = message.to_bytes();
                     let addr = target.addr;
                     self.observe_out(&bytes, &target, is_response);
@@ -1995,6 +1983,14 @@ impl Driver {
                         }
                         Err(error) => {
                             self.meters.discard_send_failure();
+                            // And by method, when it was a request (§12.3). This is where the
+                            // wire is actually missed: `Handle::send` has already returned `Ok`
+                            // with the transaction key by now, so counting at that hand-off would
+                            // miss every refused connection, unreachable peer and over-MTU
+                            // datagram — which is the whole of "why did that call linger".
+                            if let Some(method) = &method {
+                                self.meters.unsent(method);
+                            }
                             tracing::warn!(%error, %addr, "send failed");
                             if let Some(client) = self.clients.get(key) {
                                 // One transport failure terminates this transaction, so one

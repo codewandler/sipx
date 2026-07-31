@@ -120,24 +120,72 @@ pub(crate) fn report(counts: &SignallingCounts) -> Report {
     report
 }
 
-/// Write this run's counters if either flag asked for them, and name the file in the report.
+/// An armed counters export: writes the file however the command ends.
 ///
-/// Named in the report because a file that appears without being mentioned is the surprise this
-/// would otherwise be — `--capture` implies the counters file, so the run has to say where it put
-/// it. Returns the failure rather than reporting success beside a file that was not written.
+/// # Why a guard and not a call at the end
+///
+/// Because the run that most needs the numbers is the one that failed, and a call at the end runs
+/// only when the end is reached. The first version of this was exactly that call — placed after the
+/// call had already succeeded — so `sipx dial --capture ./sig.pcapng --timeout 3 <dead peer>` wrote
+/// the capture and **no counters at all**, on precisely the run a bug report is about. That is
+/// Acceptance item 3's own words inverted, and it contradicted this module's claim that a counters
+/// file which silently did not appear is the §13.2 failure one level up.
+///
+/// Arming a guard immediately after `bind` moves the decision from "did the command reach its happy
+/// path" to "was there an endpoint to count", which is the question that actually determines
+/// whether there are numbers worth writing. Every `return fail(…)` after the bind now takes the
+/// file with it.
 ///
 /// [`SignallingCounts::of`] rather than `with_dispatcher`: none of the three commands runs a
 /// `Dispatcher`, and the snapshot says so instead of reporting zeros for it.
-pub(crate) fn attach(
-    args: &Args<'_>,
-    endpoint: &sipx_transport::Handle,
-    report: Report,
-) -> Result<Report, String> {
-    let Some(path) = destination(args) else {
-        return Ok(report);
-    };
-    write(&path, &SignallingCounts::of(endpoint))?;
-    Ok(report.text("counters", path.display().to_string()))
+pub(crate) struct Export {
+    destination: Option<PathBuf>,
+    endpoint: sipx_transport::Handle,
+    written: bool,
+}
+
+impl Export {
+    /// Arm the export for this run. Cheap and inert when neither flag asked for one.
+    pub(crate) fn arm(args: &Args<'_>, endpoint: &sipx_transport::Handle) -> Self {
+        Self {
+            destination: destination(args),
+            endpoint: endpoint.clone(),
+            written: false,
+        }
+    }
+
+    /// Write the file now and name it in the report — the path where a report still exists.
+    ///
+    /// Named in the report because a file that appears without being mentioned is the surprise
+    /// `--capture` implying a counters file would otherwise be. The error is returned rather than
+    /// swallowed, so nothing reports success beside a file that was not written.
+    pub(crate) fn into_report(mut self, report: Report) -> Result<Report, String> {
+        let Some(path) = self.destination.clone() else {
+            return Ok(report);
+        };
+        write(&path, &SignallingCounts::of(&self.endpoint))?;
+        self.written = true;
+        Ok(report.text("counters", path.display().to_string()))
+    }
+}
+
+impl Drop for Export {
+    /// The failure path: the command has already emitted whatever it was going to say, so the file
+    /// is written and named on stderr rather than in a report that has gone.
+    fn drop(&mut self) {
+        if self.written {
+            return;
+        }
+        let Some(path) = &self.destination else {
+            return;
+        };
+        match write(path, &SignallingCounts::of(&self.endpoint)) {
+            Ok(()) => tracing::info!(counters = %path.display(), "wrote the signalling counters"),
+            // Loud, because this is the one failure that would leave an operator holding a capture
+            // with nothing to explain it and no indication that anything was missing.
+            Err(message) => tracing::error!("{message}"),
+        }
+    }
 }
 
 /// A counter as the report's number type.

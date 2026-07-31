@@ -1672,6 +1672,58 @@ async fn the_capture_flag_leaves_the_counters_beside_the_capture() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **The run that fails is the run that needs the numbers.**
+///
+/// `X-54`'s first version wrote the counters only after the call had already succeeded, so a dial
+/// that timed out produced the capture and no counters at all — inverting Acceptance item 3's own
+/// words on precisely the run a bug report is about, and contradicting the claim in
+/// `crates/sipx-cli/src/counters.rs` that a counters file which silently did not appear is the
+/// §13.2 failure one level up. The export is armed straight after `bind` now, so every `return
+/// fail(…)` takes the file with it.
+///
+/// Dialling a discard port that nothing answers, with a short timeout, is the cheapest honest
+/// failure: no peer process to manage, and the outcome does not depend on anything answering.
+#[tokio::test]
+async fn a_failed_run_still_exports_its_counters() {
+    let dir = scratch("counters-on-failure");
+    let capture = dir.join("sig.pcapng");
+    let counters = dir.join("sig.pcapng.counters.json");
+
+    let output = sipx()
+        .current_dir(&dir)
+        .args([
+            "dial",
+            "--capture",
+            capture.to_str().expect("a path"),
+            // A bound on failure, not a measurement: the peer never answers, so this only decides
+            // how long the test waits to find that out.
+            "--timeout",
+            "3",
+            "sip:bob@127.0.0.1:9",
+        ])
+        .output()
+        .await
+        .expect("the binary runs");
+
+    assert!(
+        !output.status.success(),
+        "this test is about the failing path, and the dial succeeded"
+    );
+    // The capture was always written on this path. The counters are the half that was missing.
+    assert!(
+        capture.exists(),
+        "the capture is written on a failed run, which is what made the missing counters a gap"
+    );
+    let body = std::fs::read_to_string(&counters)
+        .expect("a failed run must still export its counters beside the capture");
+    assert!(
+        body.contains("\"unsent_bye\"") && body.contains("\"any_loss\""),
+        "the export is a full snapshot even on the failing path: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Off unless asked for, at the command line as well as in the library: a real call, placed with no
 /// `--capture`, leaves nothing on disk.
 ///

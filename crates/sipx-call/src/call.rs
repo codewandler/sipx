@@ -1047,10 +1047,15 @@ impl Call {
             });
         match built {
             Ok(builder) => {
-                // discard: the refusal is lost, and the server transaction it would have answered
-                // is then abandoned unanswered — which `sipx_transport::DiscardCounts::unanswered`
-                // counts, at the one site that sees every instance of it. Counting it a second
-                // time here would be two tallies of one event, which §12.3 refuses.
+                // discard: the refusal is lost and **this loss reaches no counter**, which is
+                // stated rather than papered over. `DiscardCounts::unanswered` is not it: that is
+                // bumped only by the driver's 180 s sweep over transactions still handed over, so
+                // it covers a `respond` that was never called and not one that was called and
+                // failed — and on `Error::NoTransaction` there is no transaction left to sweep at
+                // all. What bounds the damage is the peer: it retransmits the request and its own
+                // transaction times out, so nothing hangs. Closing this needs a counter for
+                // responses the endpoint could not send, which is a change to
+                // `sipx_transport::Handle::respond`'s contract rather than to this call site.
                 if let Err(error) = self.endpoint.respond(&incoming.key, builder.build()).await {
                     tracing::warn!(%error, code, "could not refuse an unclaimed request");
                 }
@@ -1647,10 +1652,11 @@ impl Call {
         // A NOTIFY the transferor never answers does not undo the transfer; the call it asked
         // for has already happened either way.
         //
-        // discard: nothing is thrown away that anyone could act on. The NOTIFY itself was sent —
-        // a send that failed is counted by `sipx_transport::UnsentCounts` at the hand-off — and
-        // what is dropped here is only *waiting* for its answer. The bound is a bound on failure
-        // (`X-29`): the transfer's outcome does not depend on the reply arriving.
+        // discard: nothing is thrown away that anyone could act on. The NOTIFY itself was handed
+        // over — one the endpoint could not put on the wire is counted at the transmit by
+        // `sipx_transport::UnsentCounts` — and what is dropped here is only *waiting* for its
+        // answer. The bound bounds a failure (`X-29`): the transfer's outcome does not depend on
+        // the reply arriving.
         let _ = tokio::time::timeout(Duration::from_secs(2), responses.final_response()).await;
         Ok(())
     }
@@ -1699,10 +1705,11 @@ impl Call {
         // A BYE that is never answered still ends the call locally: the alternative is a call
         // that cannot be hung up because the far end has already gone.
         //
-        // discard: the BYE was sent, and a BYE that could *not* be sent is counted as
-        // `sipx_transport::UnsentCounts::bye` — which is the number an operator asking "why did
-        // that call linger" needs. What is dropped here is only waiting for the 200, and this
-        // side has already ended the call either way. The bound is a bound on failure (`X-29`).
+        // discard: the BYE was handed over, and one the endpoint could not put on the wire is
+        // counted at the transmit as `sipx_transport::UnsentCounts::bye` — the number an operator
+        // asking "why did that call linger" needs. What is dropped here is only waiting for the
+        // 200, and this side has already ended the call either way. The bound bounds a failure
+        // (`X-29`).
         let _ = tokio::time::timeout(Duration::from_secs(2), responses.final_response()).await;
         Ok(())
     }
@@ -2466,11 +2473,13 @@ async fn withdraw(
     // peer that never answers at all would otherwise hold the call attempt open.
     if provisional {
         // discard: counted, not ignored. A CANCEL that does not reach the wire leaves the far end
-        // ringing, which is exactly the loss §12.1 exists to make visible — so it is counted as
-        // `sipx_transport::UnsentCounts::cancel`, at the hand-off, which is the one place that
-        // sees every instance including this one. What is discarded *here* is the `Result`, and
-        // there is nothing this path can do with it: it is already the giving-up path, and the
-        // only remedy for a failed CANCEL is the ACK-then-BYE below, which runs regardless.
+        // ringing, which is exactly the loss §12.1 exists to make visible — so the driver counts it
+        // as `sipx_transport::UnsentCounts::cancel` where the socket is actually written. What is
+        // discarded *here* is the `Result`, and there is nothing this path can do with it: it is
+        // already the giving-up path, and the only remedy for a failed CANCEL is the ACK-then-BYE
+        // below, which runs regardless. Note that this `Result` being `Ok` does not mean the
+        // CANCEL went out — `Handle::send` returns once the transaction exists — which is exactly
+        // why the count is taken below rather than from what is dropped here.
         let _ = send_cancel(endpoint, invite, via, target.clone()).await;
     }
 
@@ -2487,10 +2496,10 @@ async fn withdraw(
             if !cancelled {
                 cancelled = true;
                 // discard: the same loss and the same counter as above —
-                // `sipx_transport::UnsentCounts::cancel`. This is the CANCEL that could not be
-                // sent before a provisional arrived, sent now that one has; the `Result` is
-                // discarded for the same reason, and `cancelled` is set either way so a second
-                // provisional does not produce a second CANCEL.
+                // `sipx_transport::UnsentCounts::cancel`, taken at the transmit. This is the
+                // CANCEL that could not be sent before a provisional arrived, sent now that one
+                // has; the `Result` is discarded for the same reason, and `cancelled` is set
+                // either way so a second provisional does not produce a second CANCEL.
                 let _ = send_cancel(endpoint, invite, via, target.clone()).await;
             }
             continue;
@@ -2519,15 +2528,18 @@ async fn ack_then_bye(endpoint: &Handle, invite: &Request, response: &Response, 
     // discard: counted as `sipx_transport::UnsentCounts::ack`. An ACK for a 2xx that does not go
     // out is the worst of the three — it has no transaction to retry it (RFC 3261 §13.2.2.4), so
     // the far end retransmits its 2xx for thirty-two seconds and then streams at a port this side
-    // has closed. The `Result` is discarded because the BYE below is the only remedy and it is
-    // attempted whether or not the ACK landed; returning the error would only mask the failure
-    // that brought us here.
+    // has closed. This one goes out through `send_directly`, so the `Result` dropped here *does*
+    // report the transmit; it is dropped because the BYE below is the only remedy and is attempted
+    // whether or not the ACK landed, and returning the error would only mask the failure that
+    // brought us here.
     let _ = send_ack(endpoint, &dialog, in_dialog.clone()).await;
     if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
         // discard: counted as `sipx_transport::UnsentCounts::bye` — the number an operator asking
         // "why did that call linger" needs, because a BYE that does not reach the wire leaves a
         // dialog up at the far end that no timer reaps unless RFC 4028 session timers happen to be
-        // running. Nothing here can retry it: this is the failure path itself.
+        // running. The count is taken at the transmit and not from this `Result`, which reports
+        // only that the transaction was created. Nothing here can retry it: this is the failure
+        // path itself.
         let _ = endpoint.send(bye, in_dialog).await;
     }
 }
@@ -3446,12 +3458,15 @@ impl Dialing {
                     let in_dialog = in_dialog_target(&dialog, self.target.clone());
                     // discard: counted as `sipx_transport::UnsentCounts::ack`, exactly as in
                     // `ack_then_bye` — the same two sends on the same failing path, written inline
-                    // here only because this one already holds the dialog.
+                    // here only because this one already holds the dialog. Via `send_directly`, so
+                    // this `Result` does report the transmit.
                     let _ = send_ack(&self.endpoint, &dialog, in_dialog.clone()).await;
                     if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
-                        // discard: counted as `sipx_transport::UnsentCounts::bye`. The `Result` is
-                        // dropped so that the error which brought us into this branch is the one
-                        // the caller is given, rather than being masked by a teardown failure.
+                        // discard: counted as `sipx_transport::UnsentCounts::bye`, at the
+                        // transmit rather than from this `Result`, which reports only that the
+                        // transaction was created. It is dropped so that the error which brought
+                        // us into this branch is the one the caller is given, rather than being
+                        // masked by a teardown failure.
                         let _ = self.endpoint.send(bye, in_dialog).await;
                     }
                 }
@@ -4861,11 +4876,12 @@ pub async fn answer_replacing_with(
 
     // Then end the one being replaced (RFC 3891 §3). Its media stops with it.
     //
-    // discard: the BYE this sends is counted as `sipx_transport::UnsentCounts::bye` if it does not
-    // reach the wire. The `Result` is discarded because the takeover has already succeeded on the
-    // line above and reporting a teardown failure as the *transfer* failing would be false — the
-    // caller has the new call either way, and `Call::end` has already marked the old one ended
-    // locally before the BYE was ever built.
+    // discard: the BYE this sends is counted at the transmit as
+    // `sipx_transport::UnsentCounts::bye` if the endpoint cannot put it on the wire. The `Result`
+    // is discarded because the takeover has already succeeded on the line above and reporting a
+    // teardown failure as the *transfer* failing would be false — the caller has the new call
+    // either way, and `Call::end` has already marked the old one ended locally before the BYE was
+    // ever built.
     let _ = replaced.hang_up().await;
 
     Ok(taken_over)
