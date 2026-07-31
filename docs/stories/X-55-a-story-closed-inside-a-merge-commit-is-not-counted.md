@@ -2,7 +2,7 @@
 id: X-55
 title: Count a story closed inside a merge commit, or refuse to be closed inside one
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 epic: conformance
 areas: [scripts]
