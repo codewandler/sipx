@@ -38,7 +38,7 @@ sipx-audio.workspace = true
 # the workspace table would turn the transports off for the five crates that want them.
 # A release that bumps the workspace version and forgets this line fails loudly in
 # `cargo publish`, not quietly.
-sipx-transport = { path = "../sipx-transport", version = "1.0.0-alpha.3", default-features = false }
+sipx-transport = { path = "../sipx-transport", version = "1.0.0-alpha.4", default-features = false }
 # `MESSAGE-INTEGRITY` is HMAC-SHA1 (RFC 5389 §15.4; RFC 8445 cites RFC 5389, not RFC 8489, so
 # there is no SHA-256 variant), and `subtle` compares the received tag without leaking through
 # timing how far a forgery matched — the same pairing `sipx_sdp::fingerprint` and
