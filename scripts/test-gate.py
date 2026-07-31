@@ -1664,6 +1664,11 @@ class TheCorpusProvenanceChecks(unittest.TestCase):
     #: test below asserts they do.
     NOT_A_RESULT = 75
 
+    #: What an importer exits when it did not understand its arguments — `EX_USAGE`, sysexits(3).
+    #: A finding about the caller, deliberately distinct from `NOT_A_RESULT`, so a test can tell
+    #: "refused the spelling" from "accepted it and got as far as the network".
+    USAGE = 64
+
     def unreachable_curl(self, quiet: bool = False) -> str:
         """A `PATH` whose `curl` is a machine with no route to the RFC editor.
 
@@ -1721,26 +1726,39 @@ class TheCorpusProvenanceChecks(unittest.TestCase):
         Not "curl prints nothing" — it prints `curl: (6) Could not resolve host: …` at these very
         flags, because `-S` in `-fsSL` is *show errors*. What it does not print is which corpus was
         being checked or that the committed files are not what failed, and that is what the guard
-        adds.
+        adds. `AGENTS.md` names that sentence as the guard's entire reason for existing, having
+        just deleted the false one, so it has to be pinned by something.
 
-        Asserted against a `curl` that says nothing, precisely so that curl saying it cannot be
-        what makes this pass. The importer has to name the host and the corpus on its own.
+        Two things make this assertion discriminating rather than decorative, and the first
+        version of it had neither:
+
+        * **A `curl` that says nothing**, so curl's own complaint cannot be what satisfies it.
+        * **`stderr` only.** The importer prints `fetching <url>` unconditionally *before* the
+          fetch, on stdout — and that line already contains the host and the corpus number. Read
+          both streams together and a guard whose entire body is `exit 75` passes: measured, whole
+          output `fetching https://www.rfc-editor.org/rfc/rfc5118.txt`, stderr empty. The guard's
+          three messages are the only thing on stderr in this scenario, so that is where the
+          property lives.
         """
         for corpus in self.corpora():
             with self.subTest(corpus=corpus):
                 result = self.run_importer(corpus, "--check", quiet=True)
-                output = result.stdout + result.stderr
+                # Not `result.stdout + result.stderr`: see above. The `fetching` line is free.
+                complaint = result.stderr
                 self.assertIn(
                     self.HOST,
-                    output,
-                    f"{self.importer(corpus)} failed without naming the host it could not reach, "
-                    f"so the reader cannot tell a network outage from a corpus that drifted",
+                    complaint,
+                    f"{self.importer(corpus)} failed without naming the host it could not reach — "
+                    f"nothing it said on stderr mentions {self.HOST}, so the reader cannot tell a "
+                    f"network outage from a corpus that drifted. Its whole complaint was "
+                    f"{complaint!r}",
                 )
                 self.assertIn(
                     corpus.removeprefix("rfc"),
-                    output,
+                    complaint,
                     f"{self.importer(corpus)} failed without naming which corpus was being "
-                    f"checked, which is the other half of what the guard is for",
+                    f"checked, which is the other half of what the guard is for. Its whole "
+                    f"complaint was {complaint!r}",
                 )
 
     def test_an_unreachable_rfc_editor_never_becomes_a_skip(self):
@@ -1834,30 +1852,89 @@ class TheCorpusProvenanceChecks(unittest.TestCase):
 
         Run with a `curl` that cannot succeed, so a regression here cannot actually rewrite the
         corpus: the argument has to be refused *before* the fetch, and the exit code says which
-        happened.
+        happened. `EX_USAGE` means refused; `EX_TEMPFAIL` means it got as far as fetching, which
+        means it picked a path — and the path an unknown argument picks is the one that writes.
+
+        The empty string is in the list deliberately. It is the one input where `$#` and
+        `"${1:-}"` disagree, so the first fix here still took the write path for it: `./import-…sh
+        ""` rewrote a tampered fixture and exited 0. Latent, since no invocation site passes a
+        variable today — but `"$flag"` with `flag` unset is one edit away, and this is the branch
+        that erases evidence.
         """
         for corpus in self.corpora():
-            for argument in ("--check=1", "-check", "--chekc", "--write", "check", "-c"):
+            for argument in ("--check=1", "-check", "--chekc", "--write", "check", "-c", ""):
                 with self.subTest(corpus=corpus, argument=argument):
                     result = self.run_importer(corpus, argument)
-                    self.assertNotEqual(
-                        0,
+                    self.assertEqual(
+                        self.USAGE,
                         result.returncode,
-                        f"{self.importer(corpus)} accepted `{argument}` and exited green",
+                        f"{self.importer(corpus)} exited {result.returncode} for `{argument}` "
+                        f"rather than refusing it: 0 means it rewrote the corpus, "
+                        f"{self.NOT_A_RESULT} means it carried the argument as far as the fetch. "
+                        f"Either way it selected a path instead of rejecting the spelling",
                     )
-                    self.assertNotEqual(
-                        self.NOT_A_RESULT,
-                        result.returncode,
-                        f"{self.importer(corpus)} carried `{argument}` as far as the fetch, which "
-                        f"means it selected a path instead of refusing the argument — and the "
-                        f"path it selects for an unknown argument is the one that writes",
-                    )
-                    self.assertIn(
-                        argument,
-                        result.stderr,
-                        f"{self.importer(corpus)} refused `{argument}` without saying which "
-                        f"argument it did not understand",
-                    )
+                    if argument:
+                        self.assertIn(
+                            argument,
+                            result.stderr,
+                            f"{self.importer(corpus)} refused `{argument}` without saying which "
+                            f"argument it did not understand",
+                        )
+
+    def test_a_disclaimed_step_does_not_hide_a_step_that_really_failed(self):
+        """The one place this design departs from the disk guard, pinned so a refactor cannot flip it.
+
+        `stop_without_a_result` returns `EXIT_INFRASTRUCTURE` even with reds pending, because it
+        truncates the run — the reds after it were never attempted, so the run really is
+        incomplete. A disclaimed step does not truncate anything: every other step ran and means
+        what it says, so a red beside it is a full-strength finding and the gate has to exit `1`
+        and name it. Exiting `2` there would say "re-run", and a broken tree needs reading.
+
+        Synthetic steps rather than the real corpus ones: what is under test is the run loop's
+        arithmetic, not either importer.
+        """
+        import contextlib
+        import io
+        from unittest import mock
+
+        disclaimed = self.gate.Step(
+            "a step that could not run",
+            "gate",
+            ("bash", "-c", f"exit {self.NOT_A_RESULT}"),
+            not_a_result="it could not reach what it checks",
+        )
+        red = self.gate.Step("a step that really failed", "gate", ("false",))
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(
+                self.gate, "free_bytes", return_value=self.gate.REQUIRED_FREE_BYTES * 4
+            ),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = self.gate.run([disclaimed, red])
+        summary = self.gate._ANSI.sub("", err.getvalue())
+
+        self.assertEqual(
+            self.gate.EXIT_RED,
+            code,
+            f"the gate exited {code} with a genuinely red step in the run. A disclaimer must not "
+            f"downgrade a finding to `not a result`, which tells an implementor to re-run instead "
+            f"of to look:\n{summary}",
+        )
+        self.assertIn("1 of 2 steps failed", summary, f"the red tally is wrong:\n{summary}")
+        self.assertIn(red.name, summary, "the summary does not name the step that really failed")
+        self.assertNotIn(
+            f"  {disclaimed.name}: exit",
+            summary,
+            f"the disclaimed step was counted as a failure as well:\n{summary}",
+        )
+        self.assertIn(
+            disclaimed.name,
+            summary,
+            f"the disclaimed step vanished from the summary entirely, so nobody learns it did not "
+            f"run:\n{summary}",
+        )
 
     def test_no_document_repeats_the_disproved_reason_for_the_guard(self):
         """"`curl -f` prints nothing" was false at the flags in use, and it was copied five times.
