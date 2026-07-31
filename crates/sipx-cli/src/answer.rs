@@ -92,6 +92,10 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         .emit(format);
 
     let wait = Duration::from_secs(args.number("wait").unwrap_or(60));
+    // The call's progress at INFO, which is what `-v` documents and what it produced nothing of
+    // before `X-57`: the two INFO records in the workspace are a registration refresh and a
+    // transcoding bridge, and a call goes near neither.
+    tracing::info!(address = %listening, within = ?wait, "waiting for a call");
     let deadline = tokio::time::Instant::now() + wait;
     let request = loop {
         let Ok(Some(request)) = tokio::time::timeout_at(deadline, incoming.recv()).await else {

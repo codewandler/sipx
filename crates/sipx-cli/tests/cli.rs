@@ -955,15 +955,16 @@ async fn a_refusal_carries_a_to_tag() {
 ///   refused; an invocation that started or stopped being refused would have moved it to another
 ///   code path without failing.
 ///
-/// The verbose spelling is `-v -v` and not `-vv`, which is not a stylistic choice: verbosity is
-/// counted as the number of arguments beginning with `-v`, so `-vv` counts once and reaches INFO,
-/// and nothing on a call's path logs at INFO. That the documented `-vv` cannot reach DEBUG is a
-/// separate defect, reported rather than fixed here.
+/// The verbose spelling is the documented one, `-vv`, and its control is DEBUG specifically. It was
+/// `-v -v` until `X-57`: verbosity was counted as the number of *arguments* beginning with `-v`, so
+/// `-vv` counted once and got the INFO ceiling, under which the answerer's records — all DEBUG — were
+/// filtered out. The undocumented spelling was the only one that could produce the control this test
+/// needs, which is why it used it and reported the defect rather than fixing it.
 #[tokio::test]
 async fn verbose_logging_stays_off_stdout() {
     let dir = scratch("verbose-logging");
 
-    let loud = place_a_call(&dir, &["-v", "-v"]).await;
+    let loud = place_a_call(&dir, &["-vv"], &[]).await;
     // The negative comes before its own control, deliberately: writing records to stdout empties
     // stderr as a side effect, so both assertions fire together on that one defect and the first to
     // panic is the one that gets to name it.
@@ -973,10 +974,13 @@ async fn verbose_logging_stays_off_stdout() {
         on_stdout.is_empty(),
         "stdout must carry results only, got the log records {on_stdout:?}"
     );
+    let on_stderr = log_records(&loud.answerer_stderr);
     assert!(
-        !log_records(&loud.answerer_stderr).is_empty(),
-        "the verbose answerer logged nothing, so the clean stdout above is equally consistent with \
-         logging being broken outright: {}",
+        on_stderr.iter().any(|record| record.contains("DEBUG")),
+        "`-vv` is documented as DEBUG and the answerer's records are DEBUG, so an absence of them \
+         means the second `v` was not counted and the run was capped at INFO — and it also leaves \
+         the clean stdout above equally consistent with logging being broken outright. Records \
+         seen: {on_stderr:?}, whole stream: {}",
         loud.answerer_stderr
     );
     assert!(
@@ -999,7 +1003,7 @@ async fn verbose_logging_stays_off_stdout() {
         String::from_utf8_lossy(&loud.caller.stderr)
     );
 
-    let quiet = place_a_call(&dir, &[]).await;
+    let quiet = place_a_call(&dir, &[], &[]).await;
     assert!(
         !log_records(&quiet.answerer_stderr)
             .iter()
@@ -1019,6 +1023,56 @@ async fn verbose_logging_stays_off_stdout() {
         Some(0),
         "the quiet answerer has to have taken the same path as the verbose one: {}",
         quiet.answerer_stderr
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `-v` on its own reports the call, on both ends of it (`X-57`).
+///
+/// The flag was **accepted and inert**: the only two `tracing::info!` sites in the workspace are a
+/// registration refresh and a transcoding bridge, neither of which a call goes anywhere near, so a
+/// documented level produced nothing whatsoever on the path an operator reaches for it on. That is
+/// the same shape as a capture that can only be switched on by editing code — the flag is there, and
+/// the thing it promises is not. Either the help text had to stop promising it or the records had to
+/// exist; `sipx` now logs the call's own lifecycle at INFO, so both ends have something to say.
+///
+/// Asserted on the **caller** as well as the answerer, because the caller was the worse half: it
+/// emitted no record at *any* verbosity, so `sipx dial -v` was silent all the way through a call that
+/// worked.
+///
+/// The absence of DEBUG here is what makes the neighbour above mean something: it establishes that
+/// one `v` stops at INFO, so the DEBUG records that test demands of `-vv` are attributable to the
+/// second `v` and not to a flag that switches everything on at once.
+#[tokio::test]
+async fn one_v_reports_the_call_on_both_ends_of_it() {
+    let dir = scratch("verbosity-info");
+    let placed = place_a_call(&dir, &["-v"], &["-v"]).await;
+
+    let caller_stderr = String::from_utf8_lossy(&placed.caller.stderr).into_owned();
+    for (who, stream) in [
+        ("answerer", placed.answerer_stderr.as_str()),
+        ("caller", caller_stderr.as_str()),
+    ] {
+        let records = log_records(stream);
+        assert!(
+            records.iter().any(|record| record.contains("INFO")),
+            "`{who} -v` documents INFO and this call produced {records:?}, so the level is accepted \
+             and inert — the operator asked for the call to be reported and got silence: {stream}"
+        );
+        assert!(
+            !records.iter().any(|record| record.contains("DEBUG")),
+            "one `v` is INFO, so DEBUG from the {who} means the ladder has no rung for `-vv` to \
+             climb to: {records:?}"
+        );
+    }
+
+    let written = placed.answerer_stdout.join("\n");
+    let on_stdout = log_records(&written);
+    assert!(
+        on_stdout.is_empty(),
+        "the records `-v` added must be on stderr like every other record, or one verbosity flag \
+         turns every JSON result into a parse error: {on_stdout:?}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1409,27 +1463,37 @@ struct Placed {
 /// stdout being taken and the rest discarded: a caller can only assert that stdout carries results
 /// *only* if it has all of stdout, and a process left writing into an unread pipe while the other is
 /// drained can block forever.
-async fn place_a_call(dir: &std::path::Path, answerer_flags: &[&str]) -> Placed {
+///
+/// **Both ends take flags**, because both ends are subjects: `X-57` asserts that a verbosity flag
+/// reports the call on the *caller's* path as well as the answerer's, and a helper that could only
+/// configure the answerer would have left that half to a second harness. They are separate lists
+/// rather than one shared list on purpose — `--capture` names a file, and two processes handed the
+/// same path would be writing over each other.
+async fn place_a_call(
+    dir: &std::path::Path,
+    answerer_flags: &[&str],
+    caller_flags: &[&str],
+) -> Placed {
     let mut args = vec!["--duration", "1"];
     args.extend_from_slice(answerer_flags);
     let (mut answerer, address, mut lines) = start_answerer_in(Some(dir), &args).await;
 
+    let target = format!("sip:answer@{address}");
+    let mut dial = vec![
+        "dial",
+        target.as_str(),
+        "--local",
+        "127.0.0.1:0",
+        "--json",
+        "--duration",
+        "1",
+        "--timeout",
+        "15",
+    ];
+    dial.extend_from_slice(caller_flags);
     let caller = tokio::time::timeout(
         Duration::from_secs(40),
-        sipx()
-            .current_dir(dir)
-            .args([
-                "dial",
-                &format!("sip:answer@{address}"),
-                "--local",
-                "127.0.0.1:0",
-                "--json",
-                "--duration",
-                "1",
-                "--timeout",
-                "15",
-            ])
-            .output(),
+        sipx().current_dir(dir).args(&dial).output(),
     )
     .await
     .expect("the caller finishes")
@@ -1488,11 +1552,17 @@ async fn place_a_call(dir: &std::path::Path, answerer_flags: &[&str]) -> Placed 
 /// Recognised by shape — a level word beside one of our own crate targets — rather than by message
 /// text. What is under test is which stream a record lands on, not what any subsystem chose to say,
 /// and matching a message would turn a reworded log line into a logging regression.
+///
+/// Both target spellings count. A library record is targeted at its crate — `sipx_call::call` — while
+/// the binary's own records are targeted at its module path, and the binary is named `sipx`, so those
+/// read `sipx::dial`. Matching only the first spelling made the records `X-57` put on the call's path
+/// invisible to a test written to look for them, which is a test that cannot observe its own subject.
+/// Neither spelling is a bare `sipx`: that appears in `sip:sipx@…` on every result line.
 fn log_records(stream: &str) -> Vec<&str> {
     stream
         .lines()
         .filter(|line| {
-            line.contains("sipx_")
+            (line.contains("sipx_") || line.contains("sipx::"))
                 && ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]
                     .iter()
                     .any(|level| line.contains(level))
@@ -1520,7 +1590,7 @@ async fn the_capture_flag_records_the_signalling_of_a_call() {
     // is what flushes it — `place_a_call` will not return before then, and it asserts the exit
     // rather than discarding it, so an empty capture cannot be an answerer that died holding it
     // (`X-40`).
-    place_a_call(&dir, &["--capture", capture.to_str().expect("a path")]).await;
+    place_a_call(&dir, &["--capture", capture.to_str().expect("a path")], &[]).await;
 
     let bytes = std::fs::read(&capture).expect("the capture the flag asked for exists");
     assert!(
@@ -1578,14 +1648,19 @@ async fn no_capture_flag_means_no_file() {
     std::fs::create_dir_all(&unasked).expect("a directory");
 
     let wanted = asked.join("signalling.pcapng");
-    place_a_call(&asked, &["--capture", wanted.to_str().expect("a path")]).await;
+    place_a_call(
+        &asked,
+        &["--capture", wanted.to_str().expect("a path")],
+        &[],
+    )
+    .await;
     let control = std::fs::read(&wanted).expect("the control capture exists");
     assert!(
         String::from_utf8_lossy(&control).contains("INVITE sip:"),
         "the control captured no signalling, so an absence below would prove nothing about the flag"
     );
 
-    place_a_call(&unasked, &[]).await;
+    place_a_call(&unasked, &[], &[]).await;
     let left_behind: Vec<std::path::PathBuf> = std::fs::read_dir(&unasked)
         .expect("the directory the call ran in")
         .filter_map(Result::ok)

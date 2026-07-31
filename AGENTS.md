@@ -115,6 +115,20 @@ written somewhere else is a suppression list with extra steps, and there is no s
 under any name. The rule had been swept for twice and enforced by nothing, and two violations landed
 in the wave after the second sweep (`X-44`).
 
+The two **RFC corpus steps** are the gate's only checks that reach the network, and they are the
+reason a red gate can mean "no route to the RFC editor". Neither corpus under
+`crates/sipx-testkit/corpus/` was transcribed: each is recovered from its RFC's own Appendix A
+archive by `import-rfc<n>-corpus.sh`, and `--check` re-recovers that archive and diffs it against the
+tree. That diff is the only thing that can tell a fixture edited by hand from the RFC's own bytes,
+because the suites read whatever is in the directory and pass. RFC 4475's check ran solely inside the
+`fuzz` job, which is in `NOT_RUN_LOCALLY`, and RFC 5118's ran nowhere at all — `ci.yml` did not
+mention 5118 (`X-56`). **A step per corpus**, so a red result names which one drifted, and the `fuzz`
+job keeps its own 4475 invocation because that one runs after the fuzzer in the tree the fuzzer wrote
+to: a different claim, and one a fresh checkout cannot make. Both importers guard the fetch, since
+`curl -f` prints nothing and a bare exit code reads as a corpus that changed rather than an RFC that
+could not be reached. It stays **red rather than skipped**: a provenance check that passes when it
+could not reach the RFC is the MSRV hole in a second place.
+
 `check-features.sh` is not optional garnish. `--all-features` hides a whole class of breakage:
 an optional transport that does not compile with its feature turned off is invisible until a
 downstream user turns it off, and that is exactly how `tls` came to be broken for a release.

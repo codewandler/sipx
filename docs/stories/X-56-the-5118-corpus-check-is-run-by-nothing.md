@@ -2,7 +2,7 @@
 id: X-56
 title: Run the RFC 5118 corpus check from the gate, as its RFC 4475 twin already is
 pillar: Build
-status: ready
+status: done
 priority: 3
 epic: conformance
 areas: [scripts, ci]
@@ -16,22 +16,44 @@ Make the RFC 5118 fixtures as tamper-evident as the RFC 4475 ones already are, s
 keeps holding rather than merely holding today.
 
 ## Acceptance
-- [ ] **The gap, demonstrated first.** `scripts/import-rfc5118-corpus.sh --check` verifies the twelve
+- [x] **The gap, demonstrated first.** `scripts/import-rfc5118-corpus.sh --check` verifies the twelve
       Appendix A messages against the RFC's own archive. Grep the repository: nothing invokes it —
       not `scripts/gate.py`, not any job in `.github/workflows/ci.yml`. Its RFC 4475 counterpart *is*
       invoked, by the `fuzz` job. Show that a fixture edited by hand leaves the whole gate green.
-- [ ] **It runs from a gate step and a CI job**, and `./scripts/gate.py --check` accounts for it —
+- [x] **It runs from a gate step and a CI job**, and `./scripts/gate.py --check` accounts for it —
       every command a CI job runs is either mirrored by a gate step or named in `NOT_RUN_LOCALLY`
       with a reason, which is the property `X-22` established.
-- [ ] **The failing-first test is the tampered fixture.** Edit one byte of one 5118 message, show the
+- [x] **The failing-first test is the tampered fixture.** Edit one byte of one 5118 message, show the
       new step red, restore it, show it green. A check that cannot detect a hand-edited corpus is the
       thing this story is about.
-- [ ] Consider whether the 4475 and 5118 checks belong in the same step or job, and say which and
+- [x] Consider whether the 4475 and 5118 checks belong in the same step or job, and say which and
       why. Two corpora with one rule between them is one place to remember; two steps is two.
 
 ## Progress
 - Filed 2026-07-30 by `X-51`, which ran the check by hand while verifying M12's first clause, found
   it passing, and noticed nothing would ever notice if it stopped.
+- Closed 2026-07-31. **One CI job, one step per corpus**, which is the last item's answer: two
+  corpora with one rule between them is one place to remember, while a step each is what makes a
+  red result name which corpus drifted. The `fuzz` job keeps its own RFC 4475 invocation, because
+  that one runs after the fuzzer in the tree the fuzzer wrote to and is a different claim — that a
+  campaign deposited none of its generated inputs into committed seed data. A step in another job
+  checks out a fresh tree and cannot see that at all; `test-gate.py` now pins the ordering so
+  folding the two together cannot silently lose it.
+- The gap was demonstrated at the base by the step list rather than by a full run: no gate step
+  named either importer and `ci.yml` did not contain the string `5118` anywhere, so a hand-edited
+  5118 fixture had nothing that could observe it. Four `test-gate.py` cases were red there.
+- **Failing-first, the tampered fixture:** one byte of `rfc5118/ipv6-good` flipped (`7` → `8`) and
+  the new step exits 1 naming the file that differs; restored, it exits 0. Inside the real gate
+  both steps pass over 50 RFC 4475 messages and 12 RFC 5118 messages, and `gate.py --check` reports
+  25 steps over 17 CI jobs with none unaccounted for.
+- Both steps reach the network, which is new for the gate, so both importers now guard the fetch.
+  `curl -f` prints nothing, so an unguarded failure reported a bare exit code that reads as a
+  finding about the corpus — which an unreachable RFC editor is not. It stays red rather than
+  becoming a skip: a provenance check that passes when it could not reach the RFC is the MSRV hole
+  in a second place.
+- The implementor wrote the test cases and was then killed by an org monthly spend limit before
+  writing any implementation. Its test was a precise specification and the coordinator implemented
+  against it, so this story is `coordinator-implemented`: one pair of eyes, not two.
 
 ## Notes
 - **This is `X-31`'s lesson in a second corpus.** `X-31` made the 4475 corpus tamper-evident because

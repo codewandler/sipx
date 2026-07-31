@@ -51,8 +51,14 @@ COMMANDS:
 
 GLOBAL OPTIONS:
     --json      Report results as JSON on stdout
-    -v, -vv     Log to stderr; never to stdout, which carries results
+    -v          Log a call's progress to stderr: what was dialled, what answered,
+                who called, how it ended (INFO)
+    -vv         Add the protocol detail behind it: signalling, transactions, media
+                (DEBUG, and the most there is — further v's change nothing)
     -h, --help  Show help for a command
+
+    Logging never reaches stdout, which carries results. Repeated v's count by
+    letter, so -vv and -v -v are the same request.
 
 EXIT CODES:
     0  success        3  rejected       5  timeout
@@ -71,8 +77,7 @@ async fn main() -> ExitCode {
 
     // Logging goes to stderr. One stray line on stdout turns valid JSON into a parse error at
     // the far end of a pipe, where the cause is invisible.
-    let verbosity = args.iter().filter(|a| a.starts_with("-v")).count();
-    init_logging(verbosity);
+    init_logging(verbosity(&args));
 
     let exit = match args.first().map(String::as_str) {
         Some("register") => register::run(&args, format).await,
@@ -98,14 +103,44 @@ async fn main() -> ExitCode {
     ExitCode::from(u8::try_from(exit.code()).unwrap_or(1))
 }
 
-fn init_logging(verbosity: usize) {
-    let level = match verbosity {
+/// How many times `-v` was asked for.
+///
+/// Counted by `v` **letter**, over every argument that is a `-` followed by nothing else, so the two
+/// spellings of one request agree: `-vv` is `-v -v`, and `-vvv` is `-v -v -v`. It counted *arguments*
+/// beginning with `-v` until `X-57` — which made `-vv` a single match, capped at INFO by [`level`],
+/// while `USAGE` documented it as DEBUG and nothing on a call's path logged at INFO at all. The
+/// documented flag was therefore accepted, and silent, and only the undocumented `-v -v` reached the
+/// level both this help text and that function meant by it.
+///
+/// Only a cluster of `v`s counts, where the old prefix match counted anything starting `-v`. `-V` is
+/// the version flag and there is no `--verbose`.
+fn verbosity(args: &[String]) -> usize {
+    args.iter()
+        .filter_map(|arg| arg.strip_prefix('-'))
+        .filter(|cluster| !cluster.is_empty() && cluster.bytes().all(|letter| letter == b'v'))
+        .map(str::len)
+        .sum()
+}
+
+/// The most detail that many `v`s asks for.
+///
+/// One level per `v` from WARN, **stopping at DEBUG**, so `-vvv` and beyond are `-vv`. DEBUG is the
+/// last rung the workspace has anything standing on — it contains no `trace!` call — and mapping a
+/// third `v` to TRACE would document a level whose output is identical to `-vv`'s, which is the defect
+/// `X-57` is about and not a fix for it. Saturating rather than refusing is deliberate too: an
+/// operator who holds the key down is asking for everything there is, and a usage error about a flag
+/// that means "more" would be a strange way to answer that.
+fn level(verbosity: usize) -> tracing::Level {
+    match verbosity {
         0 => tracing::Level::WARN,
         1 => tracing::Level::INFO,
         _ => tracing::Level::DEBUG,
-    };
+    }
+}
+
+fn init_logging(verbosity: usize) {
     let _ = tracing_subscriber::fmt()
-        .with_max_level(level)
+        .with_max_level(level(verbosity))
         .with_writer(std::io::stderr)
         .try_init();
 }
@@ -403,6 +438,44 @@ mod tests {
     /// `Args` over an argument list that is expected to be well formed.
     fn parsed(raw: &[String]) -> Args<'_> {
         Args::new(raw).expect("a well formed argument list")
+    }
+
+    /// `-vv` is `-v -v` and `-vvv` is `-v -v -v` (`X-57`). Counting arguments rather than letters
+    /// made the documented spelling a level quieter than the undocumented one, which is the whole
+    /// defect: `-vv` matched once.
+    #[test]
+    fn a_repeated_v_is_counted_by_letter_so_the_spellings_agree() {
+        assert_eq!(verbosity(&args(&["dial", "sip:a@b"])), 0);
+        assert_eq!(verbosity(&args(&["dial", "-v"])), 1);
+        assert_eq!(verbosity(&args(&["dial", "-vv"])), 2);
+        assert_eq!(verbosity(&args(&["dial", "-v", "-v"])), 2);
+        assert_eq!(verbosity(&args(&["dial", "-v", "-vv"])), 3);
+        assert_eq!(
+            verbosity(&args(&["dial", "-vvv"])),
+            verbosity(&args(&["dial", "-v", "-v", "-v"])),
+            "the two spellings of three must not disagree"
+        );
+    }
+
+    /// Nothing else is this flag. The old prefix match counted every argument beginning `-v`, so a
+    /// value or a flag that merely started that way raised the level.
+    #[test]
+    fn only_a_cluster_of_vs_is_verbosity() {
+        assert_eq!(verbosity(&args(&["version", "-V"])), 0);
+        assert_eq!(verbosity(&args(&["dial", "--verbose"])), 0);
+        assert_eq!(verbosity(&args(&["dial", "-vx"])), 0);
+        assert_eq!(verbosity(&args(&["dial", "-"])), 0);
+    }
+
+    /// The ladder `USAGE` documents, top included: more `v`s than there are levels is the top level
+    /// rather than a refusal, and the top is DEBUG because the workspace has no `trace!` to reach.
+    #[test]
+    fn the_ladder_climbs_one_level_per_v_and_stops_at_debug() {
+        assert_eq!(level(0), tracing::Level::WARN);
+        assert_eq!(level(1), tracing::Level::INFO);
+        assert_eq!(level(2), tracing::Level::DEBUG);
+        assert_eq!(level(3), tracing::Level::DEBUG);
+        assert_eq!(level(9), tracing::Level::DEBUG);
     }
 
     #[test]

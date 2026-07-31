@@ -345,12 +345,15 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
         "| `implemented` | Behaviour present and tested for the roles listed. |\n"
     )
 
-    def git(self, repo, *args, date=None):
+    def git(self, repo, *args, date=None, check=True):
         """A git command in the fixture, with an identity so `commit` works on any machine.
 
         `date` back-dates both the author and the committer date. The day rows are read from `%ad`, so
         a fixture that needs a history *not* dated today — the only way to observe a day with no story
         activity — sets it.
+
+        `check=False` is for the one command expected to fail: an add/add merge conflict, which is how
+        a story filed on two lines of history is arranged.
         """
         env = dict(os.environ)
         if date:
@@ -370,7 +373,7 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
             cwd=repo,
             capture_output=True,
             text=True,
-            check=True,
+            check=check,
             env=env,
         )
 
@@ -894,6 +897,176 @@ class TheCheckIsSatisfiableByTheCommitThatMovesTheBoard(unittest.TestCase):
             str(checkout),
         )
         return checkout
+
+    def merge_no_commit(self, repo, branch):
+        """Start a `--no-ff` merge and stop before the commit, so the caller can add to its tree.
+
+        This is the shape that produces the defect: a merge commit whose tree differs from *both*
+        parents. `M-34`'s closing was written exactly here — the merge resolved the branch and set
+        `status: done` in one commit, which is what "Merge impl/M-34, and close it" means.
+        """
+        self.git(repo, "merge", "--no-ff", "--no-commit", "-q", branch)
+
+    def test_a_story_closed_inside_a_merge_commit_is_counted(self):
+        """`X-55`, the closed half: `git log -p` emits no diff for a merge unless asked.
+
+        `M-34` is the instance. Its `status: done` landed in the merge commit, so the closing appeared
+        in no non-merge diff, the history walk never saw it, and the journal came out one ahead of the
+        snapshot — which took a hand repair of the generated report to recover from.
+
+        The fixture closes `X-2` *in the merge commit itself* rather than on the branch. Closing it on
+        the branch would prove nothing: the default walk visits every parent, so a branch commit's own
+        diff is already counted. What is invisible is a change that exists in no parent's diff.
+        """
+        repo = self.fixture()
+        self.git(repo, "switch", "-q", "-c", "impl/X-2")
+        self.write_story(repo, "X-9", "ready")
+        self.commit(repo, "file X-9 on the branch")
+        self.git(repo, "switch", "-q", "-")
+        self.merge_no_commit(repo, "impl/X-2")
+        self.write_story(repo, "X-2", "done")
+        self.commit(repo, "Merge impl/X-2, and close it")
+
+        closed = self.closed_facts(repo)
+        self.assertIn(
+            "closed:docs/stories/X-2-a-story.md",
+            closed,
+            "a story closed inside a merge commit must still be counted as closed; `git log -p` "
+            "shows no diff for a merge unless asked, so this fact is otherwise lost silently",
+        )
+
+    def test_a_story_filed_inside_a_merge_commit_is_counted(self):
+        """`X-55`, the filed half: `--diff-filter=A --name-only` has the same default.
+
+        A separate `git log` invocation with the same blind spot, so a story file whose first
+        appearance is a merge commit is not counted as filed either. The Acceptance asks for both.
+        """
+        repo = self.fixture()
+        self.git(repo, "switch", "-q", "-c", "impl/X-3")
+        self.write_story(repo, "X-9", "ready")
+        self.commit(repo, "file X-9 on the branch")
+        self.git(repo, "switch", "-q", "-")
+        self.merge_no_commit(repo, "impl/X-3")
+        self.write_story(repo, "X-3", "ready")
+        self.commit(repo, "Merge impl/X-3, and file X-3 while resolving it")
+
+        filed = self.filed_facts(repo)
+        self.assertIn(
+            "filed:docs/stories/X-3-a-story.md",
+            filed,
+            "a story file that first appears in a merge commit must be counted as filed",
+        )
+
+    def test_a_story_added_on_two_lines_of_history_is_one_filing(self):
+        """The over-count the same walk carries, found while deciding `X-55`'s route.
+
+        `S-26` in the real history: `f67ffad` filed it on `main`, and `0236340` on `impl/S-26`
+        independently created the same file on a branch cut from an earlier commit. The default walk
+        visits both parents, so one filing was counted **twice** — 182 filings against 181 real ones.
+        Counting merge diffs without also limiting the walk to the mainline makes this worse rather
+        than better: it adds the merge's copy as a third. Restricting the walk to first parents is
+        what makes a fact an event on the mainline, counted exactly once wherever it landed.
+
+        **Both sides must file something of their own.** The path limit is the whole `docs/stories`
+        directory, so a merge TREESAME with one parent across it has that parent's side pruned by
+        git's history simplification and the duplicate is invisible — which is why the first version
+        of this test passed against the unfixed script. `S-26`'s merge was TREESAME with neither
+        parent, and `X-8`/`X-9` here are what reproduce that.
+        """
+        repo = self.fixture()
+        self.git(repo, "switch", "-q", "-c", "impl/X-3")
+        self.write_story(repo, "X-3", "done")
+        self.write_story(repo, "X-9", "ready")
+        self.commit(repo, "file X-3 already closed, and X-9, on the branch")
+        self.git(repo, "switch", "-q", "-")
+        self.write_story(repo, "X-3", "ready")
+        self.write_story(repo, "X-8", "ready")
+        self.commit(repo, "file X-3 as ready, and X-8, on the mainline")
+        self.git(repo, "merge", "--no-ff", "-q", "-m", "Merge impl/X-3", "impl/X-3", check=False)
+        self.write_story(repo, "X-3", "done")
+        self.commit(repo, "Merge impl/X-3")
+
+        filed = self.filed_facts(repo)
+        self.assertEqual(
+            filed.count("filed:docs/stories/X-3-a-story.md"),
+            1,
+            "one story filed on two lines of history is one filing, not two",
+        )
+        for other in ("X-8", "X-9"):
+            self.assertEqual(
+                filed.count(f"filed:docs/stories/{other}-a-story.md"),
+                1,
+                f"{other} was filed once on one side of the merge and must still be counted once",
+            )
+
+    def facts_in(self, repo):
+        """`history_story_fact_days` as the copy of the generator in the fixture computes it.
+
+        Run out of process against the fixture's own `maturity.py` and `cwd`, because `ROOT` is bound
+        at import time — the module imported by this test file is rooted in the real repository.
+        """
+        program = (
+            "import importlib.util,json,pathlib,sys\n"
+            "spec=importlib.util.spec_from_file_location('m','scripts/maturity.py')\n"
+            "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\n"
+            "filed,closed=m.history_story_fact_days()\n"
+            "print(json.dumps({'filed':[i for _,i in filed],'closed':[i for _,i in closed]}))\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return json.loads(done.stdout)
+
+    def filed_facts(self, repo):
+        return self.facts_in(repo)["filed"]
+
+    def closed_facts(self, repo):
+        return self.facts_in(repo)["closed"]
+
+    def test_a_journal_ahead_of_the_snapshot_has_a_documented_repair(self):
+        """`X-55`'s last Acceptance item: recovery is a documented command, not a reverse-engineered one.
+
+        This is the state `M-34` left `main` in — "the journal came out one ahead of the snapshot".
+        The recorded journal is a floor, so the generator refuses rather than overwriting it, which is
+        right and was also a dead end: the only way out was deleting the generated
+        `maturity-event-days` line out of `docs/maturity.md` by hand, staging it and regenerating.
+        Nothing said so, and a hand-*edited* count fails the basis hash, so the one safe hand edit was
+        the one nobody would guess.
+
+        Asserted in both directions. The diagnostic must name the repair, and the repair must actually
+        leave the report green — a documented command that does not recover would be worse than none.
+        """
+        repo = self.fixture(date="2020-01-02T03:04:05+00:00")
+        self.replace_journal(repo, {"filed": {"2020-01-02": 3}, "closed": {}})
+
+        refused = self.run_maturity(repo, "--check")
+        self.assertNotEqual(refused.returncode, 0, "a journal that disagrees must not be overwritten")
+        self.assertIn("journal records 3 filed facts", refused.stderr)
+        self.assertIn(
+            "--reseed-journal",
+            refused.stderr,
+            "the diagnostic must name the repair, because regenerating cannot perform it",
+        )
+
+        reseeded = self.run_maturity(repo, "--reseed-journal")
+        self.assertEqual(reseeded.returncode, 0, reseeded.stderr)
+        self.stage(repo, "docs/maturity.md")
+        self.assertEqual(
+            self.run_maturity(repo, "--check").returncode,
+            0,
+            "the documented repair must leave the report green without a hand edit",
+        )
+
+    def test_reseeding_and_checking_at_once_is_refused(self):
+        """`--check` must not be the step that rewrites what it verifies."""
+        repo = self.fixture()
+        both = self.run_maturity(repo, "--check", "--reseed-journal")
+        self.assertNotEqual(both.returncode, 0)
+        self.assertIn("run them separately", both.stderr)
 
     def test_a_shallow_checkout_is_refused_rather_than_miscounted(self):
         """`X-49`: what made `main` and every pull request red, and where it pointed the reader.

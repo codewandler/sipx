@@ -551,8 +551,47 @@ def shallow_history():
     return answer is not None and answer.strip() == "true"
 
 
+#: How the history walk reads a merge commit, and the whole of `X-55`'s fix.
+#:
+#: **The defect.** `git log -p` and `git log --diff-filter=A --name-only` both emit *nothing* for a
+#: merge commit unless asked, so a fact whose only appearance is a merge commit is invisible. `M-34`'s
+#: `status: done` landed in the merge that resolved its branch — "Merge impl/M-34, and close it" — so
+#: the closing was in no non-merge diff, the journal came out one ahead of the snapshot, and recovering
+#: took hand-editing the generated report.
+#:
+#: **Why counting merge diffs, rather than detecting and refusing.** `X-55` offered both and asked for
+#: one. Refusing is cheaper, but this repository's history *already* contains two such closings
+#: (`M-34` and `S-26`), and history is immutable — a detector would make the gate permanently red for
+#: a defect no one can fix, which is predicate 3 read backwards. Counting them is also simply the
+#: right answer, and it fixes an over-count in the same stroke; see below.
+#:
+#: **Why the walk is limited to first parents and not merely `--diff-merges=first-parent`.** `X-55`'s
+#: Notes suggested `--diff-merges=first-parent` might reproduce the committed rows exactly, making
+#: adoption nearly free. It does not: it takes this repository from 144 closed facts to 180 and from
+#: 182 filed to 224, because `git log` walks every parent by default, so a fact on a branch is counted
+#: once on the branch commit and again in the merge that brought it in. Limiting the revision walk to
+#: the mainline is what makes the count right — **a story fact is an event on the first-parent
+#: history**, counted exactly once wherever it was written, whether that was an ordinary commit or the
+#: merge itself.
+#:
+#: **What that changed, and why it is a repair rather than a re-attribution.** Against the real
+#: history it moves three numbers, and all three were wrong before: `M-34`'s closing and `S-26`'s
+#: closing were missing, and `S-26` was counted as filed *twice* — `f67ffad` filed it on `main` while
+#: `0236340` independently created the same file on a branch cut from an earlier commit, and the
+#: all-parents walk counted both. Closed goes 144 -> 146, filed 182 -> 181.
+#:
+#: The attribution date of a fact written on a branch becomes the day it reached the mainline rather
+#: than the day it was authored. That is the honest reading once a fact is defined as a mainline event,
+#: and it is the same day in every case in this history.
+MAINLINE_WALK = ("--first-parent", "--diff-merges=first-parent")
+
+
 def history_story_fact_days():
-    """Committed `(day, identity)` facts, newest first, using the board's content rule."""
+    """Committed `(day, identity)` facts, newest first, using the board's content rule.
+
+    Read along the first-parent history, so a fact written inside a merge commit is counted and a fact
+    merged in from a branch is counted once. See `MAINLINE_WALK`.
+    """
     if shallow_history():
         raise SystemExit(
             "maturity: story filing days are read from history, and this is a shallow checkout. "
@@ -568,6 +607,7 @@ def history_story_fact_days():
             "--format=C %H %ad",
             "--diff-filter=A",
             "--name-only",
+            *MAINLINE_WALK,
             "--",
             "docs/stories",
         ]
@@ -592,6 +632,7 @@ def history_story_fact_days():
             "--format=C %H %ad",
             "-p",
             "--unified=0",
+            *MAINLINE_WALK,
             "--",
             "docs/stories",
         ]
@@ -637,6 +678,26 @@ def event_day():
     return instant.date().isoformat()
 
 
+#: The repair for a journal that no regeneration can satisfy, named in the diagnostics that need it.
+#:
+#: `X-55`'s last Acceptance item. The recorded journal is a floor, so when it records facts the
+#: snapshot does not have, the generator refuses instead of overwriting — which is right, and used to
+#: leave no way forward but deleting the generated `maturity-event-days` line out of `docs/maturity.md`
+#: by hand, staging it and regenerating. That is a reverse-engineered repair, and a hand-edited count
+#: then fails the basis hash, so the only safe hand edit was deleting the whole line — which nothing
+#: said. This flag is that operation, spelled out.
+RESEED_FLAG = "--reseed-journal"
+
+#: What to do about a journal the sources cannot justify. Both diagnostics end with this, because both
+#: are unrecoverable by plain regeneration and neither said so.
+RESEED_ADVICE = (
+    f"The committed journal is read as a floor, so regenerating cannot repair this. Rebuild the date "
+    f"attribution from committed history with `./scripts/maturity.py {RESEED_FLAG}`, then stage "
+    f"docs/maturity.md. Do that only when the journal is what is wrong: it discards first-observed "
+    f"dates and re-derives them, so a fact's day becomes its commit's day."
+)
+
+
 def reconcile_event_days(kind, recorded, history, pending, today):
     """Reconcile one journal counter with committed and pending fact totals."""
     recorded_total = sum(recorded.values())
@@ -645,7 +706,7 @@ def reconcile_event_days(kind, recorded, history, pending, today):
     if recorded_total > maximum:
         raise SystemExit(
             f"maturity: event-date journal records {recorded_total} {kind} facts, but the snapshot "
-            f"has {committed_total} committed + {pending} pending"
+            f"has {committed_total} committed + {pending} pending. {RESEED_ADVICE}"
         )
 
     if recorded_total <= committed_total:
@@ -659,7 +720,7 @@ def reconcile_event_days(kind, recorded, history, pending, today):
     return recorded
 
 
-def discovery_rate():
+def discovery_rate(reseed=False):
     """Stories filed and closed per recorded day, from history and the selected snapshot.
 
     The least obvious output here and the most useful. Burn-down is not a maturity signal while
@@ -674,6 +735,9 @@ def discovery_rate():
     history was seeded from author dates; a pending fact gets the day the report first observes it.
     That recorded day survives a later commit across midnight and an amend retaining an old author
     date. See `pending_story_facts`, and `X-39` for the gate step this repaired.
+
+    `reseed` discards the recorded journal and re-derives every date from the snapshot, which is the
+    documented repair for a journal no regeneration can satisfy (`RESEED_FLAG`, and `X-55`).
     """
     history = history_story_fact_days()
     if history is None:
@@ -687,7 +751,7 @@ def discovery_rate():
     pending_filed_facts, pending_closed_facts = pending
     pending_filed = len(pending_filed_facts)
     pending_closed = len(pending_closed_facts)
-    journal = snapshot_event_days()
+    journal = None if reseed else snapshot_event_days()
     if journal is None:
         filed = collections.Counter(history_filed)
         closed = collections.Counter(history_closed)
@@ -704,7 +768,8 @@ def discovery_rate():
         expected_basis = event_days_basis(filed, closed, all_filed_facts, all_closed_facts)
         if recorded_basis != expected_basis:
             raise SystemExit(
-                "maturity: event-date journal basis does not match the facts and attributed dates"
+                "maturity: event-date journal basis does not match the facts and attributed dates. "
+                + RESEED_ADVICE
             )
     today = event_day()
     filed = reconcile_event_days("filed", filed, history_filed, pending_filed, today)
@@ -829,7 +894,7 @@ def predicate_row(predicate, found):
     return ("met" if predicate.kind == "computed" else "met (attested)"), "—"
 
 
-def render():
+def render(reseed=False):
     found = stories()
     rows = registry()
 
@@ -929,7 +994,7 @@ def render():
     # ---- discovery versus closure
     lines.append("## Discovery versus closure")
     lines.append("")
-    rate = discovery_rate()
+    rate = discovery_rate(reseed=reseed)
     if rate is None:
         lines.append(
             "Unavailable: this is read from git history, and git could not be asked. Not reported as "
@@ -1054,9 +1119,29 @@ def main():
         action="store_true",
         help="fail if the generated report is not what the sources say, and write nothing",
     )
+    parser.add_argument(
+        RESEED_FLAG,
+        action="store_true",
+        help=(
+            "discard the recorded event-date journal and re-derive every date from committed history "
+            "and the pre-commit snapshot; the documented repair when the journal records facts the "
+            "snapshot does not have, which no regeneration can fix"
+        ),
+    )
     args = parser.parse_args()
 
-    generated = render()
+    if args.reseed_journal and args.check:
+        # `--check` must never be the thing that decides the journal is wrong: it is the reader that
+        # reports drift, and a reseeding check would report green while rewriting the attribution it
+        # was asked to verify.
+        print(
+            f"maturity: {RESEED_FLAG} rewrites the journal and --check verifies it; run them "
+            "separately",
+            file=sys.stderr,
+        )
+        return 1
+
+    generated = render(reseed=args.reseed_journal)
     if args.check:
         current = existing()
         if current is None:
@@ -1078,7 +1163,13 @@ def main():
         return 0
 
     write(generated)
-    print(f"maturity: wrote {REPORT.relative_to(ROOT)}")
+    if args.reseed_journal:
+        print(
+            f"maturity: rebuilt the event-date journal in {REPORT.relative_to(ROOT)} from committed "
+            "history; stage it"
+        )
+    else:
+        print(f"maturity: wrote {REPORT.relative_to(ROOT)}")
     return 0
 
 

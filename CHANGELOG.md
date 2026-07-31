@@ -29,6 +29,75 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     by naming a constant documented in another crate — and both are closed, the second by deleting
     the cross-file lookup rather than narrowing it.
 
+- **M10 — Reachable is delivered, on evidence rather than on mechanism (`X-52`)** — `X-50` checked
+  M10's exit criterion against the tests meant to demonstrate it and found two of its three clauses
+  held by the mechanism underneath them: the GRUU test was an `OPTIONS` against one agent, and the
+  push test stopped when the INVITE arrived with nothing answering it. Both clauses are now
+  demonstrated as they are written, in `crates/sipx-cli/tests/reachable.rs`.
+  - **Two registrations of one address of record, called individually.** A call placed at one
+    instance's GRUU is answered by that instance with audio both ways, and the other instance — its
+    registration equally current — never sees the INVITE. The contrast carries it: the same routing
+    applied to the address of record resolves to *both* bindings.
+  - **A push into an answered call.** A client holding no connection is woken, refreshes its binding,
+    answers the call it was woken for, and carries audio both ways, in RFC 8599 §4.1.3's order.
+  - **Neither `T-20` nor `T-21` is reopened.** Each delivered the mechanism it was written for; this
+    is the composition on top, which was never in their Acceptance.
+  - Both tests passed on first run — M10 was short of evidence, not of behaviour — so each was
+    **falsified against a real mutation** rather than trusted for passing: selecting a binding by
+    position instead of by `+sip.instance` makes both instances adopt one GRUU, and discarding RFC
+    8599 §8.2's PURR fails the push test.
+
+### Fixed
+
+- **Both RFC corpora are tamper-evident from the gate and from CI (`X-56`)** — each corpus is
+  recovered from its RFC's own Appendix A archive rather than transcribed, and the importer's
+  `--check` re-recovers that archive and diffs it against the tree: the only thing that can tell a
+  fixture edited by hand from the RFC's own bytes, since the suites read whatever is in the directory
+  and pass. RFC 4475's check ran solely inside the `fuzz` job, which is in `NOT_RUN_LOCALLY`, so no
+  local run covered it; RFC 5118's ran **nowhere**, and `ci.yml` did not mention 5118 at all.
+  - A gate step and a CI job per corpus, so a red result names which corpus drifted. The gate is 25
+    steps over 17 CI jobs, and one byte flipped in an RFC 5118 message now fails it.
+  - **The `fuzz` job keeps its own RFC 4475 check.** That one runs after the fuzzer, in the tree the
+    fuzzer wrote to, and proves a campaign deposited none of its generated inputs into committed seed
+    data — a claim a fresh checkout cannot make. The ordering is pinned by a test now.
+  - **The fetch is guarded**, because these are the gate's first network-dependent steps: `curl -f`
+    prints nothing, so an unreachable RFC editor used to surface as a bare exit code that read as a
+    corpus that had changed. It stays red rather than becoming a skip.
+
+- **`-vv` reaches DEBUG, and `-v` has something to say (`X-57`)** — verbosity counted the number of
+  *arguments* beginning with `-v`, so the documented `-vv` was a single match capped at INFO while
+  `USAGE` promised DEBUG. Only the undocumented `-v -v` ever reached it, and `-v` alone was worse than
+  quiet: the workspace's only two `tracing::info!` sites are a registration refresh and a transcoding
+  bridge, so `sipx dial -v` narrated **nothing** through a call that worked.
+  - **Counted by `v` letter now**, so `-vv` and `-v -v` are one request and `-vvv` agrees with
+    `-v -v -v`. The ladder saturates at DEBUG, because the workspace has no `trace!` for a third `v`
+    to reach and documenting a level identical to `-vv` would restate the defect rather than fix it.
+  - **Only a cluster of `v`s is verbosity.** The old prefix match counted `-V` and `--verbose` too.
+  - **A call reports itself at INFO** — `calling`, `answered` and `hung up` on the dialling side,
+    `waiting for a call` on the answering side, all on stderr, and `USAGE` says what each level is
+    good for. A documented level that produces silence is the same shape as a capture you can only
+    switch on by editing code.
+
+- **A story closed inside a merge commit is counted (`X-55`)** — `maturity.py` read its story facts
+  with `git log -p` and `git log --diff-filter=A --name-only`, and **neither emits anything for a
+  merge commit** unless asked. A `status: done` line whose only appearance was a merge was therefore
+  invisible: that is how `M-34`'s closing went missing, leaving the journal one ahead of the snapshot
+  and needing a hand repair nothing documented.
+  - **Counted rather than refused.** The story offered both routes and asked for one. This history
+    already contains two such closings and history is immutable, so a detector would have made the
+    gate permanently red over a defect nobody can fix.
+  - **`--diff-merges=first-parent` alone is wrong**, though the story guessed it might be free: it
+    takes filed from 182 to 224 and closed from 144 to 180, because `git log` walks every parent and a
+    branch fact is counted once on the branch and again in the merge. Pairing it with `--first-parent`
+    makes a story fact **an event on the mainline, counted exactly once** wherever it was written.
+  - **Three numbers moved and all three were wrong before**: `M-34`'s and `S-26`'s closings were
+    missing, and `S-26` was counted as filed twice — one file independently created on two lines of
+    history. Filed 182 → 181, closed 144 → 146.
+  - **The repair is a documented command**, not a reverse-engineered one: `maturity.py
+    --reseed-journal` rebuilds the date attribution from committed history, and both journal
+    diagnostics now end by naming it. It refuses to run with `--check`, so the step that verifies the
+    journal can never be the step that rewrites it.
+
 ## [1.0.0-alpha.3] — 2026-07-30
 
 **One breaking change, and four measurements that turned out not to measure what they said.**
