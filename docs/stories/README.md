@@ -52,6 +52,7 @@ _This is the layer applications actually program against, so it is the one that 
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 · S-12 built the early offer/answer and stops short of using it
 
 ### Conformance
+- [X-60 — Two gate steps fail randomly, which teaches people to re-run the gate](X-60-two-gate-steps-fail-randomly-and-teach-people-to-re-run.md) · Build · observed twice in one run — `a_recording_cut_short_by_the_cap_is_kept` failed under full-workspace load and passed alone and on re-run, and the docs-site dead-anchor probe failed with `Detected unsettled top-level await` and passed on re-run in an unchanged tree
 - [X-59 — Refuse an INVITE addressed to another instance's GRUU, or write down why answering it is right](X-59-a-call-answers-an-invite-addressed-to-another-instances-gruu.md) · Application · found by the independent review of X-52 — an INVITE whose Request-URI is instance one's public GRUU, delivered to instance two's flow, is answered by instance two and carries audio; `sent_to_our_gruu` is a predicate nothing but tests call, and `crates/sipx-call/src/` contains no GRUU reference at all
 - [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
