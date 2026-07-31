@@ -1648,7 +1648,12 @@ async fn no_capture_flag_means_no_file() {
     std::fs::create_dir_all(&unasked).expect("a directory");
 
     let wanted = asked.join("signalling.pcapng");
-    place_a_call(&asked, &["--capture", wanted.to_str().expect("a path")], &[]).await;
+    place_a_call(
+        &asked,
+        &["--capture", wanted.to_str().expect("a path")],
+        &[],
+    )
+    .await;
     let control = std::fs::read(&wanted).expect("the control capture exists");
     assert!(
         String::from_utf8_lossy(&control).contains("INVITE sip:"),
