@@ -39,7 +39,6 @@ and a scripted app. `A-1` is ready. Then the milestones below, each argued for i
 
 ## Now (in progress)
 - [X-52 — Demonstrate M10's GRUU and push clauses as they are written](X-52-m10s-first-two-clauses-are-held-by-mechanism.md) · Build · found by X-50 — T-20 and T-21 are done and their tests stop short of the clauses; the GRUU test is an OPTIONS to one agent and the push test ends when the INVITE arrives, so nothing answers it
-- [X-55 — Count a story closed inside a merge commit, or refuse to be closed inside one](X-55-a-story-closed-inside-a-merge-commit-is-not-counted.md) · Build · found integrating M-34 — its `status: done` landed in the merge commit, `git log -p` shows no diff for merges, so the closing was invisible to the history walk and the journal came out one ahead of the snapshot
 - [X-56 — Run the RFC 5118 corpus check from the gate, as its RFC 4475 twin already is](X-56-the-5118-corpus-check-is-run-by-nothing.md) · Build · found by X-51's evidence check — `import-rfc5118-corpus.sh --check` proves the twelve fixtures are still the RFC's own bytes, and no gate step and no CI job invokes it; the 4475 twin is run by the fuzz job
 - [X-57 — Make `-vv` reach DEBUG, because it is documented, accepted and inert](X-57-vv-is-documented-accepted-and-inert.md) · Build · found by X-53 — verbosity counts arguments starting with `-v`, so `-vv` counts as one and yields INFO; nothing on a call's path logs at INFO, so the documented flag produces no output at all
 
@@ -265,6 +264,7 @@ _The phone is both the product's front door and its most demanding integration t
 - [X-50 — Decide whether M10 requires TURN, because the roadmap says both](X-50-m10-has-two-exit-criteria-that-disagree.md) · Build · found closing M-23 — M10's "Done when" is satisfied today, while the ICE epic header calls M-24 an M10 story and M-24 is open; the milestone cannot be declared or deferred without picking one
 - [X-51 — Check M12's exit criterion against evidence, now that all four of its stories are closed](X-51-m12s-exit-criterion-has-never-been-checked.md) · Build · found integrating X-50 — X-16, X-17, X-18 and X-19 are all done, and nobody has ever asked whether M12's four Done-when clauses hold; M10 looked reached by status and was not
 - [X-53 — Make `verbose_logging_stays_off_stdout` able to observe logging at all](X-53-verbose-logging-test-cannot-observe-its-own-name.md) · Build · found by X-45's sweep — the test runs a command refused as a usage error before any socket binds, so no log record is ever produced and the assertion would hold identically if logging went to stdout
+- [X-55 — Count a story closed inside a merge commit, or refuse to be closed inside one](X-55-a-story-closed-inside-a-merge-commit-is-not-counted.md) · Build · found integrating M-34 — its `status: done` landed in the merge commit, `git log -p` shows no diff for merges, so the closing was invisible to the history walk and the journal came out one ahead of the snapshot
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

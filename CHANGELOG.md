@@ -29,6 +29,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     by naming a constant documented in another crate — and both are closed, the second by deleting
     the cross-file lookup rather than narrowing it.
 
+### Fixed
+
+- **A story closed inside a merge commit is counted (`X-55`)** — `maturity.py` read its story facts
+  with `git log -p` and `git log --diff-filter=A --name-only`, and **neither emits anything for a
+  merge commit** unless asked. A `status: done` line whose only appearance was a merge was therefore
+  invisible: that is how `M-34`'s closing went missing, leaving the journal one ahead of the snapshot
+  and needing a hand repair nothing documented.
+  - **Counted rather than refused.** The story offered both routes and asked for one. This history
+    already contains two such closings and history is immutable, so a detector would have made the
+    gate permanently red over a defect nobody can fix.
+  - **`--diff-merges=first-parent` alone is wrong**, though the story guessed it might be free: it
+    takes filed from 182 to 224 and closed from 144 to 180, because `git log` walks every parent and a
+    branch fact is counted once on the branch and again in the merge. Pairing it with `--first-parent`
+    makes a story fact **an event on the mainline, counted exactly once** wherever it was written.
+  - **Three numbers moved and all three were wrong before**: `M-34`'s and `S-26`'s closings were
+    missing, and `S-26` was counted as filed twice — one file independently created on two lines of
+    history. Filed 182 → 181, closed 144 → 146.
+  - **The repair is a documented command**, not a reverse-engineered one: `maturity.py
+    --reseed-journal` rebuilds the date attribution from committed history, and both journal
+    diagnostics now end by naming it. It refuses to run with `--check`, so the step that verifies the
+    journal can never be the step that rewrites it.
+
 ## [1.0.0-alpha.3] — 2026-07-30
 
 **One breaking change, and four measurements that turned out not to measure what they said.**
