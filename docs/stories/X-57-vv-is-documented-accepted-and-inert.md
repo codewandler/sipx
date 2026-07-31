@@ -2,7 +2,7 @@
 id: X-57
 title: Make `-vv` reach DEBUG, because it is documented, accepted and inert
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 epic: conformance
 areas: [sipx-cli]
