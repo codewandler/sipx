@@ -19,6 +19,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use sipx_sip::Method;
 use sipx_sip::transaction::Timer;
 
 use crate::target::TransportKind;
@@ -215,6 +216,61 @@ impl DiscardCounts {
     }
 }
 
+/// Live counts of requests the endpoint was asked to send and did not.
+#[derive(Debug, Default)]
+struct Unsent {
+    invite: AtomicU64,
+    ack: AtomicU64,
+    bye: AtomicU64,
+    cancel: AtomicU64,
+    other: AtomicU64,
+}
+
+/// Requests handed to [`crate::Handle::send`] or [`crate::Handle::send_directly`] that never
+/// reached the wire, by method (§12.3).
+///
+/// **Split by method because the consequence is.** A CANCEL that does not go out leaves the far end
+/// ringing; an ACK that does not go out leaves a 2xx retransmitting for thirty-two seconds and then
+/// a peer streaming at a port this side has closed; a BYE that does not go out leaves a dialog up
+/// at the far end that no timer will reap. One number would hide which of those happened, and they
+/// are the three questions an operator asking "why did that call linger" is choosing between.
+///
+/// **Counted here rather than at the caller, deliberately.** The hand-off is the one place that
+/// sees every one of these, including the ones a caller discards with `let _ = …` — which is most
+/// of them, because these sends are made on paths that are already failing and have nothing to do
+/// with the error. §12.3 has the rest of the argument.
+///
+/// This is **not** [`DiscardCounts::send_failures`], which counts a *transaction's* send being
+/// refused inside the driver. The two never count the same event: that one is a send the endpoint
+/// initiated on a transaction's behalf, this one is a send an application asked for and was told
+/// about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UnsentCounts {
+    /// INVITEs that did not reach the wire.
+    pub invite: u64,
+    /// ACKs that did not reach the wire — RFC 3261 §13.2.2.4's ACK for a 2xx, which has no
+    /// transaction to retry it.
+    pub ack: u64,
+    /// BYEs that did not reach the wire. The one that leaves a call up at the far end.
+    pub bye: u64,
+    /// CANCELs that did not reach the wire. The one that leaves a phone ringing.
+    pub cancel: u64,
+    /// Every other method that did not reach the wire.
+    pub other: u64,
+}
+
+impl UnsentCounts {
+    /// Every request that did not reach the wire, of every method.
+    #[must_use]
+    pub fn total(self) -> u64 {
+        self.invite
+            .saturating_add(self.ack)
+            .saturating_add(self.bye)
+            .saturating_add(self.cancel)
+            .saturating_add(self.other)
+    }
+}
+
 /// Everything an endpoint will tell you about itself, at one moment (§12).
 ///
 /// # What this is not
@@ -253,6 +309,8 @@ pub struct Counters {
     pub timeouts: TimeoutCounts,
     /// Discards that are not backpressure (§12.1).
     pub discards: DiscardCounts,
+    /// Requests the endpoint was asked to send and did not put on the wire (§12.3).
+    pub unsent: UnsentCounts,
     /// How the capture is faring, if one is running (§13).
     pub capture: CaptureCounts,
     /// Per-transport message counts, read through [`Counters::transport`].
@@ -299,7 +357,8 @@ impl Counters {
         })
     }
 
-    /// Whether anything at all has been lost: shed, discarded, or dropped from a capture.
+    /// Whether anything at all has been lost: shed, discarded, dropped from a capture, or never
+    /// put on the wire.
     ///
     /// A single question for a health check to ask. Deliberately does **not** include
     /// [`Self::parse_failures`] or [`Self::timeouts`]: a malformed datagram from a stranger and a
@@ -307,7 +366,10 @@ impl Counters {
     /// away, and folding them in here would make the number impossible to act on.
     #[must_use]
     pub fn any_loss(&self) -> bool {
-        self.shed.any() || self.discards.total() > 0 || self.capture.dropped > 0
+        self.shed.any()
+            || self.discards.total() > 0
+            || self.capture.dropped > 0
+            || self.unsent.total() > 0
     }
 }
 
@@ -335,6 +397,7 @@ pub(crate) struct Meters {
     capture_records: AtomicU64,
     capture_dropped: AtomicU64,
     capture_errors: AtomicU64,
+    unsent: Unsent,
 }
 
 /// One increment, in the one ordering this module uses.
@@ -440,6 +503,30 @@ impl Meters {
         bump(&self.capture_errors);
     }
 
+    /// A request the endpoint was asked to send never reached the wire.
+    ///
+    /// A match rather than an index, so a new [`Method`] variant is a compile error here instead of
+    /// silently landing in `other` — the same reason [`slot`] is a match.
+    pub(crate) fn unsent(&self, method: &Method) {
+        bump(match method {
+            Method::Invite => &self.unsent.invite,
+            Method::Ack => &self.unsent.ack,
+            Method::Bye => &self.unsent.bye,
+            Method::Cancel => &self.unsent.cancel,
+            Method::Register
+            | Method::Options
+            | Method::Info
+            | Method::Prack
+            | Method::Update
+            | Method::Subscribe
+            | Method::Notify
+            | Method::Refer
+            | Method::Message
+            | Method::Publish
+            | Method::Other(_) => &self.unsent.other,
+        });
+    }
+
     /// Read everything, field by field.
     ///
     /// Not a consistent instant, and [`Counters`] says so: taking a lock to make it one would put
@@ -479,6 +566,13 @@ impl Meters {
                 records: read(&self.capture_records),
                 dropped: read(&self.capture_dropped),
                 errors: read(&self.capture_errors),
+            },
+            unsent: UnsentCounts {
+                invite: read(&self.unsent.invite),
+                ack: read(&self.unsent.ack),
+                bye: read(&self.unsent.bye),
+                cancel: read(&self.unsent.cancel),
+                other: read(&self.unsent.other),
             },
             per_transport,
         }

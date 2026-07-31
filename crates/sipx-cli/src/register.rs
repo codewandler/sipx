@@ -40,6 +40,8 @@ OPTIONS:
     --wake               Act as though a push arrived: refresh the binding and report the PURR
     --capture <FILE>     Record signalling to this pcapng file. Credentials are redacted;
                          TLS is recorded decrypted. Still identifies who called whom
+    --counters <FILE>    Write this run's signalling counters to this file, as JSON.
+                         Implied by --capture, as <capture>.counters.json
     --json               Report as JSON
 ";
 
@@ -152,6 +154,9 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         ua_config = ua_config.with_push(device);
     }
 
+    // Kept before the handle is moved into the agent: the counters live behind it, and the
+    // export below is the only thing outside this crate's tests that reads them.
+    let endpoint = handle.clone();
     let mut agent = UserAgent::new(handle, ua_config);
 
     // Both reports name the address of record the same way: the normalised AOR, not the argument
@@ -180,6 +185,10 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
                 // everywhere except this field.
                 report = report.boolean("push", agent.push_support().supports(provider));
             }
+            report = match crate::counters::attach(&args, &endpoint, report) {
+                Ok(report) => report,
+                Err(message) => return fail(format, Exit::Failed, &message),
+            };
             report.emit(format);
 
             if wake {

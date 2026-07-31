@@ -46,6 +46,7 @@ pub mod ws;
 pub use capture::{CaptureConfig, Direction};
 pub use counters::{
     CaptureCounts, Counters, DiscardCounts, ShedCounts, TimeoutCounts, TransportCounts,
+    UnsentCounts,
 };
 pub use endpoint::{Config, Handle, Incoming, Responses, Unmatched, bind, new_branch};
 pub use error::{Error, Result};

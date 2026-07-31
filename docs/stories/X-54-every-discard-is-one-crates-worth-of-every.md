@@ -17,13 +17,13 @@ Close the distance between M12's third **Done when** clause and what `X-18` buil
 can be recorded on evidence rather than on the clause being nearly true.
 
 ## Acceptance
-- [ ] **The enumeration reaches past one crate.** `no_discard_in_the_signalling_path_is_silent`
+- [x] **The enumeration reaches past one crate.** `no_discard_in_the_signalling_path_is_silent`
       (`crates/sipx-transport/tests/discards.rs`) scans the `src` directory of `sipx-transport` and
       nothing else, so a silent discard added to the dialog layer is invisible to it. The signalling
       path does not stop at the socket: extend the scan — or give `sipx-call` one of the same shape —
       so that the guard covers every crate the clause's words cover. Say in the same change which
       crates those are and why, because "the signalling path" is the term the whole clause turns on.
-- [ ] **The dialog layer's known losses are counted or reasoned.** `X-51` found these by hand and they
+- [x] **The dialog layer's known losses are counted or reasoned.** `X-51` found these by hand and they
       are the census, not a wish list:
       - `crates/sipx-call/src/event.rs:299` — a call event dropped because the consumer is behind,
         reported with `tracing::debug!` and no counter.
@@ -35,19 +35,19 @@ can be recorded on evidence rather than on the clause being nearly true.
       teardown path is the number an operator asking "why did that call linger" needs. So each site
       gets a counter, or a `// discard: <reason>` in the form the guard reads — which for these means
       arguing that the loss cannot matter, not restating that it was deliberate.
-- [ ] **The numbers are reachable from outside a process, next to the capture.** `Handle::counters`
+- [x] **The numbers are reachable from outside a process, next to the capture.** `Handle::counters`
       and `Calls::counts` are both plain snapshots — that part of `X-18`'s design is right and stays,
       and no metrics library is added. What is missing is that nothing but the crates' own tests ever
       calls either: `--capture <FILE>` puts the traffic where an operator can reach it and there is no
       counterpart for the counts. Give `sipx` one — the shape is the story's choice, recorded with its
       reason — so that "counted and exportable **next to** a capture" is one thing an operator can do
       and not two features that exist separately.
-- [ ] **One snapshot or a stated reason for two.** `Handle::counters` counts what the transport
+- [x] **One snapshot or a stated reason for two.** `Handle::counters` counts what the transport
       discarded; `Calls::counts` counts what the dispatcher did not deliver. An operator holding a
       capture wants both and should not have to know the crate boundary to ask. Either join them or
       write down why the boundary is load-bearing — the same refusal `X-18` made about media counters
       is a fine answer, and an unstated split is not.
-- [ ] **Failing-first test**: `a_discard_in_the_dialog_layer_is_counted_next_to_the_capture_of_the_request_that_caused_it`
+- [x] **Failing-first test**: `a_discard_in_the_dialog_layer_is_counted_next_to_the_capture_of_the_request_that_caused_it`
       — the shape `a_datagram_that_does_not_parse_is_still_captured`
       (`crates/sipx-transport/tests/capture.rs:424`) already has for a parse failure, applied to a loss
       the dialog layer owns. That test is the precedent to follow and the proof the shape works.
@@ -58,6 +58,28 @@ can be recorded on evidence rather than on the clause being nearly true.
 ## Progress
 - Filed 2026-07-30 by `X-51`, which checked M12's four **Done when** clauses against the tests and CI
   jobs that are supposed to demonstrate them. Three hold. This is the fourth.
+- **Implemented 2026-07-31.** The decision the fourth item asks for is recorded in
+  `docs/specs/sip-transport.md` **§12.3**, which is new and is where a resuming agent should start:
+  it names the crates the signalling path is, says why the two sets of atomics stay two while the
+  reading is one, and states the rule `M-32` extends (a crate joins by being added to `CRATES` and
+  by growing a member on `SignallingCounts` — never by adding fields to another crate's struct, and
+  never by a second tally of an event already counted).
+- **The guard now scans both crates.** `CRATES` in `crates/sipx-transport/tests/discards.rs` lists
+  `sipx-transport` and `sipx-call`. Extending it turned up **sixteen** unexplained sites, not the
+  seven `X-51` named by hand; all sixteen now carry a counter or a `// discard:` reason.
+- **Two new counters, in the crate that owns each fact.** `sipx_transport::UnsentCounts` counts, by
+  method, requests handed to `Handle::send`/`send_directly` that never reached the wire — which is
+  what covers the six `let _ = …` sends, and every one added later, without a counter having to be
+  remembered at each site. `CallEvents::dropped` counts events a consumer was too far behind to be
+  given, per call, reported to the only party who can act on it.
+- **The export is `sipx --counters <FILE>`, and `--capture <FILE>` implies it** as
+  `<capture>.counters.json`. Two rules because two different operators ask: whoever took a capture
+  is assembling a bug report and wants the numbers in the same bundle; whoever wants only the
+  numbers must not be made to record call content (§13) to get them. The run names the file it
+  wrote.
+- **Left for the coordinator:** the last Acceptance item. `docs/roadmap.md` is fenced for this
+  worktree, so the "Where M12 stands" replacement prose is in the handoff report under
+  `ROADMAP_BLOCK:` rather than committed here. Nothing else in the story is outstanding.
 
 ## Notes
 - **This is the whole remaining distance to M12.** The corpus clause is held by `X-16` and `S-31`

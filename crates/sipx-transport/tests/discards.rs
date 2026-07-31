@@ -12,6 +12,19 @@
 //! dangerous discard is the one added later, in a path this file's author never saw. So the check
 //! reads the crate's own source, the way `check-audio-claims.py` and `check-pool-key.py` read theirs.
 //!
+//! # Which crates, and why the list is here rather than one per crate
+//!
+//! **The signalling path is `sipx-transport` and `sipx-call`** — see [`CRATES`] and §12.3. It ran
+//! over this crate alone until `X-54`, which is how the dialog layer came to have seven discards
+//! that nothing enumerated: `X-51` found them by hand, which is precisely the method this test
+//! exists to replace.
+//!
+//! The list lives here, next to the one copy of the detector, rather than as a copy of this file in
+//! each crate. Two copies of [`LOSS_WORDS`] is `X-24`'s pool-key failure again — a rule written in
+//! two places was wrong in one of them through two changes, and nobody was told, because nothing
+//! connected the sentence to the field. A test that reads a sibling crate's `src` is the smaller
+//! price: it adds no dependency in either direction and nothing is compiled that would not be.
+//!
 //! # What to do when this test fails
 //!
 //! It will name a `path:line`. Go there and pick one:
@@ -71,6 +84,21 @@ const LOSS_WORDS: &[&str] = &[
     "lost",
 ];
 
+/// The crates the clause's words cover: **the signalling path**, which does not stop at the socket.
+///
+/// `sipx-transport` owns the sockets, the transactions and the capture; `sipx-call` owns the
+/// dialogs and the dispatcher, and a request that is dropped there is dropped from the same path by
+/// any reading of the phrase — an ACK that reaches no call is lost exactly as thoroughly as one
+/// that reached no socket, and it is the loss that leaks calls.
+///
+/// **What is deliberately not here.** `sipx-sip` and `sipx-sdp` are the sans-IO core: they discard
+/// nothing, because nothing reaches them that they did not ask for and they hand every failure back
+/// as a typed error (`AGENTS.md` §2, §3). `sipx-media` and `sipx-rtp` are the *media* path, and
+/// M12's clause says the signalling one — those counters are `M-32`, which extends this list rather
+/// than editing what is in it. `sipx-ua` and `sipx-cli` compose the two crates below without
+/// terminating anything themselves.
+const CRATES: &[&str] = &["sipx-transport", "sipx-call"];
+
 /// A discard the scan found.
 #[derive(Debug)]
 struct Site {
@@ -79,23 +107,35 @@ struct Site {
     text: String,
 }
 
-fn source_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+/// Where a sibling crate's sources live, from this crate's own manifest directory.
+fn source_dir(crate_name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the crate sits in the workspace's crates directory")
+        .join(crate_name)
+        .join("src")
 }
 
-/// Every `.rs` file in the crate's `src`, sorted so a failure names them in a stable order.
-fn sources() -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(source_dir())
-        .expect("the crate has a src directory")
+/// Every `.rs` file in one crate's `src`, sorted so a failure names them in a stable order.
+fn sources_of(crate_name: &str) -> Vec<PathBuf> {
+    let directory = source_dir(crate_name);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&directory)
+        .unwrap_or_else(|error| panic!("{crate_name} has a src directory: {error}"))
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
         .collect();
     files.sort();
     assert!(
         files.len() > 5,
-        "the scan found almost no source files, so it is looking in the wrong place: {files:?}"
+        "the scan found almost no source files in {crate_name}, so it is looking in the wrong \
+         place: {files:?}"
     );
     files
+}
+
+/// Every source file the scan covers, across every crate in [`CRATES`].
+fn sources() -> Vec<PathBuf> {
+    CRATES.iter().flat_map(|name| sources_of(name)).collect()
 }
 
 /// Where a file's test module starts, so the scan stops there.
@@ -137,7 +177,16 @@ fn unexplained(path: &Path) -> Vec<Site> {
         let explained = context.iter().any(|near| {
             // A counter next to it, or a stated reason. Either satisfies §12.1; a counter is better,
             // because it answers "how often" as well as "why".
-            near.contains(MARKER) || near.contains("meters.") || near.contains("self.meters")
+            //
+            // Each crate spells "a counter was incremented here" its own way, and the spellings are
+            // listed rather than guessed at: `sipx-transport` reaches its `Meters` through a field
+            // called `meters`, `sipx-call` counts a request it did not deliver through
+            // `Calls::counted` and a call event it dropped through the sink's `drops`.
+            near.contains(MARKER)
+                || near.contains("meters.")
+                || near.contains("self.meters")
+                || near.contains(".counted(")
+                || near.contains("drops.")
         });
         if !explained {
             found.push(Site {
@@ -148,6 +197,18 @@ fn unexplained(path: &Path) -> Vec<Site> {
         }
     }
     found
+}
+
+/// `<crate>/src/<file>.rs`, which is what a reader needs to go and open it.
+fn short(path: &Path) -> String {
+    let mut parts: Vec<String> = path
+        .components()
+        .rev()
+        .take(3)
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.reverse();
+    parts.join("/")
 }
 
 /// **§12.1's guard.** Every discard in the signalling path is counted or explained.
@@ -162,15 +223,8 @@ fn no_discard_in_the_signalling_path_is_silent() {
         let listing = unexplained
             .iter()
             .map(|site| {
-                format!(
-                    "  {}:{}\n      {}",
-                    site.file.file_name().map_or_else(
-                        || site.file.display().to_string(),
-                        |name| name.to_string_lossy().into_owned()
-                    ),
-                    site.line,
-                    site.text
-                )
+                // Crate and file, because two crates are scanned now and each has a `lib.rs`.
+                format!("  {}:{}\n      {}", short(&site.file), site.line, site.text)
             })
             .collect::<Vec<_>>()
             .join("\n");

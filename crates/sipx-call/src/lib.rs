@@ -45,6 +45,7 @@
 //! every downstream exhaustive `match`. Treat it as though it were: carry a `_` arm.
 
 pub mod call;
+pub mod counters;
 pub mod dialog;
 pub mod dispatch;
 pub mod error;
@@ -61,6 +62,7 @@ pub use call::{
     answer_ringing_with_policy, answer_with, answer_with_policy, dial, dial_early, dial_once,
     serve,
 };
+pub use counters::SignallingCounts;
 pub use dialog::{Dialog, DialogId, Role};
 pub use dispatch::{Calls, DispatchCounts, Dispatched, Dispatcher, Invitation};
 pub use error::{Error, Result};
