@@ -2,7 +2,7 @@
 id: X-54
 title: Count every discard in the signalling path, and let the numbers out beside the capture
 pillar: Build
-status: in-progress
+status: done
 priority: 3
 design: docs/designs/sip-transport.md
 epic: sip-transport
@@ -51,7 +51,7 @@ can be recorded on evidence rather than on the clause being nearly true.
       — the shape `a_datagram_that_does_not_parse_is_still_captured`
       (`crates/sipx-transport/tests/capture.rs:424`) already has for a parse failure, applied to a loss
       the dialog layer owns. That test is the precedent to follow and the proof the shape works.
-- [ ] **`docs/roadmap.md`'s "Where M12 stands" block is updated in the same commit**, and if this
+- [x] **`docs/roadmap.md`'s "Where M12 stands" block is updated in the same commit**, and if this
       closes the last gap, M12 moves to Delivered with its four clauses' evidence named. `X-51` wrote
       that block and it becomes wrong the moment this lands.
 
@@ -94,6 +94,24 @@ can be recorded on evidence rather than on the clause being nearly true.
 - **Left for the coordinator:** the last Acceptance item. `docs/roadmap.md` is fenced for this
   worktree, so the "Where M12 stands" replacement prose is in the handoff report under
   `ROADMAP_BLOCK:` rather than committed here. Nothing else in the story is outstanding.
+
+- Closed 2026-07-31, and **M12 is delivered**. The roadmap block was written at integration rather
+  than by the implementor, because `docs/roadmap.md` is fenced out of every implementor worktree —
+  the same deviation recorded on `X-52`.
+- **One rework round, on a counter that would have been believed.** Independent review found
+  `UnsentCounts` incremented at `Handle::send`, which returns `Ok` once a transaction exists rather
+  than when bytes leave, so it could fire only on `EndpointClosed` or `NoVia` — never on the
+  unreachable peer, refused connection or over-MTU datagram it advertised. Probe: an over-MTU BYE
+  returned `ok=true` with every `unsent` field at zero and `discards.send_failures` at 1. The same
+  review found the export written only on the successful path, so a dial that timed out left a
+  capture and no counters. Both are fixed and both were verified at integration by re-running the
+  reviewer's own probes: the failed dial now leaves `sig.pcapng.counters.json` beside the capture,
+  and `a_bye_the_endpoint_cannot_put_on_the_wire_is_counted_as_a_bye` passes alongside its converse,
+  `a_send_refused_by_a_shut_down_endpoint_is_not_counted_as_unsent`.
+- The implementor declined to narrow the claim to match the broken counter, on the grounds that
+  narrowing would leave the per-method breakdown empty for exactly the failures it exists for. That
+  was the right call, and §12.3 now carries the rule `M-32` inherits: **count where the loss happens,
+  not where it is reported.**
 
 ## Notes
 - **This is the whole remaining distance to M12.** The corpus clause is held by `X-16` and `S-31`

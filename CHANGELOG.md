@@ -55,6 +55,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the test is a double and always was.** What sipx holds is per-instance GRUU learning,
     presentation and recognition.
 
+- **M12 — Provable is delivered: every discard in the signalling path is counted, and the numbers
+  come out beside the capture (`X-54`)** — `X-18` counted the transport's losses and shipped the
+  capture; the clause's other two words were still short. The guard that made the claim general
+  scanned one crate, and nothing outside each crate's own tests ever read either snapshot.
+  - **"Every" now covers `sipx-transport` and `sipx-call`.** Widening the enumeration exposed
+    **sixteen** unexplained discard sites where a hand census had found seven — the argument for an
+    enumeration over a sweep, made by the enumeration itself. All sixteen carry a counter or a reason.
+  - **`UnsentCounts` counts, by method, every request the endpoint tried to put on the wire and could
+    not** — taken at the transmit, so a refused connection, an unreachable peer and an over-MTU
+    datagram are all in it. A failed BYE on a teardown path is the number an operator asking "why did
+    that call linger" can finally read. `CallEvents::dropped` counts events a consumer was too far
+    behind to receive, per call.
+  - **`sipx --counters <FILE>`, and `--capture` implies `<capture>.counters.json`** — written on every
+    path out of the command, not only the successful one, because the run that fails is the run the
+    bug report is about. `SignallingCounts` embeds both crates' snapshots unaltered rather than
+    recounting; `dispatch` is an `Option`, so "no dispatcher was running" survives into the JSON
+    instead of being flattened into a zero.
+  - **A counter that would have been believed, caught by review.** The first version incremented where
+    a request was *handed over* rather than where the wire was missed, so it could never fire on the
+    network failures it advertised — while the spec and seven call-site comments said otherwise.
+    `docs/specs/sip-transport.md` §12.3 now states the rule the media half inherits: count where the
+    loss happens, not where it is reported.
+
 ### Fixed
 
 - **Both RFC corpora are tamper-evident from the gate and from CI (`X-56`)** — each corpus is

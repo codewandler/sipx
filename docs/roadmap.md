@@ -134,6 +134,15 @@ question of what can be built on this stack without writing Rust. **M9** waits b
   - **`M-16`'s open tracker is not M10's status.** It stays open for `M-24`'s relayed candidate,
     which belongs to the ICE epic and to no milestone; reading the tracker as the milestone is the
     substitution [the M10 section below](#m10--reachable) exists to refuse.
+- **M12 — Provable.** What lets someone outside the project check the claims rather than take them:
+  the whole RFC 5118 corpus classified and green and now tamper-evident (`X-16`, `S-31`, `X-56`), two
+  independent peers each with their own CI job over one shared test list (`X-17`), a fuzzer driving
+  the transaction layer with programs rather than bytes and a seed corpus proven unmodified after the
+  campaign (`X-19`, `S-26`), and **every discard in the signalling path counted and exportable beside
+  the capture that explains it** (`X-18`, `X-54`). The last of those took a rework: the counter was
+  first taken where a request was handed over rather than where the wire was missed, which is a
+  measurement that would have been trusted to rule a cause out. See
+  [where M12 stands](#m12--provable).
 
 ## Next
 
@@ -305,65 +314,56 @@ Last, and for a reason that is not deprioritisation: each of these measures the 
 when it is written. Built before M9 to M11 they would certify a stack nobody will ship, and would
 be extended three times. `X-16` first — a fixed corpus is the cheapest thing here.
 
-**Where M12 stands, 2026-07-30.** All four stories are closed and the milestone is **not recorded as
-reached**. Checked against the tests and CI jobs rather than against the statuses (`X-51`), three of
-the four clauses hold as written and the third does not:
+**Where M12 stands, 2026-07-31. M12 is delivered.** All four stories are closed and all four clauses
+now hold against tests and CI jobs rather than against statuses. `X-51` checked the first three and
+they are unchanged; `X-54` closed the fourth, which was short in exactly two of its words.
 
 - **The corpus** — `X-16`, done, and the clause holds. `crates/sipx-testkit/src/rfc5118.rs` classifies
   all twelve of Appendix A's messages across §4.1 to §4.10, none left unreferenced, and its
   `DEVIATIONS` list is empty since `S-31` taught the parser to tolerate §4.10's three-colon reference.
-  Nineteen tests are green under the gate's own `cargo test --workspace`: fifteen in
-  `crates/sipx-sip/tests/rfc5118_corpus.rs`, four in `crates/sipx-sdp/tests/rfc5118_sdp.rs`. Classified,
-  and green, and the classification still says what the *RFC* says — `recorded_deviations_still_hold`
-  is what stops it drifting towards what sipx does.
+  Nineteen tests are green under the gate's own `cargo test --workspace`. `X-56` then made the
+  fixtures tamper-evident from a gate step and a CI job, so the classification cannot be quietly
+  weakened by editing the bytes it classifies.
 - **Two peers** — `X-17`, done, and the clause holds. `tests/interop/run.sh --list` reports two peer
-  profiles, and CI builds its matrix from that list rather than from a list in the workflow, so one
-  `interop (<peer>)` job runs per profile with `fail-fast: false`. Both peers play the `server` role
-  and run the identical nine-test list `run.sh` owns; neither declares a `PEER_DIVERGES_ON` any more,
-  so the second runs the first's tests unaltered rather than a softened intersection. That peer also
-  answers a call sipx places and places one sipx answers, which is more than the clause asks for.
-- **The fuzzer** — `X-19`, done, and the clause holds. `fuzz/fuzz_targets/transaction_sequence.rs`
-  drives `TransactionLayer` with a decoded program of incoming messages, application requests and
-  fired timers; the messages are *built*, never parsed, which is the "rather than with bytes" half.
-  CI's `fuzz` job runs it for sixty seconds a push against seventeen committed seed programs, and
-  `scripts/check-corpus-untouched.sh` proves the seeds unmodified afterwards.
-  `transaction_sequence::KNOWN_DEFECTS` is empty — `S-26` fixed the defect the first campaign found —
-  and `the_campaign_suppresses_nothing_and_run_agrees_with_run_strict` is what keeps that honest.
-- **Counted, and next to a capture** — `X-18`, done, and **the clause is short of it**, below.
+  profiles and CI builds its matrix from that list, so one `interop (<peer>)` job runs per profile.
+  Both play the `server` role over the identical nine-test list, and neither declares a
+  `PEER_DIVERGES_ON` any more.
+- **The fuzzer** — `X-19`, done, and the clause holds. `transaction_sequence` drives `TransactionLayer`
+  with a decoded program of messages, application requests and fired timers, built rather than parsed.
+  CI's `fuzz` job runs it sixty seconds a push against seventeen committed seeds, `KNOWN_DEFECTS` is
+  empty, and `the_campaign_suppresses_nothing_and_run_agrees_with_run_strict` keeps that honest.
+- **Counted, and next to a capture** — `X-18` and `X-54`, done, and the clause holds.
 
-**What the third clause is short of.** It says *every* discard in the signalling path is counted, and
-that the count is exportable *next to* a capture of the traffic that caused it. The shape it describes
-exists, once and properly: `a_datagram_that_does_not_parse_is_still_captured`
-(`crates/sipx-transport/tests/capture.rs`) sends unparseable bytes at a recording endpoint, asserts
-those exact bytes are in the pcapng file, and asserts the transport's `parse_failures` rose. That is a
-discard counted beside the traffic that caused it, demonstrated end to end. Two of the clause's words
-reach past it:
+  1. **"Every" now covers the crates the phrase covers.** `no_discard_in_the_signalling_path_is_silent`
+     scans `CRATES` — `sipx-transport` **and** `sipx-call` — from one list beside the one copy of the
+     detector, with `docs/specs/sip-transport.md` §12.3 stating why those two and not the sans-IO core
+     or the media path. Widening it exposed **sixteen** unexplained sites where the hand census had
+     found seven, which is the argument for an enumeration over a sweep, made by the enumeration
+     itself. All sixteen carry a counter or a `// discard:` reason. `sipx_transport::UnsentCounts`
+     counts by method every request the endpoint **tried to put on the wire and could not** — taken at
+     the transmit rather than at the hand-off, so a refused connection, an unreachable peer and an
+     over-MTU datagram are all in it. A failed BYE on a teardown path is finally the number an
+     operator asking "why did that call linger" can read. `CallEvents::dropped` counts events a
+     consumer was too far behind to be given, per call, reported to the only party who can act.
+  2. **"Next to" is now true outside the process.** `sipx_call::SignallingCounts` is one reading of
+     both crates' snapshots, embedding each unaltered rather than recounting, with `dispatch` an
+     `Option` because an endpoint with no dispatcher has not dispatched nothing — it has not been
+     asked. `sipx --counters <FILE>` exports it and `--capture <FILE>` implies it as
+     `<capture>.counters.json`, written on **every** path out of the command rather than only the
+     successful one, since the run that fails is the run the bug report is about.
 
-1. **"Every" is one crate's worth.** The guard that makes the claim general —
-   `no_discard_in_the_signalling_path_is_silent`, in `crates/sipx-transport/tests/discards.rs` — scans
-   the `src` directory of `sipx-transport` and nothing else. The dialog layer is signalling by any
-   reading of the phrase and has no such guard. `sipx-call` drops a call event with a log line and no
-   counter at `crates/sipx-call/src/event.rs:299`, which is the exact failure §12.1 names; and it
-   discards the result of sending a CANCEL, an ACK and a BYE at `crates/sipx-call/src/call.rs:2443`,
-   `:2458`, `:2483`, `:2485`, `:3401` and `:3403`. Those six are best-effort by design and say so in
-   prose — but §12.1's rule is that a discard is *counted*, not that it is intended, and none of them
-   is. The crate's own counters (`Calls::counts`) cover six kinds of undelivered request and no send
-   that failed, and nothing enumerates the crate, so the next such site is invisible the way the
-   transport's were before `X-18`.
-2. **"Next to" is not true outside the process.** Both snapshots are plain structs and no metrics
-   library is imposed, which is `X-18`'s design and is right. What is missing is that nothing but the
-   crates' own tests ever reads either one: `Handle::counters` and `Calls::counts` are called from
-   `crates/sipx-transport/tests/` and `crates/sipx-call/tests/dispatch.rs` and from nowhere else in
-   the workspace. `--capture <FILE>` puts the traffic where an operator can reach it, on `dial`,
-   `answer` and `register`; there is no counterpart for the numbers. From a shell — the
-   [vision](vision.md)'s own measure of usable — the capture and the counters are two features that
-   exist separately, which is what "next to" forbids.
+**What that cost to get right, recorded because the counter would have been believed.** The first
+version incremented at `Handle::send`, which returns `Ok` as soon as a transaction exists rather than
+when bytes leave — so the counter could fire only on a closed endpoint, never on the network failures
+it advertised, while the spec and seven call-site comments told a reader otherwise. An independent
+review found it with an over-MTU BYE. §12.3 now states the rule `M-32` inherits: **count where the
+loss happens, not where it is reported.**
 
-**Media is not what holds this open.** The clause says the *signalling* path, so the media counters
-`X-18` split out to `M-32` fall outside it and `M-32` being open is not an M12 gap. That is read off
-the clause's own word rather than assumed either way. **The distance left is `X-54`**: the enumeration
-extended to the crates the phrase covers, the dialog layer's losses counted or reasoned, and one way
-to get the numbers out beside the capture.
+**Media is not what holds this open, and never was.** The clause says the *signalling* path, so the
+media counters `X-18` split out to `M-32` fall outside it — read off the clause's own word rather than
+assumed. `M-32` extends §12.3 rather than editing it: a crate joins the path by being added to
+`CRATES` and by growing a member on `SignallingCounts`, never by adding fields to another crate's
+struct and never by a second tally of an event already counted.
 
 ### After M12
 
