@@ -12,6 +12,19 @@
 //! dangerous discard is the one added later, in a path this file's author never saw. So the check
 //! reads the crate's own source, the way `check-audio-claims.py` and `check-pool-key.py` read theirs.
 //!
+//! # Which crates, and why the list is here rather than one per crate
+//!
+//! **The signalling path is `sipx-transport` and `sipx-call`** — see [`CRATES`] and §12.3. It ran
+//! over this crate alone until `X-54`, which is how the dialog layer came to have seven discards
+//! that nothing enumerated: `X-51` found them by hand, which is precisely the method this test
+//! exists to replace.
+//!
+//! The list lives here, next to the one copy of the detector, rather than as a copy of this file in
+//! each crate. Two copies of [`LOSS_WORDS`] is `X-24`'s pool-key failure again — a rule written in
+//! two places was wrong in one of them through two changes, and nobody was told, because nothing
+//! connected the sentence to the field. A test that reads a sibling crate's `src` is the smaller
+//! price: it adds no dependency in either direction and nothing is compiled that would not be.
+//!
 //! # What to do when this test fails
 //!
 //! It will name a `path:line`. Go there and pick one:
