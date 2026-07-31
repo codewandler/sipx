@@ -130,6 +130,16 @@ def gate_steps(msrv: str) -> list[Step]:
         # nothing ran it. Two sweeps declared the workspace clean and two violations landed in the
         # wave after the second one. Cheap, needs no toolchain, and reads `src/` as well as tests.
         Step("fixed sleeps", "fixed-sleep", ("./scripts/check-fixed-sleep.py", "--check")),
+        # X-56: both RFC corpora are recovered from the RFC's own Appendix A archive rather than
+        # transcribed, and the importer's `--check` re-recovers it and diffs it against the tree —
+        # the only thing that can tell a fixture edited by hand from the RFC's own bytes, since the
+        # suites read whatever is in the directory and pass. The 4475 check ran only inside `fuzz`,
+        # which is in `NOT_RUN_LOCALLY`, so no local run covered it; the 5118 one ran nowhere.
+        # A step each, so a red result names which corpus drifted. These reach the network, which
+        # is why the importers guard the fetch: an unreachable RFC editor must not read as a corpus
+        # that changed.
+        Step("rfc 4475 corpus", "corpus", ("./scripts/import-rfc4475-corpus.sh", "--check")),
+        Step("rfc 5118 corpus", "corpus", ("./scripts/import-rfc5118-corpus.sh", "--check")),
         Step("rfc compliance", "docs", ("./scripts/rfc-report.py", "--check")),
         # X-24: the connection pool key was described in three specs and had been wrong in one of
         # them through two changes to the type. The list is generated from `ConnectionKey` now,

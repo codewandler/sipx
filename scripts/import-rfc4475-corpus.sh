@@ -27,7 +27,15 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 echo "fetching $url"
-curl -fsSL "$url" -o "$work/rfc4475.txt"
+# `curl -f` prints nothing, so an unguarded fetch reports a bare exit code — and a red corpus step
+# reads as a finding about the corpus, which an unreachable RFC editor is not (`X-56`). It stays a
+# failure rather than becoming a skip: a provenance check that passes when it could not reach the
+# RFC is the MSRV hole in a second place.
+if ! curl -fsSL "$url" -o "$work/rfc4475.txt"; then
+    echo "could not fetch $url — this says nothing about the committed corpus, only that the RFC" >&2
+    echo "could not be reached to compare against it. Check the network and run this again." >&2
+    exit 1
+fi
 
 # Appendix A wraps the archive in "-- BEGIN/END MESSAGE ARCHIVE --". Everything between the
 # markers that is a single whitespace-delimited token is base64; page furniture (headers,

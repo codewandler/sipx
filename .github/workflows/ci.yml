@@ -295,6 +295,27 @@ jobs:
         # modifications are both checked (X-31), as the RFC 4475 corpus check has always done.
         run: ./scripts/check-corpus-untouched.sh
 
+  # X-56. Neither RFC corpus under crates/sipx-testkit/corpus/ was transcribed: each is recovered
+  # from its RFC's own Appendix A archive by an importer, and each importer's --check re-recovers
+  # that archive and diffs it against the tree. That is the only thing that can tell a fixture
+  # edited by hand from the RFC's own bytes, because the test suites read whatever is in the
+  # directory and pass. RFC 4475's check ran solely inside `fuzz`, which is in NOT_RUN_LOCALLY, so
+  # nothing an implementor runs before pushing covered it; RFC 5118's ran nowhere at all.
+  #
+  # One job, one step per corpus. Two corpora with one rule between them is one place to remember,
+  # and a step each is what makes a red result name which corpus drifted. The `fuzz` job keeps its
+  # own RFC 4475 invocation: that one runs after the fuzzer in the tree the fuzzer wrote to, and is
+  # a different claim — that a campaign deposited none of its generated inputs in the seed corpus.
+  corpus:
+    name: RFC corpus provenance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify the RFC 4475 corpus is still the RFC's own bytes
+        run: ./scripts/import-rfc4475-corpus.sh --check
+      - name: Verify the RFC 5118 corpus is still the RFC's own bytes
+        run: ./scripts/import-rfc5118-corpus.sh --check
+
   # `docs/designs/media.md` has said since X-28 that a fixed wall-clock duration may bound a
   # failure or define silence and may not stand in for a happens-before. It was swept for twice and
   # enforced by nothing, so two fresh violations landed in the wave after the sweep that declared
