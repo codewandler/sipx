@@ -151,10 +151,10 @@ Four milestones, each independently demonstrable, each ordered by the same rule 
 that adds a feature.** M9 to M12 are defined and their stories are cut. **M10 is delivered** as of
 `X-52` — its section stays below because the scoping argument in it is still load-bearing, and
 [where M10 stands](#m10--reachable) now records which test carries each of its three clauses.
-**M12's four stories are all closed and it is not declared**: `X-51` checked its four **Done when**
-clauses against the tests and CI jobs meant to demonstrate them, and found three held and the fourth
-short in the same way M10's two were — [where M12 stands](#m12--provable), and `X-54` is the distance
-left. M9 is a third done: `S-19` closed, `C-2` and `C-1` open. Only M11 is unstarted. The in-progress
+**M12 is delivered** as of `X-54`, and its section stays below for the same reason M10's does. `X-51`
+checked its four **Done when** clauses against the tests and CI jobs meant to demonstrate them and
+found three held and the fourth short in the same way M10's two were; `X-54` closed that fourth —
+[where M12 stands](#m12--provable) records which evidence carries each clause. M9 is a third done: `S-19` closed, `C-2` and `C-1` open. Only M11 is unstarted. The in-progress
 work is the [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host)
 epics below, which are not milestones because they are not RFC gaps.
 
