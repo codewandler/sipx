@@ -80,16 +80,40 @@ stream.
 
 ## 5. Bounded load
 
-`sipx load` requires a target, a positive rate, a positive concurrency limit, and at least one finite
-termination bound: total calls or duration. When both are supplied, the first reached stops new
-work. A seed controls call timing and deterministic media generation.
+`sipx load <URI>` requires `--rate <CALLS/S>`, `--concurrency <N>`, and at least one finite
+termination bound: `--calls <N>` or `--duration <S>`. Rate and concurrency MUST be positive and
+finite; calls and duration, when present, MUST be positive. `--seed <U64>` defaults to zero and
+controls call timing and deterministic media generation. `--call-duration <S>` defaults to zero;
+it bounds how long an answered call remains established. `--timeout <S>` retains the diagnostic
+phone's outbound setup bound and defaults to 20 seconds. All values are validated before a socket
+is opened. When both termination bounds are supplied, the first reached stops admission.
 
-Every started call is owned by the run. On timeout, interrupt or internal error the runner stops
-admission, terminates owned calls within a documented cleanup budget, waits for cleanup, and only
-then reports. Results include attempted, connected, rejected, timed out and failed calls; peak
-concurrency; response-code counts; setup-duration distribution; media loss/quality snapshots; and
-the seed and effective limits. Per-call events are optional, but the final summary is always one
-machine-readable record.
+Every started call is owned by the run. Reaching an admission bound, receiving an interrupt, or
+observing an internal runner error closes admission exactly once. Active calls receive the same
+stop signal, send `CANCEL` or `BYE` as appropriate, and are joined before the command returns. The
+cleanup budget is 40 seconds: longer than the 32-second SIP transaction ceiling, and finite so a
+broken worker cannot retain the process indefinitely. Exhausting it is an internal failure, never
+a successful partial cleanup.
+
+With `--json`, the final line is one object with this stable v1 shape (map keys that represent SIP
+status codes are decimal strings):
+
+```json
+{
+  "schema":"sipx.load.v1",
+  "status":"completed|interrupted|failed",
+  "seed":0,
+  "target":"sip:load@192.0.2.1:5060",
+  "limits":{"rate":10.0,"concurrency":32,"calls":100,"duration_ms":null,"call_duration_ms":0,"setup_timeout_ms":20000,"cleanup_ms":40000},
+  "outcomes":{"attempted":100,"connected":98,"rejected":1,"timed_out":1,"failed":0,"peak_concurrency":12},
+  "response_codes":{"200":98,"486":1},
+  "setup_ms":{"p50":18,"p95":31,"p99":45},
+  "media":{"snapshots":98,"packets_lost":0,"mean_loss":0.0000,"mean_jitter_ms":1,"mean_mos":4.38}
+}
+```
+
+An unavailable percentile or media aggregate is `null`, not zero. Per-call events are optional,
+but this summary is emitted only after cleanup and is always exactly one machine-readable record.
 
 ## 6. Secrets and output
 

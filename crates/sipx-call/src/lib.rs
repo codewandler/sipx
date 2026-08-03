@@ -45,6 +45,7 @@
 
 pub mod call;
 pub mod counters;
+pub mod coupling;
 pub mod dialog;
 pub mod dispatch;
 pub mod error;
@@ -59,9 +60,13 @@ pub use call::{
     Call, Codecs, Credentials, DialOptions, Dialing, IcePolicy, Keying, MediaPolicy, answer,
     answer_early, answer_replacing, answer_replacing_with, answer_ringing, answer_ringing_with,
     answer_ringing_with_policy, answer_with, answer_with_policy, dial, dial_early, dial_once,
-    serve,
+    dial_until, serve,
 };
 pub use counters::SignallingCounts;
+pub use coupling::{
+    CancelAction, ConfirmedCoupling, Coupling, CouplingEnd, CouplingState, EarlyCoupling,
+    FailureAction, Leg, OfferAction, OfferAxis,
+};
 pub use dialog::{Dialog, DialogId, Role};
 pub use dispatch::{Calls, DispatchCounts, Dispatched, Dispatcher, Invitation};
 pub use error::{Error, Result};

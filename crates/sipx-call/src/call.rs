@@ -1,6 +1,8 @@
 //! Establishing a call: INVITE with an SDP offer, media bound to the answer, and BYE.
 
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,8 +36,9 @@ use crate::transfer::{
 /// that is always in range. Threading a `Result` out of every call site for it would mean
 /// inventing an error that can never happen — and the previous attempt reported it as "no
 /// final response to the INVITE", which would have been actively misleading.
+const OK: u16 = 200;
+
 pub(crate) fn ok_status() -> StatusCode {
-    const OK: u16 = 200;
     StatusCode::new(OK).unwrap_or_else(|| unreachable!("200 is a valid status code"))
 }
 
@@ -65,7 +68,13 @@ pub(crate) fn token() -> String {
 pub struct Call {
     /// The dialog it runs in.
     pub dialog: Dialog,
-    media: MediaSession,
+    /// The successful final response that established this dialog.
+    ///
+    /// A caller retains the actual 2xx it received; an answerer records the 200 it sent. Keeping
+    /// this fact on the call lets applications report response-code distributions without
+    /// inventing `200` for a peer that answered with a different successful status.
+    initial_status: u16,
+    media: Arc<MediaSession>,
     endpoint: Handle,
     /// Where in-dialog requests go: the peer's `Contact`, not where the INVITE was sent.
     target: Target,
@@ -143,10 +152,30 @@ impl SessionState {
 }
 
 impl Call {
+    /// The successful final response that established this call.
+    #[must_use]
+    pub fn initial_status(&self) -> u16 {
+        self.initial_status
+    }
+
     /// The audio.
     #[must_use]
     pub fn media(&self) -> &MediaSession {
         &self.media
+    }
+
+    /// The media handle used by an owning two-call coupling.
+    ///
+    /// Kept crate-private: applications operate through [`Self::media`], while the coupling needs
+    /// one handle per bridge worker without transferring the session out of the call that owns it.
+    pub(crate) fn media_handle(&self) -> Arc<MediaSession> {
+        Arc::clone(&self.media)
+    }
+
+    /// A response handle for a coupling that must answer glare while an outgoing request borrows
+    /// this call's dialog state.
+    pub(crate) fn responder(&self) -> Handle {
+        self.endpoint.clone()
     }
 
     /// Send a DTMF digit.
@@ -1033,7 +1062,7 @@ impl Call {
     /// Failures are logged rather than returned. This exists so nothing is discarded in silence
     /// (`T-19`, story `C-4`), and handing the caller an error to ignore would put the silence
     /// back one level up.
-    async fn refuse_unclaimed(&self, incoming: &Incoming) {
+    pub(crate) async fn refuse_unclaimed(&self, incoming: &Incoming) {
         // There is no response to an ACK, and an ACK for a 2xx is a transaction of its own
         // (RFC 3261 §17.1.1.3). Nothing to send; a stray one is still worth a line.
         if incoming.request.method == Method::Ack {
@@ -1089,10 +1118,25 @@ impl Call {
     }
 
     /// Refuse a renegotiation without ending the call.
-    async fn refuse(&self, incoming: &Incoming, code: u16, reason: &'static str) -> Result<()> {
+    pub(crate) async fn refuse(
+        &self,
+        incoming: &Incoming,
+        code: u16,
+        reason: impl Into<Bytes>,
+    ) -> Result<()> {
+        Self::refuse_with(&self.endpoint, incoming, code, reason).await
+    }
+
+    /// Refuse through a cloned endpoint while the owning call is driving an outgoing exchange.
+    pub(crate) async fn refuse_with(
+        endpoint: &Handle,
+        incoming: &Incoming,
+        code: u16,
+        reason: impl Into<Bytes>,
+    ) -> Result<()> {
         let status = StatusCode::new(code).unwrap_or_else(ok_status);
         let response = ResponseBuilder::to_request(&incoming.request, status, reason)?.build();
-        self.endpoint.respond(&incoming.key, response).await?;
+        endpoint.respond(&incoming.key, response).await?;
         Ok(())
     }
 
@@ -1122,7 +1166,7 @@ impl Call {
             // address or codec, which this side did not ask for and cannot refuse — unmutes the
             // call behind the application's back.
             replacement.set_muted(self.media.is_muted());
-            let previous = std::mem::replace(&mut self.media, replacement);
+            let previous = std::mem::replace(&mut self.media, Arc::new(replacement));
             previous.stop();
         }
         self.current = to;
@@ -1828,7 +1872,7 @@ pub async fn serve(
 ///
 /// A free function rather than a method so that it borrows nothing: a future that borrowed the
 /// call would collide with the `&mut` the other arm of the `select!` needs.
-async fn sleep_until(deadline: Option<Instant>) {
+pub(crate) async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
@@ -2546,7 +2590,28 @@ pub async fn dial(
     to: &Uri,
     options: &DialOptions,
 ) -> Result<Call> {
-    dial_retrying(endpoint, target, to, options, true).await
+    dial_retrying(endpoint, target, to, options, true, None).await
+}
+
+/// Place a call until it completes or `cancelled` resolves.
+///
+/// This has the same bounded authentication and session-interval retries as [`dial`]. If
+/// cancellation wins while an INVITE is outstanding, the invitation is withdrawn before this
+/// returns, including the ACK-then-BYE race when a successful final response was already in
+/// flight. The returned [`Error::Cancelled`] distinguishes that local stop from a peer refusal.
+pub async fn dial_until<F>(
+    endpoint: &Handle,
+    target: Target,
+    to: &Uri,
+    options: &DialOptions,
+    cancelled: F,
+) -> Result<Call>
+where
+    F: Future<Output = ()> + Send,
+{
+    tokio::pin!(cancelled);
+    let cancelled: Pin<&mut (dyn Future<Output = ()> + Send)> = cancelled.as_mut();
+    dial_retrying(endpoint, target, to, options, true, Some(cancelled)).await
 }
 
 /// Place a call, surfacing a `422` instead of retrying it.
@@ -2560,8 +2625,10 @@ pub async fn dial_once(
     to: &Uri,
     options: &DialOptions,
 ) -> Result<Call> {
-    dial_retrying(endpoint, target, to, options, false).await
+    dial_retrying(endpoint, target, to, options, false, None).await
 }
+
+type Cancelled<'a> = Pin<&'a mut (dyn Future<Output = ()> + Send)>;
 
 /// Drive the two bounded retry reasons an initial INVITE has: authentication and session interval.
 async fn dial_retrying(
@@ -2570,6 +2637,7 @@ async fn dial_retrying(
     to: &Uri,
     options: &DialOptions,
     retry_interval: bool,
+    mut cancelled: Option<Cancelled<'_>>,
 ) -> Result<Call> {
     let credentials = options.credentials.clone();
     let mut attempted = options.clone();
@@ -2598,6 +2666,7 @@ async fn dial_retrying(
             &attempted,
             &identity,
             authorization.as_ref(),
+            &mut cancelled,
         )
         .await;
 
@@ -2850,6 +2919,7 @@ async fn dial_with(
     options: &DialOptions,
     identity: &Identity,
     authorization: Option<&Authorization<'_>>,
+    cancelled: &mut Option<Cancelled<'_>>,
 ) -> Result<Call> {
     let media_address = options.media_address;
     let (port, capabilities, ice, keying, via, invite) =
@@ -2864,25 +2934,44 @@ async fn dial_with(
         capabilities: &capabilities,
         seen: sipx_sip::rel::Sequence::default(),
     };
-    let (response, ringing) =
-        match await_final(&mut responses, options.timeout, &mut acknowledging).await {
-            Waited::Final { response, ringing } => (response, ringing),
-            Waited::Gone => return Err(Error::NoResponse),
-            Waited::Transport(error) => return Err(Error::Transport(error)),
-            Waited::GaveUp { provisional } => {
-                withdraw(
-                    endpoint,
-                    &invite,
-                    &via,
-                    target.clone(),
-                    &mut responses,
-                    provisional,
-                    &request_timeout_reason(),
-                )
-                .await;
-                return Err(Error::Cancelled(options.timeout.unwrap_or(Duration::ZERO)));
-            }
-        };
+    let (response, ringing) = match await_final(
+        &mut responses,
+        options.timeout,
+        &mut acknowledging,
+        cancelled,
+    )
+    .await
+    {
+        Waited::Final { response, ringing } => (response, ringing),
+        Waited::Gone => return Err(Error::NoResponse),
+        Waited::Transport(error) => return Err(Error::Transport(error)),
+        Waited::GaveUp { provisional } => {
+            withdraw(
+                endpoint,
+                &invite,
+                &via,
+                target.clone(),
+                &mut responses,
+                provisional,
+                &request_timeout_reason(),
+            )
+            .await;
+            return Err(Error::Cancelled(options.timeout.unwrap_or(Duration::ZERO)));
+        }
+        Waited::Cancelled { provisional } => {
+            withdraw(
+                endpoint,
+                &invite,
+                &via,
+                target.clone(),
+                &mut responses,
+                provisional,
+                &normal_clearing_reason(),
+            )
+            .await;
+            return Err(Error::Cancelled(Duration::ZERO));
+        }
+    };
 
     if !response.status.is_success() {
         // A non-2xx is acknowledged by the transaction layer itself, so there is nothing to
@@ -2947,7 +3036,8 @@ async fn dial_with(
             emit_construction_events(&events, ringing);
             Ok(Call {
                 dialog,
-                media,
+                initial_status: response.status.code(),
+                media: Arc::new(media),
                 endpoint: endpoint.clone(),
                 target: in_dialog,
                 awaiting_ack: None,
@@ -3316,6 +3406,16 @@ enum Arrived {
     Gone,
 }
 
+/// One early-dial event surfaced to the owning two-dialog coupling.
+pub(crate) enum CouplingDialEvent {
+    /// A provisional was consumed and any required PRACK was sent.
+    Progress,
+    /// The outbound invitation confirmed.
+    Answered(Box<Call>),
+    /// One routed in-dialog request arrived, or that route closed.
+    Incoming(Box<Option<Incoming>>),
+}
+
 /// Place a call and get the early dialog, rather than waiting for the call itself.
 ///
 /// [`dial`] and [`dial_once`] wait for the final response and hand back a [`Call`]; this hands
@@ -3528,6 +3628,44 @@ impl Dialing {
             return Ok(false);
         };
         crate::update::receive(early, incoming).await
+    }
+
+    /// Advance either the INVITE transaction or its routed early-dialog inbox once.
+    ///
+    /// Kept crate-private for [`crate::coupling::EarlyCoupling`]: unlike [`Self::answered`], this
+    /// does not consume the dialing handle or hold it across every provisional. The coupling can
+    /// therefore service UPDATEs from either pending leg and observe cancellation while the
+    /// outbound final response is still outstanding.
+    pub(crate) async fn coupling_step(
+        &mut self,
+        incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
+    ) -> Result<CouplingDialEvent> {
+        if let Some(call) = self.answered_already.take() {
+            return Ok(CouplingDialEvent::Answered(call));
+        }
+        tokio::select! {
+            request = incoming.recv() => Ok(CouplingDialEvent::Incoming(Box::new(request))),
+            arrived = self.next_response() => match arrived {
+                Arrived::Provisional(response) => {
+                    if let Err(error) = self.observe(&response).await {
+                        return Err(self.abandon(error).await);
+                    }
+                    Ok(CouplingDialEvent::Progress)
+                }
+                Arrived::Final(response) => self
+                    .confirm(*response)
+                    .await
+                    .map(Box::new)
+                    .map(CouplingDialEvent::Answered),
+                Arrived::GaveUp => {
+                    self.give_up().await;
+                    Err(Error::Cancelled(
+                        self.options.timeout.unwrap_or(Duration::ZERO),
+                    ))
+                }
+                Arrived::Gone => Err(Error::NoResponse),
+            }
+        }
     }
 
     /// Wait for the invitation to be answered, and take the call it becomes.
@@ -3903,7 +4041,8 @@ impl Dialing {
                 let events_rx = self.events_rx.take();
                 Ok(Call {
                     dialog,
-                    media,
+                    initial_status: response.status.code(),
+                    media: Arc::new(media),
                     endpoint: self.endpoint.clone(),
                     target: self.in_dialog.clone(),
                     awaiting_ack: None,
@@ -4474,7 +4613,8 @@ pub async fn answer_early(
 
     Ok(Call {
         dialog,
-        media,
+        initial_status: OK,
+        media: Arc::new(media),
         endpoint: endpoint.clone(),
         target,
         awaiting_ack: Some(acked),
@@ -4698,7 +4838,8 @@ async fn answer_negotiated(
 
     Ok(Call {
         dialog,
-        media,
+        initial_status: OK,
+        media: Arc::new(media),
         endpoint: endpoint.clone(),
         target,
         awaiting_ack: Some(acked),
@@ -4776,6 +4917,12 @@ enum Waited {
         /// Whether the far end had answered provisionally.
         provisional: bool,
     },
+    /// The owner asked this attempt to stop. A provisional decides whether CANCEL may be sent
+    /// immediately or must wait for the peer to acknowledge the INVITE first.
+    Cancelled {
+        /// Whether the far end had answered provisionally.
+        provisional: bool,
+    },
     /// The transaction ended without a final response.
     Gone,
     /// The selected transport could not be established or used.
@@ -4800,17 +4947,35 @@ async fn await_final(
     responses: &mut sipx_transport::Responses,
     limit: Option<Duration>,
     acknowledging: &mut Acknowledging<'_>,
+    cancelled: &mut Option<Cancelled<'_>>,
 ) -> Waited {
     let deadline = limit.map(|limit| tokio::time::Instant::now() + limit);
     let mut provisional = false;
     let mut ringing = None;
     loop {
-        let event = match deadline {
-            None => responses.next().await,
-            Some(deadline) => match tokio::time::timeout_at(deadline, responses.next()).await {
-                Ok(event) => event,
-                Err(_elapsed) => return Waited::GaveUp { provisional },
-            },
+        let event = match (deadline, cancelled.as_mut()) {
+            (None, None) => responses.next().await,
+            (Some(deadline), None) => {
+                match tokio::time::timeout_at(deadline, responses.next()).await {
+                    Ok(event) => event,
+                    Err(_elapsed) => return Waited::GaveUp { provisional },
+                }
+            }
+            (None, Some(cancelled)) => {
+                tokio::select! {
+                    biased;
+                    () = cancelled.as_mut() => return Waited::Cancelled { provisional },
+                    event = responses.next() => event,
+                }
+            }
+            (Some(deadline), Some(cancelled)) => {
+                tokio::select! {
+                    biased;
+                    () = cancelled.as_mut() => return Waited::Cancelled { provisional },
+                    () = tokio::time::sleep_until(deadline) => return Waited::GaveUp { provisional },
+                    event = responses.next() => event,
+                }
+            }
         };
         match event {
             Some(sipx_sip::transaction::TuEvent::Response(response)) => {

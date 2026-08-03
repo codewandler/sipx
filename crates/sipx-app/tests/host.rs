@@ -25,6 +25,8 @@ use sipx_app::host::Host;
 use sipx_call::{DialOptions, dial};
 use sipx_sip::{HeaderName, Host as UriHost, HostName, Method, Uri, build::RequestBuilder};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc::Receiver;
 
 fn loopback() -> IpAddr {
@@ -74,6 +76,73 @@ async fn host_on(document: &str) -> SocketAddr {
         let _ = host.serve(handle, incoming).await;
     });
     address
+}
+
+async fn webhook_host_on(document: &str) -> SocketAddr {
+    let (handle, incoming) = endpoint().await;
+    let address = handle.local_addr();
+    let mut host = Host::start_with_secrets(document, loopback(), |name| {
+        (name == "hook").then(|| b"test-secret".to_vec())
+    })
+    .expect("the webhook document is accepted");
+    tokio::spawn(async move {
+        let _ = host.serve(handle, incoming).await;
+    });
+    address
+}
+
+fn webhook_document(url: &str, knob: &str, status: u16, timeout_ms: u32) -> String {
+    format!(
+        r#"
+[listener.edge]
+protocol  = "sip"
+transport = "udp"
+bind      = "127.0.0.1:5060"
+app       = "greeter"
+
+[app.greeter]
+binding = "webhook"
+url = "{url}"
+signing_secrets = ["hook"]
+
+[app.greeter.on_failure]
+timeout_ms = {timeout_ms}
+{knob} = {{ reject = {status} }}
+"#
+    )
+}
+
+async fn status_peer(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let url = format!("http://{}/hook", listener.local_addr().expect("address"));
+    let task = tokio::spawn(async move {
+        for status in statuses {
+            let (mut socket, _) = listener.accept().await.expect("accepts");
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.expect("reads");
+            let response =
+                format!("HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            socket.write_all(response.as_bytes()).await.expect("writes");
+        }
+    });
+    (url, task)
+}
+
+async fn refused_by_webhook(document: &str, expected: u16) {
+    let address = webhook_host_on(document).await;
+    let (caller, _incoming) = endpoint().await;
+    let error = within(dial(
+        &caller,
+        Target::udp(address),
+        &callee_uri(),
+        &DialOptions::new("<sip:caller@test.example>", loopback()),
+    ))
+    .await
+    .expect_err("the declared failure refuses the invitation");
+    assert!(
+        error.to_string().contains(&expected.to_string()),
+        "the refusal carries declared status {expected}: {error}"
+    );
 }
 
 fn callee_uri() -> Uri {
@@ -212,4 +281,30 @@ async fn the_admission_is_released_when_the_caller_hangs_up() {
 
     within(call.hang_up()).await.expect("the caller hangs up");
     assert!(call.is_ended(), "the call is over once the caller hangs up");
+}
+
+#[tokio::test]
+async fn a_real_4xx_applies_the_declared_client_error_action_without_retry() {
+    let (url, peer) = status_peer(vec![400]).await;
+    refused_by_webhook(&webhook_document(&url, "on_4xx", 488, 1_000), 488).await;
+    peer.await.expect("one request, then the peer ends");
+}
+
+#[tokio::test]
+async fn real_5xx_retries_apply_the_declared_server_error_action_after_the_cap() {
+    let (url, peer) = status_peer(vec![500, 503, 502]).await;
+    refused_by_webhook(&webhook_document(&url, "on_5xx", 502, 1_000), 502).await;
+    peer.await.expect("three attempts, then the peer ends");
+}
+
+#[tokio::test]
+async fn a_real_callback_timeout_applies_the_declared_timeout_action() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let url = format!("http://{}/hook", listener.local_addr().expect("address"));
+    let peer = tokio::spawn(async move {
+        let (_socket, _) = listener.accept().await.expect("accepts");
+        std::future::pending::<()>().await;
+    });
+    refused_by_webhook(&webhook_document(&url, "on_timeout", 504, 50), 504).await;
+    peer.abort();
 }

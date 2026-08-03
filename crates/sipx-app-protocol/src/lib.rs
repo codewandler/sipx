@@ -1,14 +1,6 @@
 //! The `sipx.app.v1` application contract: its types, its JSON wire format, and a sans-IO
 //! instruction interpreter.
 //!
-//! # Experimental
-//!
-//! **This crate is experimental, and so is the wire line it speaks.**
-//! [`docs/specs/app-contract.md`](../../../docs/specs/app-contract.md) says `sipx.app.v1` may
-//! change incompatibly until two dissimilar applications have run against it — an inbound IVR and
-//! an outbound notifier — after which a change requires a new line. Until then this crate's public
-//! API and the bytes on the wire may both move in a patch release. Depend on it accordingly.
-//!
 //! # What is here
 //!
 //! - **The vocabulary.** [`Envelope`], [`CallSnapshot`] and [`EventKind`] are §5's events, host to
@@ -52,9 +44,11 @@
 //!   you are prepared to follow it.
 //!
 //!
-//! **Experimental**, as the heading above already says and as
-//! `tests/spec_tables.rs::the_spec_and_the_crate_agree_that_this_is_experimental` enforces. It settles
-//! when two dissimilar applications have been written against it, per the contract's own spec.
+//! **Supported:** the vocabulary, JSON codec, interpreter, and optional `sipx-call` adapter. The
+//! document-mode `sipx-app` host now depends on these surfaces to drive real calls, so changes get
+//! a `CHANGELOG.md` entry and migration guidance. The `sipx.app.v1` **wire line remains
+//! Experimental** under the stricter rule in its own spec: two dissimilar applications must run
+//! against it before incompatible wire changes require a new contract name.
 
 mod base64;
 mod document;

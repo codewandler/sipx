@@ -1,10 +1,10 @@
 //! The `sipx.app.v1` vocabulary, as Rust types rather than as JSON.
 //!
 //! [`specs/app-contract.md`](../../../../docs/specs/app-contract.md) §5 and §6. There is no
-//! serialization here and there deliberately never will be: the wire format is `C-5`'s, and a
-//! harness that carried its own copy would be a second implementation of the thing the vectors
-//! exist to pin. These types are the *meaning* the wire encodes — what an event says happened and
-//! what an instruction asks for — which is the layer the host's decision logic actually works in.
+//! serialization here. This vocabulary predates the `C-5` protocol crate and remains the public
+//! `A-7` harness's provisional model. It is a second representation of the program rather than the
+//! sole contract implementation; migrating the harness to `sipx_app_protocol::Interpreter` is an
+//! open `A-2` requirement. Production document mode does not use these types.
 //!
 //! Only the subset §11's vectors exercise is modelled. A verb the host would execute but no vector
 //! covers is [`Verb::Other`], which carries its name and is executed as a no-op effect; a verb the

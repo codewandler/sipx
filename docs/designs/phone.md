@@ -54,7 +54,10 @@ audio stack.
 - Scripts will depend on the event schema immediately. The existing versioned JSON envelope and
   additive evolution rules apply; the interactive mode does not invent a second schema.
 - A load tool can become an accidental denial-of-service tool. Concurrency, rate and total work are
-  explicit, finite and validated before the first call starts.
+  explicit, finite and validated before the first call starts. Admission is the existing
+  `sipx-testkit` paced scheduler; a shared stop signal closes admission and asks every owned call to
+  end, and the command joins those calls under the specification's finite cleanup budget before it
+  emits its sole summary.
 
 ## Acceptance / done
 

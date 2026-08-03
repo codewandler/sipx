@@ -1,13 +1,10 @@
 //! The application host — **a host process that answers a call, plus the design and test harness it
 //! was built against.**
 //!
-//! What it will be: calls terminated on the sipx stack, driven by customer code over the
-//! `sipx.app.v1` contract, with webhook documents, full-duplex sessions and an embedded
-//! TypeScript runtime as three transports of one vocabulary. What is here today is [`host`] — which
-//! binds the listeners a document declares and carries a call to its end — plus the configuration
-//! types and the harness. What is *not* here is any of the three transports that would let customer
-//! code drive it (`A-2`, `A-4`, `A-5`), so the host runs no app callback yet and says so through the
-//! document's own `on_unreachable` declaration rather than by pretending otherwise.
+//! Calls terminated on the sipx stack are driven by customer code over the `sipx.app.v1` contract.
+//! [`host`] and [`webhook`] implement document mode end to end; full-duplex sessions and an embedded
+//! TypeScript runtime remain later transports of the same vocabulary. Configuration and the
+//! deterministic harness live beside the host rather than inside the contract interpreter.
 //!
 //! The contract is specified in `docs/specs/app-contract.md`, the host's design in
 //! `docs/designs/app-host.md`, and the work is tracked by the `A-*` stories on the board.
@@ -15,7 +12,9 @@
 //! **The [`harness`]** (story `A-7`) is the deterministic apparatus every behaviour claim is held to.
 //! It runs the contract's own vector set with fake time, a scripted app and scripted call events,
 //! which is possible before the call-framework stories land and is the reason it came first. The
-//! bindings (`A-2`, `A-4`) are built against it rather than beside it.
+//! bindings (`A-2`, `A-4`) are built against it rather than beside it. Its provisional instruction
+//! runner predates `sipx-app-protocol::Interpreter`; migrating it to that sole interpreter remains
+//! an open `A-2` requirement, so harness results currently prove policy rather than that boundary.
 //!
 //! Beside it is [`config`] (story `A-1`): the document that declares a host — its listeners, its
 //! apps, what each app is granted, and what a slow, wrong or absent app does to a live call. The
@@ -38,10 +37,10 @@
 //! entry moving it to *Supported*, not a note asking them to stop. Without that clause this line
 //! would be a freeze rather than a measurement (`X-38`).
 //!
-//! **Experimental.** [`host`] answers a call, which is what settles the question this crate could not
-//! previously answer — but it runs no app callback, so `sipx.app.v1` has never crossed a process
-//! boundary here and the shape of [`config`] beyond what [`host`] reads is still unconstrained. What
-//! settles the rest is `A-2`, `A-4` or `A-5`: an app, in another process, driving a call.
+//! **Supported:** the document-mode path through [`host`], [`webhook`], and the configuration it
+//! consumes. A webhook in another process now drives a real call through `sipx.app.v1`; changes to
+//! that host-facing API receive a changelog entry and migration guidance. Session and embedded
+//! bindings remain unimplemented rather than implied by their configuration vocabulary.
 //!
 //! **[`host`] is also the definition of the stack's reachable-from-a-call surface** (`X-38`, alpha
 //! predicate 1). What this application uses is *Supported*; what no path from it reaches is
@@ -61,3 +60,4 @@
 pub mod config;
 pub mod harness;
 pub mod host;
+pub mod webhook;

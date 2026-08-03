@@ -37,28 +37,28 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 | core | 9 | 5 | 3 | 0 | 1 | application |
 | media | 16 | 5 | 10 | 0 | 1 | application + path check |
 | security | 11 | 10 | 0 | 0 | 1 | application + path check |
-| services | 15 | 5 | 6 | 2 | 2 | application |
-| transport | 14 | 8 | 4 | 2 | 0 | application |
+| services | 16 | 6 | 6 | 2 | 2 | application |
+| transport | 14 | 8 | 6 | 0 | 0 | application |
 | wire | 6 | 3 | 2 | 0 | 1 | application |
 
-71 RFCs tracked. `implemented` means what [`docs/rfc/README.md`](rfc/README.md) says it means — *Behaviour present and tested for the roles listed* — and `rfc-report.py` is what enforces that. **`X-38` did not change the status words. It changed the basis of the last column**: every layer now has a shipped application under it, in place of the caveat this table carried for `core`, `services`, `transport` and `wire`, which said no caller had been found. `scripts/check-app-surface.py` fails the gate when a crate claims supported surface no application reaches. The two layers that also say *path check* carry `rfc-report.py`'s per-row check on top; the others are entered per crate, so a single row of them is not individually attested. The column is about reachability, not about which crate holds the code: what a row must cite is `docs/rfc/README.md`'s business, and `X-43` is where the one row citing no code is being weighed.
+72 RFCs tracked. `implemented` means what [`docs/rfc/README.md`](rfc/README.md) says it means — *Behaviour present and tested for the roles listed* — and `rfc-report.py` is what enforces that. **`X-38` did not change the status words. It changed the basis of the last column**: every layer now has a shipped application under it, in place of the caveat this table carried for `core`, `services`, `transport` and `wire`, which said no caller had been found. `scripts/check-app-surface.py` fails the gate when a crate claims supported surface no application reaches. The two layers that also say *path check* carry `rfc-report.py`'s per-row check on top; the others are entered per crate, so a single row of them is not individually attested. The column is about reachability, not about which crate holds the code: what a row must cite is `docs/rfc/README.md`'s business, and `X-43` is where the one row citing no code is being weighed.
 
 ## Open work, per pillar
 
 | Pillar | Open stories |
 |---|---|
 | Application | 6 |
-| Phone | 6 |
-| Signalling | 6 |
+| Phone | 5 |
+| Signalling | 5 |
 | Media | 2 |
 | Transport | 1 |
-| **total** | **21** |
+| **total** | **19** |
 
-164 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+166 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:75edb86d92a0f4ed42406d9beea75d9039e40fb6ee22e1661f7346654c8459a3","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1}} -->
+<!-- maturity-event-days: {"basis":"sha256:9dfb36681bbeb2d46ddcd0c29d45a985f812b5c9d41716e29aac54d8e437299b","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":2},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -70,6 +70,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-07-31 | 3 | 5 | +2 |
 | 2026-08-01 | 0 | 1 | +1 |
 | 2026-08-03 | 1 | 12 | +11 |
+| 2026-08-04 | 0 | 2 | +2 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

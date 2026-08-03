@@ -25,7 +25,11 @@
 )]
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+use tokio_util::sync::CancellationToken;
 
 /// Why a call did not succeed.
 ///
@@ -73,6 +77,118 @@ pub struct Plan {
     /// accumulates every call the plan asks for and the harness runs out of sockets before the
     /// thing it is testing does.
     pub most_in_flight: usize,
+}
+
+/// Finite admission and cleanup limits for an externally controllable run.
+///
+/// Unlike [`Plan`], either `calls` or `duration` may end admission. At least one must be present;
+/// command layers validate that contract before calling this harness.
+#[derive(Debug, Clone, Copy)]
+pub struct BoundedPlan {
+    /// Maximum calls admitted, if count-bounded.
+    pub calls: Option<usize>,
+    /// Maximum time during which calls may be admitted, if time-bounded.
+    /// A duration beyond the runtime clock's range closes admission immediately rather than
+    /// panicking; command layers should reject it as invalid input.
+    pub duration: Option<Duration>,
+    /// Calls admitted per second.
+    pub rate: f64,
+    /// Reproducible arrival-jitter seed.
+    pub seed: u64,
+    /// Maximum simultaneously active calls.
+    ///
+    /// The harness normalizes zero to one and values above Tokio's semaphore ceiling to that
+    /// ceiling so a programmatically constructed plan cannot panic. User-facing command layers
+    /// should reject either value and report the invalid configuration instead.
+    pub most_in_flight: usize,
+    /// Time allowed for every owned call to acknowledge stop and finish.
+    pub cleanup: Duration,
+}
+
+impl BoundedPlan {
+    fn interval(self) -> Duration {
+        Plan {
+            calls: self.calls.unwrap_or(0),
+            rate: self.rate,
+            most_in_flight: self.most_in_flight,
+        }
+        .interval()
+    }
+
+    fn gap(self, index: usize) -> Duration {
+        let base = self.interval();
+        if base.is_zero() {
+            return base;
+        }
+        // A stateless integer mixer gives each call a stable, well-distributed value without
+        // mutable scheduler state. The factor in [0.5, 1.5) preserves the requested average while
+        // avoiding an artificial metronome. Wrapping arithmetic is intentional, not an overflow
+        // of a workload bound.
+        let mut value = self.seed.wrapping_add(
+            u64::try_from(index)
+                .unwrap_or(u64::MAX)
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15),
+        );
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^= value >> 31;
+        let unit = (value >> 11) as f64 / ((1u64 << 53) as f64);
+        Duration::try_from_secs_f64(base.as_secs_f64() * (0.5 + unit)).unwrap_or(base)
+    }
+}
+
+/// A clonable stop signal shared by admission and every owned call.
+#[derive(Debug, Clone, Default)]
+pub struct Stop {
+    token: CancellationToken,
+}
+
+impl Stop {
+    /// A fresh signal that has not been requested.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Close admission and ask active calls to clean up.
+    pub fn request(&self) {
+        self.token.cancel();
+    }
+
+    /// Wait until cleanup has been requested.
+    pub async fn requested(&self) {
+        self.token.cancelled().await;
+    }
+
+    /// Whether cleanup has already been requested.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        self.token.is_cancelled()
+    }
+}
+
+/// Why the harness closed admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionEnd {
+    /// The configured call count was admitted.
+    Calls,
+    /// The configured admission duration elapsed.
+    Duration,
+    /// The owner requested interruption.
+    Requested,
+}
+
+/// Outcome plus the lifecycle facts a bounded command must report.
+#[derive(Debug, Clone)]
+pub struct BoundedOutcome {
+    /// Per-call counts and setup measurements.
+    pub outcome: Outcome,
+    /// Greatest number of calls active simultaneously.
+    pub peak_in_flight: usize,
+    /// The event that closed admission.
+    pub admission_end: AdmissionEnd,
+    /// Whether every owned task finished inside the cleanup budget.
+    pub cleanup_complete: bool,
 }
 
 impl Plan {
@@ -193,7 +309,10 @@ where
     Fut: std::future::Future<Output = Result<(), Cause>> + Send + 'static,
 {
     let place = std::sync::Arc::new(place);
-    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(plan.most_in_flight.max(1)));
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(
+        plan.most_in_flight
+            .clamp(1, tokio::sync::Semaphore::MAX_PERMITS),
+    ));
 
     let started = tokio::time::Instant::now();
     let interval = plan.interval();
@@ -252,6 +371,184 @@ where
     outcome
 }
 
+fn account_bounded(
+    joined: std::result::Result<(std::result::Result<(), Cause>, Duration), tokio::task::JoinError>,
+    outcome: &mut Outcome,
+) -> bool {
+    match joined {
+        Ok((Ok(()), took)) => {
+            outcome.succeeded += 1;
+            outcome.setup.push(took);
+            false
+        }
+        Ok((Err(cause), _)) => {
+            let internal = matches!(cause, Cause::Other(_));
+            *outcome.failures.entry(cause).or_default() += 1;
+            internal
+        }
+        Err(joined) => {
+            let label = if joined.is_panic() {
+                "panicked"
+            } else {
+                "cancelled"
+            };
+            *outcome
+                .failures
+                .entry(Cause::Other(label.to_owned()))
+                .or_default() += 1;
+            true
+        }
+    }
+}
+
+struct ActiveCall {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for ActiveCall {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Run a finitely bounded plan, stopping admission and draining every owned call before return.
+///
+/// The call future receives the same [`Stop`] as the scheduler. Once it has established a call it
+/// should select that signal alongside its normal holding period, then perform its protocol cleanup
+/// before returning. The harness never detaches work: even a cleanup-budget failure aborts and joins
+/// every local task before it reports that cleanup was incomplete.
+#[allow(
+    clippy::too_many_lines,
+    reason = "admission and drain are one lifecycle; splitting them would make detached cleanup easier to write"
+)]
+pub async fn run_bounded<F, Fut>(plan: BoundedPlan, stop: Stop, place: F) -> BoundedOutcome
+where
+    F: Fn(usize, Stop) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<(), Cause>> + Send + 'static,
+{
+    let place = Arc::new(place);
+    let permits = Arc::new(tokio::sync::Semaphore::new(
+        plan.most_in_flight
+            .clamp(1, tokio::sync::Semaphore::MAX_PERMITS),
+    ));
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let started = tokio::time::Instant::now();
+    let duration_deadline = plan
+        .duration
+        .map(|duration| started.checked_add(duration).unwrap_or(started));
+    let mut running = tokio::task::JoinSet::new();
+    let mut admitted = 0usize;
+    let mut scheduled = started;
+    let mut outcome = Outcome::default();
+
+    let admission_end = loop {
+        // Completed tasks stay allocated inside a JoinSet until they are joined. Drain them on
+        // every admission turn rather than retaining one record per call until admission closes;
+        // a long count-bounded run then uses memory in proportion to active concurrency.
+        let mut internal_failure = false;
+        while let Some(joined) = running.try_join_next() {
+            internal_failure |= account_bounded(joined, &mut outcome);
+        }
+        if internal_failure {
+            stop.request();
+        }
+        if stop.is_requested() {
+            break AdmissionEnd::Requested;
+        }
+        if plan.calls.is_some_and(|calls| admitted >= calls) {
+            break AdmissionEnd::Calls;
+        }
+
+        let admission_wait = tokio::time::sleep_until(scheduled);
+        tokio::pin!(admission_wait);
+        if let Some(deadline) = duration_deadline {
+            tokio::select! {
+                biased;
+                () = stop.requested() => break AdmissionEnd::Requested,
+                () = tokio::time::sleep_until(deadline) => break AdmissionEnd::Duration,
+                () = &mut admission_wait => {}
+            }
+        } else {
+            tokio::select! {
+                biased;
+                () = stop.requested() => break AdmissionEnd::Requested,
+                () = &mut admission_wait => {}
+            }
+        }
+
+        let permit = if let Some(deadline) = duration_deadline {
+            tokio::select! {
+                biased;
+                () = stop.requested() => break AdmissionEnd::Requested,
+                () = tokio::time::sleep_until(deadline) => break AdmissionEnd::Duration,
+                permit = Arc::clone(&permits).acquire_owned() => permit,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                () = stop.requested() => break AdmissionEnd::Requested,
+                permit = Arc::clone(&permits).acquire_owned() => permit,
+            }
+        };
+        let Ok(permit) = permit else {
+            break AdmissionEnd::Requested;
+        };
+
+        let index = admitted;
+        admitted += 1;
+        scheduled += plan.gap(index);
+        let place = Arc::clone(&place);
+        let call_stop = stop.clone();
+        let active = Arc::clone(&active);
+        let peak = Arc::clone(&peak);
+        running.spawn(async move {
+            let _permit = permit;
+            let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+            let _active = ActiveCall { active };
+            peak.fetch_max(now_active, Ordering::SeqCst);
+            let at = tokio::time::Instant::now();
+            // The JoinSet owns this future directly. Aborting the set therefore drops the call
+            // future, its permit and its active guard before the harness can return.
+            let result = place(index, call_stop).await;
+            (result, at.elapsed())
+        });
+    };
+
+    // A count or duration bound is also an instruction to end the calls it owns. A call may have
+    // connected just before admission closed; it observes this before the summary is emitted.
+    stop.request();
+    let cleanup_deadline = tokio::time::Instant::now() + plan.cleanup;
+    outcome.attempted = admitted;
+    let mut cleanup_complete = true;
+    while !running.is_empty() {
+        match tokio::time::timeout_at(cleanup_deadline, running.join_next()).await {
+            Ok(Some(joined)) => {
+                let _internal = account_bounded(joined, &mut outcome);
+            }
+            Ok(None) => break,
+            Err(_) => {
+                cleanup_complete = false;
+                let unfinished = running.len();
+                running.abort_all();
+                while running.join_next().await.is_some() {}
+                *outcome
+                    .failures
+                    .entry(Cause::Other("cleanup budget exhausted".to_owned()))
+                    .or_default() += unfinished;
+            }
+        }
+    }
+    outcome.elapsed = started.elapsed();
+
+    BoundedOutcome {
+        outcome,
+        peak_in_flight: peak.load(Ordering::SeqCst),
+        admission_end,
+        cleanup_complete,
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -261,6 +558,128 @@ where
 )]
 mod tests {
     use super::*;
+
+    struct DropFlag(Arc<AtomicUsize>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// DPH-10: the count bound closes admission, signals every owned call, and the result is not
+    /// returned until all of them have acknowledged cleanup.
+    #[tokio::test]
+    async fn bounded_run_reaches_its_call_bound_and_cleans_every_owned_call() {
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&cleaned);
+        let bounded = run_bounded(
+            BoundedPlan {
+                calls: Some(6),
+                duration: None,
+                rate: 100_000.0,
+                seed: 7,
+                most_in_flight: 6,
+                cleanup: Duration::from_secs(1),
+            },
+            Stop::new(),
+            move |_, stop| {
+                let cleaned = Arc::clone(&seen);
+                async move {
+                    stop.requested().await;
+                    cleaned.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(bounded.admission_end, AdmissionEnd::Calls);
+        assert_eq!(bounded.outcome.attempted, 6);
+        assert_eq!(bounded.outcome.succeeded, 6);
+        assert_eq!(cleaned.load(Ordering::SeqCst), 6);
+        assert!(bounded.cleanup_complete);
+    }
+
+    /// DPH-11: interruption is a causal signal, not a sleep followed by an assumption. Once the
+    /// first call announces that it started, interruption closes admission and cleanup completes
+    /// before the harness returns.
+    #[tokio::test]
+    async fn interrupted_run_stops_admission_and_waits_for_cleanup() {
+        let stop = Stop::new();
+        let controller = stop.clone();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let began = Arc::clone(&started);
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&cleaned);
+
+        let run = tokio::spawn(run_bounded(
+            BoundedPlan {
+                calls: Some(10_000),
+                duration: None,
+                rate: 1.0,
+                seed: 9,
+                most_in_flight: 2,
+                cleanup: Duration::from_secs(1),
+            },
+            stop,
+            move |_, stop| {
+                began.notify_one();
+                let cleaned = Arc::clone(&seen);
+                async move {
+                    stop.requested().await;
+                    cleaned.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        ));
+
+        started.notified().await;
+        controller.request();
+        let bounded = run.await.expect("the bounded harness joins");
+
+        assert_eq!(bounded.admission_end, AdmissionEnd::Requested);
+        assert!(bounded.outcome.attempted < 10_000);
+        assert_eq!(
+            cleaned.load(Ordering::SeqCst),
+            bounded.outcome.attempted,
+            "the summary follows cleanup of every owned call"
+        );
+        assert!(bounded.cleanup_complete);
+    }
+
+    /// A cleanup deadline may abort work, but may never detach it. The flag is owned by the call
+    /// future itself, so observing its drop proves `run_bounded` joined the aborted future before
+    /// returning rather than only aborting an outer wrapper.
+    #[tokio::test]
+    async fn cleanup_timeout_drops_the_owned_call_before_returning() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&dropped);
+        let bounded = run_bounded(
+            BoundedPlan {
+                calls: Some(1),
+                duration: None,
+                rate: 1.0,
+                seed: 0,
+                most_in_flight: 1,
+                cleanup: Duration::from_millis(20), // A bound on failure: this call never ends.
+            },
+            Stop::new(),
+            move |_, _| {
+                let flag = DropFlag(Arc::clone(&observed));
+                async move {
+                    let _flag = flag;
+                    std::future::pending::<Result<(), Cause>>().await
+                }
+            },
+        )
+        .await;
+
+        assert!(!bounded.cleanup_complete);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(bounded.outcome.attempted, 1);
+        assert_eq!(bounded.outcome.failed(), 1);
+    }
 
     /// X-4's exit criterion, and the reason it is about the harness rather than about sipx: a
     /// load harness that miscounts is worse than no load harness, because the numbers look

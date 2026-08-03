@@ -253,10 +253,10 @@ class ClaimReachability(unittest.TestCase):
         """`X-33`'s failing-first case: the same shape as ICE, one layer over.
 
         Security is a selection layer for the same reason media is. Credentials are *supplied* —
-        `crates/sipx-cli/src/register.rs:95` is the only `with_credentials` above the call layer,
-        and it is inside an `if let Some(password)`, so supplying nothing is the silent default and
-        the REGISTER still succeeds unchallenged. A secure transport is *chosen* the same way: a
-        `Target` carries its `TransportKind`, and choosing UDP is the default.
+        the register, dial and load selectors above the call layer are conditional, so supplying
+        nothing is the silent default and those operations still proceed unchallenged. A secure
+        transport is *chosen* the same way: a `Target` carries its `TransportKind`, and choosing
+        UDP is the default.
 
         Before `X-33` this row passed `--check`, because `ROLE_REACHABILITY_LAYERS` was `{"media"}`
         — and relabelling a media row `security` was therefore the documented way out of the check.
@@ -560,10 +560,10 @@ class ClaimReachability(unittest.TestCase):
         nothing is the silent default. Security has the same two halves, and both are checked here,
         because the layer string is a proxy in exactly the way it is for media:
 
-        - **credentials are selected**: registration and outbound calls each pass credentials
-          only when their caller supplied them;
-        - **and omitting them is silent**: both calls are conditional, so passwordless register
-          and dial commands still proceed without an authentication attempt.
+        - **credentials are selected**: registration, one outbound call and bounded outbound load
+          each pass credentials only when their caller supplied them;
+        - **and omitting them is silent**: all three paths are conditional, so passwordless
+          register, dial and load commands still proceed without an authentication attempt.
 
         The transport half is the same shape — a `Target` carries its `TransportKind`, and the
         secure one is reached only because a caller asked for it: `crates/sipx-call/tests/wss.rs`
@@ -578,6 +578,10 @@ class ClaimReachability(unittest.TestCase):
         self.assertIn("options.with_credentials(credentials)", dial)
         self.assertIn("if let Some(credentials)", dial)
 
+        load = (ROOT / "crates" / "sipx-cli" / "src" / "load.rs").read_text()
+        self.assertIn("options.with_credentials(credentials)", load)
+        self.assertIn("if let Some(credentials)", load)
+
         cli_sources = (ROOT / "crates" / "sipx-cli" / "src").rglob("*.rs")
         callers = sorted(
             path.name
@@ -585,11 +589,11 @@ class ClaimReachability(unittest.TestCase):
             if ".with_credentials(" in path.read_text()
         )
         self.assertEqual(
-            ["dial.rs", "register.rs"],
+            ["dial.rs", "load.rs", "register.rs"],
             callers,
             "the set of credential selectors above the call layer changed; RFC 2617, 7616 and 8760"
-            " rely on both registration and outbound-call selectors for their documented UAC"
-            " reachability",
+            " rely on registration and outbound-call selectors for their documented UAC"
+            " reachability; every selector must remain conditional",
         )
 
         wss = (ROOT / "crates" / "sipx-call" / "tests" / "wss.rs").read_text()
@@ -612,8 +616,8 @@ class ClaimReachability(unittest.TestCase):
                 self.assertIn(
                     "crates/sipx-cli/src/register.rs",
                     by_number[number]["evidence"],
-                    "digest is selected by supplying credentials, and register.rs is the only"
-                    " caller above the call layer that does",
+                    "digest is selected by supplying credentials, and register.rs is one admitted"
+                    " caller above the call layer that makes the role reachable",
                 )
         self.assertIn(
             "crates/sipx-call/tests/wss.rs",

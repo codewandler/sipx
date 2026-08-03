@@ -20,6 +20,12 @@ pub enum Error {
     /// The endpoint loop has stopped.
     #[error("the endpoint has shut down")]
     EndpointClosed,
+    /// The next hop asked this endpoint to reduce traffic and this request was not admitted.
+    #[error("request rejected by overload control for {peer}")]
+    Overloaded {
+        /// The downstream server whose active report caused the rejection.
+        peer: std::net::SocketAddr,
+    },
     /// A request could not be sent because it has no usable `Via`, so no transaction could be
     /// keyed on it and no response could ever be matched.
     #[error("the request has no usable Via")]

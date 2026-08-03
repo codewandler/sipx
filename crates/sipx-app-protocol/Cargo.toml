@@ -1,6 +1,6 @@
 [package]
 name = "sipx-app-protocol"
-description = "The sipx.app.v1 application contract: its types, its JSON wire format, and a sans-IO instruction interpreter (experimental)"
+description = "The sipx.app.v1 application contract: its types, JSON wire format, and sans-IO instruction interpreter"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

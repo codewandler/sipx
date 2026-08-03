@@ -6,16 +6,17 @@
 //! timer" wins, the clock jumps to it, and nothing sleeps. A scenario asserting on a two-second
 //! callback timeout costs no wall-clock time at all.
 //!
-//! What is under test here is the **actor's** logic, not the interpreter's: delivery and the
-//! alternation rule (§6.3), `seq` and redelivery (§5.1), the bounded event queue (AC-9), the
-//! instruction queue's blocking discipline (§6.1), and the declared failure semantics (§9.2). When
-//! `C-5` lands, its interpreter replaces the instruction-execution half of [`Run`]; the scenarios
-//! and their expectations do not change, which is the point of writing them first.
+//! This was built before `C-5`, so [`Run`] still includes a provisional instruction interpreter as
+//! well as the actor logic it was intended to test: delivery and the alternation rule (§6.3), `seq`
+//! and redelivery (§5.1), the bounded event queue (AC-9), the instruction queue's blocking
+//! discipline (§6.1), and the declared failure semantics (§9.2). `C-5` has landed; migrating this
+//! execution half to `sipx_app_protocol::Interpreter` remains an open `A-2` requirement. Until then
+//! the scenarios are policy evidence, not proof that the crate has only one interpreter.
 //!
 //! ## Two readings the spec leaves implicit
 //!
-//! Recorded here rather than buried, because a vector's outcome depends on each and `C-5` must
-//! either agree or correct them:
+//! Recorded here rather than buried, because a vector's outcome depends on each. The protocol
+//! interpreter is now authoritative; this provisional runner must agree until it is migrated:
 //!
 //! 1. **An empty document does not replace the program.** §6.3 says a response "is the *entire* new
 //!    program", and also that "an empty `instructions` array is valid and means 'keep going'".

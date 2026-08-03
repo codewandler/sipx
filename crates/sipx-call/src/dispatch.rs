@@ -40,7 +40,7 @@ use sipx_sip::build::ResponseBuilder;
 use sipx_sip::transaction::TransactionKey;
 use sipx_sip::{HeaderName, Method, Request, StatusCode};
 use sipx_transport::{Handle, Incoming};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use crate::call::{Call, Codecs, token};
 use crate::dialog::{Dialog, cseq_number, from_tag, to_tag};
@@ -211,6 +211,20 @@ impl Invitation {
         .await
     }
 
+    /// Refuse this pending invitation with a final response.
+    ///
+    /// The dispatcher's cancellation state is claimed before the response leaves, so a crossing
+    /// CANCEL receives its own 200 but cannot also replace this final response with 487.
+    pub async fn refuse(
+        &self,
+        endpoint: &Handle,
+        status: u16,
+        reason: impl Into<Bytes>,
+    ) -> Result<()> {
+        self.pending.claim()?;
+        final_response(endpoint, &self.incoming, self.pending.tag(), status, reason).await
+    }
+
     /// Split into the INVITE and the inbox, ready for
     /// [`answer`](crate::answer) and [`serve`](crate::serve).
     ///
@@ -221,6 +235,76 @@ impl Invitation {
     #[must_use]
     pub fn into_parts(self) -> (Incoming, mpsc::Receiver<Incoming>) {
         (self.incoming, self.requests)
+    }
+
+    /// Transfer this pending invitation to the two-dialog coupling driver.
+    pub(crate) fn into_coupling(self) -> CouplingInvitation {
+        CouplingInvitation {
+            incoming: self.incoming,
+            requests: self.requests,
+            pending: self.pending,
+        }
+    }
+}
+
+/// The invitation state retained by an early two-dialog coupling.
+#[derive(Debug)]
+pub(crate) struct CouplingInvitation {
+    pub(crate) incoming: Incoming,
+    pub(crate) requests: mpsc::Receiver<Incoming>,
+    pending: Arc<Pending>,
+}
+
+impl CouplingInvitation {
+    pub(crate) fn cancellation(&self) -> CouplingCancellation {
+        CouplingCancellation(Arc::clone(&self.pending))
+    }
+
+    pub(crate) fn claim(&self) -> Result<()> {
+        self.pending.claim()
+    }
+
+    pub(crate) async fn refuse(
+        &self,
+        endpoint: &Handle,
+        status: u16,
+        reason: impl Into<Bytes>,
+    ) -> Result<()> {
+        self.pending.claim()?;
+        final_response(endpoint, &self.incoming, self.pending.tag(), status, reason).await
+    }
+}
+
+async fn final_response(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    tag: &str,
+    status: u16,
+    reason: impl Into<Bytes>,
+) -> Result<()> {
+    let status = StatusCode::new(status).ok_or_else(|| Error::Rejected {
+        status,
+        reason: "invalid final response status".to_owned(),
+    })?;
+    let response = ResponseBuilder::to_request(&incoming.request, status, reason)
+        .and_then(|builder| with_to_tag(builder, &incoming.request, Some(tag)))?
+        .build();
+    endpoint.respond(&incoming.key, response).await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CouplingCancellation(Arc<Pending>);
+
+impl CouplingCancellation {
+    pub(crate) async fn cancelled(&self) {
+        loop {
+            let notified = self.0.cancelled.notified();
+            if self.0.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -246,6 +330,7 @@ struct Pending {
     /// concerned, and the table would otherwise hold its INVITE for the life of the dispatcher.
     route: mpsc::Sender<Incoming>,
     state: Mutex<State>,
+    cancelled: Notify,
 }
 
 /// Where an invitation is, and where its one event goes.
@@ -318,6 +403,7 @@ impl Pending {
         }
         state.phase = Phase::Cancelled;
         state.events.end(EndCause::RemoteCancel);
+        self.cancelled.notify_waiters();
         true
     }
 }
@@ -588,6 +674,7 @@ impl Calls {
                 phase: Phase::Ringing,
                 events,
             }),
+            cancelled: Notify::new(),
         });
         if let Some(matched) = TransactionKey::from_request(&incoming.request) {
             self.lock().invites.insert(matched, Arc::clone(&pending));

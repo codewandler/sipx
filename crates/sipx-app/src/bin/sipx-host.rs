@@ -64,12 +64,20 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let (handle, incoming) = match host.bind_endpoint().await {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            eprintln!("sipx-host: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     eprintln!(
         "sipx-host: answering on {} ({})",
-        listener.bind, listener.name
+        handle.local_addr(),
+        listener.name
     );
 
-    match host.run().await {
+    match host.serve(handle, incoming).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("sipx-host: {error}");

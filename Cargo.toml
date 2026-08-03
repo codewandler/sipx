@@ -27,6 +27,7 @@ sipx-transport = { path = "crates/sipx-transport", version = "1.0.0-alpha.5" }
 sipx-ua = { path = "crates/sipx-ua", version = "1.0.0-alpha.5" }
 sipx-call = { path = "crates/sipx-call", version = "1.0.0-alpha.5" }
 sipx-app = { path = "crates/sipx-app", version = "1.0.0-alpha.5" }
+sipx-app-protocol = { path = "crates/sipx-app-protocol", version = "1.0.0-alpha.5" }
 sipx-testkit = { path = "crates/sipx-testkit", version = "1.0.0-alpha.5" }
 
 # Core
@@ -69,6 +70,9 @@ p256 = "0.13"
 base64 = "0.22"
 serde_json = "1"
 tracing = "0.1"
+# The document-mode application host is the only HTTP client in the workspace. Redirects and
+# serialization policy are deliberately selected by `sipx-app`, not hidden in a kernel crate.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # Async runtime (never used by the sans-IO crates)
 tokio = { version = "1", default-features = false }

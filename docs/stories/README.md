@@ -32,9 +32,9 @@ argued for in the [roadmap](../roadmap.md#next):
 - **M9 — Bridgeable.** Two thirds done: `S-19` UPDATE and `C-2` early media are closed; `C-1` two
   dialogs as one call remains. What has to be true of a session before sipx can sit between two of
   them.
-- **M11 — Attestable.** The STIR service (`S-20`) and diversion history (`S-21`) are implemented.
-  Live-call identity selection and independent verification (`S-34`) plus overload control
-  (`T-22`) remain.
+- **M11 — Attestable.** The STIR service (`S-20`), diversion history (`S-21`) and overload control
+  (`T-22`) are implemented. Only live-call identity selection and independent verification
+  (`S-34`) remain.
 
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `A` application SDK/release · `X` cross-cutting (build, CI, test infrastructure).
@@ -44,10 +44,15 @@ argued for in the [roadmap](../roadmap.md#next):
 
 ## Now (in progress)
 
+### The application host
+- [A-2 — Implement the document-mode host over the contract interpreter](A-2-document-mode-host.md) · Application · app-host phase 1 · needs C-3, C-4, C-5 and M-17 first
+
+### Edge / B2BUA
+- [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
+
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
@@ -63,7 +68,6 @@ _Everything above this layer inherits its correctness properties. SIP's genuinel
 
 ### The application host
 _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
-- [A-2 — Implement the document-mode host over the contract interpreter](A-2-document-mode-host.md) · Application · app-host phase 1 · needs C-3, C-4, C-5 and M-17 first
 - [A-3 — The TypeScript SDK and the two reference applications](A-3-typescript-sdk.md) · Application · app-host phase 2 · the reference apps are the contract's exit-from-experimental gate
 - [A-4 — Implement the session binding and originate](A-4-session-binding-and-originate.md) · Application · app-host phase 2 · WebSocket first; the subprocess variant is this story's decision
 - [A-5 — Implement the embedded TypeScript runtime](A-5-embedded-runtime.md) · Application · app-host phase 3 · needs A-6 (the binding spec) and A-3 (the SDK it hosts)
@@ -84,7 +88,6 @@ _sipx can call any endpoint you can already name, and cannot help you name one. 
 
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
-- [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
 
 ### Ice
 - [M-24 — Gather a relayed candidate from a configured relay](M-24-ice-relayed-candidate.md) · Media · ice · RFC 8656 · after M-22 · the third RFC that made M-16 impossible as one story
@@ -94,7 +97,6 @@ _The phone is both the product's front door and its most demanding integration t
 - [P-9 — Select codecs, media security and ICE from the diagnostic phone](P-9-select-codecs-media-security-and-ice.md) · Phone · M-27 and M-28 delivered the call-level policy; the CLI must consume it, not rebuild negotiation
 - [P-10 — Use live audio devices without putting device IO in the media core](P-10-use-live-audio-devices.md) · Phone · blocked by P-9; Linux release target, macOS and Windows compile checks
 - [P-11 — Drive interactive call actions through a correlated NDJSON protocol](P-11-script-interactive-call-actions.md) · Phone · after P-8/P-9; includes validated custom headers and no sleep command
-- [P-12 — Run bounded call load from the diagnostic phone](P-12-run-bounded-call-load.md) · Phone · reuse X-4's load model; every run has finite admission and cleanup bounds
 - [P-13 — Prove the complete diagnostic phone from a shell](P-13-prove-the-diagnostic-phone.md) · Phone · blocked by P-8 through P-12 and the call-layer blockers named by them
 
 ### Quic
@@ -151,6 +153,7 @@ _The phone is both the product's front door and its most demanding integration t
 - [P-5 — List what can be called with `sipx peers`](P-5-peer-book-and-list.md) · Phone · the epic's first story — a peer book and one command, with no protocol work
 - [P-7 — Make `sipx dial --password` authenticate, or reject the flag](P-7-dial-accepts-a-password-and-discards-it.md) · Application · main.rs:168 accepts --password on dial and dial.rs never reads it, so a 407-challenged call fails while the user who supplied credentials is told nothing
 - [P-8 — Select every released signalling transport from the diagnostic phone](P-8-expose-secure-signalling-transports.md) · Phone · operational capability baseline · secure transports exist in the library and are unreachable from the CLI
+- [P-12 — Run bounded call load from the diagnostic phone](P-12-run-bounded-call-load.md) · Phone · reuse X-4's load model; every run has finite admission and cleanup bounds
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 - [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling
@@ -203,6 +206,7 @@ _The phone is both the product's front door and its most demanding integration t
 - [T-19 — Stop dropping incoming requests silently](T-19-stop-dropping-incoming-requests-silently.md) · Signalling · M7 · a full channel loses requests with no counter and no log
 - [T-20 — Implement GRUU](T-20-gruu.md) · Signalling · M10 · RFC 5627 · needs T-14's Path and T-15's instance ID
 - [T-21 — Be reachable through a push notification](T-21-push-notification.md) · Signalling · M10 · RFC 8599 · a client holding no connection at all
+- [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 - [T-23 — Let a WebSocket target name its own path and port](T-23-websocket-request-path-and-port.md) · Signalling · found by X-17 — the second interop peer serves SIP over WebSocket somewhere sipx cannot ask for
 - [T-25 — Make pool eviction close the live connection it evicts](T-25-make-pool-eviction-close-the-live-connection-it-evicts.md) · Signalling · R-01 in the 2026-07-30 repository review — map removal drops the writer but leaves the socket task blocked on reads, so the configured pool bound is not a live-connection bound
 - [T-26 — Bound unauthenticated TLS and WebSocket handshakes](T-26-bound-unauthenticated-tls-and-websocket-handshakes.md) · Signalling · R-02 in the 2026-07-30 repository review — accepted stream handshakes are spawned before pool admission with no deadline or concurrency budget

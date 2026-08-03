@@ -104,3 +104,18 @@ Phase 1's criterion, verbatim: a shell script starts the host with a scripted we
 places a call into it with the sipx CLI, hears a prompt, sends digits, asserts the gather
 outcome — and the same script with the app stopped asserts the declared `on_unreachable`
 behaviour. All scenarios also pass under the deterministic harness.
+
+### Document-mode interpretation boundary (`A-2` review check)
+
+The production document-mode path in `host.rs` and `webhook.rs` may match
+`sipx_app_protocol::Output` only to perform an effect, arm a timer, or deliver an envelope, and may
+construct `Input` only from those completed operations. It must not parse a response document,
+inspect an instruction, maintain a pending program, or decide what a contract failure does. The
+webhook binding returns `Response::Body` or `Response::Failed`; the per-call actor feeds that value
+to `Interpreter` and executes the outputs it receives. Review this boundary by searching those
+production modules for `Document::parse`, `Instruction`, and `Verb`.
+
+This is not yet a crate-wide property. The public `A-7` harness predates `C-5` and still defines
+and executes a second `Instruction`/`Verb` program under `harness::contract` and
+`harness::scenario`. Its scenarios must be migrated to `sipx_app_protocol::Interpreter`, or that
+duplicate program removed, before `A-2` can satisfy the sole-interpreter acceptance item.

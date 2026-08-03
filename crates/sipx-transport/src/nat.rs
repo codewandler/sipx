@@ -78,7 +78,7 @@ pub fn apply_received_and_rport(request: &mut Request, source: SocketAddr) -> bo
 }
 
 /// The span of `;name` or `;name=value` within one via-parm, quote-aware.
-fn param_span(hop: &[u8], name: &[u8]) -> Option<(usize, usize)> {
+pub(crate) fn param_span(hop: &[u8], name: &[u8]) -> Option<(usize, usize)> {
     let mut i = 0usize;
     while i < hop.len() {
         match hop.get(i) {

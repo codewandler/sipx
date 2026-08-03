@@ -26,6 +26,7 @@ mod advertise;
 mod answer;
 mod counters;
 mod dial;
+mod load;
 mod output;
 mod peers;
 mod register;
@@ -45,6 +46,7 @@ COMMANDS:
     register    Register with a registrar
     dial        Place a call
     answer      Wait for and answer a call
+    load        Place a finite, reproducible call load
     peers       List what can be called
     help        Show this message
     version     Show the version
@@ -83,6 +85,7 @@ async fn main() -> ExitCode {
         Some("register") => register::run(&args, format).await,
         Some("dial") => dial::run(&args, format).await,
         Some("answer") => answer::run(&args, format).await,
+        Some("load") => load::run(&args, format).await,
         // Not async, and deliberately so: listing what can be called reads a file and opens no
         // socket. The registrar and local-link sources are separate stories.
         Some("peers") => peers::run(&args, format),
@@ -163,7 +166,7 @@ pub(crate) fn wants_help(raw: &[String]) -> bool {
 /// command instead of complaining about `--play`.
 ///
 /// `Err` carries the exit to return, which is `Exit::Success` when help was printed: from the
-/// caller's side both arms are "stop here", and distinguishing them would only give four commands
+/// caller's side both arms are "stop here", and distinguishing them would only give the commands
 /// the chance to disagree about it.
 pub(crate) fn arguments<'a>(
     raw: &'a [String],
@@ -442,6 +445,11 @@ const VALUED_FLAGS: &[&str] = &[
     "--tls-ca",
     "--tls-cert",
     "--tls-key",
+    "--rate",
+    "--concurrency",
+    "--calls",
+    "--seed",
+    "--call-duration",
 ];
 
 /// Flags whose values are whole seconds in the inclusive range `0..=u32::MAX`.
@@ -457,7 +465,13 @@ const VALUED_FLAGS: &[&str] = &[
 ///
 /// `every_seconds_flag_is_registered_as_numeric` derives the documented `<S>` flags from the help
 /// text and holds it against this list, so a future numeric flag cannot silently bypass validation.
-const NUMERIC_FLAGS: &[&str] = &["--duration", "--timeout", "--wait", "--expires"];
+const NUMERIC_FLAGS: &[&str] = &[
+    "--duration",
+    "--timeout",
+    "--wait",
+    "--expires",
+    "--call-duration",
+];
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -547,12 +561,13 @@ mod tests {
     #[test]
     fn every_valued_flag_in_the_help_text_is_registered() {
         let help = format!(
-            "{}{}{}{}{}",
+            "{}{}{}{}{}{}",
             USAGE,
             crate::register::HELP,
             crate::dial::HELP,
             crate::answer::HELP,
-            crate::peers::HELP
+            crate::peers::HELP,
+            crate::load::HELP
         );
 
         // A documented flag takes a value if its help line shows a placeholder after it.
@@ -674,12 +689,13 @@ mod tests {
     #[test]
     fn every_seconds_flag_is_registered_as_numeric() {
         let help = format!(
-            "{}{}{}{}{}",
+            "{}{}{}{}{}{}",
             USAGE,
             crate::register::HELP,
             crate::dial::HELP,
             crate::answer::HELP,
-            crate::peers::HELP
+            crate::peers::HELP,
+            crate::load::HELP
         );
         let documented: Vec<String> = help
             .lines()

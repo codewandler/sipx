@@ -12,6 +12,8 @@
 - RFC 2782 — SRV weighting.
 - RFC 5923 — connection reuse.
 - RFC 7118 — SIP over WebSocket.
+- RFC 7339 §4–§5, §7.2 — hop-by-hop SIP overload control and the loss algorithm.
+- RFC 7415 §3.3–§3.5.1 — rate-based overload control.
 
 **Out of scope:** TLS certificate policy (a later story), and everything the sans-IO core
 already specifies.
@@ -187,9 +189,13 @@ requests. Answering 503 is what the status code is for, and it tells the peer so
 
 **[sipx] Endpoint configuration is validated before any socket is bound or background task is
 started.** The application event/command capacity, pool connection limit, inbound handshake limit,
-inbound handshake timeout and WebSocket keepalive interval must all be non-zero. The minimum valid
-value for a count is one; the minimum valid duration is any duration greater than zero. Invalid
-values return a typed configuration error naming the field. Values are never silently clamped.
+overload peer-state limit, inbound handshake timeout, overload-report validity and WebSocket
+keepalive interval must all be non-zero. The minimum valid value for a count is one; the minimum
+valid duration is any duration greater than zero except overload validity, whose millisecond wire
+field requires at least one millisecond. Invalid values return a typed configuration error naming
+the field. Values are never silently clamped. RFC 7415's protected-request threshold `TAU2` must be
+greater than the ordinary threshold `TAU1`; equal thresholds erase the policy hook and are rejected
+at bind.
 
 The default inbound handshake budget is 64 live handshakes per endpoint and the default deadline is
 10 seconds. The budget is shared across TLS, WebSocket and secure WebSocket listeners. An accepted
@@ -205,6 +211,62 @@ shutdown cancels them and waits for their completion.
 shutdown command loses a race with command-receiver closure: command closure means cleanup has
 started, not that it has finished. The barrier becomes complete only after listeners, handshake
 tasks, pooled connections and endpoint sockets have been released.
+
+## 10.2 Hop-by-hop overload control (RFC 7339 and RFC 7415)
+
+**[RFC 7339 §4]** A client-generated topmost `Via` carries valueless `oc` and
+`oc-algo="loss,rate"`. A request never carries `oc-validity` or `oc-seq`. A server that received
+the offer fills `oc`, selects exactly one offered algorithm in a quoted `oc-algo` value, and adds
+`oc-validity` and an increasing `oc-seq` to the topmost `Via` of every response. A normal response
+reports `oc=0;oc-validity=0`: the server supports the selected algorithm and is not asking for
+control. The four parameters are exposed as typed `sipx-sip` values; malformed numeric values are
+not silently interpreted as zero.
+
+**[RFC 7339 §5.4–§5.7]** Client control state is keyed by the next hop's IP address and port.
+A report with a sequence no greater than the last report for that peer is stale and changes
+nothing. A report without `oc-validity` lasts 500 milliseconds. Expiry turns control off. A newer
+report with `oc-validity=0` also turns it off immediately and its `oc` value is ignored. Sequence
+history survives both forms of deactivation: otherwise a delayed response can reactivate an older
+reduction after the server has explicitly stopped it.
+
+Only a response matched to a live client transaction may update this state. An unmatched response
+has not proved that the endpoint sent the request whose `Via` it carries; accepting its feedback
+would let a forged datagram throttle an unrelated peer.
+
+The peer-state map has a configured non-zero bound (default 1024). A new peer first evicts the
+least-recently-used expired or control-off entry; if every entry is active, it evicts the
+least-recently-used entry. Reads refresh recency. This is an explicit resource limit: a deployment
+that simultaneously controls more next hops than the configured bound must raise it.
+
+**[RFC 7339 §7.2]** Loss control keeps the two message categories named by the RFC. The endpoint's
+policy hook assigns each request to ordinary traffic, which is reduced first, or protected traffic,
+which is reduced only after ordinary traffic is exhausted. The observed category mix converts the
+server's overall percentage into a per-category discard probability. Randomness is injected into
+the controller; production uses the operating-system generator and tests use a fixed seed.
+
+**[RFC 7415 §3.5.1–§3.5.2]** Under `rate`, `oc` is requests per second. Admission uses the RFC's
+leaky bucket with time supplied by the driver, never read by the algorithm. Its two exposed burst
+tolerances are `TAU1` for ordinary requests and the larger `TAU2` for protected requests; defaults
+are five and ten target inter-request intervals, the RFC's stated two-priority values. Equal values
+are available to tests and internal no-priority use, but endpoint configuration requires
+`TAU1 < TAU2`. A non-zero validity with `oc=0` rejects every request; validity zero disables control
+instead.
+
+An overload refusal is local and typed: no transaction or network write is created, and the
+endpoint increments `Counters::overload_rejections`. This includes the direct ACK path; overload
+control applies to all downstream requests, while the policy hook is how an application protects
+an in-dialog or emergency request. Requests that are admitted continue to advertise both algorithms
+regardless of the algorithm currently selected by the server.
+
+**[sipx] Server feedback is tied to the existing backpressure path.** When the application queue is
+full, the 503 and `Retry-After` remain, the existing shed counter still increments, and a client that
+offered overload control also receives the configured loss percentage or request rate in the
+response's topmost `Via`, with validity and sequence. The default feedback is 100% loss for 500
+milliseconds: it describes the endpoint's observed state rather than inventing a load estimator.
+Each shed event refreshes that detector interval. Until it expires, every response—including an
+application response and transaction-generated 100 Trying—reports the active value with the
+remaining validity; an ordinary response cannot undo feedback while the same bounded queue remains
+saturated. After expiry, every response reports explicit control-off state.
 
 ## 11. Test vectors
 
@@ -234,6 +296,17 @@ tasks, pooled connections and endpoint sockets have been released.
 | X22 | Final close report blocks behind a full event channel during shutdown | Shutdown cancellation releases the reporting task and completion does not hang |
 | X23 | A shutdown caller arrives after command-receiver closure | It still waits until the durable cleanup barrier completes |
 | X24 | An old generation's pong is queued ahead of a replacement pong | The old pong answers no replacement waiter; the matching generation's pong does |
+| X25 | Client-generated `Via`, then a server overload response | Request has valueless `oc` plus `loss,rate` and no server-only fields; response has typed value, selected algorithm, validity and sequence |
+| X26 | Newer report followed by an older report, then validity zero | The old report is ignored; zero disables control; neither can be undone by a delayed response |
+| X27 | 50% loss feedback over a fixed-seed ordinary request population | The deterministic distribution is reduced by half; protected requests survive while ordinary capacity remains |
+| X28 | Rate feedback with a fake clock and zero burst tolerance | One request is admitted per target interval and intervening requests are rejected |
+| X29 | Full application queue after an overload-capable request | Existing 503 and shed count remain, and the response reports overload in its topmost `Via` |
+| X30 | Learned 50% loss control driven by a 128-attempt, eight-concurrent bounded load plan | Admission ends at the call bound, both forwarding and local rejection occur, the rejection counter agrees, and every owned task finishes within cleanup |
+| X31 | Ordinary 200 response to a request offering overload control | Topmost `Via` selects one quoted algorithm and reports `oc=0`, validity zero and a sequence |
+| X32 | Rate bucket above `TAU1` but no higher than `TAU2` | Ordinary request is rejected and protected request is admitted |
+| X33 | Unmatched response carrying valid-looking overload feedback | It reaches the unmatched path but changes no client control state |
+| X34 | More reporting peers than the configured overload-state bound | The map never exceeds the bound and evicts expired/control-off least-recently-used state first |
+| X35 | Queue saturation followed by an application response for an earlier request | The response still reports active feedback; a generated 100 Trying also carries a selected report |
 
 ## 12. Counters
 
@@ -259,6 +332,7 @@ The snapshot covers, at minimum:
 - requests and responses, in and out, **per transport** — which transport is the first
   question a support case asks;
 - requests shed for backpressure (§10), embedded as the existing `ShedCounts`;
+- outbound requests rejected under overload control (§10.2);
 - responses that matched no client transaction (RFC 3261 §16.7), counted whether or not an
   application is watching for them;
 - parse failures, per transport — a malformed datagram and a stream whose framing is lost are

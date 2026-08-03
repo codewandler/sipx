@@ -249,17 +249,31 @@ note = "Reachable since `S-29`: `sipx register --push-provider … --push-prid �
 number = 7339
 title = "SIP Overload Control"
 layer = "transport"
-status = "none"
-evidence = []
-note = "sipx answers 503 when its application queue is full, which is the behaviour 7339 exists to improve on."
+status = "partial"
+roles = ["uac", "uas"]
+headers = ["Via"]
+spec = "docs/specs/sip-transport.md"
+evidence = [
+  "crates/sipx-sip/src/headers/via.rs",
+  "crates/sipx-transport/src/overload.rs",
+  "crates/sipx-transport/tests/overload.rs",
+  "crates/sipx-transport/tests/backpressure.rs",
+]
+note = "The UAC advertises `loss,rate`, accepts feedback only from responses matched to its live client transactions, keeps sequenced per-peer validity state within a configured finite LRU bound, applies seeded loss control with a local two-category policy hook, and rejects locally with a counter; a finite count/concurrency/cleanup load witness drives that endpoint path. The UAS selects an offered algorithm on every response, including transaction-generated 100 Trying, reports explicit control-off state normally, and retains active feedback on queue-full 503 and application responses for the detector's stated lifetime. Missing: recognition of `oc-seq` wraparound and a load estimator beyond the bounded queue's concrete overload signal."
 
 [[rfc]]
 number = 7415
 title = "SIP Rate Control"
 layer = "transport"
-status = "none"
-evidence = []
-note = "The rate-based half of overload control. Depends on 7339."
+status = "partial"
+roles = ["uac", "uas"]
+headers = ["Via"]
+spec = "docs/specs/sip-transport.md"
+evidence = [
+  "crates/sipx-transport/src/overload.rs",
+  "crates/sipx-transport/tests/overload.rs",
+]
+note = "The UAC offers and obeys `rate` with the RFC leaky bucket, driver-supplied time, and configurable `TAU1`/`TAU2` thresholds that preserve protected traffic after ordinary traffic is blocked; the UAS can report a configured requests-per-second limit from its queue-overload path. Missing: autonomous periodic server rate estimation/allocation and the optional randomized rate algorithm."
 
 # ---------------------------------------------------------------------------------------------
 # Core: transactions, dialogs, negotiation
@@ -862,6 +876,19 @@ evidence = [
   "crates/sipx-call/tests/call.rs",
 ]
 note = "The UA side for both call roles: History-Info is a typed ordered list with hierarchical indices and rc/mp/np target-change references. Initial calls advertise histinfo and index their first target at 1; non-100 responses return the cache and calls retain the received history. `sipx_ua::retarget` preserves received entries, exposes an omitted previous hop with `.0`, appends the forwarding `.1`, and embeds the typed Reason in the previous SIP/SIPS URI; tel targets correctly have no URI-header component. Message- and entry-level history privacy anonymize identifying targets while retaining indices. Partial because sipx is not a proxy and does not build a fork's sibling branches; automatic cache extension from every received 3xx/timeout remains the retargeting caller's explicit status input."
+
+[[rfc]]
+number = 7092
+title = "A Taxonomy of Session Initiation Protocol (SIP) Back-to-Back User Agents"
+layer = "services"
+status = "implemented"
+roles = ["uac", "uas"]
+spec = "docs/specs/call-coupling.md"
+evidence = [
+  "crates/sipx-call/src/coupling.rs",
+  "crates/sipx-call/tests/coupling.rs",
+]
+note = "The taxonomy is informational rather than a protocol conformance claim. sipx supplies the logical UAS/UAC concatenation as one owner of two dialogs: per-leg offer/answer state covers the initial INVITE, reliable provisional, PRACK, UPDATE and re-INVITE axes; glare is refused before forwarding; and a BYE on either confirmed leg ends its peer. Leaving the media bridge unattached is the §3.1.3 signalling policy; attaching it gives §3.2.3 media termination with explicit transcoding. Both `uac` and `uas` are named because a B2BUA is their logical concatenation, not because sipx ships routing, a registrar or a dial plan."
 
 [[rfc]]
 number = 7865

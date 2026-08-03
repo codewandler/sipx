@@ -22,9 +22,12 @@ runtime with no wire at all) is a driver over this one machine.
 
 ## Stability
 
-This crate remains experimental. Its exact public API and wire-line guarantees are maintained in the
-[crate-level Stability section](https://codewandler.github.io/sipx/api/sipx_app_protocol/#stability).
-That is the contract; it is linked rather than copied here so the two cannot drift.
+The vocabulary, JSON codec, interpreter and optional call adapter are **Supported** now that the
+document-mode host drives real calls through them. The `sipx.app.v1` wire line remains
+**Experimental** until the contract spec's stricter two-dissimilar-applications criterion is met.
+The exact guarantees live in the
+[crate-level Stability section](https://codewandler.github.io/sipx/api/sipx_app_protocol/#stability);
+that is the contract, linked rather than copied in full so the two cannot drift.
 
 ## Two properties worth knowing about
 

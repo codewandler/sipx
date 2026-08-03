@@ -75,6 +75,83 @@ async fn zero_handshake_budget_values_are_pre_bind_configuration_errors() {
     assert_unbound_after(error, "handshake_timeout", address).await;
 }
 
+#[tokio::test]
+async fn zero_overload_validity_is_a_pre_bind_configuration_error() {
+    let address = unused_address().await;
+    let mut config = Config::new(address);
+    config.overload.validity = Duration::ZERO;
+    let error = bind(config)
+        .await
+        .expect_err("zero overload validity is invalid");
+    assert_unbound_after(error, "overload.validity", address).await;
+}
+
+#[tokio::test]
+async fn submillisecond_overload_validity_is_rejected_before_it_rounds_to_zero_on_the_wire() {
+    let address = unused_address().await;
+    let mut config = Config::new(address);
+    config.overload.validity = Duration::from_nanos(1);
+    let error = bind(config)
+        .await
+        .expect_err("submillisecond overload validity cannot be represented");
+    assert!(
+        matches!(
+            error,
+            Error::InvalidConfig {
+                field: "overload.validity",
+                reason: "must be at least one millisecond"
+            }
+        ),
+        "unexpected error: {error}"
+    );
+    let udp = UdpSocket::bind(address)
+        .await
+        .expect("validation left UDP unbound");
+    let tcp = TcpListener::bind(address)
+        .await
+        .expect("validation left TCP unbound");
+    drop((udp, tcp));
+}
+
+#[tokio::test]
+async fn zero_overload_peer_limit_is_a_pre_bind_configuration_error() {
+    let address = unused_address().await;
+    let mut config = Config::new(address);
+    config.overload.peer_limit = 0;
+    let error = bind(config)
+        .await
+        .expect_err("zero overload peer-state limit is invalid");
+    assert_unbound_after(error, "overload.peer_limit", address).await;
+}
+
+#[tokio::test]
+async fn rate_priority_threshold_must_exceed_the_ordinary_threshold() {
+    let address = unused_address().await;
+    let mut config = Config::new(address);
+    config.overload.rate_tolerance_intervals = 5;
+    config.overload.rate_priority_tolerance_intervals = 5;
+    let error = bind(config)
+        .await
+        .expect_err("equal rate thresholds erase priority");
+    assert!(
+        matches!(
+            error,
+            Error::InvalidConfig {
+                field: "overload.rate_priority_tolerance_intervals",
+                reason: "must be greater than overload.rate_tolerance_intervals"
+            }
+        ),
+        "unexpected error: {error}"
+    );
+    let udp = UdpSocket::bind(address)
+        .await
+        .expect("validation left UDP unbound");
+    let tcp = TcpListener::bind(address)
+        .await
+        .expect("validation left TCP unbound");
+    drop((udp, tcp));
+}
+
 #[cfg(feature = "ws")]
 #[tokio::test]
 async fn zero_websocket_keepalive_is_a_pre_bind_configuration_error() {

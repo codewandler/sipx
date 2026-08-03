@@ -1,7 +1,7 @@
 # Design: Transport layer
 
-**Status:** outline — filled in by `T-1` · **Pillar:** Signalling · **Epic:** `sip-transport` ·
-**Stories:** T-1 … T-4
+**Status:** active · **Pillar:** Signalling · **Epic:** `sip-transport` ·
+**Stories:** T-1 … T-4, T-22
 
 ## Why
 
@@ -43,6 +43,51 @@ remains is a generous deadline that is a bound on *failure* in `X-29`'s sense, w
 lengthen it.
 
 Filed and closed as `X-36`; the mistaken rationale it replaced came from `X-29`.
+
+## Overload control belongs on the endpoint loop
+
+RFC 7339 feedback is hop-by-hop state about the destination the transport selected, and admission
+must happen before the transaction layer creates a request. The endpoint driver therefore owns one
+controller keyed by peer IP and port. Responses update it on the same serial loop; commands consult
+it before creating a transaction or writing a direct request. This preserves the layer's existing
+single-owner rule and makes an out-of-order response unable to race an outbound request.
+
+The controller receives elapsed time and randomness as inputs. Production supplies runtime time and
+an operating-system random source; unit tests supply explicit instants and a seeded source. Policy
+is separate from arithmetic: endpoint configuration carries a request-category function, while the
+RFC algorithms decide how much of each category can pass. That separation lets an application
+protect established-dialog or emergency traffic without replacing sequence, validity, loss, or rate
+machinery.
+
+Server feedback is deliberately narrow. The existing bounded application queue is the overload
+detector, and its existing 503 path reports the configured feedback in the response `Via`. There is
+no second queue, sampler task, or clock-driven load estimator hidden in the transport. A future
+estimator can change the configured report; it does not need to replace the wire or client state
+machines.
+
+Every response still completes RFC 7339 negotiation. The driver decorates application responses
+from the original server transaction with a selected algorithm, zero validity and an increasing
+sequence; that is the explicit control-off state. The queue-full path uses the same decorator with
+active feedback and non-zero validity. Keeping both paths behind one helper prevents ordinary 2xx
+responses from accidentally echoing the client's valueless offer as though the server had selected
+nothing.
+
+That helper sits at `Output::Send`, not only at the application command. The transaction layer also
+originates 100 Trying and retransmissions, and they are responses under RFC 7339 just as much as a
+2xx. Queue-full is a detector event with the same lifetime the server advertises; it is refreshed
+by another shed and remains the value all responses report until expiry. A final response for an
+earlier admitted request therefore cannot cancel control while the queue is still shedding.
+
+Feedback is accepted at the matching boundary for the inverse reason. Parsing a response proves
+only that bytes resemble SIP; transaction matching proves this endpoint sent the request that
+offered control. The bounded per-peer cache is LRU, preferring inactive entries for eviction, so a
+forged or simply unmatched response cannot allocate state and inactive history does not grow
+forever.
+
+Rate priority is arithmetic rather than a bypass. Ordinary and protected requests share one leaky
+bucket and therefore one long-term rate, but compare its content with `TAU1` and `TAU2`
+respectively. The higher protected threshold permits important traffic after ordinary traffic is
+blocked without creating a second bucket that could double the server's allowed rate.
 
 ## Alternatives considered
 

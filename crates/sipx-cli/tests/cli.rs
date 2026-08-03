@@ -1162,6 +1162,163 @@ async fn a_challenged_dial_without_a_password_exits_unauthorized() {
     );
 }
 
+/// DPH-10 through the shipped process: the call bound is exact and the stable summary keeps
+/// rejection causes and response codes separate. The peer counts INVITEs itself, so a command that
+/// merely printed the requested count without placing that many calls cannot pass.
+#[tokio::test]
+async fn bounded_load_stops_at_the_call_limit_and_emits_one_stable_summary() {
+    let _scenario = process_scenario().await;
+    let (handle, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("binds");
+    let address = handle.local_addr();
+    let serving = tokio::spawn(async move {
+        let mut invitations = 0usize;
+        while invitations < 3 {
+            let request = incoming.recv().await.expect("the load request arrives");
+            if request.request.method != Method::Invite {
+                continue;
+            }
+            invitations += 1;
+            let refusal = sipx_sip::build::ResponseBuilder::to_request(
+                &request.request,
+                StatusCode::new(486).expect("valid"),
+                "Busy Here",
+            )
+            .expect("builds")
+            .set_header(
+                &HeaderName::To,
+                bytes::Bytes::from(format!("<sip:load@sipx.test>;tag=load{invitations}")),
+            )
+            .expect("valid")
+            .build();
+            handle
+                .respond(&request.key, refusal)
+                .await
+                .expect("refuses");
+        }
+        invitations
+    });
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        sipx()
+            .args([
+                "load",
+                &format!("sip:load@{address}"),
+                "--rate",
+                "100",
+                "--concurrency",
+                "3",
+                "--calls",
+                "3",
+                "--seed",
+                "41",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("the bounded run finishes")
+    .expect("load runs");
+    assert_eq!(serving.await.expect("the peer finishes"), 3);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 summary");
+    assert_eq!(stdout.lines().count(), 1, "one final record: {stdout}");
+    let summary: serde_json::Value = serde_json::from_str(stdout.trim()).expect("JSON summary");
+    assert_eq!(summary["schema"], "sipx.load.v1");
+    assert_eq!(summary["seed"], 41);
+    assert_eq!(summary["outcomes"]["attempted"], 3);
+    let rejected = summary["outcomes"]["rejected"].as_u64().unwrap_or(0);
+    let stopped = summary["outcomes"]["timed_out"].as_u64().unwrap_or(0);
+    assert_eq!(rejected + stopped, 3, "every admitted call is classified");
+    assert_eq!(
+        summary["response_codes"]["486"].as_u64().unwrap_or(0),
+        rejected,
+        "only responses that arrived are counted"
+    );
+}
+
+/// DPH-11 through the process boundary: signal only after the peer has observed the first INVITE,
+/// then require the one final summary to follow cleanup. Concurrency one is load-bearing: no second
+/// invitation can be admitted while the owned first call is still cleaning up.
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupted_load_stops_admission_and_summarizes_after_cleanup() {
+    let _scenario = process_scenario().await;
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("peer binds");
+    let address = peer.local_addr().expect("peer address");
+    let mut command = sipx();
+    command
+        .args([
+            "load",
+            &format!("sip:load@{address}"),
+            "--rate",
+            "100",
+            "--concurrency",
+            "1",
+            "--calls",
+            "100",
+            "--timeout",
+            "20",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().expect("load starts");
+    let process = child.id().expect("load process id");
+
+    let mut packet = [0u8; 4096];
+    let (length, _) = tokio::time::timeout(Duration::from_secs(5), peer.recv_from(&mut packet))
+        .await
+        .expect("the first admission is bounded")
+        .expect("the first INVITE arrives");
+    assert!(
+        packet
+            .get(..length)
+            .is_some_and(|bytes| bytes.starts_with(b"INVITE ")),
+        "the readiness event is an INVITE"
+    );
+
+    let signal = Command::new("kill")
+        .args(["-INT", &process.to_string()])
+        .status()
+        .await
+        .expect("sends SIGINT");
+    assert!(signal.success(), "SIGINT reaches the load process");
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .expect("interrupted cleanup is bounded")
+        .expect("load exits");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 summary");
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "one summary after cleanup: {stdout}"
+    );
+    let summary: serde_json::Value = serde_json::from_str(stdout.trim()).expect("JSON summary");
+    assert_eq!(summary["status"], "interrupted");
+    assert_eq!(summary["outcomes"]["attempted"], 1);
+    assert_eq!(summary["outcomes"]["timed_out"], 1);
+}
+
 /// A final response to an INVITE must carry a To tag (RFC 3261 §8.2.6.2): the tag is what
 /// lets a caller behind a forking proxy tell one branch's refusal from another's.
 #[tokio::test]

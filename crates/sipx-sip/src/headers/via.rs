@@ -13,6 +13,7 @@
 //! this is the header the transaction layer leans on hardest.
 
 use bytes::Bytes;
+use std::fmt;
 
 use crate::error::HeaderError;
 use crate::headers::grammar::{self, HeaderParam, find_param_start, skip_ws, trim};
@@ -25,6 +26,105 @@ use crate::uri::Host;
 pub const BRANCH_MAGIC_COOKIE: &[u8] = b"z9hG4bK";
 
 const LABEL: &str = "Via";
+const OC_SEQUENCE_SCALE: u64 = 100_000;
+
+/// The overload-control capability or value carried by `Via`'s `oc` parameter (RFC 7339 §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OcParameter {
+    /// A valueless parameter: the client supports overload control.
+    Support,
+    /// A server report. Its units are selected by [`OverloadAlgorithm`].
+    Value(u64),
+}
+
+/// One algorithm token from `oc-algo` (RFC 7339 §4.2, RFC 7415 §3.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverloadAlgorithm {
+    /// Percentage loss control.
+    Loss,
+    /// Requests-per-second rate control.
+    Rate,
+    /// An extension a peer advertised. Kept so negotiation can ignore rather than corrupt it.
+    Other(Vec<u8>),
+}
+
+/// RFC 7339's decimal `oc-seq`, normalized to five fractional decimal places.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OverloadSequence(u64);
+
+impl OverloadSequence {
+    /// Construct an integral sequence value for a locally generated report.
+    #[must_use]
+    pub fn from_integer(value: u64) -> Option<Self> {
+        value.checked_mul(OC_SEQUENCE_SCALE).map(Self)
+    }
+
+    /// Parse `1*12DIGIT "." 1*5DIGIT` from RFC 7339 §13.1.
+    pub fn parse(value: &[u8]) -> Result<Self, HeaderError> {
+        let Some(dot) = value.iter().position(|byte| *byte == b'.') else {
+            return Err(HeaderError::Syntax { header: LABEL });
+        };
+        let whole = value.get(..dot).unwrap_or(&[]);
+        let fraction = value.get(dot.saturating_add(1)..).unwrap_or(&[]);
+        if whole.is_empty()
+            || whole.len() > 12
+            || fraction.is_empty()
+            || fraction.len() > 5
+            || !whole.iter().all(u8::is_ascii_digit)
+            || !fraction.iter().all(u8::is_ascii_digit)
+        {
+            return Err(HeaderError::Syntax { header: LABEL });
+        }
+        let whole = decimal_u64(whole)?;
+        let fraction_value = decimal_u64(fraction)?;
+        let missing = 5usize.saturating_sub(fraction.len());
+        let scale = 10u64
+            .checked_pow(u32::try_from(missing).unwrap_or(0))
+            .ok_or(HeaderError::Syntax { header: LABEL })?;
+        let scaled_fraction = fraction_value
+            .checked_mul(scale)
+            .ok_or(HeaderError::Syntax { header: LABEL })?;
+        whole
+            .checked_mul(OC_SEQUENCE_SCALE)
+            .and_then(|base| base.checked_add(scaled_fraction))
+            .map(Self)
+            .ok_or(HeaderError::Syntax { header: LABEL })
+    }
+}
+
+impl fmt::Display for OverloadSequence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let whole = self.0 / OC_SEQUENCE_SCALE;
+        let fraction = self.0 % OC_SEQUENCE_SCALE;
+        if fraction == 0 {
+            return write!(formatter, "{whole}.0");
+        }
+        let mut digits = format!("{fraction:05}");
+        while digits.ends_with('0') {
+            digits.pop();
+        }
+        write!(formatter, "{whole}.{digits}")
+    }
+}
+
+/// The four typed overload-control parameters on one `Via` hop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViaOverload {
+    /// `None` when `oc` is absent; otherwise capability or server value.
+    pub oc: Option<OcParameter>,
+    /// The offered list in a request or the single selected algorithm in a response.
+    pub algorithms: Vec<OverloadAlgorithm>,
+    /// Server-only validity. Absence is interpreted by the transport as 500 ms.
+    pub validity: Option<std::time::Duration>,
+    /// Server-only report sequence.
+    pub sequence: Option<OverloadSequence>,
+}
+
+fn decimal_u64(value: &[u8]) -> Result<u64, HeaderError> {
+    let text = std::str::from_utf8(value).map_err(|_| HeaderError::Syntax { header: LABEL })?;
+    text.parse()
+        .map_err(|_| HeaderError::Syntax { header: LABEL })
+}
 
 /// One `Via` value.
 #[derive(Debug, Clone)]
@@ -45,6 +145,68 @@ pub struct Via {
 }
 
 impl Via {
+    /// Decode the RFC 7339/RFC 7415 overload-control parameters on this hop.
+    ///
+    /// Presence and value of `oc` stay distinct because the client sends the former and only a
+    /// server may send the latter. Invalid numbers are errors rather than zero: zero has protocol
+    /// meaning for both loss/rate and validity.
+    pub fn overload(&self) -> Result<ViaOverload, HeaderError> {
+        let oc = match grammar::param(&self.params, "oc") {
+            None => None,
+            Some(parameter) => match parameter.value.as_deref() {
+                None => Some(OcParameter::Support),
+                Some(value) => Some(OcParameter::Value(decimal_u64(value)?)),
+            },
+        };
+        let algorithms = match grammar::param(&self.params, "oc-algo") {
+            None => Vec::new(),
+            Some(parameter) => {
+                let value = parameter
+                    .value
+                    .as_deref()
+                    .ok_or(HeaderError::Syntax { header: LABEL })?;
+                let algorithms: Vec<_> = value
+                    .split(|byte| *byte == b',')
+                    .map(|token| match grammar::trim(token) {
+                        token if token.eq_ignore_ascii_case(b"loss") => OverloadAlgorithm::Loss,
+                        token if token.eq_ignore_ascii_case(b"rate") => OverloadAlgorithm::Rate,
+                        token => OverloadAlgorithm::Other(token.to_vec()),
+                    })
+                    .collect();
+                if algorithms.iter().any(|algorithm| {
+                    matches!(algorithm, OverloadAlgorithm::Other(token) if token.is_empty() || !token.iter().all(u8::is_ascii_alphanumeric))
+                }) {
+                    return Err(HeaderError::Syntax { header: LABEL });
+                }
+                algorithms
+            }
+        };
+        let validity = grammar::param(&self.params, "oc-validity")
+            .map(|parameter| {
+                let value = parameter
+                    .value
+                    .as_deref()
+                    .ok_or(HeaderError::Syntax { header: LABEL })?;
+                decimal_u64(value).map(std::time::Duration::from_millis)
+            })
+            .transpose()?;
+        let sequence = grammar::param(&self.params, "oc-seq")
+            .map(|parameter| {
+                parameter
+                    .value
+                    .as_deref()
+                    .ok_or(HeaderError::Syntax { header: LABEL })
+                    .and_then(OverloadSequence::parse)
+            })
+            .transpose()?;
+        Ok(ViaOverload {
+            oc,
+            algorithms,
+            validity,
+            sequence,
+        })
+    }
+
     /// The `branch` parameter, which identifies the transaction.
     #[must_use]
     pub fn branch(&self) -> Option<&[u8]> {
@@ -291,6 +453,46 @@ mod tests {
 
         let absent = via(b"SIP/2.0/UDP h.example.com;branch=z9hG4bKx");
         assert_eq!(absent.rport(), None);
+    }
+
+    #[test]
+    fn overload_parameters_are_typed_for_both_parties() {
+        let offered = via(b"SIP/2.0/UDP client.example;branch=z9hG4bKx;oc;oc-algo=\"loss,rate\"")
+            .overload()
+            .expect("valid overload offer");
+        assert_eq!(offered.oc, Some(OcParameter::Support));
+        assert_eq!(
+            offered.algorithms,
+            vec![OverloadAlgorithm::Loss, OverloadAlgorithm::Rate]
+        );
+        assert_eq!(offered.validity, None);
+        assert_eq!(offered.sequence, None);
+
+        let report = via(
+            b"SIP/2.0/UDP server.example;branch=z9hG4bKy;oc=37;oc-algo=rate;\
+              oc-validity=750;oc-seq=42.125",
+        )
+        .overload()
+        .expect("valid overload report");
+        assert_eq!(report.oc, Some(OcParameter::Value(37)));
+        assert_eq!(report.algorithms, vec![OverloadAlgorithm::Rate]);
+        assert_eq!(report.validity, Some(std::time::Duration::from_millis(750)));
+        assert_eq!(
+            report.sequence,
+            Some(OverloadSequence::parse(b"42.125").expect("sequence"))
+        );
+    }
+
+    #[test]
+    fn malformed_overload_numbers_are_not_zero() {
+        for value in [
+            b"SIP/2.0/UDP h;oc=not-a-number;oc-algo=loss".as_slice(),
+            b"SIP/2.0/UDP h;oc=1.5;oc-algo=rate",
+            b"SIP/2.0/UDP h;oc=10;oc-algo=loss;oc-validity=-1",
+            b"SIP/2.0/UDP h;oc=10;oc-algo=loss;oc-seq=1",
+        ] {
+            assert!(via(value).overload().is_err(), "accepted {value:?}");
+        }
     }
 
     #[test]

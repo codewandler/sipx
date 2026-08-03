@@ -24,6 +24,7 @@ use crate::capture::{Capture, CaptureConfig, Direction};
 use crate::counters::{Counters, Meters, ShedCounts};
 use crate::error::{Error, Result};
 use crate::nat::apply_received_and_rport;
+use crate::overload::{Controller as OverloadController, OverloadConfig};
 use crate::target::{ConnectionKey, Target, TransportKind, response_destination};
 use crate::tcp::{self, Pool, PoolConfig};
 use crate::timers::TimerQueue;
@@ -112,6 +113,8 @@ pub struct Config {
     /// `None` — the default — costs one `Option` check per message and opens nothing. **A capture
     /// contains call content and identities even after redaction**; see [`CaptureConfig`].
     pub capture: Option<CaptureConfig>,
+    /// Hop-by-hop overload feedback, rate tolerance, prioritization, and randomness.
+    pub overload: OverloadConfig,
 }
 
 impl Config {
@@ -146,6 +149,7 @@ impl Config {
             #[cfg(feature = "wss")]
             wss_server: None,
             capture: None,
+            overload: OverloadConfig::default(),
             #[cfg(feature = "ws")]
             ws_keepalive: std::time::Duration::from_secs(25),
             unanswered_limit: std::time::Duration::from_secs(180),
@@ -169,6 +173,31 @@ impl Config {
         }
         if self.handshake_timeout.is_zero() {
             return Err(nonzero("handshake_timeout"));
+        }
+        if self.overload.validity.is_zero() {
+            return Err(nonzero("overload.validity"));
+        }
+        if self.overload.validity.as_millis() == 0 {
+            return Err(Error::InvalidConfig {
+                field: "overload.validity",
+                reason: "must be at least one millisecond",
+            });
+        }
+        if self.overload.peer_limit == 0 {
+            return Err(nonzero("overload.peer_limit"));
+        }
+        if matches!(self.overload.feedback, crate::OverloadFeedback::Loss(value) if value > 100) {
+            return Err(Error::InvalidConfig {
+                field: "overload.feedback",
+                reason: "loss percentage must be between 0 and 100",
+            });
+        }
+        if self.overload.rate_tolerance_intervals >= self.overload.rate_priority_tolerance_intervals
+        {
+            return Err(Error::InvalidConfig {
+                field: "overload.rate_priority_tolerance_intervals",
+                reason: "must be greater than overload.rate_tolerance_intervals",
+            });
         }
         #[cfg(feature = "ws")]
         if self.ws_keepalive.is_zero() {
@@ -512,6 +541,7 @@ impl Handle {
             let header = Header::build(HeaderName::Via, Bytes::from(via))?;
             request.headers.push_front(header);
         }
+        crate::overload::advertise(&mut request);
 
         let (events_tx, events_rx) = mpsc::channel(32);
         let (failures_tx, failures_rx) = mpsc::channel(1);
@@ -547,7 +577,8 @@ impl Handle {
     /// caller knows the dialog it belongs to.
     ///
     /// Returns once the bytes have been handed to the socket.
-    pub async fn send_directly(&self, request: Request, target: Target) -> Result<()> {
+    pub async fn send_directly(&self, mut request: Request, target: Target) -> Result<()> {
+        crate::overload::advertise(&mut request);
         let (sent_tx, sent_rx) = oneshot::channel();
         self.commands
             .send(Command::Direct {
@@ -944,6 +975,15 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         handed_over: HashMap::new(),
         reconnect: HashMap::new(),
         unanswered_limit: config.unanswered_limit,
+        overload: OverloadController::new(
+            config.overload.rate_tolerance_intervals,
+            config.overload.rate_priority_tolerance_intervals,
+            config.overload.peer_limit,
+        ),
+        overload_config: config.overload.clone(),
+        overload_epoch: tokio::time::Instant::now(),
+        overload_sequence: 0,
+        server_overloaded_until: None,
         clients: HashMap::new(),
         incoming: incoming_tx,
         commands: commands_rx,
@@ -1386,6 +1426,13 @@ struct Driver {
     reconnect: HashMap<TransactionKey, Target>,
     /// How long a request may sit unanswered before its transaction is abandoned.
     unanswered_limit: std::time::Duration,
+    /// Per-next-hop RFC 7339/RFC 7415 state, serialized with sends and responses on this loop.
+    overload: OverloadController,
+    overload_config: OverloadConfig,
+    overload_epoch: tokio::time::Instant,
+    overload_sequence: u64,
+    /// Queue-full detector state advertised on responses until its stated validity expires.
+    server_overloaded_until: Option<tokio::time::Instant>,
     clients: HashMap<TransactionKey, ClientSink>,
     incoming: mpsc::Sender<Incoming>,
     commands: mpsc::Receiver<Command>,
@@ -1808,6 +1855,10 @@ impl Driver {
         generation: Option<u64>,
         #[cfg(feature = "quic")] quic_reply: Option<crate::quic::Reply>,
     ) {
+        let overload_response = match &message {
+            Message::Response(response) => Some(response.clone()),
+            Message::Request(_) => None,
+        };
         // The one site inbound messages are counted, whichever transport carried them here: a
         // datagram arrives through `on_datagram` and a stream message through `on_net_event`, and
         // both funnel into this method (§12).
@@ -1861,6 +1912,7 @@ impl Driver {
                 self.perform(&key, outputs, Some((source, transport))).await;
             }
             Dispatch::Matched { key, outputs } => {
+                self.observe_overload_response(source, overload_response.as_ref());
                 self.perform(&key, outputs, Some((source, transport))).await;
             }
             Dispatch::Unmatched(message) => {
@@ -2024,6 +2076,16 @@ impl Driver {
                 failures,
                 reply,
             } => {
+                let now =
+                    tokio::time::Instant::now().saturating_duration_since(self.overload_epoch);
+                let category = (self.overload_config.categorize)(&request);
+                if !self.overload.admit(target.addr, category, now) {
+                    self.meters.overload_rejection();
+                    // discard: the caller dropped its wait; the rejection is already counted and
+                    // no network request was lost.
+                    let _ = reply.send(Err(Error::Overloaded { peer: target.addr }));
+                    return;
+                }
                 let Some((key, outputs)) = self
                     .layer
                     .send_request(*request, target.transport.reliability())
@@ -2045,39 +2107,22 @@ impl Driver {
                 key,
                 response,
                 sent,
-            } => {
-                // Nothing is removed from `handed_over` here, and that is the point. A
-                // provisional response is not an answer: an application that sends 180 Ringing
-                // and then wedges has a transaction sitting in `Proceeding`, which RFC 3261
-                // §17.2.1 gives no timer either. Clearing on any response would exempt exactly
-                // the calls most likely to be abandoned — the ones that rang. A transaction
-                // that *is* answered reaches `Output::Terminated` through Timer J at 32 s, well
-                // inside the limit, and is cleaned there.
-                if self.layer.server_request(&key).is_none() {
-                    // No transaction to answer on. Reporting success here would tell an
-                    // application its 200 OK went out while the caller heard nothing — the
-                    // caller times out believing the call failed, the callee believes it is up.
-                    // discard: the caller stopped waiting. A dropped receiver means nobody is listening
-                    // for this answer, so nothing is lost and there is nothing worth counting.
-                    let _ = sent.send(Err(Error::NoTransaction));
-                    return;
-                }
-                let outputs = self.layer.send_response(&key, *response);
-                // The success reported here is *produced by* the send, not written after it: the
-                // only way to obtain the `Ok` is from the `Performed` that `perform` hands back.
-                // Reversing these two statements does not compile, which is the guarantee `X-36`
-                // asked for — a test could not see the difference, because on a `current_thread`
-                // runtime the oneshot does not yield and `perform` finished either way.
-                let performed = self.perform(&key, outputs, None).await;
-                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
-                // for this answer, so nothing is lost and there is nothing worth counting.
-                let _ = sent.send(performed.into_result());
-            }
+            } => self.on_respond_command(key, response, sent).await,
             Command::Direct {
                 request,
                 target,
                 sent,
             } => {
+                let now =
+                    tokio::time::Instant::now().saturating_duration_since(self.overload_epoch);
+                let category = (self.overload_config.categorize)(&request);
+                if !self.overload.admit(target.addr, category, now) {
+                    self.meters.overload_rejection();
+                    // discard: the caller dropped its wait; the rejection is already counted and
+                    // no network request was lost.
+                    let _ = sent.send(Err(Error::Overloaded { peer: target.addr }));
+                    return;
+                }
                 let method = request.method.clone();
                 let bytes = Message::Request(*request).to_bytes();
                 self.observe_out(&bytes, &target, false);
@@ -2132,6 +2177,30 @@ impl Driver {
         }
     }
 
+    async fn on_respond_command(
+        &mut self,
+        key: TransactionKey,
+        response: Box<Response>,
+        sent: oneshot::Sender<Result<()>>,
+    ) {
+        // Nothing is removed from `handed_over` here, and that is the point. A provisional
+        // response is not an answer: an application that sends 180 Ringing and then wedges has a
+        // transaction sitting in `Proceeding`, which RFC 3261 §17.2.1 gives no timer either.
+        if self.layer.server_request(&key).is_none() {
+            // No transaction to answer on. Reporting success here would tell an application its
+            // 200 OK went out while the caller heard nothing.
+            // discard: the caller stopped waiting, so nothing is lost or worth counting.
+            let _ = sent.send(Err(Error::NoTransaction));
+            return;
+        }
+        let outputs = self.layer.send_response(&key, *response);
+        // The success reported here is produced by the send: consuming `Performed` is the only
+        // way to obtain the `Ok`, so reversing these statements does not compile (`X-36`).
+        let performed = self.perform(&key, outputs, None).await;
+        // discard: the caller stopped waiting, so nothing is lost or worth counting.
+        let _ = sent.send(performed.into_result());
+    }
+
     /// Perform a transaction's outputs, in order.
     async fn perform(
         &mut self,
@@ -2142,6 +2211,12 @@ impl Driver {
         for output in outputs {
             match output {
                 Output::Send(message) => {
+                    let mut message = *message;
+                    if let Message::Response(response) = &mut message
+                        && let Some(request) = self.layer.server_request(key).cloned()
+                    {
+                        self.decorate_overload_response(response, &request);
+                    }
                     let target =
                         self.destinations.get(key).cloned().or_else(|| {
                             origin.map(|(addr, transport)| Target::new(addr, transport))
@@ -2153,7 +2228,7 @@ impl Driver {
                     };
                     // Kept before `to_bytes` consumes the message: a failed transmit is counted by
                     // method (§12.3), and after this line the method is no longer reachable.
-                    let method = match &*message {
+                    let method = match &message {
                         Message::Request(request) => Some(request.method.clone()),
                         Message::Response(_) => None,
                     };
@@ -2524,8 +2599,54 @@ impl Driver {
         let Ok(builder) = builder.header(HeaderName::RetryAfter, Bytes::from_static(b"5")) else {
             return;
         };
+        self.server_overloaded_until =
+            Some(tokio::time::Instant::now() + self.overload_config.validity);
         let outputs = self.layer.send_response(key, builder.build());
         Box::pin(self.perform(key, outputs, None)).await;
+    }
+
+    /// Accept feedback only after the transaction layer has authenticated it by matching a live
+    /// client transaction. An unmatched response is application data, not controller input.
+    fn observe_overload_response(&mut self, source: SocketAddr, response: Option<&Response>) {
+        if let Some(response) = response {
+            let now = tokio::time::Instant::now().saturating_duration_since(self.overload_epoch);
+            self.overload.observe(source, response, now);
+        }
+    }
+
+    /// Decorate every server response with the queue detector's current state.
+    fn decorate_overload_response(&mut self, response: &mut Response, request: &Request) {
+        let now = tokio::time::Instant::now();
+        let active_for = self
+            .server_overloaded_until
+            .and_then(|until| until.checked_duration_since(now));
+        let (feedback, validity) = match active_for {
+            Some(remaining) if !remaining.is_zero() => {
+                let millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
+                (
+                    self.overload_config.feedback,
+                    std::time::Duration::from_millis(millis),
+                )
+            }
+            _ => {
+                self.server_overloaded_until = None;
+                let stopped = match self.overload_config.feedback {
+                    crate::OverloadFeedback::Loss(_) => crate::OverloadFeedback::Loss(0),
+                    crate::OverloadFeedback::Rate(_) => crate::OverloadFeedback::Rate(0),
+                };
+                (stopped, std::time::Duration::ZERO)
+            }
+        };
+        self.overload_sequence = if self.overload_sequence >= 999_999_999_999 {
+            1
+        } else {
+            self.overload_sequence.saturating_add(1)
+        };
+        if let Some(sequence) =
+            sipx_sip::headers::OverloadSequence::from_integer(self.overload_sequence)
+        {
+            crate::overload::add_feedback(response, request, feedback, validity, sequence);
+        }
     }
 
     fn local_addr(&self) -> SocketAddr {
@@ -2584,6 +2705,11 @@ mod tests {
             handed_over: std::collections::HashMap::new(),
             reconnect: std::collections::HashMap::new(),
             unanswered_limit: Duration::from_secs(60),
+            overload: crate::overload::Controller::new(5, 10, 1024),
+            overload_config: crate::OverloadConfig::default(),
+            overload_epoch: tokio::time::Instant::now(),
+            overload_sequence: 0,
+            server_overloaded_until: None,
             clients: std::collections::HashMap::new(),
             incoming,
             commands,

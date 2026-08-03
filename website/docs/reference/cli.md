@@ -5,7 +5,7 @@ description: Every sipx command, flag, exit code and JSON field — the surface 
 
 # CLI reference
 
-One binary, `sipx`. Four commands do work — `dial`, `answer`, `register` and `peers`, documented
+One binary, `sipx`. Five commands do work — `dial`, `answer`, `load`, `register` and `peers`, documented
 below — alongside `help` and `version`. Global: `--json` switches the report to a single-line JSON
 object on stdout; `-v`/`-vv` raise log verbosity on stderr (never stdout, so JSON stays
 parseable); `-h`/`--help` on any command.
@@ -24,7 +24,8 @@ say nothing. Both ways a value goes missing are refused:
 
 Every `<S>` value is a whole number of seconds from `0` through `4294967295`. Negative values,
 fractions, units such as `3s`, and values above that range are usage errors naming the flag. Zero is
-deliberate per command: `--duration 0` ends an established call immediately, `--timeout 0` uses the
+deliberate per command: `--duration 0` ends an established call immediately (and is refused as an
+admission bound by `load`), `--timeout 0` uses the
 transaction layer's expiry, `--wait 0` returns immediately when no call is queued, and `--expires 0`
 asks the registrar to remove the binding.
 
@@ -92,6 +93,40 @@ Reports twice: `status: "listening"` with the bound `address` first, then
 `dtmf` when digits arrived and `recording` when `--record` was given. Explicit selection adds the
 requested transport to the listening report and both requested and negotiated transport to the
 terminal report.
+
+## `sipx load <URI>`
+
+Place a finite, reproducible call load:
+
+```sh
+sipx load sip:load@192.0.2.1:5060 --rate 10 --concurrency 32 --calls 100 --seed 41 --json
+```
+
+| Flag | Meaning |
+|---|---|
+| `--rate <CALLS/S>` | Positive finite arrival rate; required |
+| `--concurrency <N>` | Positive ceiling on simultaneously active calls; required |
+| `--calls <N>` | Stop after admitting this many calls |
+| `--duration <S>` | Stop admission after this many seconds |
+| `--call-duration <S>` | End each answered call after this many seconds (default 0) |
+| `--timeout <S>` | Bound each call setup (default 20) |
+| `--seed <N>` | Reproduce arrival jitter and deterministic media (default 0) |
+| `--from <URI>` | Address used by the generated callers |
+| `--password <P>` | Digest password; prefer `SIPX_PASSWORD` |
+| `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
+| `--transport <T>` | Use `udp`, `tcp`, `tls`, `ws`, or `wss` (default `udp`) |
+| TLS options | The same verified-name, trust-root and client-identity options as `dial` |
+
+At least one of `--calls` and `--duration` is required; when both are present, the first reached
+closes admission. Reaching a bound or receiving Ctrl-C signals all owned calls to end and waits for
+their cleanup before emitting the summary. Cleanup has a 40-second failure bound, longer than the
+SIP transaction ceiling; exhaustion exits 1 and reports `status: "failed"`.
+
+JSON output is exactly one `sipx.load.v1` object. It records the seed and effective limits;
+attempted, connected, rejected, timed-out and failed calls; peak concurrency; response-code counts;
+p50/p95/p99 setup time; and aggregate media loss, jitter and MOS snapshots. Missing measurements
+are `null`, not zero. A run that reaches a configured bound is `completed`; a cleanly drained Ctrl-C
+is `interrupted`.
 
 ## `sipx register <AOR>`
 

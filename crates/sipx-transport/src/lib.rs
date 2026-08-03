@@ -37,6 +37,7 @@ pub mod dns;
 pub mod endpoint;
 pub mod error;
 pub mod nat;
+pub mod overload;
 #[cfg(feature = "quic")]
 pub mod quic;
 pub mod resolve;
@@ -56,6 +57,7 @@ pub use counters::{
 };
 pub use endpoint::{Config, Handle, Incoming, Responses, Unmatched, bind, new_branch};
 pub use error::{Error, Result};
+pub use overload::{OverloadConfig, OverloadFeedback, RequestCategory};
 pub use resolve::{Naptr, Resolver, Srv, resolve};
 pub use stun::Reply as StunReply;
 pub use target::{ConnectionKey, Target, TransportKind};

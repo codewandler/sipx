@@ -38,10 +38,11 @@ test cases.
   `Expectation` carries the effects, the conclusion, the delivered `seq`s, the knobs consulted, the
   legs and what must *not* have happened. Keeping the expectation data rather than a closure is
   what lets `A-2`/`A-4` reuse a vector's verdict instead of restating it.
-- **AC-1 … AC-9 all run**, before `C-3` and `C-5` exist, which was the story's point. What is under
-  test is the *actor's* logic — delivery, §6.3's alternation, `seq` and redelivery, the bounded
-  queue, §6.1's blocking discipline, §9.2 — not the interpreter's. When `C-5` lands it replaces the
-  instruction-execution half and the scenarios keep their expectations.
+- **AC-1 … AC-9 all run**, before `C-3` and `C-5` existed, which was the story's point. The harness
+  still carries the provisional instruction-execution half it needed then. `C-5` has since landed,
+  so migrating that half to `sipx_app_protocol::Interpreter` is now an open `A-2` requirement;
+  until then these scenarios remain useful actor-policy evidence but do not prove a
+  sole-interpreter architecture.
 - **Acceptance 4 is enforced by a type, not by review.** `Binding::respond` returns what the app
   *will* say **and how long that will take**. A real HTTP client cannot answer the second half
   before making the call, so it cannot implement the trait in good faith; combined with a `Virtual`
@@ -51,7 +52,8 @@ test cases.
   so adding a fifth knob without a scenario fails a test rather than going quietly untested. A test
   also shows a foreign binding being held to them, and being *failed* when it misbehaves.
 - **Two readings the spec leaves implicit** are recorded in `scenario`'s module docs, because a
-  vector's outcome depends on each and `C-5` must agree or correct them:
+  vector's outcome depends on each. The protocol interpreter now owns the normative reading; the
+  provisional harness interpreter must be migrated rather than treated as a second authority:
   1. An empty document does not replace the program — §6.3 calls a response "the entire new
      program" *and* calls an empty one "keep going", which only reconcile if empty changes nothing.
   2. A digit consumed by a running `gather` is not also delivered as `call.dtmf`. AC-3's barge-in is

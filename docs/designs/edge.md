@@ -31,6 +31,39 @@ be able to hold with no media path at all, and §3.2.3 (media termination) the o
 already exists. Nothing here makes sipx a proxy: a B2BUA is two user agents, which is exactly why
 it belongs in a user-agent stack while forking and Record-Route insertion do not.
 
+### The coupling primitive (`C-1`)
+
+`sipx-call::Coupling` is one owner for two confirmed `Call`s and their two routed request inboxes.
+Its driver selects over the legs independently; it never places either call or either media session
+behind a shared lock. A BYE accepted on one leg ends the peer with a BYE before the driver returns.
+The optional `sipx-media::Bridge` remains two channel-fed forwarding tasks and is rebuilt from the
+sessions the calls own, so a stalled media direction cannot hold the signalling driver or its peer.
+
+Offer/answer policy is a separate sans-I/O value, `CouplingState`, because the same decisions are
+needed before a confirmed `Call` exists. It owns one negotiation state per leg and names every legal
+offer axis: the initial INVITE, reliable provisional, PRACK, UPDATE and re-INVITE. Beginning an
+exchange marks the receiving leg as owing an answer and the peer leg as having an offer outstanding;
+only completing or failing that exchange clears both. If the other leg is already exchanging an
+offer, the arrival is refused 491 while the confirmed driver continues polling that routed inbox.
+The request's UAC owns the later randomised retry; retaining an `Incoming` after its final 491 would
+attempt to reuse a finished server transaction. The full table and lifecycle mapping are normative in
+[`specs/call-coupling.md`](../specs/call-coupling.md).
+
+The split is deliberate: endpoint routing decides which two user-agent legs to create.
+`EarlyCoupling` then owns the inbound `Invitation`/`Ringing`, outbound `Dialing`, and their routed
+inboxes; it executes PRACK, early UPDATE, CANCEL and final-status mapping before producing a
+`ConfirmedCoupling`. `CouplingState` supplies the shared decisions and `Coupling` takes over the
+confirmed calls. Listener configuration, target selection, forking and location lookup remain
+product work.
+
+The present call API always puts an offer in each initial INVITE and treats provisional SDP as its
+answer. It cannot originate an offer in a reliable provisional or negotiate an offer/answer in a
+PRACK body. The application also creates those initial INVITE legs before `EarlyCoupling` owns their
+pending state, so the owner does not relay that already-sent axis. Those carrier shapes remain an
+explicit C-1 gap; the concrete extensions are an owning initial dial constructor, `Ringing` support
+for sending an offer-bearing provisional, `Dialing` support for surfacing it as an offer rather than
+an answer, and SDP negotiation in `Ringing::on_prack`.
+
 ## Alternatives considered
 
 - **Build the edge here, as a `sipx-edge` crate.** Rejected. It would put configuration,
@@ -42,7 +75,7 @@ it belongs in a user-agent stack while forking and Record-Route insertion do not
   it outside means a second, diverging model of a state sipx already tracks — and it is the state
   whose edge cases (an early offer, a glare-losing re-INVITE) are hardest to get right.
 
-## Risks & open questions
+## Risks & resolved questions
 
 - **Resolved:** whether this belongs in this repository at all. It does not; a separate platform
   ([sipx-clstr](https://github.com/codewandler/sipx-clstr)) builds the proxy, registrar and cluster
@@ -55,10 +88,16 @@ it belongs in a user-agent stack while forking and Record-Route insertion do not
   B2BUA product forwards other people's calls and stays out; the app host terminates its own,
   which is exactly the user-agent business this repository is in. The contract's kernel half is
   the [app-sdk design](app-sdk.md).
-- Open: how much of the coupling policy is data and how much is a trait. A B2BUA that can only be
-  configured is a PBX; one that is only a trait is a tutorial. `C-1` has to pick.
-- Open: whether a signalling-only B2BUA (RFC 7092 §3.1.2/§3.1.3, no media path) is worth a separate
-  mode, or falls out of the same coupling with the bridge left unattached.
+- **Resolved — protocol policy is data, application policy stays outside.** `CouplingState` is a
+  concrete state table, not a callback trait. Whether glare is 491, whether a CANCEL may cross, and
+  which answer closes which offer are protocol invariants, so making them overridable would let an
+  application configure an invalid B2BUA. Routing, admission and target choice are not fields on
+  it; the application performs those before giving the two legs to the coupling.
+- **Resolved — signalling-only is absence, not a second mode.** A coupling has no bridge unless
+  `bridge_media` is called. The offer/answer and lifecycle state is identical either way, which is
+  RFC 7092's useful distinction: media behaviour classifies the B2BUA but does not create another
+  signalling machine. The application relays the descriptions selected by `CouplingState` directly
+  when it stays off the media path; attaching the bridge terminates the two negotiated sessions.
 
 ## Acceptance / done
 

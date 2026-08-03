@@ -330,11 +330,10 @@ fn section_11_has_a_test_for_every_vector() {
     }
 }
 
-/// The spec's status line says experimental, and so must the crate — Acceptance asks for the two
-/// to match, and a stability claim that is true in one place and not the other is worse than
-/// either alone.
+/// The spec's wire line remains experimental after the Rust crate's first real caller graduates
+/// its API. The two claims are deliberately different and both must remain visible.
 #[test]
-fn the_spec_and_the_crate_agree_that_this_is_experimental() {
+fn the_spec_and_the_crate_agree_that_the_wire_is_experimental() {
     assert!(
         SPEC.contains("**experimental**"),
         "the spec no longer says experimental; the crate docs and README must change with it"
@@ -346,7 +345,7 @@ fn the_spec_and_the_crate_agree_that_this_is_experimental() {
     );
     let lib = include_str!("../src/lib.rs");
     assert!(
-        lib.contains("# Experimental"),
-        "the crate docs must say what the spec says"
+        lib.contains("wire line remains") && lib.contains("Experimental"),
+        "the supported crate docs must retain the wire's experimental qualification"
     );
 }

@@ -9,6 +9,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Loaded SIP neighbours can negotiate bounded overload control (`T-22`).** Clients advertise and
+  obey loss- and rate-based control through typed `Via` parameters, discard stale reports, and
+  expose a prioritisation hook. Servers decorate every response—including transaction-generated
+  provisional responses—with sequenced feedback while saturation remains active. Per-peer state is
+  bounded, unmatched responses cannot install policy, and local shedding is counted before I/O.
+
+- **Two live dialogs can be owned and driven through one coupling (`C-1`, partial).** The coupling
+  propagates final failure, cancellation, BYE, confirmed UPDATE and re-INVITE offer/answer while
+  retaining optional media bridging. Its early state owns both pending legs, handles reliable
+  provisional acknowledgements and early UPDATE, and closes crossed-answer races with BYE. Initial
+  INVITE relay and offer/answer carried by reliable provisional responses or PRACK remain explicit
+  open axes, so the story and M9 remain in progress.
+
+- **Webhook applications can drive real calls through the document-mode host (`A-2`).**
+  `sipx-app` resolves named signing keys at startup, sends stable HMAC-signed contract envelopes
+  through one bounded non-redirecting HTTP client shared by every app, and feeds opaque response
+  bodies to the `sipx-app-protocol` interpreter. A per-call actor executes the interpreter's answer, prompt,
+  gather and teardown effects; deterministic and loopback vectors cover timeout, retry, 4xx, 5xx,
+  redirects and key rotation, and a shell proof drives the same path from the `sipx` CLI. This real
+  caller graduates the protocol crate's Rust vocabulary, codec, interpreter and call adapter to
+  Supported; the `sipx.app.v1` wire name remains Experimental until its separate two-application
+  criterion is met.
+
+- **The diagnostic phone can run finite, reproducible call load (`P-12`).** `sipx load` reuses the
+  paced `sipx-testkit` scheduler, requires rate, concurrency and a call-count or duration bound, and
+  shares one stop signal across admission and every owned call. Count, duration and Ctrl-C paths
+  drain cleanup under a documented finite budget before emitting one `sipx.load.v1` summary with
+  effective limits, cause-separated outcomes, response codes, setup percentiles and media quality.
+
 - **Authenticated caller identity can be signed and verified without hidden I/O (`S-20`).**
   `sipx-sip` provides typed RFC 8224 `Identity` fields, canonical identities, deterministic
   baseline `PASSporT` construction and ES256 signing/verification. `sipx-ua` adds caller-supplied

@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_sip::build::RequestBuilder;
+use sipx_sip::headers::{OcParameter, OverloadAlgorithm, Via};
 use sipx_sip::{HeaderName, Host, HostName, Method, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind, new_branch};
 use tokio::sync::mpsc::Receiver;
@@ -169,7 +170,93 @@ async fn a_shed_request_is_refused_rather_than_ignored() {
         response.headers.value(&HeaderName::RetryAfter).is_some(),
         "a 503 without Retry-After tells a peer to back off for an unspecified time"
     );
+    let overload = response
+        .headers
+        .typed::<Via>()
+        .expect("503 has a Via")
+        .expect("Via parses")
+        .overload()
+        .expect("overload parameters parse");
+    assert_eq!(overload.oc, Some(OcParameter::Value(100)));
+    assert_eq!(overload.algorithms, vec![OverloadAlgorithm::Loss]);
+    assert!(
+        overload.validity.is_some_and(|validity| {
+            !validity.is_zero() && validity <= Duration::from_millis(500)
+        }),
+        "the 503 reports the detector's remaining validity"
+    );
+    assert!(overload.sequence.is_some(), "a server report is sequenced");
     assert!(busy.shed().requests > 0, "and the refusal is counted");
+}
+
+#[tokio::test]
+async fn an_application_response_reports_active_control_while_the_queue_remains_saturated() {
+    let (busy, mut incoming) = saturated().await;
+    let (sender, _sender_incoming) = bind(Config::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
+    let busy_addr = busy.local_addr();
+
+    let mut responses = sender
+        .send(
+            request(&sender, &Method::Options, "answer-during-overload@sipx"),
+            Target::udp(busy_addr),
+        )
+        .await
+        .expect("first request sends");
+    let answerable = tokio::time::timeout(Duration::from_secs(2), incoming.recv())
+        .await
+        .expect("first request arrives")
+        .expect("incoming channel remains open");
+
+    // The first flood request occupies the sole queue slot and later requests activate the
+    // queue-full detector. Do not drain that slot: the application is still saturated when it
+    // answers the earlier request retained above.
+    for _ in 0..8u32 {
+        let _ = sender
+            .send_directly(
+                request(&sender, &Method::Options, "saturated-answer@sipx"),
+                Target::udp(busy_addr),
+            )
+            .await;
+    }
+    until(
+        SHEDDING_BOUND,
+        "the full application queue never activated overload feedback",
+        async || busy.shed().requests > 0,
+    )
+    .await;
+
+    let status = sipx_sip::StatusCode::new(200).expect("status");
+    let response = sipx_sip::ResponseBuilder::to_request(&answerable.request, status, "OK")
+        .expect("response")
+        .build();
+    busy.respond(&answerable.key, response)
+        .await
+        .expect("response sends");
+    let response = tokio::time::timeout(Duration::from_secs(2), responses.final_response())
+        .await
+        .expect("response arrives")
+        .expect("final response");
+    let overload = response
+        .headers
+        .typed::<Via>()
+        .expect("response has Via")
+        .expect("Via parses")
+        .overload()
+        .expect("overload parameters parse");
+    assert_eq!(overload.oc, Some(OcParameter::Value(100)));
+    assert_eq!(overload.algorithms, vec![OverloadAlgorithm::Loss]);
+    assert!(
+        overload
+            .validity
+            .is_some_and(|validity| !validity.is_zero()),
+        "an application response must not cancel active queue-full feedback"
+    );
+    assert!(overload.sequence.is_some());
+
+    sender.shutdown().await;
+    busy.shutdown().await;
 }
 
 /// An endpoint that is keeping up sheds nothing. Without this the counter could be incremented

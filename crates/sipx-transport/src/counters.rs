@@ -309,6 +309,8 @@ pub struct Counters {
     /// The same value [`crate::Handle::shed`] returns, embedded rather than recounted: two tallies
     /// of one event would eventually disagree, and then neither could be trusted.
     pub shed: ShedCounts,
+    /// Locally rejected outbound requests under RFC 7339/RFC 7415 control.
+    pub overload_rejections: u64,
     /// Responses that matched no client transaction (RFC 3261 §16.7).
     ///
     /// Counted whether or not anyone is watching for them through
@@ -389,6 +391,7 @@ impl Counters {
     #[must_use]
     pub fn any_loss(&self) -> bool {
         self.shed.any()
+            || self.overload_rejections > 0
             || self.discards.total() > 0
             || self.capture.dropped > 0
             || self.unsent.total() > 0
@@ -405,6 +408,7 @@ impl Counters {
 #[derive(Debug, Default)]
 pub(crate) struct Meters {
     pub(crate) shed: Shed,
+    overload_rejections: AtomicU64,
     per_transport: [TransportMeter; TRANSPORTS],
     unmatched_responses: AtomicU64,
     retransmissions: AtomicU64,
@@ -432,6 +436,11 @@ fn read(counter: &AtomicU64) -> u64 {
 }
 
 impl Meters {
+    /// An outbound request was rejected by active overload control.
+    pub(crate) fn overload_rejection(&self) {
+        bump(&self.overload_rejections);
+    }
+
     /// The meter for one transport.
     fn meter(&self, transport: TransportKind) -> Option<&TransportMeter> {
         self.per_transport.get(slot(transport))
@@ -573,6 +582,7 @@ impl Meters {
                 acks: read(&self.shed.acks),
                 unmatched: read(&self.shed.unmatched),
             },
+            overload_rejections: read(&self.overload_rejections),
             unmatched_responses: read(&self.unmatched_responses),
             retransmissions_sent: read(&self.retransmissions),
             timeouts: TimeoutCounts {

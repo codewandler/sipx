@@ -1591,7 +1591,7 @@ async fn a_retransmitted_2xx_is_acknowledged_again() {
     let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
                m=audio 41000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
     let ok = format!(
-        "SIP/2.0 200 OK\r\n{}\r\n{}\r\n{};tag=peertag\r\n{}\r\n{}\r\n\
+        "SIP/2.0 202 Accepted\r\n{}\r\n{}\r\n{};tag=peertag\r\n{}\r\n{}\r\n\
          Contact: <sip:peer@127.0.0.1:{}>\r\nContent-Type: application/sdp\r\n\
          Content-Length: {}\r\n\r\n{sdp}",
         header("Via:"),
@@ -1627,7 +1627,15 @@ async fn a_retransmitted_2xx_is_acknowledged_again() {
         acks >= 2,
         "each 2xx must be acknowledged; saw {acks} ACK(s)"
     );
-    let _ = dialing.await;
+    let call = dialing
+        .await
+        .expect("dial task finishes")
+        .expect("the 202 establishes a call");
+    assert_eq!(
+        call.initial_status(),
+        202,
+        "the call retains the successful status that actually arrived"
+    );
 }
 
 /// RFC 3261 §12.2.1.1 places the first route into the Request-URI "stripping any parameters
