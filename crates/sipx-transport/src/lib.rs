@@ -25,6 +25,10 @@
 //! **Supported.** UDP, TCP, TLS and WebSocket are all in the default feature set and all carry a call.
 //! `respond` guarantees the response is on the wire before it returns — see
 //! `docs/designs/sip-transport.md`, which records that as a guarantee rather than an internal detail.
+//!
+//! **Experimental.** QUIC is enabled by default so its feature-off build is continuously checked,
+//! but its SIP mapping is a sipx specification rather than an RFC. Its API and wire choices may
+//! change if a standard mapping is published; see `docs/specs/sip-quic.md`.
 
 pub mod capture;
 pub mod counters;
@@ -33,6 +37,8 @@ pub mod dns;
 pub mod endpoint;
 pub mod error;
 pub mod nat;
+#[cfg(feature = "quic")]
+pub mod quic;
 pub mod resolve;
 pub mod stun;
 pub mod target;

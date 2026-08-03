@@ -1,6 +1,6 @@
 [package]
 name = "sipx-transport"
-description = "Async SIP transports: UDP, TCP, TLS, WebSocket, with RFC 3263 resolution"
+description = "Async SIP transports: UDP, TCP, TLS, WebSocket, QUIC, and RFC 3263 resolution"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["udp", "tcp", "dns", "tls", "ws", "wss"]
+default = ["udp", "tcp", "dns", "tls", "ws", "wss", "quic"]
 udp = []
 ## A real DNS client behind the RFC 3263 resolver trait.
 dns = ["dep:hickory-resolver"]
@@ -21,6 +21,8 @@ tls = ["tcp", "dep:tokio-rustls", "dep:rustls-pki-types", "dep:rustls-native-cer
 ## SIP over WebSocket (RFC 7118).
 ws = ["tcp", "dep:tokio-tungstenite", "dep:futures-util"]
 wss = ["ws", "tls"]
+## Experimental SIP over QUIC mapping from `docs/specs/sip-quic.md`.
+quic = ["tcp", "tls", "dep:quinn", "dep:rustls-pki-types"]
 
 [dependencies]
 sipx-sip.workspace = true
@@ -32,6 +34,7 @@ rand.workspace = true
 rustls-native-certs = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true }
 hickory-resolver = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }

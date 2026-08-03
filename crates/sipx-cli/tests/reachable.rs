@@ -4,7 +4,7 @@
 //! rather than by demonstration when `X-50` went looking for the evidence:
 //!
 //! - "one of two registrations of the same address of record can be called individually" — `T-20`
-//!   showed a UA recognising its own GRUU and refusing both the address of record and another
+//!   showed a UA distinguishing its own GRUU from both the address of record and another
 //!   instance's, against **one** agent and an `OPTIONS`. One registration and no call.
 //! - "a push wakes a client that held no connection **into an answered call**" — `T-21` showed
 //!   RFC 8599 §4.1.3's order, push then binding-refresh REGISTER then the INVITE, and stopped when
@@ -331,6 +331,13 @@ async fn called_at(
         !other.sent_to_our_gruu(&incoming.request),
         "the other instance would have claimed a call addressed to this one's GRUU"
     );
+    assert!(
+        !mine
+            .answer(&incoming)
+            .await
+            .expect("the UA admits its own GRUU"),
+        "the UA consumed an INVITE for its own GRUU instead of leaving it to the call layer"
+    );
 
     let callee = answer(mine.endpoint(), &incoming, loopback())
         .await
@@ -376,6 +383,10 @@ async fn audio_passes(caller: &Call, callee: &Call, callee_name: &str) {
 /// to the address of record resolves to **both** bindings. Being individually callable is not a
 /// property of having registered — it is a property of the GRUU, and this is where the two come apart.
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the two contacts and their independent calls are one reachability vector"
+)]
 async fn each_of_two_registrations_of_an_address_of_record_is_called_individually() {
     let (registrar_target, bindings) = registrar().await;
     let (one, mut arriving_at_one) = instance(registrar_target.clone()).await;
@@ -425,6 +436,59 @@ async fn each_of_two_registrations_of_an_address_of_record_is_called_individuall
     assert_eq!(flow_of_two, vec![two.endpoint().local_addr()]);
 
     let (caller_endpoint, _caller_incoming) = local_endpoint().await;
+
+    // Deliver the first instance's GRUU to the second instance deliberately. The routing double
+    // normally prevents this, but individual callability is only an end-to-end property if the
+    // instance itself refuses a request the upstream network misroutes. RFC 5627 §6.1 gives a
+    // GRUU that cannot be resolved the ordinary 404 shape; the UA knows more here than the proxy
+    // did, because it holds the exact public and temporary GRUUs its own registration learned.
+    let misdirected = tokio::spawn({
+        let endpoint = caller_endpoint.clone();
+        let to = gruu_of_one.clone();
+        let flow = two.endpoint().local_addr();
+        async move {
+            dial(
+                &endpoint,
+                Target::udp(flow),
+                &to,
+                &DialOptions::new("<sip:bob@sipx.test>", loopback()),
+            )
+            .await
+        }
+    });
+    let wrong_invitation = arriving_at_two
+        .recv()
+        .await
+        .expect("the deliberately misrouted INVITE reached the other instance");
+    assert_eq!(wrong_invitation.request.method, Method::Invite);
+    assert!(
+        !two.sent_to_our_gruu(&wrong_invitation.request),
+        "the second instance took the first instance's GRUU for its own"
+    );
+    if !two
+        .answer(&wrong_invitation)
+        .await
+        .expect("the UA decides whether it owns the invitation")
+    {
+        // This branch is the failing-first reproduction of X-59. Before the fix, the UA declined
+        // to act and the call layer accepted the same INVITE; carrying audio proves the defect is
+        // an answered call, not merely a request that crossed the wrong socket.
+        let wrongly_answered = answer(two.endpoint(), &wrong_invitation, loopback())
+            .await
+            .expect("the wrong instance answers when the UA leaves the INVITE unclaimed");
+        let wrong_caller = misdirected
+            .await
+            .expect("the dialling task")
+            .expect("the wrong instance established the call");
+        audio_passes(&wrong_caller, &wrongly_answered, "the wrong instance").await;
+        panic!(
+            "an INVITE for the first instance's GRUU was answered by the second and carried audio"
+        );
+    }
+    match misdirected.await.expect("the dialling task") {
+        Err(sipx_call::Error::Rejected { status: 404, .. }) => {}
+        other => panic!("a GRUU misrouted to another instance was not refused 404: {other:?}"),
+    }
 
     // The first instance's call, at the first instance's GRUU.
     let (caller_one, callee_one) = called_at(

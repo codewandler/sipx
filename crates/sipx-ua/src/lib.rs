@@ -12,8 +12,10 @@
 //! Digest is hashing and header text, and a caller whose decision logic touches no IO must be able
 //! to use it without linking one. `default-features = false` drops the `runtime` feature and with
 //! it the modules that drive a socket — `agent`, `flows`, and the error type that wraps a transport
-//! failure — leaving `auth`, `challenge`, `gruu`, `outbound`, `push` and `registrar`. The
-//! alternative for such a caller is to write digest a second time, and two implementations of one
+//! failure — leaving `auth`, `challenge`, `gruu`, `identity`, `outbound`, `push` and `registrar`.
+//! Identity signing and verification take caller-supplied time, authority policy, and credential
+//! acquisition, so they remain usable without a runtime as well. The alternative for such a caller
+//! is to write digest or identity processing a second time, and two implementations of one
 //! algorithm eventually disagree about who is authenticated.
 //!
 //! # Stability
@@ -67,6 +69,8 @@ pub mod error;
 #[cfg(feature = "runtime")]
 pub mod flows;
 pub mod gruu;
+pub mod history;
+pub mod identity;
 pub mod outbound;
 pub mod packages;
 pub mod presence;
@@ -83,6 +87,7 @@ pub use error::{Error, Result};
 #[cfg(feature = "runtime")]
 pub use flows::{Attempt, Flows};
 pub use gruu::{Gruus, Kind as GruuKind};
+pub use history::{RetargetError, retarget};
 pub use outbound::{InstanceId, Keepalive, Power, RegId};
 pub use push::{Pending, PushService, Support};
 pub use registrar::{Lease, Outcome, PathSet, Registered, Registration, ServiceRoute};

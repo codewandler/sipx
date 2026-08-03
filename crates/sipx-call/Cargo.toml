@@ -15,6 +15,9 @@ categories.workspace = true
 # libopus, and the default codec set stays the G.711 pair — mandatory-to-implement and pure
 # Rust. Enabling it does not change what a call offers; it makes `Codecs::Opus` selectable.
 opus = ["sipx-media/opus"]
+# DTLS-SRTP (RFC 5763/5764). Off by default because it links OpenSSL. Enabling it makes the
+# explicit `Keying::DtlsSrtp` policy available; it never changes the default wire behaviour.
+dtls = ["sipx-media/dtls"]
 
 [dependencies]
 rand.workspace = true
@@ -31,6 +34,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "fs", "macros"] }
 
 [dev-dependencies]
 sipx-rtp.workspace = true
+sipx-ua.workspace = true
 bytes.workspace = true
 sipx-testkit.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }

@@ -482,6 +482,16 @@ impl Request {
         }
     }
 
+    /// Replace the Request-URI and invalidate the parsed start line.
+    ///
+    /// Retargeting logic must use this rather than assigning the public field directly: a
+    /// parsed request retains its original start-line bytes for exact forwarding, and those
+    /// bytes cease to be truthful after the target changes.
+    pub fn set_uri(&mut self, uri: Uri) {
+        self.uri = uri;
+        self.raw_start_line = None;
+    }
+
     /// Build a request.
     #[must_use]
     pub fn new(method: Method, uri: Uri) -> Self {

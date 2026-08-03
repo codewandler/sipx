@@ -152,17 +152,21 @@ note = "Subprotocol negotiation, one message per frame, and the invented sent-by
 number = 9000
 title = "QUIC: A UDP-Based Multiplexed and Secure Transport"
 layer = "transport"
-status = "none"
-evidence = []
-note = "Specified, not implemented: `docs/specs/sip-quic.md` fixes the mapping. There is no RFC for SIP over QUIC, so every choice in that spec is ours and interoperates with nothing else."
+status = "implemented"
+evidence = ["crates/sipx-transport/src/quic.rs", "crates/sipx-transport/tests/quic.rs"]
+note = "QUIC v1 through quinn: authenticated connections, bounded bidirectional streams, migration and transport PING. The SIP mapping itself is experimental and specified by sipx because no RFC defines SIP over QUIC; bare-peer vectors check its stream framing rather than trusting two sipx endpoints to agree."
 
 [[rfc]]
 number = 9001
 title = "Using TLS to Secure QUIC"
 layer = "security"
-status = "none"
-evidence = []
-note = "Would carry the certificate policy of `docs/specs/sip-tls.md` unchanged. Its §9.2 is why the spec refuses 0-RTT for requests."
+status = "implemented"
+evidence = [
+  "crates/sipx-transport/src/tls.rs",
+  "crates/sipx-transport/src/quic.rs",
+  "crates/sipx-transport/tests/quic.rs",
+]
+note = "QUIC reuses the one rustls certificate policy used by TLS and WSS, requires ALPN `sip/2`, and configures both ends to refuse 0-RTT request data. Tests distinguish wrong host, unknown issuer and wrong/no ALPN before any SIP is delivered."
 
 [[rfc]]
 number = 6455
@@ -372,10 +376,16 @@ note = "The headers parse and round-trip. Nothing acts on a preference."
 number = 3326
 title = "The Reason Header Field for SIP"
 layer = "core"
-status = "syntax"
+status = "partial"
+roles = ["uac", "uas"]
 headers = ["Reason"]
-evidence = ["crates/sipx-sip/src/name.rs"]
-note = "Parsed and preserved. sipx does not populate it on CANCEL or BYE."
+spec = "docs/specs/sip-history-info.md"
+evidence = [
+  "crates/sipx-sip/src/headers/history.rs",
+  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/tests/call.rs",
+]
+note = "The UA behavior is implemented for both call roles: a typed comma-separated header validates SIP and Q.850 causes, locally generated CANCEL and BYE requests carry causes matching the action, and the call API accepts an explicit reason so a coupled leg can report the winning SIP status from §3.1. The initial INVITE never carries Reason. Received values remain available through typed headers and RFC 7044 retargeting embeds them in the prior target URI. Partial because sipx has no proxy/fork controller and does not generate Reason in responses whose defining RFC separately permits it."
 
 # ---------------------------------------------------------------------------------------------
 # Security: transport security, authentication, identity
@@ -389,11 +399,14 @@ status = "implemented"
 roles = ["uac"]
 headers = ["Authorization", "WwwAuthenticate", "ProxyAuthenticate", "ProxyAuthorization"]
 evidence = [
-  "crates/sipx-ua/src/auth.rs",
+  "crates/sipx-sip/src/auth.rs",
   "crates/sipx-ua/tests/register.rs",
   "crates/sipx-cli/src/register.rs",
+  "crates/sipx-call/tests/call.rs",
+  "crates/sipx-cli/tests/cli.rs",
+  "docs/specs/sip-auth.md",
 ]
-note = "Checked against the worked example the RFC publishes for itself, rather than against sipx's own idea of the answer. Reachable: credentials are *selected*, and `sipx register --password` selects them — `X-33` added that citation, because until then this row claimed `uac` from `sipx-ua` alone. **Not reachable from `sipx dial`**, which accepts `--password` and discards it, so a call challenged with 407 fails rather than retrying."
+note = "Checked against the worked example the RFC publishes for itself, rather than against sipx's own idea of the answer. Reachable from both UAC paths: `sipx register --password` answers a registrar's 401/407, and `sipx dial --password` answers a challenged INVITE with the matching Authorization or Proxy-Authorization header. Both prefer `SIPX_PASSWORD` because argv is world-readable."
 
 [[rfc]]
 number = 7616
@@ -402,11 +415,14 @@ layer = "security"
 status = "implemented"
 roles = ["uac"]
 evidence = [
-  "crates/sipx-ua/src/auth.rs",
+  "crates/sipx-sip/src/auth.rs",
   "crates/sipx-ua/tests/register.rs",
   "crates/sipx-cli/src/register.rs",
+  "crates/sipx-call/tests/call.rs",
+  "crates/sipx-cli/tests/cli.rs",
+  "docs/specs/sip-auth.md",
 ]
-note = "MD5, SHA-256 and their session variants, checked against the §3.9.1 worked example rather than against sipx's own arithmetic. See RFC 8760 for SHA-512-256. Reached the same way as RFC 2617 — `sipx register --password` is the selection, and it is the only one above the call layer."
+note = "MD5, SHA-256 and their session variants, checked against the §3.9.1 worked example rather than against sipx's own arithmetic. See RFC 8760 for SHA-512-256. One sans-I/O implementation is shared by registration and outbound calls; both have CLI credential selection and bounded challenge retries."
 
 [[rfc]]
 number = 8760
@@ -415,11 +431,14 @@ layer = "security"
 status = "implemented"
 roles = ["uac"]
 evidence = [
-  "crates/sipx-ua/src/auth.rs",
+  "crates/sipx-sip/src/auth.rs",
   "crates/sipx-ua/tests/register.rs",
   "crates/sipx-cli/src/register.rs",
+  "crates/sipx-call/tests/call.rs",
+  "crates/sipx-cli/tests/cli.rs",
+  "docs/specs/sip-auth.md",
 ]
-note = "SHA-512-256 and SHA-512-256-sess, and multiple challenges resolved by strength rather than by the server's order — §2.4's `unless a local policy dictates otherwise`, taken because §3 names the downgrade attack that ordering enables. `topmost_supported` is the literal rule for callers that want it. Reached the same way as RFC 2617."
+note = "SHA-512-256 and SHA-512-256-sess, and multiple challenges resolved by strength rather than by the server's order — §2.4's `unless a local policy dictates otherwise`, taken because §3 names the downgrade attack that ordering enables. `topmost_supported` is the literal rule for callers that want it. The shared selector is reached by both registration and outbound-call retries."
 
 [[rfc]]
 number = 5922
@@ -470,23 +489,33 @@ layer = "security"
 status = "syntax"
 headers = ["Identity", "IdentityInfo"]
 evidence = ["crates/sipx-sip/src/name.rs"]
-note = "Headers only, and obsoleted by 8224. Tracked because the header names still arrive on the wire."
+note = "The obsolete `Identity-Info` name remains parse-only because it still arrives on the wire. RFC 8224's revised `Identity` field has a typed parser and is tracked separately below; this row does not claim the RFC 4474 signing mechanism."
 
 [[rfc]]
 number = 8224
 title = "Authenticated Identity Management in SIP (STIR)"
 layer = "security"
-status = "none"
-evidence = []
-note = "The replacement for 4474. Signing and verifying caller identity."
+status = "implemented"
+headers = ["Identity"]
+evidence = [
+  "crates/sipx-sip/src/identity.rs",
+  "crates/sipx-ua/src/identity.rs",
+  "crates/sipx-ua/tests/identity.rs",
+  "docs/specs/sip-identity.md",
+]
+note = "The authentication and verification services are sans-I/O: callers supply authority policy, time, credential acquisition, and credential trust. The verifier applies the RFC's ordered checks and distinct 428, 436, 437, 438, and stale-Date 403 outcomes. No call-layer path selects these services yet, so this row claims the library mechanism but no UAC or UAS role."
 
 [[rfc]]
 number = 8225
 title = "PASSporT: Personal Assertion Token"
 layer = "security"
-status = "none"
-evidence = []
-note = "The token 8224 carries."
+status = "implemented"
+evidence = [
+  "crates/sipx-sip/src/identity.rs",
+  "crates/sipx-ua/tests/identity.rs",
+  "docs/specs/sip-identity.md",
+]
+note = "Full-form baseline PASSporT with deterministic `typ`, `alg`, `x5u`, `dest`, `iat`, and `orig` serialization and ES256 signing and verification. Unsupported `ppt` values are refused; later-profile attestation levels and `origid` are deliberately not claimed. No call-layer path selects the token services yet, so this row claims no UAC or UAS role."
 
 # ---------------------------------------------------------------------------------------------
 # Media: describing it, carrying it, encoding it
@@ -610,12 +639,16 @@ title = "DTLS Extension to Establish Keys for SRTP"
 layer = "media"
 status = "partial"
 spec = "docs/specs/srtp.md"
+roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-media/src/dtls/mod.rs",
   "crates/sipx-media/src/dtls/openssl.rs",
   "crates/sipx-media/tests/dtls_srtp.rs",
+  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/tests/secure_media.rs",
+  "crates/sipx-cli/tests/interop_srtp.rs",
 ]
-note = "**Missing: a call. No role is reachable from `sipx-call`**, which is why this row lists none — `dial` and `answer` key with SDES or with nothing, `dtls::establish` has no caller outside `sipx-media`'s own tests, and no sipx call has ever performed this handshake. What *is* implemented and tested, in the crate: the `use_srtp` extension with the AES_CM_128_HMAC_SHA1_80 profile, §5.1.2's demultiplexing of DTLS from RTP and STUN on one port, and §4.2's key derivation — the exported block split client key, server key, client salt, server salt, asserted against the RFC's literal offsets rather than against the two ends agreeing with each other. The handshake is OpenSSL, behind the off-by-default `dtls` feature; everything the RFC decides is compiled either way. The gap is `M-28`; `docs/specs/srtp.md` §12.8 states it."
+note = "Both call roles are reachable when the application explicitly selects `Keying::DtlsSrtp` and the off-by-default `dtls` feature supplies OpenSSL. The initial offer and answer carry `UDP/TLS/RTP/SAVP`, a fresh certificate fingerprint and the negotiated setup role; the final response and UAC ACK leave before the handshake begins. The verified exporter output reaches `Config::srtp` on the same bound media socket, and a live call test carries encrypted audio in both roles. The independent-peer case is `interop_srtp.rs` and remains ignored outside the interop matrix. Partial: only AES_CM_128_HMAC_SHA1_80 is offered; reliable early media, ICE combined with DTLS-SRTP, and rekeying are refused rather than downgraded."
 
 [[rfc]]
 number = 5763
@@ -623,11 +656,14 @@ title = "Framework for Establishing an SRTP Security Context Using DTLS"
 layer = "media"
 status = "partial"
 spec = "docs/specs/srtp.md"
+roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-sdp/src/answer.rs",
   "crates/sipx-media/src/dtls/mod.rs",
+  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/tests/secure_media.rs",
 ]
-note = "**Missing: a call. No role is reachable from `sipx-call`**, which is why this row lists none — every offer path calls `Capabilities::with_srtp`, which is SDES, and `Capabilities::with_dtls_srtp` has no caller outside `sipx-sdp`'s own tests. An application cannot ask for this keying, so no INVITE sipx sends carries `UDP/TLS/RTP/SAVP` and no offer of one is ever answered with a fingerprint. What *is* implemented and tested, in `sipx-sdp`: the SDP half as a pure offer/answer — `UDP/TLS/RTP/SAVP` offered and answered, `a=fingerprint` and `a=setup` negotiated with the offerer sending `actpass` (§5) and the answerer taking `active` so its ClientHello opens the NAT it is behind. A DTLS offer with no fingerprint is declined rather than answered, since there would be nothing to authenticate the handshake against. The gap is `M-28`; `docs/specs/srtp.md` §12.8 states it."
+note = "Both initial-call roles are implemented. `Keying::DtlsSrtp` is an explicit dial or answer policy, emits `UDP/TLS/RTP/SAVP`, `a=fingerprint` and `a=setup`, and retains the matching identity through the handshake. The offerer sends actpass; the answerer selects active and begins only after its answer leaves, while the offerer begins only after ACK. A build without the optional handshake feature refuses the selection and never substitutes SDES or cleartext. Partial because reliable early media and rekeying are not offered through this mechanism."
 
 [[rfc]]
 number = 8122
@@ -635,19 +671,22 @@ title = "Connection-Oriented Media Transport over TLS in SDP"
 layer = "media"
 status = "partial"
 spec = "docs/specs/srtp.md"
+roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-sdp/src/fingerprint.rs",
   "crates/sipx-media/src/dtls/mod.rs",
+  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/tests/secure_media.rs",
 ]
-note = "**Missing: a call. No role is reachable from `sipx-call`**, which is why this row lists none — the fingerprint this RFC defines is only ever carried by the DTLS-SRTP keying of RFC 5763 and 5764, and no call selects that keying. `sipx-call` renders `a=fingerprint` when `Capabilities::dtls` is set, and the only way to set it is `Capabilities::with_dtls_srtp`, which has no caller outside `sipx-sdp`'s own tests — so the branch is dead and §6.2's check runs in no call sipx has ever placed. `X-30` removed the roles and lowered the status; `M-28` had already done the same to 5763 and 5764 for the same reason, and named only those two. What *is* implemented and tested, in `sipx-sdp`: `a=fingerprint` at media and session level, uppercase hex per §5's UHEX rule, and §6.2's comparison itself — a certificate that does not match yields an error rather than keys. MD5 and MD2 are refused at the parser, which is where §5's prohibition on acting on them belongs. The digest length must match the hash named, so a truncated one cannot verify a prefix. The gap is `M-28`; `docs/specs/srtp.md` §12.8 states it."
+note = "Both initial-call roles emit and consume SHA-256 certificate fingerprints through explicit DTLS-SRTP policy, and §6.2's certificate comparison completes before exported keys reach a media session. A mismatch yields no keys. Media- and session-level attributes, digest-length validation, uppercase generation and MD5/MD2 refusal remain covered below the call layer. Partial because this stack implements the fingerprint for UDP DTLS-SRTP, not the connection-oriented TLS media transport named by the RFC title, and early-media DTLS is not exposed."
 
 [[rfc]]
 number = 4145
 title = "TCP-Based Media Transport in SDP"
 layer = "media"
 status = "partial"
-evidence = ["crates/sipx-sdp/src/fingerprint.rs"]
-note = "`a=setup` only, which is the part RFC 5763 §5 borrows to decide who opens the DTLS connection. `sipx-call` renders it, but only inside the branch guarded by `Capabilities::dtls()`, so **no call sipx places emits `a=setup`** — the same dead branch as RFC 8122's `a=fingerprint`, and the reason this row is `partial` rather than cited at the call layer. The `a=connection` attribute and TCP media transport itself are not implemented: sipx carries media over UDP."
+evidence = ["crates/sipx-sdp/src/fingerprint.rs", "crates/sipx-call/src/call.rs"]
+note = "`a=setup` is emitted and acted on by initial DTLS-SRTP calls: the offer says actpass, the answer selects active or passive, and that role decides which side sends ClientHello and which exporter half protects outbound media. The `a=connection` attribute and TCP media transport itself are not implemented: sipx carries media over UDP."
 
 [[rfc]]
 number = 8445
@@ -799,19 +838,30 @@ status = "partial"
 roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-sip/src/gruu.rs",
+  "crates/sipx-ua/src/agent.rs",
   "crates/sipx-ua/src/gruu.rs",
   "crates/sipx-ua/src/registrar.rs",
   "crates/sipx-ua/tests/gruu.rs",
+  "crates/sipx-cli/tests/reachable.rs",
+  "docs/specs/gruu.md",
 ]
-note = "The UA side, for both roles: `Supported: gruu` and `+sip.instance` on REGISTER (§4.1) under the same instance identity RFC 5626 registers with, `pub-gruu` and `temp-gruu` read off the binding that names this instance and discarded with it (§4.2), a GRUU in the Contact of dialog-forming and target-refresh requests (§4.4), and §4.5's `gr` recognition — which is a comparison of its own because §5.4 notes a public GRUU is URI-equivalent to the AOR. The choice between public and temporary is the application's and asking for a temporary one never silently yields the public one, since §5.4's unlinkability is not something the other can stand in for. **Not the registrar role**: minting GRUUs, the temporary-GRUU construction of §5.4 and the 480 of §5.2 are §5's, and sipx is not a registrar."
+note = "The UA side, for both roles: `Supported: gruu` and `+sip.instance` on REGISTER (§4.1) under the same instance identity RFC 5626 registers with, `pub-gruu` and `temp-gruu` read off the binding that names this instance and discarded with it (§4.2), a GRUU in the Contact of dialog-forming and target-refresh requests (§4.4), and §4.5's `gr` recognition — which is a comparison of its own because §5.4 notes a public GRUU is URI-equivalent to the AOR. A registered UA refuses an initial INVITE bearing an unowned GRUU with the `404` §6.1 gives an unresolved GRUU, so upstream misrouting cannot establish a call at another instance. The choice between public and temporary is the application's and asking for a temporary one never silently yields the public one, since §5.4's unlinkability is not something the other can stand in for. **Not the registrar or proxy role**: minting GRUUs, the temporary-GRUU construction of §5.4, the 480 of §5.2, and ordinary location-service resolution in §6.1 remain server behavior sipx does not implement."
 
 [[rfc]]
 number = 7044
 title = "An Extension to SIP for Request History Information"
 layer = "services"
-status = "none"
-evidence = []
-note = "`History-Info`, for a call that was forwarded and needs to say by whom."
+status = "partial"
+roles = ["uac", "uas"]
+headers = ["HistoryInfo", "Privacy", "Supported"]
+spec = "docs/specs/sip-history-info.md"
+evidence = [
+  "crates/sipx-sip/src/headers/history.rs",
+  "crates/sipx-ua/src/history.rs",
+  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/tests/call.rs",
+]
+note = "The UA side for both call roles: History-Info is a typed ordered list with hierarchical indices and rc/mp/np target-change references. Initial calls advertise histinfo and index their first target at 1; non-100 responses return the cache and calls retain the received history. `sipx_ua::retarget` preserves received entries, exposes an omitted previous hop with `.0`, appends the forwarding `.1`, and embeds the typed Reason in the previous SIP/SIPS URI; tel targets correctly have no URI-header component. Message- and entry-level history privacy anonymize identifying targets while retaining indices. Partial because sipx is not a proxy and does not build a fork's sibling branches; automatic cache extension from every received 3xx/timeout remains the retargeting caller's explicit status input."
 
 [[rfc]]
 number = 7865

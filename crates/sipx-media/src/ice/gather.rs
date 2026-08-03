@@ -16,6 +16,8 @@
 //! [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
@@ -27,6 +29,7 @@ use sipx_sdp::ice::{
 use super::agent::{Agent, Config, Input, Output};
 use super::candidate::{Gathered, LocalBase, LocalCandidate};
 use super::negotiate::Negotiation;
+use crate::counters::DiscardMeters;
 
 /// How long to wait for one Binding Response before trying again (RFC 5389 §7.2.1's initial RTO).
 const STUN_RTO: Duration = Duration::from_millis(500);
@@ -200,7 +203,11 @@ impl LocalDescription {
 /// Every socket contributes a host candidate; the first one contributes a server-reflexive
 /// candidate too when a STUN server is configured and answers. `GatheringDone` is fed at the end,
 /// which is what lets the agent form checklists as soon as the peer's half arrives.
-pub(crate) async fn gather(bases: &[Base<'_>], config: &Gathering) -> LocalDescription {
+pub(crate) async fn gather(
+    bases: &[Base<'_>],
+    config: &Gathering,
+    discards: Arc<DiscardMeters>,
+) -> LocalDescription {
     let mut agent = Agent::new(
         config.agent,
         config.offerer,
@@ -234,12 +241,16 @@ pub(crate) async fn gather(bases: &[Base<'_>], config: &Gathering) -> LocalDescr
         let Some(server) = config.stun_server else {
             continue;
         };
-        let Some(mapped) = reflexive(base.socket, server, config.stun_timeout).await else {
+        let Some(mapped) = reflexive(base.socket, server, config.stun_timeout, &discards).await
+        else {
             continue;
         };
         if mapped == address {
             // §5.1.3: a server-reflexive candidate whose address is one of our host candidates is
             // redundant and is discarded. On a network with no NAT that is every one of them.
+            discards
+                .ice_redundant_candidates
+                .fetch_add(1, Ordering::Relaxed);
             tracing::debug!(%address, "no nat: the reflexive candidate is the host one");
             continue;
         }
@@ -275,7 +286,12 @@ pub(crate) async fn gather(bases: &[Base<'_>], config: &Gathering) -> LocalDescr
 /// Retransmission is RFC 5389 §7.2.1's, truncated at the deadline rather than at Rc: gathering is
 /// on the call-setup path, and an offer that waits out the full ladder for a server that is down
 /// is an offer nobody sends.
-async fn reflexive(socket: &UdpSocket, server: SocketAddr, within: Duration) -> Option<SocketAddr> {
+async fn reflexive(
+    socket: &UdpSocket,
+    server: SocketAddr,
+    within: Duration,
+    discards: &DiscardMeters,
+) -> Option<SocketAddr> {
     let id = sipx_transport::stun::new_transaction_id();
     let request = sipx_transport::stun::binding_request(&id);
     let deadline = tokio::time::Instant::now().checked_add(within)?;
@@ -298,6 +314,10 @@ async fn reflexive(socket: &UdpSocket, server: SocketAddr, within: Duration) -> 
             if from != server {
                 // Something else on the media port. It is not this transaction's business, and
                 // gathering runs before there is anywhere to hand it, so it is dropped.
+                discards
+                    .ice_gathering_foreign_datagrams
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(%from, %server, "dropping a datagram from outside the STUN gathering transaction");
                 continue;
             }
             let Some(reply) = sipx_transport::stun::parse_reply(datagram.get(..len)?) else {
@@ -425,6 +445,7 @@ mod tests {
                 },
             ],
             &Gathering::new(credentials(), true),
+            Arc::new(DiscardMeters::default()),
         )
         .await;
 
@@ -462,6 +483,7 @@ mod tests {
                 socket: &rtp,
             }],
             &Gathering::new(credentials(), true),
+            Arc::new(DiscardMeters::default()),
         )
         .await;
 
@@ -484,6 +506,7 @@ mod tests {
                 socket: &any,
             }],
             &Gathering::new(credentials(), true),
+            Arc::new(DiscardMeters::default()),
         )
         .await;
         assert!(description.candidates().is_empty());
@@ -518,6 +541,7 @@ mod tests {
                 socket: &rtp,
             }],
             &gathering,
+            Arc::new(DiscardMeters::default()),
         )
         .await;
 
@@ -559,6 +583,7 @@ mod tests {
                 socket: &rtp,
             }],
             &gathering,
+            Arc::new(DiscardMeters::default()),
         )
         .await;
         assert_eq!(description.candidates().len(), 1);

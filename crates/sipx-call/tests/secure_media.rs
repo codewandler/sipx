@@ -16,6 +16,8 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use sipx_call::{DialOptions, Error, answer, dial};
+#[cfg(feature = "dtls")]
+use sipx_call::{Keying, MediaPolicy, answer_with_policy};
 use sipx_sip::build::ResponseBuilder;
 use sipx_sip::{HeaderName, Host, HostName, Method, StatusCode, Uri};
 use sipx_testkit::certs::Ca;
@@ -29,6 +31,93 @@ fn loopback() -> IpAddr {
 /// How long a test here waits for audio it played to arrive before calling it lost (`X-28`).
 /// A bound on failure, not a window to measure in — see `MediaSession::record_at_least`.
 const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
+#[cfg(not(feature = "dtls"))]
+#[tokio::test]
+async fn selecting_dtls_without_the_feature_is_refused_without_a_fallback() {
+    let (endpoint, _incoming) = bind(Config::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let outcome = dial(
+        &endpoint,
+        Target::udp("127.0.0.1:9".parse().expect("valid")),
+        &to,
+        &DialOptions::new("<sip:caller@example.net>", loopback())
+            .with_keying(sipx_call::Keying::DtlsSrtp),
+    )
+    .await;
+    assert!(
+        matches!(outcome, Err(Error::DtlsUnavailable)),
+        "{outcome:?}"
+    );
+}
+
+/// Failing-first for `M-28`: before the call-level selector and socket/key plumbing existed this
+/// could not compile, and no INVITE built by `sipx-call` contained either asserted SDP field.
+#[cfg(feature = "dtls")]
+#[tokio::test]
+async fn a_call_selected_for_dtls_srtp_offers_it_and_carries_encrypted_audio() {
+    let (callee_endpoint, mut callee_incoming) =
+        bind(Config::new("127.0.0.1:0".parse().expect("valid")))
+            .await
+            .expect("binds");
+    let callee_addr = callee_endpoint.local_addr();
+    let (caller_endpoint, _caller_rx) = bind(Config::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
+    let policy = MediaPolicy::default().with_keying(Keying::DtlsSrtp);
+
+    let answering = tokio::spawn(async move {
+        let incoming = callee_incoming.recv().await.expect("an INVITE");
+        let offer = String::from_utf8_lossy(incoming.request.body());
+        assert!(
+            offer.contains("m=audio ") && offer.contains(" UDP/TLS/RTP/SAVP "),
+            "the selected call did not offer the DTLS-SRTP protocol: {offer}"
+        );
+        assert!(
+            offer.contains("a=fingerprint:sha-256 "),
+            "the selected call did not offer its certificate fingerprint: {offer}"
+        );
+        answer_with_policy(&callee_endpoint, &incoming, loopback(), policy)
+            .await
+            .expect("answers with DTLS-SRTP")
+    });
+
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let mut caller = tokio::time::timeout(
+        Duration::from_secs(10),
+        dial(
+            &caller_endpoint,
+            Target::udp(callee_addr),
+            &to,
+            &DialOptions::new("<sip:caller@example.net>", loopback()).with_keying(Keying::DtlsSrtp),
+        ),
+    )
+    .await
+    .expect("DTLS call did not finish within its failure bound")
+    .expect("DTLS call connects");
+    let callee = answering.await.expect("answer task finishes");
+
+    assert!(caller.is_encrypted());
+    assert!(callee.is_encrypted());
+    let tone = vec![8000i16; 3200];
+    let (_played, heard) = tokio::join!(
+        caller.media().play(&tone, 160),
+        callee.media().record_at_least(tone.len(), DELIVERY_BOUND),
+    );
+    assert!(heard.len() > 1600, "DTLS-keyed media carried no audio");
+    assert!(
+        matches!(
+            caller.reinvite(sipx_sdp::Direction::SendOnly).await,
+            Err(Error::DtlsRenegotiation)
+        ),
+        "a DTLS call must not renegotiate as plain RTP"
+    );
+
+    caller.media().stop();
+    callee.media().stop();
+}
 
 /// A call whose signalling is encrypted must encrypt its media too — that is the whole point of
 /// the story, and the thing `sips:` on its own does not give you.

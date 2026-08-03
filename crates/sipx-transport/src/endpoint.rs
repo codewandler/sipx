@@ -72,6 +72,12 @@ pub struct Config {
     /// default (5061) and a peer connecting to 5060 does not expect a handshake.
     #[cfg(feature = "tls")]
     pub tls_server: Option<(crate::tls::ServerTls, u16)>,
+    /// How sipx verifies an outbound QUIC peer.
+    #[cfg(feature = "quic")]
+    pub quic_client: Option<crate::tls::ClientTls>,
+    /// The identity and UDP port for the experimental QUIC listener.
+    #[cfg(feature = "quic")]
+    pub quic_server: Option<(crate::tls::ServerTls, u16)>,
     /// The port to listen for WebSocket connections on, if any.
     ///
     /// Its own port for the same reason TLS has one: a peer connecting to 5060 expects SIP on
@@ -131,6 +137,10 @@ impl Config {
             tls_client: None,
             #[cfg(feature = "tls")]
             tls_server: None,
+            #[cfg(feature = "quic")]
+            quic_client: None,
+            #[cfg(feature = "quic")]
+            quic_server: None,
             #[cfg(feature = "ws")]
             ws_server: None,
             #[cfg(feature = "wss")]
@@ -238,6 +248,16 @@ impl Drop for Background {
             self.cancel.cancel();
             self.tasks.close();
         }
+    }
+}
+
+fn apply_network_source(message: Message, source: SocketAddr) -> Message {
+    match message {
+        Message::Request(mut request) => {
+            apply_received_and_rport(&mut request, source);
+            Message::Request(request)
+        }
+        response @ Message::Response(_) => response,
     }
 }
 
@@ -423,6 +443,8 @@ pub struct Handle {
     ws_addr: Option<SocketAddr>,
     #[cfg(feature = "wss")]
     wss_addr: Option<SocketAddr>,
+    #[cfg(feature = "quic")]
+    quic_addr: Option<SocketAddr>,
     /// The sent-by this endpoint uses on a WebSocket it dialled out (RFC 7118 §5.2).
     ///
     /// Invented once at bind time rather than per request: a `Via` that changed between a
@@ -606,6 +628,12 @@ impl Handle {
         {
             return format!("{}:{}", self.sent_by, addr.port());
         }
+        #[cfg(feature = "quic")]
+        if transport == TransportKind::Quic
+            && let Some(addr) = self.quic_addr
+        {
+            return format!("{}:{}", self.sent_by, addr.port());
+        }
         // discard: not a loss. The parameter is unused unless a transport feature is on, and
         // this is the suppressor rather than a discarded result.
         let _ = transport;
@@ -725,6 +753,13 @@ impl Handle {
         self.meters.snapshot()
     }
 
+    /// Address of the experimental QUIC listener, when configured.
+    #[cfg(feature = "quic")]
+    #[must_use]
+    pub fn quic_addr(&self) -> Option<SocketAddr> {
+        self.quic_addr
+    }
+
     /// How many transactions and destinations the endpoint is still holding.
     ///
     /// Exposed for the soak test in `sipx-testkit`, and worth exposing: a transaction store
@@ -835,6 +870,27 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         ),
         None => None,
     };
+    #[cfg(feature = "quic")]
+    let quic_endpoint = if config.quic_client.is_some() || config.quic_server.is_some() {
+        let port = config.quic_server.as_ref().map_or(0, |(_, port)| *port);
+        Some(crate::quic::endpoint(
+            config.bind.ip(),
+            port,
+            config.quic_client.as_ref(),
+            config.quic_server.as_ref().map(|(server, _)| server),
+        )?)
+    } else {
+        None
+    };
+    #[cfg(feature = "quic")]
+    let quic_addr = match (&quic_endpoint, &config.quic_server) {
+        (Some(endpoint), Some(_)) => {
+            let addr = endpoint.local_addr()?;
+            listen_quic(endpoint.clone(), &adopt_tx, &handshakes);
+            Some(addr)
+        }
+        _ => None,
+    };
 
     let (commands_tx, commands_rx) = mpsc::channel(config.capacity);
     let (incoming_tx, incoming_rx) = mpsc::channel(config.capacity);
@@ -852,6 +908,8 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         ws_addr: upgrade_addr,
         #[cfg(feature = "wss")]
         wss_addr: secure_upgrade_addr,
+        #[cfg(feature = "quic")]
+        quic_addr,
         #[cfg(feature = "ws")]
         ws_sent_by: Arc::from(crate::ws::invented_sent_by()),
         sent_by: Arc::new(config.sent_by.clone()),
@@ -897,6 +955,10 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         tls_client: config.tls_client.clone(),
         #[cfg(feature = "ws")]
         ws_keepalive: config.ws_keepalive,
+        #[cfg(feature = "quic")]
+        quic_client: config.quic_client.clone(),
+        #[cfg(feature = "quic")]
+        quic_endpoint,
         pool: Pool::new(config.pool, config.limits, net_tx),
         limits: config.limits,
         mtu: config.mtu,
@@ -906,6 +968,8 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         unmatched: None,
         stun_waiters: HashMap::new(),
         pong_waiters: HashMap::new(),
+        #[cfg(feature = "quic")]
+        quic_replies: HashMap::new(),
         background,
         shutdown,
     };
@@ -1003,6 +1067,62 @@ async fn listen_tls(
         }
     });
     Ok(addr)
+}
+
+/// Accept QUIC handshakes off the driver loop and adopt established connections through the
+/// same bounded channel as every other optional transport.
+#[cfg(feature = "quic")]
+fn listen_quic(endpoint: quinn::Endpoint, adopt: &mpsc::Sender<Adopt>, runtime: &HandshakeRuntime) {
+    let adopt = adopt.clone();
+    let owner = runtime.owner.clone();
+    let cancel = owner.cancel.clone();
+    let permits = Arc::clone(&runtime.permits);
+    let deadline = runtime.deadline;
+    runtime.owner.spawn(async move {
+        loop {
+            let incoming = tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                incoming = endpoint.accept() => incoming,
+            };
+            let Some(incoming) = incoming else {
+                break;
+            };
+            let peer = incoming.remote_address();
+            let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+                incoming.refuse();
+                tracing::debug!(%peer, "refused inbound QUIC handshake at capacity");
+                continue;
+            };
+            let adopt = adopt.clone();
+            let cancel = cancel.clone();
+            owner.spawn(async move {
+                let connected = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => None,
+                    result = tokio::time::timeout(deadline, incoming) => Some(result),
+                };
+                match connected {
+                    Some(Ok(Ok(connection))) => {
+                        let result = adopt
+                            .send(Box::new(move |pool: &mut Pool| {
+                                pool.accept_quic(connection, peer);
+                            }))
+                            .await;
+                        if result.is_err() {
+                            tracing::debug!(%peer, "QUIC connection lost its endpoint before adoption");
+                        }
+                    }
+                    Some(Ok(Err(error))) => {
+                        tracing::debug!(%error, %peer, "inbound QUIC handshake failed");
+                    }
+                    Some(Err(_)) => tracing::debug!(%peer, "inbound QUIC handshake timed out"),
+                    None => {}
+                }
+                drop(permit);
+            });
+        }
+    });
 }
 
 /// Listen for WebSocket connections, upgrading each off the accept path.
@@ -1279,6 +1399,10 @@ struct Driver {
     tls_client: Option<crate::tls::ClientTls>,
     #[cfg(feature = "ws")]
     ws_keepalive: std::time::Duration,
+    #[cfg(feature = "quic")]
+    quic_client: Option<crate::tls::ClientTls>,
+    #[cfg(feature = "quic")]
+    quic_endpoint: Option<quinn::Endpoint>,
     pool: Pool,
     limits: Limits,
     mtu: usize,
@@ -1306,6 +1430,9 @@ struct Driver {
         ConnectionGeneration,
         std::collections::VecDeque<oneshot::Sender<Result<Option<SocketAddr>>>>,
     >,
+    /// Exact response route for each server transaction received on a QUIC stream.
+    #[cfg(feature = "quic")]
+    quic_replies: HashMap<TransactionKey, crate::quic::Reply>,
     /// Listener and pre-pool handshake tasks owned by this endpoint.
     background: Background,
     /// Durable completion barrier shared with callers that arrive after command closure.
@@ -1411,8 +1538,15 @@ impl Driver {
 
         match parse_datagram(datagram, &self.limits) {
             Ok(message) => {
-                self.on_message(message, source, TransportKind::Udp, None)
-                    .await;
+                self.on_message(
+                    message,
+                    source,
+                    TransportKind::Udp,
+                    None,
+                    #[cfg(feature = "quic")]
+                    None,
+                )
+                .await;
             }
             Err(error) => {
                 // One malformed packet must not disturb the socket. The alternative is a
@@ -1517,6 +1651,8 @@ impl Driver {
                 source,
                 transport,
                 id,
+                #[cfg(feature = "quic")]
+                quic_reply,
             } => {
                 // Re-serialised rather than raw: framing happened in the connection's task and the
                 // stream bytes are not retained, so §13.2 records that a stream capture is not
@@ -1524,7 +1660,15 @@ impl Driver {
                 // `to_bytes` re-serialises and allocates, so it is inside the closure: with no
                 // capture configured it never runs.
                 self.observe(source, transport, Direction::In, || message.to_bytes());
-                self.on_message(*message, source, transport, Some(id)).await;
+                self.on_message(
+                    *message,
+                    source,
+                    transport,
+                    Some(id),
+                    #[cfg(feature = "quic")]
+                    quic_reply,
+                )
+                .await;
             }
             tcp::Event::FramingFailed { key } => {
                 // The stream half of a parse failure, counted against the transport that carried it
@@ -1558,6 +1702,28 @@ impl Driver {
                     id,
                 };
                 self.fail_transactions_on(&generation, Some(detail)).await;
+            }
+            #[cfg(feature = "quic")]
+            tcp::Event::QuicClosed { key, id, detail } => {
+                if !self.pool.remove(&key, id) {
+                    return;
+                }
+                let generation = ConnectionGeneration {
+                    key: key.clone(),
+                    id,
+                };
+                for (transaction, bound) in &self.transaction_generations {
+                    if bound == &generation
+                        && let Some(client) = self.clients.get(transaction)
+                    {
+                        let failure = Error::Quic(crate::quic::QuicError::ConnectionClosed {
+                            peer: key.peer.to_string(),
+                            detail: detail.clone(),
+                        });
+                        let _ = client.failures.try_send(failure);
+                    }
+                }
+                self.fail_transactions_on(&generation, None).await;
             }
             tcp::Event::Closed { key, id } => {
                 // A retiring generation can report after a replacement with the same key has
@@ -1608,6 +1774,19 @@ impl Driver {
             if let Some(detail) = &tls_detail
                 && let Some(client) = self.clients.get(&key)
             {
+                #[cfg(feature = "quic")]
+                let failure = if closed.key.transport == TransportKind::Quic {
+                    Error::Quic(crate::quic::QuicError::handshake(
+                        closed.key.peer.to_string(),
+                        detail.clone(),
+                    ))
+                } else {
+                    Error::Tls(crate::tls::TlsError::Handshake {
+                        peer: closed.key.peer.to_string(),
+                        detail: detail.clone(),
+                    })
+                };
+                #[cfg(not(feature = "quic"))]
                 let failure = Error::Tls(crate::tls::TlsError::Handshake {
                     peer: closed.key.peer.to_string(),
                     detail: detail.clone(),
@@ -1627,20 +1806,14 @@ impl Driver {
         source: SocketAddr,
         transport: TransportKind,
         generation: Option<u64>,
+        #[cfg(feature = "quic")] quic_reply: Option<crate::quic::Reply>,
     ) {
         // The one site inbound messages are counted, whichever transport carried them here: a
         // datagram arrives through `on_datagram` and a stream message through `on_net_event`, and
         // both funnel into this method (§12).
         self.meters
             .message_in(transport, matches!(message, Message::Response(_)));
-
-        let message = match message {
-            Message::Request(mut request) => {
-                apply_received_and_rport(&mut request, source);
-                Message::Request(request)
-            }
-            response @ Message::Response(_) => response,
-        };
+        let message = apply_network_source(message, source);
 
         // A server transaction's responses go wherever its topmost Via says, which is why the
         // destination is computed now, from the request as amended above.
@@ -1674,10 +1847,13 @@ impl Driver {
                         },
                     );
                 }
+                #[cfg(feature = "quic")]
+                self.remember_quic_reply(&key, quic_reply);
                 self.handed_over
                     .insert(key.clone(), tokio::time::Instant::now());
                 // §18.2.2's fallback only arises on a transport that has a connection to lose.
                 if transport.reliability().is_reliable()
+                    && transport != TransportKind::Quic
                     && let Some(advertised) = advertised
                 {
                     self.reconnect.insert(key.clone(), advertised);
@@ -1817,6 +1993,8 @@ impl Driver {
             self.timers.forget_matching(|(k, _)| k == &key);
             self.destinations.remove(&key);
             self.transaction_generations.remove(&key);
+            #[cfg(feature = "quic")]
+            self.quic_replies.remove(&key);
             // `reconnect` too. It is removed nowhere else but `Output::Terminated`, which an
             // abandoned transaction never reaches — so leaving it here would trade one
             // unbounded map for another.
@@ -1936,6 +2114,16 @@ impl Driver {
                         + servers
                         + self.destinations.len()
                         + self.transaction_generations.len()
+                        + {
+                            #[cfg(feature = "quic")]
+                            {
+                                self.quic_replies.len()
+                            }
+                            #[cfg(not(feature = "quic"))]
+                            {
+                                0
+                            }
+                        }
                         + self.reconnect.len()
                         + self.handed_over.len(),
                 );
@@ -1974,7 +2162,22 @@ impl Driver {
                     let addr = target.addr;
                     self.observe_out(&bytes, &target, is_response);
                     let fallback = self.reconnect.get(key).cloned();
-                    match self.transmit(bytes, target, is_response, fallback).await {
+                    #[cfg(feature = "quic")]
+                    let transmitted = if is_response && target.transport == TransportKind::Quic {
+                        match self.quic_replies.get(key).cloned() {
+                            Some(reply) => reply
+                                .send(bytes)
+                                .await
+                                .map(|()| self.transaction_generations.get(key).cloned())
+                                .map_err(|_| Error::ConnectionClosed),
+                            None => Err(Error::ConnectionClosed),
+                        }
+                    } else {
+                        self.transmit(bytes, target, is_response, fallback).await
+                    };
+                    #[cfg(not(feature = "quic"))]
+                    let transmitted = self.transmit(bytes, target, is_response, fallback).await;
+                    match transmitted {
                         Ok(Some(generation)) => {
                             self.transaction_generations.insert(key.clone(), generation);
                         }
@@ -2015,6 +2218,8 @@ impl Driver {
                     self.timers.forget_matching(|(k, _)| k == key);
                     self.destinations.remove(key);
                     self.transaction_generations.remove(key);
+                    #[cfg(feature = "quic")]
+                    self.quic_replies.remove(key);
                     self.handed_over.remove(key);
                     self.reconnect.remove(key);
                     // Dropping the sender closes the application's response stream, which is
@@ -2076,6 +2281,43 @@ impl Driver {
         target: &Target,
     ) -> Result<Option<ConnectionGeneration>> {
         self.transmit(bytes, target.clone(), true, None).await
+    }
+
+    #[cfg(feature = "quic")]
+    fn remember_quic_reply(&mut self, key: &TransactionKey, reply: Option<crate::quic::Reply>) {
+        if let Some(reply) = reply {
+            self.quic_replies.insert(key.clone(), reply);
+        }
+    }
+
+    #[cfg(feature = "quic")]
+    async fn transmit_quic(
+        &mut self,
+        bytes: Bytes,
+        target: &Target,
+        is_response: bool,
+    ) -> Result<Option<ConnectionGeneration>> {
+        if is_response {
+            return Err(Error::ConnectionClosed);
+        }
+        let Some(client) = self.quic_client.clone() else {
+            return Err(Error::UnsupportedTransport(
+                "QUIC (no client configuration, so no outbound connection can be verified)",
+            ));
+        };
+        let Some(endpoint) = self.quic_endpoint.clone() else {
+            return Err(Error::UnsupportedTransport("QUIC (no local endpoint)"));
+        };
+        let key = target.connection();
+        let name = target
+            .verify_as
+            .as_deref()
+            .map_or_else(|| target.addr.ip().to_string(), str::to_owned);
+        let id = self
+            .pool
+            .send_quic_generation(&key, &name, &client, &endpoint, bytes)
+            .await?;
+        Ok(Some(ConnectionGeneration { key, id }))
     }
 
     /// Put bytes on the wire, opening a connection if the transport needs one.
@@ -2197,6 +2439,8 @@ impl Driver {
                     .await?;
                 Ok(Some(ConnectionGeneration { key, id }))
             }
+            #[cfg(feature = "quic")]
+            TransportKind::Quic => self.transmit_quic(bytes, &target, is_response).await,
             #[allow(unreachable_patterns)]
             other => Err(Error::UnsupportedTransport(other.as_str())),
         }
@@ -2351,6 +2595,10 @@ mod tests {
             tls_client: None,
             #[cfg(feature = "ws")]
             ws_keepalive: Duration::from_secs(60),
+            #[cfg(feature = "quic")]
+            quic_client: None,
+            #[cfg(feature = "quic")]
+            quic_endpoint: None,
             pool,
             limits: sipx_sip::Limits::stream(),
             mtu: 1300,
@@ -2360,6 +2608,8 @@ mod tests {
             unmatched: None,
             stun_waiters: std::collections::HashMap::new(),
             pong_waiters: std::collections::HashMap::new(),
+            #[cfg(feature = "quic")]
+            quic_replies: std::collections::HashMap::new(),
             background: Background::new(),
             shutdown: Arc::new(ShutdownState::default()),
         }
@@ -2604,6 +2854,8 @@ mod tests {
             ws_addr: None,
             #[cfg(feature = "wss")]
             wss_addr: None,
+            #[cfg(feature = "quic")]
+            quic_addr: None,
             #[cfg(feature = "ws")]
             ws_sent_by: Arc::from("shutdown.invalid"),
             sent_by: Arc::new("127.0.0.1".to_owned()),

@@ -26,11 +26,21 @@ impl Ca {
     /// A fresh authority, trusted by nobody until a test says so.
     #[must_use]
     pub fn new() -> Self {
+        Self::named("sipx test CA")
+    }
+
+    /// A fresh authority with a distinct subject name.
+    ///
+    /// Useful when a test needs two unrelated issuers: giving both authorities the same
+    /// distinguished name can make a verifier try the trusted authority's key and report a bad
+    /// signature instead of the unknown issuer the fixture meant to exercise.
+    #[must_use]
+    pub fn named(common_name: &str) -> Self {
         let key = KeyPair::generate().expect("a key");
         let mut params = CertificateParams::new(Vec::new()).expect("params");
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         let mut name = DistinguishedName::new();
-        name.push(DnType::CommonName, "sipx test CA");
+        name.push(DnType::CommonName, common_name);
         params.distinguished_name = name;
 
         let certificate = params.clone().self_signed(&key).expect("a CA certificate");

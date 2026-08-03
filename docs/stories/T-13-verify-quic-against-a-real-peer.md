@@ -7,7 +7,7 @@ priority: 13
 design: docs/specs/sip-quic.md
 epic: quic
 areas: [sipx-transport]
-note: track: quic · blocked by T-12
+note: track: quic · T-12 delivered the transport; independent-peer evidence remains
 ---
 
 # Verify QUIC against a real peer
@@ -28,7 +28,8 @@ as T-10 did for TLS.
       fail.
 
 ## Progress
-- (not started)
+- Not started. T-12 delivered the transport and its bare-peer vectors; this story owns evidence
+  from an independently implemented peer.
 
 ## Notes
 - Reuse the T-10 fixture authority (`cargo run -p sipx-testkit --example issue-certs`) so the

@@ -9,13 +9,17 @@ use tokio::time::Instant;
 use bytes::Bytes;
 use sipx_media::ice::{Gathering, LocalDescription, Negotiation as IceNegotiation};
 use sipx_media::{Codec, Interrupt, MediaPort, MediaSession, Playback};
-use sipx_sdp::ice::{ComponentId, Credentials};
+use sipx_sdp::ice::{ComponentId, Credentials as IceCredentials};
 use sipx_sdp::{Capabilities, Connection, Direction, SessionDescription};
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
 use sipx_sip::session::{self, MinSe, SessionExpires};
 use sipx_sip::update::{self, Reception};
-use sipx_sip::{HeaderName, Method, Request, Response, StatusCode, Uri};
+use sipx_sip::{
+    HeaderName, HistoryInfo, Method, Reason, ReasonValue, Request, Response, StatusCode, Uri,
+};
 use sipx_transport::{Handle, Incoming, Target, TransportKind};
+
+pub use sipx_sip::auth::Credentials;
 
 use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
@@ -85,6 +89,8 @@ pub struct Call {
     hold: Direction,
     /// Whether the media is encrypted.
     encrypted: bool,
+    /// The initial keying policy, retained so a later offer cannot silently downgrade it.
+    keying: Keying,
     /// A transfer the far end has asked for and we have not yet answered.
     referral: Option<Referral>,
     /// A transfer we asked for, and what has become of it.
@@ -109,6 +115,10 @@ pub struct Call {
     events: EventSink,
     /// The one receiver [`Self::events`] hands out, until it does.
     events_rx: Option<CallEvents>,
+    /// The diversion history received on the request or final response that established this
+    /// call. Retained because the application cannot recover it after the transaction stream is
+    /// consumed by call setup.
+    history: Option<HistoryInfo>,
 }
 
 /// A negotiated session timer and the deadline it is currently counting down to.
@@ -446,6 +456,12 @@ impl Call {
             .map(|state| (state.terms.interval, state.terms.we_refresh))
     }
 
+    /// The diversion history received while this call was established.
+    #[must_use]
+    pub fn history(&self) -> Option<&HistoryInfo> {
+        self.history.as_ref()
+    }
+
     /// When [`Self::on_session_deadline`] next needs to be called, if a timer was negotiated.
     ///
     /// Returned as an instant rather than as a future on purpose. A future would borrow the
@@ -607,6 +623,9 @@ impl Call {
     /// Shared by the two paths because they ask exactly the same question of exactly the same
     /// session and differ only in what carries the answer back.
     async fn renegotiate(&mut self, body: &[u8]) -> Result<Option<SessionDescription>> {
+        if self.keying == Keying::DtlsSrtp {
+            return Ok(None);
+        }
         let Ok(offer) = sipx_sdp::parse(&String::from_utf8_lossy(body)) else {
             return Ok(None);
         };
@@ -876,6 +895,9 @@ impl Call {
     /// is unanswered or one of theirs is unanswered by us (§5.1, RFC 3264): the far end would
     /// answer 491 or 500 and the round trip would have told us only what we already knew.
     pub async fn update(&mut self, direction: Direction) -> Result<()> {
+        if self.keying == Keying::DtlsSrtp {
+            return Err(Error::DtlsRenegotiation);
+        }
         if !self.negotiation.may_offer() {
             return Err(Error::Rejected {
                 status: sipx_sip::update::Refusal::Glare.status(),
@@ -1155,6 +1177,9 @@ impl Call {
     /// objection is right: a flag set before a call and cleared after it is a state machine
     /// written in the hardest way to read.
     async fn reoffer(&mut self, direction: Direction, ice: IceOffer) -> Result<()> {
+        if self.keying == Keying::DtlsSrtp {
+            return Err(Error::DtlsRenegotiation);
+        }
         let (local, remote) = self.dialog.local_and_remote();
         let cseq = self.dialog.next_cseq();
 
@@ -1687,6 +1712,14 @@ impl Call {
     /// clip, the last digit of a PIN — because sending is paced and the queue outlives the
     /// call by however much is left in it.
     async fn end(&mut self, cause: EndCause) -> Result<()> {
+        let reason = match cause {
+            EndCause::Timeout => request_timeout_reason(),
+            _ => normal_clearing_reason(),
+        };
+        self.end_with_reason(cause, &reason).await
+    }
+
+    async fn end_with_reason(&mut self, cause: EndCause, reason: &ReasonValue) -> Result<()> {
         if self.ended {
             return Ok(());
         }
@@ -1700,7 +1733,7 @@ impl Call {
         self.events.end(cause);
 
         let cseq = self.dialog.next_cseq();
-        let bye = bye_request(&self.dialog, cseq)?;
+        let bye = bye_request(&self.dialog, cseq, reason)?;
         let mut responses = self.endpoint.send(bye, self.target.clone()).await?;
         // A BYE that is never answered still ends the call locally: the alternative is a call
         // that cannot be hung up because the far end has already gone.
@@ -1717,6 +1750,15 @@ impl Call {
     /// End the call because this side decided to.
     pub async fn hang_up(&mut self) -> Result<()> {
         self.end(EndCause::LocalHangup).await
+    }
+
+    /// End the call with an explicit protocol cause.
+    ///
+    /// This is the coupled-leg shape from RFC 3326 §3.1: a controller which knows the winning
+    /// response can tell the other dialog why it is being ended instead of reducing every
+    /// teardown to a local hangup.
+    pub async fn hang_up_with_reason(&mut self, reason: ReasonValue) -> Result<()> {
+        self.end_with_reason(EndCause::LocalHangup, &reason).await
     }
 }
 
@@ -1860,13 +1902,14 @@ pub(crate) fn add_routes(
     Ok(builder)
 }
 
-fn bye_request(dialog: &Dialog, cseq: u32) -> Result<Request> {
+fn bye_request(dialog: &Dialog, cseq: u32, reason: &ReasonValue) -> Result<Request> {
     let (local, remote) = dialog.local_and_remote();
     let (uri, routes) = dialog.request_target();
     let builder = RequestBuilder::new(Method::Bye, uri)
         .header(HeaderName::To, Bytes::from(remote))?
         .header(HeaderName::From, Bytes::from(local))?
         .header(HeaderName::CallId, Bytes::from(dialog.id.call_id.clone()))?
+        .header(HeaderName::Reason, Reason::from(reason.clone()).to_bytes())?
         .cseq(cseq, &Method::Bye)?
         .max_forwards(70);
     Ok(add_routes(builder, &routes)?.build())
@@ -1938,6 +1981,20 @@ pub enum IcePolicy {
     Stun(SocketAddr),
 }
 
+/// How the initial audio stream is keyed.
+///
+/// The default preserves sipx's existing behaviour: SDES is offered only when the signalling
+/// transport protects the SDP, and a clear signalling path therefore carries plain RTP.
+/// DTLS-SRTP is always an explicit application choice because it has a different trust boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Keying {
+    /// SDES over protected signalling, or plain RTP when signalling is clear.
+    #[default]
+    Sdes,
+    /// DTLS-SRTP on the media port (RFC 5763 and RFC 5764).
+    DtlsSrtp,
+}
+
 /// The media choices shared by dialing and answering a call.
 ///
 /// This is the call-layer boundary the diagnostic phone consumes. It deliberately contains
@@ -1949,6 +2006,8 @@ pub struct MediaPolicy {
     pub codecs: Codecs,
     /// Whether and how the initial exchange gathers ICE candidates.
     pub ice: IcePolicy,
+    /// Which media keying mechanism the application selected.
+    pub keying: Keying,
 }
 
 impl MediaPolicy {
@@ -1966,12 +2025,19 @@ impl MediaPolicy {
         self
     }
 
+    /// Select the media keying mechanism while retaining the codec and ICE choices.
+    #[must_use]
+    pub const fn with_keying(mut self, keying: Keying) -> Self {
+        self.keying = keying;
+        self
+    }
+
     /// Build fresh per-call gathering state when ICE was selected.
     fn gathering(self, offerer: bool) -> Result<Option<Gathering>> {
         if self.ice == IcePolicy::Disabled {
             return Ok(None);
         }
-        let credentials = Credentials::new(token(), format!("{}{}", token(), token()))
+        let credentials = IceCredentials::new(token(), format!("{}{}", token(), token()))
             .ok_or_else(|| Error::Sdp("could not generate valid ICE credentials".to_owned()))?;
         let mut gathering = Gathering::new(credentials, offerer);
         if let IcePolicy::Stun(server) = self.ice {
@@ -2013,6 +2079,13 @@ pub struct DialOptions {
     /// The default is G.711, no ICE. In particular, enabling a crate feature never changes what
     /// goes on the wire without an application selecting it.
     pub media: MediaPolicy,
+    /// Credentials to answer a 401 or 407 during this call attempt.
+    ///
+    /// Owned by the application and retained only in the options it passes. Their `Debug`
+    /// representation redacts the password, and the call path never logs an authorization value.
+    /// [`dial`] and [`dial_once`] perform the bounded retry; [`dial_early`] surfaces
+    /// [`Error::AuthenticationChallenge`] because its handle names the original INVITE.
+    pub credentials: Option<Credentials>,
 }
 
 impl DialOptions {
@@ -2026,6 +2099,7 @@ impl DialOptions {
             session_expires: None,
             service_route: Vec::new(),
             media: MediaPolicy::default(),
+            credentials: None,
         }
     }
 
@@ -2036,6 +2110,13 @@ impl DialOptions {
     #[must_use]
     pub fn with_codecs(mut self, codecs: Codecs) -> Self {
         self.media.codecs = codecs;
+        self
+    }
+
+    /// Key this call with the selected mechanism.
+    #[must_use]
+    pub fn with_keying(mut self, keying: Keying) -> Self {
+        self.media.keying = keying;
         self
     }
 
@@ -2054,6 +2135,13 @@ impl DialOptions {
     #[must_use]
     pub fn with_service_route(mut self, hops: Vec<String>) -> Self {
         self.service_route = hops;
+        self
+    }
+
+    /// Answer a digest challenge with these credentials (RFC 3261 §22).
+    #[must_use]
+    pub fn with_credentials(mut self, credentials: Credentials) -> Self {
+        self.credentials = Some(credentials);
         self
     }
 
@@ -2086,11 +2174,62 @@ impl DialOptions {
 /// Both the receive address and the codec set come from the caller's [`DialOptions`], so they are
 /// taken as one rather than passed apart: they are two halves of the same decision about what this
 /// side is offering, and splitting them invites a call site that reads the set from somewhere else.
+#[derive(Debug)]
+enum PendingKeying {
+    Sdes,
+    #[cfg(feature = "dtls")]
+    Dtls(sipx_media::dtls::openssl::Identity),
+}
+
+/// Build the capabilities selected by policy and retain anything the later handshake needs.
+fn media_capabilities(
+    policy: MediaPolicy,
+    address: IpAddr,
+    port: u16,
+    secure_signalling: bool,
+) -> Result<(Capabilities, PendingKeying)> {
+    if policy.keying == Keying::DtlsSrtp && policy.ice != IcePolicy::Disabled {
+        return Err(Error::Sdp(
+            "DTLS-SRTP cannot yet be combined with ICE on one media port".to_owned(),
+        ));
+    }
+    let capabilities = policy.codecs.capabilities(address, port);
+    match policy.keying {
+        Keying::Sdes => Ok((
+            capabilities.with_srtp(secure_signalling),
+            PendingKeying::Sdes,
+        )),
+        Keying::DtlsSrtp => {
+            #[cfg(feature = "dtls")]
+            {
+                let identity = sipx_media::dtls::openssl::Identity::generate()
+                    .map_err(|error| Error::Dtls(error.to_string()))?;
+                let fingerprint = identity
+                    .fingerprint()
+                    .map_err(|error| Error::Dtls(error.to_string()))?;
+                Ok((
+                    capabilities.with_dtls_srtp(fingerprint),
+                    PendingKeying::Dtls(identity),
+                ))
+            }
+            #[cfg(not(feature = "dtls"))]
+            {
+                Err(Error::DtlsUnavailable)
+            }
+        }
+    }
+}
+
 async fn offered_media(
     options: &DialOptions,
     port: &MediaPort,
     transport: TransportKind,
-) -> Result<(Capabilities, SessionDescription, Option<LocalDescription>)> {
+) -> Result<(
+    Capabilities,
+    SessionDescription,
+    Option<LocalDescription>,
+    PendingKeying,
+)> {
     let local_ice = match options.media.gathering(true)? {
         Some(gathering) => Some(port.gather(&gathering).await),
         None => None,
@@ -2099,16 +2238,17 @@ async fn offered_media(
         .as_ref()
         .and_then(|local| local.default_destination(ComponentId::RTP))
         .unwrap_or_else(|| SocketAddr::new(options.media_address, port.local_addr().port()));
-    let capabilities = options
-        .media
-        .codecs
-        .capabilities(advertised.ip(), advertised.port())
-        .with_srtp(transport.is_secure());
+    let (capabilities, keying) = media_capabilities(
+        options.media,
+        advertised.ip(),
+        advertised.port(),
+        transport.is_secure(),
+    )?;
     let mut offer = offer_from(&capabilities);
     if let Some(local) = &local_ice {
         add_ice(&mut offer, local, &[]);
     }
-    Ok((capabilities, offer, local_ice))
+    Ok((capabilities, offer, local_ice, keying))
 }
 
 /// Put one gathered local description into the audio stream it belongs to.
@@ -2220,7 +2360,7 @@ fn peer_ice_credentials(body: &[u8]) -> Option<sipx_sdp::ice::Credentials> {
 /// asks the answerer for new ones; reusing them is worse than complying and much better than
 /// refusing a re-offer on a call that is working.
 fn fresh_ice_parameters() -> Option<(sipx_sdp::ice::Credentials, u64)> {
-    let credentials = Credentials::new(token(), format!("{}{}", token(), token()))?;
+    let credentials = IceCredentials::new(token(), format!("{}{}", token(), token()))?;
     Some((credentials, rand::random()))
 }
 
@@ -2318,7 +2458,14 @@ fn build_invite(
     // that it may have it, and `100rel` (RFC 3262 §4) is what permits the far end to send a
     // reliable provisional at all — §3 forbids it outright if we stay quiet, which means a
     // silent UAC gets unreliable ringing even from a UAS that would rather not send it.
-    builder = builder.header(HeaderName::Supported, Bytes::from_static(b"timer, 100rel"))?;
+    builder = builder.header(
+        HeaderName::Supported,
+        Bytes::from_static(b"timer, 100rel, histinfo"),
+    )?;
+    builder = builder.header(
+        HeaderName::HistoryInfo,
+        HistoryInfo::initial(to.clone()).to_bytes(),
+    )?;
     // RFC 3311 §4: "A UAC compliant to this specification SHOULD also include an Allow header
     // field in the INVITE request, listing the method UPDATE." It is the only way the far end
     // is permitted to decide it may renegotiate the early session or refresh with an UPDATE
@@ -2352,6 +2499,33 @@ fn build_invite(
     Ok(builder.build())
 }
 
+/// One digest answer to attach to a retried INVITE.
+struct Authorization<'a> {
+    challenge: &'a sipx_sip::auth::Challenge,
+    credentials: &'a Credentials,
+    nonce_count: u32,
+    cnonce: &'a str,
+}
+
+/// Add the header a 401 or 407 asked for, covering this request's method and URI.
+fn authorize_invite(request: &mut Request, authorization: &Authorization<'_>) -> Result<()> {
+    let uri = String::from_utf8_lossy(&request.uri.to_bytes()).into_owned();
+    let method = String::from_utf8_lossy(request.method.as_bytes()).into_owned();
+    let value = sipx_sip::auth::respond(
+        authorization.challenge,
+        authorization.credentials,
+        &method,
+        &uri,
+        authorization.nonce_count,
+        authorization.cnonce,
+    );
+    request.headers.push(sipx_sip::Header::build(
+        authorization.challenge.response_header(),
+        Bytes::from(value),
+    )?);
+    Ok(())
+}
+
 /// The `Min-SE` a `422` demands, if it named one (RFC 4028 §6).
 fn required_interval(response: &Response) -> Option<Duration> {
     response
@@ -2372,15 +2546,7 @@ pub async fn dial(
     to: &Uri,
     options: &DialOptions,
 ) -> Result<Call> {
-    let identity = Identity::fresh();
-    match dial_with(endpoint, target.clone(), to, options, &identity).await {
-        Err(Error::IntervalTooBrief(required)) => {
-            let mut retried = options.clone();
-            retried.session_expires = Some(required.max(session::ABSOLUTE_MIN_INTERVAL));
-            dial_with(endpoint, target, to, &retried, &identity.again()).await
-        }
-        other => other,
-    }
+    dial_retrying(endpoint, target, to, options, true).await
 }
 
 /// Place a call, surfacing a `422` instead of retrying it.
@@ -2394,7 +2560,87 @@ pub async fn dial_once(
     to: &Uri,
     options: &DialOptions,
 ) -> Result<Call> {
-    dial_with(endpoint, target, to, options, &Identity::fresh()).await
+    dial_retrying(endpoint, target, to, options, false).await
+}
+
+/// Drive the two bounded retry reasons an initial INVITE has: authentication and session interval.
+async fn dial_retrying(
+    endpoint: &Handle,
+    target: Target,
+    to: &Uri,
+    options: &DialOptions,
+    retry_interval: bool,
+) -> Result<Call> {
+    let credentials = options.credentials.clone();
+    let mut attempted = options.clone();
+    let mut identity = Identity::fresh();
+    let mut challenge: Option<Box<sipx_sip::auth::Challenge>> = None;
+    let mut nonce_use: Option<(String, u32)> = None;
+    let mut stale_retried = false;
+    let mut interval_retried = false;
+
+    loop {
+        let cnonce = token();
+        let authorization =
+            challenge
+                .as_deref()
+                .zip(credentials.as_ref())
+                .map(|(challenge, credentials)| Authorization {
+                    challenge,
+                    credentials,
+                    nonce_count: nonce_count_for(&mut nonce_use, &challenge.nonce),
+                    cnonce: &cnonce,
+                });
+        let result = dial_with(
+            endpoint,
+            target.clone(),
+            to,
+            &attempted,
+            &identity,
+            authorization.as_ref(),
+        )
+        .await;
+
+        match result {
+            Err(Error::AuthenticationChallenge {
+                status,
+                reason,
+                challenge: received,
+            }) => {
+                let rejected = || Error::Rejected {
+                    status,
+                    reason: reason.clone(),
+                };
+                if credentials.is_none() {
+                    return Err(rejected());
+                }
+                if challenge.is_none() {
+                    challenge = Some(received);
+                } else if received.stale && !stale_retried {
+                    stale_retried = true;
+                    challenge = Some(received);
+                } else {
+                    return Err(rejected());
+                }
+            }
+            Err(Error::IntervalTooBrief(required)) if retry_interval && !interval_retried => {
+                interval_retried = true;
+                attempted.session_expires = Some(required.max(session::ABSOLUTE_MIN_INTERVAL));
+            }
+            other => return other,
+        }
+        identity = identity.again();
+    }
+}
+
+/// The count of requests sent under `nonce`, starting over when the nonce changes.
+fn nonce_count_for(nonce_use: &mut Option<(String, u32)>, nonce: &str) -> u32 {
+    let count = match nonce_use {
+        Some((last, count)) if last == nonce => count.saturating_add(1),
+        _ => 1,
+    };
+    *nonce_use = Some((nonce.to_owned(), count));
+    count
 }
 
 /// Bind the media port and build the INVITE that will advertise it.
@@ -2407,10 +2653,12 @@ async fn open_invitation(
     to: &Uri,
     options: &DialOptions,
     identity: &Identity,
+    authorization: Option<&Authorization<'_>>,
 ) -> Result<(
     MediaPort,
     Capabilities,
     Option<LocalDescription>,
+    PendingKeying,
     String,
     Request,
 )> {
@@ -2420,7 +2668,8 @@ async fn open_invitation(
         .await
         .map_err(Error::Io)?;
 
-    let (capabilities, offer, ice) = offered_media(options, &port, target.transport).await?;
+    let (capabilities, offer, ice, keying) =
+        offered_media(options, &port, target.transport).await?;
 
     // The `Via` is built here rather than left to the transport, because a CANCEL has to carry
     // the *same* branch as the INVITE it cancels — that identity is what matches the two at the
@@ -2433,7 +2682,7 @@ async fn open_invitation(
         sipx_transport::new_branch()
     );
 
-    let invite = build_invite(
+    let mut invite = build_invite(
         endpoint,
         target,
         &Invitation {
@@ -2446,7 +2695,10 @@ async fn open_invitation(
             service_route: &options.service_route,
         },
     )?;
-    Ok((port, capabilities, ice, via, invite))
+    if let Some(authorization) = authorization {
+        authorize_invite(&mut invite, authorization)?;
+    }
+    Ok((port, capabilities, ice, keying, via, invite))
 }
 
 /// Take back an invitation the caller has stopped waiting for.
@@ -2460,6 +2712,7 @@ async fn withdraw(
     target: Target,
     responses: &mut sipx_transport::Responses,
     provisional: bool,
+    reason: &ReasonValue,
 ) {
     // Giving up is not just ceasing to wait. The far end is ringing and has been told
     // nothing; without a CANCEL it goes on ringing, and someone answering afterwards
@@ -2480,7 +2733,7 @@ async fn withdraw(
         // below, which runs regardless. Note that this `Result` being `Ok` does not mean the
         // CANCEL went out — `Handle::send` returns once the transaction exists — which is exactly
         // why the count is taken below rather than from what is dropped here.
-        let _ = send_cancel(endpoint, invite, via, target.clone()).await;
+        let _ = send_cancel(endpoint, invite, via, target.clone(), reason).await;
     }
 
     // CANCEL cannot close the race it exists to manage: a 200 already in flight
@@ -2500,7 +2753,7 @@ async fn withdraw(
                 // CANCEL that could not be sent before a provisional arrived, sent now that one
                 // has; the `Result` is discarded for the same reason, and `cancelled` is set
                 // either way so a second provisional does not produce a second CANCEL.
-                let _ = send_cancel(endpoint, invite, via, target.clone()).await;
+                let _ = send_cancel(endpoint, invite, via, target.clone(), reason).await;
             }
             continue;
         }
@@ -2533,7 +2786,11 @@ async fn ack_then_bye(endpoint: &Handle, invite: &Request, response: &Response, 
     // whether or not the ACK landed, and returning the error would only mask the failure that
     // brought us here.
     let _ = send_ack(endpoint, &dialog, in_dialog.clone()).await;
-    if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
+    if let Ok(bye) = bye_request(
+        &dialog,
+        dialog.local_cseq.saturating_add(1),
+        &normal_clearing_reason(),
+    ) {
         // discard: counted as `sipx_transport::UnsentCounts::bye` — the number an operator asking
         // "why did that call linger" needs, because a BYE that does not reach the wire leaves a
         // dialog up at the far end that no timer reaps unless RFC 4028 session timers happen to be
@@ -2556,22 +2813,47 @@ fn rejection(response: &Response) -> Error {
     {
         return Error::IntervalTooBrief(required);
     }
+    if matches!(response.status.code(), 401 | 407) {
+        let from_proxy = response.status.code() == 407;
+        let header = if from_proxy {
+            HeaderName::ProxyAuthenticate
+        } else {
+            HeaderName::WwwAuthenticate
+        };
+        let challenges = response
+            .headers
+            .get_all(&header)
+            .filter_map(|header| sipx_sip::auth::Challenge::parse(&header.value(), from_proxy))
+            .collect();
+        if let Some(challenge) = sipx_sip::auth::strongest(challenges) {
+            return Error::AuthenticationChallenge {
+                status: response.status.code(),
+                reason: String::from_utf8_lossy(&response.reason).into_owned(),
+                challenge: Box::new(challenge),
+            };
+        }
+    }
     Error::Rejected {
         status: response.status.code(),
         reason: String::from_utf8_lossy(&response.reason).into_owned(),
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the establishment sequence keeps every post-2xx path visibly ACK-safe"
+)]
 async fn dial_with(
     endpoint: &Handle,
     target: Target,
     to: &Uri,
     options: &DialOptions,
     identity: &Identity,
+    authorization: Option<&Authorization<'_>>,
 ) -> Result<Call> {
     let media_address = options.media_address;
-    let (port, capabilities, ice, via, invite) =
-        open_invitation(endpoint, &target, to, options, identity).await?;
+    let (port, capabilities, ice, keying, via, invite) =
+        open_invitation(endpoint, &target, to, options, identity, authorization).await?;
 
     let mut responses = endpoint.send(invite.clone(), target.clone()).await?;
 
@@ -2595,6 +2877,7 @@ async fn dial_with(
                     target.clone(),
                     &mut responses,
                     provisional,
+                    &request_timeout_reason(),
                 )
                 .await;
                 return Err(Error::Cancelled(options.timeout.unwrap_or(Duration::ZERO)));
@@ -2621,7 +2904,7 @@ async fn dial_with(
         &capabilities,
         options,
     ) {
-        Ok((dialog, media, in_dialog, settled)) => {
+        Ok((dialog, port, in_dialog, settled, ice, answer)) => {
             let ack = build_ack(endpoint, &dialog, &in_dialog)?;
             endpoint
                 .send_directly(ack.clone(), in_dialog.clone())
@@ -2635,6 +2918,28 @@ async fn dial_with(
                 ack,
                 in_dialog.clone(),
             ));
+            // RFC 5763 peers are allowed to wait for the SIP exchange to complete before opening
+            // the media connection. In particular, the ACK must be on the wire before a selected
+            // DTLS handshake can wait for that peer, or two correct endpoints can deadlock.
+            let (media, settled) =
+                match key_and_start(port, ice, settled, keying, &answer, false).await {
+                    Ok(started) => started,
+                    Err(error) => {
+                        // The 2xx was already acknowledged, so RFC 3261 §15 tears down the dialog
+                        // whose selected media path could not be keyed. The transport counts an
+                        // unsent BYE; the result is discarded so it cannot mask the DTLS error.
+                        if let Ok(bye) = bye_request(
+                            &dialog,
+                            dialog.local_cseq.saturating_add(1),
+                            &normal_clearing_reason(),
+                        ) {
+                            // discard: the original DTLS failure is the cause returned to the
+                            // caller; a best-effort teardown failure must not replace it.
+                            let _ = endpoint.send(bye, in_dialog).await;
+                        }
+                        return Err(error);
+                    }
+                };
             // Emitted at construction — the earliest point this call has a stream anyone could
             // read from — from what was actually observed while waiting for the final response,
             // not reconstructed later from anything left lying around.
@@ -2652,6 +2957,7 @@ async fn dial_with(
                 current: settled.negotiated,
                 peer_ice: peer_ice_credentials(response.body()),
                 encrypted: settled.srtp.is_some(),
+                keying: options.media.keying,
                 hold: Direction::SendRecv,
                 referral: None,
                 transfer: None,
@@ -2669,6 +2975,8 @@ async fn dial_with(
                 peer_allows_update: update::peer_allows(&response.headers),
                 events,
                 events_rx: Some(events_rx),
+                history: HistoryInfo::from_headers(&response.headers)
+                    .and_then(std::result::Result::ok),
             })
         }
         Err(error) => {
@@ -2693,13 +3001,20 @@ fn establish(
     ice: Option<LocalDescription>,
     offered: &Capabilities,
     options: &DialOptions,
-) -> Result<(Dialog, MediaSession, Target, Settled)> {
+) -> Result<(
+    Dialog,
+    MediaPort,
+    Target,
+    Settled,
+    Option<LocalDescription>,
+    SessionDescription,
+)> {
     let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
     let settled = settle_answer(offered.crypto.as_slice(), &answer, options.media.codecs)?;
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
-    let media = match ice {
+    let ice = match ice {
         Some(mut local) => {
             let negotiation = answer
                 .media
@@ -2708,11 +3023,11 @@ fn establish(
                     sipx_media::ice::negotiate(&answer, audio)
                 });
             local.accept(&negotiation);
-            port.start_with_ice(settled.media_config(), local)?
+            Some(local)
         }
-        None => port.start(settled.media_config())?,
+        None => None,
     };
-    Ok((dialog, media, target, settled))
+    Ok((dialog, port, target, settled, ice, answer))
 }
 
 /// What the far end's answer to *our* offer settles.
@@ -2736,6 +3051,81 @@ fn settle_answer(
         negotiated: negotiated(answer, codecs)?,
         srtp: srtp_keys(offered, answered.as_ref())?,
     })
+}
+
+/// Complete selected keying and only then start the media workers on the same bound port.
+#[cfg_attr(not(feature = "dtls"), allow(unused_mut, clippy::unused_async))]
+async fn key_and_start(
+    port: MediaPort,
+    ice: Option<LocalDescription>,
+    mut settled: Settled,
+    keying: PendingKeying,
+    peer_description: &SessionDescription,
+    local_is_answerer: bool,
+) -> Result<(MediaSession, Settled)> {
+    #[cfg(not(feature = "dtls"))]
+    // discard: these inputs select DTLS roles only; the feature-off build has no such branch.
+    let _ = (peer_description, local_is_answerer);
+    match keying {
+        PendingKeying::Sdes => {}
+        #[cfg(feature = "dtls")]
+        PendingKeying::Dtls(identity) => {
+            let audio = peer_description.media.first().ok_or(Error::NoCommonCodec)?;
+            let fingerprint = audio
+                .fingerprint()
+                .or_else(|| peer_description.fingerprint())
+                .ok_or_else(|| Error::Sdp("the DTLS peer supplied no fingerprint".to_owned()))?;
+            let peer_setup = match audio.setup() {
+                Some(setup) => setup,
+                None if local_is_answerer => sipx_sdp::fingerprint::Setup::ActPass,
+                None => {
+                    return Err(Error::Sdp(
+                        "the DTLS answer supplied no setup role".to_owned(),
+                    ));
+                }
+            };
+            let local_setup = if local_is_answerer {
+                // `peer_description` is the offer. The answerer follows the role selected by
+                // `sipx_sdp::answer`: actpass/passive -> active, active -> passive.
+                sipx_sdp::fingerprint::Setup::answer(peer_setup)
+            } else {
+                match peer_setup {
+                    sipx_sdp::fingerprint::Setup::Active => sipx_sdp::fingerprint::Setup::Passive,
+                    sipx_sdp::fingerprint::Setup::Passive => sipx_sdp::fingerprint::Setup::Active,
+                    _ => {
+                        return Err(Error::Sdp(
+                            "the DTLS answer did not select active or passive".to_owned(),
+                        ));
+                    }
+                }
+            };
+            let role = match local_setup {
+                sipx_sdp::fingerprint::Setup::Active => sipx_media::dtls::Role::Client,
+                sipx_sdp::fingerprint::Setup::Passive => sipx_media::dtls::Role::Server,
+                _ => {
+                    return Err(Error::Sdp(
+                        "the DTLS exchange did not select active or passive".to_owned(),
+                    ));
+                }
+            };
+            let remote = settled.negotiated.remote;
+            let (keyed, keys) = port
+                .key_with_dtls(identity, remote, role, fingerprint, Duration::from_secs(5))
+                .await
+                .map_err(|error| Error::Dtls(error.to_string()))?;
+            settled.srtp = Some(keys);
+            let media = match ice {
+                Some(local) => keyed.start_with_ice(settled.media_config(), local)?,
+                None => keyed.start(settled.media_config())?,
+            };
+            return Ok((media, settled));
+        }
+    }
+    let media = match ice {
+        Some(local) => port.start_with_ice(settled.media_config(), local)?,
+        None => port.start(settled.media_config())?,
+    };
+    Ok((media, settled))
 }
 
 /// Answer an incoming INVITE.
@@ -2960,8 +3350,11 @@ pub async fn dial_early(
     to: &Uri,
     options: &DialOptions,
 ) -> Result<Dialing> {
-    let (port, capabilities, ice, via, invite) =
-        open_invitation(endpoint, &target, to, options, &Identity::fresh()).await?;
+    if options.media.keying == Keying::DtlsSrtp {
+        return Err(Error::DtlsEarlyMedia);
+    }
+    let (port, capabilities, ice, _keying, via, invite) =
+        open_invitation(endpoint, &target, to, options, &Identity::fresh(), None).await?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
 
     let (events, events_rx) = EventSink::new();
@@ -3186,6 +3579,14 @@ impl Dialing {
     /// cannot do on its own.
     pub async fn cancel(mut self) {
         self.give_up().await;
+    }
+
+    /// Cancel this invitation with an explicit protocol cause.
+    ///
+    /// A SIP 200 reason represents the RFC 3326 §3.1 case where another coupled or forked leg
+    /// completed the call; other valid SIP and Q.850 causes are retained unchanged.
+    pub async fn cancel_with_reason(mut self, reason: ReasonValue) {
+        self.give_up_with_reason(&reason).await;
     }
 
     /// The early dialog's mutable parts, borrowed for one UPDATE.
@@ -3473,16 +3874,7 @@ impl Dialing {
         if !response.status.is_success() {
             // A non-2xx is acknowledged by the transaction layer itself, so there is nothing to
             // send here — only a media port to release, which happens when this is dropped.
-            const INTERVAL_TOO_SMALL: u16 = 422;
-            if response.status.code() == INTERVAL_TOO_SMALL
-                && let Some(required) = required_interval(&response)
-            {
-                return Err(Error::IntervalTooBrief(required));
-            }
-            return Err(Error::Rejected {
-                status: response.status.code(),
-                reason: String::from_utf8_lossy(&response.reason).into_owned(),
-            });
+            return Err(rejection(&response));
         }
 
         // From here the far end believes a dialog exists, so *every* path must acknowledge.
@@ -3521,6 +3913,7 @@ impl Dialing {
                     current: settled.negotiated,
                     peer_ice: peer_ice_credentials(response.body()),
                     encrypted: settled.srtp.is_some(),
+                    keying: self.options.media.keying,
                     hold: self.hold,
                     referral: None,
                     transfer: None,
@@ -3537,6 +3930,8 @@ impl Dialing {
                         || update::peer_allows(&response.headers),
                     events,
                     events_rx,
+                    history: HistoryInfo::from_headers(&response.headers)
+                        .and_then(std::result::Result::ok),
                 })
             }
             Err(error) => {
@@ -3553,7 +3948,11 @@ impl Dialing {
                     // here only because this one already holds the dialog. Via `send_directly`, so
                     // this `Result` does report the transmit.
                     let _ = send_ack(&self.endpoint, &dialog, in_dialog.clone()).await;
-                    if let Ok(bye) = bye_request(&dialog, dialog.local_cseq.saturating_add(1)) {
+                    if let Ok(bye) = bye_request(
+                        &dialog,
+                        dialog.local_cseq.saturating_add(1),
+                        &normal_clearing_reason(),
+                    ) {
                         // discard: counted as `sipx_transport::UnsentCounts::bye`, at the
                         // transmit rather than from this `Result`, which reports only that the
                         // transaction was created. It is dropped so that the error which brought
@@ -3651,6 +4050,10 @@ impl Dialing {
 
     /// Take back the invitation, whatever state it is in.
     async fn give_up(&mut self) {
+        self.give_up_with_reason(&normal_clearing_reason()).await;
+    }
+
+    async fn give_up_with_reason(&mut self, reason: &ReasonValue) {
         let Some(responses) = self.responses.as_mut() else {
             return;
         };
@@ -3661,6 +4064,7 @@ impl Dialing {
             self.target.clone(),
             responses,
             self.provisional,
+            reason,
         )
         .await;
     }
@@ -3780,6 +4184,9 @@ impl Early {
         offer: &SessionDescription,
         policy: MediaPolicy,
     ) -> Result<(Self, SessionDescription)> {
+        if policy.keying == Keying::DtlsSrtp {
+            return Err(Error::DtlsEarlyMedia);
+        }
         let negotiated = negotiated(offer, policy.codecs)?;
         let port = MediaPort::bind(SocketAddr::new(media_address, 0))
             .await
@@ -3789,10 +4196,8 @@ impl Early {
             .as_ref()
             .and_then(|local| local.default_destination(ComponentId::RTP))
             .unwrap_or_else(|| SocketAddr::new(media_address, port.local_addr().port()));
-        let capabilities = policy
-            .codecs
-            .capabilities(advertised.ip(), advertised.port())
-            .with_srtp(secure);
+        let (capabilities, _keying) =
+            media_capabilities(policy, advertised.ip(), advertised.port(), secure)?;
         let mut answer = sipx_sdp::answer(offer, &capabilities);
         if let Some(local) = local_ice.as_mut() {
             local.accept(&remote_ice);
@@ -4080,6 +4485,7 @@ pub async fn answer_early(
         peer_ice: peer_ice_credentials(incoming.request.body()),
         hold: Direction::SendRecv,
         encrypted: early.settled.is_encrypted(),
+        keying: Keying::Sdes,
         referral: None,
         transfer: None,
         session: agreed.map(|accepted| {
@@ -4092,6 +4498,8 @@ pub async fn answer_early(
         peer_allows_update,
         events,
         events_rx: Some(events_rx),
+        history: HistoryInfo::from_headers(&incoming.request.headers)
+            .and_then(std::result::Result::ok),
     })
 }
 
@@ -4198,10 +4606,12 @@ async fn answer_negotiated(
         .as_ref()
         .and_then(|local| local.default_destination(ComponentId::RTP))
         .unwrap_or_else(|| SocketAddr::new(media_address, port.local_addr().port()));
-    let capabilities = policy
-        .codecs
-        .capabilities(advertised.ip(), advertised.port())
-        .with_srtp(incoming.transport.is_secure());
+    let (capabilities, keying) = media_capabilities(
+        policy,
+        advertised.ip(),
+        advertised.port(),
+        incoming.transport.is_secure(),
+    )?;
     let mut answer_sdp = sipx_sdp::answer(&offer, &capabilities);
     if let Some(local) = local_ice.as_mut() {
         local.accept(&remote_ice);
@@ -4224,11 +4634,6 @@ async fn answer_negotiated(
         negotiated,
         srtp: srtp_keys_answering(capabilities.crypto.as_ref(), offer_crypto(&offer)),
     };
-    let media = match local_ice {
-        Some(local) => port.start_with_ice(settled.media_config(), local)?,
-        None => port.start(settled.media_config())?,
-    };
-
     let to_with_tag = {
         let existing = incoming
             .request
@@ -4282,6 +4687,10 @@ async fn answer_negotiated(
         Arc::clone(&acked),
     ));
 
+    // The answer must leave before an active answerer sends ClientHello. A caller is permitted to
+    // wait for the final SDP (and then its ACK) before opening the media path.
+    let (media, settled) = key_and_start(port, local_ice, settled, keying, &offer, true).await?;
+
     // As in `dial_with`: emitted at construction, from what was actually observed (ringing
     // first, if this path came through it) rather than recomputed afterwards.
     let (events, events_rx) = EventSink::new();
@@ -4300,6 +4709,7 @@ async fn answer_negotiated(
         peer_ice: peer_ice_credentials(incoming.request.body()),
         hold: Direction::SendRecv,
         encrypted: settled.srtp.is_some(),
+        keying: policy.keying,
         referral: None,
         transfer: None,
         session: agreed.map(|accepted| {
@@ -4313,6 +4723,8 @@ async fn answer_negotiated(
         peer_allows_update: update::peer_allows(&incoming.request.headers),
         events,
         events_rx: Some(events_rx),
+        history: HistoryInfo::from_headers(&incoming.request.headers)
+            .and_then(std::result::Result::ok),
     })
 }
 
@@ -4477,7 +4889,13 @@ async fn acknowledge(response: &Response, ctx: &mut Acknowledging<'_>) -> Result
 /// A CANCEL is not a new request in its own right: it carries the INVITE's `Via` verbatim —
 /// branch and all — its `Call-ID`, `To`, `From` and sequence *number*, differing only in the
 /// method. That is what identifies which invitation it is cancelling.
-async fn send_cancel(endpoint: &Handle, invite: &Request, via: &str, target: Target) -> Result<()> {
+async fn send_cancel(
+    endpoint: &Handle,
+    invite: &Request,
+    via: &str,
+    target: Target,
+    reason: &ReasonValue,
+) -> Result<()> {
     let copy = |name: &HeaderName| {
         invite
             .headers
@@ -4501,11 +4919,24 @@ async fn send_cancel(endpoint: &Handle, invite: &Request, via: &str, target: Tar
         .map_or(1, |cseq| cseq.sequence);
 
     let request = builder
+        .header(HeaderName::Reason, Reason::from(reason.clone()).to_bytes())?
         .cseq(sequence, &Method::Cancel)?
         .max_forwards(70)
         .build();
     endpoint.send(request, target).await?;
     Ok(())
+}
+
+fn normal_clearing_reason() -> ReasonValue {
+    ReasonValue::q850(16, Some(b"Normal call clearing".to_vec()))
+}
+
+fn request_timeout_reason() -> ReasonValue {
+    // A constant defined by the SIP status-code space; construction cannot fail.
+    StatusCode::new(408).map_or_else(
+        || ReasonValue::q850(102, Some(b"Recovery on timer expiry".to_vec())),
+        |status| ReasonValue::sip(status, Some(b"Request Timeout".to_vec())),
+    )
 }
 
 /// Acknowledge a 2xx (RFC 3261 §13.2.2.4).
@@ -4583,13 +5014,16 @@ fn build_ack(endpoint: &Handle, dialog: &Dialog, target: &Target) -> Result<Requ
 /// address the exchange arrived from is the honest fallback, and behind a NAT it is the only
 /// one that works.
 pub(crate) fn in_dialog_target(dialog: &Dialog, fallback: Target) -> Target {
-    // Over a WebSocket the `Contact` is not consulted at all. RFC 7118 §5.2: the peer has no
+    // Over a WebSocket or QUIC the `Contact` is not consulted at all. RFC 7118 §5.2: the peer has no
     // listening port, its `Contact` names something that will never resolve, and the connection
     // the dialog was established on is the only way to reach it. This is the RFC 5923 rule for
     // stream transports made absolute — there is no fallback because there is nowhere to fall
     // back to, and honouring a `Contact` here would send the BYE to an address that either does
     // not answer or belongs to somebody else.
-    if matches!(fallback.transport, TransportKind::Ws | TransportKind::Wss) {
+    if matches!(
+        fallback.transport,
+        TransportKind::Ws | TransportKind::Wss | TransportKind::Quic
+    ) {
         return fallback;
     }
 
@@ -4933,7 +5367,7 @@ const fn offered_rtpmap(codec: Codec) -> &'static str {
 #[must_use]
 pub fn contact_for(endpoint: &Handle, transport: TransportKind) -> String {
     match transport {
-        TransportKind::Ws | TransportKind::Wss => format!(
+        TransportKind::Ws | TransportKind::Wss | TransportKind::Quic => format!(
             "<sip:sipx@{};transport={}>",
             endpoint.sent_by_for(transport),
             transport.as_str().to_ascii_lowercase()

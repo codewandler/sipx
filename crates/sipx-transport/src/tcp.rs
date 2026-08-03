@@ -37,6 +37,9 @@ pub enum Event {
         transport: TransportKind,
         /// Which incarnation delivered it.
         id: u64,
+        /// Exact QUIC stream to answer on; absent for byte-stream transports and client replies.
+        #[cfg(feature = "quic")]
+        quic_reply: Option<crate::quic::Reply>,
     },
     /// Framing was lost, so the connection is being closed and everything in flight with it.
     ///
@@ -75,6 +78,16 @@ pub enum Event {
         /// Which incarnation failed.
         id: u64,
         /// The TLS backend's verification detail, containing no key material.
+        detail: String,
+    },
+    /// An established QUIC connection closed with a protocol-level reason.
+    #[cfg(feature = "quic")]
+    QuicClosed {
+        /// Which secure connection closed.
+        key: ConnectionKey,
+        /// Which incarnation closed.
+        id: u64,
+        /// QUIC close code and reason.
         detail: String,
     },
     /// The connection is gone.
@@ -261,6 +274,37 @@ impl Pool {
             // would exceed the configured bound. The peer may retry after termination.
             tracing::debug!(peer = %key.peer, "refused inbound TLS connection at capacity");
         }
+    }
+
+    /// Adopt an authenticated QUIC connection opened by a peer.
+    #[cfg(feature = "quic")]
+    pub fn accept_quic(&mut self, connection: quinn::Connection, peer: SocketAddr) {
+        let key = ConnectionKey::new(peer, TransportKind::Quic);
+        if self
+            .insert_quic(connection, key.clone(), Origin::Inbound)
+            .is_err()
+        {
+            // discard: pool admission refused this peer before any SIP message or transaction existed.
+            tracing::debug!(peer = %key.peer, "refused inbound QUIC connection at capacity");
+        }
+    }
+
+    /// Send over QUIC, opening and authenticating a pooled connection when necessary.
+    #[cfg(feature = "quic")]
+    pub(crate) async fn send_quic_generation(
+        &mut self,
+        key: &ConnectionKey,
+        verification_name: &str,
+        client: &crate::tls::ClientTls,
+        endpoint: &quinn::Endpoint,
+        bytes: Bytes,
+    ) -> Result<u64> {
+        if !self.reusable(key) {
+            self.dial_quic(key.clone(), verification_name, client, endpoint)?;
+        }
+        self.queue(key, bytes).await?;
+        self.generation(key)
+            .ok_or(crate::error::Error::EndpointClosed)
     }
 
     /// Send to a peer over TLS, connecting and verifying if there is no usable connection.
@@ -634,6 +678,53 @@ impl Pool {
         Ok(())
     }
 
+    #[cfg(feature = "quic")]
+    fn dial_quic(
+        &mut self,
+        key: ConnectionKey,
+        verification_name: &str,
+        client: &crate::tls::ClientTls,
+        endpoint: &quinn::Endpoint,
+    ) -> Result<()> {
+        crate::tls::verification_name(verification_name)?;
+        let mut client_config = client.quic_config()?;
+        client_config.transport_config(crate::quic::transport_config());
+        let connecting = endpoint
+            .connect_with(client_config, key.peer, verification_name)
+            .map_err(|error| crate::tls::TlsError::Handshake {
+                peer: key.peer.to_string(),
+                detail: error.to_string(),
+            })?;
+        let Registration {
+            writer: writer_rx,
+            cancel,
+            id,
+            start_now,
+        } = self.register(key.clone(), Origin::Outbound)?;
+        let events = self.events.clone();
+        let limits = self.limits;
+        let task_key = key.clone();
+        self.launch(key, id, cancel, start_now, async move {
+            match connecting.await {
+                Ok(connection) => {
+                    crate::quic::pump(connection, task_key, id, writer_rx, events, limits).await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, peer = %task_key.peer, "QUIC handshake failed");
+                    // discard: a stopped driver has no caller left to receive the handshake cause.
+                    let _ = events
+                        .send(Event::HandshakeFailed {
+                            key: task_key,
+                            id,
+                            detail: error.to_string(),
+                        })
+                        .await;
+                }
+            }
+        });
+        Ok(())
+    }
+
     #[cfg(feature = "ws")]
     fn dial_ws(
         &mut self,
@@ -733,6 +824,32 @@ impl Pool {
             cancel,
             start_now,
             pump(stream, task_key, id, writer_rx, events, limits),
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "quic")]
+    fn insert_quic(
+        &mut self,
+        connection: quinn::Connection,
+        key: ConnectionKey,
+        origin: Origin,
+    ) -> Result<()> {
+        let Registration {
+            writer: writer_rx,
+            cancel,
+            id,
+            start_now,
+        } = self.register(key.clone(), origin)?;
+        let events = self.events.clone();
+        let limits = self.limits;
+        let task_key = key.clone();
+        self.launch(
+            key,
+            id,
+            cancel,
+            start_now,
+            crate::quic::pump(connection, task_key, id, writer_rx, events, limits),
         );
         Ok(())
     }
@@ -872,6 +989,8 @@ async fn pump<S>(
                                         source: peer,
                                         transport,
                                         id,
+                                        #[cfg(feature = "quic")]
+                                        quic_reply: None,
                                     })
                                     .await
                                     .is_err()
@@ -1037,6 +1156,10 @@ mod tests {
             | Event::Closed { .. }
             | Event::FramingFailed { .. }
             | Event::HandshakeFailed { .. } => {
+                panic!("expected a message")
+            }
+            #[cfg(feature = "quic")]
+            Event::QuicClosed { .. } => {
                 panic!("expected a message")
             }
         }

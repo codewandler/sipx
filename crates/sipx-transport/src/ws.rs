@@ -275,6 +275,8 @@ pub(crate) async fn pump<S>(
                                 source: peer,
                                 transport,
                                 id,
+                                #[cfg(feature = "quic")]
+                                quic_reply: None,
                             })
                             .await
                             .is_err()

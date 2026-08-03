@@ -19,9 +19,29 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use sipx_audio::{Wav, read_wav, write_wav};
+use sipx_sip::{HeaderName, Method, StatusCode};
 use sipx_testkit::certs::Ca;
+use sipx_transport::{Config as TransportConfig, bind};
+use sipx_ua::{Authenticator, Presented, Verdict};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::{Semaphore, SemaphorePermit};
+
+/// One real command-line scenario at a time in this test binary.
+///
+/// A scenario may and usually does run several `sipx` processes concurrently. Running every
+/// scenario concurrently as well multiplies that into dozens of media workers, then makes a
+/// short clip's delivery depend on whether its worker is scheduled before the command's real call
+/// duration expires. The permit is a capacity/readiness barrier, not a delay: the next scenario
+/// starts when the previous one's processes have exited.
+static PROCESS_SCENARIOS: Semaphore = Semaphore::const_new(1);
+
+async fn process_scenario() -> SemaphorePermit<'static> {
+    PROCESS_SCENARIOS
+        .acquire()
+        .await
+        .expect("the CLI process-scenario semaphore remains open")
+}
 
 fn sipx() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_sipx"));
@@ -197,6 +217,7 @@ fn tls_fixture(name: &str) -> TlsFixture {
 /// both processes' terminal reports so a flag accepted and then ignored cannot pass.
 #[tokio::test]
 async fn dph_1_every_released_transport_carries_a_loopback_command_call() {
+    let _scenario = process_scenario().await;
     let tls = tls_fixture("dph-1");
     let ca = tls.ca.to_string_lossy().into_owned();
     let cert = tls.cert.to_string_lossy().into_owned();
@@ -265,6 +286,7 @@ async fn dph_1_every_released_transport_carries_a_loopback_command_call() {
 /// return a typed TLS failure and must not retry over WS, TCP or UDP.
 #[tokio::test]
 async fn dph_2_wss_name_mismatch_fails_without_downgrade() {
+    let _scenario = process_scenario().await;
     let tls = tls_fixture("dph-2");
     let ca = tls.ca.to_string_lossy().into_owned();
     let cert = tls.cert.to_string_lossy().into_owned();
@@ -324,6 +346,7 @@ async fn dph_2_wss_name_mismatch_fails_without_downgrade() {
     reason = "one matrix test keeps identical assertions visible for every released transport"
 )]
 async fn register_selects_every_released_transport() {
+    let _scenario = process_scenario().await;
     let tls = tls_fixture("register-transports");
     let ca = tls.ca.to_string_lossy().into_owned();
     let cert = std::fs::read(&tls.cert).expect("reads certificate");
@@ -364,6 +387,9 @@ async fn register_selects_every_released_transport() {
             sipx_transport::TransportKind::Tls => handle.tls_addr().expect("TLS address"),
             sipx_transport::TransportKind::Ws => handle.ws_addr().expect("WS address"),
             sipx_transport::TransportKind::Wss => handle.wss_addr().expect("WSS address"),
+            sipx_transport::TransportKind::Quic => {
+                panic!("QUIC is not part of this five-transport command-line matrix")
+            }
         };
         let registrar = handle.clone();
         let serving = tokio::spawn(async move {
@@ -455,6 +481,7 @@ fn header_line<'a>(message: &'a str, name: &str) -> &'a str {
 /// traffic nowhere.
 #[tokio::test]
 async fn register_advertises_this_client_in_via_and_contact() {
+    let _scenario = process_scenario().await;
     let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -593,6 +620,7 @@ fn assert_outbound_push_register(request: &str) {
 /// roles: this test fails on a plain REGISTER, which is all the CLI could send before.
 #[tokio::test]
 async fn register_over_a_flow_keeps_it_and_a_push_wakes_it() {
+    let _scenario = process_scenario().await;
     let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -682,6 +710,7 @@ async fn register_over_a_flow_keeps_it_and_a_push_wakes_it() {
 
 #[tokio::test]
 async fn version_and_help_succeed() {
+    let _scenario = process_scenario().await;
     let output = sipx().arg("version").output().await.expect("runs");
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("sipx"));
@@ -695,6 +724,7 @@ async fn version_and_help_succeed() {
 /// stderr where it will not be parsed as a result.
 #[tokio::test]
 async fn an_unknown_command_is_a_usage_error_on_stderr() {
+    let _scenario = process_scenario().await;
     let output = sipx()
         .args(["frobnicate", "--json"])
         .output()
@@ -714,6 +744,7 @@ async fn an_unknown_command_is_a_usage_error_on_stderr() {
 
 #[tokio::test]
 async fn dial_without_a_uri_is_a_usage_error() {
+    let _scenario = process_scenario().await;
     let output = sipx()
         .args(["dial", "--json"])
         .output()
@@ -727,6 +758,7 @@ async fn dial_without_a_uri_is_a_usage_error() {
 /// way that looks like a network problem.
 #[tokio::test]
 async fn dialling_a_name_explains_what_is_missing() {
+    let _scenario = process_scenario().await;
     let output = sipx()
         .args(["dial", "sip:bob@example.com", "--json"])
         .output()
@@ -741,6 +773,7 @@ async fn dialling_a_name_explains_what_is_missing() {
 /// that contains the audio that was played.
 #[tokio::test]
 async fn dial_plays_a_file_and_records_the_far_end() {
+    let _scenario = process_scenario().await;
     let dir = scratch("call");
     let from_caller = dir.join("caller.wav");
     let from_callee = dir.join("callee.wav");
@@ -840,10 +873,112 @@ async fn dial_plays_a_file_and_records_the_far_end() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Silence is a property of the media received, not proof that signalling failed.
+///
+/// Neither endpoint plays audio. Both still establish and complete the call, report the zero
+/// samples honestly, and use the success exit code. This is deliberately a binary test: the
+/// contract belongs to the status a shell sees, not to an internal return value (`S-33`).
+#[tokio::test]
+async fn a_completed_silent_call_is_success_for_dial_and_answer() {
+    let _scenario = process_scenario().await;
+    let dir = scratch("silent-call");
+    let heard_by_answer = dir.join("answer.wav");
+    let heard_by_dial = dir.join("dial.wav");
+    let (mut answerer, address, mut lines) = start_answerer(&[
+        "--duration",
+        "1",
+        "--record",
+        heard_by_answer.to_str().expect("an answer recording path"),
+    ])
+    .await;
+
+    let caller = tokio::time::timeout(
+        Duration::from_secs(20),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:silence@{address}"),
+                "--local",
+                "127.0.0.1:0",
+                "--json",
+                "--duration",
+                "1",
+                "--timeout",
+                "10",
+                "--record",
+                heard_by_dial.to_str().expect("a dial recording path"),
+            ])
+            .output(),
+    )
+    .await
+    .expect("the silent call is bounded")
+    .expect("dial runs");
+    let caller_report = String::from_utf8_lossy(&caller.stdout);
+    assert_eq!(
+        caller.status.code(),
+        Some(0),
+        "dial completed a call but did not exit successfully: {caller_report} / {}",
+        String::from_utf8_lossy(&caller.stderr)
+    );
+    assert!(
+        caller_report.contains("\"status\":\"answered\"")
+            && caller_report.contains("\"samples_recorded\":0")
+            && caller_report.contains("\"heard_audio\":false"),
+        "dial must distinguish successful silence in its report: {caller_report}"
+    );
+
+    let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .expect("the answer report is bounded")
+        .expect("reads answer stdout")
+        .expect("the answerer emits its terminal report");
+    assert!(
+        answer_report.contains("\"status\":\"answered\"")
+            && answer_report.contains("\"samples_recorded\":0")
+            && answer_report.contains("\"heard_audio\":false"),
+        "answer must distinguish successful silence in its report: {answer_report}"
+    );
+    let complaint = drain_stderr(&mut answerer).await;
+    let answer_status = exits_cleanly(&mut answerer, &complaint).await;
+    assert_eq!(
+        answer_status.code(),
+        Some(0),
+        "answer completed a silent call but chose another outcome: {complaint}"
+    );
+
+    for recording in [&heard_by_answer, &heard_by_dial] {
+        let heard = read_wav(std::fs::File::open(recording).expect("opens silent recording"))
+            .expect("reads silent recording");
+        assert!(
+            heard.samples.is_empty(),
+            "the test must not pass by accidentally carrying audio: {recording:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Keeping exit 0 for silence is a decision, and the decision must be discoverable to a script
+/// author rather than inferred from a test or one run of the binary.
+#[test]
+fn the_silent_call_exit_contract_is_documented_for_both_commands() {
+    let reference = include_str!("../../../website/docs/reference/cli.md");
+    assert!(
+        reference.contains(
+            "Both `dial` and `answer` exit 0 after a completed call that received no audio"
+        ),
+        "the CLI reference does not state the shared dial/answer exit rule for a silent call"
+    );
+    assert!(
+        reference.contains("`heard_audio: false`") && reference.contains("Silence is not"),
+        "the CLI reference must say where silence is reported and why it is not an exit failure"
+    );
+}
+
 /// A refused call gets its own exit code, so a script can tell busy from no-answer without
 /// matching on English.
 #[tokio::test]
 async fn a_busy_answer_gives_the_caller_the_busy_exit_code() {
+    let _scenario = process_scenario().await;
     let (mut answerer, address, _lines) = start_answerer(&["--busy"]).await;
 
     let caller = tokio::time::timeout(
@@ -877,10 +1012,161 @@ async fn a_busy_answer_gives_the_caller_the_busy_exit_code() {
     answerer_exits_cleanly(&mut answerer).await;
 }
 
+/// `S-28`: the shell-facing credential option reaches the call retry, rather than merely parsing.
+#[tokio::test]
+async fn dial_password_answers_a_proxy_challenge_and_connects() {
+    let _scenario = process_scenario().await;
+    authenticated_dial(false).await;
+}
+
+/// The environment is the documented credential route because argv is visible to other users.
+#[tokio::test]
+async fn sipx_password_answers_a_proxy_challenge_and_connects() {
+    let _scenario = process_scenario().await;
+    authenticated_dial(true).await;
+}
+
+async fn authenticated_dial(from_environment: bool) {
+    const PASSWORD: &str = "Circle Of Life";
+    let (handle, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("binds");
+    let address = handle.local_addr();
+    let serving = tokio::spawn(async move {
+        let first = incoming.recv().await.expect("the first INVITE arrives");
+        assert_eq!(first.request.method, Method::Invite);
+        let mut authenticator = Authenticator::new("proxy.example", [9; 32]);
+        let challenge = sipx_sip::build::ResponseBuilder::to_request(
+            &first.request,
+            StatusCode::new(407).expect("valid"),
+            "Proxy Authentication Required",
+        )
+        .expect("builds")
+        .set_header(
+            &HeaderName::To,
+            bytes::Bytes::from_static(b"<sip:bob@sipx.test>;tag=challenge"),
+        )
+        .expect("valid")
+        .header(
+            HeaderName::ProxyAuthenticate,
+            bytes::Bytes::from(authenticator.challenge(false)),
+        )
+        .expect("valid")
+        .build();
+        handle
+            .respond(&first.key, challenge)
+            .await
+            .expect("challenges");
+
+        let retry = incoming
+            .recv()
+            .await
+            .expect("the authenticated retry arrives");
+        let presented = Presented::from_request(&retry.request, true)
+            .expect("the retry carries Proxy-Authorization");
+        assert_eq!(presented.username, "alice");
+        assert_eq!(
+            authenticator.verify(&presented, "INVITE", PASSWORD),
+            Verdict::Authenticated
+        );
+        sipx_call::answer(&handle, &retry, "127.0.0.1".parse().expect("loopback"))
+            .await
+            .expect("answers")
+    });
+
+    let mut command = sipx();
+    command.args([
+        "dial",
+        &format!("sip:bob@{address}"),
+        "--from",
+        "sip:alice@example.net",
+        "--duration",
+        "0",
+        "--timeout",
+        "5",
+        "--json",
+    ]);
+    if from_environment {
+        command.env("SIPX_PASSWORD", PASSWORD);
+    } else {
+        command.args(["--password", PASSWORD]);
+    }
+    let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+        .await
+        .expect("the authenticated dial is bounded")
+        .expect("dial runs");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} / {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _callee = serving.await.expect("the challenge server finishes");
+}
+
+/// A challenge with no credential is a named authentication outcome, not a transaction timeout.
+#[tokio::test]
+async fn a_challenged_dial_without_a_password_exits_unauthorized() {
+    let _scenario = process_scenario().await;
+    let (handle, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("binds");
+    let address = handle.local_addr();
+    let serving = tokio::spawn(async move {
+        let invite = incoming.recv().await.expect("the INVITE arrives");
+        let authenticator = Authenticator::new("proxy.example", [11; 32]);
+        let challenge = sipx_sip::build::ResponseBuilder::to_request(
+            &invite.request,
+            StatusCode::new(407).expect("valid"),
+            "Proxy Authentication Required",
+        )
+        .expect("builds")
+        .header(
+            HeaderName::ProxyAuthenticate,
+            bytes::Bytes::from(authenticator.challenge(false)),
+        )
+        .expect("valid")
+        .build();
+        handle
+            .respond(&invite.key, challenge)
+            .await
+            .expect("challenges");
+    });
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:bob@{address}"),
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("the rejection is bounded")
+    .expect("dial runs");
+    serving.await.expect("the challenge server finishes");
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "a missing credential must be Unauthorized, not timeout: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// A final response to an INVITE must carry a To tag (RFC 3261 §8.2.6.2): the tag is what
 /// lets a caller behind a forking proxy tell one branch's refusal from another's.
 #[tokio::test]
 async fn a_refusal_carries_a_to_tag() {
+    let _scenario = process_scenario().await;
     let (mut answerer, address, _lines) = start_answerer(&["--busy"]).await;
 
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
@@ -962,6 +1248,7 @@ async fn a_refusal_carries_a_to_tag() {
 /// needs, which is why it used it and reported the defect rather than fixing it.
 #[tokio::test]
 async fn verbose_logging_stays_off_stdout() {
+    let _scenario = process_scenario().await;
     let dir = scratch("verbose-logging");
 
     let loud = place_a_call(&dir, &["-vv"], &[]).await;
@@ -1046,6 +1333,7 @@ async fn verbose_logging_stays_off_stdout() {
 /// second `v` and not to a flag that switches everything on at once.
 #[tokio::test]
 async fn one_v_reports_the_call_on_both_ends_of_it() {
+    let _scenario = process_scenario().await;
     let dir = scratch("verbosity-info");
     let placed = place_a_call(&dir, &["-v"], &["-v"]).await;
 
@@ -1081,6 +1369,7 @@ async fn one_v_reports_the_call_on_both_ends_of_it() {
 /// DTMF sent by the caller is reported by the answering side.
 #[tokio::test]
 async fn digits_sent_by_the_caller_are_reported_by_the_answerer() {
+    let _scenario = process_scenario().await;
     let (mut answerer, address, mut lines) = start_answerer(&["--duration", "10"]).await;
 
     let caller = tokio::time::timeout(
@@ -1127,6 +1416,7 @@ async fn digits_sent_by_the_caller_are_reported_by_the_answerer() {
 /// that wanted either an answer or an error.
 #[tokio::test]
 async fn a_call_that_is_never_answered_times_out_on_schedule() {
+    let _scenario = process_scenario().await;
     // A UDP socket that accepts packets and never replies.
     let black_hole = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
@@ -1180,6 +1470,7 @@ async fn a_call_that_is_never_answered_times_out_on_schedule() {
 /// to call "30" until `--timeout` was registered as taking a value.
 #[tokio::test]
 async fn a_valued_flag_before_the_uri_is_not_mistaken_for_it() {
+    let _scenario = process_scenario().await;
     let output = sipx()
         .args([
             "dial",
@@ -1207,6 +1498,7 @@ async fn a_valued_flag_before_the_uri_is_not_mistaken_for_it() {
 /// `sipx peers`, in both forms, carrying the source it came from.
 #[tokio::test]
 async fn a_peer_written_to_the_book_is_listed_by_name() {
+    let _scenario = process_scenario().await;
     let dir = scratch("peers-list");
     let book = dir.join("peers");
     // Written the way a shell script would write it: append a line, no library, no escaping.
@@ -1264,6 +1556,7 @@ async fn a_peer_written_to_the_book_is_listed_by_name() {
 /// and the design is explicit that a partial list must never be presented as complete.
 #[tokio::test]
 async fn a_peer_book_that_cannot_be_read_is_an_error_not_an_empty_list() {
+    let _scenario = process_scenario().await;
     let dir = scratch("peers-missing");
     let missing = dir.join("not-there");
 
@@ -1297,6 +1590,7 @@ async fn a_peer_book_that_cannot_be_read_is_an_error_not_an_empty_list() {
 /// restore exactly the behaviour the flag exists to prevent.
 #[tokio::test]
 async fn a_non_numeric_timeout_is_a_usage_error() {
+    let _scenario = process_scenario().await;
     let output = sipx()
         .args([
             "dial",
@@ -1313,6 +1607,60 @@ async fn a_non_numeric_timeout_is_a_usage_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--timeout"), "{stderr}");
     assert!(stderr.contains("whole number"), "{stderr}");
+}
+
+/// Every documented seconds flag refuses a non-number before command-specific validation or I/O.
+///
+/// The cases come from each command's own help instead of repeating the current five names. A new
+/// `<S>` flag therefore joins this assertion on the same change that documents it. The deliberately
+/// invalid positional/address after the flag proves ordering too: before `S-32`, `answer --duration
+/// notanumber` silently took 30 and failed on `--local` instead, while `register --expires` failed on
+/// its address of record. A refusal that does not name the numeric flag is the old defect.
+#[tokio::test]
+async fn a_non_number_is_refused_by_every_numeric_flag() {
+    let _scenario = process_scenario().await;
+    let cases: [(&str, &[&str]); 3] = [
+        ("dial", &["not-a-uri", "--json"]),
+        ("answer", &["--local", "not-an-address", "--json"]),
+        ("register", &["not-an-aor", "--json"]),
+    ];
+
+    for (command, invalid_after_arguments) in cases {
+        let help = sipx()
+            .args([command, "--help"])
+            .output()
+            .await
+            .expect("help runs");
+        let help = String::from_utf8_lossy(&help.stdout);
+        let flags: Vec<String> = help
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim_start().strip_prefix("--")?;
+                let (flag, tail) = rest.split_once(char::is_whitespace)?;
+                tail.trim_start()
+                    .starts_with("<S>")
+                    .then(|| format!("--{flag}"))
+            })
+            .collect();
+        assert!(!flags.is_empty(), "{command} documents no seconds flags");
+
+        for flag in flags {
+            let mut arguments = vec![command, flag.as_str(), "notanumber"];
+            arguments.extend(invalid_after_arguments.iter().copied());
+            let output = sipx().args(&arguments).output().await.expect("runs");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "`sipx {}` is a usage error: {stderr}",
+                arguments.join(" ")
+            );
+            assert!(
+                stderr.contains(flag.as_str()) && stderr.contains("whole number"),
+                "the refusal must name {flag} and its required domain: {stderr}"
+            );
+        }
+    }
 }
 
 /// The flags a help text documents as taking a value: a flag whose line shows a `<PLACEHOLDER>`
@@ -1353,6 +1701,7 @@ fn documented_valued_flags(help: &str) -> Vec<String> {
 /// call, and `--timeout 1`/`--wait 1` keep that to a second instead of the transaction layer's 32.
 #[tokio::test]
 async fn a_valued_flag_given_no_value_is_refused_by_every_command() {
+    let _scenario = process_scenario().await;
     let dir = scratch("valueless-flags");
     let book = dir.join("peers");
     std::fs::write(&book, "alice sip:alice@192.0.2.17:5060\n").expect("writes");
@@ -1583,6 +1932,7 @@ fn log_records(stream: &str) -> Vec<&str> {
 /// reader would test the reader twice and the flag once.
 #[tokio::test]
 async fn the_capture_flag_records_the_signalling_of_a_call() {
+    let _scenario = process_scenario().await;
     let dir = scratch("capture-flag");
     let capture = dir.join("signalling.pcapng");
 
@@ -1627,6 +1977,7 @@ async fn the_capture_flag_records_the_signalling_of_a_call() {
 /// The run names the file it wrote, which is what keeps an implied file from being a surprise.
 #[tokio::test]
 async fn the_capture_flag_leaves_the_counters_beside_the_capture() {
+    let _scenario = process_scenario().await;
     let dir = scratch("counters-beside-capture");
     let capture = dir.join("signalling.pcapng");
     let counters = dir.join("signalling.pcapng.counters.json");
@@ -1685,6 +2036,7 @@ async fn the_capture_flag_leaves_the_counters_beside_the_capture() {
 /// failure: no peer process to manage, and the outcome does not depend on anything answering.
 #[tokio::test]
 async fn a_failed_run_still_exports_its_counters() {
+    let _scenario = process_scenario().await;
     let dir = scratch("counters-on-failure");
     let capture = dir.join("sig.pcapng");
     let counters = dir.join("sig.pcapng.counters.json");
@@ -1750,6 +2102,7 @@ async fn a_failed_run_still_exports_its_counters() {
 /// against.
 #[tokio::test]
 async fn no_capture_flag_means_no_file() {
+    let _scenario = process_scenario().await;
     let dir = scratch("capture-absent");
     // A directory each, so neither run can see the other's files.
     let asked = dir.join("asked");

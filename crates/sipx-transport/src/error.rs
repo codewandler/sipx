@@ -34,6 +34,10 @@ pub enum Error {
     #[cfg(feature = "tls")]
     #[error("tls: {0}")]
     Tls(#[from] crate::tls::TlsError),
+    /// QUIC authentication, negotiation, or connection failure.
+    #[cfg(feature = "quic")]
+    #[error("quic: {0}")]
+    Quic(#[from] crate::quic::QuicError),
     /// A response was given for a transaction that no longer exists.
     ///
     /// Almost always means the application took longer to answer than

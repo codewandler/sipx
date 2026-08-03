@@ -21,6 +21,18 @@ pub enum Error {
     /// The SDP could not be read.
     #[error("sdp: {0}")]
     Sdp(String),
+    /// DTLS-SRTP was selected in a build that does not contain its handshake implementation.
+    #[error("DTLS-SRTP was selected, but sipx-call was built without its `dtls` feature")]
+    DtlsUnavailable,
+    /// A selected DTLS-SRTP media path could not be keyed.
+    #[error("DTLS-SRTP: {0}")]
+    Dtls(String),
+    /// DTLS-SRTP was selected through an early-dialog API that cannot yet preserve its ordering.
+    #[error("DTLS-SRTP is not available for early media")]
+    DtlsEarlyMedia,
+    /// A running DTLS-SRTP call was asked to renegotiate without a rekeying exchange.
+    #[error("DTLS-SRTP renegotiation is not implemented; the existing call is unchanged")]
+    DtlsRenegotiation,
     /// The INVITE got no final response.
     #[error("no final response to the INVITE")]
     NoResponse,
@@ -31,6 +43,20 @@ pub enum Error {
         status: u16,
         /// Its reason phrase.
         reason: String,
+    },
+    /// A supported digest challenge returned by an INVITE attempt.
+    ///
+    /// [`crate::dial`] and [`crate::dial_once`] consume this internally when credentials were
+    /// supplied. It can surface from [`crate::dial_early`], whose handle names one INVITE and
+    /// therefore does not silently replace it with a retry.
+    #[error("authentication required: {status} {reason}")]
+    AuthenticationChallenge {
+        /// The 401 or 407 status.
+        status: u16,
+        /// Its reason phrase.
+        reason: String,
+        /// The strongest supported challenge the response offered.
+        challenge: Box<sipx_sip::auth::Challenge>,
     },
     /// A 2xx that established no dialog — no `To` tag, or no `Contact` to send to.
     #[error("the response established no dialog")]

@@ -783,8 +783,9 @@ case §5's own figure uses rather than the case its rule spells. *(Not yet asser
 | The DTLS handshake | `sipx-media`, `dtls::openssl`, behind the `dtls` feature | The only part that needs a C library |
 | Keying a live session, both halves or neither (rule 6) | `sipx-call` | Where the offer and the answer meet |
 
-The last row is where the two mechanisms diverge today, and §12.8 is the divergence: SDES reaches
-`sipx-call` and DTLS-SRTP does not. Every piece above it is written and tested; nothing selects it.
+The last row is where policy becomes a live stream. §12.8 records the boundary `M-28` closed:
+`sipx-call` now selects either mechanism explicitly, retains the selected mechanism's keying state,
+and starts the session only after both directional keys exist.
 
 The split follows [vision.md](../vision.md) principle 1 and the same line ICE draws
 ([ice.md](ice.md) §15): grammar and pure transforms below, sockets and handshakes above.
@@ -917,54 +918,41 @@ prohibition, its digest-length rule, its uppercase-hex output and its case-insen
 (§6.1); §6.2's ordering, including refusing a peer with no fingerprint before the handshake runs
 (§6.6); and all seven rules of §7 against RFC 4568 §5.1.2, §7.1 and RFC 5764 §8.
 
-### 12.8 DTLS-SRTP is implemented and no call can select it — open
+### 12.8 DTLS-SRTP reaches an initial call — closed by `M-28`
 
-§6 is implemented in `sipx-sdp` and `sipx-media` and tested there, and **nothing in `sipx-call`
-reaches it**. Every offer this stack builds goes through
-`Capabilities::g711(…).with_srtp(transport.is_secure())` — three call sites in
-[`call.rs`](../../crates/sipx-call/src/call.rs), one per offer path — which is SDES or nothing.
-`Capabilities::with_dtls_srtp` has no caller outside `sipx-sdp`'s own test module, `dtls::establish`
-none outside `sipx-media`'s, and `DialOptions` has no keying selector at all. So no INVITE sipx
-sends has ever carried `UDP/TLS/RTP/SAVP`, and no offer of one has ever been answered with a
-fingerprint.
+`Keying` is the application choice shared by `DialOptions` and the answering `MediaPolicy`.
+`Keying::Sdes` is the default and preserves the old wire behaviour: SDES over protected signalling,
+plain RTP over clear signalling. `Keying::DtlsSrtp` emits `UDP/TLS/RTP/SAVP`, a fresh per-call
+SHA-256 certificate fingerprint and `a=setup`; it never appears merely because a Cargo feature is
+enabled. A build without the `dtls` feature returns `Error::DtlsUnavailable` for that selection and
+does not substitute SDES or plain RTP.
 
 **Which keying a call uses is the application's decision and cannot be inferred.** §5.2's rule 1
 makes SDES conditional on secure signalling because the master key *is* the SDP; DTLS-SRTP carries
 only a hash and is therefore the keying that survives a path sipx does not control. A stack that
 picked for the application would be picking between two different threat models on its behalf.
 
-The registry says so rather than claiming both roles: RFC 5763 and RFC 5764 are `partial` with no
-roles listed, and their notes name the missing half. That correction is deliberately independent of
-the code — `M-28` records that a crate-level capability with no caller at the call layer reads as a
-shipped feature in `docs/compliance.md`, and that this is the third instance of the pattern
-(`M-22`/`M-27` for ICE, RFC 3311 for UPDATE, and this) rather than an accident of one subsystem.
+The call retains the identity that produced its offer or answer until keying. `dtls::Keys` retains
+the exported directional master key and salt pairs as well as its public contexts, so the verified
+result moves directly into `Config::srtp`; there is no second export or unchecked re-split.
+`MediaPort::key_with_dtls` duplicates the descriptor for the bounded blocking handshake and returns
+the original descriptor to Tokio before media workers start. Thus DTLS and RTP use the exact port
+the SDP named, without a bind-drop-rebind race.
 
-**A selector on its own would be worse than none**, which is why the code half is not half-landed.
-An offer carrying `UDP/TLS/RTP/SAVP` that this side cannot key produces a call that connects and
-carries audio in the clear under a protocol token promising otherwise — rules 6 and 7 of §7 broken
-at once, and the failure is silent at both ends. Whatever lands has to reach keys, or not offer.
+The final-answer ordering is normative. A UAS sends its 200 before beginning the handshake. A UAC
+validates the answer, sends ACK, and only then begins the handshake. This permits a peer to defer
+media setup until the SIP exchange completes without deadlocking: neither ClientHello nor the wait
+for one can hold the ACK. A failed UAC handshake tears down the acknowledged dialog with BYE.
 
-What reaching keys needs, none of which is a row of wiring:
+The implementation closes the four boundaries the earlier audit found:
 
-1. **A keying choice the application makes**, on `DialOptions` for the offerer and on the answering
-   side for the UAS, defaulting to today's behaviour.
-2. **A certificate minted per call.** `dtls::openssl::Identity::generate` is the only source of one
-   and it lives behind the off-by-default `dtls` feature, so `sipx-call` gains a feature — and the
-   build *without* it must refuse the choice rather than fall back to SDES or to nothing, because
-   falling back is the downgrade rule 4 forbids, chosen by a build flag instead of by a peer.
-3. **The handshake on the media port, before the session starts.** `MediaPort` owns its socket and
-   `openssl::Session` needs a blocking `std::net::UdpSocket` it may `connect`, so the socket has to
-   be lent out and taken back at each of the five places `sipx-call` starts one — `establish`,
-   `Early::accept`, `answer_early`, `answer_negotiated` and `Call::move_media_if_changed`. A
-   connected socket also fixes the peer address for the life of the stream, which is the same
-   address symmetric RTP exists to correct, so the two interact.
-4. **An ACK that does not wait for it.** This is the finding that decided the split. `dial_with`
-   calls `establish` *before* sending the ACK, under a stated invariant — "from here the far end
-   believes a dialog exists, so every path must acknowledge". A DTLS handshake inside `establish`
-   holds the ACK for as long as the handshake takes, and against a peer that will not start its
-   own handshake until the ACK arrives that is a deadlock resolved only by the handshake timeout:
-   both ends wait, the call fails, and the SDP was perfectly correct. Keying therefore has to move
-   after the acknowledgement, which changes the shape of the 2xx path rather than adding to it.
+1. application policy and a stable default;
+2. feature-gated per-call identity with a typed refusal in builds that lack it;
+3. verified exported keys entering the session on the already-bound socket; and
+4. final response and ACK preceding the handshake.
 
-**Owner: `M-28`, still open for the code half.** The registry correction above is done and does not
-depend on it.
+Reliable early media remains deliberately unavailable for DTLS-SRTP and returns
+`Error::DtlsEarlyMedia` before emitting an offer or answer. Its PRACK ordering is the same class of
+problem as the ACK fixed here and needs a separate state-machine change, not a path that keys before
+the provisional leaves. DTLS-SRTP plus ICE is likewise refused until the selected candidate, rather
+than the provisional SDP address, can be the connected handshake peer. Neither refusal falls back.

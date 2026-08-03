@@ -114,7 +114,7 @@ fn permitted(uri: &Uri) -> Vec<TransportKind> {
     if uri.scheme().is_secure() {
         // A `sips:` URI is a request for TLS. Falling back to UDP because TLS was unavailable
         // would silently downgrade exactly the thing the scheme asked for.
-        vec![TransportKind::Tls, TransportKind::Wss]
+        vec![TransportKind::Tls, TransportKind::Wss, TransportKind::Quic]
     } else {
         vec![
             TransportKind::Udp,
@@ -122,6 +122,7 @@ fn permitted(uri: &Uri) -> Vec<TransportKind> {
             TransportKind::Tls,
             TransportKind::Ws,
             TransportKind::Wss,
+            TransportKind::Quic,
         ]
     }
 }
@@ -150,6 +151,7 @@ fn default_transport(uri: &Uri) -> Option<TransportKind> {
     match explicit {
         None | Some(TransportKind::Tcp | TransportKind::Tls) => Some(TransportKind::Tls),
         Some(TransportKind::Ws | TransportKind::Wss) => Some(TransportKind::Wss),
+        Some(TransportKind::Quic) => Some(TransportKind::Quic),
         Some(TransportKind::Udp) => None,
     }
 }
@@ -162,6 +164,7 @@ fn service_transport(service: &str) -> Option<TransportKind> {
         "SIPS+D2T" => Some(TransportKind::Tls),
         "SIP+D2W" => Some(TransportKind::Ws),
         "SIPS+D2W" => Some(TransportKind::Wss),
+        "SIPS+D2Q" => Some(TransportKind::Quic),
         _ => None,
     }
 }
@@ -174,6 +177,7 @@ fn srv_prefix(transport: TransportKind) -> &'static str {
         TransportKind::Tls => "_sips._tcp.",
         TransportKind::Ws => "_sip._ws.",
         TransportKind::Wss => "_sips._wss.",
+        TransportKind::Quic => "_sips._quic.",
     }
 }
 
@@ -201,7 +205,9 @@ pub fn resolve<R: Resolver + ?Sized, G: Rng + ?Sized>(
     candidates(uri, resolver, rng)
         .into_iter()
         .map(|target| match target.transport {
-            TransportKind::Tls | TransportKind::Wss => target.verifying(&identity),
+            TransportKind::Tls | TransportKind::Wss | TransportKind::Quic => {
+                target.verifying(&identity)
+            }
             _ => target,
         })
         .collect()
@@ -298,13 +304,24 @@ fn naptr_transports<R: Resolver + ?Sized>(
     if records.is_empty() {
         return allowed
             .iter()
-            .filter(|t| !matches!(t, TransportKind::Ws | TransportKind::Wss))
+            .filter(|t| {
+                !matches!(
+                    t,
+                    TransportKind::Ws | TransportKind::Wss | TransportKind::Quic
+                )
+            })
             .map(|&t| (t, format!("{}{domain}", srv_prefix(t))))
             .collect();
     }
 
     // Order first, then preference — both ascending, both "lower is better".
-    records.sort_by_key(|r| (r.order, r.preference));
+    records.sort_by_key(|r| {
+        (
+            r.order,
+            r.preference,
+            r.service.eq_ignore_ascii_case("SIPS+D2Q"),
+        )
+    });
     records
         .into_iter()
         .filter_map(|record| {
@@ -515,6 +532,101 @@ mod tests {
         );
         assert_eq!(targets[0].addr.to_string(), "192.0.2.30:5060");
         assert_eq!(targets[1].transport, TransportKind::Udp);
+    }
+
+    #[test]
+    fn a_sips_d2q_naptr_record_selects_quic_explicitly() {
+        let resolver = Fixture::default()
+            .with_naptr(
+                "example.com",
+                vec![Naptr {
+                    order: 10,
+                    preference: 10,
+                    service: "SIPS+D2Q".to_owned(),
+                    replacement: "_sips._quic.example.com".to_owned(),
+                }],
+            )
+            .with_srv(
+                "_sips._quic.example.com",
+                vec![Srv {
+                    priority: 0,
+                    weight: 0,
+                    port: 5071,
+                    target: "quic.example.com".to_owned(),
+                }],
+            )
+            .with_address("quic.example.com", "192.0.2.44");
+        let targets = resolve(
+            &uri("sips:alice@example.com"),
+            &resolver,
+            &mut SeededRng::new(1),
+        );
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].transport, TransportKind::Quic);
+        assert_eq!(targets[0].addr.to_string(), "192.0.2.44:5071");
+        assert_eq!(targets[0].verify_as.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn tls_wins_an_equal_naptr_choice_over_the_experimental_quic_mapping() {
+        let resolver = Fixture::default()
+            .with_naptr(
+                "example.com",
+                vec![
+                    Naptr {
+                        order: 10,
+                        preference: 10,
+                        service: "SIPS+D2Q".to_owned(),
+                        replacement: "_sips._quic.example.com".to_owned(),
+                    },
+                    Naptr {
+                        order: 10,
+                        preference: 10,
+                        service: "SIPS+D2T".to_owned(),
+                        replacement: "_sips._tcp.example.com".to_owned(),
+                    },
+                ],
+            )
+            .with_srv(
+                "_sips._quic.example.com",
+                vec![srv(0, 0, 5061, "quic.example.com")],
+            )
+            .with_srv(
+                "_sips._tcp.example.com",
+                vec![srv(0, 0, 5061, "tls.example.com")],
+            )
+            .with_address("quic.example.com", "192.0.2.44")
+            .with_address("tls.example.com", "192.0.2.45");
+        let targets = resolve(
+            &uri("sips:alice@example.com"),
+            &resolver,
+            &mut SeededRng::new(1),
+        );
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].transport, TransportKind::Tls);
+        assert_eq!(targets[1].transport, TransportKind::Quic);
+    }
+
+    #[test]
+    fn sips_without_an_explicit_quic_naptr_record_does_not_try_quic() {
+        let resolver = Fixture::default()
+            .with_srv(
+                "_sips._quic.example.com",
+                vec![srv(0, 0, 5061, "quic.example.com")],
+            )
+            .with_address("quic.example.com", "192.0.2.44")
+            .with_address("example.com", "192.0.2.45");
+        let targets = resolve(
+            &uri("sips:alice@example.com"),
+            &resolver,
+            &mut SeededRng::new(1),
+        );
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].transport, TransportKind::Tls);
+        assert_eq!(targets[0].addr.to_string(), "192.0.2.45:5061");
     }
 
     /// A `sips:` URI is a request for TLS. Falling back to UDP because TLS was unavailable

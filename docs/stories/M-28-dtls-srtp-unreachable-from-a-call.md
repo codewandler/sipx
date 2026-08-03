@@ -2,7 +2,7 @@
 id: M-28
 title: Offer DTLS-SRTP from a call, and stop claiming it until then
 pillar: Media
-status: ready
+status: done
 priority: 5
 design: docs/specs/srtp.md
 epic: media
@@ -17,17 +17,14 @@ Make DTLS-SRTP reachable from `sipx-call`, so the keying `M-15` built can actual
 call — and until it is, make the compliance table say so instead of claiming both roles.
 
 ## Acceptance
-- [ ] A call can offer and answer `UDP/TLS/RTP/SAVP` with `a=fingerprint`. Today every offer path
+- [x] A call can offer and answer `UDP/TLS/RTP/SAVP` with `a=fingerprint`. Today every offer path
       in `sipx-call` hardcodes `.with_srtp(transport.is_secure())` — `crates/sipx-call/src/call.rs`
-      lines 1708, 2199 and 2501 — which is SDES, and `DialOptions` has no keying selector at all.
-      *(Not done. The three lines are now 1708, 2839 and 3141 after `M-29`. `docs/specs/srtp.md`
-      §12.8 states what reaching keys needs and why it is not one row of wiring.)*
-- [ ] **Which keying a call uses is the application's choice, with a stated default.** SDES puts
+      lines 1708, 2199 and 2501 — which was SDES, and `DialOptions` had no keying selector.
+      `Keying::DtlsSrtp` now drives both initial-call roles through the live media port.
+- [x] **Which keying a call uses is the application's choice, with a stated default.** SDES puts
       the master key in the SDP body and so requires secure signalling (RFC 4568 §7.1); DTLS-SRTP
       does not. That difference is the reason to expose the choice rather than infer it.
-      *(Not done in code. The rule is now normative in `docs/specs/srtp.md` §12.8, which is where
-      the next attempt should start; no selector was added, because one that cannot reach keys
-      would offer a token this side cannot honour.)*
+      `Keying` makes the choice explicit and keeps SDES as the compatibility default.
 - [x] **The registry stops over-claiming, whatever happens to the code.** RFC 5763 and RFC 5764 are
       `status = "implemented"` with `roles = ["uac", "uas"]`, and `with_dtls_srtp` has no caller
       outside `sipx-sdp`'s own test module. A reader of `docs/compliance.md` would conclude sipx
@@ -35,14 +32,13 @@ call — and until it is, make the compliance table say so instead of claiming b
       which half is missing — **the rows get corrected either way, and that half is not optional.**
       → both rows are `partial` with no roles listed and a note leading with the missing half
       (`docs/rfc/registry.toml`), `docs/compliance.md` regenerated, `docs/specs/srtp.md` §12.8.
-- [ ] `X-27`'s interop harness runs the DTLS-SRTP case once there is a sipx side to exercise:
+- [x] `X-27`'s interop harness runs the DTLS-SRTP case once there is a sipx side to exercise:
       name the test in `KEYING_TESTS[dtls]` and drop the `KEYING_UNIMPLEMENTED[dtls]` entry. The
-      harness is already shaped for it. *(Not done, and correctly so: there is still no sipx side.
-      `tests/interop/run.sh`'s `KEYING_UNIMPLEMENTED[dtls]` text remains accurate as written.)*
-- [ ] Failing-first test: a call placed with DTLS-SRTP selected offers `UDP/TLS/RTP/SAVP` and a
-      fingerprint. It cannot pass today, because the option does not exist. *(Not written. No code
-      changed, so there was nothing to falsify; writing the test without the selector would have
-      left a test asserting the gap rather than closing it.)*
+      harness is already shaped for it. `KEYING_TESTS[dtls]` now names the live encrypted-audio
+      call and the old unimplemented entry is gone.
+- [x] Failing-first test: a call placed with DTLS-SRTP selected offers `UDP/TLS/RTP/SAVP` and a
+      fingerprint. `a_call_selected_for_dtls_srtp_offers_it_and_carries_encrypted_audio` is the
+      named regression and fails when the selector is disconnected from offer construction.
 
 ## Progress
 - **The gap is wider than this story and `docs/compliance.md:107-109` both record**, found by a
@@ -72,12 +68,12 @@ call — and until it is, make the compliance table say so instead of claiming b
 - Also: `capabilities.dtls()` is *read* at `crates/sipx-call/src/call.rs:3600` and **nothing anywhere
   ever sets it**. The branch exists and is dead, which is the shape RFC 8122 had before it was
   demoted — a reachability check that only follows evidence paths cannot see it.
-- **Still open, and deliberately.** One of five Acceptance items is done — the registry
-  correction, which the story made unconditional. The code half remains and is the reason the
-  story keeps its file rather than closing: `M-28` is not "DTLS-SRTP paperwork", it is "offer
+- **2026-07-29 — still open then, and deliberately.** One of five Acceptance items was done — the registry
+  correction, which the story made unconditional. The code half remained and was the reason the
+  story stayed open: `M-28` is not "DTLS-SRTP paperwork", it is "offer
   DTLS-SRTP from a call". Re-prioritised 2 → 5, because the over-claim that made it urgent is gone
-  and what is left is a feature rather than a correction.
-- **Adjacent, not done:** RFC 8122's row has the same shape — `status = "implemented"`, both roles,
+  and what was left was a feature rather than a correction.
+- **2026-07-29 — adjacent and not done then:** RFC 8122's row had the same shape — `status = "implemented"`, both roles,
   and `a=fingerprint` is never emitted or read by any call for exactly the same reason. It was left
   alone because the Acceptance names 5763 and 5764. Whoever closes the code half should correct it
   in the same commit, or it becomes the fifth instance of the pattern.
@@ -104,6 +100,24 @@ call — and until it is, make the compliance table say so instead of claiming b
 - **Next step for whoever picks this up:** start from §12.8's numbered list, and take the ACK
   ordering first — it decides the shape of everything after it. `dtls::openssl::Identity::generate`
   and `dtls::establish` are ready; nothing in `sipx-sdp` needs changing for either direction.
+- **2026-08-03 — the initial-call path is reachable in both roles.** `Keying::DtlsSrtp` is an
+  explicit `DialOptions`/`MediaPolicy` choice and `Keying::Sdes` preserves the prior default. A
+  no-feature build returns `Error::DtlsUnavailable`, never a weaker call. `dtls::Keys` retains the
+  exported master material for `Config::srtp`, and `MediaPort::key_with_dtls` lends the already-bound
+  socket to a five-second bounded worker before starting RTP on that same descriptor.
+- **The ACK warning determined the implementation.** The offerer validates the final answer, emits
+  ACK, and only then awaits DTLS. The answerer emits its final answer before its active handshake.
+  `a_call_selected_for_dtls_srtp_offers_it_and_carries_encrypted_audio` asserts the token,
+  fingerprint, encryption state at both ends and live audio. The test was failing-first at compile
+  time because neither `Keying` nor `with_keying` existed.
+- **Interop is no longer announced as absent.** The harness enables the CLI's opt-in `dtls` feature,
+  runs `a_real_peer_accepts_media_sipx_encrypted_with_dtls_srtp`, and the strict peer endpoint
+  refuses a cleartext fallback. RFC 5763, 5764, 8122 and the borrowed RFC 4145 role now cite the live
+  call path; the rows remain partial for their stated limitations.
+- **Deliberate boundaries:** reliable early media returns `Error::DtlsEarlyMedia`, and combining
+  DTLS-SRTP with ICE is refused before SDP leaves. Both require a selected-path/PRACK-aware state
+  transition; neither silently switches keying. Rekeying is still absent. These do not prevent an
+  ordinary initial call from offering, answering and carrying DTLS-keyed SRTP.
 
 ## Notes
 - Found by `X-27` while wiring encrypted-media interop. It could deliver the SDES half against a

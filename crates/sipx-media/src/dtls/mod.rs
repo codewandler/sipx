@@ -10,9 +10,11 @@
 //! packet on one port (§5.1.2), the protection profiles and their key sizes (§4.1.2), and turning
 //! the exported keying material into the two SRTP contexts a session needs (§4.2). The handshake
 //! itself is a DTLS implementation's job and is reached through [`Handshake`].
-//! **Experimental** (`A-8`): no `sipx-call` path selects DTLS-SRTP keying, so nothing above this
-//! crate has ever constrained this module's shape. `Config.srtp` takes `SrtpKeys` while this
-//! produces `srtp::Context`; closing that is `M-28`.
+//!
+//! **Supported**: `sipx-call` now selects this protocol, key-derivation and handshake surface for
+//! explicit DTLS-SRTP call policy (`M-28`), so an upper-layer caller has constrained its shape. The
+//! optional `dtls::openssl` implementation remains experimental; enabling that feature only
+//! makes the explicit selection available and never changes a call's default.
 //!
 
 #[cfg(feature = "dtls")]
@@ -122,6 +124,19 @@ pub struct Keys {
     pub outbound: srtp::Context,
     /// Unprotects what it receives.
     pub inbound: srtp::Context,
+    material: crate::SrtpKeys,
+}
+
+impl Keys {
+    /// Move the same directional master key and salt pairs into a live media session.
+    ///
+    /// The contexts above exist for users that apply SRTP themselves. A [`crate::MediaSession`]
+    /// constructs separate RTP and RTCP contexts, so it needs the master material instead; keeping
+    /// it here closes that boundary without trying to recover secrets from an opaque context.
+    #[must_use]
+    pub fn into_srtp_keys(self) -> crate::SrtpKeys {
+        self.material
+    }
 }
 
 /// Why keying material could not be turned into SRTP contexts.
@@ -172,9 +187,14 @@ pub fn keys_from_exported(exported: &[u8], profile: Profile, role: Role) -> Resu
         Role::Client => (client_key, client_salt, server_key, server_salt),
         Role::Server => (server_key, server_salt, client_key, client_salt),
     };
+    let material = crate::SrtpKeys {
+        local: (own_key.to_vec(), own_salt.to_vec()),
+        remote: (peer_key.to_vec(), peer_salt.to_vec()),
+    };
     Ok(Keys {
         outbound: srtp::Context::new(own_key, own_salt)?,
         inbound: srtp::Context::new(peer_key, peer_salt)?,
+        material,
     })
 }
 

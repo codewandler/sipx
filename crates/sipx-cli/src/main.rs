@@ -19,8 +19,7 @@
 //! lookup order, signalling transport selection and the exit codes.
 //!
 //! Refused rather than silently unsupported, because a flag that is accepted and dropped is worse
-//! than one that errors: a cleartext transport for a `sips:` URI and `dial --password` (`S-28`, a
-//! call cannot answer a challenge yet).
+//! than one that errors: for example, a cleartext transport for a `sips:` URI.
 //!
 
 mod advertise;
@@ -291,7 +290,7 @@ pub(crate) struct Args<'a> {
 }
 
 impl<'a> Args<'a> {
-    /// Wrap the raw arguments, refusing any valued flag that was given no value.
+    /// Wrap the raw arguments, refusing invalid valued and numeric flags.
     ///
     /// Both ways a value goes missing are refused: nothing following the flag at all, and an empty
     /// value in either form (`--target=` or `--target ""`).
@@ -336,6 +335,23 @@ impl<'a> Args<'a> {
                     ));
                 }
                 Some(_) => {}
+            }
+            if NUMERIC_FLAGS.contains(&flag.as_str()) {
+                let raw_value = given.unwrap_or_default();
+                let value = raw_value.parse::<u64>().map_err(|_| {
+                    format!(
+                        "{flag} must be a whole number of seconds from 0 through {}, not \
+                         {raw_value:?}",
+                        u32::MAX
+                    )
+                })?;
+                if value > u64::from(u32::MAX) {
+                    return Err(format!(
+                        "{flag} must be a whole number of seconds from 0 through {}, not \
+                         {raw_value:?}",
+                        u32::MAX
+                    ));
+                }
             }
         }
         Ok(Self { raw })
@@ -389,7 +405,7 @@ impl<'a> Args<'a> {
         None
     }
 
-    /// A numeric option.
+    /// A numeric option already validated by [`Self::new`].
     #[must_use]
     pub(crate) fn number(&self, name: &str) -> Option<u64> {
         self.value(name)?.parse().ok()
@@ -427,6 +443,21 @@ const VALUED_FLAGS: &[&str] = &[
     "--tls-cert",
     "--tls-key",
 ];
+
+/// Flags whose values are whole seconds in the inclusive range `0..=u32::MAX`.
+///
+/// The upper bound is a command contract rather than an incidental integer width: every supported
+/// platform and every deadline calculation can represent it, while a larger input is almost
+/// certainly a shell/configuration mistake. Zero is meaningful for each current flag:
+///
+/// - `--duration 0` ends an established call immediately;
+/// - `--timeout 0` delegates to the transaction layer's own expiry;
+/// - `--wait 0` checks once and returns immediately when no call is already queued;
+/// - `--expires 0` asks the registrar to remove the binding.
+///
+/// `every_seconds_flag_is_registered_as_numeric` derives the documented `<S>` flags from the help
+/// text and holds it against this list, so a future numeric flag cannot silently bypass validation.
+const NUMERIC_FLAGS: &[&str] = &["--duration", "--timeout", "--wait", "--expires"];
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -630,11 +661,67 @@ mod tests {
     }
 
     #[test]
-    fn a_numeric_option_parses_or_reads_as_absent() {
+    fn a_numeric_option_is_validated_before_it_can_be_read() {
         let raw = args(&["dial", "--duration", "30"]);
         assert_eq!(parsed(&raw).number("duration"), Some(30));
 
         let raw = args(&["dial", "--duration", "thirty"]);
-        assert_eq!(parsed(&raw).number("duration"), None);
+        let error = Args::new(&raw).expect_err("a non-number is not an absent flag");
+        assert!(error.contains("--duration"), "{error}");
+        assert!(error.contains("whole number"), "{error}");
+    }
+
+    #[test]
+    fn every_seconds_flag_is_registered_as_numeric() {
+        let help = format!(
+            "{}{}{}{}{}",
+            USAGE,
+            crate::register::HELP,
+            crate::dial::HELP,
+            crate::answer::HELP,
+            crate::peers::HELP
+        );
+        let documented: Vec<String> = help
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim_start().strip_prefix("--")?;
+                let (flag, tail) = rest.split_once(char::is_whitespace)?;
+                tail.trim_start()
+                    .starts_with("<S>")
+                    .then(|| format!("--{flag}"))
+            })
+            .collect();
+
+        assert!(
+            !documented.is_empty(),
+            "the help documents no seconds flags"
+        );
+        for flag in &documented {
+            assert!(
+                NUMERIC_FLAGS.contains(&flag.as_str()),
+                "{flag} is documented as seconds but is not validated as numeric"
+            );
+        }
+        for flag in NUMERIC_FLAGS {
+            assert!(
+                documented.iter().any(|item| item == flag),
+                "{flag} is validated as numeric but not documented with <S>"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_boundaries_are_the_declared_ones_for_every_seconds_flag() {
+        for flag in NUMERIC_FLAGS {
+            for accepted in ["0", "4294967295"] {
+                let raw = args(&["answer", flag, accepted]);
+                assert!(Args::new(&raw).is_ok(), "{flag} must accept {accepted}");
+            }
+            for refused in ["-1", "4294967296", "18446744073709551616"] {
+                let raw = args(&["answer", flag, refused]);
+                let error = Args::new(&raw).expect_err("outside the declared numeric domain");
+                assert!(error.contains(flag), "{error}");
+            }
+        }
     }
 }

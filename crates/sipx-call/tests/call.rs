@@ -21,9 +21,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_audio::{Wav, g711, read_wav, write_wav};
-use sipx_call::{Call, answer, dial};
-use sipx_sip::{HeaderName, Host, HostName, Method, Uri};
+use sipx_call::{Call, Credentials, answer, dial};
+use sipx_sip::{CSeq, HeaderName, Host, HostName, Method, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
+use sipx_ua::{Authenticator, Presented, Verdict};
 use tokio::sync::mpsc::Receiver;
 
 fn loopback() -> IpAddr {
@@ -94,6 +95,29 @@ async fn connected() -> (Call, Call) {
     let answering = tokio::spawn(async move {
         let incoming = callee_incoming.recv().await.expect("an INVITE arrives");
         assert_eq!(incoming.request.method, Method::Invite);
+        assert!(
+            incoming
+                .request
+                .headers
+                .typed::<sipx_sip::headers::Supported>()
+                .and_then(std::result::Result::ok)
+                .is_some_and(|tags| tags.contains("histinfo")),
+            "a caller which wants the response history advertises histinfo"
+        );
+        assert_eq!(
+            incoming
+                .request
+                .headers
+                .typed::<sipx_sip::HistoryInfo>()
+                .and_then(std::result::Result::ok)
+                .map(|history| history.0.len()),
+            Some(1),
+            "the initial target starts at one history entry"
+        );
+        assert!(
+            incoming.request.headers.get(&HeaderName::Reason).is_none(),
+            "Reason is not permitted on an initial INVITE"
+        );
         answer(&callee_endpoint, &incoming, loopback())
             .await
             .expect("answers")
@@ -109,6 +133,10 @@ async fn connected() -> (Call, Call) {
     .await
     .expect("the call connects");
 
+    assert!(
+        caller.history().is_some(),
+        "the non-100 answer returns the requested history"
+    );
     let callee = answering.await.expect("the answering side finishes");
     (caller, callee)
 }
@@ -294,6 +322,123 @@ async fn a_refused_call_reports_the_status() {
     }
 }
 
+/// `S-28`'s failing-first test: a proxy challenge is a retryable step in placing one call, not
+/// the final outcome. The wire assertions distinguish a retry from a second unrelated call.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the whole challenged transaction is one byte-level acceptance vector"
+)]
+async fn a_call_challenged_by_a_proxy_retries_with_credentials_and_connects() {
+    const USERNAME: &str = "alice";
+    const PASSWORD: &str = "Circle Of Life";
+
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+    let answering = tokio::spawn(async move {
+        let first = callee_incoming
+            .recv()
+            .await
+            .expect("the first INVITE arrives");
+        let first_call_id = first.request.headers.value(&HeaderName::CallId);
+        let first_from = first.request.headers.value(&HeaderName::From);
+        let first_via = first.request.headers.value(&HeaderName::Via);
+        assert_eq!(
+            first
+                .request
+                .headers
+                .typed::<CSeq>()
+                .and_then(Result::ok)
+                .map(|cseq| cseq.sequence),
+            Some(1)
+        );
+
+        let mut authenticator = Authenticator::new("proxy.example", [7; 32]);
+        let challenged = sipx_sip::build::ResponseBuilder::to_request(
+            &first.request,
+            sipx_sip::StatusCode::new(407).expect("valid"),
+            "Proxy Authentication Required",
+        )
+        .expect("builds")
+        .set_header(
+            &HeaderName::To,
+            Bytes::from_static(b"<sip:callee.example>;tag=challenged"),
+        )
+        .expect("valid")
+        .header(
+            HeaderName::ProxyAuthenticate,
+            Bytes::from(authenticator.challenge(false)),
+        )
+        .expect("valid")
+        .build();
+        callee_endpoint
+            .respond(&first.key, challenged)
+            .await
+            .expect("challenges");
+
+        let second = callee_incoming.recv().await.expect("the retry arrives");
+        assert_eq!(
+            second.request.headers.value(&HeaderName::CallId),
+            first_call_id
+        );
+        assert_eq!(second.request.headers.value(&HeaderName::From), first_from);
+        assert!(
+            !second.request.body().is_empty(),
+            "the retry keeps an SDP offer"
+        );
+        assert_ne!(
+            second.request.headers.value(&HeaderName::Via),
+            first_via,
+            "a retried request is a new client transaction with a fresh branch"
+        );
+        assert_eq!(
+            second
+                .request
+                .headers
+                .typed::<CSeq>()
+                .and_then(Result::ok)
+                .map(|cseq| cseq.sequence),
+            Some(2)
+        );
+        let presented = Presented::from_request(&second.request, true)
+            .expect("the retry carries Proxy-Authorization");
+        assert_eq!(presented.username, USERNAME);
+        assert_eq!(
+            authenticator.verify(&presented, "INVITE", PASSWORD),
+            Verdict::Authenticated,
+            "the digest does not answer the proxy's challenge"
+        );
+        answer(&callee_endpoint, &second, loopback())
+            .await
+            .expect("answers the authenticated call")
+    });
+
+    let (caller_endpoint, _caller_incoming) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let caller = dial(
+        &caller_endpoint,
+        Target::udp(callee_addr),
+        &to,
+        &sipx_call::DialOptions::new("<sip:alice@example.net>", loopback())
+            .with_credentials(Credentials::new(USERNAME, PASSWORD)),
+    )
+    .await
+    .expect("the authenticated call connects");
+    let callee = answering.await.expect("the answering side finishes");
+
+    let sent = clip(100);
+    let (_, heard) = tokio::join!(
+        caller.media().play(&sent.samples, 160),
+        callee
+            .media()
+            .record_at_least(sent.samples.len(), DELIVERY_BOUND)
+    );
+    assert_eq!(
+        g711::ulaw_encode_all(&heard),
+        g711::ulaw_encode_all(&sent.samples)
+    );
+}
+
 /// The far end hanging up must stop our media. Without in-dialog routing, an incoming BYE
 /// reaches nothing and the local session goes on sending RTP into a call that no longer
 /// exists — which is worse than a call that never connects, because it does not stop.
@@ -330,6 +475,14 @@ async fn a_bye_from_the_far_end_ends_the_call_locally() {
         .expect("no timeout")
         .expect("a BYE arrives");
     assert_eq!(bye.request.method, sipx_sip::Method::Bye);
+    let reason = bye
+        .request
+        .headers
+        .typed::<sipx_sip::Reason>()
+        .and_then(std::result::Result::ok)
+        .expect("a locally generated BYE explains why it ended");
+    assert_eq!(reason.0[0].protocol(), b"Q.850");
+    assert_eq!(reason.0[0].cause(), 16);
     assert!(
         caller.handle(&bye).await.expect("handles"),
         "the BYE belongs to this call"
@@ -837,9 +990,11 @@ async fn the_cancel_carries_the_invites_branch() {
     let (ringing, mut incoming) = endpoint().await;
     let ringing_addr = ringing.local_addr();
 
-    let branches = std::sync::Arc::new(tokio::sync::Mutex::new(
-        Vec::<(sipx_sip::Method, String)>::new(),
-    ));
+    let branches = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<(
+        sipx_sip::Method,
+        String,
+        Option<(Vec<u8>, u16)>,
+    )>::new()));
     let recorder = std::sync::Arc::clone(&branches);
     tokio::spawn(async move {
         while let Some(request) = incoming.recv().await {
@@ -853,10 +1008,21 @@ async fn the_cancel_carries_the_invites_branch() {
                         .map(|b| String::from_utf8_lossy(b).into_owned())
                 })
                 .unwrap_or_default();
-            recorder
-                .lock()
-                .await
-                .push((request.request.method.clone(), via));
+            recorder.lock().await.push((
+                request.request.method.clone(),
+                via,
+                request
+                    .request
+                    .headers
+                    .typed::<sipx_sip::Reason>()
+                    .and_then(std::result::Result::ok)
+                    .and_then(|reason| {
+                        reason
+                            .0
+                            .first()
+                            .map(|value| (value.protocol().to_vec(), value.cause()))
+                    }),
+            ));
             if request.request.method == Method::Invite {
                 let response = sipx_sip::build::ResponseBuilder::to_request(
                     &request.request,
@@ -883,8 +1049,8 @@ async fn the_cancel_carries_the_invites_branch() {
         "the INVITE and its CANCEL never both reached the callee",
         async || {
             let seen = branches.lock().await;
-            seen.iter().any(|(method, _)| *method == Method::Invite)
-                && seen.iter().any(|(method, _)| *method == Method::Cancel)
+            seen.iter().any(|(method, _, _)| *method == Method::Invite)
+                && seen.iter().any(|(method, _, _)| *method == Method::Cancel)
         },
     )
     .await;
@@ -892,13 +1058,13 @@ async fn the_cancel_carries_the_invites_branch() {
 
     let invite = seen
         .iter()
-        .find(|(method, _)| *method == Method::Invite)
-        .map(|(_, branch)| branch.clone())
+        .find(|(method, _, _)| *method == Method::Invite)
+        .map(|(_, branch, _)| branch.clone())
         .expect("an INVITE was sent");
     let cancel = seen
         .iter()
-        .find(|(method, _)| *method == Method::Cancel)
-        .map(|(_, branch)| branch.clone())
+        .find(|(method, _, _)| *method == Method::Cancel)
+        .map(|(_, branch, _)| branch.clone())
         .expect("a CANCEL was sent");
 
     assert!(!invite.is_empty(), "the INVITE must carry a branch");
@@ -906,6 +1072,12 @@ async fn the_cancel_carries_the_invites_branch() {
         cancel, invite,
         "a CANCEL with a different branch cancels nothing"
     );
+    let cancel_reason = seen
+        .iter()
+        .find(|(method, _, _)| *method == Method::Cancel)
+        .and_then(|(_, _, reason)| reason.clone())
+        .expect("a locally generated CANCEL explains why it was sent");
+    assert_eq!(cancel_reason, (b"SIP".to_vec(), 408));
 }
 
 /// Waiting is still the default: without a timeout, a call is bounded only by the transaction

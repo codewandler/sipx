@@ -10,6 +10,10 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+dtls = ["sipx-call/dtls"]
+
 [[bin]]
 name = "sipx"
 path = "src/main.rs"

@@ -31,6 +31,7 @@ use sipx_sdp::ice::{Candidate, ComponentId, Credentials};
 
 use super::agent::{Agent, Input, Output, Timer};
 use super::candidate::LocalBase;
+use crate::counters::DiscardMeters;
 
 /// How many events may queue for the driver before the media path stops offering them.
 ///
@@ -103,6 +104,7 @@ pub struct Local {
 #[derive(Debug, Clone)]
 pub(crate) struct Handle {
     events: mpsc::Sender<Event>,
+    discards: Arc<DiscardMeters>,
     /// Whether a pair has been selected for component 1.
     ///
     /// Read by the send loop before it reports a packet, so that the fifty notes a second an
@@ -124,6 +126,9 @@ impl Handle {
             .try_send(Event::Datagram { from, on, bytes })
             .is_err()
         {
+            self.discards
+                .ice_driver_queue_refusals
+                .fetch_add(1, Ordering::Relaxed);
             tracing::debug!(%from, "dropping a connectivity check the ice driver could not take");
         }
     }
@@ -158,7 +163,11 @@ impl Handle {
         }
         // A dropped note costs one keepalive that did not need to be sent; §11's indication is
         // unauthenticated and draws no response, so it is the cheapest thing here to lose.
-        let _ = self.events.try_send(Event::DataSent { component });
+        if self.events.try_send(Event::DataSent { component }).is_err() {
+            self.discards
+                .ice_data_sent_queue_refusals
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -192,6 +201,7 @@ struct Driver {
     destinations: Destinations,
     selected: Arc<AtomicBool>,
     stop: Arc<crate::session::Stop>,
+    discards: Arc<DiscardMeters>,
 }
 
 /// Start the driver for a stream, and hand the media path its end of it.
@@ -201,6 +211,7 @@ pub(crate) fn spawn(
     sockets: Vec<Arc<UdpSocket>>,
     destinations: Destinations,
     stop: Arc<crate::session::Stop>,
+    discards: Arc<DiscardMeters>,
 ) -> Handle {
     let (events_tx, events_rx) = mpsc::channel(EVENTS);
     let selected = Arc::new(AtomicBool::new(false));
@@ -212,11 +223,13 @@ pub(crate) fn spawn(
         destinations,
         selected: Arc::clone(&selected),
         stop,
+        discards: Arc::clone(&discards),
     };
     tokio::spawn(driver.run(pending));
     Handle {
         events: events_tx,
         selected,
+        discards,
     }
 }
 
@@ -272,10 +285,17 @@ impl Driver {
                     // Dropped receiver means the signalling side gave up on this exchange; the
                     // agent has still applied it, which is correct — the peer's credentials
                     // changed whether or not anybody is waiting to hear what ours are.
-                    let _ = reply.send(Local {
-                        credentials: self.agent.credentials().clone(),
-                        candidates: super::gather::lines(self.agent.local_candidates()),
-                    });
+                    if reply
+                        .send(Local {
+                            credentials: self.agent.credentials().clone(),
+                            candidates: super::gather::lines(self.agent.local_candidates()),
+                        })
+                        .is_err()
+                    {
+                        self.discards
+                            .ice_renegotiation_reply_unobserved
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                     outputs
                 }
             };
@@ -330,12 +350,17 @@ impl Driver {
                     let Some(socket) = self.sockets.get(usize::from(on.0)) else {
                         // The agent named a base the driver did not bind. It cannot: every base
                         // it knows came from a `LocalCandidate` this driver gathered.
+                        // discard: every base the agent can name came from a candidate gathered
+                        // over this exact socket vector, so this branch is structurally unreachable.
                         tracing::warn!(base = on.0, "no socket for the base the agent named");
                         continue;
                     };
                     if let Err(error) = socket.send_to(&bytes, to).await {
                         // One unreachable candidate is an ordinary thing to find — it is what
                         // checking is for — and the pair fails on its own timer rather than here.
+                        self.discards
+                            .ice_send_failures
+                            .fetch_add(1, Ordering::Relaxed);
                         tracing::debug!(%to, %error, "a connectivity check could not be sent");
                     }
                 }
@@ -357,6 +382,8 @@ impl Driver {
                     // The call layer decides what a failed component means ([spec] §2). What the
                     // media path does is nothing: the stream keeps sending to the default
                     // destination, which is where it was already sending.
+                    // discard: this is the agent's terminal outcome, not a payload with a later
+                    // consumer; the default path remains active.
                     tracing::warn!(component = component.get(), "ice failed for a component");
                 }
             }

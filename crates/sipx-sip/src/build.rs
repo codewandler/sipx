@@ -221,6 +221,14 @@ impl ResponseBuilder {
                 builder.headers.push(header.clone());
             }
         }
+        // RFC 7044 §9.4: a UAS returns its cache in every response except 100 when the
+        // request carried a cache or advertised `histinfo`. Centralising this beside the
+        // mandatory response-header copy keeps OPTIONS, errors and call answers consistent.
+        if let Some(history) = crate::headers::history::for_response(request, status) {
+            builder
+                .headers
+                .push(Header::new_unchecked(HeaderName::HistoryInfo, history));
+        }
         Ok(builder)
     }
 
@@ -466,6 +474,69 @@ mod tests {
                 sequence: 7,
                 method: Method::Invite
             })
+        );
+    }
+
+    #[test]
+    fn history_is_returned_in_responses_other_than_100() {
+        let request = RequestBuilder::new(Method::Invite, uri())
+            .header(HeaderName::Supported, "histinfo")
+            .unwrap()
+            .build();
+        let trying = ResponseBuilder::to_request(&request, StatusCode::new(100).unwrap(), "Trying")
+            .unwrap()
+            .build();
+        assert!(trying.headers.get(&HeaderName::HistoryInfo).is_none());
+
+        let ringing =
+            ResponseBuilder::to_request(&request, StatusCode::new(180).unwrap(), "Ringing")
+                .unwrap()
+                .build();
+        assert_eq!(
+            ringing.headers.value(&HeaderName::HistoryInfo).as_deref(),
+            Some(&b"<sip:example.com>;index=1"[..])
+        );
+    }
+
+    #[test]
+    fn repeated_history_rows_are_one_ordered_cache() {
+        let request = RequestBuilder::new(Method::Invite, uri())
+            .header(HeaderName::HistoryInfo, "<sip:first@example.com>;index=1")
+            .unwrap()
+            .header(
+                HeaderName::HistoryInfo,
+                "<sip:second@example.com>;index=1.1;mp=1",
+            )
+            .unwrap()
+            .build();
+        let response =
+            ResponseBuilder::to_request(&request, StatusCode::new(180).unwrap(), "Ringing")
+                .unwrap()
+                .build();
+        assert_eq!(
+            response.headers.value(&HeaderName::HistoryInfo).as_deref(),
+            Some(&b"<sip:first@example.com>;index=1, <sip:second@example.com>;index=1.1;mp=1"[..])
+        );
+    }
+
+    #[test]
+    fn history_privacy_anonymizes_a_response_cache() {
+        let request = RequestBuilder::new(Method::Invite, uri())
+            .header(
+                HeaderName::HistoryInfo,
+                "<sip:alice@example.com?Reason=SIP%3Bcause%3D302>;index=1",
+            )
+            .unwrap()
+            .header(HeaderName::Privacy, "history")
+            .unwrap()
+            .build();
+        let response =
+            ResponseBuilder::to_request(&request, StatusCode::new(486).unwrap(), "Busy Here")
+                .unwrap()
+                .build();
+        assert_eq!(
+            response.headers.value(&HeaderName::HistoryInfo).as_deref(),
+            Some(&b"<sip:anonymous@anonymous.invalid>;index=1"[..])
         );
     }
 

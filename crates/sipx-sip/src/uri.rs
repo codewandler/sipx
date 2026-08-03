@@ -360,6 +360,25 @@ impl Uri {
         }
     }
 
+    /// Add a URI header component and report whether this URI can carry one.
+    ///
+    /// SIP and SIPS URIs have a `?name=value` component. Opaque schemes, including `tel`, do
+    /// not; returning `false` lets History-Info follow RFC 7044 §10.2 without pretending a
+    /// reason was embedded in a URI whose grammar has nowhere to put it.
+    pub fn push_header(&mut self, header: Param) -> bool {
+        let Some(parts) = self.sip_parts_mut() else {
+            return false;
+        };
+        parts.headers.push(header);
+        true
+    }
+
+    /// Remove every URI header component with this name.
+    pub fn remove_header(&mut self, name: &str) -> bool {
+        self.sip_parts_mut()
+            .is_some_and(|parts| parts.headers.remove(name))
+    }
+
     /// Remove a URI parameter, and say whether one was there.
     ///
     /// Names match the way §19.1.4 compares them, so `%74ransport` is `transport`.

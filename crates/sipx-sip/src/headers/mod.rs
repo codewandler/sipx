@@ -23,11 +23,15 @@
 
 pub mod address;
 pub(crate) mod grammar;
+pub mod history;
 pub mod misc;
 pub mod via;
 
 pub use address::{Address, Contact, ContactValue, From, RecordRoute, Route, To};
 pub use grammar::HeaderParam;
+pub use history::{
+    HistoryEntry, HistoryIndex, HistoryInfo, Reason, ReasonValue, TargetChange, TargetChangeKind,
+};
 pub use misc::{
     Allow, CSeq, CallId, ContentLength, ContentType, Date, Expires, MaxForwards, ProxyRequire,
     Require, Supported, TokenList, Unsupported,

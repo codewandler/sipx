@@ -25,24 +25,30 @@
 //!
 //! **Supported**: `MediaSession` and the RTP/RTCP plumbing under it — binding, symmetric RTP, the
 //! pacing clock, SRTP keyed from SDES, quality statistics — plus [`ice`], whose gathering and
-//! selected-pair driver are consumed by `sipx-call`.
+//! selected-pair driver are consumed by `sipx-call`, and [`dtls`]'s protocol, key-derivation and
+//! handshake surface, which `sipx-call` selects for explicit DTLS-SRTP policy (`M-28`).
 //!
 //! **Experimental**:
 //!
-//! - [`dtls`] — a DTLS-SRTP handshake with no caller. `Config.srtp` takes `SrtpKeys` and the handshake
-//!   produces `srtp::Context`, so the two do not currently meet (`M-28`).
+//! - `dtls::openssl` — the optional OpenSSL implementation behind the off-by-default `dtls`
+//!   feature. No shipped application enables it by default; the feature never changes a session or
+//!   call without explicit DTLS-SRTP policy.
 //! - [`Bridge`] and [`Conference`] — real and tested over sessions **you** own; a `Call` does not hand
 //!   out its `MediaSession`, so two calls cannot be bridged yet (`C-6`).
 
 pub mod bridge;
 pub mod conference;
+mod counters;
 pub mod dtls;
 pub mod ice;
 pub mod session;
 
 pub use bridge::Bridge;
 pub use conference::{Conference, ConferenceError};
+pub use counters::MediaDiscardCounts;
 pub use dtls::{Arriving, Handshake, Profile, Role};
+#[cfg(feature = "dtls")]
+pub use session::DtlsStartError;
 pub use session::{
     Codec, CodecDirection, Config, Encoded, Interrupt, MediaPort, MediaSession, Playback,
     PlaybackEnd, PlaybackId, SetupError, SrtpKeys, StartError,

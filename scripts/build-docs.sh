@@ -35,9 +35,8 @@
 #      route                                        stated there with its reason
 #   5. the site build printed no warning at all     WARNING_EXCEPTIONS below, empty on purpose:
 #                                                   a handler we never audited cannot ride green
-#   6. check 4 is actually armed                    the guard self-check at the bottom builds a
-#                                                   page linking to an anchor no page emits and
-#                                                   fails if that build *succeeds*
+#   6. check 4 is actually armed                    the guard self-check calls the installed link
+#                                                   checker with a link to an id no page emits
 #   7. every public item is documented and every    `RUSTDOCFLAGS=-D warnings cargo doc`
 #      intra-doc link resolves
 #
@@ -45,34 +44,15 @@
 # build into a log to inspect its output would discard the build's own exit code, which is how a
 # step grows this defect back by accident.
 #
-# -- and the guard's probe cannot cost the next run anything -----------------------------------
-#
-# Check 6 needs a page with a dead anchor, and Docusaurus only builds pages under `website/docs`,
-# so the probe is written into a tracked directory. That is a hazard with two halves, and both are
-# closed here rather than trusted to a `trap`, because a `kill -9` runs no trap:
-#
-#   * `git add -A` must not be able to commit it. The path is in the root `.gitignore`, beside the
-#     three other entries there for exactly this class of generated file.
-#   * a leftover must not redden the next run. The sweep runs *before* the site build rather than
-#     beside the probe. Placed after the probe it could not help: the site build would abort on the
-#     leftover under `set -e` and never reach the cleanup, leaving the gate red on every later run
-#     with no defect in the tree — the exact opposite of what this step exists to say, and a
-#     violation of the predicate this story carries.
-#   * the name carries `$$`, so two runs in one checkout cannot delete each other's live probe.
-#     That is why the sweep is a glob and the removal at the end is not, and why nothing else may
-#     use the `zz-anchor-guard-probe-` prefix.
+# Check 6 used to launch a second full site build around a temporary Markdown page. That duplicated
+# compilation and worker startup just to ask the already-installed link checker one question. Under
+# full-workspace load the second Node process sometimes left its top-level await unsettled, an
+# infrastructure exit unrelated to the anchor policy. The probe now invokes the same checker with
+# the real config and a synthetic collected-link graph. The real site is still built once above.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
-
-# This run's probe, and the pattern that matches every run's.
-PROBE="website/docs/zz-anchor-guard-probe-$$.md"
-PROBE_GLOB="website/docs/zz-anchor-guard-probe-*.md"
-
-# Before anything reads `website/docs`. `rm -f` on a glob that matches nothing is a silent success,
-# so this costs a clean tree nothing and says nothing on the happy path.
-rm -f $PROBE_GLOB
 
 # Docusaurus warnings that are deliberately not failures. Empty, and it should stay that way:
 # anything added here needs a reason on the line and a story against it, because every entry is
@@ -131,56 +111,12 @@ if [ -n "$(printf '%s' "$warnings" | tr -d '[:space:]')" ]; then
     exit 1
 fi
 
-# Check 6. The guard has to be armed, and "the config says throw" is not the same claim as "a
-# dead anchor fails this build". So: write a page linking to an id no page emits — the `h1` of
-# the front page, which is the exact shape S-30 hit, because Docusaurus renders a page's first
-# `h1` as the page header and gives it no id — and require the build to fail.
-#
-# It runs after the real build so a genuine site defect is reported as itself, and it reuses the
-# warm Docusaurus cache in `website/`, so it costs seconds rather than another cold build. Building
-# a throwaway copy of `website/` instead would keep the probe out of the tree entirely; it was
-# measured at 2m31s for the cold cache and it failed for the wrong reason, so the probe stays here
-# and its leakage is closed at the top of this script instead.
+# Check 6. "The config says throw" and "the installed checker rejects the link" are distinct
+# claims. Exercise the handler a site build calls with the real config and a synthetic page linking
+# to an id the target page does not emit. This is deterministic and does not start a second compiler
+# and worker lifecycle merely to reach the checker again (`X-60`).
 echo "==> checking a dead anchor still fails the build"
-guard_log="$(mktemp)"
-guard_out="$(mktemp -d)"
-trap 'rm -rf "$site_log" "$guard_log" "$guard_out" "$PROBE"' EXIT
-cat > "$PROBE" <<'PROBEEOF'
----
-title: anchor guard probe
-description: Written by scripts/build-docs.sh and deleted again. It is gitignored, and the next
-  run of that script deletes it before building, so a copy left by a killed run costs nothing.
----
-
-# anchor guard probe
-
-A link to an id no page emits: [the front page's h1](/docs/#sipx).
-
-And one nothing could ever emit, so that adding a `## sipx` heading to the front page turns this
-check into a false "not armed" rather than leaving it with nothing to trip on:
-[nowhere](/docs/#zz-no-page-emits-this-id).
-PROBEEOF
-guard_status=0
-(cd website && npm run build --silent -- --out-dir "$guard_out") >"$guard_log" 2>&1 || guard_status=$?
-rm -f "$PROBE"
-if [ "$guard_status" -eq 0 ]; then
-    echo >&2
-    echo "a page linking to an anchor no page emits BUILT SUCCESSFULLY." >&2
-    echo >&2
-    echo "the site's broken-anchor guard is not armed: check onBrokenAnchors in" >&2
-    echo "website/docusaurus.config.js. Until it is, this step can print a dead link and" >&2
-    echo "exit 0, and the gate's verdict does not mean what it says (X-41)." >&2
-    exit 1
-fi
-if ! grep -qi 'broken anchor' "$guard_log"; then
-    echo >&2
-    echo "the probe build failed, but not for the broken anchor it was written to trip:" >&2
-    tail -20 "$guard_log" >&2
-    echo >&2
-    echo "this check proves nothing in that state — fix the build, or fix the probe." >&2
-    exit 1
-fi
-echo "anchors: a link to an id no page emits fails the build"
+node scripts/check-docs-anchor-guard.mjs
 
 # The API reference, published into the site rather than beside it. `-D warnings` is the point:
 # a missing doc on a public item or an intra-doc link that resolves nowhere fails here rather

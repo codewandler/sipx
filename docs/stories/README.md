@@ -32,8 +32,9 @@ argued for in the [roadmap](../roadmap.md#next):
 - **M9 — Bridgeable.** Two thirds done: `S-19` UPDATE and `C-2` early media are closed; `C-1` two
   dialogs as one call remains. What has to be true of a session before sipx can sit between two of
   them.
-- **M11 — Attestable.** Unstarted. `S-20` STIR, `S-21` History-Info and Reason, `T-22` overload
-  control.
+- **M11 — Attestable.** The STIR service (`S-20`) and diversion history (`S-21`) are implemented.
+  Live-call identity selection and independent verification (`S-34`) plus overload control
+  (`T-22`) remain.
 
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `A` application SDK/release · `X` cross-cutting (build, CI, test infrastructure).
@@ -43,32 +44,16 @@ argued for in the [roadmap](../roadmap.md#next):
 
 ## Now (in progress)
 
-### Call framework
-_This is the layer applications actually program against, so it is the one that decides whether_
-_None._
-
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [X-60 — Two gate steps fail randomly, which teaches people to re-run the gate](X-60-two-gate-steps-fail-randomly-and-teach-people-to-re-run.md) · Build · observed twice in one run — `a_recording_cut_short_by_the_cap_is_kept` failed under full-workspace load and passed alone and on re-run, and the docs-site dead-anchor probe failed with `Detected unsettled top-level await` and passed on re-run in an unchanged tree
-- [X-59 — Refuse an INVITE addressed to another instance's GRUU, or write down why answering it is right](X-59-a-call-answers-an-invite-addressed-to-another-instances-gruu.md) · Application · found by the independent review of X-52 — an INVITE whose Request-URI is instance one's public GRUU, delivered to instance two's flow, is answered by instance two and carries audio; `sent_to_our_gruu` is a predicate nothing but tests call, and `crates/sipx-call/src/` contains no GRUU reference at all
-- [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
-- [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
 - [T-22 — Implement overload control](T-22-overload-control.md) · Signalling · M11 · RFC 7339 + 7415 · something better than answering 503
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-32 — Give the media path's discards the same counters the transport got](M-32-media-discards-are-uncounted.md) · Media · X-18 counted every transport discard and refused this half rather than invent the answer — `sipx-transport` cannot depend on `sipx-media`, so it needs a shared crate underneath both or a parallel type of `ShedCounts`' shape; census below, including a DTMF digit dropped with neither a log nor a counter
-- [M-28 — Offer DTLS-SRTP from a call, and stop claiming it until then](M-28-dtls-srtp-unreachable-from-a-call.md) · Media · found by X-27 — dial hardcodes SDES, so sipx cannot offer DTLS-SRTP at all, while RFC 5763 and 5764 are both marked implemented with both roles
-
-### Quic
-- [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · blocked by T-11
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
-- [S-28 — Answer a 401 or 407 on an outbound INVITE](S-28-a-call-cannot-answer-an-authentication-challenge.md) · Signalling · found while closing P-7 — sipx-call has no credential type and no 401/407 path at all, so a challenged call fails outright; the digest machinery exists in sipx-ua and nothing above the registration path can reach it
-- [S-32 — Refuse a numeric flag that was given something that is not a number](S-32-a-flag-given-a-non-number-is-ignored.md) · Signalling · found by S-30 — `Args::number` conflates "absent" with "not a number", so `sipx answer --wait notanumber` exits 0 after the default 60s; `dial::numeric` already fixed it for `dial` alone, which is the tell that it was patched per-command instead of at the source
-- [S-33 — Decide what `sipx answer` should exit with when it heard no audio](S-33-sipx-answer-exits-zero-having-heard-nothing.md) · Signalling · found by X-40's implementor — the answerer reports `heard_audio: false` and still exits 0, so a script cannot distinguish a silent call from a good one by exit code
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -94,6 +79,9 @@ _sipx can call any endpoint you can already name, and cannot help you name one. 
 - [P-6 — Dial a peer by name](P-6-dial-a-peer-by-name.md) · Phone · needs P-5 — `sipx dial alice` where alice came out of `sipx peers`
 - [S-24 — Learn who is registered, with the registration event package](S-24-learn-who-is-registered.md) · Signalling · RFC 3680 is `partial` today — sipx parses the package and never subscribes to it
 
+### Conformance
+- [S-34 — Reach STIR signing and verification from a live call](S-34-reach-stir-from-live-calls.md) · Signalling · M11 evidence gap left explicit by S-20 — the sans-I/O services exist, but no call selects them and no independent verifier has accepted their output
+
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
@@ -103,14 +91,14 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 
 ### Diagnostic phone
 _The phone is both the product's front door and its most demanding integration test. Vision_
-- [P-9 — Select codecs, media security and ICE from the diagnostic phone](P-9-select-codecs-media-security-and-ice.md) · Phone · blocked by M-27 and M-28; the CLI must consume one call-level media policy, not rebuild negotiation
+- [P-9 — Select codecs, media security and ICE from the diagnostic phone](P-9-select-codecs-media-security-and-ice.md) · Phone · M-27 and M-28 delivered the call-level policy; the CLI must consume it, not rebuild negotiation
 - [P-10 — Use live audio devices without putting device IO in the media core](P-10-use-live-audio-devices.md) · Phone · blocked by P-9; Linux release target, macOS and Windows compile checks
 - [P-11 — Drive interactive call actions through a correlated NDJSON protocol](P-11-script-interactive-call-actions.md) · Phone · after P-8/P-9; includes validated custom headers and no sleep command
 - [P-12 — Run bounded call load from the diagnostic phone](P-12-run-bounded-call-load.md) · Phone · reuse X-4's load model; every run has finite admission and cleanup bounds
 - [P-13 — Prove the complete diagnostic phone from a shell](P-13-prove-the-diagnostic-phone.md) · Phone · blocked by P-8 through P-12 and the call-layer blockers named by them
 
 ### Quic
-- [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · track: quic · blocked by T-12
+- [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · track: quic · T-12 delivered the transport; independent-peer evidence remains
 
 ## Done
 - [A-1 — Finish the host configuration and failure-semantics schema](A-1-host-configuration-schema.md) · Application · app-host phase 1 · spec work, no dependency on the app-sdk stories
@@ -146,9 +134,11 @@ _The phone is both the product's front door and its most demanding integration t
 - [M-25 — Specify SRTP and its two keyings, after the fact](M-25-srtp-spec.md) · Media · found by X-25 — M-14 and M-15 shipped without the spec non-negotiable 4 requires
 - [M-26 — Echo and verify the SDES tag, which RFC 4568 requires twice](M-26-sdes-tag-neither-echoed-nor-verified.md) · Media · found by M-25 — RFC 4568 §5.1.2 and §5.1.3 are both MUSTs and sipx honours neither
 - [M-27 — Offer and answer ICE from a call](M-27-ice-in-the-call-layer.md) · Media · found by M-22 — ICE works and is reachable only through sipx-media's API; no call places one with it
+- [M-28 — Offer DTLS-SRTP from a call, and stop claiming it until then](M-28-dtls-srtp-unreachable-from-a-call.md) · Media · found by X-27 — dial hardcodes SDES, so sipx cannot offer DTLS-SRTP at all, while RFC 5763 and 5764 are both marked implemented with both roles
 - [M-29 — Make a live call run the SDES answer check it already owns](M-29-call-layer-pairs-srtp-keys-unchecked.md) · Media · found by M-26 — verify_answer and SrtpKeys::from_answer exist and sipx-call calls neither, so a live call still keys on an answer nobody checked
 - [M-30 — Let a call select Opus, or stop shipping a codec nothing can reach](M-30-a-call-cannot-select-opus.md) · Media · M-13 built the codec, not the selection — sipx-call hardcodes G.711 at six sites and Codec::from_payload_type deliberately never returns Opus, so X-33 demoted RFC 6716 and 7587 to partial
 - [M-31 — Make the answer and the negotiated codec agree, once](M-31-the-answer-and-the-negotiated-codec-can-disagree.md) · Media · found by M-30's review — `sipx-sdp/src/answer.rs:423-427` compares an rtpmap clock rate as a string while `codec_named` parses it to `u32`, so an offer with `a=rtpmap:0 PCMU/08000` settles on PCMU while the answer names only `8`
+- [M-32 — Give the media path's discards the same counters the transport got](M-32-media-discards-are-uncounted.md) · Media · X-18 counted every transport discard and refused this half rather than invent the answer — `sipx-transport` cannot depend on `sipx-media`, so it needs a shared crate underneath both or a parallel type of `ShedCounts`' shape; census below, including a DTMF digit dropped with neither a log nor a counter
 - [M-33 — Settle whether reading a report block consumes the reporting window](M-33-two-comments-disagree-about-consuming-a-reporting-window.md) · Media · found by X-18 — `session.rs:1404-1410` and `:1364-1367` carry contradictory comments about whether `report_block()` consumes a reporting window; one is wrong, and which one decides whether `MediaSession::stats()` is safe to poll
 - [M-34 — Give `collect_digits` a start deadline separate from its inter-digit gap](M-34-collect-digits-conflates-the-start-deadline-with-the-gap.md) · Media · found by X-40's implementor — `crates/sipx-media/src/session.rs:1117` has the identical one-window shape that made `sipx answer` record zero samples, so the DTMF test is the same flake waiting
 - [M-35 — Make dropping a conference stop every participant collector](M-35-make-dropping-a-conference-stop-every-participant-collector.md) · Media · R-05 in the 2026-07-30 repository review — Conference Drop aborts only the mixer while detached collectors retain participant sessions
@@ -180,14 +170,19 @@ _The phone is both the product's front door and its most demanding integration t
 - [S-17 — Implement the dialog and registration event packages](S-17-dialog-and-registration-event-packages.md) · Signalling · M8 · RFC 4235 + 3680 · blocked by S-13
 - [S-18 — Implement presence and PUBLISH](S-18-presence-and-publish.md) · Signalling · M8 · RFC 3856 + 3863 + 3903 · blocked by S-13
 - [S-19 — Implement the UPDATE method](S-19-update-method.md) · Signalling · M9 · RFC 3311 · the last session-integrity gap; 100rel unblocked it
+- [S-20 — Sign and verify caller identity with STIR](S-20-stir-and-passport.md) · Signalling · M11 · RFC 8224 + 8225 · the largest remaining RFC gap; unattested traffic otherwise
+- [S-21 — Implement History-Info, and populate Reason](S-21-history-info-and-reason.md) · Signalling · M11 · RFC 7044 + 3326 · who diverted a call and why; one story because 7044 §10.2 needs Reason
 - [S-22 — Give the caller a handle on its early dialog](S-22-caller-early-dialog.md) · Signalling · found by S-19 — sipx as caller can neither send nor receive an UPDATE while ringing
 - [S-23 — Answer a CANCEL — the UAS half sipx never implemented](S-23-uas-cancel.md) · Signalling · found by C-4 — no 487 for the INVITE and no 200 for the CANCEL anywhere in the workspace
 - [S-25 — Give the early-dialog loop a way to fail](S-25-early-dialog-observation-has-no-error-channel.md) · Signalling · found by M-29 — adopt_early_answer returns (), so a parse failure, a negotiation failure and a refused a=crypto in a reliable provisional are all discarded identically
 - [S-26 — Match a response to the RFC 2543 client transaction that sent it](S-26-legacy-client-transaction-never-matches-its-response.md) · Signalling · found by X-19's fuzzer — from_sent_request derives the client key by §17.2.3's server rules, so a legacy key carries a Request-URI and To tag that from_response cannot, and every response is Unmatched
 - [S-27 — Refuse a `sips:` URI the CLI cannot honour securely, instead of sending it in the clear](S-27-a-sips-uri-is-dialled-in-plaintext.md) · Signalling · found by X-33's implementor — dial.rs:231 strips `sips:` exactly as `sip:` and defaults to port 5060, and dial.rs:49 only ever chooses UDP or TCP, so `sipx dial sips:…` sends the INVITE in cleartext and says nothing
+- [S-28 — Answer a 401 or 407 on an outbound INVITE](S-28-a-call-cannot-answer-an-authentication-challenge.md) · Signalling · found while closing P-7 — sipx-call has no credential type and no 401/407 path at all, so a challenged call fails outright; the digest machinery exists in sipx-ua and nothing above the registration path can reach it
 - [S-29 — Register over an Outbound flow, and let a registration wake on push](S-29-register-over-an-outbound-flow-and-push.md) · Signalling · with_outbound and with_push have no caller outside sipx-ua's own tests — the eighth instance of the recurring defect — so X-37 demoted RFC 5626 and 8599 to no roles; wiring them is what makes the roles honest again
 - [S-30 — Refuse a valued flag that was given no value, instead of ignoring it](S-30-a-valued-flag-with-no-value-is-silently-dropped.md) · Signalling · found by S-29's review — `Args::value` cannot tell "--flag was last" from "--flag was absent", so a trailing valued flag is accepted and dropped; CLI-wide, and it defeats the accepted-and-dropped rule S-29 asserted for its own six flags
 - [S-31 — Tolerate RFC 5118 §4.10's three-colon IPv6 reference](S-31-tolerate-the-three-colon-ipv6-reference.md) · Signalling · found by X-16's corpus — `[2001:db8:::192.0.2.1]` is rejected with `StartLine(Uri(Host))`, and RFC 5118 §4.10 is normative that an implementation MUST tolerate it; the one recorded entry in `rfc5118::DEVIATIONS`
+- [S-32 — Refuse a numeric flag that was given something that is not a number](S-32-a-flag-given-a-non-number-is-ignored.md) · Signalling · found by S-30 — `Args::number` conflates "absent" with "not a number", so `sipx answer --wait notanumber` exits 0 after the default 60s; `dial::numeric` already fixed it for `dial` alone, which is the tell that it was patched per-command instead of at the source
+- [S-33 — Decide what `sipx answer` should exit with when it heard no audio](S-33-sipx-answer-exits-zero-having-heard-nothing.md) · Signalling · found by X-40's implementor — the answerer reports `heard_audio: false` and still exits 0, so a script cannot distinguish a silent call from a good one by exit code
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
@@ -199,6 +194,7 @@ _The phone is both the product's front door and its most demanding integration t
 - [T-9 — Implement secure WebSocket](T-9-implement-secure-websocket.md) · Signalling
 - [T-10 — Verify TLS against a real server](T-10-tls-interop.md) · Signalling · gap left explicitly by T-7
 - [T-11 — Specify SIP over QUIC](T-11-specify-sip-over-quic.md) · Signalling · track: quic · a draft rather than an RFC, so it sits below the RFC work
+- [T-12 — Implement the QUIC transport](T-12-implement-the-quic-transport.md) · Signalling · track: quic · T-11 supplied the mapping; T-13 owns independent-peer evidence
 - [T-14 — Implement the Path header](T-14-register-a-path-header.md) · Signalling · track: reachability · RFC 3327 · gates T-15 and GRUU
 - [T-15 — Implement Outbound, for client-initiated connections](T-15-client-initiated-connections.md) · Signalling · M6 · RFC 5626 · T-14 unblocked it
 - [T-16 — Implement the Service-Route header](T-16-service-route-header.md) · Signalling · M6 · RFC 3608 · the outbound twin of T-14's Path
@@ -267,6 +263,8 @@ _The phone is both the product's front door and its most demanding integration t
 - [X-56 — Run the RFC 5118 corpus check from the gate, as its RFC 4475 twin already is](X-56-the-5118-corpus-check-is-run-by-nothing.md) · Build · found by X-51's evidence check — `import-rfc5118-corpus.sh --check` proves the twelve fixtures are still the RFC's own bytes, and no gate step and no CI job invokes it; the 4475 twin is run by the fuzz job
 - [X-57 — Make `-vv` reach DEBUG, because it is documented, accepted and inert](X-57-vv-is-documented-accepted-and-inert.md) · Build · found by X-53 — verbosity counts arguments starting with `-v`, so `-vv` counts as one and yields INFO; nothing on a call's path logs at INFO, so the documented flag produces no output at all
 - [X-58 — Make an unreachable RFC editor a non-result rather than a finding, and delete the false reason for the guard](X-58-the-corpus-fetch-guard-reports-a-finding-for-an-unreachable-rfc.md) · Build · found by the independent review of X-56 — the fetch guard exits 1, so gate.py reports `1 of 25 steps failed` when the network is down, which is the exact confusion X-34 removed; and the rationale written into AGENTS.md for the guard is disproved by one command
+- [X-59 — Refuse an INVITE addressed to another instance's GRUU, or write down why answering it is right](X-59-a-call-answers-an-invite-addressed-to-another-instances-gruu.md) · Application · found by the independent review of X-52 — an INVITE whose Request-URI is instance one's public GRUU, delivered to instance two's flow, is answered by instance two and carries audio; `sent_to_our_gruu` is a predicate nothing but tests call, and `crates/sipx-call/src/` contains no GRUU reference at all
+- [X-60 — Two gate steps fail randomly, which teaches people to re-run the gate](X-60-two-gate-steps-fail-randomly-and-teach-people-to-re-run.md) · Build · observed twice in one run — `a_recording_cut_short_by_the_cap_is_kept` failed under full-workspace load and passed alone and on re-run, and the docs-site dead-anchor probe failed with `Detected unsettled top-level await` and passed on re-run in an unchanged tree
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

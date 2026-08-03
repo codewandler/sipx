@@ -17,12 +17,12 @@ selects a call path that provides both.
 | TLS and secure WebSocket (WSS) | Yes, selected explicitly with `--transport tls` or `--transport wss` | Yes. `sipx-transport` supports TLS and WSS when their Cargo features are enabled |
 | Certificate verification | Mandatory. Platform roots, additional PEM roots, service identity and optional mutual-TLS identity are configurable; verification cannot be disabled | Mandatory for outgoing TLS and WSS; there is no skip-verification option |
 | SDES-keyed SRTP | Yes. A CLI call over TLS or WSS selects the call layer's protected-signalling path | Yes. `sipx-call` negotiates SDES-keyed SRTP when the selected signalling transport is secure |
-| DTLS-SRTP | No | The SDP, fingerprint checking, handshake, and SRTP context pieces exist in `sipx-sdp` and `sipx-media`, but no `sipx-call` API can select or complete a DTLS-keyed call |
+| DTLS-SRTP | No command-line selection yet | Yes, through explicit `sipx-call::Keying::DtlsSrtp` policy when the off-by-default `dtls` feature is enabled |
 | Signalling capture | `--capture <FILE>` writes a redacted pcapng file | `sipx-transport::CaptureConfig` enables capture; redaction is on by default |
 
 For a protected command-line call, select TLS or WSS and provide any private trust root explicitly;
 the result reports both requested and negotiated transport. Media remains SDES-keyed SRTP until the
-call-level DTLS story lands.
+CLI media remains SDES-keyed SRTP until its media-policy selector lands.
 
 ## TLS and WSS protect one hop
 
@@ -39,8 +39,8 @@ the minimum and TLS 1.3 is preferred, following [RFC 8996](https://www.rfc-edito
 
 ## SDES and SRTP
 
-SRTP encrypts the RTP payload and authenticates the packet. sipx currently reaches SRTP from the
-call layer through SDES: the master key is carried in SDP, so sipx offers it only when signalling
+SRTP encrypts the RTP payload and authenticates the packet. Through SDES the master key is carried
+in SDP, so sipx offers it only when signalling
 uses TLS or WSS. A TLS-terminating intermediary can still read that SDP key. This is a property of
 SDES's threat model, not end-to-end media keying; see
 [RFC 4568 §7.1](https://www.rfc-editor.org/rfc/rfc4568#section-7.1).
@@ -50,17 +50,22 @@ authentication tag. Rekeying and the other SRTP transforms are not implemented. 
 [RFC compliance table](compliance.md) records these limits alongside the supported portions of
 RFC 3711 and RFC 4568.
 
-## DTLS-SRTP is not reachable from a call
+## DTLS-SRTP is an explicit call policy
 
 DTLS-SRTP performs its handshake on the media path and carries only the certificate fingerprint
 in signalling. That prevents a signalling intermediary from learning the media key merely by
 terminating TLS.
 
-sipx implements the component pieces: SDP fingerprints and setup roles, certificate fingerprint
-verification, the DTLS handshake behind the `sipx-media` `dtls` feature, and derivation of SRTP
-contexts. Those pieces are not wired into `sipx-call`: no dial or answer option selects them, and
-no CLI command can reach them. Enabling the Cargo feature does **not** turn an ordinary call into a
-DTLS-keyed call.
+`sipx-call::Keying::DtlsSrtp` selects it for dialing or answering. The call emits a fresh per-call
+fingerprint, verifies the peer certificate before accepting exported keys, and runs the handshake
+on the same bound port that then carries SRTP. A caller sends its ACK before beginning DTLS, so a
+peer that waits for SIP confirmation cannot deadlock with the handshake.
+
+The Cargo feature supplies the OpenSSL handshake and remains off by default. Enabling it does
+**not** turn an ordinary call into a DTLS-keyed call; the default remains SDES on protected
+signalling and plain RTP otherwise. Selecting DTLS in a build without the feature is a typed error,
+never a cleartext fallback. Reliable early media and DTLS combined with ICE are currently refused,
+also without fallback. The CLI has no media-keying flag yet.
 
 ## Captures remain sensitive
 

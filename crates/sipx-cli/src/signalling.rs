@@ -178,6 +178,10 @@ impl Selection {
                 config.wss_server = Some((server, config.bind.port()));
                 Ok(())
             }
+            TransportKind::Quic => Err(
+                "the command-line QUIC listener is not wired yet; use the sipx-transport API"
+                    .to_owned(),
+            ),
         }
     }
 
@@ -189,6 +193,7 @@ impl Selection {
             TransportKind::Tls => handle.tls_addr(),
             TransportKind::Ws => handle.ws_addr(),
             TransportKind::Wss => handle.wss_addr(),
+            TransportKind::Quic => None,
         }
     }
 }
@@ -202,6 +207,7 @@ pub(crate) fn name(kind: TransportKind) -> &'static str {
         TransportKind::Tls => "tls",
         TransportKind::Ws => "ws",
         TransportKind::Wss => "wss",
+        TransportKind::Quic => "quic",
     }
 }
 

@@ -22,6 +22,12 @@ say nothing. Both ways a value goes missing are refused:
   one can only be a mistake. It is an easy one to make: an unset shell variable expands to exactly
   this, which is how `--target "$ADDR"` arrives with nothing in it.
 
+Every `<S>` value is a whole number of seconds from `0` through `4294967295`. Negative values,
+fractions, units such as `3s`, and values above that range are usage errors naming the flag. Zero is
+deliberate per command: `--duration 0` ends an established call immediately, `--timeout 0` uses the
+transaction layer's expiry, `--wait 0` returns immediately when no call is queued, and `--expires 0`
+asks the registrar to remove the binding.
+
 `--help` is answered before any of this, so it still prints when the rest of the line is wrong.
 
 `dial`, `answer`, and `register` select `udp`, `tcp`, `tls`, `ws`, or `wss` with
@@ -172,6 +178,17 @@ Scripts branch on the exit code, not on parsing prose:
 | 4 | Unauthorized — credentials wrong or missing |
 | 5 | Timeout — nothing answered in time |
 | 6 | Busy |
+
+Both `dial` and `answer` exit 0 after a completed call that received no audio. Silence is not a
+signalling failure: a caller can legitimately stay quiet, a one-way announcement can send without
+receiving, and `--record` asks the command to preserve whatever arrives rather than asserting that
+something must arrive. Giving those successful calls a failure status would make the exit code
+depend on an application policy the command was never given.
+
+The media result remains machine-readable. A script that requires received audio uses `--json` and
+requires `heard_audio: true`; `heard_audio: false` with `samples_recorded: 0` is a successfully
+completed silent call. This rule is identical for `dial` and `answer` so the direction of the call
+does not change what an exit status means.
 
 ## The JSON contract
 

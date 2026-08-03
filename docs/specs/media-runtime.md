@@ -1,6 +1,6 @@
 # Media runtime construction and ownership
 
-**Status:** normative · **Stories:** M-35, M-36, M-37
+**Status:** normative · **Stories:** M-32, M-35, M-36, M-37
 
 ## 1. Scope
 
@@ -72,7 +72,55 @@ member map leaves the conference running and unchanged. Once it owns the map, it
 closed, aborts and drains the worker registry, and clears every participant without another await;
 cancelling the subsequent completion wait therefore cannot strand a session in a closed conference.
 
-## 4. Test vectors
+## 4. Discard counters
+
+**[sipx]** Media discard counters are a parallel, media-owned snapshot. They do not join
+`sipx_transport::Counters` in a shared crate. The two layers have independent lifetimes — an
+endpoint can carry many media sessions and a media session can be constructed without an endpoint
+— and neither crate can observe the other's losses. Moving only their value types below both would
+therefore leave the atomics and their increment sites separate while adding a crate whose sole job
+was to erase an honest ownership boundary. The application or call layer already depends on both
+and is the right place to join snapshots when it needs one view.
+
+`MediaSession::discard_counts` returns `MediaDiscardCounts`, a synchronous plain snapshot over
+atomics owned by that session. `MediaPort` creates the meters before candidate gathering; the same
+meters follow the port through gathering, the ICE driver, and every RTP, RTCP, codec, DTMF, and
+playback worker. A discard during gathering therefore remains visible after the port becomes a
+session rather than being reset to zero at the ownership transition.
+
+The snapshot counts each consequence separately: codec encode and decode failures; SRTP and SRTCP
+unprotect failures; packets from a foreign SSRC; completed DTMF digits refused by the
+application queue; unknown RTP payload types; playback completion reports with no listener; ICE
+driver datagrams and data-sent notes refused by its queue; renegotiation replies with no listener;
+ICE outputs failing to send; redundant server-reflexive candidates; and
+non-STUN-server datagrams consumed while gathering.
+
+An ICE output naming no bound socket has no counter: it is structurally unreachable because every
+base the agent can name was created from the exact socket vector the driver owns. The site carries
+that reason instead of a field permanently stuck at zero.
+
+The SRTP and SRTCP protect-error branches likewise have no counters. Their only errors are short
+headers, while those branches receive bytes from `Packet::encode` and `Rtcp::encode_compound`, which
+always make complete headers. Authentication failures on unprotect are reachable from network input
+and are counted. This distinction avoids publishing protect counters structurally stuck at zero.
+
+Every discard site MUST either increment exactly one counter or carry a `// discard: <reason>` on
+the site explaining why no counter can truthfully reach it. A source-enumeration test enforces that
+rule. A log line is not a counter.
+
+### 4.1 What the numbers do not promise
+
+Each field is individually monotonic and incremented with relaxed atomic ordering. A snapshot is
+not an instant: workers can increment different fields between their individual loads, so arithmetic
+relationships across fields are exact only while the session is quiet.
+
+Codec callbacks and socket workers run on different tasks from the caller reading the snapshot. A
+read racing a discard can observe the value immediately before or after that discard; it cannot lose
+or double-count the increment. Tests that cause asynchronous loss MUST wait for the named counter to
+rise with a bounded deadline. A fixed sleep followed by an assertion is not evidence that the count
+is honest under load.
+
+## 5. Test vectors
 
 | Vector | Input | Required result |
 |---|---|---|
@@ -88,3 +136,7 @@ cancelling the subsequent completion wait therefore cannot strand a session in a
 | O1 | Opus encoder construction is refused | typed encoder setup error; no direct G.711 encoder exists in the resulting state |
 | O2 | Opus decoder construction is refused | typed decoder setup error; no direct G.711 decoder exists in the resulting state |
 | O3 | successful Opus on dynamic payload type 96 | emitted RTP names 96 and carries Opus bytes |
+| D1 | 33 completed DTMF digits offered while the 32-place application queue is unread | the 33rd is absent from the queue and `dtmf_delivery_failures = 1` |
+| D2 | one RTP packet using neither the negotiated nor a known static payload type | no audio is delivered and `unknown_payload_type = 1` |
+| D3 | one packet after a different SSRC has established the stream | no stream state moves and `foreign_ssrc = 1` |
+| D4 | a source discard is added without a nearby counter increment or `// discard:` reason | the media discard enumeration test fails with its file and line |

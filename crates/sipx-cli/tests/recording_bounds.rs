@@ -48,7 +48,7 @@ use sipx_audio::read_wav;
 use sipx_call::{DialOptions, dial};
 use sipx_sip::Uri;
 use sipx_transport::{Config as TransportConfig, Target, bind};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 /// 8 kHz mono, which is what G.711 carries and what `--record` writes.
@@ -85,6 +85,13 @@ async fn record_a_call(case: &str, hang_up_after: u64, after: Duration, clip: us
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let recording = dir.join("heard-by-callee.wav");
 
+    // Bind the caller before starting the answerer's wait-for-call clock. On the reported flake,
+    // this setup competed with every other workspace suite after the answerer had already announced
+    // its address, so `--wait` stood in for the caller becoming ready.
+    let mut config = TransportConfig::new("127.0.0.1:0".parse().expect("valid"));
+    config.sent_by = loopback().to_string();
+    let (handle, _incoming) = bind(config).await.expect("binds");
+
     let mut answerer = Command::new(env!("CARGO_BIN_EXE_sipx"))
         .args([
             "answer",
@@ -92,7 +99,10 @@ async fn record_a_call(case: &str, hang_up_after: u64, after: Duration, clip: us
             "127.0.0.1:0",
             "--json",
             "--wait",
-            "20",
+            // A bound on failure: if a caller that is already bound cannot send an INVITE in five
+            // minutes, the harness is stuck. This is deliberately orders of magnitude above the
+            // honest loopback answer and never stands in for readiness.
+            "300",
             "--duration",
             &hang_up_after.to_string(),
             "--record",
@@ -105,6 +115,7 @@ async fn record_a_call(case: &str, hang_up_after: u64, after: Duration, clip: us
         .expect("spawns");
 
     let stdout = answerer.stdout.take().expect("piped");
+    let mut stderr = answerer.stderr.take().expect("piped");
     let mut lines = BufReader::new(stdout).lines();
     let listening = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
         .await
@@ -117,10 +128,6 @@ async fn record_a_call(case: &str, hang_up_after: u64, after: Duration, clip: us
         .and_then(|rest| rest.split('"').next())
         .expect("an address")
         .to_owned();
-
-    let mut config = TransportConfig::new("127.0.0.1:0".parse().expect("valid"));
-    config.sent_by = loopback().to_string();
-    let (handle, _incoming) = bind(config).await.expect("binds");
 
     let to = Uri::parse(Bytes::from(format!("sip:answer@{address}"))).expect("a SIP URI");
     let options = DialOptions::new("<sip:caller@127.0.0.1>", loopback())
@@ -146,8 +153,7 @@ async fn record_a_call(case: &str, hang_up_after: u64, after: Duration, clip: us
             tokio::time::timeout(Duration::from_secs(40), lines.next_line())
                 .await
                 .expect("the answerer reports rather than hanging")
-                .expect("a line")
-                .expect("the result line")
+                .expect("reads the answerer's stdout")
         }
     );
 
@@ -156,10 +162,29 @@ async fn record_a_call(case: &str, hang_up_after: u64, after: Duration, clip: us
         .await
         .expect("the answerer exits")
         .expect("waits");
+    let mut error = String::new();
+    stderr
+        .read_to_string(&mut error)
+        .await
+        .expect("reads stderr");
+    let report = report.unwrap_or_else(|| {
+        let exit_path = if status.code() == Some(5) {
+            "the wait-for-call bound expired before an INVITE arrived"
+        } else if status.success() {
+            "the answerer exited successfully without emitting its result"
+        } else if status.code().is_none() {
+            "the answerer was terminated by a signal"
+        } else {
+            "the answerer failed before emitting its result"
+        };
+        panic!(
+            "answerer stdout closed before the result line: {exit_path}; exit={status}; stderr={error:?}"
+        );
+    });
     assert!(
         status.success(),
         "the answerer exited with {status}; these tests are about what it recorded, not about it \
-         crashing: {report}"
+         crashing: report={report}; stderr={error:?}"
     );
 
     let heard = read_wav(std::fs::File::open(&recording).expect("opens")).expect("reads");

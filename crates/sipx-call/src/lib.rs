@@ -23,7 +23,7 @@
 //! **Supported**: the call lifecycle — dial, answer, early dialogs, hold and resume, both transfer
 //! flavours, DTMF, playback, recording, session timers.
 //!
-//! **Experimental**: choosing what a call offers — [`Codecs`], [`IcePolicy`], [`MediaPolicy`],
+//! **Experimental**: choosing what a call offers — [`Codecs`], [`IcePolicy`], [`Keying`], [`MediaPolicy`],
 //! [`DialOptions::with_codecs`], [`DialOptions::with_media_policy`], and the answering entry
 //! points that take a selection or policy ([`answer_with`], [`answer_with_policy`],
 //! [`answer_ringing_with`], [`answer_ringing_with_policy`], [`answer_replacing_with`],
@@ -38,8 +38,7 @@
 //!
 //! Absent rather than experimental, so that nobody looks for it: **multi-party**. Bridging and
 //! conferencing exist in `sipx-media` over sessions you own, and this crate does not expose its
-//! `MediaSession`, so two `Call`s cannot be joined (`C-6`). A call also cannot answer an
-//! authentication challenge (`S-28`).
+//! `MediaSession`, so two `Call`s cannot be joined (`C-6`).
 //!
 //! [`Error`] is `#[non_exhaustive]`: additive diagnostics stay additive for downstream callers, so
 //! a `match` over it carries a `_` arm.
@@ -57,8 +56,8 @@ pub mod transfer;
 mod update;
 
 pub use call::{
-    Call, Codecs, DialOptions, Dialing, IcePolicy, MediaPolicy, answer, answer_early,
-    answer_replacing, answer_replacing_with, answer_ringing, answer_ringing_with,
+    Call, Codecs, Credentials, DialOptions, Dialing, IcePolicy, Keying, MediaPolicy, answer,
+    answer_early, answer_replacing, answer_replacing_with, answer_ringing, answer_ringing_with,
     answer_ringing_with_policy, answer_with, answer_with_policy, dial, dial_early, dial_once,
     serve,
 };

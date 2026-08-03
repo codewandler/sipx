@@ -120,9 +120,9 @@ question of what can be built on this stack without writing Rust. **M9** waits b
     *registrar* mint the GRUU and a *proxy* resolve it to one binding, and sipx is the UA half of
     that RFC and implements neither — so the registrar and the resolution in that test are doubles,
     and always were. What sipx holds, and what the test falsifies, is per-instance GRUU learning,
-    presentation, and recognition of a GRUU as its own. It does **not** refuse a call addressed to
-    another instance's GRUU that reaches it anyway; `sipx-call` reads no `gr` parameter, and `X-59`
-    is the story that decides whether it should.
+    presentation, and recognition of a GRUU as its own. `X-59` closes the last-hop case too: once a
+    registered `UserAgent` has learned its own GRUUs, its inbound request decision refuses an
+    INVITE carrying another value with `404`, before the application can hand it to `sipx-call`.
   - **A push into an answered call** —
     `a_push_wakes_a_client_that_held_no_connection_into_an_answered_call`. A client holding no
     connection at all is woken, refreshes its binding, answers the call it was woken for, and carries
@@ -155,7 +155,8 @@ that adds a feature.** M9 to M12 are defined and their stories are cut. **M10 is
 checked its four **Done when** clauses against the tests and CI jobs meant to demonstrate them and
 found three held and the fourth short in the same way M10's two were; `X-54` closed that fourth —
 [where M12 stands](#m12--provable) records which evidence carries each clause. M9 is two thirds
-done: `S-19` and `C-2` closed, with `C-1` open. Only M11 is unstarted. The in-progress
+done: `S-19` and `C-2` closed, with `C-1` open. M11 has its identity service and diversion-history
+pieces (`S-20`, `S-21`); live-call identity evidence (`S-34`) and overload control (`T-22`) remain. The in-progress
 work is the [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host)
 epics below, which are not milestones because they are not RFC gaps.
 
@@ -244,8 +245,9 @@ those three tests rather than against the statuses of the stories that built the
   with audio both ways, and the other instance never sees it — **because the test's routing double
   sends it to one flow, which is the role a proxy plays and sipx does not.** The stack's own half is
   that each instance learns, presents and recognises its own GRUU, and that is the half the
-  falsification attacks. An INVITE for one instance's GRUU delivered to the other's flow is still
-  answered (`X-59`). `T-20`'s
+  falsification attacks. `X-59` additionally delivers the first instance's GRUU to the second
+  flow, bypassing that routing double, and proves the registered UA refuses it `404` rather than
+  establishing a call. `T-20`'s
   `a_request_to_a_gruu_reaches_the_instance_that_registered_it` remains what it always was — an
   `OPTIONS` against one agent and a stub registrar, the mechanism this composes on top of — and is
   not reopened.
@@ -277,6 +279,7 @@ who placed it, say what happened to it on the way, or ask a neighbour to send le
 | Story | RFC | What it unlocks |
 |---|---|---|
 | **S-20** STIR and PASSporT | 8224, 8225 | A signed `Identity` header field, and a verification service that refuses a bad one with the code §6.2.2 names rather than a generic 400. Without it, a call handed to the public telephone network is unattested traffic. |
+| **S-34** Live-call STIR evidence | 8224, 8225 | Select the service from a real call, have an independent verifier accept the outbound field, and refuse an invalid inbound signature before the application answers. |
 | **S-21** History-Info and Reason | 7044, 3326 | Who diverted a call and why. One story, not two: RFC 7044 §10.2 requires the `Reason` inside the `hi-targeted-to-uri`, and RFC 3326 is `syntax only` today precisely because nothing populates it. |
 | **T-22** Overload control | 7339, 7415 | `oc`, `oc-algo`, `oc-validity` and `oc-seq` on the `Via`, so a loaded endpoint says how much to send instead of answering 503 — which is what `T-19` will otherwise leave it doing. |
 
@@ -285,9 +288,10 @@ an inbound one whose signature does not verify is refused with 438, a diverted c
 carrying its diversion history with a reason per hop, and an overloaded endpoint publishes a rate
 its neighbour honours.
 
-`S-20` first and alone — it is the largest item here and the only one with a credential fetch and a
-signature in it. `S-21` next, because the element that has to get a diversion history right is a
-re-signing one, and M9 is what creates one. `T-22` is transport work and independent of both.
+`S-20`'s pure service lands first and alone — it is the largest item here and the only one with a
+credential fetch and a signature in it. `S-34` then carries it through a real call and an independent
+verifier. `S-21` supplies the history a re-signing element consumes; M9 is what creates that element.
+`T-22` is transport work and independent of all three.
 
 M11 sits after M10 because a call that cannot be reached has nothing to attest.
 
@@ -370,9 +374,10 @@ struct and never by a second tally of an event already counted.
 
 **QUIC** (`T-12` transport, `T-13` verified against a real peer) is specified in
 [`docs/specs/sip-quic.md`](https://github.com/codewandler/sipx/blob/main/docs/specs/sip-quic.md)
-and stays unscheduled on the same argument as before: there is no RFC for SIP over QUIC, so every
-choice in that spec is ours, and that makes it a bet rather than a prerequisite. A bet does not get
-a milestone — it lands in whichever one someone asks for it in.
+and the transport is now implemented. There is no RFC for SIP over QUIC, so every choice in that
+spec is ours; that makes `T-13`'s independent peer evidence more important, not optional proof that
+can be inferred from two sipx endpoints. QUIC remains outside a milestone, while `T-13` is the open
+evidence story for the public transport claim.
 
 What the compliance table still shows red after M12 is a list of features on roles sipx already
 holds, and therefore last by this roadmap's own rule: SIPREC (7865, 7866), MESSAGE (3428), INFO

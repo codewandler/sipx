@@ -31,6 +31,8 @@ PEER_READY_MARKER="Asterisk Ready"
 # neither, so where a peer puts it is a fact about the peer and belongs here.
 PEER_ENV=(
     "SIPX_INTEROP_ECHO_URI=sip:echo@127.0.0.1:5060"
+    "SIPX_INTEROP_DTLS_URI=sip:echo@127.0.0.1:5060"
+    "SIPX_INTEROP_DTLS_FROM=<sip:sipx-dtls@127.0.0.1>"
     "SIPX_INTEROP_UA_PORT=5080"
     "SIPX_INTEROP_ORIGINATE=PJSIP/sipx-ua"
     "SIPX_INTEROP_WS_PORT=8088"

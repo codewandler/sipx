@@ -71,11 +71,9 @@ ran. The middle case is kept separate from the first on purpose — asterisk doe
 perfectly well; what is missing is on our side, and recording it against the peer would file our
 gap as theirs.
 
-Today that middle case is DTLS-SRTP: `sipx-media::dtls` implements RFC 5764's parts and
-`Capabilities::with_dtls_srtp` exists, but nothing in `sipx-call` calls either — `dial` offers
-SDES and only SDES. So there is no sipx side to a DTLS call to interoperate about, and the test
-named in `KEYING_TESTS[dtls]` does not exist yet. It is announced rather than omitted, because an
-unwritten test and a passing one look identical in a summary line.
+Both declared keyings now have a named test. The harness enables `sipx-cli`'s `dtls` feature for
+the media-security role; the call still selects DTLS-SRTP explicitly, so enabling the build feature
+does not alter the SDES case or any ordinary call.
 
 The list is the contract. A test that is softened until every peer passes it measures the
 intersection of the peers, which is the one thing an interop suite must not do — so a

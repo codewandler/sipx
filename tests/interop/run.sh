@@ -31,7 +31,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 declare -A ROLE_TESTS=(
     [server]="-p sipx-ua --test interop"
     [user-agent]="-p sipx-cli --test interop_call"
-    [media-security]="-p sipx-cli --test interop_srtp"
+    [media-security]="-p sipx-cli --features dtls --test interop_srtp"
 )
 ROLE_ORDER=(server user-agent media-security)
 
@@ -50,19 +50,7 @@ declare -A KEYING_TESTS=(
 )
 KEYING_ORDER=(sdes dtls)
 
-# Keyings *sipx* cannot yet offer, whatever the peer supports.
-#
-# This is a different fact from a peer's `PEER_KEYINGS` and is kept apart from it deliberately.
-# Recording "asterisk does not do DTLS-SRTP" would be false — it does. What is true is that
-# nothing in `sipx-call` ever calls `Capabilities::with_dtls_srtp` or runs
-# `sipx_media::dtls::establish`: the pieces exist and no code path reaches them, so `dial` offers
-# SDES and only SDES. Until that is wired, there is no sipx side to the DTLS call and the test
-# named above cannot exist. Announced on every run rather than left as an absence, because an
-# unwritten test and a passing one look identical in a summary line.
-declare -A KEYING_UNIMPLEMENTED=(
-    [dtls]='sipx-call never offers DTLS-SRTP: dial() hardcodes with_srtp() and nothing calls
-    with_dtls_srtp(). See docs/stories/X-27-interop-never-encrypts-media.md.'
-)
+declare -A KEYING_UNIMPLEMENTED=()
 
 # ------------------------------------------------------------------------ the peer list ----
 available_peers() {

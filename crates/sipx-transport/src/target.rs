@@ -19,6 +19,8 @@ pub enum TransportKind {
     Ws,
     /// SIP over secure WebSocket.
     Wss,
+    /// SIP over QUIC using sipx's experimental mapping.
+    Quic,
 }
 
 impl TransportKind {
@@ -40,6 +42,7 @@ impl TransportKind {
             Self::Tls => "TLS",
             Self::Ws => "WS",
             Self::Wss => "WSS",
+            Self::Quic => "QUIC",
         }
     }
 
@@ -50,7 +53,7 @@ impl TransportKind {
     /// may offer encrypted media at all.
     #[must_use]
     pub fn is_secure(self) -> bool {
-        matches!(self, Self::Tls | Self::Wss)
+        matches!(self, Self::Tls | Self::Wss | Self::Quic)
     }
 
     /// The default port, per RFC 3261 §19.1.2 and RFC 7118.
@@ -58,7 +61,7 @@ impl TransportKind {
     pub fn default_port(self) -> u16 {
         match self {
             Self::Udp | Self::Tcp => 5060,
-            Self::Tls => 5061,
+            Self::Tls | Self::Quic => 5061,
             Self::Ws => 80,
             Self::Wss => 443,
         }
@@ -73,6 +76,7 @@ impl TransportKind {
             b"TLS" => Some(Self::Tls),
             b"WS" => Some(Self::Ws),
             b"WSS" => Some(Self::Wss),
+            b"QUIC" => Some(Self::Quic),
             _ => None,
         }
     }
@@ -153,7 +157,11 @@ impl Target {
             peer: self.addr,
             transport: self.transport,
             identity: self.verify_as.clone(),
-            path: self.path.clone(),
+            path: if matches!(self.transport, TransportKind::Ws | TransportKind::Wss) {
+                self.path.clone()
+            } else {
+                None
+            },
         }
     }
 }
@@ -162,7 +170,7 @@ impl Target {
 ///
 /// Not the address alone, and each of the other two fields earns its place.
 ///
-/// **The transport**, because TCP and TLS to one address are not interchangeable: a `sips:`
+/// **The transport**, because TCP, TLS and QUIC to one address are not interchangeable: a `sips:`
 /// request riding a cleartext socket has silently become what it asked not to be. With
 /// WebSocket in the mix the case stops being theoretical — WS and TCP can and do share a port.
 ///
@@ -383,6 +391,7 @@ mod tests {
         assert_eq!(TransportKind::Tls.default_port(), 5061);
         assert_eq!(TransportKind::Ws.default_port(), 80);
         assert_eq!(TransportKind::Wss.default_port(), 443);
+        assert_eq!(TransportKind::Quic.default_port(), 5061);
     }
 
     fn peer() -> SocketAddr {
@@ -452,8 +461,44 @@ mod tests {
             TransportKind::Tls,
             TransportKind::Ws,
             TransportKind::Wss,
+            TransportKind::Quic,
         ] {
             assert_eq!(t.reliability(), Reliability::Reliable);
         }
+    }
+
+    #[test]
+    fn quic_is_a_secure_reliable_via_transport() {
+        assert_eq!(TransportKind::parse(b"QUIC"), Some(TransportKind::Quic));
+        assert_eq!(TransportKind::Quic.as_str(), "QUIC");
+        assert!(TransportKind::Quic.is_secure());
+    }
+
+    #[test]
+    fn quic_pool_keys_keep_verified_names_and_transports_separate() {
+        let one = Target::new(peer(), TransportKind::Quic)
+            .verifying("one.example")
+            .connection();
+        let two = Target::new(peer(), TransportKind::Quic)
+            .verifying("two.example")
+            .connection();
+        let tls = Target::new(peer(), TransportKind::Tls)
+            .verifying("one.example")
+            .connection();
+        assert_ne!(one, two, "Q15: two authenticated names are two connections");
+        assert_ne!(one, tls, "Q16: QUIC and TLS cannot share a connection");
+    }
+
+    #[test]
+    fn quic_pool_keys_never_include_a_websocket_resource() {
+        let plain = Target::new(peer(), TransportKind::Quic)
+            .verifying("one.example")
+            .connection();
+        let with_irrelevant_path = Target::new(peer(), TransportKind::Quic)
+            .verifying("one.example")
+            .at_path("/ws")
+            .connection();
+        assert_eq!(plain, with_irrelevant_path);
+        assert_eq!(plain.path, None);
     }
 }

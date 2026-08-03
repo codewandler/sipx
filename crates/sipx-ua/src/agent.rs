@@ -548,18 +548,54 @@ impl UserAgent {
         }
     }
 
-    /// Answer a request that arrived.
+    /// Answer a request that arrived, when the user-agent layer owns the decision.
     ///
-    /// Handles what a user agent must answer to be a good citizen on the network; anything
-    /// else is left to the caller, which is why this returns whether it acted.
+    /// Handles what a user agent must answer to be a good citizen on the network, and refuses an
+    /// initial INVITE addressed to a GRUU this registered instance does not own. Anything else is
+    /// left to the caller, which is why this returns whether it acted.
+    ///
+    /// The GRUU guard applies only after this agent has learned at least one GRUU. An unregistered
+    /// agent cannot prove that an unfamiliar value belongs to somebody else, while one holding its
+    /// registrar-issued values can. RFC 5627 §4.5 says `gr` identifies an instance-specific URI;
+    /// §6.1 gives an unresolved GRUU the ordinary `404 Not Found` response. Applying that response
+    /// at the last hop keeps a proxy's accidental misrouting from turning an instance address back
+    /// into an address-of-record fan-out.
     pub async fn answer(&self, incoming: &Incoming) -> Result<bool> {
         match incoming.request.method {
             Method::Options => {
                 self.answer_options(incoming).await?;
                 Ok(true)
             }
+            Method::Invite
+                if !self.gruus.is_empty()
+                    && tagless_to(&incoming.request).is_some()
+                    && sipx_sip::gruu::is_gruu(&incoming.request.uri)
+                    && !self.sent_to_our_gruu(&incoming.request) =>
+            {
+                self.refuse_foreign_gruu(incoming).await?;
+                Ok(true)
+            }
             _ => Ok(false),
         }
+    }
+
+    /// Refuse a dialog-forming request whose GRUU names another registered instance.
+    async fn refuse_foreign_gruu(&self, incoming: &Incoming) -> Result<()> {
+        let mut builder = ResponseBuilder::to_request(
+            &incoming.request,
+            StatusCode::new(404).ok_or(Error::NoResponse)?,
+            "Not Found",
+        )?;
+        if let Some(to) = tagless_to(&incoming.request) {
+            builder = builder.set_header(
+                &HeaderName::To,
+                Bytes::from(format!("{to};tag={}", crate::auth::new_cnonce())),
+            )?;
+        }
+        self.endpoint
+            .respond(&incoming.key, builder.build())
+            .await?;
+        Ok(())
     }
 
     /// Answer an `OPTIONS` ping (RFC 3261 §11.2).

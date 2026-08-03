@@ -317,7 +317,7 @@ fn comment(record: &Record) -> String {
         record.local,
         record.peer,
     );
-    if matches!(record.transport, TransportKind::Tls | TransportKind::Wss) {
+    if record.transport.is_secure() {
         comment.push_str(" decrypted-in-process=yes");
     }
     if record.redacted {

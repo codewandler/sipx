@@ -62,6 +62,7 @@ use sipx_sdp::ice::ComponentId;
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc, watch};
 
+use crate::counters::{DiscardMeters, MediaDiscardCounts};
 use crate::ice;
 
 /// Which G.711 flavour a session carries.
@@ -131,6 +132,25 @@ pub enum StartError {
     /// The negotiated session could not be constructed.
     #[error(transparent)]
     Setup(#[from] SetupError),
+}
+
+/// A DTLS handshake could not take a bound media port into an SRTP session.
+#[cfg(feature = "dtls")]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DtlsStartError {
+    /// The media socket could not be converted or configured for the handshake.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    /// Something else retained the not-yet-started socket.
+    #[error("the media socket is already shared")]
+    SocketShared,
+    /// Certificate verification, profile negotiation or key export failed.
+    #[error("{0}")]
+    Handshake(#[from] crate::dtls::Error),
+    /// The bounded blocking handshake worker did not return normally.
+    #[error("the DTLS handshake worker failed: {0}")]
+    Worker(String),
 }
 
 impl Codec {
@@ -222,6 +242,7 @@ impl Encoding {
                 }),
             },
             other => {
+                // discard: `channels` exists only for the feature-gated stateful codec.
                 let _ = channels;
                 Ok(Self::Direct(other))
             }
@@ -239,6 +260,7 @@ impl Encoding {
             Self::Opus(encoder) => match encoder.encode(samples) {
                 Ok(packet) => Some(packet),
                 Err(error) => {
+                    // discard: the send loop counts the `None` returned from this callback.
                     tracing::debug!(%error, "dropping a frame Opus could not encode");
                     None
                 }
@@ -269,6 +291,7 @@ impl Decoding {
                 }),
             },
             other => {
+                // discard: `channels` exists only for the feature-gated stateful codec.
                 let _ = channels;
                 Ok(Self::Direct(other))
             }
@@ -285,6 +308,7 @@ impl Decoding {
                 Err(error) => {
                     // A packet the codec rejects is dropped, not played. A decoder pushed past
                     // a malformed packet produces noise, and noise is louder than a gap.
+                    // discard: `deliver` counts the `None` returned from this callback.
                     tracing::debug!(%error, "dropping a packet Opus could not decode");
                     None
                 }
@@ -558,6 +582,8 @@ pub struct MediaSession {
     clock_rate: u32,
     sent: Arc<AtomicU64>,
     received: Arc<AtomicU64>,
+    /// Losses owned by this session, including candidate gathering on the port it consumed.
+    discards: Arc<DiscardMeters>,
     stats: Arc<Mutex<StreamStats>>,
     /// What the far end last told us, and when.
     feedback: Arc<Mutex<Feedback>>,
@@ -640,6 +666,7 @@ impl Stop {
 struct Shared {
     sent: Arc<AtomicU64>,
     received: Arc<AtomicU64>,
+    discards: Arc<DiscardMeters>,
     outbound: Arc<Outbound>,
     feedback: Arc<Mutex<Feedback>>,
     /// Zero until the first packet names the far end's synchronisation source.
@@ -656,10 +683,11 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(local_addr: SocketAddr) -> Self {
+    fn new(local_addr: SocketAddr, discards: Arc<DiscardMeters>) -> Self {
         Self {
             sent: Arc::new(AtomicU64::new(0)),
             received: Arc::new(AtomicU64::new(0)),
+            discards,
             outbound: Arc::new(Outbound::default()),
             feedback: Arc::new(Mutex::new(Feedback::default())),
             stats: Arc::new(Mutex::new(StreamStats::new(0))),
@@ -880,6 +908,7 @@ struct Clip {
     /// Decremented by this clip's destructor, so it balances whether the clip played, was
     /// refused, or was dropped with the session.
     outstanding: Arc<AtomicUsize>,
+    discards: Arc<DiscardMeters>,
 }
 
 impl Clip {
@@ -887,7 +916,11 @@ impl Clip {
     fn finish(&self, end: PlaybackEnd) {
         // Failure means every handle has been dropped, which is a caller that started a clip and
         // never looked back — a legitimate thing to do with an announcement.
-        let _ = self.end.send(Some(end));
+        if self.end.send(Some(end)).is_err() {
+            self.discards
+                .playback_completion_unobserved
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -916,6 +949,8 @@ pub struct MediaPort {
     /// round-trip time, which has nowhere else to come from.
     rtcp: Option<Arc<UdpSocket>>,
     local_addr: SocketAddr,
+    /// Created at bind time so gathering losses survive the transition into a session.
+    discards: Arc<DiscardMeters>,
 }
 
 impl MediaPort {
@@ -945,6 +980,7 @@ impl MediaPort {
                         socket: Arc::new(socket),
                         rtcp: Some(rtcp),
                         local_addr,
+                        discards: Arc::new(DiscardMeters::default()),
                     });
                 }
             }
@@ -960,6 +996,7 @@ impl MediaPort {
             socket,
             rtcp,
             local_addr,
+            discards: Arc::new(DiscardMeters::default()),
         })
     }
 
@@ -977,6 +1014,57 @@ impl MediaPort {
     #[must_use]
     pub fn has_control_port(&self) -> bool {
         self.rtcp.is_some()
+    }
+
+    /// Run DTLS on this port and return it with the derived SRTP master material.
+    ///
+    /// The handshake borrows a duplicated descriptor for the same bound socket. No RTP worker is
+    /// running yet, so it is the only reader; once it finishes, that duplicate is dropped and the
+    /// original descriptor is restored to Tokio for [`Self::start`]. The timeout is enforced by
+    /// the DTLS socket itself, making the blocking worker bounded even if this future is cancelled.
+    #[cfg(feature = "dtls")]
+    pub async fn key_with_dtls(
+        self,
+        identity: crate::dtls::openssl::Identity,
+        peer: SocketAddr,
+        role: crate::dtls::Role,
+        fingerprint: sipx_sdp::fingerprint::Fingerprint,
+        timeout: Duration,
+    ) -> Result<(Self, SrtpKeys), DtlsStartError> {
+        let Self {
+            socket,
+            rtcp,
+            local_addr,
+            discards,
+        } = self;
+        let socket = Arc::try_unwrap(socket).map_err(|_| DtlsStartError::SocketShared)?;
+        let socket = socket.into_std()?;
+        socket.set_nonblocking(false)?;
+        let handshake_socket = socket.try_clone()?;
+
+        let keys = tokio::task::spawn_blocking(move || {
+            let mut handshake =
+                crate::dtls::openssl::Session::new(handshake_socket, peer, &identity, timeout)
+                    .map_err(|error| crate::dtls::Error::Dtls(error.to_string()))?;
+            crate::dtls::establish(&mut handshake, role, Some(&fingerprint))
+        })
+        .await
+        .map_err(|error| DtlsStartError::Worker(error.to_string()))??
+        .into_srtp_keys();
+
+        socket.set_read_timeout(None)?;
+        socket.set_write_timeout(None)?;
+        socket.set_nonblocking(true)?;
+        let socket = UdpSocket::from_std(socket)?;
+        Ok((
+            Self {
+                socket: Arc::new(socket),
+                rtcp,
+                local_addr,
+                discards,
+            },
+            keys,
+        ))
     }
 
     /// Gather ICE candidates on this port's sockets (RFC 8445 §5.1.1).
@@ -1001,7 +1089,7 @@ impl MediaPort {
                 socket: rtcp,
             });
         }
-        ice::gather::gather(&bases, gathering).await
+        ice::gather::gather(&bases, gathering, Arc::clone(&self.discards)).await
     }
 
     /// Start carrying media, now that negotiation has said where and in what.
@@ -1021,6 +1109,7 @@ impl MediaPort {
             config,
             None,
             prepared,
+            self.discards,
         ))
     }
 
@@ -1050,6 +1139,7 @@ impl MediaPort {
                 config,
                 None,
                 prepared,
+                self.discards,
             ));
         }
         Ok(MediaSession::on_socket(
@@ -1059,6 +1149,7 @@ impl MediaPort {
             config,
             Some(local),
             prepared,
+            self.discards,
         ))
     }
 }
@@ -1085,6 +1176,7 @@ impl MediaSession {
             config,
             None,
             prepared,
+            port.discards,
         ))
     }
 
@@ -1098,6 +1190,7 @@ impl MediaSession {
         config: Config,
         ice: Option<ice::LocalDescription>,
         prepared: Prepared,
+        discards: Arc<DiscardMeters>,
     ) -> Self {
         let samples_per_packet = config.samples_per_packet();
         let packet_duration = config.packet_duration;
@@ -1109,7 +1202,7 @@ impl MediaSession {
         let (encoded_tx, encoded_rx) = mpsc::channel::<Encoded>(256);
         let (digits_tx, digits_rx) = mpsc::channel::<(Digit, Duration)>(32);
 
-        let shared = Shared::new(local_addr);
+        let shared = Shared::new(local_addr, discards);
 
         // Where to send. Starts at the SDP address and is replaced by the first observed
         // source: behind a NAT the advertised address is private and unreachable.
@@ -1132,6 +1225,7 @@ impl MediaSession {
                     rtcp: Arc::clone(&rtcp_remote),
                 },
                 &shared.stop,
+                &shared.discards,
             )
         });
 
@@ -1148,6 +1242,7 @@ impl MediaSession {
                 ice: ice.clone(),
                 stop: Arc::clone(&shared.stop),
                 encoding: prepared.encoding,
+                discards: Arc::clone(&shared.discards),
             },
         ));
         let clips_tx = spawn_playback_queue(&outgoing_tx, &shared.stop);
@@ -1169,6 +1264,7 @@ impl MediaSession {
                 ice: ice.clone(),
                 stop: Arc::clone(&shared.stop),
                 decoding: prepared.decoding,
+                discards: Arc::clone(&shared.discards),
             },
         ));
 
@@ -1187,6 +1283,7 @@ impl MediaSession {
             srtp: srtp_keys,
             ice: ice.clone(),
             stop: Arc::clone(&shared.stop),
+            discards: Arc::clone(&shared.discards),
         });
 
         Self {
@@ -1211,6 +1308,7 @@ impl MediaSession {
             clock_rate,
             sent: shared.sent,
             received: shared.received,
+            discards: shared.discards,
             stats: shared.stats,
             feedback: shared.feedback,
             stop: shared.stop,
@@ -1263,7 +1361,15 @@ impl MediaSession {
         let local_addr = self.local_addr;
 
         self.stop.stop();
-        let replacement = Self::on_socket(&socket, rtcp, local_addr, config, None, prepared);
+        let replacement = Self::on_socket(
+            &socket,
+            rtcp,
+            local_addr,
+            config,
+            None,
+            prepared,
+            Arc::clone(&self.discards),
+        );
         replacement.set_muted(muted);
         replacement.set_relay(relay);
         let previous = std::mem::replace(self, replacement);
@@ -1649,6 +1755,7 @@ impl MediaSession {
             end: end_tx,
             keypresses: self.keypresses.subscribe(),
             outstanding: Arc::clone(&self.outstanding),
+            discards: Arc::clone(&self.discards),
         };
 
         // `try_send` rather than an await, so starting a playback is not itself something that
@@ -1671,6 +1778,16 @@ impl MediaSession {
     #[must_use]
     pub fn packets_received(&self) -> u64 {
         self.received.load(Ordering::Relaxed)
+    }
+
+    /// A synchronous snapshot of everything this session's media path has discarded.
+    ///
+    /// This includes candidate-gathering losses on the [`MediaPort`] the session consumed.
+    /// Each field is monotonic, but independent workers can advance different fields while this
+    /// snapshot is read, so relationships across fields are exact only while the session is quiet.
+    #[must_use]
+    pub fn discard_counts(&self) -> MediaDiscardCounts {
+        self.discards.snapshot()
     }
 
     /// How the call is going: loss, jitter, round-trip time and an estimated score.
@@ -1788,11 +1905,13 @@ fn delivery<'a>(
     audio: &'a mpsc::Sender<Vec<i16>>,
     encoded: &'a mpsc::Sender<Encoded>,
     relay: &'a AtomicBool,
+    discards: &'a DiscardMeters,
 ) -> Delivery<'a> {
     Delivery {
         audio,
         encoded,
         relay,
+        discards,
     }
 }
 
@@ -1824,6 +1943,7 @@ fn authenticated(
     context: Option<&mut sipx_rtp::SrtpContext>,
     bytes: Bytes,
     source: SocketAddr,
+    discards: &DiscardMeters,
 ) -> Option<Bytes> {
     let Some(context) = context else {
         return Some(bytes);
@@ -1831,6 +1951,9 @@ fn authenticated(
     match context.unprotect(&bytes) {
         Ok(plain) => Some(Bytes::from(plain)),
         Err(error) => {
+            discards
+                .srtp_unprotect_failures
+                .fetch_add(1, Ordering::Relaxed);
             tracing::debug!(%error, %source, "dropping a packet that failed SRTP");
             None
         }
@@ -1843,6 +1966,8 @@ fn srtp_context(keys: Option<&(Vec<u8>, Vec<u8>)>) -> Option<sipx_rtp::SrtpConte
     match sipx_rtp::SrtpContext::new(key, salt) {
         Ok(context) => Some(context),
         Err(error) => {
+            // discard: this refuses configuration before any packet exists; runtime discard
+            // counters count media the path was actually handed, not setup values.
             // Carrying on unencrypted would be the worst of the three options: the far end
             // expects SRTP, so the media is useless to it *and* readable to everyone else.
             tracing::error!(%error, "SRTP keys were refused; this session will carry nothing");
@@ -1995,8 +2120,12 @@ struct Sending {
     stop: Arc<Stop>,
     /// Constructed before this worker is spawned, so startup cannot fail inside the task.
     encoding: Encoding,
+    discards: Arc<DiscardMeters>,
 }
 
+// This is the single owner of the RTP send sequence, codec, SRTP context, pacing and their discard
+// meters. Splitting those state transitions across helpers would make their ordering harder to audit.
+#[allow(clippy::too_many_lines)]
 async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, sending: Sending) {
     let Sending {
         remote,
@@ -2008,6 +2137,7 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         ice,
         stop,
         mut encoding,
+        discards,
     } = sending;
     let mut clock = SendClock::new();
     // One context, owned by this loop. SRTP keeps a rollover counter and a replay window per
@@ -2043,6 +2173,9 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
                 let Some(built) =
                     clock.audio(&mut encoding, config.wire_payload_type(), ssrc, samples)
                 else {
+                    discards
+                        .opus_encode_failures
+                        .fetch_add(1, Ordering::Relaxed);
                     continue;
                 };
                 built
@@ -2091,6 +2224,8 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
                     // Sending it in the clear instead is not an option: the far end negotiated
                     // encryption and a cleartext packet is both unreadable to it and readable to
                     // everyone else.
+                    // discard: `Packet::encode` always makes the complete header `protect`
+                    // requires, so this error branch is structurally unreachable here.
                     tracing::warn!(%error, "dropping a packet SRTP could not protect");
                     continue;
                 }
@@ -2346,6 +2481,7 @@ struct Inbound {
     stop: Arc<Stop>,
     /// Constructed before this worker is spawned, so startup cannot fail inside the task.
     decoding: Decoding,
+    discards: Arc<DiscardMeters>,
 }
 
 /// Split a datagram arriving on a port that carries media three ways (RFC 5764 §5.1.2).
@@ -2390,6 +2526,7 @@ struct Control {
     srtp: Option<SrtpKeys>,
     ice: Option<ice::driver::Handle>,
     stop: Arc<Stop>,
+    discards: Arc<DiscardMeters>,
 }
 
 /// Start the report loops, as far as this session's configuration and sockets allow.
@@ -2420,6 +2557,7 @@ fn spawn_control(control: Control) {
             control.srtp,
             control.ice,
             control.stop,
+            control.discards,
         ));
     }
 }
@@ -2436,6 +2574,7 @@ fn spawn_ice(
     rtcp: Option<&Arc<UdpSocket>>,
     destinations: &ice::driver::Destinations,
     stop: &Arc<Stop>,
+    discards: &Arc<DiscardMeters>,
 ) -> ice::driver::Handle {
     let (agent, pending) = local.into_driver_parts();
     let mut sockets = vec![Arc::clone(socket)];
@@ -2448,6 +2587,7 @@ fn spawn_ice(
         sockets,
         destinations.clone(),
         Arc::clone(stop),
+        Arc::clone(discards),
     )
 }
 
@@ -2465,6 +2605,7 @@ async fn accept_source(
     remote: &Arc<Mutex<SocketAddr>>,
     stats: &Arc<Mutex<StreamStats>>,
     symmetric: bool,
+    discards: &DiscardMeters,
 ) -> bool {
     match *stream {
         None => {
@@ -2490,6 +2631,7 @@ async fn accept_source(
             // Another source on our port. Dropped rather than mixed in: one packet with a high
             // sequence number would otherwise advance the jitter buffer past every genuine
             // packet still to come, and the call goes silent.
+            discards.foreign_ssrc.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(
                 %source,
                 ssrc = packet.ssrc,
@@ -2501,6 +2643,9 @@ async fn accept_source(
     }
 }
 
+// This is the single ordered path from demultiplexing through authentication, source pinning,
+// statistics and delivery. Its length keeps that security-sensitive order visible in one place.
+#[allow(clippy::too_many_lines)]
 async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
     let Inbound {
         audio: incoming,
@@ -2515,6 +2660,7 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
         ice,
         stop,
         mut decoding,
+        discards,
     } = inbound;
     let mut buffer = match config.jitter_max_depth {
         Some(max) => JitterBuffer::adaptive(config.jitter_depth, max),
@@ -2553,7 +2699,7 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
                 // not coming — otherwise the last `depth - 1` packets of every clip are lost.
                 if !flush(
                     &mut buffer,
-                    &delivery(&incoming, &encoded, &relay),
+                    &delivery(&incoming, &encoded, &relay, &discards),
                     &mut decoding,
                     &digits,
                     &mut dtmf,
@@ -2577,7 +2723,7 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
         // Authenticated before it is parsed. A packet that fails is dropped and nothing about it
         // reaches the parser, the jitter buffer or the statistics — which is the point of
         // authenticating at all: forged packets must not be able to move any state.
-        let Some(bytes) = authenticated(unprotect.as_mut(), bytes, source) else {
+        let Some(bytes) = authenticated(unprotect.as_mut(), bytes, source, &discards) else {
             continue;
         };
         let Ok(packet) = Packet::decode(&bytes) else {
@@ -2587,7 +2733,17 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
             continue;
         };
 
-        if !accept_source(&mut stream, &packet, source, &remote, &stats, symmetric).await {
+        if !accept_source(
+            &mut stream,
+            &packet,
+            source,
+            &remote,
+            &stats,
+            symmetric,
+            &discards,
+        )
+        .await
+        {
             continue;
         }
 
@@ -2610,6 +2766,7 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
                     audio: &incoming,
                     encoded: &encoded,
                     relay: &relay,
+                    discards: &discards,
                 },
                 &mut decoding,
                 &digits,
@@ -2774,6 +2931,8 @@ async fn rtcp_loop(
             Some(context) => match context.protect_rtcp(&datagram) {
                 Ok(protected) => Bytes::from(protected),
                 Err(error) => {
+                    // discard: the compound encoder above always emits the eight-byte header
+                    // `protect_rtcp` requires, so this error branch is structurally unreachable.
                     tracing::warn!(%error, "dropping a report SRTCP could not protect");
                     continue;
                 }
@@ -2810,6 +2969,7 @@ async fn rtcp_receive_loop(
     srtp: Option<SrtpKeys>,
     ice: Option<crate::ice::driver::Handle>,
     stop: Arc<Stop>,
+    discards: Arc<DiscardMeters>,
 ) {
     let mut unprotect = srtp_context(srtp.as_ref().map(|keys| &keys.remote));
     let mut datagram = vec![0u8; 2048];
@@ -2837,6 +2997,9 @@ async fn rtcp_receive_loop(
             Some(context) => match context.unprotect_rtcp(&bytes) {
                 Ok(plain) => Bytes::from(plain),
                 Err(error) => {
+                    discards
+                        .srtcp_unprotect_failures
+                        .fetch_add(1, Ordering::Relaxed);
                     tracing::debug!(%error, "dropping a report that failed SRTCP");
                     continue;
                 }
@@ -2897,6 +3060,7 @@ struct Delivery<'a> {
     audio: &'a mpsc::Sender<Vec<i16>>,
     encoded: &'a mpsc::Sender<Encoded>,
     relay: &'a AtomicBool,
+    discards: &'a DiscardMeters,
 }
 
 async fn deliver(
@@ -2936,6 +3100,11 @@ async fn deliver(
                 digits
                     .arrivals
                     .send_modify(|count| *count = count.wrapping_add(1));
+            } else {
+                to.discards
+                    .dtmf_delivery_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(%digit, "dropping a DTMF digit the application queue could not take");
             }
         }
         return true;
@@ -2962,6 +3131,13 @@ async fn deliver(
     if packet.payload_type != config.wire_payload_type()
         && Codec::from_payload_type(packet.payload_type).is_none()
     {
+        to.discards
+            .unknown_payload_type
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(
+            payload_type = packet.payload_type,
+            "dropping a packet with an unknown payload type"
+        );
         return true;
     }
 
@@ -2969,6 +3145,9 @@ async fn deliver(
     // a full channel means the application has stopped reading — and a task parked here when
     // the call is hung up would hold its socket and its port for the life of the process.
     let Some(samples) = decoding.decode(&packet.payload) else {
+        to.discards
+            .opus_decode_failures
+            .fetch_add(1, Ordering::Relaxed);
         return true;
     };
 
@@ -3794,36 +3973,102 @@ mod tests {
         assert_eq!(stamps[2].wrapping_sub(stamps[1]), 80);
     }
 
-    /// sipx's own offers advertise `telephone-event` on payload type 101, so a peer that sends
-    /// DTMF sends packets this loop must not treat as speech. Decoding a four-byte event
-    /// payload as µ-law injects four garbage samples and is heard as a click.
+    /// A dynamic payload number means only what SDP assigned it. A number that names neither
+    /// the negotiated codec nor a known static codec is loss, and that loss must be observable.
     #[tokio::test]
     async fn an_unknown_payload_type_is_dropped_rather_than_decoded_as_audio() {
-        let (left, right) = pair(Codec::Pcmu).await;
-
-        // Establish the stream so `left` latches on to `right`.
-        right.play(&tone(320), 160).await;
-        let established = left.record_at_least(320, DELIVERY_BOUND).await;
-        assert_eq!(established.len(), 320);
-
-        // Now a DTMF packet on the same stream. It must not reach the audio path.
-        let dtmf = Packet::new(
-            101,
-            9000,
-            999_999,
-            1,
-            Bytes::from_static(&[0x05, 0x0A, 0x01, 0x40]),
-        );
         let raw = UdpSocket::bind(any()).await.expect("binds");
-        raw.send_to(&dtmf.encode(), left.local_addr())
+        let mut config = Config::new(raw.local_addr().expect("address"), Codec::Pcmu);
+        config.jitter_depth = 1;
+        config.jitter_max_depth = None;
+        config.dtmf_payload_type = None;
+        let session = MediaSession::start(any(), config).await.expect("starts");
+
+        // First establish the SSRC, then offer an unassigned dynamic payload on that same stream.
+        let valid = Packet::new(0, 1, 160, 7, Bytes::from(vec![0xFF; 160]));
+        raw.send_to(&valid.encode(), session.local_addr())
+            .await
+            .expect("sends");
+        let heard = session.record_at_least(160, DELIVERY_BOUND).await;
+        assert_eq!(heard.len(), 160);
+
+        let unknown = Packet::new(96, 2, 320, 7, Bytes::from_static(&[1, 2, 3, 4]));
+        raw.send_to(&unknown.encode(), session.local_addr())
             .await
             .expect("sends");
 
-        let after = left.record_until_idle(Duration::from_millis(200)).await;
+        let deadline = tokio::time::Instant::now() + DELIVERY_BOUND;
+        while session.discard_counts().unknown_payload_type == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the unknown payload never reached the discard site"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let after = session.record_until_idle(Duration::from_millis(200)).await;
         assert!(
             after.is_empty(),
-            "a telephone-event packet must not become audio samples: {after:?}"
+            "an unknown payload must not become audio samples: {after:?}"
         );
+        assert_eq!(session.discard_counts().unknown_payload_type, 1);
+    }
+
+    /// M-32's failing-first witness: unlike every other media discard in the original census,
+    /// this loss had neither a trace nor a number. Fill the application queue, offer one more
+    /// complete keypress, and assert the loss itself rather than a timeout in a consumer.
+    #[tokio::test]
+    async fn a_dtmf_digit_refused_by_the_application_queue_is_counted() {
+        let (audio, _audio_rx) = mpsc::channel(1);
+        let (encoded, _encoded_rx) = mpsc::channel(1);
+        let relay = AtomicBool::new(false);
+        let discards = Arc::new(DiscardMeters::default());
+        let delivery = Delivery {
+            audio: &audio,
+            encoded: &encoded,
+            relay: &relay,
+            discards: &discards,
+        };
+        let (digits_tx, _digits_rx) = mpsc::channel(32);
+        let arrivals = Arc::new(watch::Sender::new(0));
+        let digits = Keypresses {
+            to: digits_tx,
+            arrivals,
+        };
+        let mut decoding = Decoding::for_codec(Codec::Pcmu, 1).expect("codec");
+        let mut receiver = sipx_rtp::dtmf::Receiver::new();
+        let config = Config::new(any(), Codec::Pcmu);
+        let stop = Stop::default();
+
+        for sequence in 0u16..33 {
+            let event = DtmfEvent {
+                digit: Digit::Number(5),
+                end: true,
+                volume: 10,
+                duration: 160,
+            };
+            let packet = Packet::new(
+                dtmf::DEFAULT_PAYLOAD_TYPE,
+                sequence,
+                u32::from(sequence) * 160,
+                1,
+                event.encode(),
+            );
+            assert!(
+                deliver(
+                    &delivery,
+                    &mut decoding,
+                    &digits,
+                    &mut receiver,
+                    &config,
+                    &stop,
+                    &packet,
+                )
+                .await
+            );
+        }
+
+        assert_eq!(discards.snapshot().dtmf_delivery_failures, 1);
     }
 
     /// Once a stream is established, a packet from a different synchronisation source is
@@ -3843,13 +4088,16 @@ mod tests {
             .send_to(&forged.encode(), left.local_addr())
             .await
             .expect("sends");
-        // Ordering a stimulus: the forged packet has to reach the receive path *before* the
-        // genuine stream resumes, or the test proves nothing about the buffer being poisoned.
-        // A packet rejected on its SSRC moves no counter — that is what rejecting it means — so
-        // there is nothing to poll for here. Under-wait makes this test pass having proved
-        // nothing rather than fail, which is the direction to accept and the thing to suspect if
-        // it ever stops catching a regression (`X-44`).
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Order on the observable effect, not on elapsed wall time: under load a fixed sleep can
+        // let the genuine stream resume before this packet reaches the discard site.
+        let deadline = tokio::time::Instant::now() + DELIVERY_BOUND;
+        while left.discard_counts().foreign_ssrc == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the foreign packet never reached the discard site"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
         // The genuine stream still gets through.
         let more = tone(320);

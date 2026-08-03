@@ -486,17 +486,25 @@ class ClaimReachability(unittest.TestCase):
             with self.subTest(rfc=number):
                 self.assertEqual(["uac", "uas"], by_number[number]["roles"])
 
-        # RFC 8122 claims nothing for the subtler reason: `sipx-call` *does* render
-        # `a=fingerprint`, so a path-based check could be satisfied by citing it — but the branch
-        # is guarded by a capability nothing outside `sipx-sdp`'s unit tests ever sets. This is the
-        # dead-branch limit of the check, recorded in the design as what would widen it.
+        # RFC 5763, 5764 and 8122 regain both roles only while a call selects DTLS-SRTP and hands
+        # the negotiated fingerprint to the handshake on its already-bound media port. Keep both
+        # calls in the assertion: a registry-only promotion must not pass if either the SDP
+        # selector or the live-media handoff disappears.
         self.assertIn(
-            "fingerprint",
+            "capabilities.with_dtls_srtp(",
             call_source,
-            "the dead `a=fingerprint` branch is gone; if DTLS-SRTP was wired rather than deleted,"
-            " RFC 8122 can claim roles again",
+            "sipx-call no longer selects DTLS-SRTP, so RFC 5763, 5764 and 8122 cannot claim a"
+            " reachable role",
         )
-        self.assertNotIn("with_dtls_srtp", call_source)
+        self.assertIn(
+            ".key_with_dtls(",
+            call_source,
+            "the call no longer carries negotiated DTLS keys into its media port, so the"
+            " DTLS-SRTP role claims are no longer supportable",
+        )
+        for number in (5763, 5764, 8122):
+            with self.subTest(rfc=number):
+                self.assertEqual(["uac", "uas"], by_number[number]["roles"])
 
     def test_only_a_crate_path_proves_reachability(self):
         """The repository-root `tests/` tree is not a way through the check.
@@ -552,10 +560,10 @@ class ClaimReachability(unittest.TestCase):
         nothing is the silent default. Security has the same two halves, and both are checked here,
         because the layer string is a proxy in exactly the way it is for media:
 
-        - **credentials are selected**: `Config::with_credentials` is the opt-in, and the only
-          caller above the call layer is `crates/sipx-cli/src/register.rs`;
-        - **and omitting them is silent**: that call is inside an `if let Some(password)`, so
-          `sipx register` with no password still registers, and nothing fails.
+        - **credentials are selected**: registration and outbound calls each pass credentials
+          only when their caller supplied them;
+        - **and omitting them is silent**: both calls are conditional, so passwordless register
+          and dial commands still proceed without an authentication attempt.
 
         The transport half is the same shape — a `Target` carries its `TransportKind`, and the
         secure one is reached only because a caller asked for it: `crates/sipx-call/tests/wss.rs`
@@ -566,17 +574,22 @@ class ClaimReachability(unittest.TestCase):
         self.assertIn(".with_credentials(", register)
         self.assertIn("if let Some(password)", register)
 
+        dial = (ROOT / "crates" / "sipx-cli" / "src" / "dial.rs").read_text()
+        self.assertIn("options.with_credentials(credentials)", dial)
+        self.assertIn("if let Some(credentials)", dial)
+
         cli_sources = (ROOT / "crates" / "sipx-cli" / "src").rglob("*.rs")
-        callers = [
+        callers = sorted(
             path.name
             for path in cli_sources
             if ".with_credentials(" in path.read_text()
-        ]
+        )
         self.assertEqual(
-            ["register.rs"],
+            ["dial.rs", "register.rs"],
             callers,
             "the set of credential selectors above the call layer changed; RFC 2617, 7616 and 8760"
-            " cite register.rs as the caller that makes their `uac` claim reachable",
+            " rely on both registration and outbound-call selectors for their documented UAC"
+            " reachability",
         )
 
         wss = (ROOT / "crates" / "sipx-call" / "tests" / "wss.rs").read_text()
@@ -694,16 +707,26 @@ class ClaimReachability(unittest.TestCase):
             with self.subTest(rfc=entry["number"]):
                 self.assertEqual([], report.misdeclared_layer(entry))
 
-    def test_the_still_unreachable_media_rows_claim_no_role(self):
-        """The DTLS-SRTP rows still have no call-layer selector.
+    def test_the_newly_reachable_dtls_srtp_rows_claim_both_roles(self):
+        """M-28's three promoted rows stay tied to call-layer code and tests.
 
-        Asserted by number rather than left to the registry-wide check, so that restoring a role
-        to one of them names the story that removed it.
+        Asserted by number rather than left to the registry-wide check, so removing either role or
+        its evidence names the story that made it reachable. The selector assertion is deliberately
+        repeated here: deleting the caller must fail this mutation guard even if the rows and their
+        citations are left untouched.
         """
+        call_source = (ROOT / "crates" / "sipx-call" / "src" / "call.rs").read_text()
+        self.assertIn("capabilities.with_dtls_srtp(", call_source)
+
         by_number = {e["number"]: e for e in registry_entries()}
         for number in (5763, 5764, 8122):
             with self.subTest(rfc=number):
-                self.assertEqual([], by_number[number].get("roles", []))
+                self.assertEqual(["uac", "uas"], by_number[number]["roles"])
+                self.assertIn("crates/sipx-call/src/call.rs", by_number[number]["evidence"])
+                self.assertIn(
+                    "crates/sipx-call/tests/secure_media.rs",
+                    by_number[number]["evidence"],
+                )
 
 
 class ProseIsNotEvidence(unittest.TestCase):

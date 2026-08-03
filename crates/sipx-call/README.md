@@ -15,11 +15,11 @@ That is the contract; it is linked rather than copied here so the two cannot dri
 
 ## Deliberately absent
 
-A `Call` does not yet expose multi-party bridging or conferencing, and an outbound INVITE cannot
-yet answer a digest challenge. Those are call-layer capabilities rather than workarounds for an
-application to build around private media or authentication state.
+A `Call` does not yet expose multi-party bridging or conferencing. That is a call-layer capability
+rather than a workaround for an application to build around private media state.
 
 ## See also
 
 - [`docs/specs/call-dispatch.md`](../../docs/specs/call-dispatch.md) — routing one endpoint to many calls.
+- [`docs/specs/sip-auth.md`](../../docs/specs/sip-auth.md) — bounded 401/407 retries for outbound calls.
 - [`sipx-media`](../sipx-media/README.md) — the media sessions owned by calls.

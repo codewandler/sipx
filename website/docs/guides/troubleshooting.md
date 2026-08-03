@@ -86,8 +86,8 @@ SIPX_PASSWORD='secret' sipx -v register sip:alice@example.com --target 192.0.2.1
 
 A 401, 403, or 407 result maps to the CLI's unauthorized exit code. Confirm the address of record,
 authentication username expected by the service, password, target, and whether the service expects
-a protected transport. The current CLI can authenticate `register`, but `dial --password` is
-refused because call authentication is not implemented; it will not silently discard the secret.
+a protected transport. Both `register` and `dial` answer Digest challenges; prefer
+`SIPX_PASSWORD` to `--password`, since process arguments may be visible to other local users.
 
 Select `--transport tls` or `--transport wss`, add a private authority with `--tls-ca`, and set
 `--tls-server-name` only when the service identity differs from the URI host. A name, issuer, or

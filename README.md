@@ -11,7 +11,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 <a href="https://codewandler.github.io/sipx/"><img alt="docs: codewandler.github.io/sipx" src="https://img.shields.io/static/v1?label=docs&message=codewandler.github.io%2Fsipx&color=blue"></a>
 <a href="CHANGELOG.md"><img alt="release: 1.0.0-alpha.5" src="https://img.shields.io/static/v1?label=release&message=1.0.0-alpha.5&color=blue"></a>
 <a href="#try-the-cli"><img alt="MSRV: rustc 1.88" src="https://img.shields.io/static/v1?label=MSRV&message=rustc%201.88&color=blue"></a>
-<a href="docs/compliance.md"><img alt="RFCs: 32 implemented of 71" src="https://img.shields.io/static/v1?label=RFCs&message=32%20implemented%20of%2071&color=blue"></a>
+<a href="docs/compliance.md"><img alt="RFCs: 36 implemented of 71" src="https://img.shields.io/static/v1?label=RFCs&message=36%20implemented%20of%2071&color=blue"></a>
 <a href="docs/compliance.md"><img alt="codecs: G.711 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20Opus&color=blue"></a>
 <a href="#license"><img alt="license: MIT OR Apache-2.0" src="https://img.shields.io/static/v1?label=license&message=MIT%20OR%20Apache-2.0&color=blue"></a>
 <!-- END generated:badges -->
@@ -110,7 +110,7 @@ workspace, parsers are fuzzed, and unknown headers survive a parse/serialize rou
 | `sipx-rtp` | RTP and RTCP packet handling, sequencing, jitter buffering, quality statistics and SRTP (RFC 3550) |
 | `sipx-sdp` | SDP session descriptions (RFC 8866) and offer/answer negotiation (RFC 3264) |
 | `sipx-sip` | Sans-IO SIP core: messages, parser and transactions (RFC 3261) |
-| `sipx-transport` | Async SIP transports: UDP, TCP, TLS, WebSocket, with RFC 3263 resolution |
+| `sipx-transport` | Async SIP transports: UDP, TCP, TLS, WebSocket, QUIC, and RFC 3263 resolution |
 | `sipx-ua` | SIP user agent: registration, digest authentication, subscriptions and presence |
 <!-- END generated:crate-map -->
 

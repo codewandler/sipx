@@ -9,12 +9,74 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Authenticated caller identity can be signed and verified without hidden I/O (`S-20`).**
+  `sipx-sip` provides typed RFC 8224 `Identity` fields, canonical identities, deterministic
+  baseline `PASSporT` construction and ES256 signing/verification. `sipx-ua` adds caller-supplied
+  authority, signing credentials, credential retrieval and a bounded cache; verification maps
+  freshness, credential and signature failures to their specified SIP statuses.
+
+- **Experimental SIP over QUIC is a first-class secure transport (`T-12`).** The default transport
+  feature set can resolve explicit `SIPS+D2Q` targets, authenticate them with the existing TLS
+  certificate policy and pool connections by peer and verified name. Each request uses one bounded
+  bidirectional stream, responses return on that stream, `sip/2` is mandatory, and connection,
+  certificate and protocol-negotiation failures remain typed.
+
+- **Calls can select DTLS-SRTP in both initial-call roles (`M-28`).** `Keying::DtlsSrtp` is an
+  explicit opt-in while the existing SDES policy remains the default. The handshake reuses the
+  bound media port: the answerer starts after its final response leaves, and the offerer after
+  sending ACK. Authenticated exported keys feed the live SRTP session; unavailable support, early
+  media, ICE combinations and handshake failures are refused without a cleartext or SDES downgrade.
+  That call-layer consumer graduates `sipx_media::dtls` from Experimental to Supported; the optional
+  `dtls::openssl` implementation remains Experimental until a shipped application enables it.
+
+- **Calls carry typed diversion history and teardown causes (`S-21`).** `Reason` and
+  `History-Info` parse and serialize as typed RFC 3326/7044 values, including hierarchical indices,
+  target-change references, URI-embedded reasons and privacy anonymization. Initial calls request
+  history, non-100 responses return it, established calls expose it, UA retargeting extends it, and
+  locally generated CANCEL and BYE requests carry default or caller-selected causes.
+
+- **Outbound calls answer digest authentication challenges (`S-28`).** Digest construction now
+  lives in the sans-I/O SIP core and is shared by registration and calling. `DialOptions` accepts
+  redacted credentials, retries 401/407 challenges and one stale nonce within a bounded attempt,
+  and `sipx dial --password` or `SIPX_PASSWORD` reaches the same path; unanswered challenges exit as
+  unauthorized rather than timing out.
+
+- **Every reachable media discard has an inspectable counter (`M-32`).**
+  `MediaSession::discard_counts` exposes a media-owned atomic snapshot covering codec, SRTP/SRTCP,
+  SSRC, DTMF, payload, playback and ICE losses from gathering through the running session. A source
+  guard requires each new discard to increment a counter or carry an adjacent reason, and the
+  snapshot documents its cross-worker consistency boundary.
+
 - **Early dialogs carry media before answer (`C-2`).** A reliable provisional response can start a
   negotiated media session, callers receive and expose that session while still ringing, and the
   application receives `call.early_media.started` so it can stop a locally generated tone. The
   exact session becomes the confirmed call without rebinding; early UPDATE reconfigures it in
   place, and failed or losing early dialogs tear it down. This implements RFC 3960's gateway model;
   fork selection and the application-server model remain explicitly out of scope.
+
+### Changed
+
+- **A completed silent call remains successful for both `sipx dial` and `sipx answer` (`S-33`).**
+  Silence is a legitimate completed call, so exit status stays zero; machine-readable output keeps
+  `heard_audio: false` and the CLI reference now states that scripts needing media evidence must
+  inspect the result rather than infer it from `$?`.
+
+### Fixed
+
+- **The recording-cap and dead-anchor gate checks no longer fail spuriously under load (`X-60`).**
+  The recording fixture binds its caller before starting the answerer's wait clock and reports the
+  actual early-exit path with status and stderr. The anchor self-check now exercises the installed
+  handler and real configuration directly, avoiding a second full site build and worker lifecycle.
+
+- **A registered UA refuses an initial INVITE for another instance's GRUU (`X-59`).** Once the UA
+  has learned its own instance-specific URIs, a foreign `gr` value receives `404 Not Found` before
+  the application can hand it to the call layer; own-GRUU and address-of-record calls remain
+  available to the application.
+
+- **Numeric CLI flags can no longer fall back to defaults after invalid input (`S-32`).** All
+  documented seconds flags are validated centrally as whole numbers in `0..=u32::MAX`; non-numeric,
+  negative and overflowing values are usage errors that name the offending flag, while each flag's
+  documented zero behavior is retained.
 
 ## [1.0.0-alpha.5] — 2026-08-03
 

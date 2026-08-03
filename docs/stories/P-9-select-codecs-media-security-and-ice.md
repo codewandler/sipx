@@ -7,7 +7,7 @@ priority: 7
 design: docs/designs/phone.md
 epic: phone
 areas: [sipx-cli, sipx-call, sipx-media]
-note: blocked by M-27 and M-28; the CLI must consume one call-level media policy, not rebuild negotiation
+note: M-27 and M-28 delivered the call-level policy; the CLI must consume it, not rebuild negotiation
 ---
 
 # Select codecs, media security and ICE from the diagnostic phone
@@ -29,4 +29,4 @@ Expose the call framework's codec, keying and ICE choices through one coherent C
 
 ## Progress
 
-- Not started; blocked by call-level selection.
+- Not started. M-27 and M-28 have delivered the call-level selection this story consumes.

@@ -2,7 +2,7 @@
 id: M-32
 title: Give the media path's discards the same counters the transport got
 pillar: Media
-status: ready
+status: done
 priority: 4
 design: docs/designs/media.md
 epic: media
@@ -17,7 +17,7 @@ Make a discard in the media path as visible from outside the process as a discar
 so that an operator diagnosing one-way or choppy audio can read what was dropped instead of guessing.
 
 ## Acceptance
-- [ ] **The layering decision is made and written down.** `sipx-transport` cannot depend on
+- [x] **The layering decision is made and written down.** `sipx-transport` cannot depend on
       `sipx-media`, so media counters cannot simply join `Handle::counters`. There are two shapes and
       the story is choosing between them: a small crate underneath both carrying the counter types, or
       a parallel snapshot of `ShedCounts`' shape exposed from `sipx-media` and joined by whoever holds
@@ -25,7 +25,7 @@ so that an operator diagnosing one-way or choppy audio can read what was dropped
       carries a counter described in its own comment as the "same shape as `sipx_transport::ShedCounts`"
       — so *that precedent is the thing to either extend deliberately or replace deliberately.* Say
       which and why in the spec, not only in the story.
-- [ ] **Every discard below is counted, and a test enumerates them** — the same standard `X-18` met for
+- [x] **Every discard below is counted, and a test enumerates them** — the same standard `X-18` met for
       the transport, where the test walks the discard list so a new drop site cannot be added without
       appearing. Census taken by `X-18`, all in `crates/sipx-media/src/session.rs` unless noted:
       - Opus decode/encode: `:191`, `:235`
@@ -37,20 +37,46 @@ so that an operator diagnosing one-way or choppy audio can read what was dropped
       - unknown payload type: `:2616`
       - `Clip::finish`: `:781`
       - five in `crates/sipx-media/src/ice/driver.rs`, two in `crates/sipx-media/src/ice/gather.rs`
-- [ ] **No counter that cannot rise.** `X-18` deleted `DiscardCounts::adopted_late` rather than ship one
+- [x] **No counter that cannot rise.** `X-18` deleted `DiscardCounts::adopted_late` rather than ship one
       structurally stuck at zero, because a counter reading zero tells an operator "this never happens",
       which is worse than silence. Where a drop site genuinely cannot reach a counter, it gets the
       written reason `X-18` established in `sip-transport.md` §12.1 instead — not a counter.
-- [ ] **Where a counter can lie, it says so.** `sip-transport.md` §12.2 is the precedent: a counter that
+- [x] **Where a counter can lie, it says so.** `sip-transport.md` §12.2 is the precedent: a counter that
       can be missed or double-counted under load states that where it is defined. The media path has
       real instances — a discard inside a codec callback is not on the same thread as the driver loop.
-- [ ] **No metrics library, and no clock in the core.** `X-18` added counters with `std` atomics and no
+- [x] **No metrics library, and no clock in the core.** `X-18` added counters with `std` atomics and no
       new dependency; hold that line. `sipx-sip` and `sipx-sdp` gain nothing.
-- [ ] **The counters do not lie about load.** Do not assert a count after a sleep. `X-28`, `X-29` and
+- [x] **The counters do not lie about load.** Do not assert a count after a sleep. `X-28`, `X-29` and
       `X-40` are all this failure, and alpha predicate 3 is load-bearing for the other six: wait *for* a
       count with a deadline.
-- [ ] Failing-first test: name the assertion that fails while a media discard is invisible. The DTMF
+- [x] Failing-first test: name the assertion that fails while a media discard is invisible. The DTMF
       digit at `:2578` is the sharpest witness, because it is currently unobservable by any means.
+
+## Progress
+
+- **The parallel snapshot is deliberate.** `docs/specs/media-runtime.md` §4 records why
+  `MediaDiscardCounts` remains owned by `sipx-media`: endpoint and session lifetimes do not match,
+  and moving only value types into a lower crate would erase ownership without joining either the
+  atomics or their increment sites. The caller that owns both snapshots may compose them.
+- **Gathering and the running session share one set of meters.** `MediaPort` creates it before ICE
+  gathering and moves it into `MediaSession`; codec, RTP, RTCP, playback and ICE workers clone that
+  same set. `MediaSession::discard_counts` is synchronous and cannot wait behind the worker whose
+  overload it describes.
+- **Fourteen reachable losses have counters.** The three protect/base branches that cannot fail on
+  bytes and bases constructed by this crate carry an adjacent `// discard:` proof instead of fields
+  structurally stuck at zero. The snapshot documents the cross-task race explicitly: each field is
+  exact and monotonic, while a multi-field read is not one instant.
+- **The guard covers the whole crate recursively.** `no_discard_in_the_media_path_is_silent` scans
+  every production Rust source under `sipx-media/src`, and its mutation test proves a new bare result
+  or logged drop fails unless it has a nearby increment or written reason.
+- **Failing first:** `a_dtmf_digit_refused_by_the_application_queue_is_counted` initially failed to
+  compile because neither `DiscardMeters` nor a media discard snapshot existed. It now fills the
+  32-digit application queue and observes the 33rd refusal exactly. The unknown-payload and
+  foreign-SSRC tests also assert their named counters; the latter replaces its fixed sleep with a
+  bounded wait for the discard itself.
+- Focused verification: `cargo test -p sipx-media --all-features` (146 unit tests plus all integration
+  suites), all-target/all-feature clippy with warnings denied, the no-default-feature build, and the
+  discard enumeration in both feature shapes are green.
 
 ## Notes
 - **Filed from `X-18`'s refusal, and the refusal was right.** That story counted every transport discard

@@ -198,6 +198,23 @@ impl ClientTls {
     pub fn connector(&self) -> TlsConnector {
         TlsConnector::from(Arc::clone(&self.config))
     }
+
+    /// Reuse this exact trust and identity policy for a QUIC connection.
+    #[cfg(feature = "quic")]
+    pub(crate) fn quic_config(&self) -> Result<quinn::ClientConfig, TlsError> {
+        let config = self.quic_rustls_config();
+        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(config)
+            .map_err(|error| TlsError::Config(error.to_string()))?;
+        Ok(quinn::ClientConfig::new(Arc::new(crypto)))
+    }
+
+    #[cfg(feature = "quic")]
+    fn quic_rustls_config(&self) -> ClientConfig {
+        let mut config = (*self.config).clone();
+        config.alpn_protocols = vec![b"sip/2".to_vec()];
+        config.enable_early_data = false;
+        config
+    }
 }
 
 /// A certificate and key sipx presents.
@@ -260,6 +277,23 @@ impl ServerTls {
     #[must_use]
     pub fn acceptor(&self) -> TlsAcceptor {
         TlsAcceptor::from(Arc::clone(&self.config))
+    }
+
+    /// Reuse this exact identity policy for the QUIC handshake.
+    #[cfg(feature = "quic")]
+    pub(crate) fn quic_config(&self) -> Result<quinn::ServerConfig, TlsError> {
+        let config = self.quic_rustls_config();
+        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(config)
+            .map_err(|error| TlsError::Config(error.to_string()))?;
+        Ok(quinn::ServerConfig::with_crypto(Arc::new(crypto)))
+    }
+
+    #[cfg(feature = "quic")]
+    fn quic_rustls_config(&self) -> ServerConfig {
+        let mut config = (*self.config).clone();
+        config.alpn_protocols = vec![b"sip/2".to_vec()];
+        config.max_early_data_size = 0;
+        config
     }
 }
 
@@ -337,5 +371,127 @@ mod tests {
         let client = ClientTls::new(&TrustAnchors::system()).expect("builds");
         let printed = format!("{client:?}");
         assert_eq!(printed, "ClientTls { .. }");
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn quic_requires_sip2_and_refuses_early_data_in_both_directions() {
+        let client = ClientTls::new(&TrustAnchors::system()).expect("client");
+        let client = client.quic_rustls_config();
+        assert_eq!(client.alpn_protocols, [b"sip/2".to_vec()]);
+        assert!(!client.enable_early_data);
+
+        let ca = sipx_testkit::certs::Ca::new();
+        let (certificate, key) = ca.issue_for("localhost");
+        let identity =
+            Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("identity");
+        let server = ServerTls::new(identity)
+            .expect("server")
+            .quic_rustls_config();
+        assert_eq!(server.alpn_protocols, [b"sip/2".to_vec()]);
+        assert_eq!(server.max_early_data_size, 0);
+    }
+
+    /// Q13: even a client holding early-data-capable resumption state cannot deliver a request
+    /// before sipx's server handshake completes; its retry is exposed only as a 1-RTT stream.
+    #[cfg(feature = "quic")]
+    #[tokio::test]
+    async fn a_resumed_client_cannot_deliver_early_data_to_a_sipx_server() {
+        let ca = sipx_testkit::certs::Ca::new();
+        let (certificate, key) = ca.issue_for("localhost");
+        let identity =
+            Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("identity");
+        let server_policy = ServerTls::new(identity).expect("server policy");
+
+        // The first handshake deliberately issues an early-data-capable ticket. The second
+        // configuration comes through sipx's production conversion and shares the underlying
+        // rustls ticket machinery through the cloned policy.
+        let mut permissive = server_policy.quic_rustls_config();
+        permissive.max_early_data_size = u32::MAX;
+        let permissive = quinn::crypto::rustls::QuicServerConfig::try_from(permissive)
+            .map(|crypto| quinn::ServerConfig::with_crypto(Arc::new(crypto)))
+            .expect("permissive ticket server");
+        let rejecting = server_policy.quic_config().expect("sipx QUIC server");
+        let server =
+            quinn::Endpoint::server(permissive, "127.0.0.1:0".parse().expect("server address"))
+                .expect("server endpoint");
+        let server_addr = server.local_addr().expect("server address");
+
+        let mut anchors = TrustAnchors::only();
+        anchors
+            .add_pem(ca.pem().as_bytes())
+            .expect("test authority");
+        let mut client_tls = ClientTls::new(&anchors)
+            .expect("client policy")
+            .quic_rustls_config();
+        client_tls.enable_early_data = true;
+        let client_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(client_tls)
+            .expect("early-data client");
+        let mut client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
+        client_config.transport_config(crate::quic::transport_config());
+        let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().expect("client address"))
+            .expect("client endpoint");
+        client.set_default_client_config(client_config);
+
+        let (ready, configured) = tokio::sync::oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let first = server
+                .accept()
+                .await
+                .expect("first connection")
+                .await
+                .expect("first handshake");
+            let (mut marker, _unused) = first.open_bi().await.expect("1-RTT marker stream");
+            marker.write_all(b"ready").await.expect("1-RTT marker");
+            marker.finish().expect("1-RTT marker finishes");
+
+            server.set_server_config(Some(rejecting));
+            ready.send(()).expect("client waits for configuration");
+            let second = server
+                .accept()
+                .await
+                .expect("resumed connection")
+                .await
+                .expect("resumption handshake");
+            let (_reply, mut request) = second.accept_bi().await.expect("request stream");
+            let was_early = request.is_0rtt();
+            let bytes = request.read_to_end(1024).await.expect("request bytes");
+            (was_early, bytes)
+        });
+
+        let first = client
+            .connect(server_addr, "localhost")
+            .expect("first connect starts")
+            .await
+            .expect("first connect");
+        let (_unused, mut marker) = first.accept_bi().await.expect("server marker");
+        assert_eq!(
+            marker.read_to_end(16).await.expect("marker bytes"),
+            b"ready"
+        );
+        drop(first);
+        configured.await.expect("rejecting server installed");
+
+        let (resumed, accepted) = client
+            .connect(server_addr, "localhost")
+            .expect("resumption starts")
+            .into_0rtt()
+            .expect("client has early-data keys");
+        let (mut request, _reply) = resumed.open_bi().await.expect("early request stream");
+        request
+            .write_all(b"SIP request attempted as early data")
+            .await
+            .expect("early write is queued");
+        request.finish().expect("request finishes");
+        assert!(!accepted.await, "sipx accepted replayable early data");
+        let (mut request, _reply) = resumed.open_bi().await.expect("1-RTT request stream");
+        request
+            .write_all(b"SIP request attempted as early data")
+            .await
+            .expect("1-RTT retry writes");
+        request.finish().expect("1-RTT retry finishes");
+        let (was_early, bytes) = server_task.await.expect("server task");
+        assert!(!was_early, "the server exposed a 0-RTT request stream");
+        assert_eq!(bytes, b"SIP request attempted as early data");
     }
 }

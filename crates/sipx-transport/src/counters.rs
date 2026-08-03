@@ -25,7 +25,7 @@ use sipx_sip::transaction::Timer;
 use crate::target::TransportKind;
 
 /// How many transports are counted apart. One slot per [`TransportKind`] variant.
-const TRANSPORTS: usize = 5;
+const TRANSPORTS: usize = 6;
 
 /// Which slot a transport's counters live in.
 ///
@@ -38,6 +38,7 @@ const fn slot(transport: TransportKind) -> usize {
         TransportKind::Tls => 2,
         TransportKind::Ws => 3,
         TransportKind::Wss => 4,
+        TransportKind::Quic => 5,
     }
 }
 
@@ -621,6 +622,7 @@ mod tests {
             TransportKind::Tls,
             TransportKind::Ws,
             TransportKind::Wss,
+            TransportKind::Quic,
         ];
         let mut slots: Vec<usize> = kinds.iter().copied().map(slot).collect();
         slots.sort_unstable();

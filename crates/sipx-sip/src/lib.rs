@@ -38,12 +38,14 @@
 //! The public error enums are `#[non_exhaustive]`. New typed parse failures may be added without
 //! breaking downstream callers, so a `match` over one carries a `_` arm.
 
+pub mod auth;
 pub mod build;
 pub mod error;
 mod escape;
 pub mod event;
 pub mod gruu;
 pub mod headers;
+pub mod identity;
 pub mod message;
 pub mod name;
 pub mod params;
@@ -58,7 +60,10 @@ pub mod validate;
 
 pub use build::{RequestBuilder, ResponseBuilder};
 pub use error::{BuildError, HeaderError, UriError};
-pub use headers::{Address, CSeq, CallId, Via};
+pub use headers::{
+    Address, CSeq, CallId, HistoryEntry, HistoryIndex, HistoryInfo, Reason, ReasonValue,
+    TargetChange, TargetChangeKind, Via,
+};
 pub use message::{
     Header, Headers, Message, Method, Request, Response, StatusCode, TypedHeader, Version,
 };

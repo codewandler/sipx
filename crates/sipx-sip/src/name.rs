@@ -101,6 +101,7 @@ header_names! {
     IdentityInfo        => "Identity-Info" | b'n';        // RFC 4474
     FlowTimer           => "Flow-Timer";                  // RFC 5626
     InReplyTo           => "In-Reply-To";
+    HistoryInfo         => "History-Info";                // RFC 7044
     MaxForwards         => "Max-Forwards";
     MimeVersion         => "MIME-Version";
     MinExpires          => "Min-Expires";
@@ -108,6 +109,7 @@ header_names! {
     Organization        => "Organization";
     Path                => "Path";                        // RFC 3327
     Priority            => "Priority";
+    Privacy             => "Privacy";                     // RFC 3323
     ProxyAuthenticate   => "Proxy-Authenticate";
     ProxyAuthorization  => "Proxy-Authorization";
     ProxyRequire        => "Proxy-Require";
@@ -164,6 +166,7 @@ impl HeaderName {
                 | Self::ErrorInfo
                 // RFC 6809 §4: `Feature-Caps = "Feature-Caps" HCOLON fc-value *(COMMA fc-value)`.
                 | Self::FeatureCaps
+                | Self::HistoryInfo
                 | Self::InReplyTo
                 | Self::Path
                 | Self::ProxyRequire

@@ -4,11 +4,10 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use sipx_audio::{Wav, read_wav, write_wav};
-use sipx_call::Call;
-use sipx_sip::{Host, Uri};
+use sipx_call::{Call, Credentials};
+use sipx_sip::{Address, Host, Uri};
 use sipx_transport::{Config as TransportConfig, TransportKind, bind};
 
-use crate::Args;
 use crate::output::{Exit, Format, Report, fail};
 
 pub(crate) const HELP: &str = "\
@@ -28,6 +27,7 @@ OPTIONS:
     --timeout <S>     Give up if the call is not answered in this many seconds (default 20).
                       0 waits as long as the transaction layer does, which is 32 seconds.
     --from <URI>      Our own address (default sip:sipx@<local>)
+    --password <P>    Password. Prefer SIPX_PASSWORD, since argv is world-readable.
     --local <ADDR>    Local address to bind (default 0.0.0.0:0)
     --transport <T>   Signalling: udp, tcp, tls, ws or wss (default udp)
     --tcp             Legacy alias for --transport tcp
@@ -68,20 +68,12 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
-    // `--password` is a global valued flag, so `dial` *parses* it. It used to then throw it away:
-    // a call challenged with 407 failed while the person who supplied credentials was told nothing
-    // (`P-7`). Answering the challenge is not a CLI change — `sipx-call` has no credential type and
-    // no 401/407 path at all — so the flag is refused rather than silently ignored. `S-28` is the
-    // feature; until it exists, saying so is the only honest option.
-    if args.value("password").is_some() {
-        return fail(
-            format,
-            Exit::Usage,
-            "--password is not supported by `dial`: a call cannot answer an authentication \
-             challenge yet, so a password here would be silently ignored. `register` does \
-             authenticate; see S-28 for the call-layer work",
-        );
-    }
+    // A password on the command line is visible to every process on the machine, so the
+    // environment is the documented route and the flag is the convenience.
+    let password = args
+        .value("password")
+        .map(str::to_owned)
+        .or_else(|| std::env::var("SIPX_PASSWORD").ok());
 
     let Some((target_addr, server_name)) = target_of(&to, transport.kind()) else {
         return fail(
@@ -110,6 +102,26 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     };
     // Media has to advertise something reachable, and an unspecified address is not.
     let media_address: IpAddr = crate::advertise::reachable_ip(local, target_addr.ip());
+    let from = args
+        .value("from")
+        .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
+    let credentials = match password {
+        Some(password) => {
+            let username = Address::parse(from.as_bytes(), "From")
+                .ok()
+                .and_then(|address| address.uri.decoded_user())
+                .map(|user| String::from_utf8_lossy(&user).into_owned());
+            let Some(username) = username else {
+                return fail(
+                    format,
+                    Exit::Usage,
+                    "--password requires --from to contain a SIP username",
+                );
+            };
+            Some(Credentials::new(username, password))
+        }
+        None => None,
+    };
 
     let mut config = TransportConfig::new(local);
     config.sent_by = media_address.to_string();
@@ -126,21 +138,17 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // every `return fail(…)` below now takes the counters file with it.
     let export = crate::counters::Export::arm(&args, &handle);
 
-    let from = args
-        .value("from")
-        .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
-
     // The bound is handed to the library rather than wrapped around it. Dropping the call
     // future partway through would leave the far end believing it is in a call, and only code
     // inside the exchange can send the CANCEL that stops it ringing.
-    let attempt = match numeric(&args, "timeout", DEFAULT_TIMEOUT_SECS) {
-        Ok(seconds) => Duration::from_secs(seconds),
-        Err(message) => return fail(format, Exit::Usage, &message),
-    };
+    let attempt = Duration::from_secs(args.number("timeout").unwrap_or(DEFAULT_TIMEOUT_SECS));
 
     let mut options = sipx_call::DialOptions::new(from, media_address);
     if !attempt.is_zero() {
         options = options.with_timeout(attempt);
+    }
+    if let Some(credentials) = credentials {
+        options = options.with_credentials(credentials);
     }
 
     // What `-v` is *for*, and what it used to be worth nothing on: a call's own progress. The
@@ -158,10 +166,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     };
     tracing::info!(peer = uri, setup = ?started.elapsed(), "answered");
 
-    let duration = match numeric(&args, "duration", 30) {
-        Ok(seconds) => Duration::from_secs(seconds),
-        Err(message) => return fail(format, Exit::Usage, &message),
-    };
+    let duration = Duration::from_secs(args.number("duration").unwrap_or(30));
     let recorded = exchange(&mut call, clip.as_ref(), args.value("dtmf"), duration).await;
 
     let mut report = transport.report(
@@ -243,20 +248,6 @@ async fn exchange(
 /// call goes unanswered it is always this bound that fires. Setting them equal makes which one
 /// wins a matter of scheduling, and the error a script reads changes between runs.
 const DEFAULT_TIMEOUT_SECS: u64 = 20;
-
-/// A numeric option, or a usage error naming what was wrong with it.
-///
-/// `Args::number` returns `None` for both "absent" and "not a number", and silently falling
-/// back to the default for the second means `--timeout=3s` restores exactly the behaviour the
-/// flag was added to avoid, with no diagnostic.
-fn numeric(args: &Args<'_>, name: &str, default: u64) -> std::result::Result<u64, String> {
-    match args.value(name) {
-        None => Ok(default),
-        Some(raw) => raw
-            .parse()
-            .map_err(|_| format!("--{name} must be a whole number of seconds, not {raw:?}")),
-    }
-}
 
 fn report_failure(format: Format, error: &sipx_call::Error) -> Exit {
     let exit = match error {
@@ -448,29 +439,6 @@ mod tests {
             exit.code(),
             Exit::Usage.code(),
             "dialling a sips: URI must be refused, not connected in the clear"
-        );
-    }
-
-    /// `P-7`. `--password` is a global valued flag, so `dial` parsed it and dropped it: a 407 ended
-    /// the call while the person who supplied credentials was told nothing. Refusing is honest
-    /// because answering the challenge is a `sipx-call` feature that does not exist — that crate has
-    /// no credential type and no 401/407 path (`S-28`).
-    #[tokio::test]
-    async fn the_dial_command_refuses_a_password_it_cannot_use() {
-        let exit = run(
-            &[
-                "dial".to_owned(),
-                "--password".to_owned(),
-                "secret".to_owned(),
-                "sip:bob@192.0.2.1".to_owned(),
-            ],
-            Format::Text,
-        )
-        .await;
-        assert_eq!(
-            exit.code(),
-            Exit::Usage.code(),
-            "a password dial cannot use must be refused, not accepted and dropped"
         );
     }
 

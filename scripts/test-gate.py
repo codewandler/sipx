@@ -30,12 +30,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 AGENTS = ROOT / "AGENTS.md"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 BUILD_DOCS = ROOT / "scripts" / "build-docs.sh"
+ANCHOR_GUARD = ROOT / "scripts" / "check-docs-anchor-guard.mjs"
 DOCS_LINKS = ROOT / "scripts" / "check-docs-links.py"
 FIXED_SLEEP = ROOT / "scripts" / "check-fixed-sleep.py"
 SITE_CONFIG = ROOT / "website" / "docusaurus.config.js"
-# The dead-anchor probe `build-docs.sh` writes to prove the site's anchor guard is armed. Named
-# here because three tests below are about the file rather than about the check.
-PROBE_PREFIX = "website/docs/zz-anchor-guard-probe-"
 
 _gate = None
 
@@ -479,11 +477,12 @@ class TheDocsSiteStep(unittest.TestCase):
     and the gate reported twenty-two steps green. `S-30` only found it by reading the step's
     output instead of its exit code.
 
-    This class is the reversal detector for that. It is deliberately not the only one: the real
-    end-to-end case — write a page linking to an anchor no page emits, and require the build to
-    *fail* — lives in `build-docs.sh`, because the `gate` CI job has no node and a check that
-    skips itself on the machine where it matters is the disease, not the cure. What is asserted
-    here is the decision that check obeys, and that the check is still in the step at all.
+    This class is the reversal detector for that. It is deliberately not the only one: the Node
+    probe calls the installed link handler with a synthetic page linking to an id no page emits,
+    using the real config, and requires that call to throw. It lives in `build-docs.sh`, because
+    the `gate` CI job has no node and a check that skips itself on the machine where it matters is
+    the disease, not the cure. What is asserted here is the decision that probe obeys, and that the
+    probe is still in the step at all.
     """
 
     HANDLERS = {
@@ -578,77 +577,41 @@ class TheDocsSiteStep(unittest.TestCase):
         because deleting those lines is the cheap way to make this whole story evaporate.
         """
         self.assertIn(
-            PROBE_PREFIX,
+            "check-docs-anchor-guard.mjs",
             self.script,
-            "build-docs.sh no longer builds a page with a dead anchor to check that the guard "
-            "is armed, so the step is back to trusting a config setting it never exercises",
+            "build-docs.sh no longer exercises the installed checker with a dead anchor",
         )
         self.assertIn(
             "BUILT SUCCESSFULLY",
-            self.script,
-            "build-docs.sh does not fail when the dead-anchor probe builds cleanly",
+            ANCHOR_GUARD.read_text(encoding="utf-8"),
+            "the dead-anchor probe does not fail when the checker accepts its broken anchor",
         )
 
-    # -- and the probe cannot cost the next run anything ----------------------------------------
-    #
-    # The guard needs a page with a dead anchor, and Docusaurus only builds pages under
-    # `website/docs`, so the probe lands in a tracked directory. A `kill -9` runs no `trap`, which
-    # leaves two ways for a check about gate integrity to damage gate integrity: the leftover gets
-    # committed, or it reddens every later run with no defect in the tree. Both are closed, and
-    # both are asserted, because the closing is invisible from the diff that needs it.
+    def test_the_anchor_probe_does_not_build_the_site_a_second_time(self):
+        """The guard exercises the link checker, without a second loaded compiler lifecycle.
 
-    def test_a_leftover_probe_cannot_be_committed(self):
-        """Asserted through `git check-ignore`, not by reading the pattern.
-
-        The pattern is not the property. What matters is that `git add -A` — which is exactly what
-        the integrating agent runs after a gate run — cannot stage a broken page into the published
-        site.
+        The second full build occasionally ended in Node's unsettled-top-level-await exit path
+        under workspace load. That says nothing about the anchor handler. There is one real site
+        build; the synthetic probe invokes the same checker with the real config directly.
         """
-        probe = ROOT / f"{PROBE_PREFIX}31337.md"
-        done = subprocess.run(
-            ["git", "check-ignore", "-v", str(probe.relative_to(ROOT))],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-        )
         self.assertEqual(
-            0,
-            done.returncode,
-            f"nothing ignores {probe.relative_to(ROOT)}, so a probe left behind by a killed gate "
-            f"run is committable, and `git add -A` would put a page with a dead anchor into the "
-            f"site. git said: {done.stdout or done.stderr!r}",
-        )
-
-    def test_the_stale_probe_sweep_runs_before_the_site_build(self):
-        """Order is the whole fix, and it is invisible unless something checks it.
-
-        A leftover probe makes the *real* site build fail — correctly, it is a dead anchor in the
-        tree. Under `set -e` that aborts the script, so a cleanup placed next to the probe never
-        runs and the gate stays red on every later run until a human deletes a gitignored file
-        they cannot see in `git status`. Sweeping first is what makes a killed run cost nothing.
-        """
-        sweep = self.script.index("rm -f $PROBE_GLOB")
-        build = self.script.index("npm run build 2>&1 | tee")
-        self.assertLess(
-            sweep,
-            build,
-            "the stale-probe sweep is after the site build, so a probe left by a killed run "
-            "reddens the gate forever: the build aborts on it before the cleanup is reached",
-        )
-
-    def test_concurrent_runs_in_one_checkout_do_not_share_a_probe_path(self):
-        """One run's cleanup must not delete another run's live probe and fake a "not armed" red."""
-        self.assertIn(
-            'PROBE="website/docs/zz-anchor-guard-probe-$$.md"',
-            self.script,
-            "the probe path is fixed, so two runs in one checkout race on it",
+            1,
+            self.script.count("npm run build"),
+            "the docs step launches more than one full site build; the dead-anchor probe must "
+            "exercise the checker directly so compiler/process load cannot decide its result",
         )
         self.assertIn(
-            'rm -f "$PROBE"',
+            "check-docs-anchor-guard.mjs",
             self.script,
-            "the end-of-guard removal uses the glob rather than this run's own path, which would "
-            "delete a concurrent run's live probe",
+            "the docs step no longer runs the deterministic dead-anchor probe",
         )
+
+    def test_the_direct_anchor_probe_uses_the_real_handler_and_config(self):
+        """A source grep is not a probe: exercise the installed checker at the configured severity."""
+        source = ANCHOR_GUARD.read_text(encoding="utf-8")
+        self.assertIn("handleBrokenLinks", source)
+        self.assertIn("config.onBrokenAnchors", source)
+        self.assertIn("zz-no-page-emits-this-id", source)
 
     def test_the_step_treats_a_site_build_warning_as_a_defect(self):
         """The general form of the defect, for the handler Docusaurus adds next.

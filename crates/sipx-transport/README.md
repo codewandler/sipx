@@ -1,6 +1,6 @@
 # sipx-transport
 
-Async SIP transports: UDP, TCP, TLS, WebSocket, with RFC 3263 resolution.
+Async SIP transports: UDP, TCP, TLS, WebSocket, experimental QUIC, and RFC 3263 resolution.
 
 ## What this is
 
@@ -21,4 +21,5 @@ endpoint and incoming-message interfaces without moving their policy into the so
 ## See also
 
 - [`docs/specs/sip-transport.md`](../../docs/specs/sip-transport.md) — transport and pooling rules.
+- [`docs/specs/sip-quic.md`](../../docs/specs/sip-quic.md) — sipx's experimental QUIC mapping.
 - [`sipx-sip`](../sipx-sip/README.md) — the core driven by these transports.

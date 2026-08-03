@@ -124,8 +124,13 @@ async fn local_endpoint() -> (Handle, Receiver<Incoming>) {
 
 /// An OPTIONS aimed at `uri`, which is how a caller dereferences a GRUU (§4.5).
 fn probe(uri: &str, call_id: &str) -> sipx_sip::Request {
+    request(&Method::Options, uri, call_id)
+}
+
+/// An out-of-dialog request aimed at `uri`.
+fn request(method: &Method, uri: &str, call_id: &str) -> sipx_sip::Request {
     RequestBuilder::new(
-        Method::Options,
+        method.clone(),
         Uri::parse(Bytes::from(uri.to_owned())).expect("a URI"),
     )
     .header(HeaderName::To, Bytes::from(format!("<{uri}>")))
@@ -137,10 +142,48 @@ fn probe(uri: &str, call_id: &str) -> sipx_sip::Request {
     .expect("valid")
     .header(HeaderName::CallId, Bytes::from(call_id.to_owned()))
     .expect("valid")
-    .cseq(1, &Method::Options)
+    .cseq(1, method)
     .expect("valid")
     .max_forwards(70)
     .build()
+}
+
+/// `X-59`: recognition must be an admission decision, not merely a predicate tests can inspect.
+#[tokio::test]
+async fn an_invite_for_another_instances_gruu_is_refused_404() {
+    let (target, _) = registrar(Issue::Both).await;
+    let (endpoint, mut arriving) = local_endpoint().await;
+    let contact = format!("<sip:alice@{}>", endpoint.local_addr());
+    let mut agent = UserAgent::new(
+        endpoint,
+        config(contact, target).with_gruu(InstanceId::generate(), GruuKind::Public),
+    );
+    agent.register().await.expect("registers");
+
+    let (caller, _caller_incoming) = local_endpoint().await;
+    let target = Target::udp(agent.endpoint().local_addr());
+    let foreign = "sip:alice@sipx.test;gr=urn:uuid:00000000-0000-4000-8000-000000000000";
+    let mut responses = caller
+        .send(
+            request(&Method::Invite, foreign, "foreign-gruu@sipx.test"),
+            target,
+        )
+        .await
+        .expect("sends");
+    let incoming = arriving.recv().await.expect("the INVITE arrived");
+
+    assert!(
+        agent.answer(&incoming).await.expect("answers"),
+        "an instance-specific INVITE was left for the call layer despite naming another GRUU"
+    );
+    let refusal = responses.final_response().await.expect("a final response");
+    assert_eq!(refusal.status.code(), 404);
+    let to = refusal
+        .headers
+        .value(&HeaderName::To)
+        .map(|value| String::from_utf8_lossy(&value).into_owned())
+        .unwrap_or_default();
+    assert!(to.contains(";tag="), "the 404 has no To tag: {to}");
 }
 
 /// The story's failing-first test.

@@ -32,6 +32,8 @@ mod interop_media;
 use std::time::Duration;
 
 use bytes::Bytes;
+#[cfg(feature = "dtls")]
+use sipx_call::Keying;
 use sipx_call::{DialOptions, dial};
 use sipx_sip::Uri;
 use sipx_transport::{Config as TransportConfig, Target, TransportKind, bind};
@@ -50,6 +52,17 @@ fn sdes_uri() -> String {
 fn sdes_from() -> String {
     std::env::var("SIPX_INTEROP_SDES_FROM")
         .unwrap_or_else(|_| "<sip:sipx-srtp@127.0.0.1>".to_owned())
+}
+
+#[cfg(feature = "dtls")]
+fn dtls_uri() -> String {
+    std::env::var("SIPX_INTEROP_DTLS_URI").unwrap_or_else(|_| "sip:echo@127.0.0.1:5060".to_owned())
+}
+
+#[cfg(feature = "dtls")]
+fn dtls_from() -> String {
+    std::env::var("SIPX_INTEROP_DTLS_FROM")
+        .unwrap_or_else(|_| "<sip:sipx-dtls@127.0.0.1>".to_owned())
 }
 
 /// What this peer prints when it refuses a packet whose tag did not verify.
@@ -234,4 +247,52 @@ async fn a_real_peer_accepts_media_sipx_encrypted_with_sdes() {
 
     call.hang_up().await.expect("the BYE is accepted");
     assert!(call.is_ended(), "the call is over on our side too");
+}
+
+/// The same independent-peer proof through RFC 5763/5764 keying rather than an SDP master key.
+#[cfg(feature = "dtls")]
+#[tokio::test]
+#[ignore = "needs a user agent peer that keys media with DTLS-SRTP; see tests/interop/README.md"]
+async fn a_real_peer_accepts_media_sipx_encrypted_with_dtls_srtp() {
+    let said_before = PeerLog::read();
+    let (handle, _incoming) = bind(TransportConfig::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
+
+    let uri = dtls_uri();
+    let to = Uri::parse(Bytes::from(uri.clone())).expect("a SIP URI");
+    let target = Target::udp(addr_in(&uri));
+    let options = DialOptions::new(dtls_from(), loopback())
+        .with_keying(Keying::DtlsSrtp)
+        .with_timeout(Duration::from_secs(15));
+    let mut call = tokio::time::timeout(
+        Duration::from_secs(20),
+        dial(&handle, target, &to, &options),
+    )
+    .await
+    .expect("the peer answers within the call bound")
+    .expect("the strict DTLS-SRTP endpoint accepts the call");
+
+    assert!(
+        call.is_encrypted(),
+        "the DTLS-selected call fell back to cleartext"
+    );
+    let codec = call.media().codec();
+    let (sent, echoed) = echo_round_trip(&call).await;
+    let report = peer_media_report();
+    let since = PeerLog::read().since(&said_before);
+    let rejected = rejection_marker();
+    let complaints: Vec<&str> = since
+        .lines()
+        .filter(|line| line.contains(rejected.as_str()))
+        .collect();
+    assert!(
+        complaints.is_empty(),
+        "the peer refused DTLS-keyed packets:\n  {}\n\npeer media report:\n{report}",
+        complaints.join("\n  ")
+    );
+    assert_echo(&sent, &echoed, codec.payload_type());
+
+    call.hang_up().await.expect("the BYE is accepted");
+    assert!(call.is_ended());
 }

@@ -24,6 +24,7 @@ combinations=(
     "dns"
     "udp,tcp,dns"
     "udp,tcp,tls"
+    "udp,tcp,tls,quic"
     "udp,tcp,ws"
     "udp,tcp,tls,ws,wss"
 )
