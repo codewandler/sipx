@@ -112,6 +112,7 @@ const PAD: u8 = 0x20;
 /// Every variant is a dropped datagram. None of them is a panic, and none of them moves any
 /// state: an off-path attacker who can reach the media port can produce all of them at will.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Not STUN at all — the first two bits or the magic cookie say so (RFC 5389 §7.3).
     #[error("not a STUN message")]

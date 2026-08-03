@@ -45,6 +45,7 @@ pub type Socket<S> = WebSocketStream<S>;
 
 /// What can go wrong establishing a WebSocket.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum WsError {
     /// The peer never agreed to carry SIP.
     ///

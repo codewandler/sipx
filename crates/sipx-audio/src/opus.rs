@@ -29,6 +29,7 @@
 /// these cannot do anything different about "invalid packet" than about "buffer too small", and
 /// inventing a taxonomy would be inventing distinctions.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum OpusError {
     /// The codec refused.
     #[error("opus: {0}")]

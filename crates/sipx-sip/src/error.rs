@@ -13,6 +13,7 @@ use thiserror::Error;
 /// escaping because a caller that supplies a CRLF in a display name has a bug, and hiding it
 /// helps nobody.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum BuildError {
     /// A character that would end a line or terminate a string, in a field that must not
     /// contain one.
@@ -39,6 +40,7 @@ pub enum BuildError {
 /// The transaction layer maps these onto a response status, which is why each variant says
 /// what went wrong rather than merely that something did.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum ParseError {
     /// The request or status line is malformed. Answer 400.
     #[error("malformed start line: {0}")]
@@ -71,6 +73,7 @@ pub enum ParseError {
 
 /// What was wrong with a start line.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum StartLineError {
     /// The message is empty, or the start line is.
     #[error("empty")]
@@ -96,6 +99,7 @@ pub enum StartLineError {
 
 /// What was wrong with a header field line.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum HeaderSyntaxError {
     /// No colon separating name from value.
     #[error("no colon")]
@@ -120,6 +124,7 @@ pub enum HeaderSyntaxError {
 
 /// Why a body could not be delimited.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum FramingError {
     /// No blank line terminating the header section.
     #[error("no blank line after headers")]
@@ -171,6 +176,7 @@ impl std::fmt::Display for LimitKind {
 
 /// A URI that could not be parsed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum UriError {
     /// No scheme, or a scheme that is not a token followed by `:`.
     #[error("missing or malformed URI scheme")]
@@ -210,6 +216,7 @@ pub enum UriError {
 /// proxy may still forward such a message; only a party that needs to *read* the header has
 /// a problem.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum HeaderError {
     /// The value does not match the header's grammar.
     #[error("malformed {header} header")]

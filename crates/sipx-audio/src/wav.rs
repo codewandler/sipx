@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 
 /// What can go wrong with a WAV file.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum WavError {
     /// The file could not be read or written.
     #[error("io: {0}")]

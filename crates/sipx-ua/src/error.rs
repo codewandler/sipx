@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// What can go wrong in the user agent.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The transport failed.
     #[error("transport: {0}")]

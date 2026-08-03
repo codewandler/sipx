@@ -13,12 +13,13 @@ It did. `X-26` removed the RFC 4733 DTMF claim from the crate and it survived in
 crate table, because the first version of this script read three strings and the README was not
 one of them — so `X-35` found the same untruth in the fourth front door, still passing the gate at
 exit 0. That is the argument the paragraph above makes, run once more. The check therefore no
-longer knows about one crate: every published crate has **four front doors**, and the check reads
-all four for every one of them —
+longer knows about one crate: every published crate has **five front doors**, and the check reads
+all five for every one of them —
 
     the `description` in its manifest, which is the registry listing;
     the summary paragraph of its `lib.rs` or `main.rs`, which is the front page of the API
     reference;
+    the summary paragraph of its package `README`, which is the crates.io landing page;
     its row in `README.md`'s crate table, which is what a reader sees first;
     its row in the website's "Which crate" table —
 
@@ -32,7 +33,7 @@ Three rules run over the doors.
 else is a row and nothing published is missing.
 
 **Restatement.** The manifest description is the crate's canonical sentence about itself — the
-string the registry shows. The other three doors restate it: for a reader who wants the short
+string the registry shows. The other four doors restate it: for a reader who wants the short
 version, for a reader who opened the API reference, for a reader choosing a crate. A restatement
 may say *less* than the description, because compressing is what it is for; it may not claim a
 capability the description does not, because then the crate's own listing is not the authority on
@@ -40,7 +41,7 @@ the crate. And the two tables, being the same kind of string written for the sam
 claim the same set as each other. That pair of rules is what would have caught the DTMF row:
 `README.md` named RFC 4733 DTMF, the manifest did not, and neither did the website's table.
 
-Set *equality* across all four doors would be the wrong instrument, and is not what runs here. A
+Set *equality* across all five doors would be the wrong instrument, and is not what runs here. A
 crate summary is written at a different altitude — `Sans-IO SIP core.` is a good first line and a
 bad capability list — and a rule that demanded it enumerate every capability would turn every
 crate's front page into keywords. Containment is the honest version of "one crate, one answer".
@@ -52,12 +53,12 @@ gap.
 
 Three things this deliberately does not do.
 
-**It reads each crate documentation's summary paragraph, not the whole header.** The prose below
-the summary is where a crate says what it does *not* do — `X-26`'s record of why G.722 and
-resampling are absent lives there — and a check that could not tell a claim from a disclaimer
-would forbid writing the decision down, which is the opposite of the point. The summary is what a
-reader is shown before choosing to read further, so it is the string that has to be true on its
-own.
+**It reads each crate documentation and package README's summary paragraph, not the whole file.**
+The prose below the summary is where a crate says what it does *not* do — `X-26`'s record of why
+G.722 and resampling are absent lives there — and a check that could not tell a claim from a
+disclaimer would forbid writing the decision down, which is the opposite of the point. The summary
+is what a reader is shown before choosing to read further, so it is the string that has to be true
+on its own.
 
 **It checks codecs in one crate only.** The backing rule generalises across crates and the codec
 rule does not: `sipx-audio` is the crate that *is* the codecs, so a codec name in its blurb reads
@@ -197,6 +198,15 @@ _WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
 #: crate a row is about.
 _CRATE_CELL = re.compile(r"`sipx(?:-[a-z0-9]+)*`")
 
+#: A public error enum. The name is deliberately the policy: error structs can add private
+#: implementation detail without breaking a caller, while an enum variant is part of every
+#: downstream exhaustive match.
+_ERROR_ENUM = re.compile(r"(?m)^[ \t]*pub enum (?P<name>(?:[A-Za-z0-9_]*Error|Error))\b")
+
+#: The one phrase that classifies an intentionally exhaustive error enum. Like the fixed-sleep
+#: guard's classifications, the reason lives at the site it excuses rather than in a list here.
+EXHAUSTIVE_REASON = "/// Exhaustive by design:"
+
 
 def words(identifier: str) -> set[str]:
     """An identifier split into its words, lower-cased.
@@ -237,7 +247,7 @@ class Crate(NamedTuple):
     """A published crate, reduced to what it says about itself and what backs it."""
 
     name: str
-    #: Its four front doors, in the order the docstring lists them.
+    #: Its five front doors, in the order the docstring lists them.
     doors: tuple[FrontDoor, ...]
     #: Its modules, each with its feature gate, its header and its public items.
     modules: tuple[Module, ...]
@@ -266,6 +276,31 @@ def summary(text: str) -> str:
     return first
 
 
+def markdown_summary(text: str) -> str:
+    """The first prose paragraph after a Markdown document's H1.
+
+    A package README needs room below its lead to state deliberate absences. Reading that whole
+    file as a positive claim would turn "does not implement G.722" back into an advertisement for
+    G.722, the false-positive direction this guard has always refused.
+    """
+    lines = text.splitlines()
+    try:
+        heading = next(index for index, line in enumerate(lines) if line.startswith("# "))
+    except StopIteration:
+        return ""
+    paragraph = []
+    for line in lines[heading + 1 :]:
+        stripped = line.strip()
+        if not stripped:
+            if paragraph:
+                break
+            continue
+        if stripped.startswith("#"):
+            break
+        paragraph.append(stripped)
+    return " ".join(paragraph)
+
+
 def published() -> list[str]:
     """Every crate in the workspace that `cargo publish` would upload.
 
@@ -282,6 +317,75 @@ def published() -> list[str]:
     if not found:
         raise ValueError(f"read no publishable crates under {CRATES.relative_to(ROOT)}")
     return found
+
+
+def package_readme(crate: str) -> Path | None:
+    """The README Cargo assigns to a package, including its conventional inference.
+
+    Cargo infers a file named `README.md`, `README.txt` or `README` beside the manifest when the
+    package does not set `readme`. Keeping that rule here means ordinary `README.md` files do not
+    need eleven redundant manifest keys, while an explicitly named file is still followed.
+    """
+    directory = CRATES / crate
+    manifest = directory / "Cargo.toml"
+    package = tomllib.loads(manifest.read_text(encoding="utf-8"))["package"]
+    configured = package.get("readme")
+    if configured is False:
+        return None
+    if isinstance(configured, str):
+        return directory / configured
+    for name in ("README.md", "README.txt", "README"):
+        candidate = directory / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def readme_problems(crates: list[str]) -> list[str]:
+    """Published packages whose crates.io landing page has no file to ship."""
+    problems = []
+    for crate in crates:
+        readme = package_readme(crate)
+        if readme is None:
+            problems.append(
+                f"crates/{crate}/Cargo.toml sets no package README and no conventional README "
+                "sits beside it"
+            )
+        elif not readme.is_file():
+            problems.append(
+                f"crates/{crate}/Cargo.toml names {readme.relative_to(ROOT)}, which is not a file"
+            )
+    return problems
+
+
+def error_enum_problems(crates: list[str]) -> list[str]:
+    """Public error enums that promise their current variant set can never grow.
+
+    `sipx-app-protocol` owns a closed, versioned application vocabulary and documents its own
+    exceptions, so A-9 explicitly leaves it out. Everywhere else an enum is extensible unless the
+    type itself argues why its variants are the complete domain.
+    """
+    problems = []
+    for crate in crates:
+        if crate == "sipx-app-protocol":
+            continue
+        for path in sorted((CRATES / crate / "src").rglob("*.rs")):
+            source = path.read_text(encoding="utf-8")
+            for found in _ERROR_ENUM.finditer(source):
+                block_start = source.rfind("\n\n", 0, found.start())
+                preamble = source[block_start + 2 : found.start()]
+                if "#[non_exhaustive]" in preamble or EXHAUSTIVE_REASON in preamble:
+                    continue
+                line = source.count("\n", 0, found.start()) + 1
+                try:
+                    where = path.relative_to(ROOT)
+                except ValueError:
+                    where = path
+                problems.append(
+                    f"{where}:{line} `{found.group('name')}` is exhaustive; add "
+                    f"`#[non_exhaustive]` or an adjacent `{EXHAUSTIVE_REASON}` rationale"
+                )
+    return problems
 
 
 def entry_point(crate: str) -> Path:
@@ -456,9 +560,19 @@ def front_doors(crate: str, tables: dict[Path, dict[str, str]]) -> list[FrontDoo
     if not lead:
         raise ValueError(f"{entry.relative_to(ROOT)} opens with no `//!` summary")
 
+    readme = package_readme(crate)
+    if readme is None or not readme.is_file():
+        raise ValueError(
+            f"{manifest.relative_to(ROOT)} has no package README to use as its crates.io front door"
+        )
+    readme_lead = markdown_summary(readme.read_text(encoding="utf-8"))
+    if not readme_lead:
+        raise ValueError(f"{readme.relative_to(ROOT)} has no summary paragraph after its H1")
+
     doors = [
         FrontDoor(crate, f"{manifest.relative_to(ROOT)} description", description),
         FrontDoor(crate, f"{entry.relative_to(ROOT)} summary", lead),
+        FrontDoor(crate, f"{readme.relative_to(ROOT)} summary", readme_lead),
     ]
     for path, rows in tables.items():
         doors.append(
@@ -542,7 +656,7 @@ def agreement_problems(crate: Crate) -> list[str]:
     """No door may out-promise the manifest, and the two tables must promise the same thing.
 
     See the module docstring for why this is containment against the description rather than
-    equality across all four doors.
+    equality across all five doors.
     """
     canonical, *restatements = crate.doors
     promised = {claim.name for claim in claimed(canonical, VOCABULARY)}
@@ -621,14 +735,15 @@ def main() -> int:
 
     crates = published()
     tables = {path: table(path, heading) for path, heading in (README_TABLE, GUIDE_TABLE)}
-    problems = membership_problems(tables, crates)
+    problems = membership_problems(tables, crates) + readme_problems(crates)
     if problems:
-        print("the crate tables do not name the crates that publish:", file=sys.stderr)
+        print("the published crates do not all have the front doors they require:", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         return 1
 
     read_crates = [read(name, tables) for name in crates]
+    problems += error_enum_problems(crates)
     for crate in read_crates:
         problems += (
             claim_problems(crate) + agreement_problems(crate) + stability_problems(crate)

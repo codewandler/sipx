@@ -37,6 +37,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 /// operational problems with three different fixes. Collapsing them into "handshake failed"
 /// costs an engineer an afternoon.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TlsError {
     /// The name to verify against is not a valid DNS name.
     #[error("{0} is not a name a certificate can be checked against")]

@@ -35,7 +35,7 @@ fn fault_of(err: &ParseError) -> Option<Fault> {
         ParseError::StartLine(_) => Some(Fault::StartLine),
         ParseError::HeaderSyntax { .. } => Some(Fault::HeaderSyntax),
         ParseError::Framing(_) => Some(Fault::Framing),
-        ParseError::Limit { .. } | ParseError::Incomplete => None,
+        _ => None,
     }
 }
 

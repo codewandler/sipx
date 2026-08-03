@@ -41,8 +41,8 @@
 //! `MediaSession`, so two `Call`s cannot be joined (`C-6`). A call also cannot answer an
 //! authentication challenge (`S-28`).
 //!
-//! [`Error`] is **not** `#[non_exhaustive]` and went from 13 variants to 16 in one release, breaking
-//! every downstream exhaustive `match`. Treat it as though it were: carry a `_` arm.
+//! [`Error`] is `#[non_exhaustive]`: additive diagnostics stay additive for downstream callers, so
+//! a `match` over it carries a `_` arm.
 
 pub mod call;
 pub mod counters;

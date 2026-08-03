@@ -30,6 +30,7 @@ pub const GOODBYE: u8 = 203;
 
 /// What can go wrong reading RTCP.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RtcpError {
     /// Fewer bytes than a header.
     #[error("packet is {0} bytes; an RTCP header is 4")]

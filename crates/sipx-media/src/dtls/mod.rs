@@ -126,6 +126,7 @@ pub struct Keys {
 
 /// Why keying material could not be turned into SRTP contexts.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum KeyError {
     /// The handshake exported fewer octets than the profile needs.
     #[error("the handshake exported {got} octets; profile {profile} needs {needed}")]
@@ -210,6 +211,7 @@ pub trait Handshake {
 
 /// Why a keyed media path could not be established.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The peer offered no fingerprint, so there is nothing to check its certificate against.
     ///

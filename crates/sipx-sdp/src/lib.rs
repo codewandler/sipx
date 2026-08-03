@@ -48,6 +48,7 @@ pub use session::{
 
 /// What can go wrong reading SDP.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SdpError {
     /// A line was not `x=value`.
     #[error("malformed line: {0}")]

@@ -7,6 +7,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Published crate errors can grow additively, and every package has its own landing page
+  (`A-9`).** Twenty-six public error enums are now `#[non_exhaustive]`; the sole exhaustive
+  exception states its closed-domain reason beside the type, and a source-level guard refuses an
+  unclassified enum. All eleven published crates now ship a README that links to the crate's one
+  stability contract and states what the crate deliberately does not do. The front-door guard
+  treats each README summary as a fifth checked claim surface — 55 in total — and packaging tests
+  verify that Cargo includes every file.
+
 ## [1.0.0-alpha.4] — 2026-08-01
 
 ### Added

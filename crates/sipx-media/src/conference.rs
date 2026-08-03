@@ -30,6 +30,7 @@ use crate::session::{MediaSession, Stop};
 
 /// A conference worker configuration that cannot make forward progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConferenceError {
     /// The mixer interval is below the one-millisecond runtime floor.
     #[error("conference mix interval must be at least 1 ms, got {0:?}")]

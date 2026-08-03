@@ -35,10 +35,8 @@
 //! **Supported.** Parsing, serialisation and the §17 transaction machines are the most heavily tested
 //! surface in the workspace and are what everything above is built on.
 //!
-//! Not yet settled: the error enums are exhaustive today (`ParseError`, `BuildError`, `UriError`,
-//! `HeaderError`, `FramingError`, `StartLineError`, `HeaderSyntaxError`), which reads as a promise not
-//! to add variants — and that promise has been broken before. See `A-8`'s note on the unit of the
-//! promise; do not write an exhaustive `match` over them.
+//! The public error enums are `#[non_exhaustive]`. New typed parse failures may be added without
+//! breaking downstream callers, so a `match` over one carries a `_` arm.
 
 pub mod build;
 pub mod error;

@@ -3,12 +3,6 @@
 The `sipx.app.v1` application contract: its types, its JSON wire format, and a sans-IO
 instruction interpreter.
 
-> **Experimental.** This crate and the wire line it speaks are both experimental.
-> [`docs/specs/app-contract.md`](../../docs/specs/app-contract.md) says `sipx.app.v1` may change
-> incompatibly until two dissimilar applications have run against it — an inbound IVR and an
-> outbound notifier — after which a change requires a new line. Until then the public API and the
-> bytes on the wire may both move in a patch release.
-
 ## What this is
 
 An application drives a call by receiving **events** and answering with **instructions**. It never
@@ -25,6 +19,12 @@ async runtime anywhere in the crate — the driver's clock reading is a paramete
 "this crate never asks what time it is" is a property of the signature rather than a promise in a
 comment. Every binding the spec describes (a webhook server, a WebSocket peer, an embedded
 runtime with no wire at all) is a driver over this one machine.
+
+## Stability
+
+This crate remains experimental. Its exact public API and wire-line guarantees are maintained in the
+[crate-level Stability section](https://codewandler.github.io/sipx/api/sipx_app_protocol/#stability).
+That is the contract; it is linked rather than copied here so the two cannot drift.
 
 ## Two properties worth knowing about
 

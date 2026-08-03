@@ -25,7 +25,8 @@ The open work is the **application SDK and its host**. `C-3`, the epic's keyston
 now reports what happens to it as a typed event stream, which is the input alphabet `C-4`, `C-5`,
 `M-17` and `M-18` all report through, and `A-7` has built the deterministic harness the host's
 behaviour claims are held to — the contract's own `AC-1`…`AC-9` run under it today, with fake time
-and a scripted app. `A-1` is done and `A-9` is the ready one. Then the milestones still open, each
+and a scripted app. `A-1`, `A-7` and the release-surface hardening in `A-9` are done. Then the
+milestones still open, each
 argued for in the [roadmap](../roadmap.md#next):
 
 - **M9 — Bridgeable.** A third done: `S-19` UPDATE closed; `C-2` early media and `C-1` two dialogs
@@ -43,10 +44,6 @@ argued for in the [roadmap](../roadmap.md#next):
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
-
-### Application SDK
-_The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
-- [A-9 — Make the published crates safe to freeze — `#[non_exhaustive]` and a README per crate](A-9-freeze-what-a-published-crate-can-add.md) · Application · A-8 stated the promise and left the two mechanical halves — every public error enum outside sipx-app-protocol is exhaustive, so it promises never to add a variant, and ten of eleven crates will publish to crates.io with no README at all
 
 ### Call framework
 _This is the layer applications actually program against, so it is the one that decides whether_
@@ -119,6 +116,7 @@ _The phone is both the product's front door and its most demanding integration t
 - [A-1 — Finish the host configuration and failure-semantics schema](A-1-host-configuration-schema.md) · Application · app-host phase 1 · spec work, no dependency on the app-sdk stories
 - [A-7 — The deterministic harness — fake time, scripted bindings, scripted calls](A-7-deterministic-harness.md) · Application · app-host phase 1 · built with the host, not after it · startable against contract vectors alone
 - [A-8 — Declare what each published crate guarantees](A-8-declare-what-each-crate-guarantees.md) · Application · alpha predicate 5 — v1 freezes what "stable" means, so the line between stable and experimental has to exist before it can be frozen
+- [A-9 — Make the published crates safe to freeze — `#[non_exhaustive]` and a README per crate](A-9-freeze-what-a-published-crate-can-add.md) · Application · A-8 stated the promise and left the two mechanical halves — every public error enum outside sipx-app-protocol is exhaustive, so it promises never to add a variant, and ten of eleven crates will publish to crates.io with no README at all
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
 - [C-4 — Serve many calls from one endpoint](C-4-serve-many-calls-from-one-endpoint.md) · Signalling · app-sdk · after C-3 · size M
 - [C-5 — The application contract crate and its sans-IO interpreter](C-5-app-contract-crate-and-interpreter.md) · Application · app-sdk · parallel to C-3/C-4/M-17/M-18 · spec is docs/specs/app-contract.md · size M

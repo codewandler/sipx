@@ -23,6 +23,7 @@ over-claim and been switched off by whoever hit it second.
 
 import importlib.util
 import pathlib
+import subprocess
 import tempfile
 import sys
 import unittest
@@ -63,11 +64,12 @@ def crate(name="sipx-audio", doors=(), modules=(), vocabulary=()):
     )
 
 
-def four_doors(description="", summary="", readme="", website=""):
-    """A crate's four front doors, labelled the way the guard labels them."""
+def five_doors(description="", summary="", package="", readme="", website=""):
+    """A crate's five front doors, labelled the way the guard labels them."""
     return (
         door(description, where="crates/x/Cargo.toml description"),
         door(summary, where="crates/x/src/lib.rs summary"),
+        door(package, where="crates/x/README.md summary"),
         door(readme, where="README.md crate table"),
         door(website, where="website/docs/guides/as-a-library.md crate table"),
     )
@@ -87,6 +89,25 @@ class TheRepositoryItself(unittest.TestCase):
     def test_both_crate_tables_name_exactly_the_crates_that_publish(self):
         self.assertEqual([], guard.membership_problems(self.tables, self.published))
 
+    def test_every_published_crate_sets_and_ships_a_readme(self):
+        """A-9's failing-first package assertion: ten of eleven had no landing page."""
+        self.assertEqual([], guard.readme_problems(self.published))
+        for name in self.published:
+            with self.subTest(crate=name):
+                packaged = subprocess.run(
+                    ["cargo", "package", "-p", name, "--list", "--allow-dirty"],
+                    cwd=ROOT,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.splitlines()
+                relative = guard.package_readme(name).relative_to(guard.CRATES / name)
+                self.assertIn(str(relative), packaged)
+
+    def test_every_public_error_enum_is_non_exhaustive_or_argued_at_the_type(self):
+        """A-9's failing-first API assertion: additive variants must stay additive."""
+        self.assertEqual([], guard.error_enum_problems(self.published))
+
     def test_every_claim_every_crate_makes_is_backed(self):
         """`X-35`'s failing-first assertion.
 
@@ -102,11 +123,11 @@ class TheRepositoryItself(unittest.TestCase):
             [], [problem for c in self.crates for problem in guard.agreement_problems(c)]
         )
 
-    def test_every_crate_has_four_front_doors_and_none_of_them_is_empty(self):
+    def test_every_crate_has_five_front_doors_and_none_of_them_is_empty(self):
         """A door the reader cannot find is a door that can promise anything."""
         for c in self.crates:
             with self.subTest(crate=c.name):
-                self.assertEqual(4, len(c.doors))
+                self.assertEqual(5, len(c.doors))
                 for found in c.doors:
                     with self.subTest(where=found.where):
                         self.assertTrue(found.text.strip())
@@ -169,7 +190,7 @@ class TheRestatementRule(unittest.TestCase):
         """
         problems = guard.agreement_problems(
             crate(
-                doors=four_doors(
+                doors=five_doors(
                     description="G.711",
                     readme="G.711, RFC 4733 DTMF",
                     website="G.711, RFC 4733 DTMF",
@@ -187,13 +208,13 @@ class TheRestatementRule(unittest.TestCase):
         self.assertEqual(
             [],
             guard.agreement_problems(
-                crate(doors=four_doors(description="G.711, WAV, mixing", summary="Audio.", readme="G.711", website="G.711"))
+                crate(doors=five_doors(description="G.711, WAV, mixing", summary="Audio.", readme="G.711", website="G.711"))
             ),
         )
 
     def test_two_tables_that_promise_different_things_are_reported(self):
         problems = guard.agreement_problems(
-            crate(doors=four_doors(description="G.711, WAV", readme="G.711, WAV", website="G.711"))
+            crate(doors=five_doors(description="G.711, WAV", readme="G.711, WAV", website="G.711"))
         )
         self.assertEqual(1, len(problems))
         self.assertIn("one crate, one answer", problems[0])
@@ -201,7 +222,7 @@ class TheRestatementRule(unittest.TestCase):
     def test_a_crate_with_one_table_door_is_an_error(self):
         """Without both tables, one can promise what the other denies and nothing compares them."""
         with self.assertRaises(ValueError):
-            guard.agreement_problems(crate(doors=four_doors()[:3]))
+            guard.agreement_problems(crate(doors=five_doors()[:4]))
 
 
 class TheModuleReader(unittest.TestCase):
@@ -318,6 +339,70 @@ class TheSummary(unittest.TestCase):
         found = guard.claimed(door(guard.header(self.HEADER)), guard.CODECS)
         self.assertIn("G.722", [claim.name for claim in found])
 
+    def test_a_package_readme_stops_after_its_lead_paragraph(self):
+        readme = (
+            "# sipx-audio\n\n"
+            "Telephony audio: G.711.\n\n"
+            "## Deliberately absent\n\n"
+            "G.722 is not implemented.\n"
+        )
+        self.assertEqual("Telephony audio: G.711.", guard.markdown_summary(readme))
+        found = guard.claimed(door(guard.markdown_summary(readme)), guard.CODECS)
+        self.assertEqual(["G.711"], [claim.name for claim in found])
+
+    def test_a_package_readme_without_an_h1_has_no_summary(self):
+        self.assertEqual("", guard.markdown_summary("Telephony audio: G.711.\n"))
+
+
+class TheErrorEnumRule(unittest.TestCase):
+    """A-9: an exception is argued at the type, never hidden in a suppression list."""
+
+    def test_an_exhaustive_error_enum_is_reported(self):
+        problems = self.problems_for(
+            "/// A failure.\n#[derive(Debug)]\npub enum DemoError { Failed }\n"
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("DemoError", problems[0])
+
+    def test_a_non_exhaustive_error_enum_is_not_reported(self):
+        self.assertEqual(
+            [],
+            self.problems_for(
+                "/// A failure.\n#[derive(Debug)]\n#[non_exhaustive]\n"
+                "pub enum DemoError { Failed }\n"
+            ),
+        )
+
+    def test_an_exhaustive_error_with_an_adjacent_reason_is_not_reported(self):
+        self.assertEqual(
+            [],
+            self.problems_for(
+                "/// A failure.\n///\n/// Exhaustive by design: these are the complete states.\n"
+                "#[derive(Debug)]\npub enum DemoError { Failed }\n"
+            ),
+        )
+
+    def test_a_distant_reason_does_not_classify_the_type(self):
+        problems = self.problems_for(
+            "/// Exhaustive by design: this explains another item.\n"
+            "pub const EARLIER: u8 = 1;\n\n"
+            "/// A failure.\npub enum DemoError { Failed }\n"
+        )
+        self.assertEqual(1, len(problems))
+
+    def problems_for(self, source: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            crates = pathlib.Path(directory) / "crates"
+            src = crates / "sipx-demo" / "src"
+            src.mkdir(parents=True)
+            (src / "lib.rs").write_text(source)
+            original = guard.CRATES
+            guard.CRATES = crates
+            try:
+                return guard.error_enum_problems(["sipx-demo"])
+            finally:
+                guard.CRATES = original
+
 
 class TheClaimVocabulary(unittest.TestCase):
     """What counts as promising a capability, kept honest in both directions."""
@@ -363,7 +448,7 @@ class TheBackingRule(unittest.TestCase):
     def test_an_unimplemented_codec_is_reported(self):
         problems = guard.claim_problems(
             crate(
-                doors=four_doors(description="G.722 and G.711"),
+                doors=five_doors(description="G.722 and G.711"),
                 modules=[module(name="g711", header="G.711.")],
             )
         )
@@ -387,7 +472,7 @@ class TheBackingRule(unittest.TestCase):
         problems = guard.claim_problems(
             crate(
                 name="sipx-call",
-                doors=four_doors(description="Calls with bridging"),
+                doors=five_doors(description="Calls with bridging"),
                 vocabulary={"call", "dial", "answer", "media", "hang"},
             )
         )
@@ -402,7 +487,7 @@ class TheBackingRule(unittest.TestCase):
             guard.claim_problems(
                 crate(
                     name="sipx-call",
-                    doors=four_doors(description="Calls with DTMF"),
+                    doors=five_doors(description="Calls with DTMF"),
                     vocabulary={"send", "digits", "recv", "digit"},
                 )
             ),
@@ -415,7 +500,7 @@ class TheBackingRule(unittest.TestCase):
             guard.claim_problems(
                 crate(
                     name="sipx-media",
-                    doors=four_doors(description="Media sessions carrying G.711 and Opus"),
+                    doors=five_doors(description="Media sessions carrying G.711 and Opus"),
                     vocabulary={"media", "session", "bridge"},
                 )
             ),
@@ -435,7 +520,7 @@ class TheFeatureRule(unittest.TestCase):
         """`README.md`'s crate row said bare "Opus" — `X-35`'s fourth front door."""
         gated = module(name="opus", feature="opus", header="Opus (RFC 6716).")
         problems = guard.claim_problems(
-            crate(doors=four_doors(description="Telephony audio: Opus"), modules=[gated])
+            crate(doors=five_doors(description="Telephony audio: Opus"), modules=[gated])
         )
         self.assertEqual(1, len(problems))
         self.assertIn("off by default", problems[0])

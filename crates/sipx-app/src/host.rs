@@ -53,9 +53,10 @@ const NOT_IMPLEMENTED: u16 = 501;
 
 /// Why a host could not start, or could not keep running.
 ///
-/// Not `#[non_exhaustive]` and deliberately small: a host either read its document, bound its
-/// listener and carried its calls, or it failed at one of those three, and a caller that wants to
-/// print the reason needs no more resolution than that.
+/// Exhaustive by design: a host either read its document, bound its listener and carried its
+/// calls, or it failed at one of those three boundaries. A caller that wants to print the reason
+/// needs no more resolution than that, and a fourth boundary would be a change to the host model
+/// rather than another diagnosis inside it.
 #[derive(Debug)]
 pub enum HostError {
     /// The configuration document was refused. Carries the document's own diagnosis, which names

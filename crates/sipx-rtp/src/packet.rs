@@ -12,6 +12,7 @@ pub const HEADER_LEN: usize = 12;
 
 /// What can go wrong reading a packet.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RtpError {
     /// Fewer bytes than a header.
     #[error("packet is {0} bytes; an RTP header is {HEADER_LEN}")]

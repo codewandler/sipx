@@ -101,6 +101,7 @@ impl std::fmt::Display for CodecDirection {
 
 /// A negotiated media session that cannot be constructed safely.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SetupError {
     /// Packet pacing cannot represent a frame shorter than one millisecond.
     #[error("packet duration must be at least 1 ms, got {0:?}")]
@@ -122,6 +123,7 @@ pub enum SetupError {
 
 /// Binding or constructing a media session failed.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StartError {
     /// A socket could not be bound.
     #[error("io: {0}")]

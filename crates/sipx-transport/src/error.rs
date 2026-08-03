@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// What can go wrong in the transport layer.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Endpoint configuration cannot create a bounded, live runtime.
     #[error("invalid endpoint configuration `{field}`: {reason}")]

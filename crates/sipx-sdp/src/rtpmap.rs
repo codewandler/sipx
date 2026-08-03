@@ -26,6 +26,7 @@
 /// a caller that wants to log it, and so a malformed clock rate is a typed outcome rather than a
 /// panic ([AGENTS.md](../../../AGENTS.md) non-negotiable 3).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RtpmapError {
     /// Nothing before the first `/`.
     #[error("no encoding name")]

@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// What can go wrong establishing or running a call.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// A socket failed.
     #[error("io: {0}")]

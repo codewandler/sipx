@@ -62,6 +62,7 @@ enum Label {
 
 /// What can go wrong protecting or unprotecting a packet.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SrtpError {
     /// The key or salt was not the length the transform requires.
     #[error("{what} must be {expected} octets, not {actual}")]

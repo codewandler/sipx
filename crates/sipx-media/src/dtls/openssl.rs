@@ -26,6 +26,7 @@ use super::{Handshake, Profile, Role};
 
 /// Why a handshake could not be run.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DtlsError {
     /// OpenSSL refused something.
     #[error("openssl: {0}")]
