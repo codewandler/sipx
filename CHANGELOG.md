@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-alpha.5] — 2026-08-03
+
 ### Changed
 
 - **Published crate errors can grow additively, and every package has its own landing page
@@ -2417,7 +2419,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.4...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.5...HEAD
+[1.0.0-alpha.5]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.4...v1.0.0-alpha.5
 [1.0.0-alpha.4]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.3...v1.0.0-alpha.4
 [1.0.0-alpha.3]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.2...v1.0.0-alpha.3
 [1.0.0-alpha.2]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.1...v1.0.0-alpha.2

@@ -1,12 +1,12 @@
 ---
 title: What's new
-description: Release highlights for sipx 1.0.0-alpha.4 and guidance on the newer main-branch documentation.
+description: Release highlights for sipx 1.0.0-alpha.5 and guidance on the newer main-branch documentation.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-alpha.4 — 2026-08-01
+## 1.0.0-alpha.5 — 2026-08-03
 <!-- END generated:release-heading -->
 
 This is the current tagged release. It establishes a measured alpha baseline for the SIP,
@@ -17,43 +17,22 @@ Install this exact release with:
 
 ```bash
 cargo install --git https://github.com/codewandler/sipx \
-  --tag v1.0.0-alpha.4 --locked sipx-cli
+  --tag v1.0.0-alpha.5 --locked sipx-cli
 ```
 
 ### Release highlights
 
-- **No breaking changes.** This release is additive: new counters, a new CLI flag behaviour that
-  was documented but inert, and four measurement defects closed.
-- **Two milestones are delivered, on evidence rather than on mechanism.** The previous release
-  checked M10 and M12 against their evidence and claimed neither. **M10 — Reachable** is now
-  delivered: a call placed at one instance's GRUU is answered by that instance with audio both
-  ways while the other registration, equally current, never sees the INVITE. **M12 — Provable**
-  is delivered: its last clause needed every discard counted and exportable, which reached only
-  one crate and was false outside the process.
-- **Every discard in the signalling path is counted, and the numbers come out.** Widening the
-  enumeration beyond one crate exposed **sixteen** unexplained discard sites where a hand census
-  had found seven. `UnsentCounts` counts, by method, every request the endpoint tried to put on
-  the wire and could not — so a failed BYE on a teardown path is finally a number an operator
-  asking "why did that call linger" can read. `sipx --counters <FILE>` writes on every path out
-  of the command, not only the successful one, because the run that fails is the run the bug
-  report is about.
-- **`-vv` reaches DEBUG.** It was documented, accepted and inert: verbosity counted arguments
-  beginning with `-v`, so `-vv` counted as one and yielded INFO — and nothing on a call's path
-  logged at INFO, so the documented flag produced no output at all.
-- **The fixed-sleep rule is enforced rather than swept for.** A wall-clock duration may bound a
-  failure or define silence; it may not stand in for a happens-before. That had been swept for
-  twice and enforced by nothing, so two fresh violations landed after the second sweep. The
-  first enforced run found 30 clock-decided assertions and 2 that said which; two were real
-  defects and are now causal waits. There is no suppression list under any name.
-- **Both RFC torture corpora are tamper-evident, from the gate and from CI.** Each is recovered
-  from its RFC's own appendix rather than transcribed, and the check re-recovers and diffs it —
-  the only thing that can tell a fixture edited by hand from the RFC's own bytes, since the
-  suites read whatever is in the directory and pass. One corpus was checked only inside a job
-  that never runs locally; the other was checked nowhere at all.
-- **A gate that could not reach the network says so instead of reporting a defect.** An
-  unreachable RFC editor used to print `1 of 25 steps failed` naming a corpus — a step that never
-  read the archive claiming the committed messages had drifted. It now disclaims its own run, and
-  a disclaimer never outranks a genuine finding beside it.
+- **Breaking: public error enums are now `#[non_exhaustive]`.** Downstream exhaustive matches need
+  a wildcard arm. This is the one-time compatibility cost that lets future diagnostic variants be
+  additive instead of breaking every caller. The sole exhaustive exception is a closed set of host
+  boundaries, with that reason maintained beside the type.
+- **Every published crate has its own landing page.** All eleven packages now ship a README that
+  says what the crate is, points to its crate-level stability contract, and names the layer or
+  responsibility it deliberately leaves elsewhere.
+- **The release surface is measured from five directions per crate.** The guard now compares each
+  package README's lead paragraph with the manifest description, crate documentation, and both
+  public crate tables: 55 front doors in total. Packaging tests also prove Cargo ships every
+  README, rather than merely finding the file in a checkout.
 
 #### Still current from earlier alphas
 
@@ -117,5 +96,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 alpha. Use the tag above when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-alpha.4` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-alpha.5` merely because it appears on this
 site.
