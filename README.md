@@ -11,7 +11,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 <a href="https://codewandler.github.io/sipx/"><img alt="docs: codewandler.github.io/sipx" src="https://img.shields.io/static/v1?label=docs&message=codewandler.github.io%2Fsipx&color=blue"></a>
 <a href="CHANGELOG.md"><img alt="release: 1.0.0-alpha.5" src="https://img.shields.io/static/v1?label=release&message=1.0.0-alpha.5&color=blue"></a>
 <a href="#try-the-cli"><img alt="MSRV: rustc 1.88" src="https://img.shields.io/static/v1?label=MSRV&message=rustc%201.88&color=blue"></a>
-<a href="docs/compliance.md"><img alt="RFCs: 32 implemented of 70" src="https://img.shields.io/static/v1?label=RFCs&message=32%20implemented%20of%2070&color=blue"></a>
+<a href="docs/compliance.md"><img alt="RFCs: 32 implemented of 71" src="https://img.shields.io/static/v1?label=RFCs&message=32%20implemented%20of%2071&color=blue"></a>
 <a href="docs/compliance.md"><img alt="codecs: G.711 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20Opus&color=blue"></a>
 <a href="#license"><img alt="license: MIT OR Apache-2.0" src="https://img.shields.io/static/v1?label=license&message=MIT%20OR%20Apache-2.0&color=blue"></a>
 <!-- END generated:badges -->
@@ -126,7 +126,7 @@ The [public site](https://codewandler.github.io/sipx/) is for users and integrat
 - [Troubleshooting](https://codewandler.github.io/sipx/docs/guides/troubleshooting)
 - [RFC compliance](https://codewandler.github.io/sipx/docs/reference/compliance)
 
-The compliance registry currently tracks <!-- BEGIN generated:rfc-count -->70<!-- END generated:rfc-count --> RFCs; its public table is generated rather than copied by hand.
+The compliance registry currently tracks <!-- BEGIN generated:rfc-count -->71<!-- END generated:rfc-count --> RFCs; its public table is generated rather than copied by hand.
 
 Contributor specifications, designs, the roadmap, and the generated work board stay under
 [`docs/`](docs/). `./scripts/build-docs.sh` builds the public site, checks every link, verifies the

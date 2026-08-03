@@ -1,6 +1,6 @@
 # Design: Call framework
 
-**Status:** outline · **Pillar:** Application · **Epic:** `call` · **Stories:** `C-2`
+**Status:** active · **Pillar:** Application · **Epic:** `call` · **Stories:** `C-2`
 
 ## Why
 
@@ -11,11 +11,16 @@ media session.
 
 ## Approach
 
-_To be written when the epic starts. In outline: a `Call` owns its dialog and its media
-pipeline outright. Playback, recording, echo and DTMF are operations on that owned pipeline.
-Bridging moves frames between calls over channels, so a stalled leg cannot block its peer;
-mixing is a task that owns N receivers and one mixed output. Transfer follows RFC 3515 with
-`NOTIFY` progress reporting._
+A `Call` owns its dialog and its media pipeline outright. Before the final response, that same
+ownership sits in the handle for the early dialog: `Ringing` on the answering side and `Dialing`
+on the calling side. A reliable provisional which completes offer/answer starts the pipeline in
+that owner. Confirming the dialog moves the running pipeline into `Call`; it does not stop it,
+bind again, or derive its keys again. The detailed state and wire contract is
+[`docs/specs/call-early-media.md`](../specs/call-early-media.md).
+
+Playback, recording, echo and DTMF are operations on the owned pipeline. Bridging moves frames
+between calls over channels, so a stalled leg cannot block its peer; mixing is a task that owns N
+receivers and one mixed output. Transfer follows RFC 3515 with `NOTIFY` progress reporting.
 
 ## Alternatives considered
 

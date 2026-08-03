@@ -154,7 +154,8 @@ that adds a feature.** M9 to M12 are defined and their stories are cut. **M10 is
 **M12 is delivered** as of `X-54`, and its section stays below for the same reason M10's does. `X-51`
 checked its four **Done when** clauses against the tests and CI jobs meant to demonstrate them and
 found three held and the fourth short in the same way M10's two were; `X-54` closed that fourth —
-[where M12 stands](#m12--provable) records which evidence carries each clause. M9 is a third done: `S-19` closed, `C-2` and `C-1` open. Only M11 is unstarted. The in-progress
+[where M12 stands](#m12--provable) records which evidence carries each clause. M9 is two thirds
+done: `S-19` and `C-2` closed, with `C-1` open. Only M11 is unstarted. The in-progress
 work is the [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host)
 epics below, which are not milestones because they are not RFC gaps.
 
@@ -170,7 +171,7 @@ B2BUA belongs in this repository. The product does not; the primitive does.
 | Story | RFC | Why it is in M9 |
 |---|---|---|
 | **S-19** UPDATE | 3311 | The only way to change a session that has not been answered — §5.1 permits it "for both early and confirmed dialogs". Also what RFC 4028 §7.4 *recommends* a session refresh use when the peer allows it, which `S-11` could not do. |
-| **C-2** Early media | 3960 | `S-12` built the early-dialog offer/answer and stopped there: sipx never puts a session description in a provisional, so a caller hears a locally generated tone where the callee sent audio. |
+| **C-2** Early media | 3960 | A reliable provisional starts one negotiated session, signals the application to stop its local tone, and hands the same live stream to the confirmed call without rebinding. |
 | **C-1** Two dialogs, one call | 7092 | An offer relayed leg to leg, a re-INVITE and a BYE propagated, and a bridge in between. §3.1.3 names the role sipx should be able to hold — signalling and SDP, off the media path — and §3.2.3 the one whose media half `M-11` already built. |
 
 **Done when** a session is renegotiated before it is answered, a caller hears the callee's early

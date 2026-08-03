@@ -215,6 +215,16 @@ impl Ringing {
         self.early.is_some()
     }
 
+    /// The running media session described by the reliable provisional, when there is one.
+    ///
+    /// [`ring_early`] starts it before returning, so an answerer can send an announcement and
+    /// receive caller audio before the INVITE is accepted. [`crate::answer_early`] moves this
+    /// exact session into the resulting [`crate::Call`].
+    #[must_use]
+    pub fn media(&self) -> Option<&sipx_media::MediaSession> {
+        self.early.as_ref().map(|early| &early.media)
+    }
+
     /// Hand the early session over to the [`Call`](crate::Call) that is taking its place.
     ///
     /// Empties this ringing rather than consuming it, because it still owns the retransmission

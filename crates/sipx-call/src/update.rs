@@ -248,9 +248,13 @@ pub(crate) async fn receive(early: EarlyDialog<'_>, incoming: &Incoming) -> Resu
             )?;
 
     if has_offer {
-        let answer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
-            .ok()
-            .and_then(|offer| early.early.and_then(|session| session.reanswer(&offer)));
+        let answer = match sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body())) {
+            Ok(offer) => match early.early {
+                Some(session) => session.reanswer(&offer),
+                None => None,
+            },
+            Err(_) => None,
+        };
         let Some(answer) = answer else {
             // §5.2 and `M-8`'s rule together: the change does not happen and the dialog carries
             // on. An early dialog refused this way still rings, and still answers.

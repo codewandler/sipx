@@ -119,6 +119,7 @@ and never carries fields the host uses to route (`Via`, `Route`, `CSeq`, …). `
 |---|---|---|
 | `call.incoming` | — | a new INVITE reached the host and matched this app |
 | `call.ringing` | `reliable` | a provisional was sent or received |
+| `call.early_media.started` | — | a reliable provisional completed offer/answer and its media session is running |
 | `call.answered` | — | the 2xx/ACK completed; media may flow |
 | `call.dtmf` | `digit`, `duration_ms` | an RFC 4733 event ended |
 | `call.playback.finished` | `instruction_id`, `completed` | a `play` ran out or was cut |
@@ -245,7 +246,7 @@ flapping app degrades a call it has already scripted, it does not kill it.
 
 No routing between endpoints, no registration control, no raw SIP header access, no media
 frames (reserved, §8), no conference verb yet (`M-12` exists; the verb waits for a consumer),
-no early-media playback (`C-2` gates it), no record-to-URL, no TTS.
+no application-server-model early session (RFC 3960 section 4), no record-to-URL, no TTS.
 
 ## 11. Vectors
 

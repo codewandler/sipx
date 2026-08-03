@@ -301,6 +301,20 @@ evidence = [
 note = "Offered in Supported, honoured in Require. A reliable provisional carries RSeq and is retransmitted from T1 with no T2 cap until PRACK or 64*T1; PRACK carries RAck and is answered 2xx, or 481 when it matches nothing. A peer that requires 100rel while it is off gets 420 with Unsupported. An offer arriving in the provisional is answered in the PRACK, and an offer arriving in the INVITE may be answered in the provisional (ring_early), which is what makes an early-dialog renegotiation by UPDATE legal."
 
 [[rfc]]
+number = 3960
+title = "Early Media and Ringing Tone Generation in SIP"
+layer = "media"
+status = "partial"
+roles = ["uac", "uas"]
+spec = "docs/specs/call-early-media.md"
+evidence = [
+  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/rel.rs",
+  "crates/sipx-call/tests/reliable_provisional.rs",
+]
+note = "The §3 gateway model is implemented in both roles: a reliable provisional completes the INVITE's offer/answer, starts bidirectional media on the early dialog, signals the application to replace its local ringing tone, and hands that same running session to the confirmed call. A refusal or abandoned branch drops its session. Partial because §3.1's selection among simultaneous forked early streams remains application policy and the §4 application-server model / RFC 3959 early-session disposition is not implemented."
+
+[[rfc]]
 number = 3311
 title = "The SIP UPDATE Method"
 layer = "core"

@@ -7,6 +7,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Early dialogs carry media before answer (`C-2`).** A reliable provisional response can start a
+  negotiated media session, callers receive and expose that session while still ringing, and the
+  application receives `call.early_media.started` so it can stop a locally generated tone. The
+  exact session becomes the confirmed call without rebinding; early UPDATE reconfigures it in
+  place, and failed or losing early dialogs tear it down. This implements RFC 3960's gateway model;
+  fork selection and the application-server model remain explicitly out of scope.
+
 ## [1.0.0-alpha.5] — 2026-08-03
 
 ### Changed

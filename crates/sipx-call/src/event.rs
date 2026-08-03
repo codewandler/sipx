@@ -65,6 +65,14 @@ pub enum CallEvent {
         /// PRACK-acknowledged rather than fire-and-forget.
         reliable: bool,
     },
+    /// A provisional answer completed offer/answer and the early dialog's media session is now
+    /// running (RFC 3960 section 3.2).
+    ///
+    /// Emitted after the session starts and before [`Self::Answered`], exactly once. This is the
+    /// signal an application uses to stop a locally generated ringing tone and render what the
+    /// far end is sending instead. A provisional that carries no usable reliable answer never
+    /// emits it.
+    EarlyMediaStarted,
     /// The 2xx/ACK exchange completed. Media may flow.
     Answered,
     /// A telephone-event run ended: one full keypress (RFC 4733).

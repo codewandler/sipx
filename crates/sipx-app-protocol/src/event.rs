@@ -551,6 +551,8 @@ pub enum EventKind {
         /// Whether it was reliable (RFC 3262).
         reliable: bool,
     },
+    /// A reliable provisional completed offer/answer and its early media is running.
+    EarlyMediaStarted,
     /// The 2xx/ACK completed; media may flow.
     Answered,
     /// An RFC 4733 event ended: one full keypress.
@@ -641,6 +643,7 @@ impl EventKind {
         match self {
             Self::Incoming => "call.incoming",
             Self::Ringing { .. } => "call.ringing",
+            Self::EarlyMediaStarted => "call.early_media.started",
             Self::Answered => "call.answered",
             Self::Dtmf { .. } => "call.dtmf",
             Self::PlaybackFinished { .. } => "call.playback.finished",
@@ -663,10 +666,11 @@ impl EventKind {
     /// Enumerable so that "the crate covers the table" is a test rather than a promise; the
     /// derived test in `tests/spec_tables.rs` reads the section and compares.
     #[must_use]
-    pub fn type_names() -> [&'static str; 15] {
+    pub fn type_names() -> [&'static str; 16] {
         [
             "call.incoming",
             "call.ringing",
+            "call.early_media.started",
             "call.answered",
             "call.dtmf",
             "call.playback.finished",
@@ -701,7 +705,12 @@ impl EventKind {
         let mut members: Vec<(&'static str, Option<Json>)> =
             vec![("type", Some(Json::Str(self.type_name().to_owned())))];
         match self {
-            Self::Incoming | Self::Answered | Self::Hold | Self::Resumed | Self::Other { .. } => {}
+            Self::Incoming
+            | Self::EarlyMediaStarted
+            | Self::Answered
+            | Self::Hold
+            | Self::Resumed
+            | Self::Other { .. } => {}
             Self::Ringing { reliable } => members.push(("reliable", Some(Json::from(*reliable)))),
             Self::Dtmf { digit, duration_ms } => {
                 members.push(("digit", Some(Json::Str(digit.to_string()))));
@@ -771,6 +780,7 @@ impl EventKind {
             "call.ringing" => Self::Ringing {
                 reliable: bool_field(value, "reliable")?,
             },
+            "call.early_media.started" => Self::EarlyMediaStarted,
             "call.answered" => Self::Answered,
             "call.dtmf" => Self::Dtmf {
                 digit: string_field(value, "digit")?

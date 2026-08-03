@@ -527,6 +527,11 @@ pub struct Encoded {
 /// A running media session.
 #[derive(Debug)]
 pub struct MediaSession {
+    /// The bound RTP socket, retained so an SDP renegotiation can rebuild codec workers without
+    /// rebinding the address the peer already knows.
+    socket: Arc<UdpSocket>,
+    /// The paired RTCP socket, for the same purpose.
+    rtcp_socket: Option<Arc<UdpSocket>>,
     outgoing: mpsc::Sender<Frame>,
     digits: Mutex<mpsc::Receiver<(Digit, Duration)>>,
     /// Distinguishes one keypress from the next.
@@ -1083,6 +1088,9 @@ impl MediaSession {
         ))
     }
 
+    // All fallible preparation precedes this constructor. Keeping worker creation contiguous is
+    // what makes it reviewable that every worker shares the same sockets and stop token.
+    #[allow(clippy::too_many_lines)]
     fn on_socket(
         socket: &Arc<UdpSocket>,
         rtcp: Option<Arc<UdpSocket>>,
@@ -1164,6 +1172,7 @@ impl MediaSession {
             },
         ));
 
+        let rtcp_socket = rtcp.clone();
         spawn_control(Control {
             media: Arc::clone(socket),
             rtcp,
@@ -1181,6 +1190,8 @@ impl MediaSession {
         });
 
         Self {
+            socket: Arc::clone(socket),
+            rtcp_socket,
             ice,
             outgoing: outgoing_tx,
             digits: Mutex::new(digits_rx),
@@ -1222,6 +1233,42 @@ impl MediaSession {
     #[must_use]
     pub fn runs_ice(&self) -> bool {
         self.ice.is_some()
+    }
+
+    /// Rebuild codec and packet workers on this session's existing sockets.
+    ///
+    /// Used when a later SDP exchange changes the remote address, codec, payload type, or keys.
+    /// The local RTP/RTCP addresses do not change: they are already published to the peer, and a
+    /// replacement that rebound an ephemeral port would make the new description false. The old
+    /// workers are stopped before their replacements are installed, while mute and encoded-relay
+    /// policy survive the transition.
+    ///
+    /// Returns `false` without changing the session when ICE owns the destinations. Rebuilding an
+    /// ICE-backed session requires the agent and its selected pair to move with the workers; a
+    /// caller must refuse that renegotiation rather than silently fall back to an unchecked path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetupError`] before stopping the current workers if the new timing or codec
+    /// cannot be constructed.
+    pub fn reconfigure(&mut self, config: Config) -> Result<bool, SetupError> {
+        if self.ice.is_some() {
+            return Ok(false);
+        }
+        let prepared = Prepared::new(&config)?;
+        let muted = self.is_muted();
+        let relay = self.relay.load(Ordering::SeqCst);
+        let socket = Arc::clone(&self.socket);
+        let rtcp = self.rtcp_socket.clone();
+        let local_addr = self.local_addr;
+
+        self.stop.stop();
+        let replacement = Self::on_socket(&socket, rtcp, local_addr, config, None, prepared);
+        replacement.set_muted(muted);
+        replacement.set_relay(relay);
+        let previous = std::mem::replace(self, replacement);
+        previous.stop();
+        Ok(true)
     }
 
     /// Apply a later exchange's ICE half, and read back what this side must now signal

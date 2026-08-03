@@ -196,6 +196,10 @@ async fn an_update_renegotiates_a_session_before_it_is_answered() {
     .expect("rings with an answer");
     let tag = ringing.tag().to_owned();
     assert!(ringing.has_early_session());
+    let early_media_address = ringing
+        .media()
+        .expect("ring_early starts media")
+        .local_addr();
 
     let provisional = drain_provisional(&mut responses).await;
     assert_early_answer(&provisional);
@@ -252,6 +256,14 @@ async fn an_update_renegotiates_a_session_before_it_is_answered() {
         body.contains("RTP/AVP 8"),
         "the 2xx to the UPDATE carried no answer to the new offer: {body:?}"
     );
+    assert_eq!(
+        ringing
+            .media()
+            .expect("the updated early session is still running")
+            .local_addr(),
+        early_media_address,
+        "applying the UPDATE rebound the address its answer had already advertised"
+    );
 
     // And the renegotiation is what the call is built on when the invitation is finally
     // accepted. Asserting the codec rather than merely that a 200 came back is the difference
@@ -264,6 +276,7 @@ async fn an_update_renegotiates_a_session_before_it_is_answered() {
         sipx_media::Codec::Pcma,
         "the call was answered on the codec the INVITE offered, not the one the UPDATE settled"
     );
+    assert_eq!(call.media().local_addr(), early_media_address);
     assert!(!call.is_ended());
 }
 

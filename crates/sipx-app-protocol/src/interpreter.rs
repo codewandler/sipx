@@ -886,7 +886,11 @@ impl Interpreter {
     fn apply_to_snapshot(&mut self, event: &EventKind) {
         match event {
             EventKind::Incoming => self.snapshot.state = CallState::Incoming,
-            EventKind::Ringing { .. } => self.snapshot.state = CallState::Ringing,
+            // Media began, but the INVITE is still provisional: the snapshot remains ringing
+            // until the separate 2xx/ACK event confirms it.
+            EventKind::Ringing { .. } | EventKind::EarlyMediaStarted => {
+                self.snapshot.state = CallState::Ringing;
+            }
             EventKind::Answered => self.snapshot.state = CallState::Answered,
             EventKind::Hold => self.snapshot.media.on_hold = true,
             EventKind::Resumed => self.snapshot.media.on_hold = false,

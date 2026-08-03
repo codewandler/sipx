@@ -11,7 +11,11 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use sipx_call::{Call, DialOptions, Error, answer_ringing, dial, ring};
+use sipx_call::{
+    Call, CallEvent, DialOptions, Error, answer_early, answer_ringing, dial, dial_early, ring,
+    ring_early,
+};
+use sipx_media::Interrupt;
 use sipx_sip::rel::{RAck, RSeq};
 use sipx_sip::{HeaderName, Host, HostName, Method, Request, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
@@ -25,6 +29,161 @@ async fn endpoint() -> (Handle, Receiver<Incoming>) {
     bind(Config::new("127.0.0.1:0".parse().expect("valid")))
         .await
         .expect("binds")
+}
+
+/// C-2's failing-first vector: the gateway-model session is audible before the final response,
+/// and confirmation moves that running session rather than replacing it.
+#[tokio::test]
+async fn a_caller_receives_early_media_before_the_call_is_answered() {
+    const SENT_SAMPLES: usize = 16_000;
+    const REQUIRED_SAMPLES: usize = 8_000;
+
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let (caller_endpoint, _caller_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+    let (may_answer_tx, may_answer_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let answering = tokio::spawn(async move {
+        let invite = callee_incoming.recv().await.expect("an INVITE");
+        let mut ringing = ring_early(
+            &callee_endpoint,
+            &invite,
+            183,
+            "Session Progress",
+            loopback(),
+        )
+        .await
+        .expect("starts the answering side's early session");
+
+        let prack = callee_incoming.recv().await.expect("the PRACK");
+        assert!(
+            ringing.on_prack(&prack).await.expect("handles the PRACK"),
+            "the reliable answer was not acknowledged"
+        );
+
+        let media = ringing
+            .media()
+            .expect("ring_early owns a running media session");
+        let packet = media.samples_per_packet();
+        assert!(
+            media.play(&vec![1_200; SENT_SAMPLES], packet).await,
+            "the early announcement was cut short"
+        );
+
+        may_answer_rx
+            .await
+            .expect("the caller allows the final response");
+        answer_early(&callee_endpoint, &invite, &mut ringing)
+            .await
+            .expect("confirms the early dialog")
+    });
+
+    let mut dialing = dial_early(
+        &caller_endpoint,
+        Target::udp(callee_addr),
+        &to_uri(),
+        &options(),
+    )
+    .await
+    .expect("the early dialog is established");
+
+    let mut events = dialing.events().expect("one progress event receiver");
+    assert!(
+        matches!(
+            events.recv().await,
+            Some(CallEvent::Ringing { reliable: true })
+        ),
+        "reliable ringing is reported before its media"
+    );
+    assert!(
+        matches!(events.recv().await, Some(CallEvent::EarlyMediaStarted)),
+        "the application was not told to replace its local ringing tone"
+    );
+
+    let local_before = dialing
+        .media()
+        .expect("the caller owns the running early session")
+        .local_addr();
+    let received = dialing
+        .media()
+        .expect("the caller owns the running early session")
+        // Five seconds bounds a broken stream; the assertion measures received samples.
+        .record_at_least(REQUIRED_SAMPLES, Duration::from_secs(5))
+        .await;
+    assert!(
+        received.len() >= REQUIRED_SAMPLES,
+        "only {} of {REQUIRED_SAMPLES} early samples arrived",
+        received.len()
+    );
+
+    may_answer_tx.send(()).expect("the answerer is still alive");
+    let caller = dialing.answered().await.expect("the call is confirmed");
+    assert_eq!(
+        caller.media().local_addr(),
+        local_before,
+        "confirmation rebound the media port"
+    );
+    assert!(
+        matches!(events.recv().await, Some(CallEvent::Answered)),
+        "the early event stream did not continue into the confirmed call"
+    );
+
+    let callee = answering.await.expect("the answering side finishes");
+    assert!(!caller.media().is_stopped());
+    assert!(!callee.media().is_stopped());
+}
+
+/// The ownership half of C-2: a losing or abandoned early branch cannot leave its RTP workers
+/// detached. Dropping the handle drops its session, which resolves an outstanding playback as cut
+/// short; that completion is the happens-before rather than a sleep followed by a poll.
+#[tokio::test]
+async fn dropping_an_early_dialog_stops_its_media_session() {
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let (caller_endpoint, _caller_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+
+    let answering = tokio::spawn(async move {
+        let invite = callee_incoming.recv().await.expect("an INVITE");
+        let mut ringing = ring_early(
+            &callee_endpoint,
+            &invite,
+            183,
+            "Session Progress",
+            loopback(),
+        )
+        .await
+        .expect("starts early media");
+        let prack = callee_incoming.recv().await.expect("the PRACK");
+        assert!(ringing.on_prack(&prack).await.expect("handles PRACK"));
+        ringing
+    });
+
+    let dialing = dial_early(
+        &caller_endpoint,
+        Target::udp(callee_addr),
+        &to_uri(),
+        &options(),
+    )
+    .await
+    .expect("the early dialog is established");
+    let ringing = answering.await.expect("the answerer remains early");
+
+    let playback = dialing
+        .media()
+        .expect("the caller owns early media")
+        .start_playback(vec![900; 80_000], Interrupt::Never);
+    drop(dialing);
+
+    // Two seconds bounds a broken cleanup; playback completion is the cleanup signal.
+    let end = tokio::time::timeout(Duration::from_secs(2), playback.finished())
+        .await
+        .expect("dropping Dialing stops the media worker");
+    assert!(
+        !end.completed(),
+        "the abandoned announcement ran to its end"
+    );
+
+    drop(ringing);
 }
 
 fn to_uri() -> Uri {

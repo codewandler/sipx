@@ -29,6 +29,7 @@ pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventK
         CallEvent::Ringing { reliable } => EventKind::Ringing {
             reliable: *reliable,
         },
+        CallEvent::EarlyMediaStarted => EventKind::EarlyMediaStarted,
         CallEvent::Answered => EventKind::Answered,
         CallEvent::Dtmf { digit, duration } => EventKind::Dtmf {
             digit: digit.as_char(),

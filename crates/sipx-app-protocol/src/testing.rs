@@ -21,6 +21,7 @@ pub fn one_of_every_event() -> Vec<EventKind> {
     vec![
         EventKind::Incoming,
         EventKind::Ringing { reliable: true },
+        EventKind::EarlyMediaStarted,
         EventKind::Answered,
         EventKind::Dtmf {
             digit: '5',

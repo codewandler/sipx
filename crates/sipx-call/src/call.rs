@@ -2908,6 +2908,10 @@ pub struct Dialing {
     /// held while an application decides what to do with a handle is a `2xx` the far end is
     /// retransmitting (RFC 3261 §13.2.2.4).
     answered_already: Option<Box<Call>>,
+    /// The event stream begins with this app-visible attempt, before a `Call` exists.
+    events: Option<EventSink>,
+    /// Handed out once by [`Self::events`], or moved into the confirmed [`Call`].
+    events_rx: Option<CallEvents>,
 }
 
 /// What one read from the INVITE transaction produced.
@@ -2960,6 +2964,7 @@ pub async fn dial_early(
         open_invitation(endpoint, &target, to, options, &Identity::fresh()).await?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
 
+    let (events, events_rx) = EventSink::new();
     let mut dialing = Dialing {
         endpoint: endpoint.clone(),
         in_dialog: target.clone(),
@@ -2984,6 +2989,8 @@ pub async fn dial_early(
             .map(|limit| tokio::time::Instant::now() + limit),
         options: options.clone(),
         answered_already: None,
+        events: Some(events),
+        events_rx: Some(events_rx),
     };
     dialing.reach_early_dialog().await?;
     Ok(dialing)
@@ -3008,6 +3015,78 @@ impl Dialing {
     #[must_use]
     pub fn has_early_session(&self) -> bool {
         matches!(self.media, Some(EarlyMedia::Answered(_)))
+    }
+
+    /// The running early-media session, once a reliable provisional answered the INVITE offer.
+    ///
+    /// `None` for a bodiless provisional and before an answer arrives. When this is `Some`, the
+    /// same session is moved into the [`Call`] returned by [`Self::answered`].
+    #[must_use]
+    pub fn media(&self) -> Option<&MediaSession> {
+        match self.media.as_ref() {
+            Some(EarlyMedia::Answered(early)) => Some(&early.media),
+            _ => self.answered_already.as_ref().map(|call| call.media()),
+        }
+    }
+
+    /// This attempt's event stream, continuing on the confirmed call.
+    ///
+    /// Handed out once. A reliable provisional that starts media queues
+    /// [`CallEvent::EarlyMediaStarted`] before this method can return it; the same receiver later
+    /// observes [`CallEvent::Answered`] without being replaced at confirmation.
+    pub fn events(&mut self) -> Option<CallEvents> {
+        self.events_rx.take().or_else(|| {
+            self.answered_already
+                .as_mut()
+                .and_then(|call| call.events())
+        })
+    }
+
+    /// Drive this invitation until early media starts or a final response arrives.
+    ///
+    /// [`dial_early`] returns on the first early dialog, which may be a bodiless `180`; a later
+    /// reliable `183` can still answer the offer. This method keeps the handle in the
+    /// application's ownership while reading through those later provisionals. `true` means
+    /// [`Self::media`] is now available and [`CallEvent::EarlyMediaStarted`] has been emitted.
+    /// `false` means the invitation reached a final response first; [`Self::answered`] then hands
+    /// back the already-completed call (or its final error).
+    ///
+    /// # Errors
+    ///
+    /// The same provisional, final-refusal, timeout, cancellation, and transaction errors as
+    /// [`Self::answered`]. `false` reports a successful final response with no early-media phase;
+    /// the already-completed call is retained for [`Self::answered`].
+    pub async fn wait_for_early_media(&mut self) -> Result<bool> {
+        if self.has_early_session() {
+            return Ok(true);
+        }
+        if self.answered_already.is_some() {
+            return Ok(false);
+        }
+        loop {
+            match self.next_response().await {
+                Arrived::Provisional(response) => {
+                    if let Err(error) = self.observe(&response).await {
+                        return Err(self.abandon(error).await);
+                    }
+                    if self.has_early_session() {
+                        return Ok(true);
+                    }
+                }
+                Arrived::Final(response) => {
+                    let call = self.confirm(*response).await?;
+                    self.answered_already = Some(Box::new(call));
+                    return Ok(false);
+                }
+                Arrived::GaveUp => {
+                    self.give_up().await;
+                    return Err(Error::Cancelled(
+                        self.options.timeout.unwrap_or(Duration::ZERO),
+                    ));
+                }
+                Arrived::Gone => return Err(Error::NoResponse),
+            }
+        }
     }
 
     /// Whether the far end has said it accepts UPDATE (RFC 3311 §4).
@@ -3198,8 +3277,14 @@ impl Dialing {
 
         self.provisional = true;
         let reliable = crate::rel::reliable_sequence(response);
-        if response.status.code() > TRYING {
-            self.ringing = Some(reliable.is_some());
+        if response.status.code() > TRYING && self.ringing.is_none() {
+            let is_reliable = reliable.is_some();
+            self.ringing = Some(is_reliable);
+            if let Some(events) = self.events.as_ref() {
+                events.emit(CallEvent::Ringing {
+                    reliable: is_reliable,
+                });
+            }
         }
 
         if self.dialog.is_none() {
@@ -3309,17 +3394,21 @@ impl Dialing {
         let Some(EarlyMedia::Offered(port)) = self.media.take() else {
             return Ok(());
         };
+        let media = match self.ice.take() {
+            Some(local) => port.start_with_ice(settled.media_config(), local)?,
+            None => port.start(settled.media_config())?,
+        };
         self.media = Some(EarlyMedia::Answered(Box::new(Early {
-            port,
+            media,
             capabilities: self.capabilities.clone(),
             settled,
-            // The calling side retains its gathered agent on `Dialing`; `Early::ice` is the
-            // answering side's ownership path into `answer_early`.
-            ice: None,
             media_address: self.options.media_address,
             codecs: self.options.media.codecs,
         })));
         self.negotiation.received_answer();
+        if let Some(events) = self.events.as_ref() {
+            events.emit(CallEvent::EarlyMediaStarted);
+        }
         Ok(())
     }
 
@@ -3415,8 +3504,11 @@ impl Dialing {
                         self.in_dialog.clone(),
                     ));
                 }
-                let (events, events_rx) = EventSink::new();
-                emit_construction_events(&events, self.ringing);
+                let Some(events) = self.events.take() else {
+                    return Err(Error::NoDialog);
+                };
+                events.emit(CallEvent::Answered);
+                let events_rx = self.events_rx.take();
                 Ok(Call {
                     dialog,
                     media,
@@ -3444,7 +3536,7 @@ impl Dialing {
                     peer_allows_update: self.peer_allows_update
                         || update::peer_allows(&response.headers),
                     events,
-                    events_rx: Some(events_rx),
+                    events_rx,
                 })
             }
             Err(error) => {
@@ -3499,19 +3591,30 @@ impl Dialing {
         dialog.refresh_target(&response.headers);
         self.in_dialog = in_dialog_target(&dialog, self.target.clone());
 
-        let (port, settled) = match self.media.take() {
+        let (media, settled) = match self.media.take() {
             // The answer arrived in a provisional, and any UPDATE since settled its own. So the
             // 2xx's body is *not* read: at this point it can only be a repeat of the answer or,
             // worse, a description that undoes the renegotiation. `answer_early` sends no body
             // in this exact case, and for the same reason.
-            Some(EarlyMedia::Answered(early)) if confirms_early => (early.port, early.settled),
-            Some(EarlyMedia::Answered(early)) => (early.port, self.settle_from(response)?),
-            Some(EarlyMedia::Offered(port)) => (port, self.settle_from(response)?),
+            Some(EarlyMedia::Answered(early)) if confirms_early => (early.media, early.settled),
+            Some(EarlyMedia::Answered(early)) => {
+                // This 2xx confirmed a different fork from the early dialog the handle names.
+                // Never attach the losing branch's running stream to the winner. Multi-branch
+                // selection is application policy; until this handle can represent both, the
+                // honest outcome is to tear the loser down and ACK-then-BYE the unrepresented
+                // winner through `confirm`'s error path.
+                drop(early);
+                return Err(Error::NoDialog);
+            }
+            Some(EarlyMedia::Offered(port)) => {
+                let settled = self.settle_from(response)?;
+                let media = match self.ice.take() {
+                    Some(local) => port.start_with_ice(settled.media_config(), local)?,
+                    None => port.start(settled.media_config())?,
+                };
+                (media, settled)
+            }
             None => return Err(Error::NoDialog),
-        };
-        let media = match self.ice.take() {
-            Some(local) => port.start_with_ice(settled.media_config(), local)?,
-            None => port.start(settled.media_config())?,
         };
         Ok((dialog, media, settled))
     }
@@ -3659,11 +3762,9 @@ async fn answer_gathering(
 /// would make the 200 contradict the 183 for no reason.
 #[derive(Debug)]
 pub(crate) struct Early {
-    pub(crate) port: MediaPort,
+    pub(crate) media: MediaSession,
     pub(crate) capabilities: Capabilities,
     pub(crate) settled: Settled,
-    /// The gathered ICE agent retained until the provisional exchange becomes a call.
-    pub(crate) ice: Option<LocalDescription>,
     pub(crate) media_address: IpAddr,
     /// The codec set the provisional's answer was built from, kept because the exchange is not
     /// over: an UPDATE may reoffer before the 200, and it has to be answered from the same set
@@ -3712,12 +3813,15 @@ impl Early {
             negotiated,
             srtp: srtp_keys_answering(capabilities.crypto.as_ref(), offer_crypto(offer)),
         };
+        let media = match local_ice {
+            Some(local) => port.start_with_ice(settled.media_config(), local)?,
+            None => port.start(settled.media_config())?,
+        };
         Ok((
             Self {
-                port,
+                media,
                 capabilities,
                 settled,
-                ice: local_ice,
                 media_address,
                 codecs: policy.codecs,
             },
@@ -3733,7 +3837,16 @@ impl Early {
     /// what the last completed exchange settled.
     pub(crate) fn adopt_answer(&mut self, answer: &SessionDescription) {
         if let Ok(negotiated) = negotiated(answer, self.codecs) {
-            self.settled.negotiated = negotiated;
+            let settled = Settled {
+                negotiated,
+                srtp: self.settled.srtp.clone(),
+            };
+            // A failed replacement leaves the working early stream in place. The UPDATE itself
+            // was usable, so turning a local socket failure into a peer refusal would describe
+            // the wrong fault; the eventual call still confirms the last session that ran.
+            // discard: the peer has already answered our UPDATE, so there is no signalling
+            // response left to change; the still-running media session is the safe fallback.
+            let _ = self.replace_media(settled);
         }
     }
 
@@ -3755,11 +3868,33 @@ impl Early {
         {
             return None;
         }
-        self.settled = Settled {
+        let settled = Settled {
             negotiated,
             srtp: srtp_keys_answering(self.capabilities.crypto.as_ref(), offer_crypto(offer)),
         };
+        self.replace_media(settled).ok()?;
         Some(answer)
+    }
+
+    /// Apply an early UPDATE to the session that is already running.
+    ///
+    /// This is the same transition [`Call::move_media_if_changed`] performs for a confirmed
+    /// dialog, but it happens at UPDATE time rather than being deferred to the INVITE's 2xx. The
+    /// resulting session is then the one confirmation moves into `Call`, so answer time itself
+    /// still neither rebinds nor leaves a gap.
+    fn replace_media(&mut self, settled: Settled) -> Result<()> {
+        let to = settled.negotiated;
+        let changed = to.remote != self.settled.negotiated.remote
+            || to.codec != self.settled.negotiated.codec
+            || to.wire_payload_type() != self.settled.negotiated.wire_payload_type()
+            || settled.is_encrypted() != self.settled.is_encrypted();
+        if changed && !self.media.reconfigure(settled.media_config())? {
+            return Err(Error::Sdp(
+                "an ICE-backed early session cannot change its media format in place".to_owned(),
+            ));
+        }
+        self.settled = settled;
+        Ok(())
     }
 }
 
@@ -3918,12 +4053,7 @@ pub async fn answer_early(
     }
     let response = response.build();
 
-    let media = match early.ice {
-        Some(local) => early
-            .port
-            .start_with_ice(early.settled.media_config(), local)?,
-        None => early.port.start(early.settled.media_config())?,
-    };
+    let media = early.media;
     endpoint.respond(&incoming.key, response.clone()).await?;
 
     let acked = Arc::new(tokio::sync::Notify::new());
