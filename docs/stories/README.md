@@ -71,6 +71,8 @@ _Everything above this layer inherits its correctness properties. SIP's genuinel
 
 ### Transport layer
 _The transport layer is the only place in the signalling stack that touches the network, which_
+- [T-28 — Cancel an outgoing INVITE transaction from a forwarding element](T-28-cancel-an-outgoing-invite-transaction.md) · Signalling · requested by sipx-clstr PX-12 — the UA has a private builder, while a proxy cannot cancel one branch through Handle
+- [T-29 — Bind only the selected cleartext transports](T-29-bind-only-the-selected-cleartext-transports.md) · Signalling · requested by sipx-clstr FC-1 — Config can express UDP or UDP+TCP, never TCP without an undeclared UDP socket
 - [X-54 — Count every discard in the signalling path, and let the numbers out beside the capture](X-54-every-discard-is-one-crates-worth-of-every.md) · Build · found by X-51 — M12's third clause says *every* discard in the signalling path is counted and exportable next to a capture; the enumeration covers one crate, the dialog layer has uncounted losses, and nothing outside the crates' own tests can read either counter snapshot
 
 ## Blocked
