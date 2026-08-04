@@ -40,8 +40,6 @@ PCM/G.722/jitter lane remain separate decisions rather than silent beta.4 scope 
 
 ## Now (in progress)
 - [A-15 — Publish and verify 1.0.0-beta.4](A-15-publish-beta4.md) · Application · beta.4 capstone · immutable tag, exact registry consumer, installed Opus CLI, Pages and GitHub prerelease
-- [X-95 — Order the symmetric-RTP proof by receipt, not kernel enqueue](X-95-order-the-symmetric-rtp-proof-by-receipt.md) · Build · exact-main beta.4 CI exposed a send-to-versus-receive race in the non-ICE proof
-- [X-96 — Arm the browser cleanup proof after process start](X-96-arm-the-browser-cleanup-proof-after-process-start.md) · Build · the full beta.4 gate exposed a total-timeout race before the lifecycle probe wrote its PID evidence
 
 ## Next (ready — take the top one unless the user named a story)
 _None._
@@ -317,6 +315,8 @@ _sipx implements exactly one SRTP protection profile:_
 - [X-91 — Provision device audio for the feature matrix](X-91-provision-device-audio-for-the-feature-matrix.md) · Build · beta-1 blocker · exact-sha CI enabled device audio without its Linux build prerequisite
 - [X-92 — Pass the provenance denylist to the release gate](X-92-pass-the-provenance-denylist-to-the-release-gate.md) · Build · beta-1 release blocker · the tagged gate could not read the configured organization secret
 - [X-94 — Resume a partial release with fixed controller tooling](X-94-resume-a-partial-release-with-fixed-controller-tooling.md) · Build · beta.2 published four leaf crates before the tag-bound resume verifier rejected Cargo's valid clean VCS record
+- [X-95 — Order the symmetric-RTP proof by receipt, not kernel enqueue](X-95-order-the-symmetric-rtp-proof-by-receipt.md) · Build · exact-main beta.4 CI exposed a send-to-versus-receive race in the non-ICE proof
+- [X-96 — Arm the browser cleanup proof after process start](X-96-arm-the-browser-cleanup-proof-after-process-start.md) · Build · the full beta.4 gate exposed a total-timeout race before the lifecycle probe wrote its PID evidence
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

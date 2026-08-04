@@ -16,13 +16,13 @@ does not turn RFC coverage into a weighted release score.
 |---|---|---|---|
 | 1 | No claim outlives its caller, at any layer | met | — |
 | 2 | Adversarial input and adversarial timing are both fuzzed | met | — |
-| 3 | A red gate means a defect | open | `X-95`, `X-96` |
+| 3 | A red gate means a defect | met | — |
 | 4 | No known-wrong shipped path | met (attested) | — |
 | 5 | The public API says what it guarantees | met | — |
 | 6 | Testable from a shell for everything the CLI exposes | met (attested) | — |
 | 7 | The distance to v1 is generated, not asserted | met | — |
 
-**6 of 7 predicates met.** A predicate is met when every story declaring it is `done`. **A story declares its predicate itself**, in its own `predicate:` frontmatter field, so there is no list of predicate stories kept here to fall behind the board — which is what happened, and is `X-42`.
+**7 of 7 predicates met.** A predicate is met when every story declaring it is `done`. **A story declares its predicate itself**, in its own `predicate:` frontmatter field, so there is no list of predicate stories kept here to fall behind the board — which is what happened, and is `X-42`.
 
 - **Predicate 1 is computed, not attested.** Computed, but the thing computed is a *definition* rather than a search. `X-38` ships an application (`sipx-app`) and defines the reachable-from-a-call surface as what it uses; `scripts/check-app-surface.py` holds every crate's `Supported` claim against that application's real dependency closure, and the gate is red when the two disagree. The three path checks before it could only find capabilities that were *mentioned* — a path is satisfied by citing a file whose relevant branch is dead — and none of them could say whether a capability was worth selecting. An application answers that by needing it or not. What this does **not** say is that every row of a layer is individually reached: the declarations it checks are per crate, so the surface is entered per crate.
 - **Predicate 4 is attested, not computed.** Cannot be computed: a defect nobody has found leaves no trace in either source. What is reported is the absence of *open* stories describing one.
@@ -32,14 +32,14 @@ does not turn RFC coverage into a weighted release score.
 
 | # | Predicate | State | Waiting on |
 |---|---|---|---|
-| 1 | Every alpha integrity predicate still holds | open | alpha predicate 3 (open) |
+| 1 | Every alpha integrity predicate still holds | met | — |
 | 2 | Hostile-input, entropy and SRTCP replay invariants are executable | met | — |
 | 3 | Browser-audio negotiation is complete and fail-closed | met | — |
 | 4 | One nominated component carries every browser-media protocol safely | met | — |
 | 5 | An independent browser endpoint carries Opus in both roles | met | — |
 | 6 | Exact registry, CLI, Pages and GitHub release evidence agrees | open | `A-15` |
 
-**4 of 6 predicates met. All 6 are required; this is not a weighted score.** Integrity is derived from the alpha table above. Every other association lives in the blocking story's own `announcement:` frontmatter, so the report has no second list to drift. RFC coverage is intentionally absent from this gate: a smaller truthful surface is announceable and an overstated larger one is not. This informational threshold does not authorize publicity.
+**5 of 6 predicates met. All 6 are required; this is not a weighted score.** Integrity is derived from the alpha table above. Every other association lives in the blocking story's own `announcement:` frontmatter, so the report has no second list to drift. RFC coverage is intentionally absent from this gate: a smaller truthful surface is announceable and an overstated larger one is not. This informational threshold does not authorize publicity.
 
 ## RFC coverage, per layer
 
@@ -60,19 +60,19 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Build | 8 |
 | Media | 7 |
+| Build | 6 |
 | Signalling | 6 |
 | Application | 5 |
 | Transport | 4 |
 | Phone | 2 |
-| **total** | **32** |
+| **total** | **30** |
 
-203 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+205 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:c8c03e2ead96878320ecd7b5b28d956f2404787ed3f8800a2a491755450634e9","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51}} -->
+<!-- maturity-event-days: {"basis":"sha256:0d65ba9a4b1accf1b5e649257a637e6c57825e35c29ccb204fd4b7bb988cd134","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":2},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -85,6 +85,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-01 | 0 | 1 | +1 |
 | 2026-08-03 | 1 | 12 | +11 |
 | 2026-08-04 | 51 | 39 | -12 |
+| 2026-08-05 | 0 | 2 | +2 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

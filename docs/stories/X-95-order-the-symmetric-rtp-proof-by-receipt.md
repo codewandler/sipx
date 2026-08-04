@@ -2,7 +2,7 @@
 id: X-95
 title: Order the symmetric-RTP proof by receipt, not kernel enqueue
 pillar: Build
-status: in-progress
+status: done
 priority: 1
 design: docs/specs/deployment-addresses.md
 epic: conformance
@@ -21,11 +21,11 @@ to an observed source only after sipx has accepted a valid packet from it.
 
 ## Acceptance
 
-- [ ] The hosted failure is preserved as failing-first evidence and identified as a test-ordering
+- [x] The hosted failure is preserved as failing-first evidence and identified as a test-ordering
       defect rather than a production symmetric-RTP regression.
-- [ ] The proof waits for sipx's public receive event before sending returned media; no fixed sleep
+- [x] The proof waits for sipx's public receive event before sending returned media; no fixed sleep
       or widened race window stands in for the event.
-- [ ] The isolated regression remains green under a bounded repetition, and the complete gate and
+- [x] The isolated regression remains green under a bounded repetition, and the complete gate and
       exact-main CI pass before the beta.4 tag is created.
 
 ## Progress
@@ -34,6 +34,9 @@ to an observed source only after sipx has accepted a valid packet from it.
   the kernel through `send_to`, but the test queued 100 reply frames before sipx's receive loop had
   necessarily parsed the primer and updated the shared destination. One legal pre-latch frame then
   reached the advertised sink and failed the assertion.
+- The unchanged test reproduced twice in 200 bounded runs. After it waited for `MediaSession::recv`
+  before sending one reply, the exact regression passed 200 of 200 repetitions and the complete
+  local gate passed all 36 steps.
 
 ## Notes
 

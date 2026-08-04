@@ -70,6 +70,11 @@ It is a new immutable release after beta.3, not a replacement for an existing ta
 
 ### Fixed
 
+- **Release proofs now wait for their causal readiness events instead of racing scheduler load**
+  (`X-95`, `X-96`). The non-ICE symmetric-RTP test waits until sipx accepts the primer packet before
+  sending its reply, and the browser lifecycle self-test waits for admitted process evidence before
+  asserting group cleanup while checking the outer timeout independently.
+
 - **The two-process playback proof now keeps its receiver alive for the complete causal sender
   bound** (`X-60`). The receiver's twelve-second lifetime is derived from the caller's six-second
   exchange plus the call layer's five-second media-queue drain, so workspace load cannot close the
