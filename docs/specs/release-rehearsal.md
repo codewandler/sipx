@@ -11,7 +11,7 @@ The helper reads the workspace and package records from `cargo metadata --locked
 names, versions, publication policy and dependency edges therefore come from the same manifests Cargo
 will package. Git supplies the checkout state and the exact annotated tag at `HEAD`.
 
-There are four release modes, one recovery-authorized form of `publish`, and one dirty-candidate
+There are four release modes, two controller-authorized forms of `publish`, and one dirty-candidate
 diagnostic:
 
 | Mode | Registry writes | Required checkout | Action |
@@ -97,6 +97,30 @@ second first-publication path. Before any write it MUST establish all of these f
 The recovery workflow retains the ordinary frontier, timeout, consumer, Pages and GitHub-prerelease
 proofs. It obtains no authority to change package bytes: a mismatch stops before another upload, and
 a required package-content change still requires a new version.
+
+### 1.3 One-purpose beta.1 first-publication replay
+
+The partial-recovery authority above MUST continue to refuse an empty visible package set. A
+separate manual workflow may begin the otherwise unpublished `v1.0.0-beta.1` package set only when
+every immutable incident fact is exact:
+
+- annotated tag object `b0bcadcc2a69a5824ec4a9549f7800c88c4f13fa`, peeled commit
+  `3ab81709c7a235831638c62eba5fe73ce9eb7773`, and failed run `30906820031`;
+- fixed workflow source `.github/workflows/crates-io-beta1-replay.yml` from exact `main`, with a
+  separate clean tag checkout and positive protected run identity;
+- the original run validated the tag, failed its complete gate and skipped rehearsal, publication,
+  consumer, Pages and GitHub Release; and
+- the replay has since passed the complete gate on the immutable checkout with the required
+  provenance input and passed the current controller's locked rehearsal before receiving the Cargo
+  credential.
+
+The helper argument is exactly
+`--authorize-ci-beta1-replay v1.0.0-beta.1@3ab81709c7a235831638c62eba5fe73ce9eb7773@30906820031`.
+It is publish-only, requires an explicit release root and is mutually exclusive with both ordinary
+and partial-recovery authorization. Its only semantic difference is that this exact authority may
+start with zero visible packages. After the first upload, archive reproduction, canonical checksum,
+dependency-frontier, visibility and consumer rules are identical. Any other version, tag, commit,
+run, repository, event, workflow source or controller identity is refusal before a Cargo write.
 
 `verify-consumer` first polls all exact versions under the same finite visibility rule. It creates a
 temporary Cargo project whose dependencies use `=<workspace-version>` and name `registry =
@@ -204,3 +228,4 @@ the unavailable dependencies. It never guesses that a successful upload is alrea
 | R17 | GitHub tag push or tag-selected manual dispatch, exact annotated tag/HEAD/workflow SHA, both confirmations and token | retain the ordinary frontier/checksum rules and permit at most one ready frontier |
 | R18 | protected recovery names a failed same-tag release whose gate/rehearsal passed and publication failed, with matching visible bytes | fixed controller may advance one missing frontier; wrong run/workflow/step/commit/controller or byte mismatch dispatches no upload |
 | R19 | Cargo VCS record omits `git.dirty`, sets a boolean, or gives a non-boolean value | omitted/false is clean; true is dirty; malformed is refused |
+| R20 | exact beta.1 replay authority and empty registry, or any mutation of its fixed incident/workflow/controller facts | exact authority may begin one frontier after the workflow's new gate and rehearsal; every mutation refuses, while ordinary recovery still refuses zero visible packages |

@@ -259,6 +259,103 @@ def resume_workflow_problems(text: str) -> list[str]:
     return problems
 
 
+def beta1_replay_workflow_problems(text: str) -> list[str]:
+    """Return defects in the hard-bound historical beta.1 first-publication replay."""
+
+    problems: list[str] = []
+    checks = (
+        ("beta.1 replay permissions are not read-only", r"permissions:\s*\n\s+actions:\s*read\s*\n\s+contents:\s*read\s*\n\s+pages:\s*read"),
+        ("beta.1 replay does not serialize with beta.1 publication", r"group:\s*crates-io-v1\.0\.0-beta\.1"),
+        ("beta.1 replay concurrency can cancel publication", r"cancel-in-progress:\s*false"),
+        ("beta.1 replay runs outside the protected release environment", r"\n\s*replay:\s*\n.*?environment:\s*\n\s+name:\s*release"),
+        ("beta.1 replay job has no finite timeout", r"\n\s*replay:\s*\n(?:(?!\n\s*github_release:).)*?timeout-minutes:\s*[1-9][0-9]*"),
+        ("beta.1 replay tag constant differs", r"RELEASE_TAG:\s*v1\.0\.0-beta\.1"),
+        ("beta.1 replay commit constant differs", r"RELEASE_SHA:\s*3ab81709c7a235831638c62eba5fe73ce9eb7773"),
+        ("beta.1 replay failed-run constant differs", r"SIPX_FAILED_RELEASE_RUN_ID:\s*30906820031"),
+        ("beta.1 replay tag-object constant differs", r"EXPECTED_RELEASE_TAG_OBJECT:\s*b0bcadcc2a69a5824ec4a9549f7800c88c4f13fa"),
+        ("beta.1 replay Pages run constant differs", r"EXPECTED_PAGES_RUN_ID:\s*30906258443"),
+        ("beta.1 replay Pages artifact constant differs", r"EXPECTED_PAGES_ARTIFACT_ID:\s*8891214271"),
+        ("beta.1 replay does not define separate controller and release roots", r"CONTROLLER_ROOT:.*?/controller\s*\n\s+SIPX_RELEASE_ROOT:.*?/release"),
+        (
+            "beta.1 replay controller checkout is absent or mutable",
+            r"Check out the fixed beta\.1 replay controller\s*\n(?:(?!\n\s+- name:).)*?uses:\s*actions/checkout@v4(?:(?!\n\s+- name:).)*?ref:\s*\$\{\{\s*github\.sha\s*\}\}(?:(?!\n\s+- name:).)*?path:\s*controller(?:(?!\n\s+- name:).)*?fetch-depth:\s*0(?:(?!\n\s+- name:).)*?persist-credentials:\s*false",
+        ),
+        (
+            "beta.1 replay immutable checkout is absent or not separate",
+            r"Check out the immutable beta\.1 tag separately\s*\n(?:(?!\n\s+- name:).)*?uses:\s*actions/checkout@v4(?:(?!\n\s+- name:).)*?ref:\s*refs/tags/v1\.0\.0-beta\.1(?:(?!\n\s+- name:).)*?path:\s*release(?:(?!\n\s+- name:).)*?fetch-depth:\s*0(?:(?!\n\s+- name:).)*?persist-credentials:\s*false",
+        ),
+        ("beta.1 replay workflow source is not exact main", r"expected_workflow_ref=.*?\.github/workflows/crates-io-beta1-replay\.yml@refs/heads/main.*?GITHUB_WORKFLOW_REF.*?expected_workflow_ref"),
+        ("beta.1 replay controller is not bound to event/workflow SHA", r"GITHUB_SHA.*?GITHUB_WORKFLOW_SHA.*?controller_sha.*?GITHUB_SHA"),
+        ("beta.1 replay controller cleanliness is not required", r"CONTROLLER_ROOT.*?status --porcelain=v1 --untracked-files=all"),
+        ("beta.1 replay does not require the annotated tag", r"SIPX_RELEASE_ROOT.*?cat-file -t .*?refs/tags/\$RELEASE_TAG.*?!= tag"),
+        ("beta.1 replay does not bind local and remote tag objects", r"local_tag_object=.*?refs/tags/\$RELEASE_TAG.*?remote_tag_object=.*?ls-remote --refs --tags origin .*?EXPECTED_RELEASE_TAG_OBJECT"),
+        ("beta.1 replay does not bind the peeled commit", r"release_sha=.*?refs/tags/\$RELEASE_TAG\^\{commit\}.*?RELEASE_SHA"),
+        ("beta.1 replay failed run is not queried", r"actions/runs/\$SIPX_FAILED_RELEASE_RUN_ID"),
+        ("beta.1 replay failed jobs are not queried", r"actions/runs/\$SIPX_FAILED_RELEASE_RUN_ID/jobs\?filter=latest&per_page=100"),
+        ("beta.1 replay does not require the original gate failure", r"Run the complete release gate[\"']:\s*[\"']failure"),
+        ("beta.1 replay does not require original rehearsal to be skipped", r"Rehearse the locked registry packages[\"']:\s*[\"']skipped"),
+        ("beta.1 replay does not require original publication to be skipped", r"Publish dependency-ready frontiers under a finite bound[\"']:\s*[\"']skipped"),
+        ("beta.1 replay does not require original consumer to be skipped", r"Verify the exact registry consumer and installed CLI[\"']:\s*[\"']skipped"),
+        ("beta.1 replay does not require original Pages proof to be skipped", r"Verify Pages deployment from the release commit[\"']:\s*[\"']skipped"),
+        ("beta.1 replay does not rerun the complete gate", r"- name:\s*Rerun the complete beta\.1 gate.*?working-directory:\s*release.*?\./scripts/gate\.py"),
+        ("beta.1 replay gate lacks the provenance input", r"Rerun the complete beta\.1 gate\s*\n\s+env:\s*\n\s+SIPX_DENYLIST:\s*\$\{\{\s*secrets\.SIPX_DENYLIST\s*\}\}"),
+        ("beta.1 replay does not rerun locked rehearsal", r"- name:\s*Rehearse the immutable beta\.1 packages.*?working-directory:\s*controller.*?--release-root [\"']\$SIPX_RELEASE_ROOT[\"'].*?--dry-run"),
+        ("beta.1 replay Cargo secret does not use the repository convention", r"CARGO_REGISTRY_TOKEN:\s*\$\{\{\s*secrets\.CARGO_REGISTRY_TOKEN\s*\}\}"),
+        ("beta.1 replay does not refuse an empty Cargo secret", r"-z [\"']?\$CARGO_REGISTRY_TOKEN"),
+        ("beta.1 replay does not use its distinct helper authority", r"--authorize-ci-beta1-replay [\"']\$RELEASE_TAG@\$RELEASE_SHA@\$SIPX_FAILED_RELEASE_RUN_ID[\"']"),
+        ("beta.1 replay does not recheck remote tag before publication", r"for \(\(invocation = 1; invocation <= max_invocations; invocation\+\+\)\); do.*?ls-remote --refs --tags origin .*?EXPECTED_RELEASE_TAG_OBJECT.*?--authorize-ci-beta1-replay"),
+        ("beta.1 replay frontier loop is not bounded", r"max_invocations=\$\(\(public_count \+ 1\)\).*?invocation <= max_invocations"),
+        ("beta.1 replay does not require all-visible observation", r"all public packages are already registry-visible"),
+        ("beta.1 replay exact consumer proof is absent", r"Verify the exact beta\.1 registry consumer and installed CLI.*?--release-root [\"']\$SIPX_RELEASE_ROOT[\"'].*?--verify-consumer"),
+        ("beta.1 replay does not inspect both archived Pages surfaces", r"\./docs/getting-started\.html\s+\./api/sipx_call/index\.html"),
+        ("beta.1 replay does not download the exact Pages artifact", r"actions/artifacts/\$EXPECTED_PAGES_ARTIFACT_ID/zip"),
+        ("beta.1 replay does not keep live docs on beta.2", r"codewandler\.github\.io/sipx/docs/getting-started.*?1\.0\.0-beta\.2"),
+        ("beta.1 replay GitHub prerelease is not dependent", r"\n\s*github_release:\s*\n.*?needs:\s*replay"),
+        ("beta.1 replay GitHub prerelease lacks write authority", r"\n\s*github_release:\s*\n.*?permissions:\s*\n\s+contents:\s*write"),
+        ("beta.1 replay does not recheck tag before GitHub Release", r"Create or verify the replayed beta\.1 GitHub prerelease.*?local_tag_object=.*?remote_tag_object=.*?RELEASE_TAG_OBJECT.*?gh release view"),
+        ("beta.1 replay GitHub Release is not a prerelease", r"gh release create .*?--prerelease"),
+        ("beta.1 replay may become latest", r"gh release create .*?--latest=false"),
+        ("beta.1 replay does not consume reviewed notes", r"gh release create .*?--notes-file [\"']\$RELEASE_NOTES[\"']"),
+        ("beta.1 replay does not verify an existing release", r"gh release view .*?target_commitish.*?reviewed replay notes differ"),
+    )
+    for label, pattern in checks:
+        required(text, label, pattern, problems)
+
+    if re.search(r"(?m)^  (?:push|pull_request|schedule):", text):
+        problems.append("beta.1 replay has an automatic entry")
+    if re.search(r"(?m)^\s*cargo\s+publish\b", text):
+        problems.append("beta.1 replay calls cargo publish directly")
+    replay_job = re.search(r"(?ms)^  replay:\s*$.*?(?=^  github_release:\s*$)", text)
+    if replay_job is not None and re.search(r"(?m)^\s+contents:\s*write\s*$", replay_job.group()):
+        problems.append("beta.1 replay publication job can write repository contents")
+    if re.search(r"(?m)^      (?:GH_TOKEN|CARGO_REGISTRY_TOKEN|SIPX_DENYLIST):", text):
+        problems.append("a beta.1 replay credential is exposed at job scope")
+
+    posting_patterns = (
+        r"\bgh\s+(?:issue|pr)\s+(?:create|comment)\b",
+        r"\bgh\s+api\b[^\n]*(?:--method|-X)\s+POST\b",
+        r"\bcurl\b[^\n]*(?:--request|-X)\s+POST\b",
+        r"\brepository_dispatch\b",
+    )
+    if any(re.search(pattern, text, re.IGNORECASE) for pattern in posting_patterns):
+        problems.append("beta.1 replay contains an external announcement or posting side effect")
+
+    ordered = (
+        "- name: Authorize beta.1 replay from the failed release evidence",
+        "- name: Rerun the complete beta.1 gate",
+        "- name: Rehearse the immutable beta.1 packages",
+        "- name: Require the approved Cargo credential for beta.1 replay",
+        "- name: Replay dependency-ready beta.1 frontiers",
+        "- name: Verify the exact beta.1 registry consumer",
+        "- name: Verify the archived beta.1 Pages artifact",
+        "- name: Create or verify the replayed beta.1 GitHub prerelease",
+    )
+    positions = [text.find(marker) for marker in ordered]
+    if any(position < 0 for position in positions) or positions != sorted(positions):
+        problems.append("beta.1 replay credential precedes evidence, gate or rehearsal")
+    return problems
+
+
 def specification_problems(text: str) -> list[str]:
     """Require the normative contract to retain its authority boundaries."""
 
@@ -287,6 +384,18 @@ def specification_problems(text: str) -> list[str]:
         r"Recovery tooling and\s+release bytes live in separate checkouts",
         problems,
     )
+    required(
+        text,
+        "specification does not hard-bind the beta.1 replay incident",
+        r"beta\.1 replay workflow MUST verify failed run `30906820031`.*?b0bcadcc2a69a5824ec4a9549f7800c88c4f13fa.*?3ab81709c7a235831638c62eba5fe73ce9eb7773",
+        problems,
+    )
+    required(
+        text,
+        "specification does not keep beta.1 superseded",
+        r"beta\.1 replay takes its reviewed body.*?superseded status.*?beta\.2 as current",
+        problems,
+    )
     return problems
 
 
@@ -295,6 +404,7 @@ def check(root: pathlib.Path = ROOT) -> list[str]:
 
     workflow = root / ".github" / "workflows" / "crates-io.yml"
     resume_workflow = root / ".github" / "workflows" / "crates-io-resume.yml"
+    beta1_replay_workflow = root / ".github" / "workflows" / "crates-io-beta1-replay.yml"
     spec = root / "docs" / "specs" / "release-workflow.md"
     problems = []
     if not workflow.is_file():
@@ -309,6 +419,14 @@ def check(root: pathlib.Path = ROOT) -> list[str]:
         problems.append(f"missing {resume_workflow.relative_to(root)}")
     else:
         problems.extend(resume_workflow_problems(resume_workflow.read_text(encoding="utf-8")))
+    if not beta1_replay_workflow.is_file():
+        problems.append(f"missing {beta1_replay_workflow.relative_to(root)}")
+    else:
+        problems.extend(
+            beta1_replay_workflow_problems(
+                beta1_replay_workflow.read_text(encoding="utf-8")
+            )
+        )
     return problems
 
 
@@ -322,8 +440,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"release workflow: {problem}", file=sys.stderr)
     if not problems:
         print(
-            "release workflow: approved tag and failed-run recovery, bounded registry, "
-            "Pages and resumable GitHub prerelease"
+            "release workflow: approved tag, partial recovery and fixed beta.1 replay, "
+            "bounded registry, Pages and resumable GitHub prerelease"
         )
     return 1 if problems else 0
 

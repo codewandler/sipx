@@ -57,6 +57,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   own once subjects are refreshed one at a time, and the skill now says so alongside a new procedure
   for adding a subject.
 
+- **The failed beta.1 cut has a one-purpose protected replay path (`X-95`).** Its authority is
+  hard-bound to the immutable beta.1 tag object, release commit and original failed run. It reruns
+  the complete tag gate and locked rehearsal before exposing the Cargo credential, preserves
+  partial recovery's refusal to begin publication, verifies the archived exact-SHA Pages artifact
+  and keeps beta.2 recommended when it creates the delayed prerelease record.
+
 ### Changed
 
 - **The public-fact guard is held off on a comparison row about another stack** (`X-74`).
@@ -78,7 +84,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   across throwaway repositories, and `X-47`'s "no prior-art project names left in the README or
   public site" clause is superseded, with the decision and its reasoning recorded in
   `docs/archive/2026-08-04-vendor-neutral-public-site.md`.
-
 ### Fixed
 
 - **A generated comparison cell must name the tree it was computed from (`X-77`).** Those cells are

@@ -31,6 +31,13 @@ not package authority: package bytes MUST come from a separate clean checkout of
 The required tag and failed ordinary-run ID are explicit inputs and are both validated before a
 registry probe or write.
 
+One historical first-publication replay MAY operate only for `v1.0.0-beta.1` under §4's
+`replaying-first-publication` state. It is not parameterized: its annotated tag object, peeled
+commit and failed ordinary-run ID are constants held by structural tests. It uses a distinct helper
+authorization and a distinct manual-only workflow from exact `main`; neither ordinary publication
+nor partial recovery gains authority from an empty registry. The replay MUST rerun the immutable
+tag's complete gate and locked rehearsal successfully before the Cargo credential is exposed.
+
 The Cargo credential is the environment or repository secret named `CARGO_REGISTRY_TOKEN`, exposed
 only to the presence check and publication step. An empty value MUST fail before the gate or any
 registry probe. The gate/publication job has read-only repository contents permission and does not
@@ -72,6 +79,7 @@ push or Pages deployment, so ancestry is necessary but not sufficient for a veri
 | publishing | gated tag and non-empty Cargo secret | one dependency-ready frontier becomes visible | helper visibility and command bounds |
 | publishing | visible frontier | rerun helper on unchanged tag | public-package count plus one invocations total |
 | recovering | failed ordinary run for this tag whose gate and rehearsal passed and publication step failed | fixed controller reproduces every visible checksum, then advances at most one unchanged frontier per bounded invocation | protected job timeout and public-package count plus one invocations total |
+| replaying-first-publication | exact beta.1 failed run whose tag validation passed, gate failed and every later release step skipped | fixed controller reruns the immutable tag's complete gate and locked rehearsal, then may publish the empty registry under beta.1-only authority | protected job timeout and public-package count plus one invocations total |
 | distributed | every package visible | exact registry consumer and Opus-enabled installed CLI loopback pass | helper consumer and visibility bounds |
 | documented | distributed | successful `ci.yml` Pages deployment job whose `head_sha` equals the tag commit; public guide and API URLs answer | finite HTTP retries and job timeout |
 | released | documented | one non-draft GitHub prerelease for the exact tag and reviewed notes | one create, or exact verification of an existing release |
@@ -92,6 +100,16 @@ release bytes live in separate checkouts. The helper receives distinct recovery 
 binding the workflow source SHA, exact tag and release SHA, failed run ID and current run identity.
 The ordinary tag-source authorization remains unchanged.
 
+The beta.1 replay workflow MUST verify failed run `30906820031` through the Actions API before any
+release secret is exposed. It MUST require that immutable-tag validation succeeded, the gate failed,
+and rehearsal, publication, consumer, Pages and GitHub-prerelease work were skipped. Its separate
+release checkout MUST be annotated tag object `b0bcadcc2a69a5824ec4a9549f7800c88c4f13fa`, peeling to
+`3ab81709c7a235831638c62eba5fe73ce9eb7773`; its controller is the exact `main` workflow commit.
+After the current complete gate and rehearsal pass, the distinct helper authority may classify zero
+visible packages and begin one bounded dependency-ready frontier. No other tag, commit, run or
+workflow may exercise that exception. Once a frontier exists, the ordinary archive-reproduction and
+checksum rules apply unchanged.
+
 ## 5. Documentation and GitHub prerelease proof
 
 The successful Pages evidence MUST come from the push-triggered `ci.yml` run for `main` whose
@@ -100,6 +118,12 @@ conclusion `success`. The workflow then probes both the public getting-started g
 generated `sipx-call` API index. A tag workflow or HTTP 200 by itself cannot establish the commit
 that supplied the page.
 
+The late beta.1 replay MUST NOT roll the live site backward from beta.2. Instead it verifies the
+unexpired `github-pages` artifact from exact-SHA CI run `30906258443`: the run and its deployment job
+must be successful and bound to the beta.1 commit, the artifact identity must be exact, its
+getting-started page must name beta.1 and its generated `sipx-call` API index must exist. The current
+public guide and API are then probed separately and MUST continue to name and serve beta.2.
+
 Only after registry consumer and Pages proofs pass may the workflow create the GitHub Release. It
 MUST use the existing tag (`--verify-tag`), mark the release as a prerelease and take its body from
 `docs/releases/<version>.md`. A resume that finds the release already present MUST verify that it is
@@ -107,6 +131,12 @@ non-draft, prerelease, names the same tag and has the reviewed body; it MUST NOT
 release or silently rewrite the first one. This repository-native prerelease is part of the beta
 cut. Broader publicity remains hypothetical and requires separate explicit authorization; the
 workflow MUST NOT post broader publicity.
+
+The beta.1 replay takes its reviewed body from
+`docs/releases/1.0.0-beta.1-replay.md` at the exact controller commit. The body MUST lead with the
+superseded status, name beta.2 as current and disclose the documentation defect corrected by
+`X-70`. The replayed Release remains a non-draft prerelease for the immutable beta.1 tag and is
+never selected as latest. Its later creation time does not make it the recommended release.
 
 ## 6. Static vectors
 
@@ -121,6 +151,7 @@ workflow MUST NOT post broader publicity.
 | `RWF-7` | accept Pages without matching `head_sha`, deploy job and two probes | static check fails |
 | `RWF-8` | make the GitHub prerelease non-idempotent, unverified or inline-noted; or add broader posting | static check fails |
 | `RWF-9` | recovery omits protected environment, separate checkouts, failed-run step evidence, exact controller/tag/SHA binding, visible-byte proof or bounded frontier loop | static check fails |
+| `RWF-10` | beta.1 replay accepts another tag/run/object, exposes a secret before current gate and rehearsal, changes recovery's zero-visible refusal, omits historical Pages artifact proof or presents beta.1 as latest | static check fails |
 
 These are structural tests, not evidence that GitHub or crates.io accepted a write. Actual release
 acceptance remains the run records and registry bytes produced only after explicit authorization.
