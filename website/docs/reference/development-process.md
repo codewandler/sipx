@@ -81,7 +81,8 @@ layer they name. A green harness self-test by itself says only that the measurin
 closed.
 
 The public [native-browser proof](browser-audio-proof.md) describes the two roles, independent
-runtime facts, negative cases, and the boundary that result does not widen.
+runtime facts, negative cases, the executable `browser_audio_proof` example, and the one-command
+native-browser harness. It also records the boundary that result does not widen.
 
 ## Work survives the session that discovered it
 

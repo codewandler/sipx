@@ -2,8 +2,7 @@
 id: M-48
 title: Specify the browser-audio profile and state machine
 pillar: Media
-status: in-progress
-priority: 1
+status: done
 design: docs/designs/webrtc-audio.md
 epic: webrtc-audio
 areas: [sipx-sdp, sipx-media, sipx-call, interop, docs, beta4]
@@ -36,7 +35,7 @@ runtime and independent-peer stories can implement without inventing policy in p
       contract.
 - [x] TURN, video, data channels, browser APIs and multiple bundled media sections remain explicit
       omissions; the spec does not claim a general WebRTC stack.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 

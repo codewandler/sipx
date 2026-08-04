@@ -1979,9 +1979,12 @@ async fn dial_plays_a_file_and_records_the_far_end() {
     )
     .expect("writes");
 
+    // The receiver must outlive the caller's complete causal bound: six seconds of exchange plus
+    // Call::hang_up's five-second media-queue flush. Twelve seconds leaves that relation true
+    // under load; it is a bound on failure, while the BYE remains the ordinary completion event.
     let (mut answerer, address, mut lines) = start_answerer(&[
         "--duration",
-        "10",
+        "12",
         "--play",
         from_callee.to_str().expect("a path"),
         "--record",

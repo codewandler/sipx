@@ -2,8 +2,7 @@
 id: M-49
 title: Negotiate a fail-closed browser-audio profile
 pillar: Media
-status: in-progress
-priority: 7
+status: done
 design: docs/specs/webrtc-audio.md
 epic: webrtc-audio
 areas: [sipx-sdp, sipx-call, sipx-media, beta4]
@@ -35,7 +34,7 @@ returns a typed refusal instead of silently falling back when any mandatory elem
 - [x] The profile is reachable through the call API and diagnostic CLI with negotiated codec,
       keying and candidate facts in terminal and JSON results.
 - [x] RFC registry and API/reference documentation are updated with the implementation.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 

@@ -2,8 +2,7 @@
 id: M-46
 title: Multiplex RTCP and negotiate the DTLS setup role
 pillar: Media
-status: in-progress
-priority: 6
+status: done
 design: docs/designs/demand.md
 epic: demand
 areas: [sipx-sdp, sipx-media, sipx-rtp, beta4]
@@ -36,7 +35,7 @@ sipx and any browser-side peer.
       This story must not weaken `M-28`'s guarantee — a test asserts it still holds.
 - [x] `docs/rfc/registry.toml` gains RFC 5761 and updates the RFC 4145 and 5763 rows in the same
       commit; `rfc-report.py --check` green.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 

@@ -14,6 +14,45 @@ uses the browser's own `RTCPeerConnection`, WebSocket, Web Audio, and statistics
 page contains no sipx parser, SDP generator, ICE agent, DTLS implementation, packetizer, or codec.
 The sipx side is a compiled example that consumes only the public transport, call, and media APIs.
 
+## Run the executable proof
+
+The public-API endpoint is the `sipx-call` example `browser_audio_proof`. The harness normally
+launches it with this exact shape:
+
+```bash
+cargo run -p sipx-call --example browser_audio_proof --features opus,dtls -- \
+  --role browser-offerer \
+  --case positive \
+  --media-address "$SIPX_BROWSER_AUDIO_MEDIA_ADDRESS" \
+  --cert "$SIPX_BROWSER_AUDIO_WSS_CERT" \
+  --key "$SIPX_BROWSER_AUDIO_WSS_KEY" \
+  --result /tmp/sipx-browser-offerer.json
+```
+
+`--role` is `browser-offerer` or `browser-answerer`. `--case` is `positive`,
+`FingerprintMismatch`, `NoNominatedPair`, or `WeakerMedia`; fingerprint mismatch belongs to the
+offerer role, while missing nomination and weaker media belong to the answerer role.
+`--media-address` must be a non-loopback address assigned to the host so the browser can reach the
+advertised ICE candidate. `--cert` and `--key` are one PEM WSS identity, and `--result` is the JSON
+file the example writes after the bounded call. The process first prints a JSON listening record,
+then waits for the matching native-browser peer. Running this endpoint alone is therefore not an
+interoperability proof.
+
+For the complete proof from a source checkout, first build that exact example and then run the
+single harness command:
+
+```bash
+cargo build -p sipx-call --example browser_audio_proof --features opus,dtls
+./tests/browser-audio/ci.sh
+```
+
+The harness generates the ephemeral WSS identity, discovers a reachable host address, starts the
+matched Chrome WebDriver, runs both positive roles and all three refusal cases, and validates the
+evidence. It exits nonzero when a compatible `chromedriver`, browser, OpenSSL, or native Opus
+development library is unavailable; an unavailable proof environment is not reported as a skip.
+This command is repository proof infrastructure, not a browser SDK or a supported application
+launcher.
+
 ## What the positive proves
 
 The proof establishes two separate calls:

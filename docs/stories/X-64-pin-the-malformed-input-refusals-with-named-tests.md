@@ -2,8 +2,7 @@
 id: X-64
 title: Pin the malformed-input refusals with named tests
 pillar: Build
-status: in-progress
-priority: 2
+status: done
 design: docs/designs/input-hardening.md
 epic: input-hardening
 areas: [sipx-sip, sipx-transport, beta4]
@@ -36,7 +35,7 @@ recurs across independent SIP implementations.
 - [x] For each of the three classes, the story's Progress log records the scratch edit that removes
       the corresponding bound and the test failing against it. A test that passes with the bound
       removed does not satisfy this story.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 - Missing response headers exposed a real defect: `ResponseBuilder::to_request` built a response

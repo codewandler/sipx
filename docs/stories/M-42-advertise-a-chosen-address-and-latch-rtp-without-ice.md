@@ -2,8 +2,7 @@
 id: M-42
 title: Advertise a chosen address and latch RTP without ICE
 pillar: Media
-status: in-progress
-priority: 5
+status: done
 design: docs/designs/demand.md
 epic: demand
 areas: [sipx-transport, sipx-media, sipx-call, beta4]
@@ -39,7 +38,7 @@ address it cannot actually receive on, without requiring ICE at either end.
       of the request URI (RFC 3261 §8.1.2).
 - [x] The capability is reachable from the CLI, per vision principle 6, and documented in the
       library guides.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 

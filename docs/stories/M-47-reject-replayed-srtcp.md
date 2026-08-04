@@ -2,8 +2,7 @@
 id: M-47
 title: Reject replayed SRTCP with a separate replay window
 pillar: Media
-status: in-progress
-priority: 4
+status: done
 design: docs/specs/srtp.md
 epic: media-security-profiles
 areas: [sipx-rtp, sipx-media, security, beta4]
@@ -33,7 +32,7 @@ control traffic on the same exposed component as media.
       replay test fail; round-trip success alone is not evidence.
 - [x] `docs/specs/srtp.md` §12.2 moves from open to fixed with the implementation and test named,
       and the RFC 3711 registry evidence is updated in the same commit.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 

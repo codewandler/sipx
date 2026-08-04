@@ -2,8 +2,7 @@
 id: M-50
 title: Run ICE, DTLS, SRTP and SRTCP on one nominated component
 pillar: Media
-status: in-progress
-priority: 8
+status: done
 design: docs/specs/webrtc-audio.md
 epic: webrtc-audio
 areas: [sipx-media, sipx-rtp, sipx-call, sipx-transport, beta4]
@@ -38,7 +37,7 @@ STUN, DTLS, SRTP and SRTCP classified and processed on one bound port.
       interleaved with advancing SRTP sequence numbers.
 - [x] A two-sipx deterministic proof carries non-silent Opus both ways over the complete component
       before the independent endpoint is introduced.
-- [ ] `./scripts/gate.py` green, including `check-fixed-sleep.py`.
+- [x] `./scripts/gate.py` green, including `check-fixed-sleep.py`.
 
 ## Progress
 

@@ -2,8 +2,7 @@
 id: X-65
 title: Assert the branch and tag RNG is cryptographic
 pillar: Build
-status: in-progress
-priority: 3
+status: done
 design: docs/designs/input-hardening.md
 epic: input-hardening
 areas: [sipx-sip, sipx-transport, beta4]
@@ -30,7 +29,7 @@ rather than depending on review of the call site.
 - [x] Dialog tags (RFC 3261 §19.3) are covered by the same assertions.
 - [x] The statistical bound states its arithmetic in a comment on the line — the chosen threshold and
       the resulting false-failure rate — so the test cannot become a retry.
-- [ ] `./scripts/gate.py` green, including `check-fixed-sleep.py`.
+- [x] `./scripts/gate.py` green, including `check-fixed-sleep.py`.
 
 ## Progress
 

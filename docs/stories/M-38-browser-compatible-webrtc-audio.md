@@ -2,8 +2,7 @@
 id: M-38
 title: Complete one browser-compatible WebRTC audio path
 pillar: Media
-status: backlog
-priority: 15
+status: done
 design: docs/designs/webrtc-audio.md
 epic: webrtc-audio
 areas: [sipx-sdp, sipx-media, sipx-call, sipx-transport, interop, docs]
@@ -21,21 +20,21 @@ without expanding sipx into a video, data-channel, or general browser media stac
 
 ## Acceptance
 
-- [ ] A normative browser-audio spec cites RFC 5761, 7118, 7874, 8445, 8825, 8827, 8829, 8834 and
+- [x] A normative browser-audio spec cites RFC 5761, 7118, 7874, 8445, 8825, 8827, 8829, 8834 and
       8839;
       it defines one audio media section, offer/answer state, DTLS/ICE ordering, RTCP multiplexing,
       downgrade refusal, and byte-level vectors before implementation changes.
-- [ ] One call profile offers and answers `UDP/TLS/RTP/SAVPF`, `a=rtcp-mux`, ICE credentials and
+- [x] One call profile offers and answers `UDP/TLS/RTP/SAVPF`, `a=rtcp-mux`, ICE credentials and
       candidates, a DTLS fingerprint/setup role, and the RFC 7874 audio vocabulary. A missing build
       feature or incompatible answer is a typed refusal, never a fallback to SDES or plain RTP.
-- [ ] ICE and DTLS-SRTP share the selected media component: nomination chooses the DTLS peer, and
+- [x] ICE and DTLS-SRTP share the selected media component: nomination chooses the DTLS peer, and
       STUN, DTLS, SRTP and SRTCP are demultiplexed on the same bound port without a bind/drop/rebind
       race. RTCP actually uses the multiplexed component rather than only advertising it.
-- [ ] A bounded shell proof drives an independently implemented browser SIP endpoint in both call
+- [x] A bounded shell proof drives an independently implemented browser SIP endpoint in both call
       roles over WSS + ICE + DTLS-SRTP + Opus, carries non-silent audio in both directions, and
       reports the negotiated codec, keying and candidate pair. Wrong-fingerprint and weaker-answer
       negatives are immediate and non-vacuous.
-- [ ] RFC registry and public fit/security pages are updated in the same change. They distinguish
+- [x] RFC registry and public fit/security pages are updated in the same change. They distinguish
       the working host/server-reflexive audio path from the still-absent TURN relay, video, browser
       API, data-channel and multi-media-section surfaces.
 
@@ -46,11 +45,12 @@ negotiation, `M-50` owns the nominated shared component, and `M-51` owns the ind
 proof and public boundary. `M-46` supplies RTCP multiplexing and DTLS role negotiation. This file
 remains the epic tracker and is not counted as one of the ten beta.4 implementation/release stories.
 
-The prerequisites are real and separately reachable: WSS (`T-8`, `T-9`, `T-23`),
-Opus (`M-13`, `M-30`, `P-9`, `P-13`), ICE (`M-19` through `M-23`, `M-27`, `P-9`) and DTLS-SRTP
-(`M-15`, `M-28`, `P-9`). The composition is not present. The call and CLI explicitly refuse
-DTLS-SRTP with ICE; SDP has no `RTP/SAVPF` or `a=rtcp-mux` path; and no independently implemented
-browser SIP endpoint has carried audio with sipx.
+The prerequisites remain separately reachable: WSS (`T-8`, `T-9`, `T-23`), Opus (`M-13`, `M-30`,
+`P-9`, `P-13`), ICE (`M-19` through `M-23`, `M-27`, `P-9`) and DTLS-SRTP (`M-15`, `M-28`, `P-9`).
+Beta.4 composes them through a fail-closed call profile and one nominated component. A complete
+local proof and hosted workflow run `30947782300` job `92121949350` carried non-silent Opus in both
+SIP roles against the native browser endpoint and exercised all three named downgrade/security
+negatives.
 
 ## Notes
 

@@ -22,7 +22,7 @@ Pin the exact public beta in `Cargo.toml` so every sipx crate resolves to the sa
 
 ```toml
 [dependencies]
-sipx-call = "=1.0.0-beta.3"
+sipx-call = "=1.0.0-beta.4"
 ```
 
 This website documents `main`, which can be tested explicitly with:
@@ -39,11 +39,19 @@ Optional behavior is opt-in. For example, make Opus selectable by `sipx-call` li
 
 ```toml
 [dependencies]
-sipx-call = { version = "=1.0.0-beta.3", features = ["opus"] }
+sipx-call = { version = "=1.0.0-beta.4", features = ["opus"] }
 ```
 
 Opus links a C library. Enabling the feature makes `Codecs::Opus` available; it does not silently
 change the codecs a call offers. G.711 remains the default selection.
+
+The named browser-audio call policy needs both optional media boundaries and still has to be
+selected explicitly:
+
+```toml
+[dependencies]
+sipx-call = { version = "=1.0.0-beta.4", features = ["opus", "dtls"] }
+```
 
 ### Opus packaging policy
 
