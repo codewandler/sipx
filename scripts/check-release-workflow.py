@@ -57,6 +57,14 @@ def workflow_problems(text: str) -> list[str]:
         ("release commit is not required on main", r"git merge-base --is-ancestor .*origin/main"),
         ("reviewed versioned release record is not required", r"docs/releases/\$version\.md"),
         ("complete gate is absent", r"\./scripts/gate\.py(?:\s|$)"),
+        (
+            "complete gate does not receive the provenance denylist secret",
+            r"Run the complete release gate\s*\n\s+env:\s*\n\s+SIPX_DENYLIST:\s*\$\{\{\s*secrets\.SIPX_DENYLIST\s*\}\}\s*\n\s+run:\s*\|.*?\./scripts/gate\.py",
+        ),
+        (
+            "empty provenance denylist is not refused before the gate",
+            r"Run the complete release gate.*?-z [\"']?\$SIPX_DENYLIST.*?exit 1.*?\./scripts/gate\.py",
+        ),
         ("locked publication rehearsal is absent", r"\./scripts/release\.py --dry-run"),
         ("publication bypasses exact tag confirmation", r"--publish.*?--confirm-publish [\"']\$RELEASE_TAG[\"']"),
         ("publication bypasses exact CI tag and commit authorization", r"--publish.*?--authorize-ci-publish [\"']\$RELEASE_TAG@\$RELEASE_SHA[\"']"),
@@ -102,6 +110,8 @@ def workflow_problems(text: str) -> list[str]:
         problems.append("publication job can write repository contents")
     if re.search(r"(?m)^      (?:GH_TOKEN|CARGO_REGISTRY_TOKEN):", text):
         problems.append("a release credential is exposed at job scope")
+    if len(re.findall(r"\$\{\{\s*secrets\.SIPX_DENYLIST\s*\}\}", text)) != 1:
+        problems.append("provenance denylist secret is not confined to the gate step")
 
     ordered = (
         ("Publish dependency-ready frontiers", "publication"),
@@ -120,13 +130,19 @@ def workflow_problems(text: str) -> list[str]:
 
 
 def specification_problems(text: str) -> list[str]:
-    """Require the normative contract to retain the no-announcement boundary."""
+    """Require the normative contract to retain its authority boundaries."""
 
     problems: list[str] = []
     required(
         text,
         "specification does not separate the GitHub prerelease from broader publicity",
         r"MUST NOT post broader publicity",
+        problems,
+    )
+    required(
+        text,
+        "specification does not confine the provenance denylist to the gate step",
+        r"`SIPX_DENYLIST`.*?MUST be exposed only to the complete-gate step",
         problems,
     )
     return problems

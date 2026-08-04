@@ -73,6 +73,8 @@ SIPX_DEPENDENCY_VERSION = re.compile(
 PUBLIC_RELEASE_HEADING = re.compile(
     r"^## (?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?) — \d{4}-\d{2}-\d{2}$"
 )
+DOC_COMMENT = re.compile(r"^\s*(?://!|///)\s?(?P<body>.*)$")
+RUST_DOC_LANGUAGES = {"", "rust", "no_run", "ignore", "should_panic"}
 
 # These entry points jointly define whether somebody can adopt the current public beta
 # without first reading the repository's internal roadmap. Unlike a copied capability table, the
@@ -478,6 +480,39 @@ def public_adoption_problems(contents: dict[str, str]) -> list[str]:
     return problems
 
 
+def rust_doc_example_problems(text: str, source: str) -> list[str]:
+    """Reject panic-prone access and detached work in fenced Rust doc examples."""
+
+    problems = []
+    in_fence = False
+    rust_fence = False
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        match = DOC_COMMENT.match(line)
+        if match is None:
+            in_fence = False
+            rust_fence = False
+            continue
+        body = match.group("body")
+        if body.startswith("```"):
+            if in_fence:
+                in_fence = False
+                rust_fence = False
+            else:
+                language = body.removeprefix("```").strip().split(",", 1)[0]
+                in_fence = True
+                rust_fence = language in RUST_DOC_LANGUAGES
+            continue
+        if not (in_fence and rust_fence):
+            continue
+        if re.search(r"\.(?:unwrap|expect)\s*\(|\bpanic!\s*\(", body):
+            problems.append(f"{source}:{line_number}: panic-prone Rust doc example")
+        if re.search(r"\b[A-Za-z_]\w*(?:\.\w+)*\s*\[[^]]+\]", body):
+            problems.append(f"{source}:{line_number}: raw indexing in Rust doc example")
+        if "tokio::spawn" in body and re.search(r"(?:let\s+\w+\s*=|=\s*)tokio::spawn", body) is None:
+            problems.append(f"{source}:{line_number}: detached task in Rust doc example")
+    return problems
+
+
 def public_files() -> list[Path]:
     files = [README]
     files.extend(sorted(DOCS.rglob("*.md")))
@@ -526,6 +561,12 @@ def process(update: bool) -> int:
         if page.suffix == ".md":
             failures.extend(public_fact_problems(text, source))
     failures.extend(public_adoption_problems(public_contents))
+    for source in sorted((ROOT / "crates").rglob("*.rs")):
+        failures.extend(
+            rust_doc_example_problems(
+                source.read_text(encoding="utf-8"), str(source.relative_to(ROOT))
+            )
+        )
 
     for failure in failures:
         print(f"sync-website: {failure}", file=sys.stderr)

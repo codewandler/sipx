@@ -16,7 +16,7 @@ note: generate five all-or-nothing beta predicates without turning RFC coverage 
 
 ## Goal
 
-Make the hypothetical readiness for broader `1.0.0-beta.1` publicity as explicit and drift-resistant
+Make the hypothetical readiness for broader `1.0.0-beta.2` publicity as explicit and drift-resistant
 as the existing alpha measurement, while keeping the stable v1 gate and authorization separate.
 
 ## Acceptance
@@ -39,5 +39,5 @@ as the existing alpha measurement, while keeping the stable v1 gate and authoriz
 
 ## Notes
 
-- `1.0.0-beta.1` permits documented breaking changes. Only `1.0.0` freezes supported APIs.
+- `1.0.0-beta.2` permits documented breaking changes. Only `1.0.0` freezes supported APIs.
 - This story changes measurement and roadmap state, not the runtime product.

@@ -4,7 +4,7 @@
 
 ## 1. Scope
 
-This specification defines the repository-hosted orchestration for the one `1.0.0-beta.1`
+This specification defines the repository-hosted orchestration for the current public beta
 publication. It does not replace `scripts/release.py`: the helper remains the authority for package
 order, normalized bytes, registry visibility, partial-publication recovery and the exact consumer
 proof. The workflow supplies the approved environment, exact annotated tag, registry credential,
@@ -30,6 +30,11 @@ registry probe. The gate/publication job has read-only repository contents permi
 persist the checkout credential. A dependent GitHub-prerelease job alone has repository contents
 write permission; its checkout also does not persist a credential, and its GitHub token is exposed
 only to the create-or-verify step. No credential is printed.
+
+The external provenance denylist is the repository or organization secret named
+`SIPX_DENYLIST`. It MUST be exposed only to the complete-gate step so that the release gate makes
+the same mandatory provenance claim as ordinary CI. An absent denylist MUST stop the release
+before package rehearsal or publication; its contents MUST NOT be stored in this repository.
 
 ## 3. Immutable input
 
@@ -92,7 +97,7 @@ workflow MUST NOT post broader publicity.
 |---|---|---|
 | `RWF-1` | remove tag-push or tag-selected manual entry, or let its confirmation differ | static check fails |
 | `RWF-2` | remove environment, serialization, finite timeout or split read/write authority | static check fails |
-| `RWF-3` | rename or stop checking the Cargo secret | static check fails |
+| `RWF-3` | rename or stop checking the Cargo secret, or remove the gate's provenance-secret input | static check fails |
 | `RWF-4` | accept a lightweight/dirty/non-main tag | static check fails |
 | `RWF-5` | call Cargo publication directly or omit exact helper tag/commit authorization | static check fails |
 | `RWF-6` | make frontier repetition unbounded or omit exact consumer proof | static check fails |

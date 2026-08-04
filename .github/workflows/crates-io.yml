@@ -138,7 +138,14 @@ jobs:
           cache-dependency-path: website/package-lock.json
 
       - name: Run the complete release gate
-        run: ./scripts/gate.py
+        env:
+          SIPX_DENYLIST: ${{ secrets.SIPX_DENYLIST }}
+        run: |
+          if [[ -z "$SIPX_DENYLIST" ]]; then
+            echo "the release environment must provide SIPX_DENYLIST" >&2
+            exit 1
+          fi
+          exec ./scripts/gate.py
 
       - name: Rehearse the locked registry packages
         run: ./scripts/release.py --dry-run

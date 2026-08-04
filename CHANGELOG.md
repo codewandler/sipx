@@ -9,9 +9,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 No changes yet.
 
+## [1.0.0-beta.2] — 2026-08-04
+
+This is the first published public beta. The `1.0.0-beta.1` tag was an unpublished release
+candidate: its protected workflow stopped at the mandatory provenance gate before package
+rehearsal, registry publication, consumer verification, Pages proof, or GitHub Release creation.
+The library and CLI surface described in the beta.1 section below is unchanged.
+
+### Fixed
+
+- **The protected release gate receives its external provenance denylist (`X-92`).** The Actions
+  secret is confined to the complete-gate step, its absence still stops publication, and the
+  workflow's adversarial structural suite now rejects a missing, renamed, duplicated, or
+  job-scoped mapping.
+
+- **Published Rust examples model bounded ownership (`X-70`).** The dispatcher example replaces a
+  detached call task and panic-prone address parse with bounded `JoinSet` ownership, propagated
+  failures and cancellation-safe shutdown. The public-doc guard now rejects panic-prone access,
+  raw indexing and detached tasks in fenced Rust doc examples.
+
 ## [1.0.0-beta.1] — 2026-08-04
 
-This is the first public beta. sipx is
+This was the first public-beta candidate, but it was not published. sipx is
 pre-1.0: Supported APIs receive a changelog entry and migration guidance when they break, while
 Experimental APIs may change or be removed without one. Adoption starts with the modular Rust
 crates, and the `sipx` CLI is their executable shell proof.
@@ -2635,7 +2654,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.1...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.2...HEAD
+[1.0.0-beta.2]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.1...v1.0.0-beta.2
 [1.0.0-beta.1]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.5...v1.0.0-beta.1
 [1.0.0-alpha.5]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.4...v1.0.0-alpha.5
 [1.0.0-alpha.4]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.3...v1.0.0-alpha.4

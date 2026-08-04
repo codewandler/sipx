@@ -97,6 +97,27 @@ class AuthorityMutations(unittest.TestCase):
             "empty Cargo secret is not refused",
         )
 
+    def test_complete_gate_receives_the_provenance_denylist_secret(self) -> None:
+        self.assert_mutation(
+            "SIPX_DENYLIST: ${{ secrets.SIPX_DENYLIST }}",
+            "SIPX_DENYLIST: unavailable",
+            "complete gate does not receive the provenance denylist secret",
+        )
+        duplicated = WORKFLOW.replace(
+            "    env:\n      RELEASE_TAG:",
+            "    env:\n      SIPX_DENYLIST: ${{ secrets.SIPX_DENYLIST }}\n      RELEASE_TAG:",
+            1,
+        )
+        self.assertIn(
+            "provenance denylist secret is not confined to the gate step",
+            checker.workflow_problems(duplicated),
+        )
+        self.assert_mutation(
+            '[[ -z "$SIPX_DENYLIST" ]]',
+            '[[ "configured" == "configured" ]]',
+            "empty provenance denylist is not refused before the gate",
+        )
+
     def test_annotated_clean_main_tag_is_required(self) -> None:
         self.assert_mutation("git cat-file -t", "git cat-file -e", "lightweight tags are not refused")
         self.assert_mutation(
@@ -247,6 +268,17 @@ class PublicityBoundaryMutations(unittest.TestCase):
         )
         self.assertIn(
             "specification does not separate the GitHub prerelease from broader publicity",
+            checker.specification_problems(mutated),
+        )
+
+    def test_the_specification_confines_the_provenance_denylist(self) -> None:
+        mutated = SPEC_TEXT.replace(
+            "MUST be exposed only to the complete-gate step",
+            "may be exposed to the job",
+            1,
+        )
+        self.assertIn(
+            "specification does not confine the provenance denylist to the gate step",
             checker.specification_problems(mutated),
         )
 

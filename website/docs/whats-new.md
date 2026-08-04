@@ -1,12 +1,12 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-beta.1 public beta.
+description: Release highlights and adoption notes for the sipx 1.0.0-beta.2 public beta.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-beta.1 — 2026-08-04
+## 1.0.0-beta.2 — 2026-08-04
 <!-- END generated:release-heading -->
 
 The first public beta is published as exact crates.io packages from one immutable release tag. Its
@@ -19,7 +19,7 @@ matrix.
 Install the exact CLI release with:
 
 ```bash
-cargo install --locked --version =1.0.0-beta.1 sipx-cli
+cargo install --locked --version =1.0.0-beta.2 sipx-cli
 ```
 
 The adoption surface leads with the modular Rust crates: applications select the protocol, transport,
@@ -130,5 +130,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 beta. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-beta.1` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-beta.2` merely because it appears on this
 site.

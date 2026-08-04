@@ -177,5 +177,34 @@ class PublicGuardTests(unittest.TestCase):
         self.assertTrue(any("stale current-main capability claim" in p for p in problems))
 
 
+class RustDocExampleGuardTests(unittest.TestCase):
+    def test_rust_doc_examples_refuse_panic_access_indexing_and_detached_tasks(self) -> None:
+        sample = """\
+//! ```no_run
+//! let address = "127.0.0.1".parse().expect("address");
+//! let first = packets[0];
+//! tokio::spawn(async move { serve().await });
+//! ```
+"""
+        problems = SYNC.rust_doc_example_problems(sample, "sample.rs")
+        self.assertEqual(3, len(problems))
+        self.assertTrue(any("panic-prone" in problem for problem in problems))
+        self.assertTrue(any("raw indexing" in problem for problem in problems))
+        self.assertTrue(any("detached task" in problem for problem in problems))
+
+    def test_non_rust_history_and_owned_tasks_are_allowed(self) -> None:
+        sample = """\
+//! ```text
+//! value.unwrap()
+//! ```
+//! ```
+//! let mut tasks = tokio::task::JoinSet::new();
+//! tasks.spawn(async move { serve().await });
+//! let value = values.get(0);
+//! ```
+"""
+        self.assertEqual([], SYNC.rust_doc_example_problems(sample, "sample.rs"))
+
+
 if __name__ == "__main__":
     unittest.main()

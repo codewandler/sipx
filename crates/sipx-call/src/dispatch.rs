@@ -15,18 +15,39 @@
 //! ```no_run
 //! # async fn example(endpoint: sipx_transport::Handle,
 //! #                  incoming: tokio::sync::mpsc::Receiver<sipx_transport::Incoming>)
-//! #     -> sipx_call::Result<()> {
-//! use sipx_call::{Dispatched, Dispatcher, answer, serve};
+//! #     -> Result<(), Box<dyn std::error::Error>> {
+//! use std::net::IpAddr;
+//! use sipx_call::{Dispatched, Dispatcher, serve};
+//! use tokio::task::JoinSet;
 //!
+//! const MAX_CALLS: usize = 64;
+//! let media_address: IpAddr = "203.0.113.7".parse()?;
 //! let mut dispatcher = Dispatcher::new(endpoint.clone(), incoming);
-//! while let Some(event) = dispatcher.next().await {
-//!     if let Dispatched::Invitation(invitation) = event {
-//!         let (invite, mut requests) = invitation.into_parts();
-//!         let mut call = answer(&endpoint, &invite, "203.0.113.7".parse().expect("addr")).await?;
-//!         tokio::spawn(async move { serve(&mut call, &mut requests).await });
+//! let mut calls = JoinSet::new();
+//! let outcome: Result<(), Box<dyn std::error::Error>> = async {
+//!     loop {
+//!         tokio::select! {
+//!             event = dispatcher.next() => {
+//!                 let Some(event) = event else { break };
+//!                 if let Dispatched::Invitation(invitation) = event {
+//!                     if calls.len() >= MAX_CALLS {
+//!                         invitation.refuse(&endpoint, 503, "Service Unavailable").await?;
+//!                         continue;
+//!                     }
+//!                     let mut call = invitation.answer(&endpoint, media_address).await?;
+//!                     let (_, mut requests) = invitation.into_parts();
+//!                     calls.spawn(async move { serve(&mut call, &mut requests).await });
+//!                 }
+//!             }
+//!             joined = calls.join_next(), if !calls.is_empty() => {
+//!                 if let Some(joined) = joined { joined??; }
+//!             }
+//!         }
 //!     }
-//! }
-//! # Ok(())
+//!     Ok(())
+//! }.await;
+//! calls.shutdown().await;
+//! outcome
 //! # }
 //! ```
 
