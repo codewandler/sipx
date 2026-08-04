@@ -8,12 +8,15 @@ test runs `cargo publish`; command execution is separately asserted through a re
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 import os
 import pathlib
 import select
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import tomllib
 import unittest
@@ -78,6 +81,32 @@ def github_publish_environment(
         "GITHUB_RUN_ID": "123456",
         "GITHUB_RUN_ATTEMPT": "1",
         "CARGO_REGISTRY_TOKEN": "fixture-secret-never-used",
+    }
+
+
+def github_recovery_environment(
+    controller_sha: str, *, failed_run_id: str = "654321"
+) -> dict[str, str]:
+    """One complete GitHub context for the main-branch recovery controller."""
+
+    return {
+        "CI": "true",
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_REPOSITORY": "codewandler/sipx",
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_REF_TYPE": "branch",
+        "GITHUB_REF_NAME": "main",
+        "GITHUB_SHA": controller_sha,
+        "GITHUB_WORKFLOW_SHA": controller_sha,
+        "GITHUB_WORKFLOW_REF": (
+            "codewandler/sipx/.github/workflows/crates-io-resume.yml@refs/heads/main"
+        ),
+        "GITHUB_RUN_ID": "123456",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "CARGO_REGISTRY_TOKEN": "fixture-secret-never-used",
+        "SIPX_FAILED_RELEASE_RUN_ID": failed_run_id,
     }
 
 
@@ -355,6 +384,57 @@ readme = "README.md"
         )
 
 
+class ThePackagedVcsEvidence(unittest.TestCase):
+    def package(self) -> release.Package:
+        return release.Package(
+            name="sipx-core",
+            version="1.0.0-beta.1",
+            public=True,
+            dependencies=(),
+            manifest=pathlib.Path("/work/crates/sipx-core/Cargo.toml"),
+            readme=pathlib.Path("/work/crates/sipx-core/README.md"),
+            license="MIT OR Apache-2.0",
+        )
+
+    def archive(self, root: pathlib.Path, *, dirty: object = ...) -> pathlib.Path:
+        package_record = self.package()
+        archive = root / f"{package_record.name}-{package_record.version}.crate"
+        git: dict[str, object] = {"sha1": "a" * 40}
+        if dirty is not ...:
+            git["dirty"] = dirty
+        payload = json.dumps({"git": git}).encode("utf-8")
+        member = tarfile.TarInfo(
+            f"{package_record.name}-{package_record.version}/.cargo_vcs_info.json"
+        )
+        member.size = len(payload)
+        with tarfile.open(archive, mode="w:gz") as bundle:
+            bundle.addfile(member, io.BytesIO(payload))
+        return archive
+
+    def test_cargo_omitting_dirty_is_clean_archive_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = release._archive_evidence(
+                self.package(), self.archive(pathlib.Path(directory))
+            )
+        self.assertFalse(evidence.dirty)
+        self.assertEqual("a" * 40, evidence.git_sha1)
+
+    def test_present_non_boolean_dirty_is_refused(self) -> None:
+        for dirty in (None, 0, "false", []):
+            with self.subTest(dirty=dirty), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(release.ReleaseError, "clean-state fact"):
+                    release._archive_evidence(
+                        self.package(), self.archive(pathlib.Path(directory), dirty=dirty)
+                    )
+
+    def test_present_true_dirty_remains_dirty_archive_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = release._archive_evidence(
+                self.package(), self.archive(pathlib.Path(directory), dirty=True)
+            )
+        self.assertTrue(evidence.dirty)
+
+
 class ThePublicationBoundary(unittest.TestCase):
     def setUp(self) -> None:
         # GitHub itself sets CI=true. Most tests exercise local authority, so make that path
@@ -488,6 +568,77 @@ class ThePublicationBoundary(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual(11.0, calls[0][1])
         self.assertEqual("crates-io", calls[0][0][calls[0][0].index("--registry") + 1])
+
+    def test_controller_uses_an_explicit_release_root_without_writing_its_script_there(self) -> None:
+        version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"][
+            "package"
+        ]["version"]
+        tag = f"v{version}"
+        calls: list[tuple[tuple[str, ...], pathlib.Path]] = []
+        visible = iter((False, True))
+        with tempfile.TemporaryDirectory() as directory:
+            release_root = pathlib.Path(directory).resolve()
+            crate = release_root / "crates" / "sipx-sip"
+            crate.mkdir(parents=True)
+            (release_root / "Cargo.toml").write_text(
+                "[workspace]\nmembers = [\"crates/*\"]\n"
+                f"[workspace.package]\nversion = \"{version}\"\n"
+                'license = "MIT OR Apache-2.0"\n',
+                encoding="utf-8",
+            )
+            for filename in ("LICENSE-MIT", "LICENSE-APACHE"):
+                (release_root / filename).write_text("fixture\n", encoding="utf-8")
+            (crate / "Cargo.toml").write_text(
+                "[package]\nname = \"sipx-sip\"\n"
+                f"version = \"{version}\"\n",
+                encoding="utf-8",
+            )
+            (crate / "README.md").write_text("fixture\n", encoding="utf-8")
+            metadata = {
+                "packages": [
+                    package(
+                        "sipx-sip",
+                        version=version,
+                        manifest_path=str(crate / "Cargo.toml"),
+                        readme=str(crate / "README.md"),
+                    )
+                ]
+            }
+
+            def bounded(
+                command: tuple[str, ...], *, cwd: pathlib.Path, timeout: float, env=None
+            ):
+                del timeout, env
+                calls.append((tuple(command), cwd))
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch.object(release, "_install_cleanup_handlers"),
+                mock.patch.object(release, "_metadata", return_value=metadata) as metadata_call,
+                mock.patch.object(
+                    release, "_checkout", return_value=(False, (tag,), (tag,))
+                ) as checkout_call,
+                mock.patch.object(
+                    release, "_registry_available", side_effect=lambda *_args: next(visible)
+                ),
+                mock.patch.object(release, "_bounded_run", side_effect=bounded),
+            ):
+                self.assertEqual(
+                    0,
+                    release.main(
+                        (
+                            "--publish",
+                            "--confirm-publish",
+                            tag,
+                            "--release-root",
+                            str(release_root),
+                        )
+                    ),
+                )
+            metadata_call.assert_called_once_with(release_root)
+            checkout_call.assert_called_once_with(release_root)
+            self.assertEqual([(calls[0][0], release_root)], calls)
+            self.assertFalse((release_root / "scripts" / "release.py").exists())
 
     def test_main_generic_ci_refuses_before_registry_probe_or_upload(self) -> None:
         version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"][
@@ -683,6 +834,93 @@ class ThePublicationBoundary(unittest.TestCase):
                         ci_environment=github_publish_environment(tag, sha, event=event),
                     ),
                 )
+
+    def test_exact_main_workflow_recovery_authorizes_one_failed_run_and_release_commit(self) -> None:
+        tag = "v1.0.0-beta.1"
+        release_sha = "a" * 40
+        controller_sha = "b" * 40
+        failed_run_id = "654321"
+        self.assertEqual(
+            [],
+            release.checkout_problems(
+                "publish",
+                "1.0.0-beta.1",
+                dirty=False,
+                tags=(tag,),
+                annotated_tags=(tag,),
+                confirmation=tag,
+                ci=True,
+                head_sha=release_sha,
+                ci_recovery_authorization=f"{tag}@{release_sha}@{failed_run_id}",
+                controller_sha=controller_sha,
+                ci_environment=github_recovery_environment(
+                    controller_sha, failed_run_id=failed_run_id
+                ),
+            ),
+        )
+
+    def test_recovery_authority_cannot_start_a_first_publication(self) -> None:
+        self.assertEqual(
+            [],
+            release.recovery_visibility_problems(None, ()),
+            "ordinary publication remains allowed to start with an empty registry frontier",
+        )
+        problems = release.recovery_visibility_problems(
+            "v1.0.0-beta.1@" + "a" * 40 + "@654321", ()
+        )
+        self.assertTrue(any("already registry-visible" in problem for problem in problems))
+        self.assertEqual(
+            [],
+            release.recovery_visibility_problems(
+                "v1.0.0-beta.1@" + "a" * 40 + "@654321", ("sipx-sip",)
+            ),
+        )
+
+    def test_recovery_authority_is_distinct_and_every_identity_mismatch_refuses(self) -> None:
+        tag = "v1.0.0-beta.1"
+        release_sha = "a" * 40
+        controller_sha = "b" * 40
+        failed_run_id = "654321"
+        base = github_recovery_environment(controller_sha, failed_run_id=failed_run_id)
+        cases = (
+            ("event", {"GITHUB_EVENT_NAME": "push"}, "workflow_dispatch", None),
+            ("repository", {"GITHUB_REPOSITORY": "someone/sipx"}, "codewandler/sipx", None),
+            ("branch", {"GITHUB_REF": f"refs/tags/{tag}"}, "refs/heads/main", None),
+            (
+                "workflow",
+                {"GITHUB_WORKFLOW_REF": base["GITHUB_WORKFLOW_REF"].replace("resume", "release")},
+                "crates-io-resume.yml",
+                None,
+            ),
+            ("controller", {"GITHUB_SHA": "c" * 40}, "GITHUB_SHA", None),
+            ("failed env", {"SIPX_FAILED_RELEASE_RUN_ID": "7"}, "failed release run", None),
+            ("current run", {"GITHUB_RUN_ID": failed_run_id}, "current recovery run", None),
+            ("missing token", {"CARGO_REGISTRY_TOKEN": ""}, "CARGO_REGISTRY_TOKEN", None),
+            ("wrong release", {}, "recovery authorization", f"{tag}@{'c' * 40}@{failed_run_id}"),
+            ("missing failed run", {}, "recovery authorization", f"{tag}@{release_sha}"),
+        )
+        for label, changes, expected, authorization in cases:
+            environment = dict(base)
+            environment.update(changes)
+            with self.subTest(label=label):
+                problems = release.checkout_problems(
+                    "publish",
+                    "1.0.0-beta.1",
+                    dirty=False,
+                    tags=(tag,),
+                    annotated_tags=(tag,),
+                    confirmation=tag,
+                    ci=True,
+                    head_sha=release_sha,
+                    ci_recovery_authorization=(
+                        authorization
+                        if authorization is not None
+                        else f"{tag}@{release_sha}@{failed_run_id}"
+                    ),
+                    controller_sha=controller_sha,
+                    ci_environment=environment,
+                )
+                self.assertTrue(any(expected in problem for problem in problems), problems)
 
     def test_each_github_authority_mismatch_refuses_publication(self) -> None:
         tag = "v1.0.0-beta.1"

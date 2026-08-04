@@ -21,16 +21,16 @@ test or CI job that carries every clause rather than against the mechanism under
 roadmap keeps both sections for the scoping arguments in them: [where M10
 stands](../roadmap.md#m10--reachable), [where M12 stands](../roadmap.md#m12--provable).
 
-The next public boundary is **`1.0.0-beta.2`, not stable 1.0**. The advertised Opus command path is
-rate- and direction-correct, and its normalized package and independent-peer proofs pass. The
-complete 32-step local gate and exact-sha GitHub CI are green; the generated [maturity
-report](../maturity.md) therefore records **7 of 7 alpha-integrity predicates and 3 of 5 beta
-predicates met** before publication. Those are predicate counts, not weighted maturity scores.
+The next public boundary is **`1.0.0-beta.2`, not stable 1.0**. Its immutable tag and exact-SHA CI
+are green, and protected publication run `30912030744` passed the full gate and locked package
+rehearsal. It published four byte-verified leaf crates before `X-94` found that the tag-bound resume
+verifier rejected Cargo's valid clean VCS record; the other seven packages and GitHub prerelease are
+still absent. The generated [maturity report](../maturity.md) records that known-wrong public state
+rather than treating story counts as a weighted maturity score.
 
-What remains is one explicitly authorized, irreversible story: `A-12` creates the immutable beta
-commit and annotated tag, publishes all eleven public packages, verifies an exact registry-only
-consumer and Opus-enabled CLI, checks the published pages, and creates the repository-native GitHub
-prerelease without broader publicity. Stable
+Two in-progress stories now carry the cut: `X-94` adds a protected, checksum-bound recovery path for
+the unchanged tag bytes; `A-12` remains open until all eleven packages, the exact registry consumer,
+Opus-enabled installed CLI, Pages and repository-native GitHub prerelease are verified. Stable
 `1.0.0` remains a later decision after real outside use; browser audio, video admission,
 application-host phases and unadvertised optional features do not delay this beta boundary.
 
@@ -42,6 +42,7 @@ application-host phases and unadvertised optional features do not delay this bet
 
 ## Now (in progress)
 - [A-12 — Publish and verify 1.0.0-beta.2](A-12-publish-and-announce-beta.md) · Application · irreversible cut only after P-13, A-11 and explicit user authorization
+- [X-94 — Resume a partial release with fixed controller tooling](X-94-resume-a-partial-release-with-fixed-controller-tooling.md) · Build · beta.2 published four leaf crates before the tag-bound resume verifier rejected Cargo's valid clean VCS record
 
 ## Next (ready — take the top one unless the user named a story)
 _None._

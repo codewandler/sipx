@@ -11,7 +11,8 @@ The helper reads the workspace and package records from `cargo metadata --locked
 names, versions, publication policy and dependency edges therefore come from the same manifests Cargo
 will package. Git supplies the checkout state and the exact annotated tag at `HEAD`.
 
-There are four release modes and one dirty-candidate diagnostic:
+There are four release modes, one recovery-authorized form of `publish`, and one dirty-candidate
+diagnostic:
 
 | Mode | Registry writes | Required checkout | Action |
 |---|---:|---|---|
@@ -73,6 +74,29 @@ facts have been checked:
 
 A manual resume selects the tag as the workflow ref; selecting `main` and passing a tag-shaped input
 does not satisfy the contract.
+
+### 1.2 Protected controller recovery
+
+An immutable tag can outlive a defect in the controller stored at that tag. After a release run has
+passed the complete gate and locked rehearsal, published at least one frontier, and then failed in
+the publication step, a separate protected recovery workflow MAY use fixed controller tooling from
+its exact `main` workflow commit against a separate clean checkout of the release tag. This is not a
+second first-publication path. Before any write it MUST establish all of these facts:
+
+- the supplied failed-run ID names `crates-io.yml` at the same release commit, with conclusion
+  `failure`; its complete-gate and locked-rehearsal steps succeeded and its publication step failed;
+- the release checkout is the clean, unique annotated version tag, contained in `main`, while the
+  controller checkout is the exact workflow-source commit; neither checkout contributes files to
+  the other;
+- every visible exact package is reproduced from the release checkout and has the same canonical
+  crates.io SHA-256 checksum before a missing frontier is dispatched; and
+- CI recovery authority names the recovery workflow, repository, workflow-dispatch event, protected
+  run identity, exact tag, release SHA, failed-run ID and controller SHA. Ordinary branch CI and an
+  unprotected or differently sourced workflow remain unable to publish.
+
+The recovery workflow retains the ordinary frontier, timeout, consumer, Pages and GitHub-prerelease
+proofs. It obtains no authority to change package bytes: a mismatch stops before another upload, and
+a required package-content change still requires a new version.
 
 `verify-consumer` first polls all exact versions under the same finite visibility rule. It creates a
 temporary Cargo project whose dependencies use `=<workspace-version>` and name `registry =
@@ -140,8 +164,10 @@ The first frontier has no prior bytes to compare. Once any package is visible, t
 all public `.crate` archives from the clean tagged checkout in a temporary target directory, with no
 `--allow-dirty`. It also creates a temporary exact-version project under an isolated Cargo home and
 uses a bounded `cargo generate-lockfile` to obtain each already-visible package's canonical
-crates.io SHA-256 checksum from a fresh index. Every reproduced visible archive must embed `HEAD` and
-`dirty = false` in Cargo's VCS record, and its SHA-256 must equal the registry checksum. This check
+crates.io SHA-256 checksum from a fresh index. Every reproduced visible archive must embed `HEAD` in
+Cargo's VCS record and must be clean according to Cargo's encoding: `git.dirty` omitted or boolean
+`false` means clean, while boolean `true` means dirty. A present value of another type is malformed
+and refused. Its SHA-256 must equal the registry checksum. This check
 runs before a later frontier, before `publish` reports an all-visible release, and before
 `verify-consumer` installs anything. A mismatch stops before success or another publish command, so
 moving the annotated tag or changing bytes cannot make a later frontier or the announcement proof
@@ -176,3 +202,5 @@ the unavailable dependencies. It never guesses that a successful upload is alrea
 | R15 | first frontier, matching partial frontier, all-visible state, or moved-tag mismatch | first proceeds without prior evidence; matching bytes resume; all-visible and consumer proofs recheck; mismatch dispatches no upload or install |
 | R16 | registry probe times out or reports anything except exact not-found | refuse before treating the package as absent or dispatching an upload |
 | R17 | GitHub tag push or tag-selected manual dispatch, exact annotated tag/HEAD/workflow SHA, both confirmations and token | retain the ordinary frontier/checksum rules and permit at most one ready frontier |
+| R18 | protected recovery names a failed same-tag release whose gate/rehearsal passed and publication failed, with matching visible bytes | fixed controller may advance one missing frontier; wrong run/workflow/step/commit/controller or byte mismatch dispatches no upload |
+| R19 | Cargo VCS record omits `git.dirty`, sets a boolean, or gives a non-boolean value | omitted/false is clean; true is dirty; malformed is refused |

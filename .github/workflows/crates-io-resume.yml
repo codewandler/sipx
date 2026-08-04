@@ -1,0 +1,385 @@
+name: Resume partial crates.io beta
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact existing annotated version tag whose failed publication is resumed
+        required: true
+        type: string
+      failed_run_id:
+        description: Failed Publish crates.io beta Actions run ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  pages: read
+
+concurrency:
+  group: crates-io-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    name: recover and verify partial publication
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment:
+      name: release
+    outputs:
+      release_tag: ${{ steps.release_facts.outputs.tag }}
+      release_version: ${{ steps.release_facts.outputs.version }}
+      release_sha: ${{ steps.release_facts.outputs.sha }}
+      release_tag_object: ${{ steps.release_facts.outputs.tag_object }}
+      release_notes: ${{ steps.release_facts.outputs.notes }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      SIPX_FAILED_RELEASE_RUN_ID: ${{ inputs.failed_run_id }}
+      CONTROLLER_ROOT: ${{ github.workspace }}/controller
+      SIPX_RELEASE_ROOT: ${{ github.workspace }}/release
+      EXPECTED_RELEASE_TAG_OBJECT: 04a19dff6a7d7b6c072c98d18ad4b42407955d4b
+      RUSTUP_TOOLCHAIN: 1.97.1
+    steps:
+      - name: Check out the fixed recovery controller
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: controller
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the immutable release tag separately
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          path: release
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the main controller and immutable annotated tag
+        id: release_facts
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/crates-io-resume.yml@refs/heads/main"
+          if [[ "$GITHUB_REF" != refs/heads/main || "$GITHUB_REF_NAME" != main ]]; then
+            echo "recovery must be dispatched with main selected as its ref" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_WORKFLOW_REF" != "$expected_workflow_ref" ]]; then
+            echo "recovery workflow source is not exact main: $GITHUB_WORKFLOW_REF" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_SHA" != "$GITHUB_WORKFLOW_SHA" || "$(git -C "$CONTROLLER_ROOT" rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "controller checkout, event SHA and workflow SHA must be identical" >&2
+            exit 1
+          fi
+          if [[ -n "$(git -C "$CONTROLLER_ROOT" status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "controller checkout is not clean" >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "release tag is not v<semver>: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if [[ ! "$SIPX_FAILED_RELEASE_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "failed release run ID must be a positive integer" >&2
+            exit 1
+          fi
+          if [[ "$(git -C "$SIPX_RELEASE_ROOT" cat-file -t "refs/tags/$RELEASE_TAG")" != tag ]]; then
+            echo "$RELEASE_TAG is not an annotated tag" >&2
+            exit 1
+          fi
+          local_tag_object="$(git -C "$SIPX_RELEASE_ROOT" rev-parse "refs/tags/$RELEASE_TAG")"
+          remote_tag_object="$(git -C "$SIPX_RELEASE_ROOT" ls-remote --refs --tags origin "refs/tags/$RELEASE_TAG" | awk 'NR == 1 { print $1 } NR > 1 { exit 2 }')"
+          if [[ "$local_tag_object" != "$EXPECTED_RELEASE_TAG_OBJECT" || "$remote_tag_object" != "$EXPECTED_RELEASE_TAG_OBJECT" ]]; then
+            echo "local and remote tag objects must remain pinned at $EXPECTED_RELEASE_TAG_OBJECT" >&2
+            exit 1
+          fi
+          release_sha="$(git -C "$SIPX_RELEASE_ROOT" rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          if [[ "$(git -C "$SIPX_RELEASE_ROOT" rev-parse HEAD)" != "$release_sha" ]]; then
+            echo "release checkout is not the commit named by $RELEASE_TAG" >&2
+            exit 1
+          fi
+          version="$(python3 - "$SIPX_RELEASE_ROOT/Cargo.toml" <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+
+          manifest = pathlib.Path(sys.argv[1])
+          print(tomllib.loads(manifest.read_text(encoding="utf-8"))["workspace"]["package"]["version"])
+          PY
+          )"
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "release tag $RELEASE_TAG does not match workspace version $version" >&2
+            exit 1
+          fi
+          mapfile -t tags < <(git -C "$SIPX_RELEASE_ROOT" tag --points-at HEAD)
+          if [[ "${#tags[@]}" -ne 1 || "${tags[0]}" != "$RELEASE_TAG" ]]; then
+            echo "release commit must carry only $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if [[ -n "$(git -C "$SIPX_RELEASE_ROOT" status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "release checkout is not clean" >&2
+            exit 1
+          fi
+          git -C "$SIPX_RELEASE_ROOT" fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git -C "$SIPX_RELEASE_ROOT" merge-base --is-ancestor "$release_sha" origin/main; then
+            echo "$RELEASE_TAG is not contained in origin/main" >&2
+            exit 1
+          fi
+          notes="docs/releases/$version.md"
+          if [[ ! -s "$SIPX_RELEASE_ROOT/$notes" ]]; then
+            echo "reviewed release notes are missing: $notes" >&2
+            exit 1
+          fi
+          {
+            echo "RELEASE_VERSION=$version"
+            echo "RELEASE_SHA=$release_sha"
+            echo "RELEASE_NOTES=$notes"
+          } >>"$GITHUB_ENV"
+          {
+            echo "tag=$RELEASE_TAG"
+            echo "version=$version"
+            echo "sha=$release_sha"
+            echo "tag_object=$local_tag_object"
+            echo "notes=$notes"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Authorize recovery from the failed release evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_record="$RUNNER_TEMP/sipx-failed-release-run.json"
+          jobs_record="$RUNNER_TEMP/sipx-failed-release-jobs.json"
+          gh api -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SIPX_FAILED_RELEASE_RUN_ID" >"$run_record"
+          gh api -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SIPX_FAILED_RELEASE_RUN_ID/jobs?filter=latest&per_page=100" \
+            >"$jobs_record"
+          python3 - "$run_record" "$jobs_record" "$RELEASE_TAG" "$RELEASE_SHA" "$SIPX_FAILED_RELEASE_RUN_ID" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          run = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          jobs = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")).get("jobs", [])
+          tag, sha, requested_id = sys.argv[3:]
+          problems = []
+          if str(run.get("id")) != requested_id:
+              problems.append("returned run ID differs")
+          if run.get("path") != ".github/workflows/crates-io.yml":
+              problems.append("run is not from .github/workflows/crates-io.yml")
+          if run.get("head_sha") != sha or run.get("head_branch") != tag:
+              problems.append("run is not bound to the release tag commit")
+          if run.get("event") not in {"push", "workflow_dispatch"}:
+              problems.append("run has no authorized release entry")
+          if run.get("status") != "completed" or run.get("conclusion") != "failure":
+              problems.append("run is not a completed failed release")
+
+          release_jobs = [job for job in jobs if job.get("name") == "publish and verify prerelease"]
+          if len(release_jobs) != 1:
+              problems.append("run does not have exactly one release job")
+          else:
+              job = release_jobs[0]
+              if job.get("conclusion") != "failure":
+                  problems.append("release job did not fail")
+              steps = {step.get("name"): step for step in job.get("steps", [])}
+              required = {
+                  "Validate the immutable annotated tag": "success",
+                  "Run the complete release gate": "success",
+                  "Rehearse the locked registry packages": "success",
+                  "Publish dependency-ready frontiers under a finite bound": "failure",
+                  "Verify the exact registry consumer and installed CLI": "skipped",
+                  "Verify Pages deployment from the release commit": "skipped",
+              }
+              for name, conclusion in required.items():
+                  if steps.get(name, {}).get("conclusion") != conclusion:
+                      problems.append(f"{name!r} was not {conclusion}")
+              ordered = [
+                  "Validate the immutable annotated tag",
+                  "Run the complete release gate",
+                  "Rehearse the locked registry packages",
+                  "Publish dependency-ready frontiers under a finite bound",
+              ]
+              numbers = [steps.get(name, {}).get("number") for name in ordered]
+              if any(not isinstance(number, int) for number in numbers) or numbers != sorted(numbers):
+                  problems.append("validation, gate, rehearsal and publication evidence is out of order")
+
+          prerelease_jobs = [job for job in jobs if job.get("name") == "publish or verify GitHub prerelease"]
+          if len(prerelease_jobs) != 1 or prerelease_jobs[0].get("conclusion") != "skipped":
+              problems.append("the failed run reached or omitted the GitHub prerelease job")
+          if problems:
+              raise SystemExit("failed release run is not authorized recovery evidence: " + "; ".join(problems))
+          PY
+
+      - name: Install recovery build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libopus-dev libssl-dev pkg-config
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+
+      - name: Require the approved Cargo credential
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [[ -z "$CARGO_REGISTRY_TOKEN" ]]; then
+            echo "the release environment must provide CARGO_REGISTRY_TOKEN" >&2
+            exit 1
+          fi
+
+      - name: Resume dependency-ready frontiers under a finite bound
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        shell: bash
+        working-directory: controller
+        run: |
+          set -euo pipefail
+          public_count="$(cargo metadata --manifest-path "$SIPX_RELEASE_ROOT/Cargo.toml" --no-deps --format-version 1 | python3 -c 'import json, sys; print(sum(package.get("publish") != [] for package in json.load(sys.stdin)["packages"]))')"
+          max_invocations=$((public_count + 1))
+          report="$RUNNER_TEMP/sipx-recovery-frontier.txt"
+          complete=false
+          for ((invocation = 1; invocation <= max_invocations; invocation++)); do
+            echo "recovery frontier invocation $invocation of $max_invocations"
+            remote_tag_object="$(git -C "$SIPX_RELEASE_ROOT" ls-remote --refs --tags origin "refs/tags/$RELEASE_TAG" | awk 'NR == 1 { print $1 } NR > 1 { exit 2 }')"
+            if [[ "$remote_tag_object" != "$EXPECTED_RELEASE_TAG_OBJECT" ]]; then
+              echo "remote tag object moved before recovery invocation $invocation" >&2
+              exit 1
+            fi
+            : >"$report"
+            ./scripts/release.py \
+              --release-root "$SIPX_RELEASE_ROOT" \
+              --publish \
+              --confirm-publish "$RELEASE_TAG" \
+              --authorize-ci-recovery "$RELEASE_TAG@$RELEASE_SHA@$SIPX_FAILED_RELEASE_RUN_ID" \
+              --registry-wait-seconds 300 \
+              --command-timeout-seconds 1800 2>&1 | tee "$report"
+            if grep -Fqx "all public packages are already registry-visible" "$report"; then
+              complete=true
+              break
+            fi
+          done
+          if [[ "$complete" != true ]]; then
+            echo "recovery did not reach the all-visible state in $max_invocations invocations" >&2
+            exit 1
+          fi
+
+      - name: Verify the exact registry consumer and installed CLI
+        working-directory: controller
+        run: |
+          ./scripts/release.py \
+            --release-root "$SIPX_RELEASE_ROOT" \
+            --verify-consumer \
+            --registry-wait-seconds 300 \
+            --consumer-timeout-seconds 900 \
+            --command-timeout-seconds 1800
+
+      - name: Verify Pages deployment from the release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&head_sha=$RELEASE_SHA&per_page=100" \
+            --jq '.workflow_runs | map(select(.head_sha == env.RELEASE_SHA and .head_branch == "main" and .conclusion == "success")) | first | .id // empty')"
+          if [[ -z "$run_id" ]]; then
+            echo "no successful main CI run has head_sha $RELEASE_SHA" >&2
+            exit 1
+          fi
+          deployment_job="$(gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name == "deploy docs site" and .conclusion == "success") | .id' \
+            | head -n 1)"
+          if [[ -z "$deployment_job" ]]; then
+            echo "CI run $run_id has no successful deploy docs site job" >&2
+            exit 1
+          fi
+          guide="$RUNNER_TEMP/sipx-getting-started.html"
+          curl --fail --silent --show-error --location \
+            --retry 8 --retry-all-errors --retry-max-time 120 --connect-timeout 10 --max-time 20 \
+            --output "$guide" https://codewandler.github.io/sipx/docs/getting-started
+          if ! grep -Fq "$RELEASE_VERSION" "$guide"; then
+            echo "the deployed getting-started guide does not name $RELEASE_VERSION" >&2
+            exit 1
+          fi
+          curl --fail --silent --show-error --location \
+            --retry 8 --retry-all-errors --retry-max-time 120 --connect-timeout 10 --max-time 20 \
+            --output /dev/null https://codewandler.github.io/sipx/api/sipx_call/index.html
+          echo "Pages run $run_id job $deployment_job is bound to $RELEASE_SHA"
+
+  github_release:
+    name: publish or verify recovered GitHub prerelease
+    needs: recover
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.recover.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.recover.outputs.release_version }}
+      RELEASE_SHA: ${{ needs.recover.outputs.release_sha }}
+      RELEASE_TAG_OBJECT: ${{ needs.recover.outputs.release_tag_object }}
+      RELEASE_NOTES: ${{ needs.recover.outputs.release_notes }}
+    steps:
+      - name: Check out the recovered release record
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.recover.outputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create or verify the recovered GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          local_tag_object="$(git rev-parse "refs/tags/$RELEASE_TAG")"
+          remote_tag_object="$(git ls-remote --refs --tags origin "refs/tags/$RELEASE_TAG" | awk 'NR == 1 { print $1 } NR > 1 { exit 2 }')"
+          if [[ "$local_tag_object" != "$RELEASE_TAG_OBJECT" || "$remote_tag_object" != "$RELEASE_TAG_OBJECT" ]]; then
+            echo "release tag object moved before GitHub prerelease handling" >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            record="$RUNNER_TEMP/sipx-existing-release.json"
+            gh api -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$record"
+            python3 - "$record" "$RELEASE_NOTES" "$RELEASE_TAG" "$RELEASE_VERSION" "$RELEASE_SHA" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          record = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          notes = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").strip()
+          tag = sys.argv[3]
+          version = sys.argv[4]
+          sha = sys.argv[5]
+          problems = []
+          if record.get("tag_name") != tag:
+              problems.append("tag differs")
+          if record.get("target_commitish") != sha:
+              problems.append("target differs")
+          if record.get("name") != f"sipx {version}":
+              problems.append("title differs")
+          if record.get("draft") is not False or record.get("prerelease") is not True:
+              problems.append("release is not a published prerelease")
+          if str(record.get("body", "")).strip() != notes:
+              problems.append("reviewed notes differ")
+          if problems:
+              raise SystemExit("existing GitHub Release is not the reviewed prerelease: " + ", ".join(problems))
+          PY
+          else
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --target "$RELEASE_SHA" \
+              --prerelease \
+              --title "sipx $RELEASE_VERSION" \
+              --notes-file "$RELEASE_NOTES"
+          fi

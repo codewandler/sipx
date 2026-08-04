@@ -17,12 +17,16 @@ checker = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = checker
 SPEC.loader.exec_module(checker)
 WORKFLOW = (ROOT / ".github" / "workflows" / "crates-io.yml").read_text(encoding="utf-8")
+RESUME_WORKFLOW = (ROOT / ".github" / "workflows" / "crates-io-resume.yml").read_text(
+    encoding="utf-8"
+)
 SPEC_TEXT = (ROOT / "docs" / "specs" / "release-workflow.md").read_text(encoding="utf-8")
 
 
 class CurrentWorkflow(unittest.TestCase):
     def test_current_workflow_satisfies_the_contract(self) -> None:
         self.assertEqual([], checker.workflow_problems(WORKFLOW))
+        self.assertEqual([], checker.resume_workflow_problems(RESUME_WORKFLOW))
         self.assertEqual([], checker.specification_problems(SPEC_TEXT))
         self.assertEqual([], checker.check())
 
@@ -280,6 +284,219 @@ class PublicityBoundaryMutations(unittest.TestCase):
         self.assertIn(
             "specification does not confine the provenance denylist to the gate step",
             checker.specification_problems(mutated),
+        )
+
+    def test_the_specification_binds_and_separates_recovery(self) -> None:
+        mutated = SPEC_TEXT.replace(
+            "recovery workflow MUST verify the named failed run through the Actions API before exposing the\nCargo credential",
+            "recovery may trust a supplied run ID after exposing the credential",
+            1,
+        )
+        self.assertIn(
+            "specification does not bind recovery to failed-run evidence before credentials",
+            checker.specification_problems(mutated),
+        )
+        mutated = SPEC_TEXT.replace(
+            "Recovery tooling and\nrelease bytes live in separate checkouts",
+            "Recovery tooling may modify the release checkout",
+            1,
+        )
+        self.assertIn(
+            "specification does not separate recovery tooling from release bytes",
+            checker.specification_problems(mutated),
+        )
+
+
+class RecoveryMutations(unittest.TestCase):
+    def assert_mutation(self, old: str, new: str, expected: str) -> None:
+        self.assertIn(old, RESUME_WORKFLOW, f"recovery fixture no longer contains {old!r}")
+        problems = checker.resume_workflow_problems(RESUME_WORKFLOW.replace(old, new, 1))
+        self.assertIn(expected, problems)
+
+    def test_recovery_is_manual_protected_read_only_and_serialized(self) -> None:
+        self.assert_mutation(
+            "  workflow_dispatch:\n",
+            "  push:\n",
+            "recovery has an automatic entry",
+        )
+        self.assert_mutation(
+            "      failed_run_id:\n",
+            "      ignored_run_id:\n",
+            "recovery has no required failed run input",
+        )
+        self.assert_mutation(
+            "      name: release\n",
+            "      name: staging\n",
+            "recovery runs outside the protected release environment",
+        )
+        self.assert_mutation(
+            "  cancel-in-progress: false\n",
+            "  cancel-in-progress: true\n",
+            "recovery concurrency can cancel a publication",
+        )
+        self.assert_mutation(
+            "  contents: read\n",
+            "  contents: write\n",
+            "recovery permissions are not read-only",
+        )
+
+    def test_controller_and_release_checkouts_stay_separate_and_immutable(self) -> None:
+        self.assert_mutation(
+            "          ref: ${{ github.sha }}\n          path: controller\n",
+            "          ref: main\n          path: controller\n",
+            "fixed controller checkout is absent or mutable",
+        )
+        self.assert_mutation(
+            "          ref: refs/tags/${{ inputs.tag }}\n          path: release\n",
+            "          ref: ${{ github.sha }}\n          path: release\n",
+            "immutable release checkout is absent or not separate",
+        )
+        self.assert_mutation(
+            ".github/workflows/crates-io-resume.yml@refs/heads/main",
+            ".github/workflows/crates-io-resume.yml@refs/heads/recovery",
+            "recovery workflow source is not required from exact main",
+        )
+        self.assert_mutation(
+            'git -C "$SIPX_RELEASE_ROOT" status --porcelain=v1 --untracked-files=all',
+            'git -C "$SIPX_RELEASE_ROOT" status --porcelain=v1 --untracked-files=no',
+            "release checkout cleanliness is not required",
+        )
+
+    def test_failed_run_is_bound_to_original_workflow_tag_and_step_results(self) -> None:
+        mutations = (
+            (
+                'run.get("path") != ".github/workflows/crates-io.yml"',
+                'run.get("path") != ".github/workflows/anything.yml"',
+                "failed run is not bound to the ordinary workflow",
+            ),
+            (
+                'run.get("head_sha") != sha or run.get("head_branch") != tag',
+                'run.get("head_sha") != run.get("head_sha")',
+                "failed run is not bound to tag and release SHA",
+            ),
+            (
+                '"Run the complete release gate": "success"',
+                '"Run a partial gate": "success"',
+                "recovery does not require the complete gate to have succeeded",
+            ),
+            (
+                '"Rehearse the locked registry packages": "success"',
+                '"Skip package rehearsal": "success"',
+                "recovery does not require rehearsal to have succeeded",
+            ),
+            (
+                '"Publish dependency-ready frontiers under a finite bound": "failure"',
+                '"Publish dependency-ready frontiers under a finite bound": "success"',
+                "recovery does not require publication to have failed",
+            ),
+        )
+        for old, new, expected in mutations:
+            with self.subTest(expected=expected):
+                self.assert_mutation(old, new, expected)
+
+    def test_recovery_uses_fixed_controller_interface_and_exact_authority(self) -> None:
+        self.assert_mutation(
+            '--release-root "$SIPX_RELEASE_ROOT"',
+            '--release-root "$CONTROLLER_ROOT"',
+            "recovery publication does not name the immutable release root",
+        )
+        self.assert_mutation(
+            '--authorize-ci-recovery "$RELEASE_TAG@$RELEASE_SHA@$SIPX_FAILED_RELEASE_RUN_ID"',
+            '--authorize-ci-recovery "$RELEASE_TAG@$RELEASE_SHA@1"',
+            "recovery authorization is not bound to tag, release SHA and failed run",
+        )
+        # Mutate the second root argument: consumer verification must independently name it.
+        first = RESUME_WORKFLOW.index('--release-root "$SIPX_RELEASE_ROOT"')
+        second = RESUME_WORKFLOW.index('--release-root "$SIPX_RELEASE_ROOT"', first + 1)
+        mutated = (
+            RESUME_WORKFLOW[:second]
+            + '--release-root "$CONTROLLER_ROOT"'
+            + RESUME_WORKFLOW[second + len('--release-root "$SIPX_RELEASE_ROOT"') :]
+        )
+        self.assertIn(
+            "recovery exact consumer proof is absent",
+            checker.resume_workflow_problems(mutated),
+        )
+
+    def test_recovery_pins_tag_object_and_original_packager_toolchain(self) -> None:
+        self.assert_mutation(
+            "EXPECTED_RELEASE_TAG_OBJECT: 04a19dff6a7d7b6c072c98d18ad4b42407955d4b",
+            "EXPECTED_RELEASE_TAG_OBJECT: movable",
+            "recovery does not pin the beta tag object",
+        )
+        self.assert_mutation(
+            "RUSTUP_TOOLCHAIN: 1.97.1",
+            "RUSTUP_TOOLCHAIN: stable",
+            "recovery does not pin the original packager toolchain",
+        )
+        self.assert_mutation(
+            'rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal',
+            "rustup toolchain install stable --profile minimal",
+            "recovery does not install the pinned packager toolchain",
+        )
+
+        query = 'git -C "$SIPX_RELEASE_ROOT" ls-remote --refs --tags origin "refs/tags/$RELEASE_TAG"'
+        occurrences = []
+        start = 0
+        while True:
+            found = RESUME_WORKFLOW.find(query, start)
+            if found < 0:
+                break
+            occurrences.append(found)
+            start = found + len(query)
+        self.assertEqual(2, len(occurrences), "release-root remote-tag query count changed")
+        second = occurrences[1]
+        mutated = RESUME_WORKFLOW[:second] + "printf stale" + RESUME_WORKFLOW[second + len(query) :]
+        self.assertIn(
+            "recovery does not recheck the remote tag object before every helper write",
+            checker.resume_workflow_problems(mutated),
+        )
+
+        github_query = 'git ls-remote --refs --tags origin "refs/tags/$RELEASE_TAG"'
+        self.assertIn(github_query, RESUME_WORKFLOW)
+        mutated = RESUME_WORKFLOW.replace(github_query, "printf stale", 1)
+        self.assertIn(
+            "recovery does not recheck the tag object before GitHub prerelease handling",
+            checker.resume_workflow_problems(mutated),
+        )
+
+    def test_recovery_frontier_and_downstream_evidence_remain_bounded_and_exact(self) -> None:
+        self.assert_mutation(
+            "max_invocations=$((public_count + 1))",
+            "max_invocations=999999",
+            "recovery frontier loop is not bounded by public package count",
+        )
+        self.assert_mutation(
+            "all public packages are already registry-visible",
+            "publication probably finished",
+            "recovery frontier does not require the all-visible observation",
+        )
+        self.assert_mutation(
+            "head_sha=$RELEASE_SHA",
+            "head_sha=main",
+            "recovery Pages run is not selected by release SHA",
+        )
+        self.assert_mutation(
+            "--consumer-timeout-seconds 900",
+            "--consumer-timeout-seconds 0",
+            "recovery consumer command has no finite bound",
+        )
+
+    def test_recovery_write_authority_is_dependent_and_posting_is_refused(self) -> None:
+        self.assert_mutation(
+            "    needs: recover\n",
+            "    needs: []\n",
+            "recovery GitHub prerelease is not dependent",
+        )
+        self.assert_mutation(
+            "          persist-credentials: false\n",
+            "          persist-credentials: true\n",
+            "fixed controller checkout is absent or mutable",
+        )
+        mutated = RESUME_WORKFLOW + "\n      - run: gh issue create --title released\n"
+        self.assertIn(
+            "recovery contains an external announcement or posting side effect",
+            checker.resume_workflow_problems(mutated),
         )
 
 

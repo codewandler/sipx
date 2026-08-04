@@ -7,7 +7,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-No changes yet.
+### Fixed
+
+- **Partial registry publication can be recovered without moving the release tag (`X-94`).** A
+  protected manual workflow uses fixed controller tooling against a separate immutable-tag
+  checkout, verifies the failed run and every already-published checksum, and resumes only the
+  dependency-ready packages still absent. Cargo's omitted clean `git.dirty` field is handled
+  correctly; distinct CI authority, the original packager toolchain and annotated tag object are
+  pinned by adversarial checks.
 
 ## [1.0.0-beta.2] — 2026-08-04
 

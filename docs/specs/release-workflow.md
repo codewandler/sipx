@@ -16,13 +16,20 @@ Normative words **MUST**, **MUST NOT**, **SHOULD** and **MAY** are used as in RF
 
 ## 2. Entry and authority
 
-The workflow MAY start from a pushed version tag or from `workflow_dispatch`. A manual run MUST be
+The ordinary workflow MAY start from a pushed version tag or from `workflow_dispatch`. A manual run MUST be
 dispatched with that existing tag selected as the GitHub ref and MUST require the same exact tag as
 a redundant confirmation input. Selecting a branch and supplying an arbitrary tag input is not a
 release entry: checkout alone cannot change the event or workflow-source authority recorded by
 GitHub. Both entries MUST pass through the `release` environment, whose repository or organization
 policy supplies required approval. Concurrent runs for one tag MUST serialize and MUST NOT cancel
 an in-progress publication.
+
+One separate `workflow_dispatch` recovery workflow MAY operate after a partial publication only
+under §4's `recovering` state. It MUST run in the same protected `release` environment and serialize
+with the ordinary workflow by release tag. Its exact `main` workflow commit is controller authority,
+not package authority: package bytes MUST come from a separate clean checkout of the immutable tag.
+The required tag and failed ordinary-run ID are explicit inputs and are both validated before a
+registry probe or write.
 
 The Cargo credential is the environment or repository secret named `CARGO_REGISTRY_TOKEN`, exposed
 only to the presence check and publication step. An empty value MUST fail before the gate or any
@@ -64,6 +71,7 @@ push or Pages deployment, so ancestry is necessary but not sufficient for a veri
 | gated | validated tag | full local gate and locked publication dry-run pass | job timeout plus helper command bounds |
 | publishing | gated tag and non-empty Cargo secret | one dependency-ready frontier becomes visible | helper visibility and command bounds |
 | publishing | visible frontier | rerun helper on unchanged tag | public-package count plus one invocations total |
+| recovering | failed ordinary run for this tag whose gate and rehearsal passed and publication step failed | fixed controller reproduces every visible checksum, then advances at most one unchanged frontier per bounded invocation | protected job timeout and public-package count plus one invocations total |
 | distributed | every package visible | exact registry consumer and Opus-enabled installed CLI loopback pass | helper consumer and visibility bounds |
 | documented | distributed | successful `ci.yml` Pages deployment job whose `head_sha` equals the tag commit; public guide and API URLs answer | finite HTTP retries and job timeout |
 | released | documented | one non-draft GitHub prerelease for the exact tag and reviewed notes | one create, or exact verification of an existing release |
@@ -74,6 +82,15 @@ from the validated tag. Each successful helper call either makes a frontier visi
 that all packages are visible. The loop limit is derived from the number of public packages plus
 one final observation; exhausting it is failure. A rerun is safe because the helper compares
 already-visible registry checksums with the tagged archives before advancing.
+
+The recovery workflow MUST verify the named failed run through the Actions API before exposing the
+Cargo credential to publication. The run's repository, original workflow path, release SHA and
+conclusion must agree; the `Run the complete release gate` and
+`Rehearse the locked registry packages` steps must be successful and
+`Publish dependency-ready frontiers under a finite bound` must be failed. Recovery tooling and
+release bytes live in separate checkouts. The helper receives distinct recovery authorization
+binding the workflow source SHA, exact tag and release SHA, failed run ID and current run identity.
+The ordinary tag-source authorization remains unchanged.
 
 ## 5. Documentation and GitHub prerelease proof
 
@@ -103,6 +120,7 @@ workflow MUST NOT post broader publicity.
 | `RWF-6` | make frontier repetition unbounded or omit exact consumer proof | static check fails |
 | `RWF-7` | accept Pages without matching `head_sha`, deploy job and two probes | static check fails |
 | `RWF-8` | make the GitHub prerelease non-idempotent, unverified or inline-noted; or add broader posting | static check fails |
+| `RWF-9` | recovery omits protected environment, separate checkouts, failed-run step evidence, exact controller/tag/SHA binding, visible-byte proof or bounded frontier loop | static check fails |
 
 These are structural tests, not evidence that GitHub or crates.io accepted a write. Actual release
 acceptance remains the run records and registry bytes produced only after explicit authorization.

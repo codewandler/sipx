@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Statically hold the approved beta workflow to the release orchestration contract."""
+"""Statically hold ordinary and recovery beta workflows to the release contract."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from collections.abc import Sequence
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "crates-io.yml"
+RESUME_WORKFLOW = ROOT / ".github" / "workflows" / "crates-io-resume.yml"
 SPEC = ROOT / "docs" / "specs" / "release-workflow.md"
 
 
@@ -129,6 +130,135 @@ def workflow_problems(text: str) -> list[str]:
     return problems
 
 
+def resume_workflow_problems(text: str) -> list[str]:
+    """Return authority and recovery-contract defects in the protected resume workflow."""
+
+    problems: list[str] = []
+    checks = (
+        ("recovery has no required exact tag input", r"workflow_dispatch:\s*\n\s+inputs:\s*\n\s+tag:.*?required:\s*true"),
+        ("recovery has no required failed run input", r"failed_run_id:.*?required:\s*true"),
+        ("recovery permissions are not read-only", r"permissions:\s*\n\s+actions:\s*read\s*\n\s+contents:\s*read\s*\n\s+pages:\s*read"),
+        ("recovery does not serialize with publication by tag", r"group:\s*crates-io-\$\{\{\s*inputs\.tag\s*\}\}"),
+        ("recovery concurrency can cancel a publication", r"cancel-in-progress:\s*false"),
+        ("recovery runs outside the protected release environment", r"\n\s*recover:\s*\n.*?environment:\s*\n\s+name:\s*release"),
+        ("recovery job has no finite timeout", r"\n\s*recover:\s*\n(?:(?!\n\s*github_release:).)*?timeout-minutes:\s*[1-9][0-9]*"),
+        ("failed run input is not passed to the helper convention", r"SIPX_FAILED_RELEASE_RUN_ID:\s*\$\{\{\s*inputs\.failed_run_id\s*\}\}"),
+        ("recovery does not define separate controller and release roots", r"CONTROLLER_ROOT:.*?/controller\s*\n\s+SIPX_RELEASE_ROOT:.*?/release"),
+        ("recovery does not pin the beta tag object", r"EXPECTED_RELEASE_TAG_OBJECT:\s*04a19dff6a7d7b6c072c98d18ad4b42407955d4b"),
+        ("recovery tag object is not passed to the dependent job", r"release_tag_object:\s*\$\{\{\s*steps\.release_facts\.outputs\.tag_object\s*\}\}.*?RELEASE_TAG_OBJECT:\s*\$\{\{\s*needs\.recover\.outputs\.release_tag_object\s*\}\}"),
+        ("recovery does not pin the original packager toolchain", r"RUSTUP_TOOLCHAIN:\s*1\.97\.1"),
+        (
+            "fixed controller checkout is absent or mutable",
+            r"Check out the fixed recovery controller\s*\n(?:(?!\n\s+- name:).)*?uses:\s*actions/checkout@v4(?:(?!\n\s+- name:).)*?ref:\s*\$\{\{\s*github\.sha\s*\}\}(?:(?!\n\s+- name:).)*?path:\s*controller(?:(?!\n\s+- name:).)*?fetch-depth:\s*0(?:(?!\n\s+- name:).)*?persist-credentials:\s*false",
+        ),
+        (
+            "immutable release checkout is absent or not separate",
+            r"Check out the immutable release tag separately\s*\n(?:(?!\n\s+- name:).)*?uses:\s*actions/checkout@v4(?:(?!\n\s+- name:).)*?ref:\s*refs/tags/\$\{\{\s*inputs\.tag\s*\}\}(?:(?!\n\s+- name:).)*?path:\s*release(?:(?!\n\s+- name:).)*?fetch-depth:\s*0(?:(?!\n\s+- name:).)*?persist-credentials:\s*false",
+        ),
+        (
+            "recovery workflow source is not required from exact main",
+            r"expected_workflow_ref=.*?\.github/workflows/crates-io-resume\.yml@refs/heads/main.*?GITHUB_WORKFLOW_REF.*?expected_workflow_ref",
+        ),
+        ("recovery event is not required on main", r"GITHUB_REF.*?refs/heads/main.*?GITHUB_REF_NAME.*?main"),
+        (
+            "controller checkout is not bound to event and workflow SHAs",
+            r"GITHUB_SHA.*?GITHUB_WORKFLOW_SHA.*?git -C [\"']?\$CONTROLLER_ROOT[\"']? rev-parse HEAD.*?GITHUB_SHA",
+        ),
+        ("controller cleanliness is not required", r"git -C [\"']?\$CONTROLLER_ROOT[\"']? status --porcelain=v1 --untracked-files=all"),
+        ("failed run ID is not required to be positive numeric", r"SIPX_FAILED_RELEASE_RUN_ID.*?\^\[1-9\]\[0-9\]\*\$"),
+        ("recovery does not require an annotated tag", r"git -C [\"']?\$SIPX_RELEASE_ROOT[\"']? cat-file -t .*?refs/tags/\$RELEASE_TAG.*?!= tag"),
+        (
+            "recovery does not bind local and remote annotated tag objects",
+            r"local_tag_object=.*?rev-parse .*?refs/tags/\$RELEASE_TAG.*?remote_tag_object=.*?ls-remote --refs --tags origin .*?refs/tags/\$RELEASE_TAG.*?local_tag_object.*?EXPECTED_RELEASE_TAG_OBJECT.*?remote_tag_object.*?EXPECTED_RELEASE_TAG_OBJECT",
+        ),
+        ("recovery does not peel the tag to its commit", r"git -C [\"']?\$SIPX_RELEASE_ROOT[\"']? rev-parse .*?refs/tags/\$RELEASE_TAG\^\{commit\}"),
+        ("recovery tag is not matched to workspace version", r"RELEASE_TAG.*?v\$version"),
+        ("recovery permits another tag on the release commit", r"git -C [\"']?\$SIPX_RELEASE_ROOT[\"']? tag --points-at HEAD"),
+        ("release checkout cleanliness is not required", r"git -C [\"']?\$SIPX_RELEASE_ROOT[\"']? status --porcelain=v1 --untracked-files=all"),
+        ("recovery release commit is not required on main", r"git -C [\"']?\$SIPX_RELEASE_ROOT[\"']? merge-base --is-ancestor .*?origin/main"),
+        ("failed release run record is not queried", r"actions/runs/\$SIPX_FAILED_RELEASE_RUN_ID[\"']?"),
+        ("failed release jobs are not queried", r"actions/runs/\$SIPX_FAILED_RELEASE_RUN_ID/jobs\?filter=latest&per_page=100"),
+        ("failed run is not bound to the ordinary workflow", r"run\.get\([\"']path[\"']\)\s*!=\s*[\"']\.github/workflows/crates-io\.yml[\"']"),
+        ("failed run is not bound to tag and release SHA", r"run\.get\([\"']head_sha[\"']\)\s*!=\s*sha\s+or\s+run\.get\([\"']head_branch[\"']\)\s*!=\s*tag"),
+        ("recovery accepts a run that did not fail", r"run\.get\([\"']status[\"']\)\s*!=\s*[\"']completed[\"']\s+or\s+run\.get\([\"']conclusion[\"']\)\s*!=\s*[\"']failure[\"']"),
+        ("recovery does not require the complete gate to have succeeded", r"Run the complete release gate[\"']:\s*[\"']success"),
+        ("recovery does not require rehearsal to have succeeded", r"Rehearse the locked registry packages[\"']:\s*[\"']success"),
+        ("recovery does not require publication to have failed", r"Publish dependency-ready frontiers under a finite bound[\"']:\s*[\"']failure"),
+        ("failed-run evidence is not checked in step order", r"ordered\s*=.*?Validate the immutable annotated tag.*?Run the complete release gate.*?Rehearse the locked registry packages.*?Publish dependency-ready frontiers under a finite bound.*?numbers.*?sorted\(numbers\)"),
+        ("recovery accepts downstream consumer evidence from the failed run", r"Verify the exact registry consumer and installed CLI[\"']:\s*[\"']skipped"),
+        ("recovery accepts downstream Pages evidence from the failed run", r"Verify Pages deployment from the release commit[\"']:\s*[\"']skipped"),
+        ("recovery accepts an earlier GitHub prerelease", r"publish or verify GitHub prerelease.*?conclusion.*?skipped"),
+        ("Cargo secret does not use the repository convention in recovery", r"CARGO_REGISTRY_TOKEN:\s*\$\{\{\s*secrets\.CARGO_REGISTRY_TOKEN\s*\}\}"),
+        ("empty Cargo secret is not refused in recovery", r"-z [\"']?\$CARGO_REGISTRY_TOKEN"),
+        ("recovery publication does not use the fixed controller", r"working-directory:\s*controller\s*\n\s+run:\s*\|.*?\./scripts/release\.py"),
+        ("recovery does not install the pinned packager toolchain", r"rustup toolchain install [\"']\$RUSTUP_TOOLCHAIN[\"'] --profile minimal"),
+        ("recovery publication does not name the immutable release root", r"Resume dependency-ready frontiers.*?\./scripts/release\.py.*?--release-root [\"']\$SIPX_RELEASE_ROOT[\"'].*?--publish"),
+        (
+            "recovery does not recheck the remote tag object before every helper write",
+            r"for \(\(invocation = 1; invocation <= max_invocations; invocation\+\+\)\); do.*?ls-remote --refs --tags origin .*?refs/tags/\$RELEASE_TAG.*?remote_tag_object.*?EXPECTED_RELEASE_TAG_OBJECT.*?\./scripts/release\.py.*?--publish",
+        ),
+        ("recovery authorization is not bound to tag, release SHA and failed run", r"--authorize-ci-recovery [\"']\$RELEASE_TAG@\$RELEASE_SHA@\$SIPX_FAILED_RELEASE_RUN_ID[\"']"),
+        ("recovery publication does not use a finite visibility bound", r"--registry-wait-seconds\s+[1-9][0-9]*"),
+        ("recovery frontier loop is not bounded by public package count", r"max_invocations=\$\(\(public_count \+ 1\)\).*?invocation <= max_invocations"),
+        ("recovery frontier does not require the all-visible observation", r"all public packages are already registry-visible"),
+        ("recovery exact consumer proof is absent", r"- name:\s*Verify the exact registry consumer and installed CLI.*?\./scripts/release\.py.*?--release-root [\"']\$SIPX_RELEASE_ROOT[\"'].*?--verify-consumer"),
+        ("recovery consumer command has no finite bound", r"--consumer-timeout-seconds\s+[1-9][0-9]*"),
+        ("recovery Pages run is not selected by release SHA", r"actions/workflows/ci\.yml/runs\?.*?head_sha=\$RELEASE_SHA"),
+        ("recovery Pages result is not checked against release SHA", r"\.head_sha == env\.RELEASE_SHA"),
+        ("recovery Pages evidence omits the deployment job", r"deploy docs site.*?conclusion == [\"']success[\"']"),
+        ("recovery public guide is not probed", r"https://codewandler\.github\.io/sipx/docs/getting-started"),
+        ("recovery public API is not probed", r"https://codewandler\.github\.io/sipx/api/sipx_call/index\.html"),
+        ("recovery GitHub prerelease is not dependent", r"\n\s*github_release:\s*\n.*?needs:\s*recover"),
+        ("recovery GitHub prerelease lacks least-privilege write authority", r"\n\s*github_release:\s*\n.*?permissions:\s*\n\s+contents:\s*write\s*\n\s+env:"),
+        ("recovery prerelease checkout cannot prove the annotated tag object", r"Check out the recovered release record.*?fetch-depth:\s*0.*?persist-credentials:\s*false"),
+        ("recovery write token is not scoped to prerelease step", r"Create or verify the recovered GitHub prerelease\s*\n\s+env:\s*\n\s+GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}"),
+        ("recovery GitHub prerelease does not verify the tag", r"gh release create .*?--verify-tag"),
+        ("recovery GitHub Release is not a prerelease", r"gh release create .*?--prerelease"),
+        ("recovery GitHub prerelease is not bound to release SHA", r"gh release create .*?--target [\"']\$RELEASE_SHA[\"']"),
+        (
+            "recovery does not recheck the tag object before GitHub prerelease handling",
+            r"Create or verify the recovered GitHub prerelease.*?local_tag_object=.*?rev-parse .*?refs/tags/\$RELEASE_TAG.*?remote_tag_object=.*?ls-remote --refs --tags origin .*?refs/tags/\$RELEASE_TAG.*?local_tag_object.*?RELEASE_TAG_OBJECT.*?remote_tag_object.*?RELEASE_TAG_OBJECT.*?gh release view",
+        ),
+        ("recovery GitHub prerelease does not consume reviewed notes", r"gh release create .*?--notes-file [\"']\$RELEASE_NOTES[\"']"),
+        ("recovery does not verify an existing prerelease", r"gh release view .*?record\.get\([\"']prerelease[\"']\).*?reviewed notes differ"),
+    )
+    for label, pattern in checks:
+        required(text, label, pattern, problems)
+
+    if re.search(r"(?m)^  (?:push|pull_request|schedule):", text):
+        problems.append("recovery has an automatic entry")
+    if re.search(r"(?m)^\s*cargo\s+publish\b", text):
+        problems.append("recovery calls cargo publish directly")
+    recover_job = re.search(r"(?ms)^  recover:\s*$.*?(?=^  github_release:\s*$)", text)
+    if recover_job is not None and re.search(r"(?m)^\s+contents:\s*write\s*$", recover_job.group()):
+        problems.append("recovery publication job can write repository contents")
+    if re.search(r"(?m)^      (?:GH_TOKEN|CARGO_REGISTRY_TOKEN):", text):
+        problems.append("a recovery credential is exposed at job scope")
+
+    posting_patterns = (
+        r"\bgh\s+(?:issue|pr)\s+(?:create|comment)\b",
+        r"\bgh\s+api\b[^\n]*(?:--method|-X)\s+POST\b",
+        r"\bcurl\b[^\n]*(?:--request|-X)\s+POST\b",
+        r"\brepository_dispatch\b",
+    )
+    if any(re.search(pattern, text, re.IGNORECASE) for pattern in posting_patterns):
+        problems.append("recovery contains an external announcement or posting side effect")
+
+    ordered = (
+        "- name: Authorize recovery from the failed release evidence",
+        "- name: Require the approved Cargo credential",
+        "- name: Resume dependency-ready frontiers",
+        "- name: Verify the exact registry consumer",
+        "- name: Verify Pages deployment",
+        "- name: Create or verify the recovered GitHub prerelease",
+    )
+    positions = [text.find(marker) for marker in ordered]
+    if all(position >= 0 for position in positions) and positions != sorted(positions):
+        problems.append("recovery evidence, credential, publication and downstream proofs are out of order")
+
+    return problems
+
+
 def specification_problems(text: str) -> list[str]:
     """Require the normative contract to retain its authority boundaries."""
 
@@ -145,13 +275,26 @@ def specification_problems(text: str) -> list[str]:
         r"`SIPX_DENYLIST`.*?MUST be exposed only to the complete-gate step",
         problems,
     )
+    required(
+        text,
+        "specification does not bind recovery to failed-run evidence before credentials",
+        r"recovery workflow MUST verify the named failed run through the Actions API before exposing the\s+Cargo credential",
+        problems,
+    )
+    required(
+        text,
+        "specification does not separate recovery tooling from release bytes",
+        r"Recovery tooling and\s+release bytes live in separate checkouts",
+        problems,
+    )
     return problems
 
 
 def check(root: pathlib.Path = ROOT) -> list[str]:
-    """Check the real workflow and its normative specification."""
+    """Check the real workflows and their normative specification."""
 
     workflow = root / ".github" / "workflows" / "crates-io.yml"
+    resume_workflow = root / ".github" / "workflows" / "crates-io-resume.yml"
     spec = root / "docs" / "specs" / "release-workflow.md"
     problems = []
     if not workflow.is_file():
@@ -162,6 +305,10 @@ def check(root: pathlib.Path = ROOT) -> list[str]:
     else:
         problems.extend(specification_problems(spec.read_text(encoding="utf-8")))
     problems.extend(workflow_problems(workflow.read_text(encoding="utf-8")))
+    if not resume_workflow.is_file():
+        problems.append(f"missing {resume_workflow.relative_to(root)}")
+    else:
+        problems.extend(resume_workflow_problems(resume_workflow.read_text(encoding="utf-8")))
     return problems
 
 
@@ -174,7 +321,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     for problem in problems:
         print(f"release workflow: {problem}", file=sys.stderr)
     if not problems:
-        print("release workflow: approved tag, bounded registry, Pages and resumable GitHub prerelease")
+        print(
+            "release workflow: approved tag and failed-run recovery, bounded registry, "
+            "Pages and resumable GitHub prerelease"
+        )
     return 1 if problems else 0
 
 

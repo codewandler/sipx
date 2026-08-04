@@ -28,6 +28,7 @@ CLI_PACKAGE = "sipx-cli"
 CRATES_IO_LOCK_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 EXPECTED_GITHUB_REPOSITORY = "codewandler/sipx"
 EXPECTED_GITHUB_WORKFLOW = ".github/workflows/crates-io.yml"
+EXPECTED_GITHUB_RECOVERY_WORKFLOW = ".github/workflows/crates-io-resume.yml"
 _OWNED_GROUPS: dict[int, subprocess.Popen[bytes]] = {}
 
 
@@ -387,7 +388,9 @@ def _archive_manifest(
     return manifest_text, tuple(entries), problems
 
 
-def inspect_contents(packages: Sequence[Package]) -> list[str]:
+def inspect_contents(
+    packages: Sequence[Package], workspace_root: pathlib.Path = ROOT
+) -> list[str]:
     """Inspect Cargo's real dirty-tree listings and normalized local archives."""
 
     problems = []
@@ -397,7 +400,8 @@ def inspect_contents(packages: Sequence[Package]) -> list[str]:
     listings = {}
     for package in public:
         listing_result = _capture(
-            ("cargo", "package", "--locked", "--allow-dirty", "--list", "-p", package.name)
+            ("cargo", "package", "--locked", "--allow-dirty", "--list", "-p", package.name),
+            root=workspace_root,
         )
         if listing_result.returncode != 0:
             problems.append(
@@ -427,7 +431,7 @@ def inspect_contents(packages: Sequence[Package]) -> list[str]:
         ]
         for private in sorted(package.name for package in packages if not package.public):
             command.extend(("--exclude", private))
-        package_result = _capture(tuple(command))
+        package_result = _capture(tuple(command), root=workspace_root)
         if package_result.returncode != 0:
             problems.append(
                 "workspace local archive creation failed: "
@@ -504,6 +508,19 @@ def ready_frontier(packages: Sequence[Package], available: set[str]) -> tuple[st
     )
 
 
+def recovery_visibility_problems(
+    authorization: str | None, available: Sequence[str]
+) -> list[str]:
+    """Keep recovery authority narrower than authority to begin a publication."""
+
+    if authorization is not None and not available:
+        return [
+            "CI recovery requires at least one exact workspace package to be already "
+            "registry-visible; it cannot authorize first publication"
+        ]
+    return []
+
+
 def checkout_problems(
     mode: str,
     version: str,
@@ -515,6 +532,8 @@ def checkout_problems(
     annotated_tags: Sequence[str] = (),
     head_sha: str | None = None,
     ci_authorization: str | None = None,
+    ci_recovery_authorization: str | None = None,
+    controller_sha: str | None = None,
     ci_environment: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Return checkout/authority defects before any Cargo publication command can run."""
@@ -532,16 +551,33 @@ def checkout_problems(
     if mode == "publish" and confirmation != tag:
         problems.append(f"publish requires the exact confirmation --confirm-publish {tag}")
     if mode == "publish" and ci:
-        problems.extend(
-            ci_publish_problems(
-                version,
-                head_sha=head_sha,
-                authorization=ci_authorization,
-                environment={} if ci_environment is None else ci_environment,
+        environment = {} if ci_environment is None else ci_environment
+        if ci_authorization is not None and ci_recovery_authorization is not None:
+            problems.append("CI publication accepts only one authorization mode")
+        elif ci_recovery_authorization is not None:
+            problems.extend(
+                ci_recovery_problems(
+                    version,
+                    release_sha=head_sha,
+                    controller_sha=controller_sha,
+                    authorization=ci_recovery_authorization,
+                    environment=environment,
+                )
             )
-        )
-    elif mode == "publish" and ci_authorization is not None:
-        problems.append("--authorize-ci-publish is valid only inside authorized GitHub Actions")
+        else:
+            problems.extend(
+                ci_publish_problems(
+                    version,
+                    head_sha=head_sha,
+                    authorization=ci_authorization,
+                    environment=environment,
+                )
+            )
+    elif mode == "publish":
+        if ci_authorization is not None:
+            problems.append("--authorize-ci-publish is valid only inside authorized GitHub Actions")
+        if ci_recovery_authorization is not None:
+            problems.append("--authorize-ci-recovery is valid only inside authorized GitHub Actions")
     return problems
 
 
@@ -604,6 +640,80 @@ def ci_publish_problems(
     return problems
 
 
+def ci_recovery_problems(
+    version: str,
+    *,
+    release_sha: str | None,
+    controller_sha: str | None,
+    authorization: str | None,
+    environment: Mapping[str, str],
+) -> list[str]:
+    """Return reasons a main-branch recovery run lacks narrowly bound authority."""
+
+    tag = f"v{version}"
+    release = release_sha or ""
+    controller = controller_sha or ""
+    problems = []
+    exact = {
+        "CI": "true",
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_REPOSITORY": EXPECTED_GITHUB_REPOSITORY,
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_REF_TYPE": "branch",
+        "GITHUB_REF_NAME": "main",
+    }
+    for name, expected in exact.items():
+        if environment.get(name) != expected:
+            problems.append(f"CI recovery requires {name}={expected!r}")
+
+    if re.fullmatch(r"[0-9a-f]{40}", release) is None:
+        problems.append("CI recovery requires the release HEAD to be one full lowercase Git object ID")
+    if re.fullmatch(r"[0-9a-f]{40}", controller) is None:
+        problems.append("CI recovery requires the controller to be one full lowercase Git object ID")
+    else:
+        if environment.get("GITHUB_SHA") != controller:
+            problems.append("CI recovery requires GITHUB_SHA to equal the controller checkout HEAD")
+        if environment.get("GITHUB_WORKFLOW_SHA") != controller:
+            problems.append(
+                "CI recovery requires GITHUB_WORKFLOW_SHA to equal the controller checkout HEAD"
+            )
+
+    workflow_ref = environment.get("GITHUB_WORKFLOW_REF", "")
+    expected_workflow_ref = (
+        f"{EXPECTED_GITHUB_REPOSITORY}/{EXPECTED_GITHUB_RECOVERY_WORKFLOW}@refs/heads/main"
+    )
+    if workflow_ref != expected_workflow_ref:
+        problems.append(f"CI recovery requires GITHUB_WORKFLOW_REF={expected_workflow_ref!r}")
+
+    failed_run_id = environment.get("SIPX_FAILED_RELEASE_RUN_ID", "")
+    if not failed_run_id.isascii() or not failed_run_id.isdigit() or int(failed_run_id) <= 0:
+        problems.append("CI recovery requires one positive numeric failed release run ID")
+    authorization_match = re.fullmatch(
+        r"(v[^@]+)@([0-9a-f]{40})@([1-9][0-9]*)", authorization or ""
+    )
+    if authorization_match is None or authorization_match.group(1, 2) != (tag, release):
+        problems.append(
+            "CI recovery requires the exact recovery authorization "
+            f"--authorize-ci-recovery {tag}@{release}@{failed_run_id}"
+        )
+    elif authorization_match.group(3) != failed_run_id:
+        problems.append("CI recovery authorization must name the exact failed release run")
+
+    run_id = environment.get("GITHUB_RUN_ID", "")
+    if not run_id.isascii() or not run_id.isdigit() or int(run_id) <= 0:
+        problems.append("CI recovery requires a positive numeric GITHUB_RUN_ID")
+    elif run_id == failed_run_id:
+        problems.append("CI recovery requires the current recovery run to differ from the failed run")
+    attempt = environment.get("GITHUB_RUN_ATTEMPT", "")
+    if not attempt.isascii() or not attempt.isdigit() or int(attempt) <= 0:
+        problems.append("CI recovery requires a positive numeric GITHUB_RUN_ATTEMPT")
+    if not environment.get("CARGO_REGISTRY_TOKEN", "").strip():
+        problems.append("CI recovery requires CARGO_REGISTRY_TOKEN")
+    return problems
+
+
 def commands_for(
     mode: str, order: Sequence[str], *, excluded: Sequence[str] = ()
 ) -> tuple[tuple[str, ...], ...]:
@@ -632,28 +742,32 @@ def commands_for(
     raise ReleaseError(f"unknown release mode {mode!r}")
 
 
-def _capture(command: Sequence[str], timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
-    return _bounded_run(command, cwd=ROOT, timeout=timeout)
+def _capture(
+    command: Sequence[str], timeout: float = 120.0, *, root: pathlib.Path = ROOT
+) -> subprocess.CompletedProcess[str]:
+    return _bounded_run(command, cwd=root, timeout=timeout)
 
 
-def _metadata() -> dict[str, object]:
-    result = _capture(("cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"))
+def _metadata(root: pathlib.Path = ROOT) -> dict[str, object]:
+    result = _capture(
+        ("cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"), root=root
+    )
     if result.returncode != 0:
         raise ReleaseError(result.stderr.strip() or "cargo metadata failed")
     return json.loads(result.stdout)
 
 
-def _checkout() -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
-    status = _capture(("git", "status", "--porcelain", "--untracked-files=all"))
+def _checkout(root: pathlib.Path = ROOT) -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
+    status = _capture(("git", "status", "--porcelain", "--untracked-files=all"), root=root)
     if status.returncode != 0:
         raise ReleaseError(status.stderr.strip() or "git status failed")
-    tags = _capture(("git", "tag", "--points-at", "HEAD"))
+    tags = _capture(("git", "tag", "--points-at", "HEAD"), root=root)
     if tags.returncode != 0:
         raise ReleaseError(tags.stderr.strip() or "git tag inspection failed")
     names = tuple(sorted(tags.stdout.splitlines()))
     annotated = []
     for name in names:
-        kind = _capture(("git", "cat-file", "-t", f"refs/tags/{name}"))
+        kind = _capture(("git", "cat-file", "-t", f"refs/tags/{name}"), root=root)
         if kind.returncode != 0:
             raise ReleaseError(kind.stderr.strip() or f"cannot inspect tag {name}")
         if kind.stdout.strip() == "tag":
@@ -661,10 +775,10 @@ def _checkout() -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
     return bool(status.stdout.strip()), names, tuple(annotated)
 
 
-def _head_commit() -> str:
+def _head_commit(root: pathlib.Path = ROOT) -> str:
     """Return the full commit checked out by a CI publication run."""
 
-    result = _capture(("git", "rev-parse", "HEAD"))
+    result = _capture(("git", "rev-parse", "HEAD"), root=root)
     if result.returncode != 0:
         raise ReleaseError(result.stderr.strip() or "cannot read release commit")
     head = result.stdout.strip()
@@ -705,7 +819,9 @@ def poll_registry_visibility(
     return Visibility(tuple(sorted(available)), tuple(sorted(missing)))
 
 
-def _registry_available(package: str, version: str, timeout: float = 15.0) -> bool:
+def _registry_available(
+    package: str, version: str, timeout: float = 15.0, root: pathlib.Path = ROOT
+) -> bool:
     result = _bounded_run(
         (
             "cargo",
@@ -716,7 +832,7 @@ def _registry_available(package: str, version: str, timeout: float = 15.0) -> bo
             "--color",
             "never",
         ),
-        cwd=ROOT,
+        cwd=root,
         timeout=max(0.1, timeout),
     )
     if result.returncode == 0:
@@ -1062,8 +1178,8 @@ def _archive_evidence(package: Package, archive: pathlib.Path) -> ArchiveEvidenc
     git = record.get("git") if isinstance(record, dict) else None
     if not isinstance(git, dict) or not isinstance(git.get("sha1"), str):
         raise ReleaseError(f"{package.name}: packaged Cargo VCS record has no Git commit")
-    dirty = git.get("dirty")
-    if not isinstance(dirty, bool):
+    dirty = git.get("dirty", False)
+    if "dirty" in git and not isinstance(dirty, bool):
         raise ReleaseError(f"{package.name}: packaged Cargo VCS record has no clean-state fact")
     return ArchiveEvidence(digest.hexdigest(), str(git["sha1"]), dirty)
 
@@ -1135,13 +1251,14 @@ def verify_resume_bytes(
     version: str,
     *,
     timeout: float,
+    workspace_root: pathlib.Path = ROOT,
 ) -> list[str]:
     """Build local archives and compare visible packages with fresh crates.io index checksums."""
 
     if not available:
         return []
     head_result = _bounded_run(
-        ("git", "rev-parse", "HEAD"), cwd=ROOT, timeout=min(timeout, 120.0)
+        ("git", "rev-parse", "HEAD"), cwd=workspace_root, timeout=min(timeout, 120.0)
     )
     if head_result.returncode != 0:
         raise ReleaseError(head_result.stderr.strip() or "cannot read release commit")
@@ -1166,7 +1283,7 @@ def verify_resume_bytes(
         ]
         for private in sorted(package.name for package in packages if not package.public):
             command.extend(("--exclude", private))
-        packaged = _bounded_run(tuple(command), cwd=ROOT, timeout=timeout)
+        packaged = _bounded_run(tuple(command), cwd=workspace_root, timeout=timeout)
         if packaged.returncode != 0:
             raise ReleaseError(
                 "cannot reproduce clean tagged archives before resuming: "
@@ -1262,10 +1379,21 @@ def _parser() -> argparse.ArgumentParser:
         metavar="TAG",
         help="exact v<version> confirmation; meaningful only with --publish",
     )
-    parser.add_argument(
+    authorizations = parser.add_mutually_exclusive_group()
+    authorizations.add_argument(
         "--authorize-ci-publish",
         metavar="TAG@SHA",
         help="exact tag and full commit authorization required for GitHub Actions publication",
+    )
+    authorizations.add_argument(
+        "--authorize-ci-recovery",
+        metavar="TAG@SHA@FAILED_RUN_ID",
+        help="exact release commit and failed run authorization for main-workflow recovery",
+    )
+    parser.add_argument(
+        "--release-root",
+        metavar="PATH",
+        help="exact release checkout used for every Cargo, Git and publication operation",
     )
     parser.add_argument(
         "--registry-wait-seconds",
@@ -1308,6 +1436,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.authorize_ci_publish is not None and mode != "publish":
         print("--authorize-ci-publish is valid only with --publish", file=sys.stderr)
         return 1
+    if args.authorize_ci_recovery is not None and mode != "publish":
+        print("--authorize-ci-recovery is valid only with --publish", file=sys.stderr)
+        return 1
+    if args.authorize_ci_recovery is not None and args.release_root is None:
+        print("--authorize-ci-recovery requires an explicit --release-root", file=sys.stderr)
+        return 1
     if args.registry_wait_seconds <= 0:
         print("--registry-wait-seconds must be greater than zero", file=sys.stderr)
         return 1
@@ -1319,19 +1453,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     try:
-        root_manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        release_root = (
+            pathlib.Path(args.release_root).resolve() if args.release_root is not None else ROOT
+        )
+        root_manifest = tomllib.loads((release_root / "Cargo.toml").read_text(encoding="utf-8"))
         workspace_package = root_manifest["workspace"]["package"]
         version = str(workspace_package["version"])
         license_expression = str(workspace_package["license"])
-        metadata = _metadata()
+        metadata = _metadata(release_root)
         records = metadata.get("packages")
         if not isinstance(records, list):
             raise ReleaseError("cargo metadata has no package list")
-        packages = package_records(records, version, ROOT)
-        problems = graph_problems(packages, version, ROOT)
-        problems.extend(metadata_problems(packages, ROOT, license_expression))
+        packages = package_records(records, version, release_root)
+        problems = graph_problems(packages, version, release_root)
+        problems.extend(metadata_problems(packages, release_root, license_expression))
         if mode == "inspect-contents":
-            content_problems = inspect_contents(packages)
+            content_problems = inspect_contents(packages, release_root)
             problems.extend(content_problems)
             public_count = sum(package.public for package in packages)
             print(
@@ -1342,9 +1479,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             if problems:
                 raise ReleaseError("\n".join(f"- {problem}" for problem in problems))
             return 0
-        dirty, tags, annotated_tags = _checkout()
+        dirty, tags, annotated_tags = _checkout(release_root)
         ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
-        head_sha = _head_commit() if mode == "publish" and (ci or args.authorize_ci_publish) else None
+        head_sha = (
+            _head_commit(release_root)
+            if mode == "publish"
+            and (ci or args.authorize_ci_publish or args.authorize_ci_recovery)
+            else None
+        )
+        controller_sha = _head_commit(ROOT) if ci and args.authorize_ci_recovery else None
         problems.extend(
             checkout_problems(
                 mode,
@@ -1356,6 +1499,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ci=ci,
                 head_sha=head_sha,
                 ci_authorization=args.authorize_ci_publish,
+                ci_recovery_authorization=args.authorize_ci_recovery,
+                controller_sha=controller_sha,
                 ci_environment=os.environ,
             )
         )
@@ -1369,7 +1514,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             visibility = poll_registry_visibility(
                 order,
                 lambda package, remaining: _registry_available(
-                    package, version, min(15.0, remaining)
+                    package, version, min(15.0, remaining), release_root
                 ),
                 timeout=args.registry_wait_seconds,
                 interval=2.0,
@@ -1385,6 +1530,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 visibility.available,
                 version,
                 timeout=args.command_timeout_seconds,
+                workspace_root=release_root,
             )
             if resume_problems:
                 raise ReleaseError(
@@ -1397,12 +1543,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("exact registry libraries and installed CLI completed the loopback proof")
             return 0
         if mode == "publish":
-            available = {name for name in order if _registry_available(name, version)}
+            available = {
+                name for name in order if _registry_available(name, version, 15.0, release_root)
+            }
+            visibility_problems = recovery_visibility_problems(
+                args.authorize_ci_recovery, tuple(sorted(available))
+            )
+            if visibility_problems:
+                raise ReleaseError("\n".join(f"- {problem}" for problem in visibility_problems))
             resume_problems = verify_resume_bytes(
                 packages,
                 tuple(sorted(available)),
                 version,
                 timeout=args.command_timeout_seconds,
+                workspace_root=release_root,
             )
             if resume_problems:
                 raise ReleaseError(
@@ -1426,7 +1580,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for command in commands:
             print("+ " + " ".join(command))
             result = _bounded_run(
-                command, cwd=ROOT, timeout=args.command_timeout_seconds
+                command, cwd=release_root, timeout=args.command_timeout_seconds
             )
             if result.stdout:
                 print(result.stdout, end="")
@@ -1438,7 +1592,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             visibility = poll_registry_visibility(
                 frontier,
                 lambda package, remaining: _registry_available(
-                    package, version, min(15.0, remaining)
+                    package, version, min(15.0, remaining), release_root
                 ),
                 timeout=args.registry_wait_seconds,
                 interval=2.0,
