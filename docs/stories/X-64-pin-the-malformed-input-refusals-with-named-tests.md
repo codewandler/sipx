@@ -2,13 +2,13 @@
 id: X-64
 title: Pin the malformed-input refusals with named tests
 pillar: Build
-status: backlog
-priority: 12
+status: ready
+priority: 2
 design: docs/designs/input-hardening.md
 epic: input-hardening
-areas: [sipx-sip, sipx-transport]
+areas: [sipx-sip, sipx-transport, beta4]
 predicate:
-announcement:
+announcement: 2
 note: three recurring input classes · properties currently asserted by design, sampled by fuzzing, pinned by nothing · beta-1
 ---
 

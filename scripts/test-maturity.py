@@ -200,12 +200,12 @@ class TheAnnouncementPredicateRule(unittest.TestCase):
     def test_an_invalid_announcement_number_is_an_error(self):
         with self.assertRaises(SystemExit) as caught:
             maturity.predicate_stories(
-                {"A-1": {"status": "backlog", "announcement": "6"}},
+                {"A-1": {"status": "backlog", "announcement": "7"}},
                 predicates=maturity.BETA,
                 field=maturity.ANNOUNCEMENT_FIELD,
                 gate="beta-announcement",
             )
-        self.assertIn("no beta-announcement predicate 6", str(caught.exception))
+        self.assertIn("no beta-announcement predicate 7", str(caught.exception))
 
     def test_an_undeclared_computed_announcement_predicate_is_unknown(self):
         predicate = maturity.Predicate(3, "Interop", "computed")

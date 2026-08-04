@@ -824,7 +824,7 @@ be replayed for as long as the key lives.
 It is RECOMMENDED rather than MUST, and the exposure is smaller than SRTP's — an attacker replays
 reception statistics, not audio, though a replayed receiver report can drive a congestion-control
 response. It is a behaviour change to a public method (`unprotect_rtcp` gains a `Replayed` return),
-so it is a story rather than something to fold into this one. **Owner: a new story.**
+so it is a story rather than something to fold into this one. **Owner: `M-47`.**
 
 ### 12.3 The SDES tag is neither echoed nor verified — **echo fixed by `M-26`, check wired by `M-29`; closed**
 

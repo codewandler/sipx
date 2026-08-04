@@ -158,15 +158,17 @@ ALPHA = (
     Predicate(7, "The distance to v1 is generated, not asserted", "computed"),
 )
 
-#: The all-or-nothing hypothetical announcement threshold for `1.0.0-beta.3`. No feature or RFC percentage appears
-#: here: a truthful smaller surface is ready and an overstated larger one is not. Predicate 1 is
-#: derived from every alpha predicate and therefore deliberately has no declaring story of its own.
+#: The all-or-nothing hypothetical announcement threshold for `1.0.0-beta.4`. No feature or RFC
+#: percentage appears here: a truthful smaller surface is ready and an overstated larger one is not.
+#: Predicate 1 is derived from every alpha predicate and therefore deliberately has no declaring
+#: story of its own.
 BETA = (
     Predicate(1, "Every alpha integrity predicate still holds", "derived"),
-    Predicate(2, "The complete phone behavior is proven from a shell", "computed"),
-    Predicate(3, "Every claimed transport has two independent peers", "computed"),
-    Predicate(4, "Registry distribution is reproducible and verified", "computed"),
-    Predicate(5, "The public adoption surface is honest and current", "computed"),
+    Predicate(2, "Hostile-input, entropy and SRTCP replay invariants are executable", "computed"),
+    Predicate(3, "Browser-audio negotiation is complete and fail-closed", "computed"),
+    Predicate(4, "One nominated component carries every browser-media protocol safely", "computed"),
+    Predicate(5, "An independent browser endpoint carries Opus in both roles", "computed"),
+    Predicate(6, "Exact registry, CLI, Pages and GitHub release evidence agrees", "computed"),
 )
 
 
@@ -988,7 +990,7 @@ def render(reseed=False):
 
     # ---- hypothetical prerelease publicity, deliberately separate from the stable v1 gate
     beta_met = 0
-    lines.append("## Hypothetical announcement readiness for `1.0.0-beta.3`")
+    lines.append("## Hypothetical announcement readiness for `1.0.0-beta.4`")
     lines.append("")
     lines.append("| # | Predicate | State | Waiting on |")
     lines.append("|---|---|---|---|")
@@ -999,7 +1001,7 @@ def render(reseed=False):
         lines.append(f"| {predicate.number} | {predicate.name} | {state} | {waiting} |")
     lines.append("")
     lines.append(
-        f"**{beta_met} of {len(BETA)} predicates met. All five are required; this is not a weighted "
+        f"**{beta_met} of {len(BETA)} predicates met. All {len(BETA)} are required; this is not a weighted "
         "score.** Integrity is derived from the alpha table above. Every other association lives in "
         f"the blocking story's own `{ANNOUNCEMENT_FIELD}:` frontmatter, so the report has no second "
         "list to drift. RFC coverage is intentionally absent from this gate: a smaller truthful "

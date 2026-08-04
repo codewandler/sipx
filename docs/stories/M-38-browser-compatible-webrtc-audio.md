@@ -41,7 +41,12 @@ without expanding sipx into a video, data-channel, or general browser media stac
 
 ## Progress
 
-Not started. The prerequisites are real and separately reachable: WSS (`T-8`, `T-9`, `T-23`),
+Split for the beta.4 wave: `M-48` specifies the profile, `M-49` implements fail-closed
+negotiation, `M-50` owns the nominated shared component, and `M-51` owns the independent-browser
+proof and public boundary. `M-46` supplies RTCP multiplexing and DTLS role negotiation. This file
+remains the epic tracker and is not counted as one of the ten beta.4 implementation/release stories.
+
+The prerequisites are real and separately reachable: WSS (`T-8`, `T-9`, `T-23`),
 Opus (`M-13`, `M-30`, `P-9`, `P-13`), ICE (`M-19` through `M-23`, `M-27`, `P-9`) and DTLS-SRTP
 (`M-15`, `M-28`, `P-9`). The composition is not present. The call and CLI explicitly refuse
 DTLS-SRTP with ICE; SDP has no `RTP/SAVPF` or `a=rtcp-mux` path; and no independently implemented

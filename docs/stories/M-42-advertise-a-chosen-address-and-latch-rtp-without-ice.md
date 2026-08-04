@@ -2,13 +2,13 @@
 id: M-42
 title: Advertise a chosen address and latch RTP without ICE
 pillar: Media
-status: backlog
-priority: 14
+status: ready
+priority: 5
 design: docs/designs/demand.md
 epic: demand
-areas: [sipx-transport, sipx-media, sipx-call]
+areas: [sipx-transport, sipx-media, sipx-call, beta4]
 predicate:
-announcement:
+announcement: [3, 4]
 note: the loudest unmet need in the surveyed ecosystem · most requesters are not doing ICE at all
 ---
 

@@ -21,18 +21,17 @@ test or CI job that carries every clause rather than against the mechanism under
 roadmap keeps both sections for the scoping arguments in them: [where M10
 stands](../roadmap.md#m10--reachable), [where M12 stands](../roadmap.md#m12--provable).
 
-The current release target is **`1.0.0-beta.3`, not stable 1.0**. The advertised Opus command path,
-normalized packages, independent-peer proofs and public adoption surface pass the generated
-[maturity report](../maturity.md)'s **7 of 7 alpha-integrity predicates**. The beta.3 table is now
-**5 of 5** after the exact registry distribution, installed Opus CLI and public Pages surface were
-verified. Those are all-or-nothing predicate counts, not weighted maturity scores and not
-authorization for broader publicity.
+The current release target is **`1.0.0-beta.4`, not stable 1.0**. The newly selected wave is exactly
+ten stories carrying the query-only `beta4` area tag. It is measured at **0 of 6** all-or-nothing
+announcement predicates. The alpha-integrity table is **6 of 7** because `M-47` gives the known
+SRTCP replay gap in `docs/specs/srtp.md` §12.2 an owner; recording a known-wrong shipped path as open
+is measurement becoming more honest, not the released beta.3 changing underneath its tag.
 
-The explicitly authorized release story is `A-14`: it cuts latest `main` under a new immutable tag,
-publishes all eleven public packages, verifies an exact registry-only consumer and Opus-enabled CLI,
-checks the published pages, and creates the repository-native GitHub prerelease without broader
-publicity. Stable `1.0.0` remains a later decision after real outside use; browser audio, video,
-application-host phases and unadvertised optional features do not delay this prerelease boundary.
+`A-15` is the release capstone after the other nine stories and the `M-38` epic exit. The wave
+delivers a fail-closed browser-audio profile, one nominated media component, an independent Opus
+proof and the highest-demand non-ICE connectivity path, with malformed ingress, entropy and SRTCP
+replay invariants pinned. Stable `1.0.0`, TURN, video and the second PCM/G.722/jitter lane remain
+separate decisions rather than silent beta.4 scope growth.
 
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `A` application SDK/release · `X` cross-cutting (build, CI, test infrastructure).
@@ -44,7 +43,11 @@ application-host phases and unadvertised optional features do not delay this pre
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
-_None._
+- [M-48 — Specify the browser-audio profile and state machine](M-48-specify-browser-audio-profile.md) · Media · beta.4 starts here · normative profile, ordering, downgrade refusals, resource bounds and byte-level vectors before code
+- [X-64 — Pin the malformed-input refusals with named tests](X-64-pin-the-malformed-input-refusals-with-named-tests.md) · Build · three recurring input classes · properties currently asserted by design, sampled by fuzzing, pinned by nothing · beta-1
+- [X-65 — Assert the branch and tag RNG is cryptographic](X-65-assert-the-branch-and-tag-rng-is-cryptographic.md) · Build · spec says cryptographic because a guessable branch is a response-injection primitive · nothing fails if it stops being · beta-1
+- [M-47 — Reject replayed SRTCP with a separate replay window](M-47-reject-replayed-srtcp.md) · Media · known gap in srtp.md §12.2 · authenticate first, then reject a repeated SRTCP index without touching the SRTP window
+- [M-42 — Advertise a chosen address and latch RTP without ICE](M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md) · Media · the loudest unmet need in the surveyed ecosystem · most requesters are not doing ICE at all
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -69,7 +72,6 @@ _The measure of this stack's reach is what can be built on it **without writing 
 
 ### demand-led capability work
 _sipx's backlog has been derived from RFCs, from our own review findings, and from what the design_
-- [M-42 — Advertise a chosen address and latch RTP without ICE](M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md) · Media · the loudest unmet need in the surveyed ecosystem · most requesters are not doing ICE at all
 - [M-43 — Carry linear PCM in and out without format assumptions](M-43-carry-linear-pcm-in-and-out-without-format-assumptions.md) · Media · four reported use cases resolve to one unopinionated PCM boundary · not an AI feature
 - [M-44 — Negotiate and carry G.722](M-44-negotiate-and-carry-g722.md) · Media · the only codec with real demand that sipx lacks · static PT 9 with the RFC 3551 clock-rate trap
 - [M-45 — Hold incoming audio in a jitter buffer](M-45-hold-incoming-audio-in-a-jitter-buffer.md) · Media · two independent field reports of seconds of added delay · characterise the current buffer before changing it
@@ -105,11 +107,6 @@ _sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.
 ### Ice
 - [M-24 — Gather a relayed candidate from a configured relay](M-24-ice-relayed-candidate.md) · Media · ice · RFC 8656 · after M-22 · the third RFC that made M-16 impossible as one story
 
-### input hardening
-_sipx already refuses the malformed-input classes that most often take a SIP stack down: parser_
-- [X-64 — Pin the malformed-input refusals with named tests](X-64-pin-the-malformed-input-refusals-with-named-tests.md) · Build · three recurring input classes · properties currently asserted by design, sampled by fuzzing, pinned by nothing · beta-1
-- [X-65 — Assert the branch and tag RNG is cryptographic](X-65-assert-the-branch-and-tag-rng-is-cryptographic.md) · Build · spec says cryptographic because a guessable branch is a response-injection primitive · nothing fails if it stops being · beta-1
-
 ### media security profiles
 _sipx implements exactly one SRTP protection profile:_
 - [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
@@ -120,7 +117,13 @@ _sipx implements exactly one SRTP protection profile:_
 ### Video
 - [M-40 — Decide whether video belongs in sipx](M-40-decide-whether-video-belongs-in-sipx.md) · Media · post-beta admission gate; the current vision says video is a non-goal, so no implementation precedes this decision
 
+### Release
+- [A-15 — Publish and verify 1.0.0-beta.4](A-15-publish-beta4.md) · Application · beta.4 capstone · immutable tag, exact registry consumer, installed Opus CLI, Pages and GitHub prerelease
+
 ### browser-compatible WebRTC audio
+- [M-49 — Negotiate a fail-closed browser-audio profile](M-49-negotiate-browser-audio-profile.md) · Media · after M-48 and M-46 · one named profile owns the complete SDP vocabulary and never downgrades silently
+- [M-50 — Run ICE, DTLS, SRTP and SRTCP on one nominated component](M-50-run-browser-media-on-one-component.md) · Media · beta.4 critical path · one bounded owner, nominated-peer binding and no bind/drop/rebind race
+- [M-51 — Prove browser audio against an independent endpoint](M-51-prove-browser-audio.md) · Media · beta.4 product proof · both SIP roles, non-silent Opus both ways, immediate fingerprint and downgrade negatives
 - [M-38 — Complete one browser-compatible WebRTC audio path](M-38-browser-compatible-webrtc-audio.md) · Media · epic tracker; reuse WSS, ICE, DTLS-SRTP and Opus, then prove their browser-audio composition
 
 ## Done

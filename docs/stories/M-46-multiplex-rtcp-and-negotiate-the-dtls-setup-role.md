@@ -3,12 +3,12 @@ id: M-46
 title: Multiplex RTCP and negotiate the DTLS setup role
 pillar: Media
 status: backlog
-priority: 15
+priority: 6
 design: docs/designs/demand.md
 epic: demand
-areas: [sipx-sdp, sipx-media, sipx-rtp]
+areas: [sipx-sdp, sipx-media, sipx-rtp, beta4]
 predicate:
-announcement:
+announcement: [3, 4]
 note: RFC 5761 + RFC 4145 · both are hard blockers for browser interop · prerequisites for M-38
 ---
 

@@ -2,13 +2,13 @@
 id: X-65
 title: Assert the branch and tag RNG is cryptographic
 pillar: Build
-status: backlog
-priority: 13
+status: ready
+priority: 3
 design: docs/designs/input-hardening.md
 epic: input-hardening
-areas: [sipx-sip, sipx-transport]
+areas: [sipx-sip, sipx-transport, beta4]
 predicate:
-announcement:
+announcement: 2
 note: spec says cryptographic because a guessable branch is a response-injection primitive · nothing fails if it stops being · beta-1
 ---
 

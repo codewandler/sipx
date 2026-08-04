@@ -10,6 +10,10 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
+_As of 2026-08-04:_ **`1.0.0-beta.2` and `1.0.0-beta.3` are published prereleases.** Beta.4 is the
+next measured wave: ten stories selected around secure browser audio and real-network connectivity,
+with the exact set and order recorded below. Stable `1.0.0` remains a separate promotion decision.
+
 _As of 2026-07-30:_ **all seven `1.0.0-alpha` predicates are met**, and `1.0.0-alpha` is cut.
 [`maturity.md`](maturity.md) reports them, and it reports them as *computed* rather than asserted —
 which is what predicate 7 was for. What this does **not** mean is that v1 is close: its first
@@ -162,12 +166,36 @@ Application-host phase 1 is delivered by `A-2`; the remaining in-progress work i
 [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host) phases below, which
 are not milestones because they are not RFC gaps.
 
-**Next release cut.** `C-1`, `A-2` and `S-34` are closed, so the alpha boundary this paragraph used to
-describe has been reached. The next public boundary is now `1.0.0-beta.3`: one deliberate prerelease
-cut after the phone's DPH-1…DPH-12 matrix, registry-only consumer proof and public claims all
-agree. The cut includes its repository-native GitHub prerelease, but no broader publicity. The five
-generated predicates below measure hypothetical announcement readiness. Later host phases and optional
-features do not get mixed into it merely to make the release look larger.
+**Next release cut.** Beta.3 is published. The next boundary is `1.0.0-beta.4`, a deliberately
+coherent feature-and-security wave rather than a bag of the ten shortest stories. Its product claim
+is narrow: audio connects securely through real networks, including one independently proven
+browser-compatible path. The six generated predicates below measure that boundary; they do not
+authorize broader publicity.
+
+### Beta.4 — secure audio through real networks
+
+The `beta4` area tag is the machine-queryable selection. Exactly ten stories carry it; `M-38`
+remains their epic tracker and is deliberately not counted as an eleventh implementation story.
+
+| Order | Story | Outcome | Starts when |
+|---:|---|---|---|
+| 1 | [**M-48 — Specify the browser-audio profile and state machine**](stories/M-48-specify-browser-audio-profile.md) | Normative SDP, ordering, downgrade, resource and byte-vector contract before code | now |
+| 2 | [**X-64 — Pin malformed-input refusals**](stories/X-64-pin-the-malformed-input-refusals-with-named-tests.md) | Named mutation-proven bounds across UDP, TCP, TLS, WS and WSS | now, parallel |
+| 3 | [**X-65 — Assert branch and tag RNG is cryptographic**](stories/X-65-assert-the-branch-and-tag-rng-is-cryptographic.md) | The off-path response-injection invariant fails loudly if construction regresses | now, parallel |
+| 4 | [**M-47 — Reject replayed SRTCP with a separate replay window**](stories/M-47-reject-replayed-srtcp.md) | Closes the known shipped replay gap before multiplexed control traffic becomes browser-reachable | now, parallel |
+| 5 | [**M-42 — Advertise chosen addresses and latch RTP without ICE**](stories/M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md) | Highest-demand real-network path, with explicit precedence when ICE is selected | verify-first now |
+| 6 | [**M-46 — Multiplex RTCP and negotiate the DTLS setup role**](stories/M-46-multiplex-rtcp-and-negotiate-the-dtls-setup-role.md) | `rtcp-mux` and `actpass` substrate required by browser media | after M-48 |
+| 7 | [**M-49 — Negotiate a fail-closed browser-audio profile**](stories/M-49-negotiate-browser-audio-profile.md) | One named call profile either negotiates the complete secure path or refuses before I/O | after M-48 and M-46 |
+| 8 | [**M-50 — Run ICE, DTLS, SRTP and SRTCP on one nominated component**](stories/M-50-run-browser-media-on-one-component.md) | One bounded, cancellation-safe owner with no bind/drop/rebind race | after M-42, M-46, M-47 and M-49 |
+| 9 | [**M-51 — Prove browser audio against an independent endpoint**](stories/M-51-prove-browser-audio.md) | Non-silent Opus in both SIP roles plus fingerprint, nomination and downgrade negatives | after M-50 |
+| 10 | [**A-15 — Publish and verify `1.0.0-beta.4`**](stories/A-15-publish-beta4.md) | Immutable tag, registry consumer, installed CLI, exact-SHA Pages and GitHub prerelease | after the other nine and M-38 |
+
+The critical path is `M-48 → M-46/M-49 → M-50 → M-51 → A-15`. `X-64`, `X-65`, `M-47` and the
+verify-first half of `M-42` can proceed in parallel. The selection intentionally defers the second
+audio-runtime lane (`M-43` PCM, `M-44` G.722 and `M-45` jitter quality), TURN (`M-24`), portable
+artifacts (`P-14`) and graceful drain (`T-29`) rather than placing two unrelated critical paths in
+one cut. Video remains the post-beta admission decision `M-40`; the current vision still excludes
+it, and beta.4 does not silently reverse that decision.
 
 ### M9 — Bridgeable
 
@@ -404,7 +432,7 @@ honest about what it does not do.**
 A stack can be short of features and still be worth depending on. It cannot be *wrong about itself*
 and be worth depending on, because every consumer's design decision rests on what the table says.
 
-### `1.0.0-beta.3` — the hypothetical public-announcement predicates
+### `1.0.0-beta.4` — the hypothetical public-announcement predicates
 
 This is the threshold at which the prerelease could responsibly receive broader publicity: outside
 Rust users can install exact registry
@@ -415,18 +443,25 @@ creates its GitHub prerelease only; later publicity requires separate explicit a
 
 Stories declare the predicates they bear on through `announcement:` frontmatter, using the same
 single-source rule as the alpha's `predicate:` field. [`maturity.md`](maturity.md) generates the
-state and names blockers. All five are required; they are not a weighted score.
+state and names blockers. All six are required; they are not a weighted score.
 
 1. **Every alpha integrity predicate still holds.** This is derived from the complete alpha table,
    not from another story list.
-2. **The complete phone behavior is proven from a shell.** P-11 supplies correlated interactive
-   control; P-13 runs DPH-1 through DPH-12 as one bounded matrix.
-3. **Every claimed transport has two independent peers.** The beta claims UDP, TCP, TLS, WS and WSS.
-   QUIC stays experimental until T-13 and is not smuggled into this predicate through a crate map.
-4. **Registry distribution is reproducible and verified.** Every public package is rehearsed in
-   dependency order, then exact crates.io versions build in a clean consumer and install the CLI.
-5. **The public adoption surface is honest and current.** README, site, API docs, help, JSON schemas,
-   release notes and explicit omissions all describe the same release commit.
+2. **Hostile-input, entropy and SRTCP replay invariants are executable.** Named tests and recorded
+   mutations hold framing/allocation bounds, cryptographic branch/tag construction and the separate
+   authenticated SRTCP replay window.
+3. **Browser-audio negotiation is complete and fail-closed.** The normative profile and its call
+   policy agree on one SDP vocabulary; missing features, incompatible roles and weaker media are
+   typed refusals rather than downgrades.
+4. **One nominated component carries every browser-media protocol safely.** STUN, DTLS, SRTP and
+   SRTCP have one bounded owner, nomination binds the peer, fingerprint verification precedes keys,
+   and RTCP multiplexing is real behavior rather than an SDP claim.
+5. **An independent browser endpoint carries Opus in both roles.** The bounded proof asserts
+   non-silent audio, negotiated facts and non-vacuous fingerprint, nomination and downgrade
+   negatives.
+6. **Exact registry, CLI, Pages and GitHub release evidence agrees.** Every public package is
+   rehearsed and checksum-verified, an exact registry consumer and installed Opus CLI run, Pages is
+   bound to the release SHA, and one immutable annotated tag owns the GitHub prerelease.
 
 No RFC total or completion percentage belongs here. The compliance table measures protocol scope;
 the hypothetical announcement gate measures whether the scope being offered is truthful and usable.
