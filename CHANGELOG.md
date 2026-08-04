@@ -81,6 +81,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A generated comparison cell must name the tree it was computed from (`X-77`).** Those cells are
+  recomputed at render time, so when the workspace version moved to `1.0.0-beta.2` their
+  `version_evaluated` was left claiming `1.0.0-beta.1` — the numbers stayed correct and the version
+  attached to them went quietly wrong, which nothing caught: the value is a plain string and the
+  public fact guard does not read that cell. `comparison-report.py --check` now fails when a
+  `generated` observation on this repository's own row names anything other than the workspace
+  version, and the message names the remedy.
+
 - **Partial registry publication can be recovered without moving the release tag (`X-94`).** A
   protected manual workflow uses fixed controller tooling against a separate immutable-tag
   checkout, verifies the failed run and every already-published checksum, and resumes only the

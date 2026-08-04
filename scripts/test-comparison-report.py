@@ -155,6 +155,9 @@ class TheConfidenceLadder(unittest.TestCase):
                 confidence="generated",
                 generated_from=["rfc-count"],
                 summary="It tracks {rfc-count} documents.",
+                # A generated cell is computed from the current tree, so it has to name that
+                # tree's version — see `TheSelfVersion`.
+                version_evaluated=report.workspace_version(),
             ),
             stacks=[a_stack(is_self=True)],
         )
@@ -526,6 +529,54 @@ class GeneratedCellsAreNeverTyped(unittest.TestCase):
         )
         self.assertIn("1234", rendered)
         self.assertNotIn("{rfc-count}", rendered)
+
+
+class TheSelfVersion(unittest.TestCase):
+    """A generated cell is computed from the current tree, so it must say which tree that is."""
+
+    def a_generated_observation(self, **overrides):
+        return an_observation(
+            confidence="generated",
+            generated_from=["rfc-count"],
+            summary="It tracks {rfc-count} documents.",
+            **overrides,
+        )
+
+    def test_a_generated_cell_at_a_stale_version_is_rejected(self) -> None:
+        problems = problems_for(
+            self.a_generated_observation(version_evaluated="0.0.0-not-the-workspace"),
+            stacks=[a_stack(is_self=True)],
+        )
+        self.assertTrue(
+            any("workspace" in p and "0.0.0-not-the-workspace" in p for p in problems),
+            f"a generated cell claimed a version it was not computed from; problems={problems}",
+        )
+
+    def test_the_message_names_the_remedy(self) -> None:
+        problems = problems_for(
+            self.a_generated_observation(version_evaluated="0.0.0-not-the-workspace"),
+            stacks=[a_stack(is_self=True)],
+        )
+        self.assertTrue(any("regenerate" in p for p in problems), f"problems={problems}")
+
+    def test_a_generated_cell_at_the_workspace_version_is_accepted(self) -> None:
+        problems = problems_for(
+            self.a_generated_observation(version_evaluated=report.workspace_version()),
+            stacks=[a_stack(is_self=True)],
+        )
+        self.assertEqual([], problems)
+
+    def test_an_external_row_may_name_any_version(self) -> None:
+        """The rule is about our own computed cells, not about anyone else's pinned tag."""
+        self.assertEqual([], problems_for(an_observation(version_evaluated="2.17")))
+
+    def test_the_workspace_version_is_read_from_the_manifest(self) -> None:
+        import tomllib
+
+        manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["workspace"]["package"]["version"], report.workspace_version()
+        )
 
 
 class TheGenerationRules(unittest.TestCase):

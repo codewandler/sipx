@@ -376,6 +376,36 @@ def generated_problems(observation, values: dict[str, str]) -> list[str]:
     return problems
 
 
+def workspace_version() -> str:
+    """The version this repository currently is, read from the workspace manifest."""
+    manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
+    return manifest["workspace"]["package"]["version"]
+
+
+def self_version_problems(observation, selves: set[str], version: str) -> list[str]:
+    """A generated cell must say it was taken at the version it is actually computed from.
+
+    Generated values are recomputed at render time from the current tree, so the moment the
+    workspace version moves, a `version_evaluated` left behind claims those numbers were measured
+    at a release they were not. Nothing else catches it: the value is a plain string, the public
+    fact guard does not read this cell, and the numbers themselves stay correct — only the version
+    attached to them goes quietly wrong. It went wrong exactly once, during the rebase that put
+    this work on top of a release (`X-77`).
+    """
+    if observation.get("confidence") != "generated":
+        return []
+    if observation.get("stack") not in selves:
+        return []
+    stated = observation.get("version_evaluated")
+    if stated == version:
+        return []
+    return [
+        f"{where_of(observation)} is generated from the current tree but says it was evaluated at"
+        f" {stated!r}, and the workspace is {version!r}. Set version_evaluated to the workspace"
+        " version and regenerate"
+    ]
+
+
 def staleness_problems(observation, today: datetime.date) -> list[str]:
     """A comparison ages the moment it ships; refusing to report is the honest answer."""
     where = where_of(observation)
@@ -495,6 +525,7 @@ def marker_problems(observation) -> list[str]:
 def check(dimension_list, stack_list, observation_list, values, today) -> list[str]:
     """Every claim the evidence does not back up."""
     selves = {s.get("id") for s in stack_list if s.get("is_self")}
+    version = workspace_version()
     problems = []
 
     for dimension in dimension_list:
@@ -523,6 +554,7 @@ def check(dimension_list, stack_list, observation_list, values, today) -> list[s
         problems.extend(evidence_problems(observation))
         problems.extend(confidence_problems(observation, selves))
         problems.extend(generated_problems(observation, values))
+        problems.extend(self_version_problems(observation, selves, version))
         problems.extend(staleness_problems(observation, today))
 
     problems.extend(coverage_problems(dimension_list, stack_list, observation_list))

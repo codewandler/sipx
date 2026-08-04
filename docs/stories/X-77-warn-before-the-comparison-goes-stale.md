@@ -92,6 +92,22 @@ two never both fire for one row.
   failures.
 - **The rendered preamble** was changed in `render()` and the document regenerated, never
   hand-edited.
+**A second staleness was found while integrating this work onto a release.** Rebasing onto
+`1.0.0-beta.2` left our own rows saying `version_evaluated: 1.0.0-beta.1` while their values were
+being recomputed from the new tree — the numbers stayed correct and the version attached to them
+went quietly wrong. Nothing caught it: the value is a plain string, and the public fact guard does
+not read that cell. `self_version_problems()` now requires a `generated` cell on the `is_self` stack
+to name the workspace version, with five tests and a demonstration:
+
+```
+Comparison claims the evidence does not back up:
+  sipx/language-safety is generated from the current tree but says it was evaluated at '1.0.0-beta.1', and the workspace is '1.0.0-beta.2'. Set version_evaluated to the workspace version and regenerate
+exit=1
+```
+
+It also caught a fixture in an existing test that had been giving a self stack an arbitrary version,
+which is the same defect in the suite rather than in the data.
+
 - **`SKILL.md`** gained an **Adding a subject** section — the procedure documented refreshing and
   silently assumed `stacks.json` was populated — plus the rule that divergent dates are the desired
   end state and that `evaluated_at` is never edited to achieve them.
