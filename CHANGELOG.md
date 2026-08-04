@@ -7,7 +7,65 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A generated, checked stack comparison, published as a public reference page** (`X-72`, `X-73`,
+  `X-74`). `docs/comparison/` is a JSON registry of dimensions, subjects and observations;
+  `scripts/comparison-report.py` renders `docs/comparison.md` from it and, with `--check`, holds
+  every claim against its evidence; `sync-website.py` inlines a sanitised copy into
+  `website/docs/reference/comparison.md`. Eight stacks over six dimensions.
+
+  Half the page is about software this repository does not control and cannot test, so the
+  asymmetry is made visible rather than smoothed over. Every cell carries a **confidence tier**:
+  `generated` is computed from this repository at render time and is restricted to sipx's own
+  column; `measured` requires a `reproduce` command that re-derives the finding from the subject at
+  a pinned tag; `documented` cites the subject's own published material; `assessed` is judgment and
+  must carry a rationale. Every external observation in the first dataset is `measured`, and all 42
+  of their commands were executed.
+
+  Three properties are enforced rather than intended. **sipx's own numbers cannot be typed** — a
+  generated cell states them as `{rule}` placeholders substituted at render time from the RFC
+  registry, the gate script, the transport enum, the audio-claims checker and the workspace lint
+  table, so a hand-edited number fails the byte-compare. **Staleness is a build failure**, not a
+  footnote: an observation older than 180 days fails `--check` and the message names the refresh
+  command. And **there is no suppression list under any name** — the only way past a rule is
+  demotion to a lower tier or removal of the row, because both change what the published page says.
+
+  The page states where sipx loses — age, adoption, third-party audit, codec breadth — because that
+  is the credibility mechanism for every other row. The derivation lives in
+  `.claude/skills/compare-stacks/`, the repository's first tracked files under `.claude/`, so a
+  refresh is a command rather than a conversation.
+
+- **The comparison is on the adoption path, and being orphaned is now a test failure** (`X-76`).
+  The page shipped registered in the sidebar — so it reached the site nav, `llms.txt` and
+  `llms-full.txt` — and linked from no prose anywhere, which every existing check was happy with. It
+  is now reached from `does-this-fit.md` (both from the section listing what to choose something else
+  for, and from the closing link sentence), from the intro, from the README and from the site footer.
+  `test_the_comparison_page_is_reachable_from_the_adoption_path` requires at least one current-surface
+  page to link to it: a sidebar entry is not a path to a page.
+
+- **The staleness gate gives thirty days' notice and a standing countdown** (`X-77`). Every
+  observation in the first dataset was derived in one sitting, so all of them expire on the same day,
+  and `--check` was green until the day it was not. From `STALE_WARNING_DAYS` out, a run prints a
+  `notice:` line per approaching observation and still exits 0; past `MAX_OBSERVATION_AGE_DAYS` the
+  same row is a failure, unchanged. The countdown to the soonest expiry rides on the success line, so
+  "when does this need refreshing" is answerable from any green run.
+
+  `expiring_soon()` is deliberately not called from `check()` — that function returns failures, and
+  folding a warning into it would either fail the build a month early or teach a reader that some of
+  what it returns is advisory. The dates are never edited to stagger the cliff; they diverge on their
+  own once subjects are refreshed one at a time, and the skill now says so alongside a new procedure
+  for adding a subject.
+
 ### Changed
+
+- **The public-fact guard is held off on a comparison row about another stack** (`X-74`).
+  `public_fact_problems()` exists to stop a stale sipx version, MSRV or RFC count reaching a public
+  page, and the comparison page states another project's pinned tag in every row.
+  `foreign_stack_row()` scopes the waiver to comparison table rows whose subject is not sipx —
+  sipx's own rows, the page's hand-written surround and every other public page stay checked. No
+  number on another stack's row is a claim about sipx, so none of them is checked against sipx's
+  workspace.
 
 - **The provenance gate has one scoped exception (`X-71`).** A comparison subject may now be named
   in the comparison registry under `docs/comparison/`, in the `docs/comparison.md` generated from

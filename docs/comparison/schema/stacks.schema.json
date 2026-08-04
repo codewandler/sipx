@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/codewandler/sipx/docs/comparison/schema/stacks.schema.json",
+  "title": "Comparison subjects",
+  "description": "The stacks being compared, in render order. Exactly one carries is_self, and only that one may hold generated cells.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["stacks"],
+  "properties": {
+    "stacks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "language", "repository", "license"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "description": "Stable identity, and the basename of observations/<id>.json."
+          },
+          "name": {"type": "string", "minLength": 1},
+          "language": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The implementation language, not the languages it has bindings for."
+          },
+          "repository": {
+            "type": "string",
+            "format": "uri",
+            "description": "Where the evidence was read from. A subject with no readable source cannot hold a measured observation."
+          },
+          "license": {"type": "string", "minLength": 1},
+          "is_self": {
+            "type": "boolean",
+            "description": "True for this repository, and for no other stack. Gates the generated confidence tier."
+          }
+        }
+      }
+    }
+  }
+}

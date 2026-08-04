@@ -139,6 +139,7 @@ The [public site](https://codewandler.github.io/sipx/) is for users and integrat
 - [How sipx is built](https://codewandler.github.io/sipx/docs/reference/development-process)
 - [Diagnostic-phone proof](https://codewandler.github.io/sipx/docs/reference/diagnostic-phone-proof)
 - [RFC compliance](https://codewandler.github.io/sipx/docs/reference/compliance)
+- [How sipx compares](https://codewandler.github.io/sipx/docs/reference/comparison)
 
 The compliance registry currently tracks <!-- BEGIN generated:rfc-count -->72<!-- END generated:rfc-count --> RFCs; its public table is generated rather than copied by hand.
 

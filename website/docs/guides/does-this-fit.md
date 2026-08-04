@@ -32,6 +32,10 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
 
 ## Choose something else when you need
 
+Each of these is a boundary of what sipx does, not a judgement about what else exists. For what the
+alternatives actually offer against sipx — measured at a pinned version, with the evidence for every
+claim and the places sipx loses stated plainly — see [How sipx compares](../reference/comparison.md).
+
 - **Proxy, registrar, or PBX behavior.** sipx does not fork or route other users' requests,
   add itself to a route set, store registrations for other endpoints, or provide dial plans.
 - **A desktop phone interface.** The optional device driver can open an exact microphone or speaker,
@@ -58,8 +62,9 @@ DTLS-SRTP keeps that media key out of signalling and is selectable through both 
 CLI, but it still has one SRTP transform with no rekeying. Reliable early media and ICE combined
 with DTLS-SRTP are refused rather than silently downgraded.
 
-See [Security](../reference/security.md) for the CLI-versus-library matrix and
-[RFC compliance](../reference/compliance.md) for the checked, protocol-by-protocol status.
+See [Security](../reference/security.md) for the CLI-versus-library matrix,
+[RFC compliance](../reference/compliance.md) for the checked, protocol-by-protocol status, and
+[How sipx compares](../reference/comparison.md) for the same questions asked of other stacks.
 
 ## Application host status
 

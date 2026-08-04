@@ -1,0 +1,76 @@
+{
+  "stack": "sipsorcery",
+  "observations": [
+    {
+      "dimension": "language-safety",
+      "confidence": "measured",
+      "summary": "C# on .NET, and the split matters: the core `SIPSorcery` library enables no unsafe blocks at all, while the optional FFmpeg, VP8 and Windows media packages do — 83 unsafe blocks and 8 `DllImport` declarations across the tree, none of them in the signalling path. A deployment that stays on the managed codecs keeps the parser fully memory-safe.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v10.0.13 https://github.com/sipsorcery-org/sipsorcery \"$C\"; grep -c AllowUnsafeBlocks \"$C\"/src/SIPSorcery/SIPSorcery.csproj || echo 'core: none'; grep -rnE '\\bunsafe\\s*\\{' \"$C\"/src --include='*.cs' | wc -l",
+      "evidence": [
+        {"url": "https://github.com/sipsorcery-org/sipsorcery/blob/v10.0.13/src/SIPSorcery/SIPSorcery.csproj", "note": "the core library project, with no AllowUnsafeBlocks"},
+        {"url": "https://github.com/sipsorcery-org/sipsorcery/tree/v10.0.13/src", "note": "the optional media packages that do enable it"}
+      ],
+      "version_evaluated": "v10.0.13",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "transports",
+      "confidence": "measured",
+      "summary": "udp, tcp, tls, ws and wss, as a single closed enum. The set is the same as the Go and Rust peers here, and includes both WebSocket forms.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v10.0.13 https://github.com/sipsorcery-org/sipsorcery \"$C\"; f=$(grep -rl 'enum SIPProtocolsEnum' \"$C\"/src | head -1); sed -n '/enum SIPProtocolsEnum/,/}/p' \"$f\"",
+      "evidence": [
+        {"url": "https://github.com/sipsorcery-org/sipsorcery/tree/v10.0.13/src/core/SIP", "note": "the SIPProtocolsEnum declaration"}
+      ],
+      "version_evaluated": "v10.0.13",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "media",
+      "confidence": "measured",
+      "summary": "Terminates media, and is the only stack here whose media half is a full WebRTC implementation in the same language: `RTCPeerConnection`, an ICE channel, DTLS-SRTP with both client and server roles, SCTP data channels, and managed G.711, G.722 and G.729 codecs. If the target is a browser peer rather than a SIP peer, this is the closest fit on the page.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v10.0.13 https://github.com/sipsorcery-org/sipsorcery \"$C\"; find \"$C\"/src/SIPSorcery \\( -iname '*srtp*' -o -iname '*dtls*' -o -iname '*ice*' \\) -name '*.cs' | sed 's|.*/||' | sort; find \"$C\"/src/SIPSorcery -ipath '*odec*' -name '*.cs' | sed 's|.*/||'",
+      "evidence": [
+        {"url": "https://github.com/sipsorcery-org/sipsorcery/tree/v10.0.13/src/net", "note": "RTCPeerConnection, RtpIceChannel, DtlsSrtpTransport and the SRTP context"},
+        {"url": "https://github.com/sipsorcery-org/sipsorcery/tree/v10.0.13/src/SIPSorcery", "note": "the managed G.711, G.722 and G.729 codecs"}
+      ],
+      "version_evaluated": "v10.0.13",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "security-posture",
+      "confidence": "measured",
+      "summary": "Two published advisories and a SECURITY.md reporting route. There are no in-tree fuzz targets and no sanitiser or analysis job among the six CI workflows, which are build, test, packaging and smoke-test jobs. The managed runtime carries much of the weight that fuzzing carries for the C stacks here.",
+      "reproduce": "gh api '/repos/sipsorcery-org/sipsorcery/security-advisories?per_page=100' --jq 'length'; C=$(mktemp -d); git clone -q --depth 1 --branch v10.0.13 https://github.com/sipsorcery-org/sipsorcery \"$C\"; ls \"$C\"/.github/workflows; find \"$C\" -maxdepth 3 -type d -iname 'fuzz*'",
+      "evidence": [
+        {"url": "https://github.com/sipsorcery-org/sipsorcery/security/advisories", "note": "the published advisories"},
+        {"url": "https://github.com/sipsorcery-org/sipsorcery/tree/v10.0.13/.github/workflows", "note": "the CI workflows, all build and test"}
+      ],
+      "version_evaluated": "v10.0.13",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "testing-ci",
+      "confidence": "measured",
+      "summary": "1172 xunit facts with 13 carrying a skip reason — the largest unit-test suite on this page — and a `TortureTests.cs` covering 12 RFC 4475 cases of which one is skipped. CI runs the suite on Linux, macOS and Windows. Conformance is asserted in documentation rather than derived from a checked registry.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v10.0.13 https://github.com/sipsorcery-org/sipsorcery \"$C\"; grep -r '\\[Fact\\]\\|\\[Theory\\]' \"$C\"/test --include='*.cs' | wc -l; grep -rE 'Skip *=' \"$C\"/test --include='*.cs' | wc -l; grep -c '\\[Fact\\]\\|\\[Theory\\]' \"$C\"/test/unit/core/SIP/TortureTests.cs",
+      "evidence": [
+        {"url": "https://github.com/sipsorcery-org/sipsorcery/blob/v10.0.13/test/unit/core/SIP/TortureTests.cs", "note": "the torture suite, and the one skipped case"},
+        {"url": "https://github.com/sipsorcery-org/sipsorcery/tree/v10.0.13/.github/workflows", "note": "the three-platform test matrix"}
+      ],
+      "version_evaluated": "v10.0.13",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "maturity-adoption",
+      "confidence": "measured",
+      "summary": "First tag November 2019, 151 tags since, 3077 commits, active within a week of measurement — a fast release cadence and well past 1.0. Distributed through NuGet, which for a .NET consumer is the lowest-friction adoption path on this page. BSD-3-Clause.",
+      "reproduce": "C=$(mktemp -d); git clone -q --filter=blob:none https://github.com/sipsorcery-org/sipsorcery \"$C\"; git -C \"$C\" rev-list --count HEAD; git -C \"$C\" tag | wc -l; git -C \"$C\" log -1 --format=%ad --date=short $(git -C \"$C\" tag --sort=creatordate | head -1)",
+      "evidence": [
+        {"url": "https://github.com/sipsorcery-org/sipsorcery/tags", "note": "the release history from 2019 onward"},
+        {"url": "https://github.com/sipsorcery-org/sipsorcery/blob/v10.0.13/LICENSE.md", "note": "BSD-3-Clause"}
+      ],
+      "version_evaluated": "v10.0.13",
+      "evaluated_at": "2026-08-04"
+    }
+  ]
+}

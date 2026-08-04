@@ -1,0 +1,75 @@
+{
+  "stack": "resiprocate",
+  "observations": [
+    {
+      "dimension": "language-safety",
+      "confidence": "measured",
+      "summary": "C++, across 1191 `.cxx` and `.cpp` files — the largest codebase compared here. Memory safety is again a property of the code; RAII and the standard containers remove a large class of defect that plain C leaves exposed, but nothing rules out the rest by construction.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch resiprocate-1.14.0 https://github.com/resiprocate/resiprocate \"$C\"; find \"$C\" \\( -name '*.cxx' -o -name '*.cpp' \\) | wc -l",
+      "evidence": [
+        {"url": "https://github.com/resiprocate/resiprocate/tree/resiprocate-1.14.0/resip/stack", "note": "the SIP stack sources at the pinned tag"}
+      ],
+      "version_evaluated": "resiprocate-1.14.0",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "transports",
+      "confidence": "measured",
+      "summary": "The broadest transport enum here: TLS, TCP, UDP, SCTP, DCCP, DTLS, WS and WSS. WebSocket and secure WebSocket are named in the same enum as the rest, which makes it one of only three stacks on this page that can face a browser without a gateway.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch resiprocate-1.14.0 https://github.com/resiprocate/resiprocate \"$C\"; sed -n '/^typedef enum/,/} TransportType;/p' \"$C\"/rutil/TransportType.hxx",
+      "evidence": [
+        {"url": "https://github.com/resiprocate/resiprocate/blob/resiprocate-1.14.0/rutil/TransportType.hxx", "note": "the TransportType enum"}
+      ],
+      "version_evaluated": "resiprocate-1.14.0",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "media",
+      "confidence": "measured",
+      "summary": "Media is a separate layer rather than part of the stack: `reflow` provides an SRTP-capable media flow built on a bundled libsrtp, and `media/` carries GStreamer and Kurento integrations plus an SDP container. So it terminates media, but by wiring an external media engine rather than by shipping codecs of its own — which makes the codec question one about the engine you choose.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch resiprocate-1.14.0 https://github.com/resiprocate/resiprocate \"$C\"; ls \"$C\"/reflow \"$C\"/media; ls \"$C\"/contrib | grep srtp",
+      "evidence": [
+        {"url": "https://github.com/resiprocate/resiprocate/tree/resiprocate-1.14.0/reflow", "note": "the media flow layer, including Srtp2Helper"},
+        {"url": "https://github.com/resiprocate/resiprocate/tree/resiprocate-1.14.0/media", "note": "GStreamer and Kurento integrations, and the SDP container"}
+      ],
+      "version_evaluated": "resiprocate-1.14.0",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "security-posture",
+      "confidence": "measured",
+      "summary": "No advisories published through the repository's own security tab, and no SECURITY.md at the pinned tag. CI is two build workflows with no sanitiser, fuzzing or static-analysis job; the only fuzzer in the tree belongs to the bundled libsrtp rather than to the SIP parser. For a codebase of this age and size that absence is the notable finding, not a clean bill of health.",
+      "reproduce": "gh api '/repos/resiprocate/resiprocate/security-advisories?per_page=100' --jq 'length'; C=$(mktemp -d); git clone -q --depth 1 --branch resiprocate-1.14.0 https://github.com/resiprocate/resiprocate \"$C\"; ls \"$C\"/.github/workflows; find \"$C\" -maxdepth 3 -type d -iname 'fuzz*'",
+      "evidence": [
+        {"url": "https://github.com/resiprocate/resiprocate/security/advisories", "note": "the advisory index, empty at the time of reading"},
+        {"url": "https://github.com/resiprocate/resiprocate/tree/resiprocate-1.14.0/.github/workflows", "note": "linux-ci and windows-ci, and nothing else"}
+      ],
+      "version_evaluated": "resiprocate-1.14.0",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "testing-ci",
+      "confidence": "measured",
+      "summary": "217 test translation units, including a dedicated `SipTortureTests.cxx` with around 270 assertions — the most thorough parser-torture suite found on this page outside sipx's own corpora. Against that, CI is only two build workflows, so much of that suite's value depends on whoever runs it locally.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch resiprocate-1.14.0 https://github.com/resiprocate/resiprocate \"$C\"; find \"$C\" -path '*/test/*' \\( -name '*.cxx' -o -name '*.cpp' \\) | wc -l; grep -c 'assert\\|TEST' \"$C\"/resip/stack/test/SipTortureTests.cxx",
+      "evidence": [
+        {"url": "https://github.com/resiprocate/resiprocate/blob/resiprocate-1.14.0/resip/stack/test/SipTortureTests.cxx", "note": "the torture suite"},
+        {"url": "https://github.com/resiprocate/resiprocate/tree/resiprocate-1.14.0/resip/stack/test", "note": "the stack test directory"}
+      ],
+      "version_evaluated": "resiprocate-1.14.0",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "maturity-adoption",
+      "confidence": "measured",
+      "summary": "First tag May 2004 — the oldest lineage here — with 190 tags, 11537 commits and activity within the last fortnight of measurement. It also ships more than a library: `repro` is a working proxy and registrar, and `reTurn` a TURN server, so adopting it can mean adopting a stack and its server estate together.",
+      "reproduce": "C=$(mktemp -d); git clone -q --filter=blob:none https://github.com/resiprocate/resiprocate \"$C\"; git -C \"$C\" rev-list --count HEAD; git -C \"$C\" tag | wc -l; git -C \"$C\" log -1 --format=%ad --date=short $(git -C \"$C\" tag --sort=creatordate | head -1)",
+      "evidence": [
+        {"url": "https://github.com/resiprocate/resiprocate/tags", "note": "the release history from 2004 onward"},
+        {"url": "https://github.com/resiprocate/resiprocate/tree/resiprocate-1.14.0/repro", "note": "the proxy and registrar shipped alongside the stack"}
+      ],
+      "version_evaluated": "resiprocate-1.14.0",
+      "evaluated_at": "2026-08-04"
+    }
+  ]
+}

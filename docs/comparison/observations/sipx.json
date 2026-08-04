@@ -1,0 +1,140 @@
+{
+  "stack": "sipx",
+  "observations": [
+    {
+      "dimension": "language-safety",
+      "confidence": "generated",
+      "generated_from": [
+        "unsafe-policy"
+      ],
+      "summary": "Rust, with `unsafe_code` set to `{unsafe-policy}` for the whole workspace — the parser that reads unauthenticated bytes cannot contain a memory-safety defect of its own. Unsafe code still exists below it, in the TLS and codec dependencies.",
+      "evidence": [
+        {
+          "path": "Cargo.toml",
+          "note": "the workspace lint table carrying the setting"
+        },
+        {
+          "path": "AGENTS.md",
+          "note": "non-negotiable 3, which also forbids panics on network input"
+        }
+      ],
+      "version_evaluated": "1.0.0-beta.2",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "transports",
+      "confidence": "generated",
+      "generated_from": [
+        "transports"
+      ],
+      "summary": "{transports}. Each is a separate cargo feature and is built alone in CI, so a transport that does not compile with the others off is caught rather than shipped. The QUIC mapping is experimental and has no standards-track counterpart.",
+      "evidence": [
+        {
+          "path": "crates/sipx-transport/src/target.rs",
+          "note": "the transport enum and its wire spellings"
+        },
+        {
+          "path": "crates/sipx-transport/Cargo.toml",
+          "note": "one feature per transport"
+        },
+        {
+          "path": "scripts/check-features.sh",
+          "note": "the per-feature build matrix"
+        }
+      ],
+      "version_evaluated": "1.0.0-beta.2",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "media",
+      "confidence": "generated",
+      "generated_from": [
+        "codecs"
+      ],
+      "summary": "Terminates media. Codecs claimed and backed by an encoder and a decoder: {codecs}. SRTP, DTLS-SRTP and ICE are implemented and reachable from the call layer, which is checked rather than asserted.",
+      "evidence": [
+        {
+          "path": "crates/sipx-audio/src",
+          "note": "the codec implementations the claim is checked against"
+        },
+        {
+          "path": "scripts/check-audio-claims.py",
+          "note": "the check that refuses a codec name with no encoder and decoder behind it"
+        },
+        {
+          "path": "docs/compliance.md",
+          "note": "the generated RFC table, including the media and security layers"
+        }
+      ],
+      "version_evaluated": "1.0.0-beta.2",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "security-posture",
+      "confidence": "documented",
+      "summary": "No published advisories, because no vulnerability has been reported by anyone outside the project — which is a statement about the project's age, not its safety. A fuzz job runs the parser targets in CI seeded from the RFC torture corpora, and a dependency-advisory job runs on every change. There has been no third-party audit.",
+      "evidence": [
+        {
+          "path": ".github/workflows/ci.yml",
+          "note": "the fuzz smoke job and the advisory job"
+        },
+        {
+          "path": "website/docs/reference/security.md",
+          "note": "the published security surface and reporting route"
+        },
+        {
+          "path": "docs/maturity.md",
+          "note": "the generated maturity report, including what is still open"
+        }
+      ],
+      "version_evaluated": "1.0.0-beta.2",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "testing-ci",
+      "confidence": "generated",
+      "generated_from": [
+        "gate-steps",
+        "rfc-count"
+      ],
+      "summary": "{gate-steps} gate steps must pass before a change lands, and a self-check refuses to let the local gate omit a CI job. Conformance is a checked registry of {rfc-count} RFCs whose published table is generated from it, so a claim cannot drift from the code behind it. Both RFC torture corpora are re-recovered from the RFC editor and diffed against the tree rather than transcribed.",
+      "evidence": [
+        {
+          "path": "scripts/gate.py",
+          "note": "the gate, and the check that holds it against CI"
+        },
+        {
+          "path": "docs/rfc/registry.toml",
+          "note": "the conformance registry the published table is generated from"
+        },
+        {
+          "path": "docs/rfc/README.md",
+          "note": "every way the conformance check fails"
+        }
+      ],
+      "version_evaluated": "1.0.0-beta.2",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "maturity-adoption",
+      "confidence": "documented",
+      "summary": "This is where sipx loses, and not narrowly. Its repository history is measured in weeks where the oldest stacks here are measured in decades; its first public boundary is a beta rather than a stable 1.0; it has no known production deployment outside its own authors; no third party has audited it; and it has never had a vulnerability reported, which says only that nobody has looked. Years of carrying real traffic against real peers is evidence no gate substitutes for, and several stacks on this page have it.",
+      "evidence": [
+        {
+          "path": "docs/maturity.md",
+          "note": "predicate counts for the alpha and beta boundaries, generated from the backlog"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "note": "the full release history, which is short"
+        },
+        {
+          "path": "tests/interop",
+          "note": "the two independent peers the suite runs against"
+        }
+      ],
+      "version_evaluated": "1.0.0-beta.2",
+      "evaluated_at": "2026-08-04"
+    }
+  ]
+}

@@ -21,15 +21,19 @@ test or CI job that carries every clause rather than against the mechanism under
 roadmap keeps both sections for the scoping arguments in them: [where M10
 stands](../roadmap.md#m10--reachable), [where M12 stands](../roadmap.md#m12--provable).
 
-**`1.0.0-beta.2` is the first published public beta, not stable 1.0.** Its immutable tag, all eleven
-crates.io packages, exact registry consumer, Opus-enabled installed CLI, release-commit Pages and
-[GitHub prerelease](https://github.com/codewandler/sipx/releases/tag/v1.0.0-beta.2) were verified by
-protected release run `30915437072`. The generated [maturity report](../maturity.md) records the
-all-or-nothing result rather than treating story counts as a weighted maturity score.
+The next public boundary is **`1.0.0-beta.1`, not stable 1.0**. The advertised Opus command path is
+rate- and direction-correct, and its normalized package and independent-peer proofs pass. Exact-sha
+CI exposed one release-policy blocker after the complete 32-step local gate passed; the generated
+[maturity report](../maturity.md) therefore records **6 of 7 alpha-integrity predicates and 2 of 5
+beta predicates met** until `X-90` is verified and closed. Those are predicate counts, not weighted
+maturity scores.
 
-Stable `1.0.0` remains a later decision after real outside use. Browser audio, video admission,
-application-host phases and unadvertised optional features did not delay this beta boundary; they
-remain explicit roadmap work rather than claims attached to the released surface.
+What remains is one explicitly authorized, irreversible story: `A-12` creates the immutable beta
+commit and annotated tag, publishes all eleven public packages, verifies an exact registry-only
+consumer and Opus-enabled CLI, checks the published pages, and creates the repository-native GitHub
+prerelease without broader publicity. Stable
+`1.0.0` remains a later decision after real outside use; browser audio, video admission,
+application-host phases and unadvertised optional features do not delay this beta boundary.
 
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `A` application SDK/release · `X` cross-cutting (build, CI, test infrastructure).
@@ -61,8 +65,22 @@ _The measure of this stack's reach is what can be built on it **without writing 
 - [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
 
 ### Conformance
-- [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 - [X-66 — Measure coverage and publish the number](X-66-measure-coverage-and-publish-the-number.md) · Build · 1756 test attributes and no measurement of what they reach · a number that is generated, never asserted · follow-up
+- [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
+
+### demand-led capability work
+_sipx's backlog has been derived from RFCs, from our own review findings, and from what the design_
+- [M-42 — Advertise a chosen address and latch RTP without ICE](M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md) · Media · the loudest unmet need in the surveyed ecosystem · most requesters are not doing ICE at all
+- [M-43 — Carry linear PCM in and out without format assumptions](M-43-carry-linear-pcm-in-and-out-without-format-assumptions.md) · Media · four reported use cases resolve to one unopinionated PCM boundary · not an AI feature
+- [M-44 — Negotiate and carry G.722](M-44-negotiate-and-carry-g722.md) · Media · the only codec with real demand that sipx lacks · static PT 9 with the RFC 3551 clock-rate trap
+- [M-45 — Hold incoming audio in a jitter buffer](M-45-hold-incoming-audio-in-a-jitter-buffer.md) · Media · two independent field reports of seconds of added delay · characterise the current buffer before changing it
+- [M-46 — Multiplex RTCP and negotiate the DTLS setup role](M-46-multiplex-rtcp-and-negotiate-the-dtls-setup-role.md) · Media · RFC 5761 + RFC 4145 · both are hard blockers for browser interop · prerequisites for M-38
+- [P-14 — Ship portable CLI artifacts](P-14-ship-portable-cli-artifacts.md) · Phone · the surveyed stack's most-engaged issue is a glibc failure · Rust makes this a build-matrix problem
+- [S-36 — Verify the reported call-control and registration traps](S-36-verify-the-reported-call-control-and-registration-traps.md) · Signalling · six field-reported failure modes · each becomes a passing test or a defect · cheap, high information
+- [T-28 — Fall back to TCP when a request exceeds the path MTU](T-28-fall-back-to-tcp-when-a-request-exceeds-the-path-mtu.md) · Transport · RFC 3261 §18.1.1 · sipx currently refuses where the RFC says switch transport
+- [T-29 — Drain in-flight work on a graceful shutdown](T-29-drain-in-flight-work-on-a-graceful-shutdown.md) · Transport · restart without dropping calls · labelled critical and never delivered by the surveyed stack
+- [T-30 — Export signalling capture and media quality to a collector](T-30-export-signalling-capture-and-media-quality-to-a-collector.md) · Transport · the two observability asks people maintained private forks for · hooks, not a bundled exporter
+- [X-75 — Be quiet by default and easy to test against](X-75-be-quiet-by-default-and-easy-to-test-against.md) · Build · recurring complaint against the surveyed stack · a library that spams logs and cannot be tested against
 
 ### Depth
 - [X-67 — Split the call module along its seams](X-67-split-the-call-module-along-its-seams.md) · Build · call.rs is 6560 lines, ~6100 of them production · hold, transfer, session timers, re-INVITE and ICE restart in one file · follow-up
@@ -271,7 +289,7 @@ _sipx implements exactly one SRTP protection profile:_
 - [X-44 — Guard the fixed-sleep rule mechanically, because the sweep did not hold](X-44-the-fixed-sleep-rule-is-swept-for-not-guarded.md) · Build · found while integrating the X-39/X-40/M-33 wave — `X-29` swept the workspace and `0.12.0` claims "no test in the workspace now asserts after a fixed sleep", but nothing enforces it and two new instances appeared within the same wave
 - [X-45 — Make `no_capture_flag_means_no_file` able to observe the thing it is named for](X-45-a-capture-test-that-places-no-call-cannot-observe-capture.md) · Build · found by X-40's implementor — the test kills the answerer immediately and never places a call, so it cannot detect a capture file being written *during* a call; the X-36 shape
 - [X-46 — Stop `sip-tls.md` claiming a configurable minimum TLS version that does not exist](X-46-sip-tls-claims-a-configurable-minimum-version.md) · Build · found by X-43's implementor — `docs/specs/sip-tls.md` §3.2 lists the minimum protocol version as CONFIGURABLE, but neither `ClientTls` nor `ServerTls` takes a version and nothing above them names one
-- [X-47 — Make the public docs an adoption path instead of a status ledger](X-47-make-the-public-docs-an-adoption-path.md) · Build · shorten the front doors, lead with shipped CLI and Rust workflows, make security and operational limits canonical, and demote experimental surfaces
+- [X-47 — Make the public docs an adoption path instead of a status ledger](X-47-make-the-public-docs-an-adoption-path.md) · Build · shorten the front doors, lead with shipped CLI and Rust workflows, make security and operational limits canonical, and demote experimental surfaces · one Acceptance clause superseded by X-71
 - [X-48 — Audit conformance, capability and release readiness](X-48-audit-conformance-and-release-readiness.md) · Build · evidence-based assessment of the shipped library and phone surfaces, with gaps kept distinct from implemented-but-unreachable code
 - [X-49 — Stop CI checking the board against a history it did not fetch](X-49-ci-checks-the-board-against-a-truncated-history.md) · Build · found by CI going red on main and on every pull request at 1.0.0-alpha — two jobs failed, both accusing docs/maturity.md's event-date journal of recording a fact the snapshot did not have
 - [X-50 — Decide whether M10 requires TURN, because the roadmap says both](X-50-m10-has-two-exit-criteria-that-disagree.md) · Build · found closing M-23 — M10's "Done when" is satisfied today, while the ICE epic header calls M-24 an M10 story and M-24 is open; the milestone cannot be declared or deferred without picking one
@@ -289,6 +307,12 @@ _sipx implements exactly one SRTP protection profile:_
 - [X-62 — An interop test failure is reported as peer success](X-62-interop-test-failure-is-reported-as-peer-success.md) · Quality
 - [X-63 — Default overload advertisement breaks an independent peer](X-63-default-overload-advertisement-breaks-an-independent-peer.md) · Signalling
 - [X-70 — Make the doc examples model the rules the workspace enforces](X-70-make-the-doc-examples-model-the-rules-the-workspace-enforces.md) · Build · the canonical dispatcher example teaches a detached spawn and an expect, both banned in library code · beta-2
+- [X-71 — Scope the provenance relaxation for comparison subjects](X-71-scope-the-provenance-relaxation-for-comparison-subjects.md) · Build · reverses non-negotiable 1 in one directory and supersedes X-47's site-neutrality clause · must land alone
+- [X-72 — Define the comparison data model and its checker](X-72-define-the-comparison-data-model-and-its-checker.md) · Build · JSON registry + confidence ladder + staleness · seeded with sipx's generated column only · blocked on X-71
+- [X-73 — Derive the first comparison dataset with a repo-local skill](X-73-derive-the-first-comparison-dataset-with-a-repo-local-skill.md) · Build · the repo's first tracked .claude/ file · a refresh must be a command, not a conversation · blocked on X-72
+- [X-74 — Publish the comparison page](X-74-publish-the-comparison-page.md) · Build · three-hop compliance chain · must state where sipx loses · blocked on X-73
+- [X-76 — Put the comparison on the adoption path](X-76-put-the-comparison-on-the-adoption-path.md) · Build · the page is in the sidebar and in nobody's prose · a sidebar entry is not a path to a page
+- [X-77 — Warn before the comparison goes stale](X-77-warn-before-the-comparison-goes-stale.md) · Build · every observation expires on the same day · a wall with no notice is the failure people learn to silence
 - [X-90 — Make the release dependency policy pass](X-90-make-the-release-dependency-policy-pass.md) · Build · beta-1 blocker · exact-sha CI exposed a data-license exception and intentional path-only test edges
 - [X-91 — Provision device audio for the feature matrix](X-91-provision-device-audio-for-the-feature-matrix.md) · Build · beta-1 blocker · exact-sha CI enabled device audio without its Linux build prerequisite
 - [X-92 — Pass the provenance denylist to the release gate](X-92-pass-the-provenance-denylist-to-the-release-gate.md) · Build · beta-1 release blocker · the tagged gate could not read the configured organization secret

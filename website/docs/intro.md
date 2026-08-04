@@ -78,6 +78,8 @@ remains Experimental. There is no embedded runtime or TypeScript SDK. See the
 
 - [Getting started](getting-started.md) — install the tagged CLI and make a local call.
 - [Does sipx fit?](guides/does-this-fit.md) — supported roles, limitations, and security edges.
+- [How sipx compares](reference/comparison.md) — the same questions asked of other stacks, with the
+  evidence for each answer and where sipx loses.
 - [Use sipx as a library](guides/as-a-library.md) — Git dependencies, features, and crate choices.
 - [Integrate with an existing SIP system](guides/integrate-existing-system.md).
 - [How sipx is built](reference/development-process.md) — specifications, evidence, and the release gate.

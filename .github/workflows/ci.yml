@@ -171,6 +171,10 @@ jobs:
       # This suite builds throwaway repositories to prove the scope admits the comparison
       # artifacts, rejects every other path, and never reaches the commit-message scan.
       - run: python3 scripts/test-provenance.py
+      # X-72: the comparison checker carries the confidence ladder, the staleness limit and the
+      # rule that this repository's own column is substituted rather than typed. A guard that
+      # elaborate needs its own suite, and every rule in it has a reversed fixture.
+      - run: python3 scripts/test-comparison-report.py
 
   # The peer list is read from the repository rather than written here, so that adding an interop
   # peer stays what `tests/interop/README.md` promises it is: adding a profile. A matrix spelled
@@ -259,6 +263,10 @@ jobs:
       # application uses, so this fails when a crate claims supported surface no application
       # reaches, or when the application starts selecting something still marked experimental.
       - run: ./scripts/check-app-surface.py --check
+      # X-72: the comparison page is generated and checked like every other published table. An
+      # unevidenced claim, or an observation that has aged past its limit, fails the build rather
+      # than shipping with a note — half of what it states is about software we cannot test.
+      - run: ./scripts/comparison-report.py --check
 
   # The documentation site. Built on every push and pull request so a broken link fails review
   # rather than the deployed page; published only from `main`.

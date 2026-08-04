@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/codewandler/sipx/docs/comparison/schema/dimensions.schema.json",
+  "title": "Comparison dimensions",
+  "description": "The questions the comparison asks, in render order. One row per question a chooser actually has.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["dimensions"],
+  "properties": {
+    "dimensions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "question", "why"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "description": "Stable identity. Observations reference it; renaming one orphans every observation against it."
+          },
+          "title": {"type": "string", "minLength": 1},
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What this row asks, phrased as the chooser's question rather than as a feature name."
+          },
+          "why": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why the question is worth a row. A dimension that cannot say this is a column, not a question."
+          }
+        }
+      }
+    }
+  }
+}

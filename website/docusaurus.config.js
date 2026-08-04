@@ -151,6 +151,7 @@ const config = {
               { label: 'API reference', href: 'https://codewandler.github.io/sipx/api/' },
               { label: 'Security', to: '/docs/reference/security' },
               { label: 'RFC compliance', to: '/docs/reference/compliance' },
+              { label: 'How sipx compares', to: '/docs/reference/comparison' },
               { label: 'How sipx is built', to: '/docs/reference/development-process' },
               { label: "What's new", to: '/docs/whats-new' },
               { label: 'Application host', to: '/docs/sdk/overview' },

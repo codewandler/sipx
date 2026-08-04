@@ -1,0 +1,78 @@
+{
+  "stack": "pjsip",
+  "observations": [
+    {
+      "dimension": "language-safety",
+      "confidence": "measured",
+      "summary": "C, across 503 non-vendored `.c` files. Memory safety is a property of the code rather than of the language, so the parser that reads unauthenticated bytes is exactly where a defect becomes memory corruption — which is what the project's own advisory history is largely about. The mitigation here is fuzzing and static analysis rather than a type system.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch 2.17 https://github.com/pjsip/pjproject \"$C\"; find \"$C\" -name '*.c' -not -path '*/third_party/*' | wc -l",
+      "evidence": [
+        {"url": "https://github.com/pjsip/pjproject/tree/2.17/pjsip/src/pjsip", "note": "the SIP stack sources at the pinned tag"},
+        {"url": "https://github.com/pjsip/pjproject/security/advisories", "note": "the advisory index, most entries buffer-handling defects"}
+      ],
+      "version_evaluated": "2.17",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "transports",
+      "confidence": "measured",
+      "summary": "UDP, TCP and TLS are implemented; the transport-type enum additionally names DTLS, SCTP and a loopback, but only `sip_transport_udp.c`, `_tcp.c`, `_tls.c` and `_loop.c` exist — SCTP has no transport module behind its enum value. There is no SIP-over-WebSocket transport in the core stack, which rules it out as a browser-facing signalling peer without a gateway.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch 2.17 https://github.com/pjsip/pjproject \"$C\"; ls \"$C\"/pjsip/src/pjsip/ | grep sip_transport_; sed -n '/typedef enum pjsip_transport_type_e/,/} pjsip_transport_type_e/p' \"$C\"/pjsip/include/pjsip/sip_types.h | grep -oE 'PJSIP_TRANSPORT_[A-Z0-9_]+' | sort -u",
+      "evidence": [
+        {"url": "https://github.com/pjsip/pjproject/blob/2.17/pjsip/include/pjsip/sip_types.h", "note": "the transport-type enum, including the values with no module"},
+        {"url": "https://github.com/pjsip/pjproject/tree/2.17/pjsip/src/pjsip", "note": "the four transport modules that exist"}
+      ],
+      "version_evaluated": "2.17",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "media",
+      "confidence": "measured",
+      "summary": "Terminates media, and has the widest codec set of any stack here: G.711, G.722, G.722.1, GSM, iLBC, L16, Opus, Speex, SILK, AMR (via opencore), G.729 (via bcg729), plus H.263, H.264 and VP8/VP9 video. SRTP is present with both SDES and DTLS-SRTP keying, alongside an ICE transport and a jitter buffer. This is a full media framework, not a signalling library.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch 2.17 https://github.com/pjsip/pjproject \"$C\"; ls \"$C\"/pjmedia/src/pjmedia-codec/*.c; ls \"$C\"/pjmedia/src/pjmedia/ | grep -iE 'srtp|transport_ice|jbuf'",
+      "evidence": [
+        {"url": "https://github.com/pjsip/pjproject/tree/2.17/pjmedia/src/pjmedia-codec", "note": "one source file per codec"},
+        {"url": "https://github.com/pjsip/pjproject/tree/2.17/pjmedia/src/pjmedia", "note": "transport_srtp, transport_srtp_dtls, transport_srtp_sdes, transport_ice, jbuf"}
+      ],
+      "version_evaluated": "2.17",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "security-posture",
+      "confidence": "measured",
+      "summary": "53 published advisories — by a wide margin the most of any stack here, and the strongest evidence on this page that a project receives reports and acts on them. It carries in-tree fuzz targets, an OSS-Fuzz workflow, CodeQL analysis, daily Coverity scans and sanitiser builds on Linux and macOS, plus a SECURITY.md reporting route. Read the count as attention, not as weakness.",
+      "reproduce": "gh api '/repos/pjsip/pjproject/security-advisories?per_page=100' --jq 'length'; C=$(mktemp -d); git clone -q --depth 1 --branch 2.17 https://github.com/pjsip/pjproject \"$C\"; ls \"$C\"/.github/workflows \"$C\"/tests/fuzz",
+      "evidence": [
+        {"url": "https://github.com/pjsip/pjproject/security/advisories", "note": "the published advisory index"},
+        {"url": "https://github.com/pjsip/pjproject/tree/2.17/.github/workflows", "note": "cifuzz, codeql-analysis, coverity-scan-daily, sanitiser builds"},
+        {"url": "https://github.com/pjsip/pjproject/blob/2.17/SECURITY.md", "note": "the reporting route"}
+      ],
+      "version_evaluated": "2.17",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "testing-ci",
+      "confidence": "measured",
+      "summary": "CI builds on Linux, macOS and Windows, with fuzzing, CodeQL and Coverity alongside. Around 40 test translation units, and the SIP message tests draw on the RFC 4475 torture corpus. Conformance to the RFCs is documented in prose rather than checked by anything in the build.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch 2.17 https://github.com/pjsip/pjproject \"$C\"; ls \"$C\"/.github/workflows; find \"$C\" -path '*/test/*' -name '*.c' | wc -l; grep -li torture \"$C\"/pjsip/src/test/*.c",
+      "evidence": [
+        {"url": "https://github.com/pjsip/pjproject/blob/2.17/pjsip/src/test/msg_test.c", "note": "the message tests, including torture cases"},
+        {"url": "https://github.com/pjsip/pjproject/tree/2.17/.github/workflows", "note": "the CI matrix"}
+      ],
+      "version_evaluated": "2.17",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "maturity-adoption",
+      "confidence": "measured",
+      "summary": "The most mature stack on this page: first tag December 2005, 80 tags since, 6999 commits, and a commit on the day this was measured. Twenty years of carrying real traffic against real peers is evidence no test suite substitutes for, and nothing here matches it. The licence is the trade — GPL-2.0-or-later, or a commercial licence from the vendor.",
+      "reproduce": "C=$(mktemp -d); git clone -q --filter=blob:none https://github.com/pjsip/pjproject \"$C\"; git -C \"$C\" rev-list --count HEAD; git -C \"$C\" tag | wc -l; git -C \"$C\" log -1 --format=%ad --date=short $(git -C \"$C\" tag --sort=creatordate | head -1)",
+      "evidence": [
+        {"url": "https://github.com/pjsip/pjproject/tags", "note": "the release history from 2005 onward"},
+        {"url": "https://github.com/pjsip/pjproject/blob/2.17/COPYING", "note": "GPL-2.0; the commercial option is offered separately by the vendor"}
+      ],
+      "version_evaluated": "2.17",
+      "evaluated_at": "2026-08-04"
+    }
+  ]
+}

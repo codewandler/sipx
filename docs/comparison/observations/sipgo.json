@@ -1,0 +1,76 @@
+{
+  "stack": "sipgo",
+  "observations": [
+    {
+      "dimension": "language-safety",
+      "confidence": "measured",
+      "summary": "Go, and notably disciplined about it: 73 source files with zero uses of `unsafe.Pointer` and zero cgo. The runtime rules out memory-corruption defects in the parser, at the cost of a garbage collector in the media path — which matters less here because it does not carry media.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v1.4.3 https://github.com/emiago/sipgo \"$C\"; find \"$C\" -name '*.go' | wc -l; grep -rn 'unsafe\\.Pointer\\|\"C\"' \"$C\" --include='*.go' | grep -v _test | wc -l",
+      "evidence": [
+        {"url": "https://github.com/emiago/sipgo/tree/v1.4.3/sip", "note": "the SIP layer at the pinned tag"}
+      ],
+      "version_evaluated": "v1.4.3",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "transports",
+      "confidence": "measured",
+      "summary": "UDP, TCP, TLS, WS and WSS, one source file per transport with a shared connection pool. A clean, complete set for signalling, including the two that let it face a browser.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v1.4.3 https://github.com/emiago/sipgo \"$C\"; ls \"$C\"/sip | grep transport_",
+      "evidence": [
+        {"url": "https://github.com/emiago/sipgo/tree/v1.4.3/sip", "note": "transport_udp, _tcp, _tls, _ws, _wss and the connection pool"}
+      ],
+      "version_evaluated": "v1.4.3",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "media",
+      "confidence": "measured",
+      "summary": "Signalling only. Two files mention RTP and there is no codec, SRTP, ICE or jitter-buffer code in the repository; media lives in a separate companion library by the same author. That is a product decision rather than a gap, but it changes what adopting it means: the media half is a second dependency with its own maturity.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v1.4.3 https://github.com/emiago/sipgo \"$C\"; grep -rl 'rtp' \"$C\" --include='*.go' | wc -l; ls \"$C\" | grep -icE 'media|codec|rtp' || echo 0",
+      "evidence": [
+        {"url": "https://github.com/emiago/sipgo/tree/v1.4.3", "note": "the repository root, with no media directory"},
+        {"url": "https://github.com/emiago/sipgo/blob/v1.4.3/README.md", "note": "the README, which points media users at a companion library"}
+      ],
+      "version_evaluated": "v1.4.3",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "security-posture",
+      "confidence": "measured",
+      "summary": "Three published advisories and a SECURITY.md reporting route — for a project this young, publishing at all is the signal. It carries a Go fuzzing corpus under `sip/testdata/fuzz`. There is no sanitiser or race-detector job in the single CI workflow, which for Go means the race detector is available and not wired in.",
+      "reproduce": "gh api '/repos/emiago/sipgo/security-advisories?per_page=100' --jq 'length'; C=$(mktemp -d); git clone -q --depth 1 --branch v1.4.3 https://github.com/emiago/sipgo \"$C\"; ls \"$C\"/sip/testdata/fuzz; ls \"$C\"/.github/workflows",
+      "evidence": [
+        {"url": "https://github.com/emiago/sipgo/security/advisories", "note": "the published advisories"},
+        {"url": "https://github.com/emiago/sipgo/tree/v1.4.3/sip/testdata/fuzz", "note": "the fuzzing corpus"},
+        {"url": "https://github.com/emiago/sipgo/blob/v1.4.3/SECURITY.md", "note": "the reporting route"}
+      ],
+      "version_evaluated": "v1.4.3",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "testing-ci",
+      "confidence": "measured",
+      "summary": "83 test functions with 13 skips, and a table-driven `TestTorture` covering roughly 23 RFC 4475 cases — a real torture suite rather than a mention of one, which puts it ahead of most of this page on parser conformance for its age. CI is a single test workflow.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v1.4.3 https://github.com/emiago/sipgo \"$C\"; grep -rc 'func Test' \"$C\" --include='*_test.go' | awk -F: '{s+=$2} END{print s}'; grep -r 't.Skip' \"$C\" --include='*_test.go' | wc -l; grep -c '^\\s*\"' \"$C\"/sip/torture_test.go",
+      "evidence": [
+        {"url": "https://github.com/emiago/sipgo/blob/v1.4.3/sip/torture_test.go", "note": "the table-driven torture suite"},
+        {"url": "https://github.com/emiago/sipgo/tree/v1.4.3/.github/workflows", "note": "the single test workflow"}
+      ],
+      "version_evaluated": "v1.4.3",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "maturity-adoption",
+      "confidence": "measured",
+      "summary": "First tag May 2022, 74 tags since, 577 commits, active within a fortnight of measurement — young but shipping steadily, and past 1.0. The BSD-2-Clause licence makes it one of the least encumbered options here.",
+      "reproduce": "C=$(mktemp -d); git clone -q --filter=blob:none https://github.com/emiago/sipgo \"$C\"; git -C \"$C\" rev-list --count HEAD; git -C \"$C\" tag | wc -l; git -C \"$C\" log -1 --format=%ad --date=short $(git -C \"$C\" tag --sort=creatordate | head -1)",
+      "evidence": [
+        {"url": "https://github.com/emiago/sipgo/tags", "note": "the release history from 2022 onward"},
+        {"url": "https://github.com/emiago/sipgo/blob/v1.4.3/LICENSE", "note": "BSD-2-Clause"}
+      ],
+      "version_evaluated": "v1.4.3",
+      "evaluated_at": "2026-08-04"
+    }
+  ]
+}

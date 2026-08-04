@@ -1,0 +1,61 @@
+{
+  "stacks": [
+    {
+      "id": "sipx",
+      "name": "sipx",
+      "language": "Rust",
+      "repository": "https://github.com/codewandler/sipx",
+      "license": "MIT OR Apache-2.0",
+      "is_self": true
+    },
+    {
+      "id": "pjsip",
+      "name": "PJSIP (pjproject)",
+      "language": "C",
+      "repository": "https://github.com/pjsip/pjproject",
+      "license": "GPL-2.0-or-later, or a commercial licence"
+    },
+    {
+      "id": "resiprocate",
+      "name": "reSIProcate",
+      "language": "C++",
+      "repository": "https://github.com/resiprocate/resiprocate",
+      "license": "Vovida Software License 1.0 (per file)"
+    },
+    {
+      "id": "baresip",
+      "name": "baresip (with libre)",
+      "language": "C",
+      "repository": "https://github.com/baresip/baresip",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "id": "sipgo",
+      "name": "sipgo",
+      "language": "Go",
+      "repository": "https://github.com/emiago/sipgo",
+      "license": "BSD-2-Clause"
+    },
+    {
+      "id": "sipsorcery",
+      "name": "SIPSorcery",
+      "language": "C#",
+      "repository": "https://github.com/sipsorcery-org/sipsorcery",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "id": "rsipstack",
+      "name": "rsipstack",
+      "language": "Rust",
+      "repository": "https://github.com/restsend/rsipstack",
+      "license": "MIT"
+    },
+    {
+      "id": "jain-sip",
+      "name": "JAIN-SIP (NIST reference implementation)",
+      "language": "Java",
+      "repository": "https://github.com/usnistgov/jsip",
+      "license": "NIST conditions of use (public domain), with Apache-licensed dependencies"
+    }
+  ]
+}

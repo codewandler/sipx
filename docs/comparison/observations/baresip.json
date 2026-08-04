@@ -1,0 +1,76 @@
+{
+  "stack": "baresip",
+  "observations": [
+    {
+      "dimension": "language-safety",
+      "confidence": "measured",
+      "summary": "C, and deliberately small: 249 `.c` files in the application, with the protocol machinery in the companion `re` library. Memory safety is a property of the code, but the surface a reviewer has to hold in their head is a fraction of the other C and C++ stacks here, which is a real if unquantified safety argument.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v4.10.0 https://github.com/baresip/baresip \"$C\"; find \"$C\" -name '*.c' | wc -l",
+      "evidence": [
+        {"url": "https://github.com/baresip/baresip/tree/v4.10.0/src", "note": "the application sources at the pinned tag"},
+        {"url": "https://github.com/baresip/re", "note": "the companion library holding the SIP, RTP and TLS machinery"}
+      ],
+      "version_evaluated": "v4.10.0",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "transports",
+      "confidence": "measured",
+      "summary": "UDP, TCP, TLS, WS and WSS, spelled as `SIP_TRANSP_*` and selected per account. WebSocket support puts it among the stacks that can face a browser directly.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v4.10.0 https://github.com/baresip/baresip \"$C\"; grep -rhoE 'SIP_TRANSP_[A-Z]+' \"$C\" | sort -u",
+      "evidence": [
+        {"url": "https://github.com/baresip/baresip/blob/v4.10.0/src/reg.c", "note": "registration switching on the transport"},
+        {"url": "https://github.com/baresip/baresip/blob/v4.10.0/src/config.c", "note": "the default transport"}
+      ],
+      "version_evaluated": "v4.10.0",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "media",
+      "confidence": "measured",
+      "summary": "Terminates media, and everything is a module: separate modules for G.711, G.722, G.722.1, Opus, Opus multistream, AAC, AMR and Codec2, plus `srtp`, `dtls_srtp` and `ice`. The modular build is the distinguishing property — a deployment compiles in the codecs it needs and nothing else, which matters on embedded targets.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v4.10.0 https://github.com/baresip/baresip \"$C\"; ls \"$C\"/modules | grep -iE 'opus|g711|g722|amr|codec2|aac|srtp|dtls|ice'",
+      "evidence": [
+        {"url": "https://github.com/baresip/baresip/tree/v4.10.0/modules", "note": "one module per codec and per media-security mechanism"}
+      ],
+      "version_evaluated": "v4.10.0",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "security-posture",
+      "confidence": "measured",
+      "summary": "One published advisory, and no SECURITY.md at the pinned tag — but the CI is the most safety-oriented of any C project here: dedicated `sanitizers.yml`, `valgrind.yml`, `clang-analyze.yml`, `coverage.yml` and `lint.yml` workflows alongside the build matrix. There are no in-tree fuzz targets.",
+      "reproduce": "gh api '/repos/baresip/baresip/security-advisories?per_page=100' --jq 'length'; C=$(mktemp -d); git clone -q --depth 1 --branch v4.10.0 https://github.com/baresip/baresip \"$C\"; ls \"$C\"/.github/workflows",
+      "evidence": [
+        {"url": "https://github.com/baresip/baresip/tree/v4.10.0/.github/workflows", "note": "sanitizers, valgrind, clang-analyze, coverage, lint"},
+        {"url": "https://github.com/baresip/baresip/security/advisories", "note": "the advisory index"}
+      ],
+      "version_evaluated": "v4.10.0",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "testing-ci",
+      "confidence": "measured",
+      "summary": "34 test translation units against ten CI workflows — the ratio is unusual, and it says where this project puts its trust: not in a large unit-test suite but in building the same code many ways, under sanitisers, valgrind and a static analyser, on Linux, Fedora, Windows and mingw. No RFC torture corpus is present in this repository.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v4.10.0 https://github.com/baresip/baresip \"$C\"; find \"$C\"/test -name '*.c' | wc -l; ls \"$C\"/.github/workflows | wc -l",
+      "evidence": [
+        {"url": "https://github.com/baresip/baresip/tree/v4.10.0/test", "note": "the test directory"},
+        {"url": "https://github.com/baresip/baresip/tree/v4.10.0/.github/workflows", "note": "ten workflows, several of them analysis rather than build"}
+      ],
+      "version_evaluated": "v4.10.0",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "maturity-adoption",
+      "confidence": "measured",
+      "summary": "First tag June 2014, 88 tags, 4508 commits, and a commit within a fortnight of measurement. Its lineage is older than that date suggests — the `re` library it is built on predates the split — and it is now maintained by a foundation rather than a single author, which is a succession signal most projects this size do not have.",
+      "reproduce": "C=$(mktemp -d); git clone -q --filter=blob:none https://github.com/baresip/baresip \"$C\"; git -C \"$C\" rev-list --count HEAD; git -C \"$C\" tag | wc -l; git -C \"$C\" log -1 --format=%ad --date=short $(git -C \"$C\" tag --sort=creatordate | head -1)",
+      "evidence": [
+        {"url": "https://github.com/baresip/baresip/tags", "note": "the release history"},
+        {"url": "https://github.com/baresip/baresip/blob/v4.10.0/LICENSE", "note": "BSD-3-Clause, held by the Baresip Foundation"}
+      ],
+      "version_evaluated": "v4.10.0",
+      "evaluated_at": "2026-08-04"
+    }
+  ]
+}

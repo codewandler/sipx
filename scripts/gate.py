@@ -157,6 +157,11 @@ def gate_steps(msrv: str) -> list[Step]:
         # into a check that reports clean because it looked nowhere. The suite builds throwaway
         # repositories rather than trusting the real one, so it needs no denylist to run.
         Step("provenance tests", "gate", ("python3", "scripts/test-provenance.py")),
+        # X-72: the comparison registry is the one measurement in this repository whose subject is
+        # mostly software we do not control, so its checker carries more of the weight than usual —
+        # the confidence ladder, the staleness limit and the rule that this repository's own column
+        # is substituted rather than typed are all it. A guard that elaborate needs its own suite.
+        Step("comparison tests", "gate", ("python3", "scripts/test-comparison-report.py")),
         Step(
             "provenance",
             "provenance",
@@ -217,6 +222,11 @@ def gate_steps(msrv: str) -> list[Step]:
         # application uses, so a crate claiming supported surface nothing reaches — or an
         # application reaching for something still marked experimental — is a red gate.
         Step("app surface", "docs", ("./scripts/check-app-surface.py", "--check")),
+        # X-72: X-35 is the scar — hand-maintained public capability tables that sold a
+        # DTLS-SRTP path no call could reach. A comparison page is that failure with a larger blast
+        # radius, so it is generated and checked like every other published table, and an
+        # observation that has aged past its limit fails the build rather than shipping with a note.
+        Step("comparison", "docs", ("./scripts/comparison-report.py", "--check")),
         Step("fmt", "fmt", ("cargo", "fmt", "--all", "--check")),
         Step(
             "clippy",

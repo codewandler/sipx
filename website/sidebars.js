@@ -39,6 +39,7 @@ const sidebars = {
       items: [
         'reference/security',
         'reference/compliance',
+        'reference/comparison',
         'reference/development-process',
         'reference/diagnostic-phone-proof',
         'whats-new',

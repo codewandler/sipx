@@ -1,0 +1,77 @@
+{
+  "stack": "rsipstack",
+  "observations": [
+    {
+      "dimension": "language-safety",
+      "confidence": "measured",
+      "summary": "Rust, with zero occurrences of `unsafe` anywhere under `src/`. It does not declare `unsafe_code = \"forbid\"`, so the property holds by practice rather than by a lint that would fail the build — but as measured at this tag the parser is entirely safe code.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v0.5.21 https://github.com/restsend/rsipstack \"$C\"; grep -rn 'unsafe' \"$C\"/src --include='*.rs' | wc -l; grep -rn 'unsafe_code' \"$C\" || echo 'no forbid declared'",
+      "evidence": [
+        {"url": "https://github.com/restsend/rsipstack/tree/v0.5.21/src", "note": "the stack sources at the pinned tag"},
+        {"url": "https://github.com/restsend/rsipstack/blob/v0.5.21/Cargo.toml", "note": "the manifest, which declares no lint table"}
+      ],
+      "version_evaluated": "v0.5.21",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "transports",
+      "confidence": "measured",
+      "summary": "UDP, TCP, TLS and WebSocket, one module each, with TLS and WebSocket behind cargo features that are on by default. No QUIC and no SCTP.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v0.5.21 https://github.com/restsend/rsipstack \"$C\"; ls \"$C\"/src/transport/; sed -n '/\\[features\\]/,/^\\[/p' \"$C\"/Cargo.toml",
+      "evidence": [
+        {"url": "https://github.com/restsend/rsipstack/tree/v0.5.21/src/transport", "note": "udp.rs, tcp.rs, tls.rs, websocket.rs"},
+        {"url": "https://github.com/restsend/rsipstack/blob/v0.5.21/Cargo.toml", "note": "the feature table gating TLS and WebSocket"}
+      ],
+      "version_evaluated": "v0.5.21",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "media",
+      "confidence": "measured",
+      "summary": "Signalling only. The source tree is dialog, transaction, transport, resolver and SIP types; there is an `rtp-rs` dependency for packet types but no media session, codec, SRTP or ICE code. Terminating media means bringing your own media stack.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v0.5.21 https://github.com/restsend/rsipstack \"$C\"; ls \"$C\"/src; grep -n 'rtp\\|srtp' \"$C\"/Cargo.toml",
+      "evidence": [
+        {"url": "https://github.com/restsend/rsipstack/tree/v0.5.21/src", "note": "the module list, with no media directory"},
+        {"url": "https://github.com/restsend/rsipstack/blob/v0.5.21/Cargo.toml", "note": "rtp-rs as the only media-adjacent dependency"}
+      ],
+      "version_evaluated": "v0.5.21",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "security-posture",
+      "confidence": "measured",
+      "summary": "No published advisories, no SECURITY.md, no fuzz targets and no sanitiser job — the CI is a single `ci.yml`. For a project this new that is unsurprising rather than alarming, but it means the memory safety of the language is doing essentially all of the work, and nothing in the build is looking for logic defects in the parser.",
+      "reproduce": "gh api '/repos/restsend/rsipstack/security-advisories?per_page=100' --jq 'length'; C=$(mktemp -d); git clone -q --depth 1 --branch v0.5.21 https://github.com/restsend/rsipstack \"$C\"; ls \"$C\"/.github/workflows; find \"$C\" -maxdepth 3 -type d -iname 'fuzz*' | wc -l",
+      "evidence": [
+        {"url": "https://github.com/restsend/rsipstack/security/advisories", "note": "the advisory index, empty at the time of reading"},
+        {"url": "https://github.com/restsend/rsipstack/tree/v0.5.21/.github/workflows", "note": "a single CI workflow"}
+      ],
+      "version_evaluated": "v0.5.21",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "testing-ci",
+      "confidence": "measured",
+      "summary": "242 test functions under `src/`, none ignored — a healthy suite for the size. No RFC torture corpus is present, so parser conformance rests on hand-written cases, and there is no generated conformance record to check a claim against.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch v0.5.21 https://github.com/restsend/rsipstack \"$C\"; grep -r '#\\[tokio::test\\]\\|#\\[test\\]' \"$C\"/src --include='*.rs' | wc -l; grep -r '#\\[ignore\\]' \"$C\"/src --include='*.rs' | wc -l; grep -rli 'rfc4475\\|torture' \"$C\" | wc -l",
+      "evidence": [
+        {"url": "https://github.com/restsend/rsipstack/tree/v0.5.21/src", "note": "tests live in the modules they cover"},
+        {"url": "https://github.com/restsend/rsipstack/tree/v0.5.21/src/transport/tests", "note": "the transport test directory"}
+      ],
+      "version_evaluated": "v0.5.21",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "maturity-adoption",
+      "confidence": "measured",
+      "summary": "The youngest stack here by release history: exactly one tag, created three weeks before this was measured, over 442 commits. It is published on crates.io and actively developed, but there is no release track record to read yet and the version number says pre-1.0. MIT licensed.",
+      "reproduce": "C=$(mktemp -d); git clone -q --filter=blob:none https://github.com/restsend/rsipstack \"$C\"; git -C \"$C\" rev-list --count HEAD; git -C \"$C\" tag | wc -l; git -C \"$C\" log -1 --format=%ad --date=short $(git -C \"$C\" tag --sort=creatordate | head -1)",
+      "evidence": [
+        {"url": "https://github.com/restsend/rsipstack/tags", "note": "the release history: one tag"},
+        {"url": "https://crates.io/crates/rsipstack", "note": "the published crate"}
+      ],
+      "version_evaluated": "v0.5.21",
+      "evaluated_at": "2026-08-04"
+    }
+  ]
+}

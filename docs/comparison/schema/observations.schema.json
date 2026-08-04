@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/codewandler/sipx/docs/comparison/schema/observations.schema.json",
+  "title": "One subject's observations",
+  "description": "What was found about one stack, one entry per dimension. Every dimension must be answered or explicitly marked not evaluated; there is no third state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["stack", "observations"],
+  "properties": {
+    "stack": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Must match a stack id in stacks.json, and the file's own basename."
+    },
+    "observations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/finding"},
+          {"$ref": "#/$defs/notEvaluated"}
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "notEvaluated": {
+      "title": "An explicit omission",
+      "description": "Absence is never ambiguous: a dimension nobody looked at says so, with a reason.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dimension", "not_evaluated"],
+      "properties": {
+        "dimension": {"type": "string"},
+        "not_evaluated": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why it was not evaluated. An omission with no reason reads as a finding."
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dimension",
+        "confidence",
+        "summary",
+        "evidence",
+        "version_evaluated",
+        "evaluated_at"
+      ],
+      "properties": {
+        "dimension": {"type": "string"},
+        "confidence": {
+          "enum": ["generated", "measured", "documented", "assessed"],
+          "description": "The confidence ladder. generated is computed from this repository at render time and is restricted to the is_self stack; measured is re-derivable by the reproduce command at the pinned version; documented is the subject's own published material; assessed is reviewer judgment and must carry a rationale."
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The finding, in one table cell. On a generated cell, every computed value appears as a {rule} placeholder and is substituted at render time — it is never typed."
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["note"],
+            "properties": {
+              "url": {"type": "string", "format": "uri"},
+              "path": {
+                "type": "string",
+                "description": "A path in this repository. Must exist."
+              },
+              "note": {"type": "string", "minLength": 1}
+            },
+            "oneOf": [{"required": ["url"]}, {"required": ["path"]}]
+          },
+          "description": "At least one entry, each pointing at something that can stop being true."
+        },
+        "version_evaluated": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The tag, release or version the observation was taken at. Without it the claim has no subject."
+        },
+        "evaluated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "ISO date. Past the age limit the check fails and names the refresh command."
+        },
+        "reproduce": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required by the measured tier: a command that re-derives the finding from the subject at version_evaluated."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required by the assessed tier: what the judgment rests on, so a reader can disagree with it."
+        },
+        "generated_from": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string"},
+          "description": "Required by, and restricted to, the generated tier. Each rule is recomputed at render time and substituted into the summary's matching placeholder."
+        }
+      }
+    }
+  }
+}

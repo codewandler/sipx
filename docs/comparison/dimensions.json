@@ -1,0 +1,40 @@
+{
+  "dimensions": [
+    {
+      "id": "language-safety",
+      "title": "Language and memory safety",
+      "question": "What is it written in, and which class of defect is ruled out by construction rather than by review?",
+      "why": "A SIP stack parses unauthenticated bytes from anyone who can reach the port. Whether a malformed message can become memory corruption is decided by the language before any code is written, and it is the one property no amount of testing can retrofit."
+    },
+    {
+      "id": "transports",
+      "title": "Transports",
+      "question": "Which transports can carry signalling, and which of them are secure?",
+      "why": "Transport coverage decides where a stack can be deployed at all — a browser peer needs WebSocket, a carrier interconnect usually needs TLS, and a stack without the one you need is not a candidate however good the rest of it is."
+    },
+    {
+      "id": "media",
+      "title": "Media",
+      "question": "What can it encode, carry and protect, and does it terminate media at all?",
+      "why": "Signalling-only stacks and media-terminating stacks solve different problems, and the difference is invisible in a feature list that says 'SIP'. This row separates them, and then says which codecs and which media protection each side actually has."
+    },
+    {
+      "id": "security-posture",
+      "title": "Security posture",
+      "question": "What does the project do to find its own vulnerabilities, and what has it published when it found them?",
+      "why": "Every long-lived network stack has had vulnerabilities; the useful question is whether the project looks for them and says so. Published advisories are a sign of maturity, not of weakness — silence is the thing to be wary of."
+    },
+    {
+      "id": "testing-ci",
+      "title": "Testing and CI",
+      "question": "What has to be green before a change lands, and is conformance measured or asserted?",
+      "why": "A capability table tells you what somebody believes; the gate tells you what is checked every time. This row is the closest thing to a measurement of whether the other rows can be trusted."
+    },
+    {
+      "id": "maturity-adoption",
+      "title": "Maturity and adoption",
+      "question": "How long has it existed, who runs it in production, and has anyone outside the project audited it?",
+      "why": "This is the row where a new stack loses to an old one, and saying so is what makes the rest of the page worth reading. Years in production against real peers is evidence no test suite substitutes for."
+    }
+  ]
+}

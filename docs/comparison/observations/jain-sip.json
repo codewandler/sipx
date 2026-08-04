@@ -1,0 +1,75 @@
+{
+  "stack": "jain-sip",
+  "observations": [
+    {
+      "dimension": "language-safety",
+      "confidence": "measured",
+      "summary": "Java, across 945 source files, with no JNI at all — the two matches for `native` in the tree are both the word inside a comment. The JVM rules out memory-corruption defects in the parser as thoroughly as any option here.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch JAIN-SIP-1-2-166 https://github.com/usnistgov/jsip \"$C\"; find \"$C\"/src -name '*.java' | wc -l; grep -rnE '\\bnative\\b' \"$C\"/src --include='*.java'",
+      "evidence": [
+        {"url": "https://github.com/usnistgov/jsip/tree/JAIN-SIP-1-2-166/src", "note": "the sources at the pinned tag"}
+      ],
+      "version_evaluated": "JAIN-SIP-1-2-166",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "transports",
+      "confidence": "measured",
+      "summary": "UDP, TCP, TLS and SCTP — a message processor and channel per transport, with SCTP as a separate module. It is the only stack here that implements SCTP, and the only one with no WebSocket transport at all, so it cannot face a browser without a gateway.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch JAIN-SIP-1-2-166 https://github.com/usnistgov/jsip \"$C\"; ls \"$C\"/src/gov/nist/javax/sip/stack/ | grep -E 'MessageProcessor.java|MessageChannel.java'; ls \"$C\"/src/gov/nist/javax/sip/stack/sctp",
+      "evidence": [
+        {"url": "https://github.com/usnistgov/jsip/tree/JAIN-SIP-1-2-166/src/gov/nist/javax/sip/stack", "note": "UDP, TCP and TLS message processors"},
+        {"url": "https://github.com/usnistgov/jsip/tree/JAIN-SIP-1-2-166/src/gov/nist/javax/sip/stack/sctp", "note": "the SCTP message processor"}
+      ],
+      "version_evaluated": "JAIN-SIP-1-2-166",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "media",
+      "confidence": "measured",
+      "summary": "Signalling only, and by design: it is the reference implementation of a signalling API specification, so there is no RTP, codec, SRTP or ICE code anywhere in the tree. Media is the application's problem entirely.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch JAIN-SIP-1-2-166 https://github.com/usnistgov/jsip \"$C\"; find \"$C\"/src \\( -ipath '*rtp*' -o -ipath '*codec*' \\) | wc -l",
+      "evidence": [
+        {"url": "https://github.com/usnistgov/jsip/tree/JAIN-SIP-1-2-166/src/javax/sip", "note": "the specification's API surface, which is signalling only"}
+      ],
+      "version_evaluated": "JAIN-SIP-1-2-166",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "security-posture",
+      "confidence": "measured",
+      "summary": "No published advisories, no SECURITY.md, no fuzz targets, and no CI configuration at all — the repository predates GitHub Actions and was never migrated. Nothing in this repository is currently looking for defects in it, which for a stack still on classpaths is the finding that matters most here.",
+      "reproduce": "gh api '/repos/usnistgov/jsip/security-advisories?per_page=100' --jq 'length'; C=$(mktemp -d); git clone -q --depth 1 --branch JAIN-SIP-1-2-166 https://github.com/usnistgov/jsip \"$C\"; ls \"$C\"/.github/workflows 2>/dev/null || echo 'no workflows'",
+      "evidence": [
+        {"url": "https://github.com/usnistgov/jsip/security/advisories", "note": "the advisory index, empty at the time of reading"},
+        {"url": "https://github.com/usnistgov/jsip/tree/JAIN-SIP-1-2-166", "note": "the tree at the pinned tag, with no CI configuration"}
+      ],
+      "version_evaluated": "JAIN-SIP-1-2-166",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "testing-ci",
+      "confidence": "measured",
+      "summary": "Around 200 JUnit tests including a torture suite and a TCK message-flow harness — a serious suite for its era, and the TCK is something no other stack here has. But nothing runs it automatically: with no CI configuration, every one of those tests is only as good as the last person to run it locally.",
+      "reproduce": "C=$(mktemp -d); git clone -q --depth 1 --branch JAIN-SIP-1-2-166 https://github.com/usnistgov/jsip \"$C\"; grep -r 'public void test' \"$C\"/src/test --include='*.java' | wc -l; ls \"$C\"/src/test/torture; ls \"$C\"/.github/workflows 2>/dev/null || echo 'no CI'",
+      "evidence": [
+        {"url": "https://github.com/usnistgov/jsip/tree/JAIN-SIP-1-2-166/src/test/torture", "note": "the torture suite"},
+        {"url": "https://github.com/usnistgov/jsip/tree/JAIN-SIP-1-2-166/src/test/tck", "note": "the TCK message-flow harness"}
+      ],
+      "version_evaluated": "JAIN-SIP-1-2-166",
+      "evaluated_at": "2026-08-04"
+    },
+    {
+      "dimension": "maturity-adoption",
+      "confidence": "measured",
+      "summary": "The oldest and the most dormant. First tag June 2003 and 60 tags, but the last tag in this repository is from September 2011 and the last commit from July 2024 — fifteen years without a release here. It is still on classpaths through Maven Central and through downstream forks that continued after this repository stopped, so adopting it means adopting a fork's release history rather than this one's.",
+      "reproduce": "C=$(mktemp -d); git clone -q --filter=blob:none https://github.com/usnistgov/jsip \"$C\"; git -C \"$C\" tag | wc -l; git -C \"$C\" log -1 --format=%ad --date=short $(git -C \"$C\" tag --sort=creatordate | head -1); git -C \"$C\" log -1 --format=%ad --date=short $(git -C \"$C\" tag --sort=-creatordate | head -1); git -C \"$C\" log -1 --format=%ad --date=short",
+      "evidence": [
+        {"url": "https://github.com/usnistgov/jsip/tags", "note": "the release history, ending in 2011"},
+        {"url": "https://central.sonatype.com/artifact/javax.sip/jain-sip-ri", "note": "the artefact still published to Maven Central"}
+      ],
+      "version_evaluated": "JAIN-SIP-1-2-166",
+      "evaluated_at": "2026-08-04"
+    }
+  ]
+}
