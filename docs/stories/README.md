@@ -40,8 +40,6 @@ PCM/G.722/jitter lane remain separate decisions rather than silent beta.4 scope 
 
 ## Now (in progress)
 - [A-15 — Publish and verify 1.0.0-beta.4](A-15-publish-beta4.md) · Application · beta.4 capstone · immutable tag, exact registry consumer, installed Opus CLI, Pages and GitHub prerelease
-- [M-38 — Complete one browser-compatible WebRTC audio path](M-38-browser-compatible-webrtc-audio.md) · Media · epic tracker; reuse WSS, ICE, DTLS-SRTP and Opus, then prove their browser-audio composition
-- [M-51 — Prove browser audio against an independent endpoint](M-51-prove-browser-audio.md) · Media · beta.4 product proof · both SIP roles, non-silent Opus both ways, immediate fingerprint and downgrade negatives
 
 ## Next (ready — take the top one unless the user named a story)
 _None._
@@ -164,6 +162,7 @@ _sipx implements exactly one SRTP protection profile:_
 - [M-35 — Make dropping a conference stop every participant collector](M-35-make-dropping-a-conference-stop-every-participant-collector.md) · Media · R-05 in the 2026-07-30 repository review — Conference Drop aborts only the mixer while detached collectors retain participant sessions
 - [M-36 — Reject zero media worker intervals before starting](M-36-reject-zero-media-worker-intervals-before-starting.md) · Media · media portion of R-07 in the 2026-07-30 repository review — zero packet and mix periods kill tasks while a zero RTCP interval can hot-loop
 - [M-37 — Never put a fallback codec under a negotiated payload type](M-37-never-put-a-fallback-codec-under-a-negotiated-payload-type.md) · Media · R-08 in the 2026-07-30 repository review — failed Opus setup constructs Direct PCMU state while retaining the negotiated Opus payload type
+- [M-38 — Complete one browser-compatible WebRTC audio path](M-38-browser-compatible-webrtc-audio.md) · Media · epic tracker; reuse WSS, ICE, DTLS-SRTP and Opus, then prove their browser-audio composition
 - [M-39 — Close the packaged and independent-peer Opus proof](M-39-close-the-opus-product-proof.md) · Media · Opus is rate- and direction-correct through the CLI, normalized packages and an independent peer
 - [M-42 — Advertise a chosen address and latch RTP without ICE](M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md) · Media · the loudest unmet need in the surveyed ecosystem · most requesters are not doing ICE at all
 - [M-46 — Multiplex RTCP and negotiate the DTLS setup role](M-46-multiplex-rtcp-and-negotiate-the-dtls-setup-role.md) · Media · RFC 5761 + RFC 4145 · both are hard blockers for browser interop · prerequisites for M-38
@@ -171,6 +170,7 @@ _sipx implements exactly one SRTP protection profile:_
 - [M-48 — Specify the browser-audio profile and state machine](M-48-specify-browser-audio-profile.md) · Media · beta.4 starts here · normative profile, ordering, downgrade refusals, resource bounds and byte-level vectors before code
 - [M-49 — Negotiate a fail-closed browser-audio profile](M-49-negotiate-browser-audio-profile.md) · Media · after M-48 and M-46 · one named profile owns the complete SDP vocabulary and never downgrades silently
 - [M-50 — Run ICE, DTLS, SRTP and SRTCP on one nominated component](M-50-run-browser-media-on-one-component.md) · Media · beta.4 critical path · one bounded owner, nominated-peer binding and no bind/drop/rebind race
+- [M-51 — Prove browser audio against an independent endpoint](M-51-prove-browser-audio.md) · Media · beta.4 product proof · both SIP roles, non-silent Opus both ways, immediate fingerprint and downgrade negatives
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone

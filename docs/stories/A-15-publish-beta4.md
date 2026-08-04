@@ -20,7 +20,7 @@ enough evidence to prove every public artifact came from one immutable release c
 
 ## Acceptance
 
-- [ ] Every other story tagged `beta4` is `done`; `M-38` is closed; alpha integrity and all beta.4
+- [x] Every other story tagged `beta4` is `done`; `M-38` is closed; alpha integrity and all beta.4
       announcement predicates are met before the tag is created.
 - [x] Workspace versions, lockfile, changelog, reviewed release notes, README, public site,
       comparison facts and explicit omissions consistently name `1.0.0-beta.4` while historical

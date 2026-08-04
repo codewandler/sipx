@@ -2,8 +2,7 @@
 id: M-38
 title: Complete one browser-compatible WebRTC audio path
 pillar: Media
-status: in-progress
-priority: 2
+status: done
 design: docs/designs/webrtc-audio.md
 epic: webrtc-audio
 areas: [sipx-sdp, sipx-media, sipx-call, sipx-transport, interop, docs]
