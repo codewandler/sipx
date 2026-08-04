@@ -95,6 +95,107 @@ def problems_for(observation, *, stacks=None, dimensions=None, today=TODAY):
     return [p for p in found if FIXTURE_STACK in p or FIXTURE_DIMENSION in p]
 
 
+def a_capability(**overrides):
+    capability = {
+        "id": "zz-capability",
+        "category": "core",
+        "title": "A public capability",
+        "ownership": "sipx",
+        "status": "implemented",
+        "implementation": ["crates/sipx-sip/src/message.rs"],
+        "evidence": [{"url": "https://example.invalid/source", "note": "the exported API"}],
+    }
+    capability.update(overrides)
+    return capability
+
+
+def a_capability_ledger(capabilities=None, **overrides):
+    ledger = {
+        "subject": FIXTURE_STACK,
+        "version_evaluated": "1.2.3",
+        "evaluated_at": "2026-08-01",
+        "source_revision": "0123456789abcdef",
+        "capabilities": capabilities or [a_capability()],
+        "_file": f"{FIXTURE_STACK}.json",
+    }
+    ledger.update(overrides)
+    return ledger
+
+
+def capability_problems_for(capability, **ledger_overrides):
+    ledger = a_capability_ledger([capability], **ledger_overrides)
+    return report.capability_problems([ledger], [a_stack()], TODAY)
+
+
+def a_complete_capability_ledger():
+    capabilities = []
+    for category in sorted(report.REQUIRED_CAPABILITY_CATEGORIES):
+        capabilities.append(a_capability(id=f"zz-{category}", category=category))
+    return a_capability_ledger(capabilities)
+
+
+class TheCapabilityLedger(unittest.TestCase):
+    """A complete leaf inventory has one evidence-backed owner and disposition per row."""
+
+    def test_an_open_sipx_row_without_a_story_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(status="open"))
+        self.assertTrue(any("open sipx row" in problem for problem in problems), problems)
+
+    def test_a_complete_fresh_ledger_is_accepted(self) -> None:
+        self.assertEqual(
+            [],
+            report.capability_problems(
+                [a_complete_capability_ledger()], [a_stack()], TODAY
+            ),
+        )
+
+    def test_an_unknown_owner_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(ownership="somebody"))
+        self.assertTrue(any("unknown ownership" in problem for problem in problems), problems)
+
+    def test_a_duplicate_leaf_is_rejected(self) -> None:
+        capability = a_capability()
+        ledger = a_capability_ledger([capability, dict(capability)])
+        problems = report.capability_problems([ledger], [a_stack()], TODAY)
+        self.assertTrue(any("declares capability" in problem for problem in problems), problems)
+
+    def test_an_unevidenced_leaf_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(evidence=[]))
+        self.assertTrue(any("cites no evidence" in problem for problem in problems), problems)
+
+    def test_an_implemented_leaf_without_rust_source_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(implementation=[]))
+        self.assertTrue(any("Rust source evidence" in problem for problem in problems), problems)
+
+    def test_implementation_evidence_must_be_workspace_rust_source(self) -> None:
+        problems = capability_problems_for(a_capability(implementation=["README.md"]))
+        self.assertTrue(any("workspace crate" in problem for problem in problems), problems)
+
+    def test_a_stale_ledger_is_rejected(self) -> None:
+        stale = TODAY - datetime.timedelta(days=report.MAX_OBSERVATION_AGE_DAYS + 1)
+        problems = capability_problems_for(
+            a_capability(), evaluated_at=stale.isoformat()
+        )
+        self.assertTrue(any("stale" in problem for problem in problems), problems)
+
+    def test_an_exclusion_without_a_rationale_is_rejected(self) -> None:
+        problems = capability_problems_for(
+            a_capability(ownership="not-applicable", status="excluded")
+        )
+        self.assertTrue(any("without a rationale" in problem for problem in problems), problems)
+
+    def test_a_leaf_reaches_the_rendered_document(self) -> None:
+        rendered = report.render(
+            [a_dimension()],
+            [a_stack()],
+            [an_observation()],
+            report.GENERATED_VALUES_FOR_TESTS,
+            [a_capability_ledger()],
+        )
+        self.assertIn("A public capability", rendered)
+        self.assertIn("Endpoint capability ledger", rendered)
+
+
 class TheClosedKeySet(unittest.TestCase):
     """A record may carry the keys its schema names, and no others."""
 
@@ -617,6 +718,15 @@ class TheRealDataset(unittest.TestCase):
             ),
         )
 
+    def test_the_capability_ledgers_have_no_outstanding_problems(self) -> None:
+        _, stacks, _ = report.dataset()
+        self.assertEqual(
+            [],
+            report.capability_problems(
+                report.capability_ledgers(), stacks, datetime.date.today()
+            ),
+        )
+
     def test_exactly_one_stack_is_this_repository(self) -> None:
         _, stacks, _ = report.dataset()
         selves = [s for s in stacks if s.get("is_self")]
@@ -624,7 +734,13 @@ class TheRealDataset(unittest.TestCase):
 
     def test_the_report_is_current(self) -> None:
         dimensions, stacks, observations = report.dataset()
-        rendered = report.render(dimensions, stacks, observations, report.generated_values())
+        rendered = report.render(
+            dimensions,
+            stacks,
+            observations,
+            report.generated_values(),
+            report.capability_ledgers(),
+        )
         self.assertEqual(
             report.REPORT.read_text(encoding="utf-8"),
             rendered,

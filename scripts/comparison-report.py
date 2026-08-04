@@ -43,6 +43,7 @@ COMPARISON = ROOT / "docs" / "comparison"
 DIMENSIONS = COMPARISON / "dimensions.json"
 STACKS = COMPARISON / "stacks.json"
 OBSERVATIONS = COMPARISON / "observations"
+CAPABILITIES = COMPARISON / "capabilities"
 REPORT = ROOT / "docs" / "comparison.md"
 
 # Live sources for the generated tier. Each is read by its own rule below.
@@ -98,6 +99,35 @@ FINDING_KEYS = (
 # two states at once, which is the ambiguity the marker exists to remove.
 MARKER_KEYS = ({"stack", "dimension", "not_evaluated"}, set())
 EVIDENCE_KEYS = ({"note"}, {"url", "path"})
+CAPABILITY_LEDGER_KEYS = (
+    {"subject", "version_evaluated", "evaluated_at", "source_revision", "capabilities"},
+    set(),
+)
+CAPABILITY_KEYS = (
+    {"id", "category", "title", "ownership", "status", "evidence"},
+    {"story", "rationale", "implementation"},
+)
+
+CAPABILITY_OWNERS = ("sipx", "sipx-clstr", "not-shipped", "not-applicable")
+CAPABILITY_STATUS = {
+    "sipx": {"implemented", "open"},
+    "sipx-clstr": {"tracked"},
+    "not-shipped": {"absent"},
+    "not-applicable": {"excluded"},
+}
+REQUIRED_CAPABILITY_CATEGORIES = {
+    "authentication",
+    "core",
+    "dialogs",
+    "endpoint",
+    "examples",
+    "lifecycle",
+    "media",
+    "methods",
+    "operations",
+    "transactions",
+    "transports",
+}
 
 KEY_SETS = {
     "dimension": DIMENSION_KEYS,
@@ -217,6 +247,183 @@ def observations() -> list[dict]:
 
 def dataset() -> tuple[list[dict], list[dict], list[dict]]:
     return dimensions(), stacks(), observations()
+
+
+def capability_ledgers() -> list[dict]:
+    """Leaf-level public capability inventories, one immutable subject per file."""
+    found = []
+    for path in sorted(CAPABILITIES.glob("*.json")):
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        loaded["_file"] = path.name
+        found.append(loaded)
+    return found
+
+
+def capability_where(ledger, capability=None) -> str:
+    subject = ledger.get("subject", "?")
+    if capability is None:
+        return f"capability ledger {subject}"
+    return f"{subject}/capability/{capability.get('id', '?')}"
+
+
+def capability_schema_problems(ledger) -> list[str]:
+    """Closed key sets for ledgers and their leaves."""
+    problems = []
+    required, optional = CAPABILITY_LEDGER_KEYS
+    keys = {key for key in ledger if not key.startswith("_")}
+    where = capability_where(ledger)
+    problems.extend(
+        f"{where} is missing the required key {key!r}" for key in sorted(required - keys)
+    )
+    problems.extend(
+        f"{where} carries the unknown key {key!r}"
+        for key in sorted(keys - required - optional)
+    )
+    capabilities = ledger.get("capabilities", [])
+    if not isinstance(capabilities, list):
+        return problems + [f"{where} has 'capabilities', which must be a list"]
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            problems.append(f"{where} contains a capability that is not an object")
+            continue
+        required, optional = CAPABILITY_KEYS
+        keys = set(capability)
+        leaf = capability_where(ledger, capability)
+        problems.extend(
+            f"{leaf} is missing the required key {key!r}" for key in sorted(required - keys)
+        )
+        problems.extend(
+            f"{leaf} carries the unknown key {key!r}"
+            for key in sorted(keys - required - optional)
+        )
+    return problems
+
+
+def capability_staleness_problems(ledger, today: datetime.date) -> list[str]:
+    """A leaf inventory ages as one pinned reading, not as unrelated rows."""
+    synthetic = {
+        "stack": ledger.get("subject", "?"),
+        "dimension": "capability-ledger",
+        "evaluated_at": ledger.get("evaluated_at"),
+    }
+    return staleness_problems(synthetic, today)
+
+
+def capability_evidence_problems(ledger, capability) -> list[str]:
+    """Every leaf points at subject evidence that can stop being true."""
+    where = capability_where(ledger, capability)
+    entries = capability.get("evidence", [])
+    if not isinstance(entries, list) or not entries:
+        return [f"{where} cites no evidence"]
+    problems = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            problems.append(f"{where} has an evidence entry that is not a citation")
+            continue
+        problems.extend(f"{where}: {problem}" for problem in schema_problems("evidence", entry))
+        pointers = {key for key in ("url", "path") if entry.get(key)}
+        if len(pointers) != 1:
+            problems.append(f"{where} must give exactly one evidence url or path")
+        path = entry.get("path")
+        if isinstance(path, str) and path and not (ROOT / path).exists():
+            problems.append(f"{where} cites {path}, which does not exist")
+    return problems
+
+
+def capability_problems(ledger_list, stack_list, today: datetime.date) -> list[str]:
+    """Ownership, disposition and discovery closure for leaf-level inventories."""
+    known_stacks = {stack.get("id") for stack in stack_list}
+    problems = []
+    subjects = Counter()
+    for ledger in ledger_list:
+        subject = ledger.get("subject")
+        where = capability_where(ledger)
+        subjects[subject] += 1
+        if subject not in known_stacks:
+            problems.append(f"{where} names a subject stacks.json does not declare")
+        if ledger.get("_file") != f"{subject}.json":
+            problems.append(f"{where} is filed as {ledger.get('_file')!r}; filename must match")
+        if not ledger.get("version_evaluated") or not ledger.get("source_revision"):
+            problems.append(f"{where} has no immutable version and source revision")
+        problems.extend(capability_staleness_problems(ledger, today))
+
+        seen = Counter()
+        categories = set()
+        for capability in ledger.get("capabilities", []):
+            if not isinstance(capability, dict):
+                continue
+            leaf = capability_where(ledger, capability)
+            cap_id = capability.get("id")
+            seen[cap_id] += 1
+            categories.add(capability.get("category"))
+            owner = capability.get("ownership")
+            status = capability.get("status")
+            if owner not in CAPABILITY_OWNERS:
+                problems.append(
+                    f"{leaf} has unknown ownership {owner!r}; choose one of"
+                    f" {', '.join(CAPABILITY_OWNERS)}"
+                )
+            elif status not in CAPABILITY_STATUS[owner]:
+                problems.append(
+                    f"{leaf} has status {status!r}, which is not valid for ownership {owner!r}"
+                )
+            problems.extend(capability_evidence_problems(ledger, capability))
+
+            story = capability.get("story")
+            if owner == "sipx" and status == "open":
+                if not isinstance(story, str) or not story:
+                    problems.append(f"{leaf} is an open sipx row with no story")
+                elif not (ROOT / story).is_file():
+                    problems.append(f"{leaf} cites missing story {story}")
+                else:
+                    story_text = (ROOT / story).read_text(encoding="utf-8")
+                    story_status = re.search(r"^status:\s*(\S+)", story_text, re.MULTILINE)
+                    if story_status is None:
+                        problems.append(f"{leaf} cites {story}, which has no status")
+                    elif story_status.group(1) == "done":
+                        problems.append(
+                            f"{leaf} is still open but {story} is done; update the disposition"
+                        )
+            implementation = capability.get("implementation")
+            if owner == "sipx" and status == "implemented":
+                if not isinstance(implementation, list) or not implementation:
+                    problems.append(f"{leaf} claims implementation with no Rust source evidence")
+                else:
+                    for source in implementation:
+                        path = ROOT / source if isinstance(source, str) else ROOT
+                        if (
+                            not isinstance(source, str)
+                            or not source.startswith("crates/")
+                            or path.suffix != ".rs"
+                            or not path.is_file()
+                        ):
+                            problems.append(
+                                f"{leaf} cites {source!r} as implementation; it must be existing"
+                                " Rust source in a workspace crate"
+                            )
+            elif implementation:
+                problems.append(
+                    f"{leaf} carries implementation evidence without implemented sipx ownership"
+                )
+            if owner == "sipx-clstr" and (
+                not isinstance(story, str) or not story.startswith("https://")
+            ):
+                problems.append(f"{leaf} is cluster-owned and has no external story link")
+            if owner == "not-applicable" and not capability.get("rationale"):
+                problems.append(f"{leaf} is excluded without a rationale")
+
+        for cap_id, count in sorted(seen.items(), key=lambda item: str(item[0])):
+            if count > 1:
+                problems.append(f"{where} declares capability {cap_id!r} {count} times")
+        missing_categories = REQUIRED_CAPABILITY_CATEGORIES - categories
+        if missing_categories:
+            problems.append(
+                f"{where} omits required categories: {', '.join(sorted(missing_categories))}"
+            )
+    for subject, count in subjects.items():
+        if count > 1:
+            problems.append(f"capability subject {subject!r} has {count} ledgers")
+    return problems
 
 
 def is_marker(observation) -> bool:
@@ -588,7 +795,46 @@ def evidence_cell(observation) -> str:
     return " · ".join(links) or "—"
 
 
-def render(dimension_list, stack_list, observation_list, values) -> str:
+def render_capability_ledgers(ledger_list, stack_list) -> list[str]:
+    """Render the finite parity target without collapsing leaves into a score."""
+    names = {stack.get("id"): stack.get("name", stack.get("id", "?")) for stack in stack_list}
+    out = []
+    for ledger in ledger_list:
+        subject = ledger.get("subject", "?")
+        out += [
+            f"## Endpoint capability ledger: {cell(str(names.get(subject, subject)))}",
+            "",
+            "This is the leaf-level ownership profile for one immutable subject release. It is a",
+            "finite discovery gate, not a score: an open sipx row names the story that closes it,",
+            "and a platform row is excluded or assigned to the cluster repository explicitly.",
+            "The immutable source revision is retained in the checked data and each row states the",
+            "subject version it was evaluated against.",
+            "",
+            "| Category | Capability | Subject version | Ownership | Status | Evidence | Story or rationale |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for capability in ledger.get("capabilities", []):
+            story = capability.get("story")
+            if isinstance(story, str) and story.startswith("http"):
+                disposition = f"[tracking story]({story})"
+            elif isinstance(story, str) and story:
+                href = os.path.relpath(ROOT / story, REPORT.parent).replace(os.path.sep, "/")
+                disposition = f"[tracking story]({href})"
+            else:
+                disposition = cell(capability.get("rationale", "—"))
+            evidence = evidence_cell({"evidence": capability.get("evidence", [])})
+            out.append(
+                f"| {cell(str(capability.get('category', '—')))} |"
+                f" {cell(str(capability.get('title', capability.get('id', '—'))))} |"
+                f" `{cell(str(ledger.get('version_evaluated', '—')))}` |"
+                f" `{cell(str(capability.get('ownership', '—')))}` |"
+                f" `{cell(str(capability.get('status', '—')))}` | {evidence} | {disposition} |"
+            )
+        out.append("")
+    return out
+
+
+def render(dimension_list, stack_list, observation_list, values, ledger_list=None) -> str:
     answers = {
         (o.get("stack"), o.get("dimension")): o for o in observation_list
     }
@@ -675,6 +921,8 @@ def render(dimension_list, stack_list, observation_list, values) -> str:
             )
         out.append("")
 
+    out.extend(render_capability_ledgers(ledger_list or [], stack_list))
+
     return "\n".join(out) + "\n"
 
 
@@ -686,6 +934,7 @@ def main() -> int:
     args = parser.parse_args()
 
     dimension_list, stack_list, observation_list = dataset()
+    ledger_list = capability_ledgers()
 
     # Shape before substance. `render` reads records directly, so a malformed one would crash it —
     # and a traceback in place of "sipx/media carries the unknown key 'score'" tells whoever added
@@ -693,6 +942,7 @@ def main() -> int:
     malformed = [p for d in dimension_list for p in schema_problems("dimension", d)]
     malformed += [p for s in stack_list for p in schema_problems("stack", s)]
     malformed += [p for o in observation_list for p in schema_problems(kind_of(o), o)]
+    malformed += [p for ledger in ledger_list for p in capability_schema_problems(ledger)]
     if malformed:
         print("The comparison registry does not match its schema:", file=sys.stderr)
         for problem in malformed:
@@ -702,7 +952,8 @@ def main() -> int:
     values = generated_values()
     today = datetime.date.today()
     problems = check(dimension_list, stack_list, observation_list, values, today)
-    rendered = render(dimension_list, stack_list, observation_list, values)
+    problems.extend(capability_problems(ledger_list, stack_list, today))
+    rendered = render(dimension_list, stack_list, observation_list, values, ledger_list)
 
     # Notice, not a result. Printed in both modes and before the verdict, so it is visible on the
     # run that still passes — which is the only run on which it is any use.
@@ -726,7 +977,8 @@ def main() -> int:
         print(
             f"comparison: {plural(len(stack_list), 'stack')} over"
             f" {plural(len(dimension_list), 'dimension')}, every claim evidenced,"
-            f" none stale{countdown}"
+            f" {plural(sum(len(ledger.get('capabilities', [])) for ledger in ledger_list), 'capability row')}"
+            f" owned, none stale{countdown}"
         )
         return 0
 

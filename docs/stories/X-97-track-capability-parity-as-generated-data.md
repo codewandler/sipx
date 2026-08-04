@@ -2,7 +2,7 @@
 id: X-97
 title: Track capability parity as generated data
 pillar: Build
-status: ready
+status: in-progress
 priority: 1
 design: docs/designs/stack-comparison.md
 epic: stack-comparison
@@ -38,5 +38,6 @@ that can prove the selected endpoint target is complete and can identify work ow
 
 ## Progress
 
-- Not started. This is the M13 discovery gate; any newly discovered sipx-owned gap joins M13 before
-  the load milestone may start.
+- In progress. The first pinned leaf-level inventory and its checker are being added on the
+  capability-ledger feature branch. Any newly discovered sipx-owned gap joins M13 before the load
+  milestone may start.
