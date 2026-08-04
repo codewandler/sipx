@@ -1,6 +1,7 @@
 # Design: event reachability
 
-**Status:** proposed · **Pillar:** Signalling · **Epic:** `event-reachability` · **Stories:** S-35
+**Status:** accepted · **Pillar:** Signalling · **Epic:** `event-reachability` · **Stories:** S-35,
+S-37, S-38, S-39
 
 ## Why
 
@@ -21,7 +22,9 @@ caller is indistinguishable, from a user's seat, from one that was never written
 absent, because the registry and the crate docs describe behaviour a user cannot invoke.
 
 `S-24` (learn who is registered, via RFC 3680) sits on top of this and cannot be completed without
-it: it needs both a subscriber that can issue SUBSCRIBE and a path that accepts one.
+it: it consumes the generic subscriber rather than hiding a second event client inside discovery.
+The same reachability defect exists for RFC 3903: publication state and entity tags work as library
+logic, but no endpoint can receive or originate PUBLISH.
 
 ## Approach
 
@@ -38,14 +41,19 @@ it: it needs both a subscriber that can issue SUBSCRIBE and a path that accepts 
 - Subscriptions are bounded like every other peer-driven resource in the workspace: a cap on
   concurrent subscriptions, and per-package state that cannot grow without one, matching the
   bounded-by-construction rule the transport layer already holds (`docs/designs/bounded-transports.md`).
-- The subscriber half (issuing SUBSCRIBE, tracking `Subscription-State`) is **out of scope here**
-  and belongs to `S-24`, which this story unblocks.
+- `S-37` specifies the reusable event-client contract before code. `S-38` then issues SUBSCRIBE,
+  tracks `Subscription-State`, authenticates, refreshes and terminates it without giving any event
+  package ownership of transport or timers. `S-24` is one consumer and remains responsible only for
+  translating the `reg` package into peers.
+- `S-39` carries the existing RFC 3903 compositor and entity-tag lifecycle through live inbound and
+  outbound PUBLISH paths. It reuses the store from `S-18`; it does not create a second presence
+  service or durable publication database.
 
 ## Alternatives considered
 
 - **Build subscriber and notifier socket paths together.** Rejected: they are separable, the
   notifier half is the one with an implementation already waiting, and one story that lands both
-  is one story that lands neither for longer. `S-24` consumes this.
+  is one story that lands neither for longer. The generic client follows its own specification.
 - **Expose the subscription store as a public API and let applications route SUBSCRIBE themselves.**
   Rejected for the reason `docs/designs/edge.md` gives for `CouplingState`: making the protocol
   state machine the application's responsibility lets an application configure an invalid one. The

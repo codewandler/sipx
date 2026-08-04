@@ -2,11 +2,11 @@
 id: X-75
 title: Be quiet by default and easy to test against
 pillar: Build
-status: backlog
-priority: 17
-design: docs/designs/demand.md
-epic: demand
-areas: [sipx-call, sipx-ua, sipx-testkit]
+status: ready
+priority: 5
+design: docs/designs/test-surfaces.md
+epic: test-surfaces
+areas: [sipx-call, sipx-ua, sipx-testkit, m13, parity-wave-1]
 predicate:
 announcement:
 note: recurring complaint against the surveyed stack · a library that spams logs and cannot be tested against

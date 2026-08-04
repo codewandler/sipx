@@ -1,7 +1,7 @@
 # Design: stack comparison
 
 **Status:** accepted · **Pillar:** Build · **Epic:** `stack-comparison` · **Stories:** X-71, X-72,
-X-73, X-74
+X-73, X-74, X-97
 
 ## Why
 
@@ -66,6 +66,12 @@ per cell, so a reader can see which comparisons are strong and which are one per
 observation past `max_observation_age_days` fails `--check`, and the failure names the command that
 refreshes it. This is the `X-34` doctrine in a third place: refuse to report rather than report
 falsely.
+
+**Capability ownership is leaf-level.** `X-97` extends the comparison from a small chooser-facing
+set of dimensions to a complete public-capability ledger for one immutable subject release. Each
+leaf records evidence, ownership, disposition and, when sipx owns an open gap, the story that closes
+it. Platform functions owned by the cluster repository are linked there rather than silently copied
+into this stack. A broad row such as "SIP" cannot hide an unclassified method or runtime surface.
 
 **The derivation is a skill, not a memory.** `.claude/skills/compare-stacks/` encodes the process —
 scope, clone and pin, fan out by dimension group, apply the evidence rules, emit JSON, iterate

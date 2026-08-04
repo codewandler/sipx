@@ -2,11 +2,11 @@
 id: S-35
 title: Accept an inbound subscription from a socket
 pillar: Signalling
-status: backlog
-priority: 17
+status: ready
+priority: 2
 design: docs/designs/event-reachability.md
 epic: event-reachability
-areas: [sipx-ua, sipx-call]
+areas: [sipx-ua, sipx-call, m13, parity-wave-1]
 predicate:
 announcement:
 note: RFC 6665 notifier is implemented and unreachable · nothing in the workspace receives a SUBSCRIBE · unblocks S-24 · follow-up

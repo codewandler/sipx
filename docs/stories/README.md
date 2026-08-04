@@ -32,6 +32,13 @@ highest-demand non-ICE connectivity path, with malformed ingress, entropy and SR
 invariants pinned. Stable `1.0.0`, TURN, video and the second PCM/G.722/jitter lane remain separate
 decisions rather than silent beta.4 scope growth.
 
+The selected post-beta.4 implementation wave is **M13 — Endpoint-complete**: nine stories across
+`stack-comparison`, `event-reachability`, `dialog-extensions`, `live-endpoint-policy` and
+`test-surfaces`, queryable as `parity-wave-1`. The ready frontier is X-97, S-35, S-37, S-40, X-75
+and T-31; their dependent stories remain backlog until those contracts land. M14 holds the bounded
+comparative signalling load run after M13, and M15 separately tracks the audio-only browser SDK,
+WASM kernel, browser-native WebRTC adapter and public demo. Neither is silently part of this wave.
+
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `A` application SDK/release · `X` cross-cutting (build, CI, test infrastructure).
 
@@ -42,7 +49,27 @@ decisions rather than silent beta.4 scope growth.
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
-_None._
+
+### application-owned dialog extensions
+_Calls already specialize the methods whose semantics the stack owns: BYE, re-INVITE, UPDATE,_
+- [S-40 — Surface application-owned dialog requests](S-40-surface-application-owned-dialog-requests.md) · Signalling · authenticated INFO, MESSAGE and admitted extension methods without bypassing dialog invariants
+
+### event reachability
+_sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.rs`: a subscription_
+- [S-35 — Accept an inbound subscription from a socket](S-35-accept-an-inbound-subscription-from-a-socket.md) · Signalling · RFC 6665 notifier is implemented and unreachable · nothing in the workspace receives a SUBSCRIBE · unblocks S-24 · follow-up
+- [S-37 — Specify endpoint event-client behavior](S-37-specify-endpoint-event-client-behavior.md) · Signalling · spec before code · generic RFC 6665 client contract consumed by S-24
+
+### live endpoint policy
+_A long-running endpoint has two operational seams that currently require replacement or a fork:_
+- [T-31 — Reload the TLS server identity without restarting](T-31-reload-the-tls-server-identity-without-restarting.md) · Transport · validate then atomically swap new-handshake identity · established connections survive
+
+### stack comparison
+_The public site tells a reader what sipx is and whether it fits, but never what choosing it costs_
+- [X-97 — Track capability parity as generated data](X-97-track-capability-parity-as-generated-data.md) · Build · M13 discovery gate · every public capability gets evidence, ownership and a disposition
+
+### supported test surfaces
+_The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
+- [X-75 — Be quiet by default and easy to test against](X-75-be-quiet-by-default-and-easy-to-test-against.md) · Build · recurring complaint against the surveyed stack · a library that spams logs and cannot be tested against
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -61,6 +88,22 @@ _The measure of this stack's reach is what can be built on it **without writing 
 - [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
 - [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
 
+### browser audio SDK
+_Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it does not let a web_
+- [A-16 — Specify the browser SDK contract](A-16-specify-the-browser-sdk-contract.md) · Application · M15 admission and spec gate · audio-only WASM SIP with browser-owned WebRTC
+- [A-17 — Generate and package the browser SDK](A-17-generate-and-package-the-browser-sdk.md) · Application · after S-41, T-33 and M-52 · generated ABI types plus small handwritten ergonomic layer
+- [A-18 — Publish a runnable browser-audio demo](A-18-publish-a-runnable-browser-audio-demo.md) · Application · after A-17 · static public demo for register, dial, answer and non-silent audio
+- [M-52 — Adapt browser-native WebRTC audio](M-52-adapt-browser-native-webrtc-audio.md) · Media · after A-16 · reuse beta.4 profile through RTCPeerConnection, do not implement WebRTC in WASM
+- [S-41 — Export the sans-I/O session kernel to WebAssembly](S-41-export-the-sans-io-session-kernel-to-wasm.md) · Signalling · after A-16 · deterministic Rust state machine with host bytes, timers and entropy
+- [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
+- [X-100 — Prove the packaged browser SDK](X-100-prove-the-packaged-browser-sdk.md) · Build · M15 exit · clean consumer, supported browser matrix, both SIP roles and fail-closed negatives
+
+### comparative signalling load
+_The existing load scheduler, bounded CLI load command and soak checks measure sipx well, but they do_
+- [P-15 — Run a bounded call-load responder](P-15-run-a-bounded-call-load-responder.md) · Phone · after X-98 and X-75 · machine-ready signalling UAS with finite admission and cleanup
+- [X-98 — Specify the neutral comparative load profile](X-98-specify-the-neutral-comparative-load-profile.md) · Build · M14 starts after M13 · signalling-only common workload, safe supervisor and stable result schema
+- [X-99 — Run and publish the comparative load result](X-99-run-and-publish-the-comparative-load-result.md) · Build · after M13, X-98 and P-15 · immutable builds, both directions, raw evidence before summary
+
 ### Conformance
 - [X-66 — Measure coverage and publish the number](X-66-measure-coverage-and-publish-the-number.md) · Build · 1756 test attributes and no measurement of what they reach · a number that is generated, never asserted · follow-up
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
@@ -75,7 +118,6 @@ _sipx's backlog has been derived from RFCs, from our own review findings, and fr
 - [T-28 — Fall back to TCP when a request exceeds the path MTU](T-28-fall-back-to-tcp-when-a-request-exceeds-the-path-mtu.md) · Transport · RFC 3261 §18.1.1 · sipx currently refuses where the RFC says switch transport
 - [T-29 — Drain in-flight work on a graceful shutdown](T-29-drain-in-flight-work-on-a-graceful-shutdown.md) · Transport · restart without dropping calls · labelled critical and never delivered by the surveyed stack
 - [T-30 — Export signalling capture and media quality to a collector](T-30-export-signalling-capture-and-media-quality-to-a-collector.md) · Transport · the two observability asks people maintained private forks for · hooks, not a bundled exporter
-- [X-75 — Be quiet by default and easy to test against](X-75-be-quiet-by-default-and-easy-to-test-against.md) · Build · recurring complaint against the surveyed stack · a library that spams logs and cannot be tested against
 
 ### Depth
 - [X-67 — Split the call module along its seams](X-67-split-the-call-module-along-its-seams.md) · Build · call.rs is 6560 lines, ~6100 of them production · hold, transfer, session timers, re-INVITE and ICE restart in one file · follow-up
@@ -96,10 +138,15 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 
 ### event reachability
 _sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.rs`: a subscription_
-- [S-35 — Accept an inbound subscription from a socket](S-35-accept-an-inbound-subscription-from-a-socket.md) · Signalling · RFC 6665 notifier is implemented and unreachable · nothing in the workspace receives a SUBSCRIBE · unblocks S-24 · follow-up
+- [S-38 — Place and maintain event subscriptions](S-38-place-and-maintain-event-subscriptions.md) · Signalling · after S-37 · reusable outbound SUBSCRIBE and NOTIFY tracking · S-24 is a consumer
+- [S-39 — Send and receive publications through an endpoint](S-39-send-and-receive-publications-through-an-endpoint.md) · Signalling · after S-37 · make the existing RFC 3903 compositor and entity tags wire-reachable
 
 ### Ice
 - [M-24 — Gather a relayed candidate from a configured relay](M-24-ice-relayed-candidate.md) · Media · ice · RFC 8656 · after M-22 · the third RFC that made M-16 impossible as one story
+
+### live endpoint policy
+_A long-running endpoint has two operational seams that currently require replacement or a fork:_
+- [T-32 — Expose bounded endpoint observation and policy hooks](T-32-expose-bounded-endpoint-observation-and-policy-hooks.md) · Transport · typed lifecycle seams · bounded observation · no arbitrary post-key message mutation
 
 ### media security profiles
 _sipx implements exactly one SRTP protection profile:_
@@ -122,6 +169,7 @@ _sipx implements exactly one SRTP protection profile:_
 - [A-12 — Publish and verify 1.0.0-beta.2](A-12-publish-and-announce-beta.md) · Application · irreversible cut only after P-13, A-11 and explicit user authorization
 - [A-13 — Explain how sipx was built on the public documentation site](A-13-explain-how-sipx-was-built.md) · Application · before A-12; evidence-led development narrative, not an internal story dump
 - [A-14 — Publish 1.0.0-beta.3 from latest main](A-14-publish-beta3-from-latest-main.md) · Application · new immutable prerelease from latest main; beta.2 remains untouched
+- [A-15 — Publish and verify 1.0.0-beta.4](A-15-publish-beta4.md) · Application · beta.4 capstone · immutable tag, exact registry consumer, installed Opus CLI, Pages and GitHub prerelease
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 gateway model · one live session crosses early and confirmed dialog state
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M

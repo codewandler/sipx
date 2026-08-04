@@ -39,7 +39,7 @@ the case where real infrastructure exists.
   serving registrations for other endpoints would be a PBX, which the vision names as a non-goal.
   This gets the same information without becoming the infrastructure.
 - Builds on the subscription machinery already shipped — the stack "serves subscriptions to what
-  its dialogs and registrations are doing" — so the new work is the client half and the `reg`
-  package's semantics, not a new event framework.
+  its dialogs and registrations are doing" — and on `S-38`'s reusable event client. This story owns
+  only the `reg` package-to-peer-list policy, not a second subscriber implementation.
 - RFC 6665 (`SIP-Specific Event Notification`) is `partial` and is this story's substrate; check
   whether anything it still lacks blocks a long-lived subscription before starting.

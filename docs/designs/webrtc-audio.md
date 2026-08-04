@@ -1,6 +1,6 @@
 # Design: browser-compatible WebRTC audio
 
-**Status:** implemented on the beta.4 branch; release evidence pending · **Normative profile:**
+**Status:** delivered in `1.0.0-beta.4` · **Normative profile:**
 [`docs/specs/webrtc-audio.md`](../specs/webrtc-audio.md) ·
 **Pillar:** Media · **Epic:** `webrtc-audio` · **Tracker:** `M-38`
 
