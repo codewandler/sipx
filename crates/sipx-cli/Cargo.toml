@@ -23,7 +23,7 @@ sipx-sip.workspace = true
 sipx-rtp.workspace = true
 bytes.workspace = true
 sipx-call.workspace = true
-sipx-ua.workspace = true
+sipx-ua = { workspace = true, features = ["runtime"] }
 sipx-transport.workspace = true
 sipx-audio.workspace = true
 sipx-testkit.workspace = true

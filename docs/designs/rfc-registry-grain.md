@@ -335,16 +335,17 @@ column changes in a generated document.
 called out as the "rule fitted to the data it was tested on" risk. Taken row by row the argument
 turns out to be the same argument four times and to hold — but it rests on a fact nobody had run:
 
-**No crate in this workspace receives a SUBSCRIBE or a PUBLISH off a socket.**
+**No call or application dispatcher selects the SUBSCRIBE, PUBLISH or package services.**
 `Subscriptions::on_subscribe` and `Compositor::apply` take an already-parsed `sipx_sip::Request` and
 are handed one by `sipx-ua`'s own tests. `sipx-call`'s dispatcher routes ACK, BYE, NOTIFY, PRACK,
 REFER and UPDATE, and unit-tests that SUBSCRIBE and PUBLISH are *not* on `Allow`. `sipx-ua/src/`
-contains neither `Method::Subscribe` nor `Method::Publish` anywhere.
+contains neither `Method::Subscribe` nor `Method::Publish` anywhere, and neither application
+surface routes those methods or imports the modules that implement the services.
 
 That is precisely what makes `sipx-ua` the crate that **serves** the role rather than a crate below
-one that must select the capability. There is no `sipx-call` for subscriptions; `sipx-ua` is the top
-of that stack, and asking these rows to cite the call layer would ask them to cite a crate that does
-not and should not depend on them. Row by row:
+one that must select the capability. `sipx-call` now depends on `sipx-ua` for authenticated
+identity, but that path selects the identity module, not subscription, publication or packages.
+Dependency reachability is not selection of every service in the dependency. Row by row:
 
 | Row | Resolution | The fact it rests on |
 |---|---|---|
@@ -456,9 +457,9 @@ presence, publication and event packages nowhere. Under this story's own thesis 
 over-claim one layer over, so it needs an argument rather than a place in the "false positives"
 column. (RFC 5627 is a fifth row of the same shape, cited from `sipx-sip` and `sipx-ua`.)
 
-**The distinguishing fact is which crate serves the claimed role, and it is a manifest fact.**
-`sipx-call` depends on `sipx-media` and `sipx-sdp`; it does not depend on `sipx-ua`, which is its
-sibling. So:
+**The distinguishing fact is which crate serves the claimed role and whether a dispatcher selects
+that service.** `sipx-call` depends on `sipx-media` and `sipx-sdp`, and now also on `sipx-ua` for
+authenticated identity. So:
 
 - For a media row, the crate that serves `uac`/`uas` — `sipx-call`, because that is where an
   application places and answers a call — is a *different crate* from the one implementing the
@@ -466,21 +467,23 @@ sibling. So:
   does. `sipx-call` does not mention ICE at all.
 - For a services row, `sipx-ua` **is** the crate that serves the role. It is the notifier: a
   SUBSCRIBE arrives at `sipx_ua::subscribe::Subscriptions` and the package produces the body the
-  NOTIFY carries. There is no crate above it that must select anything, and asking such a row to
-  cite `sipx-call` would ask it to cite a crate that does not depend on it and should not.
+  NOTIFY carries. No call or application dispatcher routes SUBSCRIBE or PUBLISH into those modules.
+  The call layer's import of `sipx_ua::identity` therefore makes identity reachable without making
+  the sibling subscription and publication services selected.
 
 `crates/sipx-ua/tests/packages.rs` shows the surface being driven and not merely compiled: it
 links against the crate from outside, imports `sipx_ua::presence::{Compositor, Pidf, Publish,
 Published, Tuple}` and `sipx_ua::packages`, and joins them to `Subscriptions` with a real
-SUBSCRIBE. `scripts/test-rfc-report.py` asserts both the manifest fact and that test's contents, so
-that a change to either surfaces as a gate failure rather than as prose going quietly stale.
+SUBSCRIBE. `scripts/test-rfc-report.py` asserts both the absence of call/application dispatcher
+selection and that test's contents, so a change to either surfaces as a gate failure rather than as
+prose going quietly stale.
 
 **The honest residual:** the shipped binary cannot subscribe or publish, so nothing exercises these
 rows end to end outside the test suite. That is a gap in `sipx-cli`'s feature set and a real one —
 but a `uas` claim about a library is a claim about the library's API, and that API is public,
-documented and driven from outside its crate. If sipx ever grows an application layer that *must*
-be gone through to serve a subscription, the way `sipx-call` must be gone through to have a call,
-these rows acquire the media shape and this section is wrong.
+documented and driven from outside its crate. If a call or application dispatcher starts routing
+those methods into the service modules, these rows acquire the media shape and this section is
+wrong.
 
 #### Why "has a cross-crate integration test" is *not* the distinguishing fact
 

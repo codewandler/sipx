@@ -12,9 +12,9 @@
 //! **The [`harness`]** (story `A-7`) is the deterministic apparatus every behaviour claim is held to.
 //! It runs the contract's own vector set with fake time, a scripted app and scripted call events,
 //! which is possible before the call-framework stories land and is the reason it came first. The
-//! bindings (`A-2`, `A-4`) are built against it rather than beside it. Its provisional instruction
-//! runner predates `sipx-app-protocol::Interpreter`; migrating it to that sole interpreter remains
-//! an open `A-2` requirement, so harness results currently prove policy rather than that boundary.
+//! bindings (`A-2`, `A-4`) are built against it rather than beside it. The harness is a virtual-time
+//! driver over `sipx-app-protocol::Interpreter`, the same interpreter production document mode
+//! drives.
 //!
 //! Beside it is [`config`] (story `A-1`): the document that declares a host — its listeners, its
 //! apps, what each app is granted, and what a slow, wrong or absent app does to a live call. The

@@ -27,14 +27,17 @@ sipx-rtp.workspace = true
 sipx-audio.workspace = true
 sipx-media.workspace = true
 sipx-transport.workspace = true
+sipx-ua.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "fs", "macros"] }
 
 [dev-dependencies]
+openssl.workspace = true
+base64.workspace = true
+serde_json.workspace = true
 sipx-rtp.workspace = true
-sipx-ua.workspace = true
 bytes.workspace = true
 sipx-testkit.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }

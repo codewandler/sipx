@@ -28,6 +28,9 @@ use super::contract::{Document, Event};
 pub enum Outcome {
     /// A document — the entire new program (§6.3). An empty one means "keep going".
     Document(Document),
+    /// Raw document bytes. The protocol interpreter, not the harness, decides whether they are a
+    /// valid whole document (§6.4).
+    Body(String),
     /// The app answered 4xx: the request itself is wrong.
     ClientError {
         /// The status.
@@ -73,6 +76,15 @@ impl Reply {
         Self {
             after: delay,
             outcome: Outcome::Document(document),
+        }
+    }
+
+    /// Raw response bytes, interpreted only by `sipx-app-protocol`.
+    #[must_use]
+    pub fn body(body: impl Into<String>) -> Self {
+        Self {
+            after: Duration::ZERO,
+            outcome: Outcome::Body(body.into()),
         }
     }
 

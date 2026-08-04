@@ -18,6 +18,9 @@ pub enum Error {
     /// A message could not be built.
     #[error("build: {0}")]
     Build(#[from] sipx_sip::error::BuildError),
+    /// A selected authentication service could not attest the outbound caller identity.
+    #[error("caller identity: {0}")]
+    IdentityAuthentication(#[from] sipx_ua::identity::AuthenticationError),
     /// The SDP could not be read.
     #[error("sdp: {0}")]
     Sdp(String),

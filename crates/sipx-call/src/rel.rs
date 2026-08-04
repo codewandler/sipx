@@ -17,7 +17,7 @@ use sipx_sip::update;
 use sipx_sip::{HeaderName, Method, Response, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
 
-use crate::call::{Codecs, Early, MediaPolicy};
+use crate::call::{Codecs, Early, EarlyOffer, MediaPolicy};
 use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
 
@@ -173,6 +173,8 @@ pub struct Ringing {
     /// Its presence is exactly the difference between a dialog whose session may be
     /// renegotiated before it is answered and one whose may not — see [`ring_early`].
     early: Option<Early>,
+    /// An offer sent in the reliable provisional, until its answer arrives in PRACK.
+    early_offer: Option<Box<EarlyOffer>>,
 }
 
 impl Ringing {
@@ -308,10 +310,32 @@ impl Ringing {
                 .acknowledge(&ack, self.invite_cseq, Method::Invite.as_bytes())
         });
 
-        let (status, reason) = if matched {
-            (200, "OK")
+        let negotiated = if matched {
+            match self.early_offer.take() {
+                Some(offered) => {
+                    let answer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
+                        .map_err(|error| Error::Sdp(error.to_string()));
+                    match answer {
+                        Ok(answer) => match offered.settle(&answer).await {
+                            Ok(early) => {
+                                self.early = Some(early);
+                                self.negotiation.received_answer();
+                                Ok(())
+                            }
+                            Err(error) => Err(error),
+                        },
+                        Err(error) => Err(error),
+                    }
+                }
+                None => Ok(()),
+            }
         } else {
-            (481, "Call/Transaction Does Not Exist")
+            Ok(())
+        };
+        let (status, reason) = match (&negotiated, matched) {
+            (Err(_), true) => (488, "Not Acceptable Here"),
+            (_, true) => (200, "OK"),
+            (_, false) => (481, "Call/Transaction Does Not Exist"),
         };
         let code = StatusCode::new(status)
             .ok_or_else(|| Error::Sdp("unreachable: literal status".to_owned()))?;
@@ -324,6 +348,7 @@ impl Ringing {
                 stop.notify_waiters();
             }
         }
+        negotiated?;
         Ok(matched)
     }
 }
@@ -352,6 +377,72 @@ pub async fn ring(
     enabled: bool,
 ) -> Result<Ringing> {
     ring_with(endpoint, incoming, status, reason, enabled, None).await
+}
+
+/// Ring with an SDP offer in a reliable provisional response.
+///
+/// The initial INVITE must be offerless. Its caller owes the answer in PRACK (RFC 3262 section
+/// 5), and [`Ringing::on_prack`] does not acknowledge the negotiation until that answer parses and
+/// establishes the early session.
+pub async fn ring_offer_early(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    status: u16,
+    reason: &'static str,
+    media_address: IpAddr,
+    direction: Direction,
+) -> Result<Ringing> {
+    ring_offer_early_with_policy(
+        endpoint,
+        incoming,
+        status,
+        reason,
+        media_address,
+        direction,
+        MediaPolicy::default(),
+    )
+    .await
+}
+
+/// [`ring_offer_early`], using one coherent codec, security and ICE policy.
+pub async fn ring_offer_early_with_policy(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    status: u16,
+    reason: &'static str,
+    media_address: IpAddr,
+    direction: Direction,
+    policy: MediaPolicy,
+) -> Result<Ringing> {
+    if !incoming.request.body().is_empty() {
+        return Err(Error::Rejected {
+            status: 500,
+            reason: "the INVITE already carries an offer".to_owned(),
+        });
+    }
+    if !Offered::in_request(&incoming.request).supported {
+        return Err(Error::Rejected {
+            status: 421,
+            reason: "the caller did not offer 100rel, so no offer may go in a provisional"
+                .to_owned(),
+        });
+    }
+    let offered = EarlyOffer::bind(
+        media_address,
+        incoming.transport.is_secure(),
+        direction,
+        policy,
+    )
+    .await?;
+    ring_with(
+        endpoint,
+        incoming,
+        status,
+        reason,
+        true,
+        Some(ProvisionalSession::Offer(Box::new(offered))),
+    )
+    .await
 }
 
 /// Ring, and answer the INVITE's offer in the provisional (RFC 3262 §5 + RFC 3311 §4).
@@ -445,16 +536,36 @@ pub async fn ring_early_with_policy(
         policy,
     )
     .await?;
-    ring_with(endpoint, incoming, status, reason, true, Some(settled)).await
+    ring_with(
+        endpoint,
+        incoming,
+        status,
+        reason,
+        true,
+        Some(ProvisionalSession::Answer(
+            Box::new(settled.0),
+            Box::new(settled.1),
+        )),
+    )
+    .await
 }
 
+enum ProvisionalSession {
+    Answer(Box<Early>, Box<SessionDescription>),
+    Offer(Box<EarlyOffer>),
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one construction keeps reliability, SDP carrier and retained media state aligned"
+)]
 async fn ring_with(
     endpoint: &Handle,
     incoming: &Incoming,
     status: u16,
     reason: &'static str,
     enabled: bool,
-    early: Option<(Early, SessionDescription)>,
+    session: Option<ProvisionalSession>,
 ) -> Result<Ringing> {
     let offered = Offered::in_request(&incoming.request);
     let decision = rel::reliability(offered, enabled);
@@ -522,17 +633,26 @@ async fn ring_with(
     // answer only in a reliable provisional; `ring_early` has already refused the case where
     // that cannot be met, so reaching here with an unreliable response and a description would
     // be a bug rather than a peer's doing.
-    let early = match early {
-        Some((settled, answer)) if reliable => {
+    let (early, early_offer) = match session {
+        Some(ProvisionalSession::Answer(settled, answer)) if reliable => {
             builder = builder
                 .header(
                     HeaderName::ContentType,
                     Bytes::from_static(b"application/sdp"),
                 )?
                 .body(Bytes::from(answer.to_string_sdp()));
-            Some(settled)
+            (Some(*settled), None)
         }
-        _ => None,
+        Some(ProvisionalSession::Offer(offered)) if reliable => {
+            builder = builder
+                .header(
+                    HeaderName::ContentType,
+                    Bytes::from_static(b"application/sdp"),
+                )?
+                .body(Bytes::from(offered.description().to_string_sdp()));
+            (None, Some(offered))
+        }
+        _ => (None, None),
     };
 
     let response = builder.build();
@@ -553,7 +673,9 @@ async fn ring_with(
     // outstanding either way, so an UPDATE carrying an offer is legal; without one this side
     // owes an answer to the INVITE, and RFC 3311 §5.2's third rule refuses such an UPDATE with
     // a 500 until the 200 settles it.
-    let negotiation = if early.is_none() && crate::update::carries_offer(&incoming.request) {
+    let negotiation = if early_offer.is_some() {
+        update::Negotiation::offering()
+    } else if early.is_none() && crate::update::carries_offer(&incoming.request) {
         update::Negotiation::owing()
     } else {
         update::Negotiation::idle()
@@ -580,6 +702,7 @@ async fn ring_with(
         negotiation,
         peer_allows_update: update::peer_allows(&incoming.request.headers),
         early,
+        early_offer,
     })
 }
 

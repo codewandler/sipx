@@ -30,19 +30,22 @@
 //!   you are prepared to follow it.
 //!
 //!
-//! **Supported**: registration leases, digest authentication, Path, Service-Route, registering as
-//! one Outbound flow, and push. `S-29` is what gives the last two a caller above this crate —
-//! `sipx register --outbound` and `--push-provider`/`--push-prid` — and it is why `X-37` had
-//! demoted their compliance rows in the first place.
+//! **Supported**: registration leases, digest authentication, authenticated caller identity, Path,
+//! Service-Route, registering as one Outbound flow, and push. `S-34` gives identity its caller:
+//! outbound and inbound policies in `sipx-call` select the authentication and verification
+//! services. `S-29` is what gives Outbound and push their callers — `sipx register --outbound` and
+//! `--push-provider`/`--push-prid` — and it is why `X-37` had demoted their compliance rows in the
+//! first place.
 //!
 //! **Which application backs that claim, stated because the two are not the same** (`X-38`). Every
-//! item above is called by `sipx-cli` and none of them by the host in `sipx-app`, which uses only this
-//! crate's answering half: `Host::agent_config` builds a [`Config`] to answer OPTIONS with and names
-//! the listener's own address as a registrar that nothing ever sends to, so `register` is never
-//! called. `X-38` defines the *call*-reachable surface as what the host uses, and registration is not
-//! call-reachable in principle rather than by omission — it happens before and outside any call. So
-//! this claim rests on `A-8`'s rule instead: the CLI's promise is its command-line surface, documented
-//! in `website/docs/reference/cli.md` and asserted by `tests/cli.rs`.
+//! Registration, Outbound and push are called by `sipx-cli`, while authenticated identity is called
+//! by `sipx-call`, which is itself the call framework used by `sipx-app`. The host uses only this
+//! crate's answering half directly: `Host::agent_config` builds a [`Config`] to answer OPTIONS with
+//! and names the listener's own address as a registrar that nothing ever sends to, so `register` is
+//! never called. `X-38` defines the *call*-reachable surface as what the host uses, and registration
+//! is not call-reachable in principle rather than by omission — it happens before and outside any
+//! call. So the registration claim rests on `A-8`'s other rule: the CLI's promise is its command-line
+//! surface, documented in `website/docs/reference/cli.md` and asserted by `tests/cli.rs`.
 //! `scripts/check-app-surface.py` checks that citation rather than trusting it, so this paragraph
 //! cannot rot into a claim with no caller at all. Push is earned in full: the `pn-*` parameters,
 //! §8.2's answer read back, and §4.1.3's refresh through `UserAgent::woken`. Outbound is earned

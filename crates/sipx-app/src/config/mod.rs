@@ -29,6 +29,7 @@ mod schema;
 mod syntax;
 pub mod vectors;
 
+pub(crate) use running::ActorCompletion;
 pub use running::{Admission, AppPolicy, Running};
 
 // The list of normative points is deliberately **not** here. §3 of the spec is the source of

@@ -10,33 +10,38 @@
 //! the ones `A-2` and `A-4` are meant to *share* rather than restate: a binding proves it honours
 //! the declaration by running these through [`Vector::check_against`], not by writing its own.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use super::binding::{Outcome, Reply};
 use super::contract::{
-    DialOutcome, Document, Effect, EndCause, EventKind, GatherReason, Instruction, Verb,
+    DialOutcome, Document, Effect, EndCause, EventKind, Gather, GatherReason, Instruction, Source,
+    Verb,
 };
 use super::policy::{Failure, FailurePolicy, OnFailure};
 use super::scenario::{Conclusion, Expectation, Scenario, Step, Vector};
 
 /// `answer, play(p1), gather(g1)` — AC-2's program, and the one AC-3 starts from.
 fn answer_play_gather() -> Document {
-    Document::of(vec![
+    Document::new(vec![
         Instruction::new("a1", Verb::Answer),
         Instruction::new(
             "p1",
             Verb::Play {
-                source: "welcome.wav".to_owned(),
+                source: Source::File("welcome.wav".to_owned()),
                 interruptible: true,
             },
         ),
         Instruction::new(
             "g1",
-            Verb::Gather {
-                max: 4,
+            Verb::GatherDigits(Gather {
+                min: 0,
+                max: Some(4),
                 terminators: "#".to_owned(),
-                timeout: Duration::from_secs(10),
-            },
+                digit_timeout_ms: None,
+                timeout_ms: Some(10_000),
+                prompt: None,
+            }),
         ),
     ])
 }
@@ -49,7 +54,7 @@ fn play(id: &str, source: &str) -> Instruction {
     Instruction::new(
         id,
         Verb::Play {
-            source: source.to_owned(),
+            source: Source::File(source.to_owned()),
             interruptible: true,
         },
     )
@@ -110,6 +115,7 @@ pub fn ac_2() -> Vector {
             .then(keep_going())
             .steps(vec![
                 Step::event(0, EventKind::Incoming),
+                Step::event(100, EventKind::Answered),
                 Step::event(1000, played("p1")),
                 Step::event(1500, dtmf('1')),
                 Step::event(1600, dtmf('2')),
@@ -149,17 +155,21 @@ pub fn ac_3() -> Vector {
         Scenario::new("AC-3 barge-in replaces the program")
             .script(vec![
                 Reply::now(answer_play_gather()),
-                Reply::now(Document::of(vec![Instruction::new(
+                keep_going(),
+                Reply::now(Document::new(vec![Instruction::new(
                     "d1",
                     Verb::Dial {
                         target: "sip:bob@example.net".to_owned(),
-                        timeout: Duration::from_secs(30),
+                        from: None,
+                        timeout_ms: Some(30_000),
+                        headers: BTreeMap::default(),
                     },
                 )])),
             ])
             .then(keep_going())
             .steps(vec![
                 Step::event(0, EventKind::Incoming),
+                Step::event(100, EventKind::Answered),
                 Step::event(500, dtmf('9')),
             ]),
         Expectation::new()
@@ -195,14 +205,15 @@ pub fn ac_4() -> Vector {
     Vector::new(
         Scenario::new("AC-4 a redelivery answered differently")
             .script(vec![
-                Reply::now(Document::of(vec![
+                Reply::now(Document::new(vec![
                     Instruction::new("a1", Verb::Answer),
                     play("p1", "welcome.wav"),
                 ])),
                 keep_going(),
-                Reply::now(Document::of(vec![play("p2", "menu.wav")])),
+                keep_going(),
+                Reply::now(Document::new(vec![play("p2", "menu.wav")])),
                 // The answer to the redelivery: a different program entirely, and inert.
-                Reply::now(Document::of(vec![Instruction::new(
+                Reply::now(Document::new(vec![Instruction::new(
                     "h1",
                     Verb::Hangup {
                         cause: EndCause::Hangup,
@@ -212,6 +223,7 @@ pub fn ac_4() -> Vector {
             .then(keep_going())
             .steps(vec![
                 Step::event(0, EventKind::Incoming),
+                Step::event(100, EventKind::Answered),
                 Step::event(1000, played("p1")),
                 Step::event(2000, dtmf('5')),
                 Step::redeliver(3000, 3),
@@ -245,19 +257,20 @@ pub fn ac_5() -> Vector {
     Vector::new(
         Scenario::new("AC-5 unknown verb rejects the document whole")
             .script(vec![
-                Reply::now(Document::of(vec![
+                Reply::now(Document::new(vec![
                     Instruction::new("a1", Verb::Answer),
                     play("p1", "welcome.wav"),
                     play("p2", "menu.wav"),
                 ])),
-                Reply::now(Document::of(vec![Instruction::new(
-                    "x1",
-                    Verb::Unknown("spindle".to_owned()),
-                )])),
+                keep_going(),
+                Reply::body(
+                    r#"{"contract":"sipx.app.v1","instructions":[{"id":"x1","do":"spindle"}]}"#,
+                ),
             ])
             .then(keep_going())
             .steps(vec![
                 Step::event(0, EventKind::Incoming),
+                Step::event(100, EventKind::Answered),
                 Step::event(1000, played("p1")),
             ]),
         Expectation::new()
@@ -272,7 +285,6 @@ pub fn ac_5() -> Vector {
                     source: "menu.wav".to_owned(),
                 },
             ])
-            .failures(vec![Failure::ServerError])
             .conclusion(Conclusion::Live),
     )
 }
@@ -286,19 +298,28 @@ pub fn ac_5() -> Vector {
 pub fn ac_6() -> Vector {
     Vector::new(
         Scenario::new("AC-6 a gather that times out")
-            .script(vec![Reply::now(Document::of(vec![
-                Instruction::new("a1", Verb::Answer),
-                Instruction::new(
-                    "g1",
-                    Verb::Gather {
-                        max: 4,
-                        terminators: "#".to_owned(),
-                        timeout: Duration::from_secs(5),
-                    },
-                ),
-            ]))])
+            .script(vec![
+                Reply::now(Document::new(vec![
+                    Instruction::new("a1", Verb::Answer),
+                    Instruction::new(
+                        "g1",
+                        Verb::GatherDigits(Gather {
+                            min: 0,
+                            max: Some(4),
+                            terminators: "#".to_owned(),
+                            digit_timeout_ms: None,
+                            timeout_ms: Some(5_000),
+                            prompt: None,
+                        }),
+                    ),
+                ])),
+                keep_going(),
+            ])
             .then(keep_going())
-            .steps(vec![Step::event(0, EventKind::Incoming)])
+            .steps(vec![
+                Step::event(0, EventKind::Incoming),
+                Step::event(100, EventKind::Answered),
+            ])
             .until(10_000),
         Expectation::new()
             .effects(vec![
@@ -325,24 +346,30 @@ pub fn ac_6() -> Vector {
 pub fn ac_7() -> Vector {
     Vector::new(
         Scenario::new("AC-7 a dial refused with 486")
-            .script(vec![Reply::now(Document::of(vec![
-                Instruction::new("a1", Verb::Answer),
-                Instruction::new(
-                    "d1",
-                    Verb::Dial {
-                        target: "sip:bob@example.net".to_owned(),
-                        timeout: Duration::from_secs(30),
-                    },
-                ),
-            ]))])
+            .script(vec![
+                Reply::now(Document::new(vec![
+                    Instruction::new("a1", Verb::Answer),
+                    Instruction::new(
+                        "d1",
+                        Verb::Dial {
+                            target: "sip:bob@example.net".to_owned(),
+                            from: None,
+                            timeout_ms: Some(30_000),
+                            headers: BTreeMap::default(),
+                        },
+                    ),
+                ])),
+                keep_going(),
+            ])
             .then(keep_going())
             .steps(vec![
                 Step::event(0, EventKind::Incoming),
+                Step::event(100, EventKind::Answered),
                 Step::event(
                     2000,
                     EventKind::DialFinished {
                         instruction_id: "d1".to_owned(),
-                        leg: "leg-d1".to_owned(),
+                        leg: "b".to_owned(),
                         outcome: DialOutcome::Busy,
                     },
                 ),
@@ -358,7 +385,7 @@ pub fn ac_7() -> Vector {
             .legs(vec![])
             .delivered_event(EventKind::DialFinished {
                 instruction_id: "d1".to_owned(),
-                leg: "leg-d1".to_owned(),
+                leg: "b".to_owned(),
                 outcome: DialOutcome::Busy,
             })
             .conclusion(Conclusion::Live),
@@ -374,17 +401,22 @@ pub fn ac_7() -> Vector {
 pub fn ac_8() -> Vector {
     Vector::new(
         Scenario::new("AC-8 an event arriving mid-callback")
-            .script(vec![Reply::after(
-                Duration::from_millis(300),
-                Document::of(vec![
-                    Instruction::new("a1", Verb::Answer),
-                    play("p1", "welcome.wav"),
-                ]),
-            )])
+            .script(vec![
+                Reply::after(
+                    Duration::from_millis(300),
+                    Document::new(vec![
+                        Instruction::new("a1", Verb::Answer),
+                        play("p1", "welcome.wav"),
+                    ]),
+                ),
+                keep_going(),
+                keep_going(),
+            ])
             .then(keep_going())
             .steps(vec![
                 Step::event(0, EventKind::Incoming),
                 Step::event(100, dtmf('7')),
+                Step::event(400, EventKind::Answered),
             ]),
         Expectation::new()
             .effects(vec![
@@ -394,7 +426,7 @@ pub fn ac_8() -> Vector {
                     source: "welcome.wav".to_owned(),
                 },
             ])
-            .delivered_seqs(vec![1, 2])
+            .delivered_seqs(vec![1, 2, 3])
             .conclusion(Conclusion::Live),
     )
 }
@@ -408,7 +440,7 @@ pub fn ac_8() -> Vector {
 #[must_use]
 pub fn ac_9() -> Vector {
     let mut steps = vec![Step::event(0, EventKind::Incoming)];
-    for i in 0..20u64 {
+    for i in 0..u64::try_from(super::scenario::EVENT_QUEUE * 2).unwrap_or(u64::MAX) {
         steps.push(Step::event(100 + i * 10, dtmf('1')));
     }
     steps.push(Step::event(
@@ -422,7 +454,7 @@ pub fn ac_9() -> Vector {
         Scenario::new("AC-9 call.ended under a full queue")
             .script(vec![Reply::after(
                 Duration::from_secs(5),
-                Document::of(vec![Instruction::new("a1", Verb::Answer)]),
+                Document::new(vec![Instruction::new("a1", Verb::Answer)]),
             )])
             .then(keep_going())
             // A callback timeout longer than the app's own delay, so this vector is about the

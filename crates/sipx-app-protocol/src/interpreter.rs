@@ -299,6 +299,8 @@ pub struct Interpreter {
     legs_named: usize,
     /// Whether `call.ended` has been delivered. After it there is nothing left to drive.
     ended: bool,
+    /// A terminal event waiting behind the one callback already in flight (§6.3).
+    terminal_pending: Option<(Timestamp, EventKind)>,
 }
 
 impl Interpreter {
@@ -315,6 +317,7 @@ impl Interpreter {
             queued: VecDeque::new(),
             legs_named: 0,
             ended: false,
+            terminal_pending: None,
         }
     }
 
@@ -354,22 +357,57 @@ impl Interpreter {
         let mut out = Vec::new();
         match input {
             Input::Event(event) => {
+                if self.ended || self.terminal_pending.is_some() {
+                    return out;
+                }
                 // The snapshot is updated even when the event queues: §6.3 says a snapshot always
                 // reflects *now*, not the queue's past.
                 self.apply_to_snapshot(&event);
-                if self.outstanding.is_some() {
+                if matches!(event, EventKind::Ended { .. }) {
+                    self.finish(at, event, &mut out);
+                } else if self.outstanding.is_some() {
                     self.enqueue(event);
                 } else {
                     self.process(at, event, &mut out);
                 }
             }
-            Input::MediaGate { muted } => self.snapshot.media.muted = muted,
+            Input::MediaGate { muted } if !self.ended && self.terminal_pending.is_none() => {
+                self.snapshot.media.muted = muted;
+            }
+            Input::MediaGate { .. } => {}
             Input::TimerFired(timer) => self.fire(at, timer, &mut out),
             Input::Response { callback, response } => {
                 self.respond(at, &callback, response, &mut out);
             }
         }
         out
+    }
+
+    /// Enter the one-way terminal state and deliver its one event.
+    fn finish(&mut self, at: Timestamp, event: EventKind, out: &mut Vec<Output>) {
+        if self.ended {
+            return;
+        }
+        self.queued.clear();
+        self.program.abandon();
+        if let Some(running) = self.running.take() {
+            if running.playing {
+                out.push(Output::Effect(Effect::StopPlayback));
+            }
+            match running.instruction.verb {
+                Verb::Pause { .. } => out.push(Output::ClearTimer(Timer::Pause)),
+                Verb::GatherDigits(_) => {
+                    out.push(Output::ClearTimer(Timer::GatherOverall));
+                    out.push(Output::ClearTimer(Timer::GatherDigit));
+                }
+                _ => {}
+            }
+        }
+        if self.outstanding.is_some() {
+            self.terminal_pending = Some((at, event));
+        } else {
+            self.deliver(at, event, out);
+        }
     }
 
     /// §6.3's alternation: an event arriving while a callback is outstanding waits its turn.
@@ -686,12 +724,27 @@ impl Interpreter {
     }
 
     fn fire(&mut self, at: Timestamp, timer: Timer, out: &mut Vec<Output>) {
+        if (self.ended || self.terminal_pending.is_some()) && timer != Timer::Callback {
+            return;
+        }
         match timer {
             Timer::Callback => {
                 // §9.2: the callback did not return in time. The token the driver holds is now
                 // stale; a response presented with it is ignored below.
-                if self.outstanding.take().is_some() {
-                    self.fail(at, Failure::Timeout, out);
+                if self.outstanding.take().is_some() && !self.ended {
+                    if let Some((terminal_at, event)) = self.terminal_pending.take() {
+                        self.deliver(terminal_at, event, out);
+                        return;
+                    }
+                    if self.snapshot.state == CallState::Ended {
+                        // The terminal event arrived while this callback was outstanding. Its
+                        // snapshot is authoritative even though its envelope is still queued: do
+                        // not tear down an already-ended call; release the queue so `call.ended`
+                        // can become the last delivery.
+                        self.drain_ended(at, out);
+                    } else {
+                        self.fail(at, Failure::Timeout, out);
+                    }
                 }
             }
             Timer::Pause => {
@@ -743,6 +796,23 @@ impl Interpreter {
         }
         self.outstanding = None;
         out.push(Output::ClearTimer(Timer::Callback));
+        if let Some((terminal_at, event)) = self.terminal_pending.take() {
+            self.deliver(terminal_at, event, out);
+            return;
+        }
+        // `call.ended` is the app's last observation, not an opportunity to act on a call that no
+        // longer exists. A failed or non-empty answer to that delivery is therefore acknowledged
+        // and ignored; applying its policy could issue a second hangup or refusal after teardown.
+        if self.ended {
+            return;
+        }
+        if self.snapshot.state == CallState::Ended {
+            // `call.ended` may be queued behind the callback being answered. The snapshot already
+            // says there is no live call on which a failure policy or document can act; draining
+            // is still required so the terminal envelope itself reaches the app.
+            self.drain_ended(at, out);
+            return;
+        }
         match response {
             Response::Failed(failure) => self.fail(at, failure, out),
             Response::Document(document) => self.accept(document, out),
@@ -879,6 +949,21 @@ impl Interpreter {
                 return;
             };
             self.process(at, event, out);
+        }
+    }
+
+    /// Deliver the terminal event that made the snapshot ended, dropping superseded queued events.
+    ///
+    /// Every event carries the current snapshot, so once that snapshot is ended an older queued
+    /// event cannot be acted on usefully. Running it through [`Self::process`] could advance a
+    /// program on a call that no longer exists. `call.ended` is the one event that may never be
+    /// dropped, and becomes the next and final delivery.
+    fn drain_ended(&mut self, at: Timestamp, out: &mut Vec<Output>) {
+        while let Some(event) = self.queued.pop_front() {
+            if matches!(event, EventKind::Ended { .. }) {
+                self.deliver(at, event, out);
+                return;
+            }
         }
     }
 

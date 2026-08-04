@@ -54,6 +54,15 @@ One process, three layers, and the interpreter is not one of them — it is impo
    reach which app, declared failure semantics, capability grants, authentication material.
    Evaluated in the actor, once per decision, from configuration loaded at start.
 
+**Actor lifecycle.** The serving future retains a supervisor for every per-call actor and awaits
+that supervisor on ordinary endpoint shutdown. Cancellation of the serving future signals the
+same supervisor before releasing it; the supervisor continues to own and join the actor tasks, and
+each actor cooperatively refuses a pending invitation or sends BYE for a confirmed call. An
+actor-owned admission lease records completion even when the cancelled serving future can no
+longer receive task results. Actor starts and completions use bounded queues, and at most 1024 call
+actors may be live; the next app-routed invitation receives 503 and its provisional admission is
+rolled back.
+
 **Determinism (`A-7`).** The actor's logic — interpreter, timers, redelivery, failure
 semantics — runs under a harness with fake time, scripted bindings and scripted calls. This is
 the sans-IO discipline applied one layer up, and it is built with the first host code, not
@@ -115,7 +124,8 @@ webhook binding returns `Response::Body` or `Response::Failed`; the per-call act
 to `Interpreter` and executes the outputs it receives. Review this boundary by searching those
 production modules for `Document::parse`, `Instruction`, and `Verb`.
 
-This is not yet a crate-wide property. The public `A-7` harness predates `C-5` and still defines
-and executes a second `Instruction`/`Verb` program under `harness::contract` and
-`harness::scenario`. Its scenarios must be migrated to `sipx_app_protocol::Interpreter`, or that
-duplicate program removed, before `A-2` can satisfy the sole-interpreter acceptance item.
+This is a crate-wide property. The public `A-7` harness predates `C-5`, but now drives
+`sipx_app_protocol::Interpreter` on virtual time and re-exports its contract vocabulary. Its runner
+may match `Output` to perform an effect, arm a timer or deliver an event, and construct `Input` from
+those completions; it owns no instruction queue, parser or verb dispatch. A source-level regression
+holds that runner boundary in addition to the production-module review above.

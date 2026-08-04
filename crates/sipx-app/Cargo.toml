@@ -26,7 +26,7 @@ sipx-media.workspace = true
 # RFC 3261 §11: a call listener must answer an OPTIONS, and what answers one is a user agent — the
 # `Allow` list it sends is the one list saying what this stack does, so the host answers through it
 # rather than building a 200 of its own that would drift.
-sipx-ua.workspace = true
+sipx-ua = { workspace = true, features = ["runtime"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 # HTTP, signing, and their wire concerns stop at this leaf application.
 reqwest.workspace = true

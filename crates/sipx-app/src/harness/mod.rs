@@ -9,15 +9,15 @@
 //! This is the sans-IO discipline of the kernel applied one layer up, and the
 //! [design](../../../../docs/designs/app-host.md) says it is built *with* the first host code
 //! rather than after it. It is startable today because it needs only the contract's vectors: when
-//! `C-5`'s interpreter lands it replaces the instruction-execution half of the runner, and the
-//! scenarios do not change.
+//! The runner drives `sipx-app-protocol::Interpreter` directly; fake and production bindings share
+//! one instruction execution path.
 //!
 //! ## The layers
 //!
 //! | Module | What it is |
 //! |---|---|
 //! | [`time`] | `Virtual` — the only clock, with a zero a real instant does not have |
-//! | [`contract`] | `sipx.app.v1`'s events, verbs and effects as types, not as JSON |
+//! | [`contract`] | re-exports of the protocol vocabulary plus observable driver effects |
 //! | [`policy`] | §9.2's declared failure semantics, with the spec's defaults |
 //! | [`binding`] | the app, as a trait a real socket cannot honestly implement |
 //! | [`scenario`] | a scenario as data, and the discrete-event loop that runs it |
@@ -41,7 +41,8 @@ pub mod vectors;
 
 pub use binding::{Binding, Outcome, Reply, ScriptedApp};
 pub use contract::{
-    DialOutcome, Document, Effect, EndCause, Event, EventKind, GatherReason, Instruction, Verb,
+    DialOutcome, Document, Effect, EndCause, Event, EventKind, Gather, GatherReason, Instruction,
+    Source, Verb,
 };
 pub use policy::{Failure, FailurePolicy, OnFailure};
 pub use scenario::{Conclusion, EVENT_QUEUE, Run, Scenario, Step};

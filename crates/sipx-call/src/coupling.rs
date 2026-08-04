@@ -10,13 +10,13 @@ use std::net::IpAddr;
 
 use sipx_media::Bridge;
 use sipx_sdp::Direction;
-use sipx_sip::{Method, Reason};
+use sipx_sip::{Method, Reason, Uri};
 use sipx_transport::Incoming;
 use tokio::sync::mpsc;
 
 use crate::call::{CouplingDialEvent, sleep_until};
 use crate::dispatch::CouplingInvitation;
-use crate::{Call, Dialing, Error, Invitation, Result, Ringing};
+use crate::{Call, Calls, DialOptions, Dialing, Error, Invitation, Result, Ringing};
 
 const DEFERRED_CAPACITY: usize = 16;
 
@@ -294,6 +294,103 @@ pub struct EarlyCoupling {
 }
 
 impl EarlyCoupling {
+    /// Consume an inbound invitation and create its relayed target leg under one owner.
+    ///
+    /// Target selection remains application policy. The coupling maps the source offer's audio
+    /// direction onto fresh target-leg SDP; endpoint addresses, ports and key material are never
+    /// copied between the two user-agent dialogs.
+    pub async fn dial(
+        invitation: Invitation,
+        calls: &Calls,
+        endpoint: &sipx_transport::Handle,
+        target: sipx_transport::Target,
+        to: &Uri,
+        options: &DialOptions,
+        media_address: IpAddr,
+    ) -> Result<Self> {
+        let Some(direction) = relayed_direction(&invitation.request().request) else {
+            invitation
+                .refuse(endpoint, 488, "Not Acceptable Here")
+                .await?;
+            return Err(Error::Sdp(
+                "the source initial INVITE carried no usable audio offer".to_owned(),
+            ));
+        };
+        let invitation = invitation.into_coupling();
+        let mut state = CouplingState::new();
+        let _relay = state.begin_offer(Leg::One, OfferAxis::InitialInvite);
+        let cancellation = invitation.cancellation();
+        let options = options.clone().with_initial_direction(direction);
+        let mut dialing = Box::pin(crate::dial_early(endpoint, target, to, &options));
+        let outbound = tokio::select! {
+            result = &mut dialing => match result {
+                Ok(outbound) => outbound,
+                Err(error) => {
+                    let (status, reason) = match &error {
+                        Error::Rejected { status, reason } => (*status, reason.clone()),
+                        _ => (503, "Service Unavailable".to_owned()),
+                    };
+                    invitation.refuse(endpoint, status, reason).await?;
+                    return Err(error);
+                }
+            },
+            () = cancellation.cancelled() => {
+                match dialing.await {
+                    Ok(dialing) => dialing.cancel().await,
+                    Err(error) => tracing::debug!(%error, "outbound leg ended while cancellation waited for a provisional"),
+                }
+                return Err(Error::InvitationCancelled);
+            }
+        };
+        let Some(dialog) = outbound.dialog() else {
+            let mut call = outbound.answered().await?;
+            call.hang_up().await?;
+            invitation
+                .refuse(endpoint, 503, "Service Unavailable")
+                .await?;
+            return Err(Error::NoDialog);
+        };
+        let outgoing_incoming = calls.register(dialog);
+        let answered_early = outbound.has_early_session();
+        let ringing = if answered_early {
+            crate::ring_early(
+                endpoint,
+                &invitation.incoming,
+                183,
+                "Session Progress",
+                media_address,
+            )
+            .await
+        } else {
+            crate::ring(endpoint, &invitation.incoming, 180, "Ringing", true).await
+        };
+        let ringing = match ringing {
+            Ok(ringing) => ringing,
+            Err(error) => {
+                outbound.cancel().await;
+                let (status, reason) = match &error {
+                    Error::Rejected { status, reason } => (*status, reason.clone()),
+                    _ => (503, "Service Unavailable".to_owned()),
+                };
+                invitation.refuse(endpoint, status, reason).await?;
+                return Err(error);
+            }
+        };
+        if answered_early && ringing.has_early_session() {
+            let _completed = state.complete(Leg::One);
+        }
+        Ok(Self {
+            invitation,
+            ringing,
+            dialing: Some(outbound),
+            outgoing_incoming,
+            endpoint: endpoint.clone(),
+            media_address,
+            state,
+            deferred: PerLeg::new(VecDeque::new(), VecDeque::new()),
+        })
+    }
+
     /// Join an inbound invitation already rung to its pending outbound invitation.
     ///
     /// Routing and target selection happen before this handoff. From this point the coupling is
@@ -474,7 +571,7 @@ impl EarlyCoupling {
         }
         let inbound = if self.ringing.has_early_session() {
             let mut ringing = self.ringing;
-            crate::answer_early(&self.endpoint, &self.invitation.incoming, &mut ringing).await?
+            crate::answer_early(&self.endpoint, &self.invitation.incoming, &mut ringing).await
         } else {
             crate::answer_ringing(
                 &self.endpoint,
@@ -482,7 +579,18 @@ impl EarlyCoupling {
                 self.media_address,
                 &self.ringing,
             )
-            .await?
+            .await
+        };
+        let inbound = match inbound {
+            Ok(inbound) => inbound,
+            Err(error) => {
+                // The target already has a confirmed dialog. An inbound answer failure cannot
+                // make that ownership disappear; end it before returning the primary cause.
+                if let Err(cleanup) = outbound.hang_up().await {
+                    tracing::warn!(%cleanup, "could not end confirmed peer after inbound answer failed");
+                }
+                return Err(error);
+            }
         };
         Ok(ConfirmedCoupling {
             coupling: Coupling::new(inbound, outbound),
@@ -541,6 +649,9 @@ impl EarlyCoupling {
         incoming: Incoming,
         outbound_call: &mut Option<Call>,
     ) -> Result<()> {
+        let Some(direction) = relayed_direction(&incoming.request) else {
+            return Call::refuse_with(&self.endpoint, &incoming, 488, "Not Acceptable Here").await;
+        };
         match self.state.begin_offer(leg, OfferAxis::Update) {
             OfferAction::Refuse { status } => {
                 let reason = if status == 491 {
@@ -553,7 +664,6 @@ impl EarlyCoupling {
             OfferAction::Relay { .. } => {}
         }
 
-        let direction = relayed_direction(&incoming);
         let (relayed, inbox_closed) = match leg {
             Leg::One => match outbound_call {
                 Some(call) => {
@@ -860,6 +970,21 @@ impl Coupling {
         one_incoming: &mut mpsc::Receiver<Incoming>,
         two_incoming: &mut mpsc::Receiver<Incoming>,
     ) -> Result<Option<CouplingEnd>> {
+        let source = self.call(leg);
+        if !source.dialog.matches(&incoming.request) {
+            source.refuse_unclaimed(&incoming).await;
+            return Ok(None);
+        }
+        if source.dialog.is_out_of_order(&incoming.request) {
+            source
+                .refuse(&incoming, 500, "Server Internal Error")
+                .await?;
+            return Ok(None);
+        }
+        let Some(direction) = source.can_accept_offer(incoming.request.body()) else {
+            source.refuse(&incoming, 488, "Not Acceptable Here").await?;
+            return Ok(None);
+        };
         match self.state.begin_offer(leg, axis) {
             OfferAction::Refuse { status } => {
                 let reason = if status == 491 {
@@ -873,7 +998,6 @@ impl Coupling {
             OfferAction::Relay { .. } => {}
         }
 
-        let direction = relayed_direction(&incoming);
         let (relayed, inbox_closed) = match leg {
             Leg::One => {
                 drive_outgoing_offer(
@@ -1013,8 +1137,8 @@ fn offer_axis(incoming: &Incoming) -> Option<OfferAxis> {
     }
 }
 
-fn relayed_direction(incoming: &Incoming) -> Direction {
-    let offered = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
+fn relayed_direction(request: &sipx_sip::Request) -> Option<Direction> {
+    sipx_sdp::parse(&String::from_utf8_lossy(request.body()))
         .ok()
         .and_then(|description| {
             description
@@ -1023,13 +1147,6 @@ fn relayed_direction(incoming: &Incoming) -> Direction {
                 .find(|media| media.media == "audio" && !media.is_rejected())
                 .map(|media| media.direction())
         })
-        .unwrap_or(Direction::SendRecv);
-    match offered {
-        Direction::SendOnly => Direction::RecvOnly,
-        Direction::RecvOnly => Direction::SendOnly,
-        Direction::SendRecv => Direction::SendRecv,
-        Direction::Inactive => Direction::Inactive,
-    }
 }
 
 #[cfg(test)]
@@ -1041,6 +1158,30 @@ fn relayed_direction(incoming: &Incoming) -> Direction {
 )]
 mod tests {
     use super::*;
+
+    fn request_with(body: &'static [u8]) -> sipx_sip::Request {
+        let host = sipx_sip::HostName::new("callee.example").expect("valid host");
+        let mut request =
+            sipx_sip::Request::new(Method::Invite, Uri::sip(sipx_sip::Host::Name(host)));
+        request.set_body(bytes::Bytes::from_static(body));
+        request
+    }
+
+    #[test]
+    fn malformed_sdp_has_no_relay_direction() {
+        assert_eq!(
+            relayed_direction(&request_with(b"not a session description")),
+            None
+        );
+    }
+
+    #[test]
+    fn relay_preserves_endpoint_relative_direction() {
+        let request = request_with(
+            b"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\na=sendonly\r\n",
+        );
+        assert_eq!(relayed_direction(&request), Some(Direction::SendOnly));
+    }
 
     #[test]
     fn every_offer_axis_uses_two_per_leg_states_and_returns_to_idle() {

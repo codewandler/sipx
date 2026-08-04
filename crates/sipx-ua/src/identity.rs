@@ -1,7 +1,8 @@
 //! RFC 8224 authentication and verification services.
 //!
-//! **Experimental** (`A-8`): the library mechanism is implemented and tested, but no call-layer
-//! path or shipped application selects it yet, so no external caller has constrained this API.
+//! **Supported** (`S-34`): outbound and inbound call policies select these services through
+//! `sipx-call`, which constrains their public shape. sipx remains pre-1.0, so Supported does not
+//! mean frozen; breaking changes receive a migration note.
 //!
 //! Network retrieval and trust remain caller-owned. This module only orders policy decisions,
 //! supplies a bounded cache, and maps verification failures to their specified SIP statuses.
@@ -384,6 +385,18 @@ impl VerificationFailure {
             Self::UnsupportedCredential => 437,
             Self::StaleDate => 403,
             Self::InvalidIdentity => 438,
+        }
+    }
+
+    /// SIP reason phrase paired with [`Self::status`].
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::MissingIdentity => "Use Identity Header",
+            Self::BadIdentityInfo => "Bad Identity Info",
+            Self::UnsupportedCredential => "Unsupported Credential",
+            Self::StaleDate => "Stale Date",
+            Self::InvalidIdentity => "Invalid Identity Header",
         }
     }
 }

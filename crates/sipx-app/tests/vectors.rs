@@ -20,7 +20,7 @@ use sipx_app::harness::binding::{Binding, Outcome, Reply};
 use sipx_app::harness::vectors;
 use sipx_app::harness::{
     Conclusion, Document, EVENT_QUEUE, Effect, EndCause, Event, EventKind, Failure, FailurePolicy,
-    Instruction, OnFailure, Scenario, Step, Verb, Virtual,
+    Gather, Instruction, OnFailure, Scenario, Source, Step, Verb, Virtual,
 };
 
 /// §11, every row. Each vector carries its own expectation, so a failure names itself.
@@ -38,6 +38,20 @@ fn every_contract_vector_holds() {
 #[test]
 fn the_whole_vector_set_is_present() {
     assert_eq!(vectors::all().len(), 9, "AC-1 through AC-9");
+}
+
+/// A-2's review boundary as a regression: the harness driver may execute protocol outputs and
+/// schedule timers, but it cannot grow a second instruction reader or dispatcher again.
+#[test]
+fn the_harness_runner_drives_the_sole_protocol_interpreter() {
+    let runner = include_str!("../src/harness/scenario.rs");
+    assert!(runner.contains("Interpreter::new"));
+    for forbidden in ["Document::parse", "Verb::", ".instructions"] {
+        assert!(
+            !runner.contains(forbidden),
+            "the harness runner must not interpret instructions through {forbidden}"
+        );
+    }
 }
 
 /// Acceptance point 3: every §9.2 knob has a scenario, for every action it can declare.
@@ -139,21 +153,24 @@ fn a_scenario_spanning_a_minute_of_virtual_time_runs_instantly() {
 #[test]
 fn a_blocking_verb_holds_the_queue_until_its_completion_event() {
     let run = Scenario::new("play blocks the gather behind it")
-        .script(vec![Reply::now(Document::of(vec![
+        .script(vec![Reply::now(Document::new(vec![
             Instruction::new(
                 "p1",
                 Verb::Play {
-                    source: "welcome.wav".to_owned(),
+                    source: Source::File("welcome.wav".to_owned()),
                     interruptible: true,
                 },
             ),
             Instruction::new(
                 "g1",
-                Verb::Gather {
-                    max: 1,
+                Verb::GatherDigits(Gather {
+                    min: 0,
+                    max: Some(1),
                     terminators: String::new(),
-                    timeout: Duration::from_secs(5),
-                },
+                    digit_timeout_ms: None,
+                    timeout_ms: Some(5_000),
+                    prompt: None,
+                }),
             ),
         ]))])
         .then(Reply::now(Document::keep_going()))
@@ -177,18 +194,18 @@ fn a_blocking_verb_holds_the_queue_until_its_completion_event() {
 fn an_empty_document_keeps_the_program_rather_than_clearing_it() {
     let run = Scenario::new("keep going")
         .script(vec![
-            Reply::now(Document::of(vec![
+            Reply::now(Document::new(vec![
                 Instruction::new(
                     "p1",
                     Verb::Play {
-                        source: "one.wav".to_owned(),
+                        source: Source::File("one.wav".to_owned()),
                         interruptible: true,
                     },
                 ),
                 Instruction::new(
                     "p2",
                     Verb::Play {
-                        source: "two.wav".to_owned(),
+                        source: Source::File("two.wav".to_owned()),
                         interruptible: true,
                     },
                 ),
@@ -248,7 +265,9 @@ fn the_event_queue_is_bounded_rather_than_growing() {
         run.dropped.len()
     );
     assert!(
-        !run.dropped.iter().any(EventKind::is_ended),
+        !run.dropped
+            .iter()
+            .any(|event| matches!(event, EventKind::Ended { .. })),
         "and never at the cost of call.ended"
     );
 }

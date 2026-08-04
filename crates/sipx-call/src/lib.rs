@@ -24,11 +24,15 @@
 //! flavours, DTMF, playback, recording, session timers.
 //!
 //! **Experimental**: choosing what a call offers — [`Codecs`], [`IcePolicy`], [`Keying`], [`MediaPolicy`],
-//! [`DialOptions::with_codecs`], [`DialOptions::with_media_policy`], and the answering entry
+//! [`OutboundIdentityPolicy`], [`InboundIdentityPolicy`],
+//! [`DialOptions::with_codecs`], [`DialOptions::with_initial_direction`],
+//! [`DialOptions::with_media_policy`],
+//! [`DialOptions::with_identity`], [`Dispatcher::with_identity`], and the answering entry
 //! points that take a selection or policy ([`answer_with`], [`answer_with_policy`],
 //! [`answer_ringing_with`], [`answer_ringing_with_policy`], [`answer_replacing_with`],
 //! [`Invitation::answer_with`], [`Invitation::answer_with_policy`], [`ring_early_with`],
-//! [`ring_early_with_policy`]). These choices are pre-1.0 and their shape may still move.
+//! [`ring_early_with_policy`], [`ring_offer_early`], [`ring_offer_early_with_policy`] and
+//! [`dial_early_without_offer`]). These choices are pre-1.0 and their shape may still move.
 //!
 //! The set is the G.711 pair unless a call says otherwise, and `Codecs::Opus` exists only when this
 //! crate is built with its `opus` feature — which links libopus. So the variants a `match` on
@@ -50,6 +54,7 @@ pub mod dialog;
 pub mod dispatch;
 pub mod error;
 pub mod event;
+pub mod identity;
 pub mod rel;
 pub mod transfer;
 // Crate-private: every item in it is `pub(crate)`, and a `pub mod` whose contents are all
@@ -59,8 +64,8 @@ mod update;
 pub use call::{
     Call, Codecs, Credentials, DialOptions, Dialing, IcePolicy, Keying, MediaPolicy, answer,
     answer_early, answer_replacing, answer_replacing_with, answer_ringing, answer_ringing_with,
-    answer_ringing_with_policy, answer_with, answer_with_policy, dial, dial_early, dial_once,
-    dial_until, serve,
+    answer_ringing_with_policy, answer_with, answer_with_policy, dial, dial_early,
+    dial_early_without_offer, dial_once, dial_until, serve,
 };
 pub use counters::SignallingCounts;
 pub use coupling::{
@@ -71,5 +76,9 @@ pub use dialog::{Dialog, DialogId, Role};
 pub use dispatch::{Calls, DispatchCounts, Dispatched, Dispatcher, Invitation};
 pub use error::{Error, Result};
 pub use event::{CallEvent, CallEvents, EndCause};
-pub use rel::{Ringing, ring, ring_early, ring_early_with, ring_early_with_policy};
+pub use identity::{InboundIdentityPolicy, OutboundIdentityPolicy};
+pub use rel::{
+    Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_offer_early,
+    ring_offer_early_with_policy,
+};
 pub use transfer::{Referral, Replaces, Transfer, TransferState};

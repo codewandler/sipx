@@ -1,50 +1,24 @@
-//! A scenario, and the decision logic it drives.
+//! A deterministic scenario driver for the contract interpreter.
 //!
-//! A scenario **is data**: when call events occur, what the app answers and after how long, and
-//! what the host should have done. Running one is a discrete-event loop over
-//! [`Virtual`] time — the earliest of "the next scripted event" and "the next
-//! timer" wins, the clock jumps to it, and nothing sleeps. A scenario asserting on a two-second
-//! callback timeout costs no wall-clock time at all.
-//!
-//! This was built before `C-5`, so [`Run`] still includes a provisional instruction interpreter as
-//! well as the actor logic it was intended to test: delivery and the alternation rule (§6.3), `seq`
-//! and redelivery (§5.1), the bounded event queue (AC-9), the instruction queue's blocking
-//! discipline (§6.1), and the declared failure semantics (§9.2). `C-5` has landed; migrating this
-//! execution half to `sipx_app_protocol::Interpreter` remains an open `A-2` requirement. Until then
-//! the scenarios are policy evidence, not proof that the crate has only one interpreter.
-//!
-//! ## Two readings the spec leaves implicit
-//!
-//! Recorded here rather than buried, because a vector's outcome depends on each. The protocol
-//! interpreter is now authoritative; this provisional runner must agree until it is migrated:
-//!
-//! 1. **An empty document does not replace the program.** §6.3 says a response "is the *entire* new
-//!    program", and also that "an empty `instructions` array is valid and means 'keep going'".
-//!    Those only reconcile if empty is the one document that changes nothing — otherwise "keep
-//!    going" would mean "discard everything queued", which is the opposite.
-//! 2. **A digit consumed by a running `gather` is not also delivered as `call.dtmf`.** The gather
-//!    is the abstraction over collecting digits; delivering both would have the app see every
-//!    keypress it explicitly asked the host to collect for it. AC-3's barge-in is a digit arriving
-//!    during a `play`, where no gather is running, and that case is unaffected.
+//! A scenario **is data**: call events, binding replies, timer firings and expectations. The
+//! runner advances [`Virtual`] time to the next scripted event or interpreter timer and never
+//! sleeps. Instruction semantics are not implemented here: every event and response is fed to
+//! [`sipx_app_protocol::Interpreter`], and this module only performs its outputs.
 
 use std::collections::VecDeque;
 
+use sipx_app_protocol::{
+    CallSnapshot, Callback, Direction, Input, Interpreter, Output, Response, Timer, Timestamp,
+};
 use sipx_transport::timers::TimerQueue;
 
 use super::binding::{Binding, Outcome, Reply, ScriptedApp};
-use super::contract::{
-    DialOutcome, Document, Effect, EndCause, Event, EventKind, GatherReason, Instruction, Verb,
-};
-use super::policy::{Failure, FailurePolicy, OnFailure};
+use super::contract::{Effect, EndCause, Event, EventKind, Source};
+use super::policy::{Failure, FailurePolicy};
 use super::time::Virtual;
 
-/// How many events may queue behind an outstanding callback before the host starts dropping.
-///
-/// One slot of this is reserved for `call.ended` (AC-9), so ordinary events compete for
-/// `EVENT_QUEUE - 1`. The same reasoning as `sipx-call`'s own stream: every other event carries a
-/// snapshot and a consumer that missed one resynchronises from the next, but a consumer that never
-/// learns the call ended waits forever.
-pub const EVENT_QUEUE: usize = 8;
+/// The interpreter's declared bound for events waiting behind one callback.
+pub const EVENT_QUEUE: usize = sipx_app_protocol::MAX_QUEUED_EVENTS;
 
 /// One thing the scenario makes happen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,12 +30,11 @@ pub enum Step {
         /// What.
         kind: EventKind,
     },
-    /// An event already delivered is delivered again with the same `seq` (§5.1) — a document-mode
-    /// retry or a session reconnect replay. The app may answer differently; the host may not care.
+    /// A binding redelivers an event with the same sequence number (§5.1).
     Redeliver {
         /// When.
         at: Virtual,
-        /// Which event.
+        /// Which delivery.
         seq: u64,
     },
 }
@@ -106,22 +79,22 @@ pub enum Conclusion {
 /// A scenario: everything that happens, and nothing that depends on the machine running it.
 #[derive(Debug)]
 pub struct Scenario {
-    /// What this scenario is called — a vector id like `AC-3`, or a knob name.
+    /// A vector id or descriptive name.
     pub name: String,
-    /// The app's declared failure semantics (§9.2).
+    /// The app's declared failure semantics.
     pub policy: FailurePolicy,
-    /// What the app answers, in order, one per delivered event.
+    /// What the app answers, in order.
     pub script: Vec<Reply>,
-    /// What it answers once the script runs out. `None` means "keep going".
+    /// What it answers after the script is exhausted.
     pub then: Option<Reply>,
-    /// What happens to the call, in time order.
+    /// Call events and redeliveries, in time order.
     pub steps: Vec<Step>,
-    /// How long to run for. The loop stops here even if timers remain, so a scenario cannot hang.
+    /// The virtual-time bound for this run.
     pub until: Virtual,
 }
 
 impl Scenario {
-    /// A scenario with the §9.2 defaults, running for one minute of virtual time.
+    /// A scenario with the contract defaults and a one-minute virtual bound.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -141,21 +114,21 @@ impl Scenario {
         self
     }
 
-    /// With this app script.
+    /// With this binding script.
     #[must_use]
     pub fn script(mut self, script: Vec<Reply>) -> Self {
         self.script = script;
         self
     }
 
-    /// Answering this once the script runs out.
+    /// Answering this after the script runs out.
     #[must_use]
     pub fn then(mut self, reply: Reply) -> Self {
         self.then = Some(reply);
         self
     }
 
-    /// With these steps.
+    /// With these call steps.
     #[must_use]
     pub fn steps(mut self, steps: Vec<Step>) -> Self {
         self.steps = steps;
@@ -169,7 +142,7 @@ impl Scenario {
         self
     }
 
-    /// Run it.
+    /// Run against the built-in scripted binding.
     #[must_use]
     pub fn run(self) -> Run {
         let mut app = ScriptedApp::new(self.script.clone());
@@ -179,10 +152,7 @@ impl Scenario {
         self.run_against(&mut app)
     }
 
-    /// Run it against a binding of the caller's own.
-    ///
-    /// This is what acceptance point 3 means by *shared*: `A-2` and `A-4` run the same scenarios
-    /// through their own binding adapter rather than restating the failure semantics per binding.
+    /// Run against another deterministic binding.
     #[must_use]
     pub fn run_against<B: Binding>(&self, app: &mut B) -> Run {
         Actor::new(self).drive(app)
@@ -192,30 +162,30 @@ impl Scenario {
 /// What a scenario did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
-    /// The name of the scenario that produced it.
+    /// The scenario name.
     pub name: String,
-    /// What the host executed, in order.
+    /// Call operations performed, in order.
     pub effects: Vec<Effect>,
-    /// Every event the app was actually given, in delivery order.
+    /// Every event delivered to the binding, including redeliveries.
     pub delivered: Vec<Event>,
-    /// Events dropped by the queue's overflow policy. Never contains `call.ended` (AC-9).
+    /// Scripted call events the interpreter did not deliver because its queue overflowed.
     pub dropped: Vec<EventKind>,
-    /// Which §9.2 knob was consulted, in order. Empty when the app never failed.
+    /// Transport/timer failures presented to the interpreter.
     pub failures: Vec<Failure>,
-    /// The legs the snapshot would list (§5.2).
+    /// Legs in the interpreter's final snapshot.
     pub legs: Vec<String>,
-    /// How it finished.
+    /// How the call finished.
     pub conclusion: Conclusion,
 }
 
 impl Run {
-    /// The `seq` of each delivered event, which is what §5.1's ordering claims are about.
+    /// The sequence number of every delivery.
     #[must_use]
     pub fn delivered_seqs(&self) -> Vec<u64> {
         self.delivered.iter().map(|event| event.seq).collect()
     }
 
-    /// The first delivered event of this type, if any.
+    /// The first delivered event of this type.
     #[must_use]
     pub fn first(&self, type_name: &str) -> Option<&EventKind> {
         self.delivered
@@ -224,50 +194,64 @@ impl Run {
             .find(|kind| kind.type_name() == type_name)
     }
 
-    /// Whether `call.ended` reached the app. AC-9's whole question.
+    /// Whether the app saw the terminal event.
     #[must_use]
     pub fn app_saw_ended(&self) -> bool {
-        self.delivered.iter().any(|event| event.kind.is_ended())
+        self.delivered.iter().any(Event::is_ended)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum TimerKey {
-    /// The app's answer to this event arrives.
-    Reply(u64),
-    /// The callback for this event has taken too long (§9.2 `timeout_ms`).
-    Callback(u64),
-    /// A `gather` ran out of time.
-    Gather(String),
-    /// A `dial` ran out of time.
-    Dial(String),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum InterpreterTimer {
+    Callback,
+    Pause,
+    GatherOverall,
+    GatherDigit,
 }
 
-/// One call's decision logic — the thing every behaviour claim about the host rests on.
+impl InterpreterTimer {
+    fn from_protocol(timer: Timer) -> Self {
+        match timer {
+            Timer::Callback => Self::Callback,
+            Timer::Pause => Self::Pause,
+            Timer::GatherOverall => Self::GatherOverall,
+            Timer::GatherDigit => Self::GatherDigit,
+        }
+    }
+
+    fn protocol(self) -> Timer {
+        match self {
+            Self::Callback => Timer::Callback,
+            Self::Pause => Timer::Pause,
+            Self::GatherOverall => Timer::GatherOverall,
+            Self::GatherDigit => Timer::GatherDigit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TimerKey {
+    Interpreter(InterpreterTimer),
+    Reply(u64),
+}
+
+struct PendingReply {
+    seq: u64,
+    callback: Callback,
+    outcome: Outcome,
+}
+
+/// A virtual binding and call-framework driver around the sole interpreter.
 struct Actor<'a> {
     scenario: &'a Scenario,
     now: Virtual,
+    interpreter: Interpreter,
     timers: TimerQueue<TimerKey, Virtual>,
-    /// Events not yet delivered, oldest first.
-    queue: VecDeque<Event>,
-    /// The `seq` of the callback currently outstanding, if any. §6.3: at most one per call.
-    outstanding: Option<u64>,
-    /// Every event created, by `seq`, so a redelivery can repeat one.
+    pending: Vec<PendingReply>,
     history: Vec<Event>,
-    /// The highest `seq` whose response has already been applied. A response for one at or below
-    /// this is a redelivery's, and is ignored (AC-4).
-    applied: Option<u64>,
-    next_seq: u64,
-    /// The program: instructions not yet started.
-    program: VecDeque<Instruction>,
-    /// The instruction blocking the queue, if any (§6.1).
-    running: Option<Instruction>,
-    /// Digits a running `gather` has collected.
-    collected: String,
-    /// Answers the app has given but whose arrival time has not come yet. Held rather than applied
-    /// on the spot, because "the app answered after 300 ms" has to be able to lose a race with a
-    /// 200 ms callback timeout — which is the whole of the slow-app case.
-    answers: Vec<(u64, Outcome)>,
+    undelivered_inputs: Vec<EventKind>,
+    active_playback: Option<String>,
+    gather_started: Option<String>,
     run: Run,
 }
 
@@ -276,16 +260,16 @@ impl<'a> Actor<'a> {
         Self {
             scenario,
             now: Virtual::epoch(),
+            interpreter: Interpreter::new(
+                CallSnapshot::new("harness-call", Direction::Inbound),
+                scenario.policy.protocol(),
+            ),
             timers: TimerQueue::new(),
-            queue: VecDeque::new(),
-            outstanding: None,
+            pending: Vec::new(),
             history: Vec::new(),
-            applied: None,
-            next_seq: 1,
-            program: VecDeque::new(),
-            running: None,
-            collected: String::new(),
-            answers: Vec::new(),
+            undelivered_inputs: Vec::new(),
+            active_playback: None,
+            gather_started: None,
             run: Run {
                 name: scenario.name.clone(),
                 effects: Vec::new(),
@@ -300,13 +284,9 @@ impl<'a> Actor<'a> {
 
     fn drive<B: Binding>(mut self, app: &mut B) -> Run {
         let mut steps: VecDeque<Step> = self.scenario.steps.iter().cloned().collect();
-
         loop {
             let next_step = steps.front().map(Step::at);
             let next_timer = self.timers.next_deadline();
-            // Earliest wins; a step and a timer at the same instant let the step go first, so a
-            // scenario that says "the digit arrives exactly as the gather expires" is the digit
-            // arriving in time rather than a coin toss.
             let now = match (next_step, next_timer) {
                 (Some(step), Some(timer)) if step <= timer => step,
                 (Some(step), None) => step,
@@ -317,7 +297,6 @@ impl<'a> Actor<'a> {
                 break;
             }
             self.now = now;
-
             if next_step == Some(now) {
                 if let Some(step) = steps.pop_front() {
                     self.step(step, app);
@@ -328,188 +307,205 @@ impl<'a> Actor<'a> {
                 }
             }
         }
+
+        self.run.dropped = self.undelivered_inputs;
+        self.run.legs = self
+            .interpreter
+            .snapshot()
+            .legs
+            .iter()
+            .map(|leg| leg.leg.clone())
+            .collect();
         self.run
     }
 
     fn step<B: Binding>(&mut self, step: Step, app: &mut B) {
         match step {
-            Step::Event { kind, .. } => self.occur(kind, app),
+            Step::Event { kind, .. } => self.event(kind, app),
             Step::Redeliver { seq, .. } => {
-                if let Some(event) = self.history.iter().find(|e| e.seq == seq).cloned() {
-                    self.ask(event, app);
+                if let Some(event) = self.history.iter().find(|event| event.seq == seq).cloned() {
+                    let _discarded = app.respond(&event);
+                    self.run.delivered.push(event);
                 }
             }
         }
     }
 
-    /// Something happened to the call.
-    fn occur<B: Binding>(&mut self, kind: EventKind, app: &mut B) {
-        // A digit a running `gather` asked for belongs to the gather, not to the app (see the
-        // module docs).
-        if let (EventKind::Dtmf { digit, .. }, Some(instruction)) = (&kind, self.running.clone())
-            && let Verb::Gather {
-                max, terminators, ..
-            } = &instruction.verb
+    fn event<B: Binding>(&mut self, kind: EventKind, app: &mut B) {
+        if let EventKind::PlaybackFinished { instruction_id, .. } = &kind
+            && self.active_playback.as_deref() == Some(instruction_id)
         {
-            if terminators.contains(*digit) {
-                self.resolve_gather(&instruction.id, GatherReason::Terminator, app);
-            } else {
-                self.collected.push(*digit);
-                if self.collected.chars().count() >= *max {
-                    self.resolve_gather(&instruction.id, GatherReason::Max, app);
-                }
-            }
-            return;
+            self.active_playback = None;
         }
-
-        if self.run.conclusion == Conclusion::Live
-            && let EventKind::Ended { cause } = &kind
-        {
-            self.run.conclusion = Conclusion::Ended(cause.clone());
+        if let EventKind::Ended { cause } = &kind {
+            self.run.conclusion = Conclusion::Ended(*cause);
         }
-        // A completion event resolves whatever it names, whether the harness or the scenario
-        // produced it.
-        self.settle(&kind);
-
-        let event = Event {
-            seq: self.next_seq,
-            kind,
-        };
-        self.next_seq += 1;
-        self.history.push(event.clone());
-        self.enqueue(event);
-        self.pump(app);
+        self.undelivered_inputs.push(kind.clone());
+        self.input(Input::Event(kind), app);
     }
 
-    /// A completion event clears the instruction it names, and updates the leg list.
-    fn settle(&mut self, kind: &EventKind) {
-        let finished = match kind {
-            EventKind::PlaybackFinished { instruction_id, .. }
-            | EventKind::GatherFinished { instruction_id, .. } => Some(instruction_id.clone()),
-            EventKind::DialFinished {
+    fn input<B: Binding>(&mut self, input: Input, app: &mut B) {
+        let at = Timestamp::from_unix_millis(self.now_millis());
+        let outputs = self.interpreter.handle(at, input);
+        self.outputs(outputs, app);
+    }
+
+    fn outputs<B: Binding>(&mut self, outputs: Vec<Output>, app: &mut B) {
+        let mut terminal = None;
+        for output in outputs {
+            match output {
+                Output::Effect(effect) => {
+                    if let Some(cause) = self.effect(effect) {
+                        terminal = Some(cause);
+                    }
+                }
+                Output::Deliver { envelope, callback } => {
+                    self.deliver(envelope.seq, envelope.event.clone(), callback, app);
+                }
+                Output::SetTimer { timer, after_ms } => {
+                    if timer == Timer::GatherOverall
+                        && let Some(id) = self.interpreter.running().map(str::to_owned)
+                        && self.gather_started.as_deref() != Some(id.as_str())
+                    {
+                        self.run
+                            .effects
+                            .push(Effect::StartGather { id: id.clone() });
+                        self.gather_started = Some(id);
+                    }
+                    self.timers.set(
+                        TimerKey::Interpreter(InterpreterTimer::from_protocol(timer)),
+                        self.now,
+                        std::time::Duration::from_millis(u64::from(after_ms)),
+                    );
+                }
+                Output::ClearTimer(timer) => {
+                    self.timers
+                        .clear(&TimerKey::Interpreter(InterpreterTimer::from_protocol(
+                            timer,
+                        )));
+                    if matches!(timer, Timer::GatherOverall | Timer::GatherDigit) {
+                        self.gather_started = None;
+                    }
+                }
+            }
+        }
+        if let Some(cause) = terminal
+            && !matches!(
+                self.interpreter.snapshot().state,
+                sipx_app_protocol::CallState::Ended
+            )
+        {
+            self.event(EventKind::Ended { cause }, app);
+        }
+    }
+
+    fn effect(&mut self, effect: sipx_app_protocol::Effect) -> Option<EndCause> {
+        match effect {
+            sipx_app_protocol::Effect::Answer => self.run.effects.push(Effect::Answer),
+            sipx_app_protocol::Effect::Play {
                 instruction_id,
-                leg,
-                outcome,
+                source,
+                ..
             } => {
-                // §5.2: a leg that did not answer is no longer listed. AC-7 asks exactly this.
-                if *outcome != DialOutcome::Answered {
-                    self.run.legs.retain(|held| held != leg);
+                self.active_playback = Some(instruction_id.clone());
+                self.run.effects.push(Effect::StartPlay {
+                    id: instruction_id,
+                    source: match source {
+                        Source::File(path) => path,
+                        Source::Inline(_) => "<inline>".to_owned(),
+                    },
+                });
+            }
+            sipx_app_protocol::Effect::StopPlayback => {
+                if let Some(id) = self.active_playback.take() {
+                    self.run.effects.push(Effect::StopPlay { id });
                 }
-                Some(instruction_id.clone())
             }
-            _ => None,
-        };
-        if let Some(id) = finished
-            && self.running.as_ref().is_some_and(|i| i.id == id)
+            sipx_app_protocol::Effect::Dial {
+                instruction_id,
+                target,
+                ..
+            } => self.run.effects.push(Effect::Dial {
+                id: instruction_id,
+                target,
+            }),
+            sipx_app_protocol::Effect::HangUp { cause } => {
+                self.run.effects.push(Effect::Hangup { cause });
+                self.run.conclusion = Conclusion::Ended(cause);
+                return Some(cause);
+            }
+            sipx_app_protocol::Effect::Reject { status, .. } => {
+                self.run.effects.push(Effect::Reject { status });
+                let cause = EndCause::Rejected { status };
+                self.run.conclusion = Conclusion::Ended(cause);
+                return Some(cause);
+            }
+            other => self.run.effects.push(Effect::Other {
+                verb: effect_name(&other).to_owned(),
+            }),
+        }
+        None
+    }
+
+    fn deliver<B: Binding>(&mut self, seq: u64, kind: EventKind, callback: Callback, app: &mut B) {
+        if let Some(index) = self
+            .undelivered_inputs
+            .iter()
+            .position(|candidate| candidate == &kind)
         {
-            self.running = None;
-            self.collected.clear();
-            self.timers.clear(&TimerKey::Gather(id.clone()));
-            self.timers.clear(&TimerKey::Dial(id));
+            self.undelivered_inputs.remove(index);
         }
-    }
-
-    fn enqueue(&mut self, event: Event) {
-        if event.kind.is_ended() {
-            // The reserved slot. `call.ended` is a call's last word and is never what an overflow
-            // discards, so it does not consult the bound at all.
-            self.queue.push_back(event);
-            return;
-        }
-        if self.queue.len() + 1 >= EVENT_QUEUE {
-            self.run.dropped.push(event.kind);
-            return;
-        }
-        self.queue.push_back(event);
-    }
-
-    /// Deliver the next queued event, if the app is free to take one (§6.3: one at a time).
-    fn pump<B: Binding>(&mut self, app: &mut B) {
-        if self.outstanding.is_some() {
-            return;
-        }
-        let Some(event) = self.queue.pop_front() else {
-            return;
-        };
-        self.ask(event, app);
-    }
-
-    fn ask<B: Binding>(&mut self, event: Event, app: &mut B) {
-        let seq = event.seq;
+        let event = Event { seq, kind };
         let reply = app.respond(&event);
+        self.history.push(event.clone());
         self.run.delivered.push(event);
-        self.outstanding = Some(seq);
-        if self.pending_reply(seq, reply) {
-            // The app failed on the spot rather than after a delay, so nothing is outstanding and
-            // the next queued event can go out now. Recursion terminates because every pass either
-            // empties the queue or ends the call, and an ended call stops failing.
-            self.pump(app);
+        if !matches!(reply.outcome, Outcome::Silent) {
+            self.pending.push(PendingReply {
+                seq,
+                callback,
+                outcome: reply.outcome,
+            });
+            self.timers.set(TimerKey::Reply(seq), self.now, reply.after);
         }
-    }
-
-    /// Returns whether the app failed synchronously, leaving nothing outstanding.
-    fn pending_reply(&mut self, seq: u64, reply: Reply) -> bool {
-        match reply.outcome {
-            // An app that is not there has already failed; there is nothing to wait for.
-            Outcome::Unreachable => {
-                self.outstanding = None;
-                self.fail(Failure::Unreachable);
-                return true;
-            }
-            Outcome::Silent => {
-                self.timers.set(
-                    TimerKey::Callback(seq),
-                    self.now,
-                    self.scenario.policy.timeout,
-                );
-            }
-            outcome => {
-                self.answers.push((seq, outcome));
-                self.timers.set(TimerKey::Reply(seq), self.now, reply.after);
-                self.timers.set(
-                    TimerKey::Callback(seq),
-                    self.now,
-                    self.scenario.policy.timeout,
-                );
-            }
-        }
-        false
     }
 
     fn fire<B: Binding>(&mut self, key: TimerKey, app: &mut B) {
         match key {
+            TimerKey::Interpreter(timer) => {
+                if timer == InterpreterTimer::Callback && self.run.conclusion == Conclusion::Live {
+                    self.run.failures.push(Failure::Timeout);
+                    self.pending.clear();
+                }
+                self.input(Input::TimerFired(timer.protocol()), app);
+            }
             TimerKey::Reply(seq) => {
-                self.timers.clear(&TimerKey::Callback(seq));
-                if self.outstanding == Some(seq) {
-                    self.outstanding = None;
-                }
-                if let Some(index) = self.answers.iter().position(|(at, _)| *at == seq) {
-                    let (_, outcome) = self.answers.remove(index);
-                    self.apply(seq, outcome);
-                }
-                self.pump(app);
-            }
-            TimerKey::Callback(seq) => {
-                // The app took too long. A reply that turns up later finds its `seq` already
-                // settled and is ignored — which is the same rule redelivery uses.
-                self.answers.retain(|(at, _)| *at != seq);
-                if self.outstanding == Some(seq) {
-                    self.outstanding = None;
-                }
-                self.applied = Some(self.applied.map_or(seq, |a| a.max(seq)));
-                self.fail(Failure::Timeout);
-                self.pump(app);
-            }
-            TimerKey::Gather(id) => {
-                self.resolve_gather(&id, GatherReason::Timeout, app);
-            }
-            TimerKey::Dial(id) => {
-                let leg = format!("leg-{id}");
-                self.occur(
-                    EventKind::DialFinished {
-                        instruction_id: id,
-                        leg,
-                        outcome: DialOutcome::Timeout,
+                let Some(index) = self.pending.iter().position(|reply| reply.seq == seq) else {
+                    return;
+                };
+                let reply = self.pending.remove(index);
+                self.timers
+                    .clear(&TimerKey::Interpreter(InterpreterTimer::Callback));
+                let response = match reply.outcome {
+                    Outcome::Document(document) => Response::Document(document),
+                    Outcome::Body(body) => Response::Body(body),
+                    Outcome::ClientError { .. } => {
+                        self.record_failure(Failure::ClientError);
+                        Response::Failed(sipx_app_protocol::Failure::ClientError)
+                    }
+                    Outcome::ServerError { .. } => {
+                        self.record_failure(Failure::ServerError);
+                        Response::Failed(sipx_app_protocol::Failure::ServerError)
+                    }
+                    Outcome::Unreachable => {
+                        self.record_failure(Failure::Unreachable);
+                        Response::Failed(sipx_app_protocol::Failure::Unreachable)
+                    }
+                    Outcome::Silent => return,
+                };
+                self.input(
+                    Input::Response {
+                        callback: reply.callback,
+                        response,
                     },
                     app,
                 );
@@ -517,195 +513,55 @@ impl<'a> Actor<'a> {
         }
     }
 
-    fn resolve_gather<B: Binding>(&mut self, id: &str, reason: GatherReason, app: &mut B) {
-        if self.running.as_ref().is_none_or(|i| i.id != id) {
-            return;
-        }
-        let digits = self.collected.clone();
-        self.occur(
-            EventKind::GatherFinished {
-                instruction_id: id.to_owned(),
-                digits,
-                reason,
-            },
-            app,
-        );
-    }
-
-    /// Apply what the app said.
-    fn apply(&mut self, seq: u64, outcome: Outcome) {
-        // AC-4: a response for a `seq` already settled is a redelivery's, and changes nothing.
-        if self.applied.is_some_and(|applied| seq <= applied) {
-            return;
-        }
-        self.applied = Some(seq);
-
-        match outcome {
-            Outcome::Document(document) => {
-                if let Some(_verb) = document.is_rejected() {
-                    // §6.4: rejected whole, and the app's declared policy applies as if the
-                    // callback had failed with a 5xx. The prior program is untouched (AC-5).
-                    self.fail(Failure::ServerError);
-                    return;
-                }
-                self.adopt(document);
-            }
-            Outcome::ClientError { .. } => self.fail(Failure::ClientError),
-            Outcome::ServerError { .. } => self.fail(Failure::ServerError),
-            Outcome::Unreachable => self.fail(Failure::Unreachable),
-            Outcome::Silent => {}
+    fn record_failure(&mut self, failure: Failure) {
+        if self.run.conclusion == Conclusion::Live {
+            self.run.failures.push(failure);
         }
     }
 
-    /// Replace the program with this document, then run it (§6.3).
-    fn adopt(&mut self, document: Document) {
-        // An empty document means "keep going" — the one document that changes nothing. See the
-        // module docs for why this is not "replace the program with nothing".
-        if !document.instructions.is_empty() {
-            if let Some(running) = self.running.take() {
-                // Running interruptible work is stopped; a `play` is the case that shows.
-                if matches!(running.verb, Verb::Play { .. }) {
-                    self.run.effects.push(Effect::StopPlay {
-                        id: running.id.clone(),
-                    });
-                }
-                self.timers.clear(&TimerKey::Gather(running.id.clone()));
-                self.timers.clear(&TimerKey::Dial(running.id));
-                self.collected.clear();
-            }
-            // Whatever was still queued is discarded — replacement, not append (AC-3). Queued
-            // instructions never started, so nothing is stopped for them.
-            self.program.clear();
-            self.program.extend(document.instructions);
-        }
-        self.advance();
+    fn now_millis(&self) -> i64 {
+        i64::try_from(self.now.millis()).unwrap_or(i64::MAX)
     }
+}
 
-    /// Execute instructions in order until one blocks or the queue empties (§6.1).
-    fn advance(&mut self) {
-        while self.running.is_none() {
-            let Some(instruction) = self.program.pop_front() else {
-                return;
-            };
-            let blocks = instruction.verb.blocks();
-            self.execute(&instruction);
-            if blocks && self.run.conclusion == Conclusion::Live {
-                self.running = Some(instruction);
-                return;
-            }
-        }
-    }
-
-    fn execute(&mut self, instruction: &Instruction) {
-        let id = instruction.id.clone();
-        match &instruction.verb {
-            Verb::Answer => self.run.effects.push(Effect::Answer),
-            Verb::Play { source, .. } => self.run.effects.push(Effect::StartPlay {
-                id,
-                source: source.clone(),
-            }),
-            Verb::Gather { timeout, .. } => {
-                self.collected.clear();
-                self.run
-                    .effects
-                    .push(Effect::StartGather { id: id.clone() });
-                self.timers.set(TimerKey::Gather(id), self.now, *timeout);
-            }
-            Verb::Dial { target, timeout } => {
-                self.run.legs.push(format!("leg-{id}"));
-                self.run.effects.push(Effect::Dial {
-                    id: id.clone(),
-                    target: target.clone(),
-                });
-                self.timers.set(TimerKey::Dial(id), self.now, *timeout);
-            }
-            Verb::Hangup { cause } => {
-                self.run.effects.push(Effect::Hangup {
-                    cause: cause.clone(),
-                });
-                self.end(cause.clone());
-            }
-            Verb::Reject { status } => {
-                self.run.effects.push(Effect::Reject { status: *status });
-                self.end(EndCause::Rejected { status: *status });
-            }
-            Verb::Other(name) => self.run.effects.push(Effect::Other {
-                id,
-                verb: name.clone(),
-            }),
-            // Never reached: §6.4 rejects the document before it is adopted.
-            Verb::Unknown(_) => {}
-        }
-    }
-
-    /// The declared response to a failure (§9.2). Never a hard-coded one — ground rule 3.
-    fn fail(&mut self, failure: Failure) {
-        // A call that is already over cannot be hung up twice. The app still receives `call.ended`
-        // and may still answer it badly; that answer has nothing left to act on, and counting it
-        // would report a second consultation of a knob that was only consulted once.
-        if self.run.conclusion != Conclusion::Live {
-            return;
-        }
-        self.run.failures.push(failure);
-        match self.scenario.policy.action_for(failure).clone() {
-            // "Keep program" is not "stop": whatever was queued behind the instruction that just
-            // resolved carries on, which is what AC-5 means by the prior program still running.
-            OnFailure::Continue => self.advance(),
-            OnFailure::Hangup => {
-                self.run.effects.push(Effect::Hangup {
-                    cause: EndCause::Hangup,
-                });
-                self.end(EndCause::Hangup);
-            }
-            OnFailure::Reject { status } => {
-                self.run.effects.push(Effect::Reject { status });
-                self.end(EndCause::Rejected { status });
-            }
-        }
-    }
-
-    /// The call is over: stop the program and queue the last event the app will see.
-    fn end(&mut self, cause: EndCause) {
-        if self.run.conclusion != Conclusion::Live {
-            return;
-        }
-        self.run.conclusion = Conclusion::Ended(cause.clone());
-        self.program.clear();
-        self.running = None;
-        let event = Event {
-            seq: self.next_seq,
-            kind: EventKind::Ended { cause },
-        };
-        self.next_seq += 1;
-        self.history.push(event.clone());
-        self.enqueue(event);
+fn effect_name(effect: &sipx_app_protocol::Effect) -> &'static str {
+    match effect {
+        sipx_app_protocol::Effect::Ring { .. } => "ring",
+        sipx_app_protocol::Effect::Record { .. } => "record",
+        sipx_app_protocol::Effect::SendDigits { .. } => "send_dtmf",
+        sipx_app_protocol::Effect::Bridge { .. } => "bridge",
+        sipx_app_protocol::Effect::Unbridge => "unbridge",
+        sipx_app_protocol::Effect::Hold => "hold",
+        sipx_app_protocol::Effect::Resume => "resume",
+        sipx_app_protocol::Effect::Mute => "mute",
+        sipx_app_protocol::Effect::Unmute => "unmute",
+        sipx_app_protocol::Effect::Transfer { .. } => "transfer",
+        sipx_app_protocol::Effect::AcceptTransfer => "accept_transfer",
+        sipx_app_protocol::Effect::RefuseTransfer { .. } => "refuse_transfer",
+        _ => "contract-effect",
     }
 }
 
 /// What a scenario should have produced.
-///
-/// Data, like the scenario itself — acceptance point 1's "plus the expected effects and outcomes".
-/// Keeping it data rather than a closure is what lets `A-2` and `A-4` run the same vectors through
-/// their own binding and get the same verdict, instead of each restating the assertions.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Expectation {
-    /// The effects the host must have executed, in order. `None` asserts nothing about them.
+    /// Exact effects, when specified.
     pub effects: Option<Vec<Effect>>,
-    /// Effects that must **not** appear, whatever else does.
+    /// Effects that must be absent.
     pub without: Vec<Effect>,
-    /// How the call must have finished.
+    /// Expected conclusion.
     pub conclusion: Option<Conclusion>,
-    /// The `seq` of every delivered event, in delivery order.
+    /// Exact delivered sequence numbers.
     pub delivered_seqs: Option<Vec<u64>>,
-    /// The §9.2 knobs that must have been consulted, in order.
+    /// Exact binding failures.
     pub failures: Option<Vec<Failure>>,
-    /// The legs the snapshot must list.
+    /// Final leg names.
     pub legs: Option<Vec<String>>,
-    /// Whether `call.ended` must have reached the app.
+    /// Whether the terminal event reached the binding.
     pub app_saw_ended: Option<bool>,
-    /// An event of this type must have been delivered, equal to this.
+    /// An exact event that must have been delivered.
     pub delivered_event: Option<EventKind>,
-    /// Whether anything must have been dropped by the queue's overflow policy.
+    /// Whether any event was dropped.
     pub dropped_any: Option<bool>,
 }
 
@@ -716,56 +572,56 @@ impl Expectation {
         Self::default()
     }
 
-    /// Exactly these effects, in this order.
+    /// Exactly these effects.
     #[must_use]
     pub fn effects(mut self, effects: Vec<Effect>) -> Self {
         self.effects = Some(effects);
         self
     }
 
-    /// And none of these, anywhere.
+    /// And none of these effects.
     #[must_use]
     pub fn without(mut self, effects: Vec<Effect>) -> Self {
         self.without = effects;
         self
     }
 
-    /// Finishing like this.
+    /// Finishing this way.
     #[must_use]
     pub fn conclusion(mut self, conclusion: Conclusion) -> Self {
         self.conclusion = Some(conclusion);
         self
     }
 
-    /// Delivering these `seq`s, in this order.
+    /// Delivering these sequence numbers.
     #[must_use]
     pub fn delivered_seqs(mut self, seqs: Vec<u64>) -> Self {
         self.delivered_seqs = Some(seqs);
         self
     }
 
-    /// Consulting these knobs, in this order.
+    /// Presenting these failures to the interpreter.
     #[must_use]
     pub fn failures(mut self, failures: Vec<Failure>) -> Self {
         self.failures = Some(failures);
         self
     }
 
-    /// Leaving the snapshot listing these legs.
+    /// Leaving these legs in the snapshot.
     #[must_use]
     pub fn legs(mut self, legs: Vec<String>) -> Self {
         self.legs = Some(legs);
         self
     }
 
-    /// With `call.ended` reaching the app, or not.
+    /// With the terminal event seen or unseen.
     #[must_use]
     pub fn app_saw_ended(mut self, saw: bool) -> Self {
         self.app_saw_ended = Some(saw);
         self
     }
 
-    /// Having delivered this exact event.
+    /// Having delivered this event.
     #[must_use]
     pub fn delivered_event(mut self, kind: EventKind) -> Self {
         self.delivered_event = Some(kind);
@@ -779,10 +635,7 @@ impl Expectation {
         self
     }
 
-    /// Check a run against this, naming the first thing that disagrees.
-    ///
-    /// # Errors
-    /// The mismatch, described well enough to act on without re-reading the scenario.
+    /// Check a run, returning the first useful mismatch.
     pub fn check(&self, run: &Run) -> Result<(), String> {
         let at = &run.name;
         if let Some(expected) = &self.effects
@@ -839,11 +692,14 @@ impl Expectation {
             ));
         }
         if let Some(expected) = &self.delivered_event
-            && !run.delivered.iter().any(|e| &e.kind == expected)
+            && !run.delivered.iter().any(|event| &event.kind == expected)
         {
             return Err(format!(
                 "{at}: expected {expected:?} among delivered, got {:?}",
-                run.delivered.iter().map(|e| &e.kind).collect::<Vec<_>>()
+                run.delivered
+                    .iter()
+                    .map(|event| &event.kind)
+                    .collect::<Vec<_>>()
             ));
         }
         if let Some(expected) = self.dropped_any
@@ -854,46 +710,40 @@ impl Expectation {
                 run.dropped
             ));
         }
-        // AC-9's invariant, checked on every vector rather than only the one that poses it: an
-        // overflow may discard anything except the call's last word.
-        if run.dropped.iter().any(EventKind::is_ended) {
-            return Err(format!(
-                "{at}: call.ended was dropped, which must never happen"
-            ));
+        if run
+            .dropped
+            .iter()
+            .any(|event| matches!(event, EventKind::Ended { .. }))
+        {
+            return Err(format!("{at}: call.ended was dropped"));
         }
         Ok(())
     }
 }
 
-/// A scenario and what it should produce.
+/// A scenario paired with its expected result.
 #[derive(Debug)]
 pub struct Vector {
     /// What happens.
     pub scenario: Scenario,
-    /// What should come of it.
+    /// What must result.
     pub expect: Expectation,
 }
 
 impl Vector {
-    /// Pair a scenario with its expectation.
+    /// Pair data and expectation.
     #[must_use]
     pub fn new(scenario: Scenario, expect: Expectation) -> Self {
         Self { scenario, expect }
     }
 
-    /// Run it against the harness's own scripted app.
-    ///
-    /// # Errors
-    /// Whatever disagreed.
+    /// Check against the built-in scripted binding.
     pub fn check(self) -> Result<(), String> {
         let run = self.scenario.run();
         self.expect.check(&run)
     }
 
-    /// Run it against a binding of the caller's own — `A-2`'s HTTP client, `A-4`'s session.
-    ///
-    /// # Errors
-    /// Whatever disagreed.
+    /// Check against another deterministic binding.
     pub fn check_against<B: Binding>(&self, app: &mut B) -> Result<(), String> {
         let run = self.scenario.run_against(app);
         self.expect.check(&run)

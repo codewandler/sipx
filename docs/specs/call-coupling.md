@@ -12,8 +12,9 @@ bridge (§3.1.3) or with the channel-based terminating bridge (§3.2.3).
 The primitive has three layers. `CouplingState` is sans-I/O and describes every legal offer
 carrier. `EarlyCoupling` owns an inbound `Invitation`/`Ringing`, an outbound `Dialing`, and both
 routed inboxes until cancellation, refusal, or confirmation. `Coupling` then owns the two confirmed
-`Call`s. The application creates and routes the two user-agent legs; the coupling owns them once
-joined.
+`Call`s. `EarlyCoupling::dial` consumes the inbound invitation before it creates the outbound
+initial INVITE, so the object owns the first relayed axis as well as all later ones. Routing and
+target selection remain application policy and are inputs to that constructor.
 
 ## 2. Types and ownership
 
@@ -35,6 +36,15 @@ on the other's media worker.
 
 `begin_offer(source, axis)` is the one entry point for an offer, whether its carrier is the initial
 INVITE, a reliable provisional, PRACK, UPDATE or re-INVITE.
+
+For a confirmed request, the coupling performs three read-only checks before `begin_offer` and
+before sending anything on the peer leg: the request matches the source dialog, its CSeq is fresh,
+and the source `Call` can answer the offer. That last check is the call's own renegotiation
+preparation without its state-changing half: SDP must parse, contain usable active audio, negotiate
+one of the call's codecs, and use a keying mode that supports renegotiation. A wrong dialog receives
+481; an unacceptable description receives 488. Neither opens coupling state or traffic on the peer
+leg. The eventual source `Call::handle` applies the same preparation, so preflight and acceptance
+cannot become two definitions of usable media.
 
 | Source state | Peer state | Result | New source / peer state |
 |---|---|---|---|
@@ -64,22 +74,35 @@ protocol error: RFC 3261 §14.1 assigns the randomised retry to the request's UA
 after the outstanding exchange settles enters `begin_offer` as a new transaction and is relayed.
 No timer is read and no stale network request is retained by this state machine.
 
-### 4.1 Executable early axes and remaining gap
+### 4.1 Executable early axes and remaining gaps
 
-The application creates the two initial INVITE legs and their `Ringing`/`Dialing` state before the
-ownership handoff; `EarlyCoupling` does not claim to relay those already-sent requests or
-provisionals. From the handoff it executes the offer shape the present public call API can create:
-both reliable 183 answers are PRACKed, and an offer-carrying UPDATE on either early dialog is relayed
-before its source receives an answer. It keeps polling the far inbox during that UPDATE, so its
-glare decision is live too. Initial-INVITE relay by the owning object therefore remains part of the
-all-axis acceptance gap as well.
+`EarlyCoupling::dial` reads the source initial offer's audio direction before consuming its
+`Invitation`, preserves that direction on the target leg, and creates the target INVITE while it is
+the sole owner. Direction is endpoint-relative: if the source offers `sendonly`, the coupling
+receives on that leg and must offer `sendonly` on the target leg to forward the same flow. Inverting
+it would make the coupling receive on both legs. SDP addresses, ports, keys and ICE credentials are
+deliberately regenerated per leg: this is a pair of user agents, not a proxy copying endpoint
+coordinates between networks.
 
-Two legal RFC 3262 shapes remain policy-only: an offer that *originates* in a reliable provisional,
-and its answer in PRACK (or an offer originating in PRACK). `ring_early` only answers the initial
-INVITE offer, `Dialing` only interprets provisional SDP as that answer, and `Ringing::on_prack`
-settles RAck without SDP negotiation. Executing those axes requires extending those three APIs to
-surface an offer-bearing provisional and negotiate a PRACK body; naming `OfferAxis` does not claim
-that wire support. Consequently C-1's all-axis acceptance item remains open.
+The call layer exposes both halves of RFC 3262 section 5's delayed-offer shape.
+`dial_early_without_offer` sends an
+offerless INVITE. An SDP-bearing reliable provisional is therefore an offer rather than an answer;
+the `Dialing` owns its negotiated answer, sends that answer in PRACK, and starts the same media
+session the confirmed `Call` later inherits. In the other role, `ring_offer_early` puts an offer in
+a reliable provisional and `Ringing::on_prack` validates and adopts the answer before returning a
+2xx. A missing or unusable PRACK answer receives 488 and cannot make the ringing state look
+negotiated. Both paths use the early dialog's own sequence space. They are prerequisites, not a
+claim that `EarlyCoupling` relays that exchange: the coupling must still hold the target PRACK while
+the source leg's provisional offer obtains its answer.
+
+After either initial shape has settled, offer-carrying UPDATEs on either early dialog are relayed
+before its source receives an answer. The driver keeps polling the far inbox during that UPDATE,
+so its glare decision remains live.
+
+An unattached media bridge means no forwarding task, but each `Call` still binds and advertises a
+local media endpoint. That is media termination without forwarding, not RFC 7092 section 3.1.3's
+off-media-path role. A transparent SDP mapping is required before signalling-only coupling is a
+truthful claim.
 
 ## 5. Lifecycle table
 
@@ -97,13 +120,14 @@ owned, or an independent terminal event ends both through BYE.
 
 ## 6. Media policy
 
-There is no signalling-only enum. A fresh coupling has no bridge. `bridge_media` attaches the
-existing channel-based bridge to the two sessions and reports whether it transcodes. Dropping or
-closing the coupling drops the bridge before the calls and stops both forwarding tasks.
+There is no signalling-only enum. A fresh coupling has no forwarding bridge, but its two `Call`s
+remain media-terminating sessions. `bridge_media` attaches the existing channel-based bridge to
+those sessions and reports whether it transcodes. Dropping or closing the coupling drops the bridge
+before the calls and stops both forwarding tasks.
 
-An application implementing RFC 7092 §3.1.3 follows the `CouplingState` actions and relays SDP while
-leaving the bridge unattached. An application implementing §3.2.3 negotiates the two sessions at
-the B2BUA and calls `bridge_media`.
+An application implementing RFC 7092 §3.2.3 negotiates the two sessions at the B2BUA and calls
+`bridge_media`. Section 3.1.3 remains open: it needs a distinct transparent SDP mapping whose calls
+do not bind or advertise local media endpoints.
 
 ## 7. Test vectors
 
@@ -113,6 +137,8 @@ the B2BUA and calls `bridge_media`.
 | O2 | offer from leg two while leg one's relay is outstanding | 491; no forwarded request |
 | O3 | complete O2's outstanding exchange; the remote UAC sends a new retry | the new transaction is relayed |
 | O4 | a second offer while this coupling owes an answer on its source leg | 500; state unchanged |
+| O5 | syntactically valid offer names the wrong source dialog | source receives 481; peer leg receives no request |
+| O6 | malformed SDP, no common codec, or unsupported renegotiation keying | source receives 488; peer leg receives no request and coupling state remains idle |
 | L1 | BYE on leg one of two confirmed calls | leg one answers 200; leg two receives BYE; driver ends |
 | L2 | CANCEL before outbound confirmation | outbound action is CANCEL |
 | L3 | CANCEL after both dialogs confirm | no teardown action and both dialogs remain owned |
@@ -120,5 +146,8 @@ the B2BUA and calls `bridge_media`.
 | L5 | final failure after peer confirmation | BYE the peer; never synthesize an INVITE response |
 | L6 | inbound CANCEL while `EarlyCoupling` owns a pending outbound INVITE | outbound receives CANCEL; driver returns cancelled |
 | E1 | reliable answers on both early legs, followed by PRACK and an offer-carrying UPDATE | both PRACKs complete; UPDATE offer and answer cross before either INVITE final |
+| E2 | source initial INVITE carries `sendonly`; owning coupling creates target leg | target initial INVITE carries `sendonly`; both pending legs remain owned by the coupling |
+| E3 | offerless INVITE; reliable 183 carries an offer | PRACK carries the answer; both sides hold an early session before either final response |
+| E4 | E3 with a PRACK carrying no SDP answer | PRACK receives 488; the ringing side has no early session and cannot confirm as negotiated |
 | M1 | fresh coupling | no media bridge and no forwarding task |
 | M2 | `bridge_media` | audio crosses in both directions over the existing bridge |

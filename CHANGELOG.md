@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Live calls can select authenticated caller identity (`S-34`).** `DialOptions` can sign each
+  outbound INVITE attempt with a caller-owned authentication service and time source; `Dispatcher`
+  can require or optionally verify inbound identity before an answerable invitation exists.
+  Ordinary calls remain unchanged. Live tests prove an independently parsed and verified outbound
+  wire token, invalid-signature refusal with 438 before application delivery, and required missing
+  identity with 428. This first call-layer consumer graduates `sipx_ua::identity` from Experimental
+  to Supported.
+
 - **Loaded SIP neighbours can negotiate bounded overload control (`T-22`).** Clients advertise and
   obey loss- and rate-based control through typed `Via` parameters, discard stale reports, and
   expose a prioritisation hook. Servers decorate every response—including transaction-generated
@@ -18,9 +26,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Two live dialogs can be owned and driven through one coupling (`C-1`, partial).** The coupling
   propagates final failure, cancellation, BYE, confirmed UPDATE and re-INVITE offer/answer while
   retaining optional media bridging. Its early state owns both pending legs, handles reliable
-  provisional acknowledgements and early UPDATE, and closes crossed-answer races with BYE. Initial
-  INVITE relay and offer/answer carried by reliable provisional responses or PRACK remain explicit
-  open axes, so the story and M9 remain in progress.
+  provisional acknowledgements and early UPDATE, and closes crossed-answer races with BYE. Its
+  owning initial constructor maps a source offer onto fresh target-leg SDP before handing out any
+  pending state. The delayed-offer path can originate an offer in a reliable provisional, negotiate
+  its answer in PRACK, and retain that early media through confirmation. Confirmed relays prove the
+  source call can accept an offer—including codec and keying constraints—before sending anything
+  on the far leg. Relaying that delayed exchange across both coupled legs, and a truly
+  off-media-path SDP mapping, remain open.
 
 - **Webhook applications can drive real calls through the document-mode host (`A-2`).**
   `sipx-app` resolves named signing keys at startup, sends stable HMAC-signed contract envelopes
@@ -30,7 +42,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   redirects and key rotation, and a shell proof drives the same path from the `sipx` CLI. This real
   caller graduates the protocol crate's Rust vocabulary, codec, interpreter and call adapter to
   Supported; the `sipx.app.v1` wire name remains Experimental until its separate two-application
-  criterion is met.
+  criterion is met. The deterministic harness now drives that same interpreter instead of its
+  provisional instruction model; its experimental instruction constructors are replaced by the
+  protocol crate's supported vocabulary. Call actors continue servicing SIP and timers while an
+  HTTP callback is outstanding, so a peer BYE is acknowledged and its terminal event delivered
+  even when the callback reaches its declared timeout. The host now supervises and cooperatively
+  joins every actor across endpoint closure or serving-future cancellation, bounds active actors
+  and their queues, refuses saturation with 503, and uses generation-scoped admission completion
+  so a late actor cannot retire a replacement call with the same Call-ID.
 
 - **The diagnostic phone can run finite, reproducible call load (`P-12`).** `sipx load` reuses the
   paced `sipx-testkit` scheduler, requires rate, concurrency and a call-count or duration bound, and

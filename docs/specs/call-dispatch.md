@@ -109,6 +109,7 @@ a `DispatchCounts` — the same shape and the same reasoning as `Handle::shed` (
 | `unsupported` | out-of-dialog requests answered `405` | 9 |
 | `malformed` | requests answered `400` for naming no dialog at all | 1 |
 | `merged` | INVITEs answered `482` | 2 |
+| `identity` | initial INVITEs refused by a selected RFC 8224 verification policy | `sip-identity` §7 |
 
 `DispatchCounts::total()` is every field, and **every refusal the table makes is on one of them**.
 The last two exist because the first version of this type had four and the `400` and `482` branches

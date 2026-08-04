@@ -1,6 +1,6 @@
 # SIP authenticated identity and PASSporT
 
-**Status:** implementing (`S-20`) · **Crates:** `sipx-sip`, `sipx-ua`
+**Status:** implementing (`S-20`, `S-34`) · **Crates:** `sipx-sip`, `sipx-ua`, `sipx-call`
 
 Normative references: RFC 8224 §§4, 6.1, 6.2, 7 and 8; RFC 8225 §§4–9 and Appendix A;
 RFC 7515 §5.1; RFC 7518 §3.4; RFC 6979 §3.2.
@@ -132,3 +132,43 @@ bad signature that reached Step 5 is 438 rather than generic 400.
 The Appendix A key material is an RFC-owned interoperability oracle, not a sipx round trip. P2 uses
 the same request/key but corrupts the signature, which proves the named 438 path reaches the actual
 cryptographic verifier.
+
+## 7. Live-call composition
+
+`sipx-call` composes these sans-I/O services without acquiring any of their inputs. An outbound
+identity policy owns an `AuthenticationService` and a caller-supplied function returning Unix time.
+`DialOptions` selects that policy explicitly. Every initial INVITE attempt is built first, then
+signed immediately before it enters the transport; authentication and session-interval retries
+therefore receive a fresh `Date` and `Identity` rather than copying either from an earlier attempt.
+No selected policy means the builder is byte-for-byte unchanged and no authority or clock function
+is called.
+
+An inbound identity policy owns a `VerificationService`, the required/optional decision, and a
+caller-supplied time function. It belongs to `Dispatcher`, because that is the only point that owns
+the endpoint request stream before an application receives an `Invitation`. For a new initial
+INVITE, verification runs after basic dialog and merged-request checks but before a route or
+invitation is reserved:
+
+| Verification result | Dispatcher action |
+|---|---|
+| verified | reserve and surface `Dispatched::Invitation` |
+| unverified, identity optional | reserve and surface normally |
+| 428 / 436 / 437 / 403 / 438 | send that final response; increment `identity`; surface nothing |
+
+This placement makes “before the application answers” structural: a rejected INVITE never becomes
+an `Invitation` on which `answer` could be called. The time function and credential fetcher are
+application values; neither `sipx-call`, `sipx-ua`, nor `sipx-sip` reads a clock or dereferences the
+attacker-controlled `info` URI by itself.
+
+Two live-call vectors extend §6:
+
+| ID | Input | Required result |
+|---|---|---|
+| P8 | outbound `DialOptions` selecting the RFC Appendix A credential | the wire INVITE carries an `Identity` whose JWS signing input and ES256 signature are accepted by a cryptographic implementation that shares neither sipx's PASSporT serializer nor verifier |
+| P9 | dispatcher requiring identity; signed INVITE with one changed signature octet | `438 Invalid Identity Header`; no `Dispatched::Invitation` reaches the application |
+
+P8 parses the received wire field independently, checks its outer `info` and `alg` parameters and
+the SIP `Date`, reconstructs the JWS signing input directly from its two encoded segments, converts
+the RFC 7518 raw `R || S` signature to the verifier's native form, and verifies it with a separately
+embedded RFC-owned public-key fixture. It does not call `sipx-sip::identity` to parse, serialize, or
+verify the token, and the verifier never receives the signing key.

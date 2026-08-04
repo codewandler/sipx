@@ -24,15 +24,16 @@ the answer relayed back, a re-INVITE or a BYE on one leg has a defined consequen
 - [ ] An offer is relayed wherever it can legally arrive — the initial INVITE, a reliable provisional
       (`C-2`), a PRACK, an UPDATE (`S-19`) or a re-INVITE — and the answer relayed back on the same
       axis. An offer/answer state model per leg, not one shared one.
-- [ ] Glare is resolved rather than propagated. If a re-INVITE is outstanding on leg B when one
-      arrives on leg A, leg A gets **491** and the coupling retries after the outstanding exchange
-      completes; it does not forward a request the far end will refuse.
+- [x] Glare is resolved rather than propagated. If a re-INVITE is outstanding on leg B when one
+      arrives on leg A, leg A gets **491** and its UAC's fresh randomised retry is accepted after
+      the outstanding exchange completes; the coupling does not forward a request the far end will
+      refuse or replay a completed server transaction.
 - [x] Terminating either leg terminates the other, with a defined mapping from the reason: a 4xx/5xx
       on the outbound leg becomes a final response on the inbound one; a BYE on either becomes a BYE
       on the other.
 - [x] A CANCEL on the inbound leg cancels the outbound leg if it has not been answered, and does
       nothing that leaves a dialog behind if it has.
-- [x] A signalling-only coupling is possible: the same object with no media bridge attached, for the
+- [ ] A signalling-only coupling is possible: the same object with no media bridge attached, for the
       RFC 7092 §3.1.3 role — "understands SDP syntax but remains off the media path". Whether that
       is a mode or a consequence of not calling `bridge` is the design's choice, and it is recorded.
 - [x] `docs/designs/edge.md` is updated with what was decided, including the two open questions it
@@ -51,11 +52,23 @@ the answer relayed back, a re-INVITE or a BYE on one leg has a defined consequen
   before either INVITE has a final response, maps outbound final refusal onto the inbound INVITE,
   cancels a pending outbound leg, and BYEs an outbound leg whose 2xx crossed cancellation. It
   hands both confirmed calls and their inboxes over as `ConfirmedCoupling`.
+- Added the owning initial constructor `EarlyCoupling::dial`: it consumes the source invitation
+  before creating the target INVITE, maps the source audio direction onto fresh per-leg SDP, and
+  retains cancellation responsibility while the target early dialog is established.
+- Added the call primitives needed for RFC 3262's delayed-offer path. `ring_offer_early` originates an offer in a reliable
+  provisional, `dial_early_without_offer` negotiates it and returns the answer in PRACK, and
+  `Ringing::on_prack` adopts that answer into the same early media session confirmation inherits.
+  The two-leg coupling still needs to hold the target PRACK until the source leg's provisional
+  offer returns its answer; the standalone call proof does not claim that relay is complete.
 - Implemented `sipx_call::Coupling`, which solely owns two confirmed `Call`s, relays UPDATE and
   re-INVITE negotiation in either direction, accepts a BYE before ending the peer with BYE, and
-  treats a closed routed inbox as terminal rather than orphaning the other dialog. A fresh coupling
-  is signalling-only; `bridge_media` explicitly attaches and rebuilds `M-11`'s bounded-channel
-  bridge after renegotiation.
+  treats a closed routed inbox as terminal rather than orphaning the other dialog. `bridge_media`
+  explicitly attaches and rebuilds `M-11`'s bounded-channel bridge after renegotiation. Without a
+  bridge the calls still terminate media locally, so this is not yet the signalling-only role.
+- Confirmed offer relay preflights the source `Call` without mutation before opening coupling state
+  or sending on the peer leg. Dialog identity, ordering, SDP syntax, active audio, negotiated codec,
+  and renegotiation keying are therefore source-local refusals. Live regressions prove the far leg
+  receives no request for a wrong dialog, malformed SDP, or valid SDP with no common codec.
 - Added the normative state/lifecycle tables and byte-independent vectors in
   `docs/specs/call-coupling.md`, resolved both design questions in `docs/designs/edge.md`, and added
   RFC 7092 to the compliance registry with the `uac` and `uas` roles.
@@ -63,19 +76,16 @@ the answer relayed back, a re-INVITE or a BYE on one leg has a defined consequen
   re-INVITE axis before the initiating response completes, bridged audio crosses, and a BYE on one
   leg is answered before the other leg receives its BYE. Executable early tests prove PRACK plus an
   offer-carrying UPDATE before confirmation, CANCEL propagation, and identical outbound/inbound
-  final status. Unit vectors cover the complete legal-axis policy table.
-  The acceptance wording says the coupling retries after 491; the protocol-correct implementation
-  instead accepts the request UAC's fresh, randomised retry after settlement. A 491 is a final
-  response, so retaining and replaying its old `Incoming` would reuse a completed transaction.
-- Two acceptance items remain deliberately unchecked. The call API cannot yet originate an SDP
-  offer in a reliable provisional or negotiate an offer/answer in a PRACK body: `ring_early` only
-  answers the initial INVITE offer, `Dialing` treats provisional SDP as that answer, and
-  `Ringing::on_prack` handles RAck but no SDP. The application also creates both initial INVITE legs
-  before handing their pending state to `EarlyCoupling`, so the owner does not itself relay that
-  already-sent axis. The precise extensions are recorded in the coupling spec and edge design. The
-  glare item also literally assigns retry to the coupling, while RFC 3261 §14.1 assigns a fresh
-  randomized request to the UAC that received 491; live 491 and that fresh peer retry are tested,
-  but the contradictory wording is not checked as met.
+  final status. `the_owning_coupling_relays_the_initial_invite_offer` proves the owner creates and
+  remains responsible for the target initial leg; `a_reliable_provisional_offer_is_answered_in_prack`
+  proves both RFC 3262 carrier primitives and retained early media, but not yet their two-leg relay.
+  Unit vectors cover the complete
+  legal-axis policy table. The glare vector proves a live 491 and the request UAC's fresh retry after
+  settlement; retaining and replaying the old `Incoming` would reuse a completed transaction.
+- A coupling without an attached `Bridge` creates no forwarding tasks, but both owned `Call`s still
+  advertise and terminate media locally. That is not RFC 7092 section 3.1.3's off-media-path role;
+  a transparent SDP mapping that does not bind sipx media remains open, so the signalling-only
+  acceptance item stays unchecked.
 
 ## Notes
 - Scope discipline is the whole point of this story. It is the primitive, not the product: no

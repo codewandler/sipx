@@ -96,15 +96,25 @@ impl FailurePolicy {
         self
     }
 
-    /// The action declared for a given failure.
+    /// Convert the host declaration into the sole interpreter's policy value.
     #[must_use]
-    pub fn action_for(&self, failure: Failure) -> &OnFailure {
-        match failure {
-            Failure::Timeout => &self.on_timeout,
-            Failure::ServerError => &self.on_5xx,
-            Failure::Unreachable => &self.on_unreachable,
-            Failure::ClientError => &self.on_4xx,
+    pub(crate) fn protocol(&self) -> sipx_app_protocol::Policy {
+        sipx_app_protocol::Policy {
+            timeout_ms: u32::try_from(self.timeout.as_millis()).unwrap_or(u32::MAX),
+            on_timeout: protocol_action(&self.on_timeout),
+            on_5xx: protocol_action(&self.on_5xx),
+            on_unreachable: protocol_action(&self.on_unreachable),
+            on_4xx: protocol_action(&self.on_4xx),
+            dial_headers: Vec::new(),
         }
+    }
+}
+
+fn protocol_action(action: &OnFailure) -> sipx_app_protocol::OnFailure {
+    match action {
+        OnFailure::Continue => sipx_app_protocol::OnFailure::Continue,
+        OnFailure::Hangup => sipx_app_protocol::OnFailure::Hangup,
+        OnFailure::Reject { status } => sipx_app_protocol::OnFailure::Reject { status: *status },
     }
 }
 
@@ -178,16 +188,23 @@ mod tests {
             .on_unreachable(OnFailure::Continue)
             .on_4xx(OnFailure::Hangup);
 
-        assert_eq!(policy.action_for(Failure::Timeout), &OnFailure::Hangup);
+        let protocol = policy.protocol();
         assert_eq!(
-            policy.action_for(Failure::ServerError),
-            &OnFailure::Reject { status: 503 }
+            protocol.on(sipx_app_protocol::Failure::Timeout),
+            sipx_app_protocol::OnFailure::Hangup
         );
         assert_eq!(
-            policy.action_for(Failure::Unreachable),
-            &OnFailure::Continue
+            protocol.on(sipx_app_protocol::Failure::ServerError),
+            sipx_app_protocol::OnFailure::Reject { status: 503 }
         );
-        assert_eq!(policy.action_for(Failure::ClientError), &OnFailure::Hangup);
+        assert_eq!(
+            protocol.on(sipx_app_protocol::Failure::Unreachable),
+            sipx_app_protocol::OnFailure::Continue
+        );
+        assert_eq!(
+            protocol.on(sipx_app_protocol::Failure::ClientError),
+            sipx_app_protocol::OnFailure::Hangup
+        );
     }
 
     #[test]

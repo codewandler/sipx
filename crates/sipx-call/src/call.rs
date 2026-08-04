@@ -26,6 +26,7 @@ pub use sipx_sip::auth::Credentials;
 use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
 use crate::event::{CallEvent, CallEvents, EndCause, EventSink};
+use crate::identity::OutboundIdentityPolicy;
 use crate::transfer::{
     Referral, Replaces, Transfer, TransferState, is_terminated, parse_sipfrag, sipfrag,
 };
@@ -128,6 +129,18 @@ pub struct Call {
     /// call. Retained because the application cannot recover it after the transaction stream is
     /// consumed by call setup.
     history: Option<HistoryInfo>,
+}
+
+/// The pure half of accepting a peer's in-dialog offer.
+///
+/// Kept as one value so [`Call::can_accept_offer`] and [`Call::renegotiate`] cannot drift: the
+/// coupling asks the first question before it changes its other leg, and the call later applies
+/// exactly the description that passed that check.
+struct PreparedRenegotiation {
+    offer: SessionDescription,
+    negotiated: Negotiated,
+    answer: SessionDescription,
+    direction: Direction,
 }
 
 /// A negotiated session timer and the deadline it is currently counting down to.
@@ -651,38 +664,57 @@ impl Call {
     ///
     /// Shared by the two paths because they ask exactly the same question of exactly the same
     /// session and differ only in what carries the answer back.
-    async fn renegotiate(&mut self, body: &[u8]) -> Result<Option<SessionDescription>> {
+    fn prepare_renegotiation(&self, body: &[u8]) -> Option<PreparedRenegotiation> {
         if self.keying == Keying::DtlsSrtp {
-            return Ok(None);
+            return None;
         }
-        let Ok(offer) = sipx_sdp::parse(&String::from_utf8_lossy(body)) else {
-            return Ok(None);
-        };
-        let Ok(renegotiated) = negotiated(&offer, self.codecs) else {
-            return Ok(None);
-        };
+        let offer = sipx_sdp::parse(&String::from_utf8_lossy(body)).ok()?;
+        let negotiated = negotiated(&offer, self.codecs).ok()?;
 
         let capabilities = self
             .codecs
             .capabilities(self.media_address, self.media.local_addr().port());
-        let mut answer_sdp = sipx_sdp::answer(&offer, &capabilities);
-        if answer_sdp
+        let answer = sipx_sdp::answer(&offer, &capabilities);
+        if answer
             .media
             .iter()
             .all(sipx_sdp::MediaDescription::is_rejected)
         {
-            return Ok(None);
+            return None;
         }
-        self.answer_ice(&offer, &mut answer_sdp).await;
+        let direction = offer
+            .media
+            .iter()
+            .find(|media| media.media == "audio" && !media.is_rejected())
+            .map(sipx_sdp::MediaDescription::direction)?;
+        Some(PreparedRenegotiation {
+            offer,
+            negotiated,
+            answer,
+            direction,
+        })
+    }
+
+    /// Whether this call can answer an in-dialog offer, without changing call or media state.
+    ///
+    /// The coupling uses this before opening an exchange on its other leg. Syntax alone is not
+    /// enough: the source call may have no common codec or may use DTLS-SRTP, whose renegotiation
+    /// this layer deliberately refuses.
+    pub(crate) fn can_accept_offer(&self, body: &[u8]) -> Option<Direction> {
+        self.prepare_renegotiation(body)
+            .map(|prepared| prepared.direction)
+    }
+
+    async fn renegotiate(&mut self, body: &[u8]) -> Result<Option<SessionDescription>> {
+        let Some(mut prepared) = self.prepare_renegotiation(body) else {
+            return Ok(None);
+        };
+        self.answer_ice(&prepared.offer, &mut prepared.answer).await;
 
         // Hold is a direction, not a separate state: `sendonly` or `inactive` from the far end
         // means it will not play what we send.
         let was_on_hold = self.is_on_hold();
-        self.hold = offer
-            .media
-            .iter()
-            .find(|m| m.media == "audio" && !m.is_rejected())
-            .map_or(Direction::SendRecv, sipx_sdp::MediaDescription::direction);
+        self.hold = prepared.direction;
         // Emitted right where `hold` changes, not by polling it afterwards — a renegotiation
         // that does not change the direction (a keep-alive, say) must not report a hold that
         // never happened.
@@ -692,8 +724,8 @@ impl Call {
             _ => {}
         }
 
-        self.move_media_if_changed(renegotiated).await?;
-        Ok(Some(answer_sdp))
+        self.move_media_if_changed(prepared.negotiated).await?;
+        Ok(Some(prepared.answer))
     }
 
     /// Give the running agent the ICE half of an answer to one of our later offers.
@@ -2098,6 +2130,12 @@ pub struct DialOptions {
     pub from: String,
     /// Where this side receives media.
     pub media_address: IpAddr,
+    /// Direction advertised by the initial SDP offer.
+    ///
+    /// `SendRecv` is the ordinary endpoint default. A two-dialog owner uses this to map the
+    /// source leg's initial offer onto fresh SDP for its target leg without copying endpoint
+    /// addresses, ports or key material.
+    pub initial_direction: Direction,
     /// How long to wait for an answer before giving up and cancelling.
     ///
     /// `None` waits as long as the transaction layer does — 64·T1, or 32 seconds with the
@@ -2130,6 +2168,11 @@ pub struct DialOptions {
     /// [`dial`] and [`dial_once`] perform the bounded retry; [`dial_early`] surfaces
     /// [`Error::AuthenticationChallenge`] because its handle names the original INVITE.
     pub credentials: Option<Credentials>,
+    /// Authentication service selected for this call's initial INVITE attempts.
+    ///
+    /// `None` is the wire-compatible default: no `Date` or `Identity` is added and no authority,
+    /// credential, or time input is consulted. The policy owns those explicit caller inputs.
+    pub identity: Option<OutboundIdentityPolicy>,
 }
 
 impl DialOptions {
@@ -2139,11 +2182,13 @@ impl DialOptions {
         Self {
             from: from.into(),
             media_address,
+            initial_direction: Direction::SendRecv,
             timeout: None,
             session_expires: None,
             service_route: Vec::new(),
             media: MediaPolicy::default(),
             credentials: None,
+            identity: None,
         }
     }
 
@@ -2154,6 +2199,13 @@ impl DialOptions {
     #[must_use]
     pub fn with_codecs(mut self, codecs: Codecs) -> Self {
         self.media.codecs = codecs;
+        self
+    }
+
+    /// Advertise this direction in the initial offer.
+    #[must_use]
+    pub const fn with_initial_direction(mut self, direction: Direction) -> Self {
+        self.initial_direction = direction;
         self
     }
 
@@ -2186,6 +2238,13 @@ impl DialOptions {
     #[must_use]
     pub fn with_credentials(mut self, credentials: Credentials) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    /// Sign every initial INVITE attempt with this caller-owned authentication policy.
+    #[must_use]
+    pub fn with_identity(mut self, identity: OutboundIdentityPolicy) -> Self {
+        self.identity = Some(identity);
         self
     }
 
@@ -2288,6 +2347,8 @@ async fn offered_media(
         advertised.port(),
         transport.is_secure(),
     )?;
+    let mut capabilities = capabilities;
+    capabilities.direction = options.initial_direction;
     let mut offer = offer_from(&capabilities);
     if let Some(local) = &local_ice {
         add_ice(&mut offer, local, &[]);
@@ -2448,7 +2509,7 @@ struct Invitation<'a> {
     to: &'a Uri,
     from: &'a str,
     via: &'a str,
-    offer: &'a SessionDescription,
+    offer: Option<&'a SessionDescription>,
     session_expires: Option<Duration>,
     identity: &'a Identity,
     /// The pre-loaded route set, outermost first (RFC 3608 §6.1).
@@ -2490,12 +2551,15 @@ fn build_invite(
             HeaderName::Contact,
             Bytes::from(contact_for(endpoint, target.transport)),
         )?
-        .header(
-            HeaderName::ContentType,
-            Bytes::from_static(b"application/sdp"),
-        )?
-        .max_forwards(70)
-        .body(Bytes::from(offer.to_string_sdp()));
+        .max_forwards(70);
+    if let Some(offer) = offer {
+        builder = builder
+            .header(
+                HeaderName::ContentType,
+                Bytes::from_static(b"application/sdp"),
+            )?
+            .body(Bytes::from(offer.to_string_sdp()));
+    }
 
     // One `Supported` row listing everything this side can do. Both tags are statements of
     // capability rather than requests: `timer` tells a far end that wants liveness detection
@@ -2758,7 +2822,7 @@ async fn open_invitation(
             to,
             from: options.from.as_str(),
             via: &via,
-            offer: &offer,
+            offer: Some(&offer),
             session_expires: options.session_expires,
             identity,
             service_route: &options.service_route,
@@ -2767,7 +2831,47 @@ async fn open_invitation(
     if let Some(authorization) = authorization {
         authorize_invite(&mut invite, authorization)?;
     }
+    if let Some(identity) = &options.identity {
+        identity.sign(&mut invite)?;
+    }
     Ok((port, capabilities, ice, keying, via, invite))
+}
+
+/// Build the RFC 3262 delayed-offer form of an INVITE.
+///
+/// No media socket is bound yet because the remote offer determines whether there is a session
+/// to answer. The socket is created when that offer arrives in a reliable provisional, before
+/// its answer is placed in PRACK.
+fn open_offerless_invitation(
+    endpoint: &Handle,
+    target: &Target,
+    to: &Uri,
+    options: &DialOptions,
+    identity: &Identity,
+) -> Result<(String, Request)> {
+    let via = format!(
+        "SIP/2.0/{} {};rport;branch={}",
+        target.transport.as_str(),
+        endpoint.sent_by_for(target.transport),
+        sipx_transport::new_branch()
+    );
+    let mut invite = build_invite(
+        endpoint,
+        target,
+        &Invitation {
+            to,
+            from: options.from.as_str(),
+            via: &via,
+            offer: None,
+            session_expires: options.session_expires,
+            identity,
+            service_route: &options.service_route,
+        },
+    )?;
+    if let Some(identity) = &options.identity {
+        identity.sign(&mut invite)?;
+    }
+    Ok((via, invite))
 }
 
 /// Take back an invitation the caller has stopped waiting for.
@@ -3314,6 +3418,9 @@ pub(crate) async fn answer_tagged(
 enum EarlyMedia {
     /// Bound, and named in the INVITE's offer. The far end has not answered it yet.
     Offered(MediaPort),
+    /// The INVITE carried no offer. A reliable provisional may supply one for this side to
+    /// answer in PRACK (RFC 3262 section 5).
+    WaitingForOffer,
     /// Answered in a reliable provisional (RFC 3262 §5), and renegotiable from here.
     Answered(Box<Early>),
 }
@@ -3363,7 +3470,7 @@ pub struct Dialing {
     ice: Option<LocalDescription>,
     /// What the INVITE offered, kept because an SRTP answer has to be paired with the offer it
     /// answers and because a later UPDATE offers from the same starting point.
-    capabilities: Capabilities,
+    capabilities: Option<Capabilities>,
     negotiation: update::Negotiation,
     peer_allows_update: bool,
     /// The direction the last UPDATE from this side set, carried into the [`Call`] so that an
@@ -3469,10 +3576,64 @@ pub async fn dial_early(
         seen: sipx_sip::rel::Sequence::default(),
         media: Some(EarlyMedia::Offered(port)),
         ice,
-        capabilities,
+        capabilities: Some(capabilities),
         // RFC 3264: the INVITE carried our offer, so an exchange is open until the far end
         // answers it — which before the 200 can only happen in a reliable provisional.
         negotiation: update::Negotiation::offering(),
+        peer_allows_update: false,
+        hold: Direction::SendRecv,
+        ringing: None,
+        provisional: false,
+        deadline: options
+            .timeout
+            .map(|limit| tokio::time::Instant::now() + limit),
+        options: options.clone(),
+        answered_already: None,
+        events: Some(events),
+        events_rx: Some(events_rx),
+    };
+    dialing.reach_early_dialog().await?;
+    Ok(dialing)
+}
+
+/// Place an offerless INVITE and answer an offer from a reliable provisional in PRACK.
+///
+/// This is RFC 3262 section 5's delayed-offer shape. An SDP-bearing reliable provisional is not
+/// merely observed: it is answered on the same dialog sequence and the resulting media is retained
+/// through confirmation. Like [`dial_early`], this function can return for a bodiless provisional;
+/// [`Dialing::has_early_session`] distinguishes that case from a negotiated early session.
+///
+/// # Errors
+///
+/// The same transport, timeout and final-response errors as [`dial_early`], plus the SDP or media
+/// error produced while answering the provisional offer. DTLS-SRTP is refused because its active
+/// handshake cannot be started safely before the final response on this path.
+pub async fn dial_early_without_offer(
+    endpoint: &Handle,
+    target: Target,
+    to: &Uri,
+    options: &DialOptions,
+) -> Result<Dialing> {
+    if options.media.keying == Keying::DtlsSrtp {
+        return Err(Error::DtlsEarlyMedia);
+    }
+    let identity = Identity::fresh();
+    let (via, invite) = open_offerless_invitation(endpoint, &target, to, options, &identity)?;
+    let responses = endpoint.send(invite.clone(), target.clone()).await?;
+    let (events, events_rx) = EventSink::new();
+    let mut dialing = Dialing {
+        endpoint: endpoint.clone(),
+        in_dialog: target.clone(),
+        invite,
+        via,
+        target,
+        responses: Some(responses),
+        dialog: None,
+        seen: sipx_sip::rel::Sequence::default(),
+        media: Some(EarlyMedia::WaitingForOffer),
+        ice: None,
+        capabilities: None,
+        negotiation: update::Negotiation::idle(),
         peer_allows_update: false,
         hold: Direction::SendRecv,
         ringing: None,
@@ -3497,7 +3658,9 @@ impl Dialing {
     /// having to guess in advance what it will be asked.
     #[must_use]
     pub fn dialog(&self) -> Option<&Dialog> {
-        self.dialog.as_ref()
+        self.dialog
+            .as_ref()
+            .or_else(|| self.answered_already.as_ref().map(|call| &call.dialog))
     }
 
     /// Whether the far end has answered this invitation's offer, in a reliable provisional.
@@ -3862,19 +4025,50 @@ impl Dialing {
             // reliable provisional a UAC receives, and the far end retransmits until one arrives;
             // failing a beat earlier would leave it resending a response into a CANCEL that has
             // already gone.
-            let adopted = self.adopt_early_answer(response);
+            let adopted = if matches!(self.media, Some(EarlyMedia::WaitingForOffer))
+                && !response.body().is_empty()
+            {
+                self.adopt_early_offer(response).await.map(Some)
+            } else {
+                self.adopt_early_answer(response).map(|()| None)
+            };
             if let Some(dialog) = self.dialog.as_mut() {
                 dialog.refresh_target(&response.headers);
             }
             // A failure is logged rather than fatal, for `await_final`'s reason: the invitation
             // is still running, and abandoning a ringing call because one PRACK did not get
             // through is a worse outcome than the unreliability it was fixing.
-            if let Err(error) = self.acknowledge(response, rseq).await {
+            let prack_answer = adopted.as_ref().ok().and_then(Clone::clone);
+            if let Err(error) = self.acknowledge(response, rseq, prack_answer).await {
                 tracing::debug!(%error, "could not acknowledge a reliable provisional");
             }
             adopted?;
         }
         Ok(())
+    }
+
+    /// Answer a reliable provisional's offer for an offerless INVITE.
+    async fn adopt_early_offer(&mut self, response: &Response) -> Result<SessionDescription> {
+        if response.body().is_empty() {
+            return Err(Error::Sdp(
+                "an offerless INVITE received a reliable provisional with no offer".to_owned(),
+            ));
+        }
+        let offer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
+            .map_err(|error| Error::Sdp(error.to_string()))?;
+        let (early, answer) = Early::settle(
+            self.options.media_address,
+            self.target.transport.is_secure(),
+            &offer,
+            self.options.media,
+        )
+        .await?;
+        self.media = Some(EarlyMedia::Answered(Box::new(early)));
+        self.negotiation.sent_answer();
+        if let Some(events) = self.events.as_ref() {
+            events.emit(CallEvent::EarlyMediaStarted);
+        }
+        Ok(answer)
     }
 
     /// Whether a response belongs to the dialog this handle holds.
@@ -3924,8 +4118,11 @@ impl Dialing {
         // the set, so a conformant answer cannot trip it — an answer that does is naming
         // something we never offered, which is exactly what `S-25` exists to refuse rather than
         // hang on.
+        let Some(capabilities) = self.capabilities.clone() else {
+            return Err(Error::NoDialog);
+        };
         let settled = settle_answer(
-            self.capabilities.crypto.as_slice(),
+            capabilities.crypto.as_slice(),
             &answer,
             self.options.media.codecs,
         )?;
@@ -3939,7 +4136,7 @@ impl Dialing {
         };
         self.media = Some(EarlyMedia::Answered(Box::new(Early {
             media,
-            capabilities: self.capabilities.clone(),
+            capabilities,
             settled,
             media_address: self.options.media_address,
             codecs: self.options.media.codecs,
@@ -3978,7 +4175,12 @@ impl Dialing {
     /// builds a throwaway `Dialog` per acknowledgement because it keeps none, which restarts
     /// that space at the INVITE's number every time. Here an UPDATE may follow, and it would
     /// then reuse the PRACK's number.
-    async fn acknowledge(&mut self, response: &Response, rseq: u32) -> Result<()> {
+    async fn acknowledge(
+        &mut self,
+        response: &Response,
+        rseq: u32,
+        answer: Option<SessionDescription>,
+    ) -> Result<()> {
         // §4: out of order means an earlier one is missing, and a duplicate has already been
         // acknowledged. Neither is PRACKed.
         if self.seen.accept(rseq) != sipx_sip::rel::Received::Acknowledge {
@@ -3991,11 +4193,16 @@ impl Dialing {
             .typed::<sipx_sip::CSeq>()
             .and_then(std::result::Result::ok)
             .map_or(1, |cseq| cseq.sequence);
-        let body = crate::rel::prack_body(
-            !self.invite.body().is_empty(),
-            response.body(),
-            &self.capabilities,
-        );
+        let body = match answer {
+            Some(answer) => Some(answer),
+            None => self.capabilities.as_ref().and_then(|capabilities| {
+                crate::rel::prack_body(
+                    !self.invite.body().is_empty(),
+                    response.body(),
+                    capabilities,
+                )
+            }),
+        };
         crate::rel::send_prack(
             &self.endpoint,
             dialog,
@@ -4152,6 +4359,7 @@ impl Dialing {
                 };
                 (media, settled)
             }
+            Some(EarlyMedia::WaitingForOffer) => return Err(Error::NoEarlySession),
             None => return Err(Error::NoDialog),
         };
         Ok((dialog, media, settled))
@@ -4161,8 +4369,11 @@ impl Dialing {
     fn settle_from(&mut self, response: &Response) -> Result<Settled> {
         let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
             .map_err(|error| Error::Sdp(error.to_string()))?;
+        let Some(capabilities) = self.capabilities.as_ref() else {
+            return Err(Error::NoEarlySession);
+        };
         let settled = settle_answer(
-            self.capabilities.crypto.as_slice(),
+            capabilities.crypto.as_slice(),
             &answer,
             self.options.media.codecs,
         )?;
@@ -4313,6 +4524,84 @@ pub(crate) struct Early {
     /// over: an UPDATE may reoffer before the 200, and it has to be answered from the same set
     /// rather than from the default one.
     pub(crate) codecs: Codecs,
+}
+
+/// A media offer placed in a reliable provisional and awaiting its answer in PRACK.
+#[derive(Debug)]
+pub(crate) struct EarlyOffer {
+    port: MediaPort,
+    capabilities: Capabilities,
+    offer: SessionDescription,
+    ice: Option<LocalDescription>,
+    keying: PendingKeying,
+    media_address: IpAddr,
+    codecs: Codecs,
+}
+
+impl EarlyOffer {
+    pub(crate) async fn bind(
+        media_address: IpAddr,
+        secure: bool,
+        direction: Direction,
+        policy: MediaPolicy,
+    ) -> Result<Self> {
+        if policy.keying == Keying::DtlsSrtp {
+            return Err(Error::DtlsEarlyMedia);
+        }
+        let port = MediaPort::bind(SocketAddr::new(media_address, 0))
+            .await
+            .map_err(Error::Io)?;
+        let local_ice = match policy.gathering(true)? {
+            Some(gathering) => Some(port.gather(&gathering).await),
+            None => None,
+        };
+        let advertised = local_ice
+            .as_ref()
+            .and_then(|local| local.default_destination(ComponentId::RTP))
+            .unwrap_or_else(|| SocketAddr::new(media_address, port.local_addr().port()));
+        let (mut capabilities, keying) =
+            media_capabilities(policy, advertised.ip(), advertised.port(), secure)?;
+        capabilities.direction = direction;
+        let mut offer = offer_from(&capabilities);
+        if let Some(local) = &local_ice {
+            add_ice(&mut offer, local, &[]);
+        }
+        Ok(Self {
+            port,
+            capabilities,
+            offer,
+            ice: local_ice,
+            keying,
+            media_address,
+            codecs: policy.codecs,
+        })
+    }
+
+    pub(crate) fn description(&self) -> &SessionDescription {
+        &self.offer
+    }
+
+    pub(crate) async fn settle(mut self, answer: &SessionDescription) -> Result<Early> {
+        let settled = settle_answer(self.capabilities.crypto.as_slice(), answer, self.codecs)?;
+        if let Some(local) = self.ice.as_mut() {
+            let remote = answer
+                .media
+                .first()
+                .map_or(IceNegotiation::Absent, |audio| {
+                    sipx_media::ice::negotiate(answer, audio)
+                });
+            local.accept(&remote);
+        }
+        let (media, settled) =
+            key_and_start(self.port, self.ice, settled, self.keying, answer, false).await?;
+        Ok(Early {
+            media,
+            capabilities: self.capabilities,
+            settled,
+            media_address: self.media_address,
+            codecs: self.codecs,
+        })
+    }
 }
 
 impl Early {

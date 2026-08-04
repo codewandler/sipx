@@ -17,9 +17,9 @@
 )]
 
 use sipx_app_protocol::{
-    CallSnapshot, Callback, DialOutcome, Direction, Document, Effect, EndCause, Envelope,
-    EventKind, Failure, GatherReason, Input, Interpreter, OnFailure, Output, Policy, Response,
-    Timer, Timestamp,
+    CallSnapshot, CallState, Callback, DialOutcome, Direction, Document, Effect, EndCause,
+    Envelope, EventKind, Failure, GatherReason, Input, Interpreter, OnFailure, Output, Policy,
+    Response, Timer, Timestamp,
 };
 
 /// A fixed instant. The interpreter never asks what time it is, so the tests never have to move
@@ -575,7 +575,7 @@ fn ac_9_call_ended_survives_a_full_event_queue() {
         },
     );
     // One delivery goes out and is left unanswered, so everything after it queues.
-    let (_, _held) = delivery(interpreter.handle(now(), Input::Event(EventKind::Answered)));
+    let (_, held) = delivery(interpreter.handle(now(), Input::Event(EventKind::Answered)));
 
     // Flood the queue well past its bound.
     for _ in 0..(sipx_app_protocol::MAX_QUEUED_EVENTS * 4) {
@@ -588,40 +588,316 @@ fn ac_9_call_ended_survives_a_full_event_queue() {
         );
     }
     // And then the one event that may never be dropped.
-    interpreter.handle(
+    let terminal = interpreter.handle(
         now(),
         Input::Event(EventKind::Ended {
             cause: EndCause::Remote,
         }),
     );
-
-    // The held callback times out, which lets the queue drain. `call.ended` must be in it.
-    let outputs = interpreter.handle(now(), Input::TimerFired(Timer::Callback));
-    let mut drained: Vec<EventKind> = Vec::new();
-    let mut outputs = outputs;
-    while let Some((envelope, callback)) = outputs.into_iter().find_map(|output| match output {
-        Output::Deliver { envelope, callback } => Some((*envelope, callback)),
-        _ => None,
-    }) {
-        drained.push(envelope.event);
-        outputs = interpreter.handle(
-            now(),
-            Input::Response {
-                callback,
-                response: Response::Body(String::new()),
-            },
-        );
-    }
     assert!(
-        drained.iter().any(|event| matches!(
-            event,
+        !terminal
+            .iter()
+            .any(|output| matches!(output, Output::Deliver { .. }))
+    );
+    let state = interpreter.snapshot().state;
+    interpreter.handle(now(), Input::Event(EventKind::Answered));
+    assert_eq!(
+        interpreter.snapshot().state,
+        state,
+        "late events cannot resurrect the snapshot"
+    );
+    let terminal = interpreter.handle(
+        now(),
+        Input::Response {
+            callback: held,
+            response: Response::Body(String::new()),
+        },
+    );
+    let (ended, _callback) = delivery(terminal);
+    assert!(
+        matches!(
+            ended.event,
             EventKind::Ended {
                 cause: EndCause::Remote
             }
-        )),
-        "`call.ended` is never what overflow drops; drained {} events",
-        drained.len()
+        ),
+        "`call.ended` supersedes the full queue"
     );
+}
+
+/// A response to `call.ended` cannot act on the call again. The deterministic host harness used
+/// to carry this guard in its second interpreter; keeping the proof here makes the sole
+/// interpreter own it for every binding.
+#[test]
+fn a_failed_answer_to_call_ended_cannot_hang_up_twice() {
+    let policy = Policy {
+        on_unreachable: OnFailure::Hangup,
+        ..Policy::default()
+    };
+    let mut interpreter = interpreter(policy);
+    let (_, incoming) = delivery(interpreter.handle(now(), Input::Event(EventKind::Incoming)));
+    let outputs = interpreter.handle(
+        now(),
+        Input::Response {
+            callback: incoming,
+            response: Response::Failed(Failure::Unreachable),
+        },
+    );
+    assert_eq!(
+        effects(&outputs),
+        vec![&Effect::HangUp {
+            cause: EndCause::Hangup
+        }]
+    );
+
+    let (ended, callback) = delivery(interpreter.handle(
+        now(),
+        Input::Event(EventKind::Ended {
+            cause: EndCause::Hangup,
+        }),
+    ));
+    assert!(matches!(ended.event, EventKind::Ended { .. }));
+
+    let outputs = interpreter.handle(
+        now(),
+        Input::Response {
+            callback,
+            response: Response::Failed(Failure::Unreachable),
+        },
+    );
+    assert!(
+        effects(&outputs).is_empty(),
+        "an ended call has no second failure action: {outputs:?}"
+    );
+}
+
+#[test]
+fn a_timeout_waiting_for_call_ended_s_answer_cannot_hang_up_twice() {
+    let policy = Policy {
+        on_timeout: OnFailure::Hangup,
+        ..Policy::default()
+    };
+    let mut interpreter = interpreter(policy);
+    let (_ended, _callback) = delivery(interpreter.handle(
+        now(),
+        Input::Event(EventKind::Ended {
+            cause: EndCause::Remote,
+        }),
+    ));
+
+    let outputs = interpreter.handle(now(), Input::TimerFired(Timer::Callback));
+    assert!(
+        effects(&outputs).is_empty(),
+        "an ended call has no timeout action: {outputs:?}"
+    );
+}
+
+#[test]
+fn ended_spends_the_prior_callback_before_a_failure_can_tear_down_again() {
+    let policy = Policy {
+        on_unreachable: OnFailure::Hangup,
+        ..Policy::default()
+    };
+    let mut interpreter = interpreter(policy);
+    let (_, callback) = delivery(interpreter.handle(now(), Input::Event(EventKind::Incoming)));
+    let terminal = interpreter.handle(
+        now(),
+        Input::Event(EventKind::Ended {
+            cause: EndCause::Remote,
+        }),
+    );
+    assert!(
+        !terminal
+            .iter()
+            .any(|output| matches!(output, Output::Deliver { .. }))
+    );
+
+    let outputs = interpreter.handle(
+        now(),
+        Input::Response {
+            callback,
+            response: Response::Failed(Failure::Unreachable),
+        },
+    );
+    assert!(
+        effects(&outputs).is_empty(),
+        "the ended snapshot suppresses teardown: {outputs:?}"
+    );
+    let (ended, _terminal_callback) = delivery(outputs);
+    assert!(matches!(ended.event, EventKind::Ended { .. }));
+}
+
+#[test]
+fn ended_clears_the_prior_callback_timer_without_timeout_teardown() {
+    let policy = Policy {
+        on_timeout: OnFailure::Hangup,
+        ..Policy::default()
+    };
+    let mut interpreter = interpreter(policy);
+    let (_, _callback) = delivery(interpreter.handle(now(), Input::Event(EventKind::Incoming)));
+    let terminal = interpreter.handle(
+        now(),
+        Input::Event(EventKind::Ended {
+            cause: EndCause::Remote,
+        }),
+    );
+    assert!(
+        !terminal
+            .iter()
+            .any(|output| matches!(output, Output::Deliver { .. }))
+    );
+
+    let outputs = interpreter.handle(now(), Input::TimerFired(Timer::Callback));
+    let (_ended, _callback) = delivery(outputs);
+    assert!(
+        interpreter.snapshot().state == CallState::Ended,
+        "the ended snapshot suppresses timeout teardown"
+    );
+}
+
+#[test]
+fn ended_abandons_the_program_instead_of_advancing_hangup_to_play() {
+    let mut interpreter = interpreter(Policy::default());
+    let (_, callback) = delivery(interpreter.handle(now(), Input::Event(EventKind::Incoming)));
+    let outputs = interpreter.handle(
+        now(),
+        Input::Response {
+            callback,
+            response: Response::Body(body(
+                r#"{"id":"h1","do":"hangup"},{"id":"p1","do":"play","source":{"file":"late.wav"}}"#,
+            )),
+        },
+    );
+    assert!(matches!(
+        effects(&outputs).as_slice(),
+        [Effect::HangUp { .. }]
+    ));
+
+    let outputs = interpreter.handle(
+        now(),
+        Input::Event(EventKind::Ended {
+            cause: EndCause::Hangup,
+        }),
+    );
+    assert!(
+        !effects(&outputs)
+            .iter()
+            .any(|effect| matches!(effect, Effect::Play { .. })),
+        "terminal input never advances to the queued play: {outputs:?}"
+    );
+    assert_eq!(interpreter.pending(), 0);
+    assert!(interpreter.running().is_none());
+}
+
+#[test]
+fn ended_clears_pause_and_all_later_inputs_are_effect_free() {
+    let mut interpreter = interpreter(Policy::default());
+    let (_, callback) = delivery(interpreter.handle(now(), Input::Event(EventKind::Incoming)));
+    interpreter.handle(
+        now(),
+        Input::Response {
+            callback,
+            response: Response::Body(body(
+                r#"{"id":"w1","do":"pause","ms":500},{"id":"h1","do":"hangup"}"#,
+            )),
+        },
+    );
+    let (_, held) = delivery(interpreter.handle(
+        now(),
+        Input::Event(EventKind::Dtmf {
+            digit: '1',
+            duration_ms: 80,
+        }),
+    ));
+
+    let terminal = interpreter.handle(
+        now(),
+        Input::Event(EventKind::Ended {
+            cause: EndCause::Remote,
+        }),
+    );
+    assert!(terminal.contains(&Output::ClearTimer(Timer::Pause)));
+    assert!(!terminal.contains(&Output::ClearTimer(Timer::Callback)));
+    let terminal = interpreter.handle(
+        now(),
+        Input::Response {
+            callback: held,
+            response: Response::Body(String::new()),
+        },
+    );
+    assert!(terminal.contains(&Output::ClearTimer(Timer::Callback)));
+    let (_ended, callback) = delivery(terminal);
+    for outputs in [
+        interpreter.handle(now(), Input::TimerFired(Timer::Pause)),
+        interpreter.handle(
+            now(),
+            Input::Event(EventKind::Dtmf {
+                digit: '2',
+                duration_ms: 80,
+            }),
+        ),
+        interpreter.handle(
+            now(),
+            Input::Response {
+                callback,
+                response: Response::Body(body(r#"{"id":"h2","do":"hangup"}"#)),
+            },
+        ),
+    ] {
+        assert!(
+            effects(&outputs).is_empty(),
+            "no input after terminal state has a call effect: {outputs:?}"
+        );
+    }
+}
+
+#[test]
+fn ended_clears_gather_and_callback_timers() {
+    let mut interpreter = interpreter(Policy::default());
+    let (_, callback) = delivery(interpreter.handle(now(), Input::Event(EventKind::Incoming)));
+    let outputs = interpreter.handle(
+        now(),
+        Input::Response {
+            callback,
+            response: Response::Body(body(
+                r##"{"id":"g1","do":"gather","max":4,"terminators":"#","timeout_ms":10000}"##,
+            )),
+        },
+    );
+    assert!(outputs.contains(&Output::SetTimer {
+        timer: Timer::GatherOverall,
+        after_ms: 10_000,
+    }));
+    let outputs = interpreter.handle(
+        now(),
+        Input::Event(EventKind::Dtmf {
+            digit: '1',
+            duration_ms: 80,
+        }),
+    );
+    let (_, callback) = delivery(outputs);
+
+    let terminal = interpreter.handle(
+        now(),
+        Input::Event(EventKind::Ended {
+            cause: EndCause::Remote,
+        }),
+    );
+    for timer in [Timer::GatherOverall, Timer::GatherDigit] {
+        assert!(
+            terminal.contains(&Output::ClearTimer(timer)),
+            "terminal input clears {timer:?}: {terminal:?}"
+        );
+    }
+    let terminal = interpreter.handle(
+        now(),
+        Input::Response {
+            callback,
+            response: Response::Body(String::new()),
+        },
+    );
+    assert!(terminal.contains(&Output::ClearTimer(Timer::Callback)));
+    let (_ended, _callback) = delivery(terminal);
 }
 
 /// §6.3's other clause, on its own: **at most one callback is outstanding per call**.

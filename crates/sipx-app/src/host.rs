@@ -30,7 +30,9 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::future::Future;
 use std::net::IpAddr;
+use std::pin::Pin;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -43,11 +45,13 @@ use sipx_media::{Interrupt, Playback, PlaybackId};
 use sipx_sip::{HeaderName, StatusCode, Uri, build::ResponseBuilder, uri::Host as UriHost};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use sipx_ua::{Config as AgentConfig, UserAgent};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::config::{
-    Admission, AppBinding, AppPolicy, ConfigError, Grants, HostConfig, Listener, Protocol, Running,
+    ActorCompletion, Admission, AppBinding, AppPolicy, ConfigError, Grants, HostConfig, Listener,
+    Protocol, Running,
 };
 use crate::harness::policy::OnFailure;
 use crate::webhook::{Webhook, WebhookClient, WebhookError};
@@ -99,7 +103,9 @@ struct DocumentCall {
     webhook: Webhook,
     timers: [Option<Instant>; 3],
     playbacks: BTreeMap<PlaybackId, (String, Playback)>,
-    ended: mpsc::Sender<String>,
+    shutdown: watch::Receiver<bool>,
+    stopping: bool,
+    terminal: bool,
 }
 
 impl DocumentCall {
@@ -110,7 +116,7 @@ impl DocumentCall {
         media_address: IpAddr,
         policy: AppPolicy,
         webhook: Webhook,
-        ended: mpsc::Sender<String>,
+        shutdown: watch::Receiver<bool>,
     ) -> Self {
         let invitation_events = invitation.events();
         let interpreter = Interpreter::new(
@@ -132,35 +138,37 @@ impl DocumentCall {
             webhook,
             timers: [None; 3],
             playbacks: BTreeMap::new(),
-            ended,
+            shutdown,
+            stopping: false,
+            terminal: false,
         }
     }
 
-    async fn run(mut self) {
+    async fn run(mut self) -> String {
         let outputs = self
             .interpreter
             .handle(timestamp(), Input::Event(EventKind::Incoming));
         self.drive(outputs).await;
 
-        if self.call.is_some() {
+        if self.stopping {
+            self.teardown().await;
+        } else if self.call.is_some() {
             self.serve_answered().await;
-        } else if self.invitation.is_some() {
+        } else if !self.terminal && self.invitation.is_some() {
             self.wait_for_cancel().await;
         }
-        let _ = self.ended.send(self.call_id).await;
+        if self.stopping {
+            self.teardown().await;
+        }
+        self.call_id
     }
 
     async fn wait_for_cancel(&mut self) {
-        let Some(events) = self.invitation_events.as_mut() else {
-            return;
-        };
-        let Some(event) = events.recv().await else {
-            return;
-        };
-        let Some(event) = sipx_app_protocol::event_from_call(&event, "") else {
-            return;
-        };
-        let outputs = self.interpreter.handle(timestamp(), Input::Event(event));
+        let action = self.next_invitation_action().await;
+        if matches!(action, ActorAction::Closed | ActorAction::Shutdown) {
+            self.stopping = true;
+        }
+        let outputs = self.apply_action(action).await;
         self.drive(outputs).await;
     }
 
@@ -169,61 +177,105 @@ impl DocumentCall {
             if self.call.as_ref().is_none_or(Call::is_ended) {
                 break;
             }
-            let contract_timer = self.next_timer();
-            let session_deadline = self.call.as_ref().and_then(Call::session_deadline);
-            let action = {
-                let Some(call) = self.call.as_mut() else {
-                    break;
-                };
-                let Some(events) = self.events.as_mut() else {
-                    break;
-                };
-                let Some(inbox) = self.inbox.as_mut() else {
-                    break;
-                };
-                tokio::select! {
-                    event = events.recv() => event.map_or(ActorAction::Closed, ActorAction::CallEvent),
-                    incoming = inbox.recv() => incoming.map_or(ActorAction::Closed, |message| ActorAction::Incoming(Box::new(message))),
-                    digit = call.media().recv_digit() => ActorAction::Digit(digit.map(|(digit, duration)| {
-                        (
-                            digit.as_char(),
-                            u32::try_from(duration.as_millis()).unwrap_or(u32::MAX),
-                        )
-                    })),
-                    () = sleep_until(contract_timer.map(|(at, _)| at)) => {
-                        contract_timer.map_or(ActorAction::Closed, |(_, timer)| ActorAction::Timer(timer))
-                    }
-                    () = sleep_until(session_deadline) => ActorAction::SessionDeadline,
-                }
-            };
-
-            let outputs = match action {
-                ActorAction::CallEvent(event) => self.call_event(event),
-                ActorAction::Digit(Some((digit, duration_ms))) => self.interpreter.handle(
-                    timestamp(),
-                    Input::Event(EventKind::Dtmf { digit, duration_ms }),
-                ),
-                ActorAction::Digit(None) => Vec::new(),
-                ActorAction::Incoming(incoming) => {
-                    if let Some(call) = self.call.as_mut() {
-                        let _ = call.handle(&incoming).await;
-                    }
-                    Vec::new()
-                }
-                ActorAction::Timer(timer) => {
-                    self.clear_timer(timer);
-                    self.interpreter
-                        .handle(timestamp(), Input::TimerFired(timer))
-                }
-                ActorAction::SessionDeadline => {
-                    if let Some(call) = self.call.as_mut() {
-                        let _ = call.on_session_deadline().await;
-                    }
-                    Vec::new()
-                }
-                ActorAction::Closed => break,
-            };
+            let action = self.next_answered_action().await;
+            if matches!(action, ActorAction::Closed | ActorAction::Shutdown) {
+                self.stopping = true;
+                break;
+            }
+            let outputs = self.apply_action(action).await;
             self.drive(outputs).await;
+            if self.stopping {
+                break;
+            }
+        }
+    }
+
+    async fn next_answered_action(&mut self) -> ActorAction {
+        let contract_timer = self.next_timer();
+        let session_deadline = self.call.as_ref().and_then(Call::session_deadline);
+        let Some(call) = self.call.as_mut() else {
+            return ActorAction::Closed;
+        };
+        let Some(events) = self.events.as_mut() else {
+            return ActorAction::Closed;
+        };
+        let Some(inbox) = self.inbox.as_mut() else {
+            return ActorAction::Closed;
+        };
+        let shutdown = &mut self.shutdown;
+        tokio::select! {
+            _ = shutdown.changed() => ActorAction::Shutdown,
+            event = events.recv() => event.map_or(ActorAction::Closed, ActorAction::CallEvent),
+            incoming = inbox.recv() => incoming.map_or(ActorAction::Closed, |message| ActorAction::Incoming(Box::new(message))),
+            digit = call.media().recv_digit() => ActorAction::Digit(digit.map(|(digit, duration)| {
+                (
+                    digit.as_char(),
+                    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX),
+                )
+            })),
+            () = sleep_until(contract_timer.map(|(at, _)| at)) => {
+                contract_timer.map_or(ActorAction::Closed, |(_, timer)| ActorAction::Timer(timer))
+            }
+            () = sleep_until(session_deadline) => ActorAction::SessionDeadline,
+        }
+    }
+
+    async fn next_invitation_action(&mut self) -> ActorAction {
+        let Some(events) = self.invitation_events.as_mut() else {
+            return std::future::pending().await;
+        };
+        let shutdown = &mut self.shutdown;
+        tokio::select! {
+            _ = shutdown.changed() => ActorAction::Shutdown,
+            event = events.recv() => event.map_or(ActorAction::Closed, ActorAction::CallEvent),
+        }
+    }
+
+    async fn apply_action(&mut self, action: ActorAction) -> Vec<Output> {
+        match action {
+            ActorAction::CallEvent(event) => self.call_event(event),
+            ActorAction::Digit(Some((digit, duration_ms))) => self.interpreter.handle(
+                timestamp(),
+                Input::Event(EventKind::Dtmf { digit, duration_ms }),
+            ),
+            ActorAction::Digit(None) | ActorAction::Closed => Vec::new(),
+            ActorAction::Shutdown => {
+                self.stopping = true;
+                Vec::new()
+            }
+            ActorAction::Incoming(incoming) => {
+                let ended = if let Some(call) = self.call.as_mut() {
+                    let _ = call.handle(&incoming).await;
+                    call.is_ended()
+                } else {
+                    false
+                };
+                let mut outputs = Vec::new();
+                // `Call::handle(BYE)` records `call.ended` before its 200 leaves. Drain that
+                // synchronously queued event before returning to the HTTP race, so a simultaneously
+                // ready webhook timeout cannot apply failure policy to an already-ended call.
+                if ended {
+                    loop {
+                        let Some(event) = self.events.as_mut().and_then(CallEvents::try_recv)
+                        else {
+                            break;
+                        };
+                        outputs.extend(self.call_event(event));
+                    }
+                }
+                outputs
+            }
+            ActorAction::Timer(timer) => {
+                self.clear_timer(timer);
+                self.interpreter
+                    .handle(timestamp(), Input::TimerFired(timer))
+            }
+            ActorAction::SessionDeadline => {
+                if let Some(call) = self.call.as_mut() {
+                    let _ = call.on_session_deadline().await;
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -254,6 +306,14 @@ impl DocumentCall {
             other => {
                 let id = self.interpreter.running().unwrap_or("");
                 sipx_app_protocol::event_from_call(&other, id).map_or_else(Vec::new, |event| {
+                    if matches!(event, EventKind::Ended { .. }) {
+                        self.terminal = true;
+                        // A pending INVITE's CANCEL transaction and 487 have already been
+                        // answered by the dispatcher. Release its route now; retaining it
+                        // would make `run` wait for a second event that can never exist.
+                        self.invitation_events = None;
+                        self.invitation = None;
+                    }
                     self.interpreter.handle(timestamp(), Input::Event(event))
                 })
             }
@@ -263,14 +323,12 @@ impl DocumentCall {
     async fn drive(&mut self, outputs: Vec<Output>) {
         let mut pending: VecDeque<Output> = outputs.into();
         while let Some(output) = pending.pop_front() {
+            if self.stopping {
+                break;
+            }
             let more = match output {
                 Output::Deliver { envelope, callback } => {
-                    let response = self
-                        .webhook
-                        .deliver(&envelope, self.callback_budget, unix_seconds())
-                        .await;
-                    self.interpreter
-                        .handle(timestamp(), Input::Response { callback, response })
+                    self.deliver_while_serving(*envelope, callback).await
                 }
                 Output::Effect(effect) => {
                     self.effect(effect).await;
@@ -295,6 +353,72 @@ impl DocumentCall {
             };
             for output in more.into_iter().rev() {
                 pending.push_front(output);
+            }
+        }
+    }
+
+    /// Keep the call actor live while one document callback is in flight.
+    ///
+    /// The contract permits only one app callback, not only one source of call input. A BYE,
+    /// CANCEL, routed in-dialog request, media digit or contract timer can all race HTTP; leaving
+    /// them unpolled until HTTP returns can strand a mandatory SIP response behind the callback's
+    /// own timeout.
+    async fn deliver_while_serving(
+        &mut self,
+        envelope: sipx_app_protocol::Envelope,
+        callback: sipx_app_protocol::Callback,
+    ) -> Vec<Output> {
+        let webhook = self.webhook.clone();
+        let budget = self.callback_budget;
+        let sent_at = unix_seconds();
+        let delivery = webhook.deliver(&envelope, budget, sent_at);
+        tokio::pin!(delivery);
+        let mut deferred = Vec::new();
+
+        let response = loop {
+            let action = if self.call.is_some() {
+                tokio::select! {
+                    response = &mut delivery => break response,
+                    action = self.next_answered_action() => action,
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    action = self.next_invitation_action() => action,
+                    response = &mut delivery => break response,
+                }
+            };
+            if matches!(action, ActorAction::Closed | ActorAction::Shutdown) {
+                self.stopping = true;
+                return deferred;
+            }
+            let outputs = self.apply_action(action).await;
+            self.perform_while_callback(outputs, &mut deferred).await;
+        };
+
+        deferred.extend(
+            self.interpreter
+                .handle(timestamp(), Input::Response { callback, response }),
+        );
+        deferred
+    }
+
+    async fn perform_while_callback(&mut self, outputs: Vec<Output>, deferred: &mut Vec<Output>) {
+        for output in outputs {
+            match output {
+                // The interpreter's callback token makes this unreachable while another callback
+                // is outstanding. Preserve it for the ordinary driver if that invariant changes.
+                Output::Deliver { .. } => deferred.push(output),
+                Output::Effect(effect) => self.effect(effect).await,
+                Output::SetTimer {
+                    timer: Timer::Callback,
+                    ..
+                }
+                | Output::ClearTimer(Timer::Callback) => {}
+                Output::SetTimer { timer, after_ms } => {
+                    self.set_timer(timer, Duration::from_millis(u64::from(after_ms)));
+                }
+                Output::ClearTimer(timer) => self.clear_timer(timer),
             }
         }
     }
@@ -404,6 +528,25 @@ impl DocumentCall {
         }
     }
 
+    /// Finish one actor after the host has stopped accepting network work.
+    ///
+    /// Both SIP operations are themselves bounded by the transaction layer. The actor awaits
+    /// them instead of dropping the call state, so a confirmed dialog gets its BYE and a pending
+    /// invitation gets an explicit final response while its endpoint is still usable.
+    async fn teardown(&mut self) {
+        if let Some(call) = self.call.as_mut()
+            && !call.is_ended()
+        {
+            let _ = call.hang_up().await;
+        }
+        if let Some(invitation) = self.invitation.take() {
+            let _ = invitation
+                .refuse(&self.handle, INTERNAL_ERROR, "Server Shutting Down")
+                .await;
+            self.invitation_events = None;
+        }
+    }
+
     fn set_timer(&mut self, timer: Timer, after: Duration) {
         if let Some(slot) = timer_slot(timer)
             && let Some(deadline) = self.timers.get_mut(slot)
@@ -442,7 +585,132 @@ enum ActorAction {
     Digit(Option<(char, u32)>),
     Timer(Timer),
     SessionDeadline,
+    Shutdown,
     Closed,
+}
+
+type CallActor = Pin<Box<dyn Future<Output = ActorCompletion> + Send + 'static>>;
+
+/// Maximum actor starts or completions that may wait behind the serving loop. Reaching it applies
+/// backpressure to admission or actor completion; it never allocates an unbounded background
+/// queue. Active calls themselves remain independently bounded by the host's transport limits.
+const ACTOR_QUEUE: usize = 1024;
+const MAX_ACTORS: usize = 1024;
+
+/// Owns call actors beyond the lifetime of the `serve` future that admitted them.
+///
+/// On the ordinary path `serve` receives every completion and joins the supervisor. If its own
+/// future is cancelled, dropping this guard closes the spawn channel and signals shutdown; the
+/// supervisor still owns the actor `JoinSet`, so it cooperatively drains calls instead of letting
+/// `JoinSet::drop` abort them at an arbitrary SIP await.
+struct ActorSupervisor {
+    spawn: Option<mpsc::Sender<CallActor>>,
+    completed: mpsc::Receiver<ActorCompletion>,
+    shutdown: watch::Sender<bool>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    completion_open: bool,
+    permits: std::sync::Arc<Semaphore>,
+}
+
+impl ActorSupervisor {
+    fn new() -> Self {
+        Self::with_limit(MAX_ACTORS)
+    }
+
+    fn with_limit(actor_limit: usize) -> Self {
+        let (spawn, requests) = mpsc::channel(ACTOR_QUEUE);
+        let (completed_tx, completed) = mpsc::channel(ACTOR_QUEUE);
+        let (shutdown, _) = watch::channel(false);
+        let actor_shutdown = shutdown.clone();
+        let task = tokio::spawn(supervise_actors(requests, completed_tx, actor_shutdown));
+        Self {
+            spawn: Some(spawn),
+            completed,
+            shutdown,
+            task: Some(task),
+            completion_open: true,
+            permits: std::sync::Arc::new(Semaphore::new(actor_limit)),
+        }
+    }
+
+    fn receiver(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
+    fn reserve(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.permits.clone().try_acquire_owned().ok()
+    }
+
+    async fn spawn(&self, actor: CallActor) {
+        if let Some(spawn) = &self.spawn {
+            let _ = spawn.send(actor).await;
+        }
+    }
+
+    async fn join_next(&mut self) -> Option<ActorCompletion> {
+        let completed = self.completed.recv().await;
+        if completed.is_none() {
+            self.completion_open = false;
+        }
+        completed
+    }
+
+    fn completion_open(&self) -> bool {
+        self.completion_open
+    }
+
+    async fn finish(&mut self, running: &mut Running) {
+        self.stop();
+        while let Some(completion) = self.completed.recv().await {
+            running.complete(completion);
+        }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+
+    fn stop(&mut self) {
+        let _ = self.shutdown.send(true);
+        self.spawn = None;
+    }
+}
+
+impl Drop for ActorSupervisor {
+    fn drop(&mut self) {
+        self.stop();
+        // The supervisor, not a call actor, remains scheduled here. It owns and joins every actor
+        // after the cancelled serving future can no longer await asynchronous SIP teardown.
+        let _ = self.task.take();
+    }
+}
+
+async fn supervise_actors(
+    mut requests: mpsc::Receiver<CallActor>,
+    completed: mpsc::Sender<ActorCompletion>,
+    shutdown: watch::Sender<bool>,
+) {
+    let mut actors = JoinSet::new();
+    loop {
+        tokio::select! {
+            actor = requests.recv() => match actor {
+                Some(actor) => {
+                    actors.spawn(actor);
+                }
+                None => break,
+            },
+            joined = actors.join_next(), if !actors.is_empty() => {
+                if let Some(Ok(call)) = joined {
+                    let _ = completed.send(call).await;
+                }
+            }
+        }
+    }
+    let _ = shutdown.send(true);
+    while let Some(joined) = actors.join_next().await {
+        if let Ok(call) = joined {
+            let _ = completed.send(call).await;
+        }
+    }
 }
 
 fn timer_slot(timer: Timer) -> Option<usize> {
@@ -696,7 +964,7 @@ impl Host {
     /// A document with no call listener, or a listener that could not be bound.
     pub async fn run(&mut self) -> Result<(), HostError> {
         let (handle, incoming) = self.bind_endpoint().await?;
-        self.serve(handle, incoming).await
+        Box::pin(self.serve(handle, incoming)).await
     }
 
     /// Bind the configured call listener without entering the serving loop.
@@ -729,12 +997,10 @@ impl Host {
         let listener = self.call_listener()?;
         let agent = UserAgent::new(handle.clone(), Self::agent_config(&listener));
         let mut dispatcher = Dispatcher::new(handle.clone(), incoming);
-        // A call runs on its own task, so the task reports its own end here and the loop forgets it
-        // on the next turn. N11 is why this exists rather than the admission simply being dropped:
-        // a live call keeps the policy it was admitted with, and `Running` can only honour that
-        // while it still knows the call is live. Ending the admission at spawn time — which is what
-        // this did first — left `live_calls` reading zero with calls up.
-        let (ended, mut endings) = mpsc::channel::<String>(ENDINGS);
+        // The serving future owns every call task. N11 is why admission cannot end at spawn time,
+        // and ownership is why endpoint shutdown cannot silently discard a live SIP dialog: the
+        // stop signal reaches every actor, then this future joins every actor before returning.
+        let mut actors = ActorSupervisor::new();
 
         loop {
             // Keep one `Dispatcher::next` future alive while calls report completion. Dropping and
@@ -747,9 +1013,9 @@ impl Host {
                 loop {
                     tokio::select! {
                         event = &mut next => break event,
-                        ended_call = endings.recv() => {
-                            if let Some(call) = ended_call {
-                                self.running.end(&call);
+                        joined = actors.join_next(), if actors.completion_open() => {
+                            if let Some(completion) = joined {
+                                self.running.complete(completion);
                             }
                         }
                     }
@@ -760,7 +1026,8 @@ impl Host {
             };
             match event {
                 Dispatched::Invitation(invitation) => {
-                    self.admit(&handle, &listener, invitation, &ended).await;
+                    self.admit(&handle, &listener, invitation, &mut actors)
+                        .await;
                 }
                 Dispatched::OutOfDialog(request) => {
                     answer_out_of_dialog(&agent, &handle, &request).await;
@@ -768,9 +1035,7 @@ impl Host {
                 _ => {}
             }
         }
-        for call in drain(&mut endings) {
-            self.running.end(&call);
-        }
+        actors.finish(&mut self.running).await;
         Ok(())
     }
 
@@ -803,115 +1068,146 @@ impl Host {
     }
 
     /// Admit one invitation under the document's routing, and act on the answer.
-    async fn admit(
-        &mut self,
-        handle: &Handle,
-        listener: &Listener,
+    fn admit<'a>(
+        &'a mut self,
+        handle: &'a Handle,
+        listener: &'a Listener,
         invitation: Invitation,
-        ended: &mpsc::Sender<String>,
-    ) {
-        let call_id = call_id(invitation.request());
-        match self.running.admit(&call_id, &listener.name) {
-            Admission::App(policy) => {
-                if let AppBinding::Webhook { .. } = &policy.binding
-                    && let Some(webhook) = self.webhooks.get(&policy.app).cloned()
-                {
-                    let actor = DocumentCall::new(
-                        handle.clone(),
-                        invitation,
-                        call_id,
-                        self.media_address,
-                        *policy,
-                        webhook,
-                        ended.clone(),
-                    );
-                    tokio::spawn(actor.run());
-                    return;
-                }
+        actors: &'a mut ActorSupervisor,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let call_id = call_id(invitation.request());
+            match self.running.admit(&call_id, &listener.name) {
+                Admission::App(policy) => {
+                    if let AppBinding::Webhook { .. } = &policy.binding
+                        && let Some(webhook) = self.webhooks.get(&policy.app).cloned()
+                    {
+                        let Some(permit) = actors.reserve() else {
+                            let _ = invitation.refuse(handle, 503, "Service Unavailable").await;
+                            self.running.end(&call_id);
+                            return;
+                        };
+                        let Some(lease) = self.running.completion_lease(call_id.clone()) else {
+                            let _ = invitation
+                                .refuse(handle, INTERNAL_ERROR, "Server Internal Error")
+                                .await;
+                            self.running.end(&call_id);
+                            return;
+                        };
+                        let actor = DocumentCall::new(
+                            handle.clone(),
+                            invitation,
+                            call_id,
+                            self.media_address,
+                            *policy,
+                            webhook,
+                            actors.receiver(),
+                        );
+                        actors
+                            .spawn(Box::pin(async move {
+                                let _permit = permit;
+                                let _call_id = actor.run().await;
+                                let completion = lease.completion();
+                                drop(lease);
+                                completion
+                            }))
+                            .await;
+                        return;
+                    }
 
-                // Session and embedded bindings are later phases. Until their drivers exist they
-                // are unreachable in the document's own vocabulary.
-                match policy.failure.on_unreachable {
-                    OnFailure::Reject { status } => {
-                        let _ = invitation.refuse(handle, status, "Unavailable").await;
-                        self.running.end(&call_id);
-                    }
-                    OnFailure::Hangup => {
-                        self.carry(handle, invitation, call_id, true, ended.clone())
-                            .await;
-                    }
-                    OnFailure::Continue => {
-                        self.carry(handle, invitation, call_id, false, ended.clone())
-                            .await;
+                    // Session and embedded bindings are later phases. Until their drivers exist they
+                    // are unreachable in the document's own vocabulary.
+                    match policy.failure.on_unreachable {
+                        OnFailure::Reject { status } => {
+                            let _ = invitation.refuse(handle, status, "Unavailable").await;
+                            self.running.end(&call_id);
+                        }
+                        OnFailure::Hangup => {
+                            let shutdown = actors.receiver();
+                            self.carry(handle, invitation, call_id, true, actors, shutdown)
+                                .await;
+                        }
+                        OnFailure::Continue => {
+                            let shutdown = actors.receiver();
+                            self.carry(handle, invitation, call_id, false, actors, shutdown)
+                                .await;
+                        }
                     }
                 }
+                Admission::Refuse(status) => {
+                    let _ = invitation.refuse(handle, status, "Declined").await;
+                }
+                // A listener that is not there, or a session listener a call arrived on. Both are
+                // host bugs rather than the caller's problem, and neither is ever silence (N6).
+                Admission::NoSuchListener | Admission::NotACallListener => {
+                    let _ = invitation
+                        .refuse(handle, INTERNAL_ERROR, "Server Internal Error")
+                        .await;
+                }
             }
-            Admission::Refuse(status) => {
-                let _ = invitation.refuse(handle, status, "Declined").await;
-            }
-            // A listener that is not there, or a session listener a call arrived on. Both are
-            // host bugs rather than the caller's problem, and neither is ever silence (N6).
-            Admission::NoSuchListener | Admission::NotACallListener => {
-                let _ = invitation
-                    .refuse(handle, INTERNAL_ERROR, "Server Internal Error")
-                    .await;
-            }
-        }
+        })
     }
 
     /// Answer an invitation and serve the call to its end on its own task.
     ///
-    /// The task reports `call_id` back over `ended` whichever way the call finishes, so the
-    /// admission is forgotten exactly once and only after the call is really over.
+    /// The owned task returns `call_id` whichever way the call finishes, so the admission is
+    /// forgotten exactly once and only after the call is really over.
     async fn carry(
-        &self,
+        &mut self,
         handle: &Handle,
         invitation: Invitation,
         call_id: String,
         hang_up_at_once: bool,
-        ended: mpsc::Sender<String>,
+        actors: &ActorSupervisor,
+        mut shutdown: watch::Receiver<bool>,
     ) {
+        let Some(permit) = actors.reserve() else {
+            let _ = invitation.refuse(handle, 503, "Service Unavailable").await;
+            self.running.end(&call_id);
+            return;
+        };
         // The caller gave up, or the answer could not be sent. Either way there is no call to carry
         // and nothing useful to say to a peer that is already gone — but the admission still has to
         // be released, or a host that is refused often enough leaks one entry per attempt.
         let Ok(mut call) = invitation.answer(handle, self.media_address).await else {
-            let _ = ended.send(call_id).await;
+            self.running.end(&call_id);
             return;
         };
         let (_, mut inbox) = invitation.into_parts();
-        tokio::spawn(async move {
-            if hang_up_at_once {
-                let _ = call.hang_up().await;
-            } else {
-                // `serve` is the one loop: it honours the RFC 4028 session timer, answers what the
-                // call does not claim rather than dropping it, and returns when the call ends.
-                let _ = sipx_call::serve(&mut call, &mut inbox).await;
-                if !call.is_ended() {
+        let Some(lease) = self.running.completion_lease(call_id.clone()) else {
+            self.running.end(&call_id);
+            return;
+        };
+        actors
+            .spawn(Box::pin(async move {
+                let _permit = permit;
+                if hang_up_at_once {
                     let _ = call.hang_up().await;
+                } else {
+                    // `serve` is the one loop: it honours the RFC 4028 session timer, answers what
+                    // the call does not claim rather than dropping it, and returns when the call
+                    // ends.
+                    tokio::select! {
+                        () = shutdown_signal(&mut shutdown) => {}
+                        _ = sipx_call::serve(&mut call, &mut inbox) => {}
+                    }
+                    if !call.is_ended() {
+                        let _ = call.hang_up().await;
+                    }
                 }
-            }
-            let _ = ended.send(call_id).await;
-        });
+                let completion = lease.completion();
+                drop(lease);
+                completion
+            }))
+            .await;
     }
 }
 
-/// How many finished calls may be waiting to be forgotten before a task reporting one has to wait.
-///
-/// Generous rather than tuned: the only cost of a large queue here is memory for a string per call,
-/// and the cost of a small one is a finishing call blocking on a loop that is busy answering.
-const ENDINGS: usize = 1024;
-
-/// Every call that has reported its end since the last turn of the loop.
-///
-/// Non-blocking on purpose. The alternative is selecting over this and `Dispatcher::next`, which
-/// would make the loop's correctness depend on that future being cancel-safe — a property it does
-/// not document, and one a host should not quietly assume.
-fn drain(endings: &mut mpsc::Receiver<String>) -> Vec<String> {
-    let mut ended = Vec::new();
-    while let Ok(call) = endings.try_recv() {
-        ended.push(call);
+async fn shutdown_signal(shutdown: &mut watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
     }
-    ended
+    let _ = shutdown.changed().await;
 }
 
 /// Answer a request that arrived outside any dialog.
@@ -964,10 +1260,12 @@ async fn refuse(handle: &Handle, incoming: &Incoming, status: u16, reason: &'sta
 )]
 mod tests {
     use super::*;
+    use sipx_call::{DialOptions, dial};
     use sipx_sip::{HostName, Method, Request, Response, build::RequestBuilder};
     use sipx_transport::TransportKind;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
 
     /// A document with one UDP call listener routed to one app.
     const DOCUMENT: &str = r#"
@@ -997,6 +1295,8 @@ url = "{url}"
 signing_secrets = ["hook"]
 
 [app.greeter.on_failure]
+timeout_ms = 250
+on_timeout = "hangup"
 on_4xx = {{ reject = 488 }}
 "#
         )
@@ -1015,6 +1315,146 @@ on_4xx = {{ reject = 488 }}
                 .expect("writes");
         });
         (url, task)
+    }
+
+    async fn answering_then_holding_webhook()
+    -> (String, oneshot::Receiver<()>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+        let url = format!("http://{}/hook", listener.local_addr().expect("address"));
+        let (held, held_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.expect("accepts incoming callback");
+            let mut request = [0_u8; 4096];
+            let _ = first
+                .read(&mut request)
+                .await
+                .expect("reads incoming event");
+            let body =
+                r#"{"contract":"sipx.app.v1","instructions":[{"id":"answer","do":"answer"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            first
+                .write_all(response.as_bytes())
+                .await
+                .expect("answers with answer instruction");
+
+            let (mut second, _) = listener.accept().await.expect("accepts answered callback");
+            let _ = second
+                .read(&mut request)
+                .await
+                .expect("reads answered event");
+            held.send(()).expect("reports held callback");
+            let mut drained = [0_u8; 256];
+            while second.read(&mut drained).await.expect("waits for timeout") != 0 {}
+
+            let (mut third, _) = listener.accept().await.expect("accepts terminal callback");
+            let mut terminal = Vec::new();
+            loop {
+                let read = third
+                    .read(&mut request)
+                    .await
+                    .expect("reads terminal event");
+                assert_ne!(read, 0, "the terminal request is complete");
+                terminal.extend_from_slice(&request[..read]);
+                if terminal
+                    .windows(b"call.ended".len())
+                    .any(|window| window == b"call.ended")
+                {
+                    break;
+                }
+                assert!(terminal.len() <= 16 * 1024, "the request stays bounded");
+            }
+            third
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("acknowledges terminal event");
+        });
+        (url, held_rx, task)
+    }
+
+    async fn holding_initial_webhook()
+    -> (String, oneshot::Receiver<()>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+        let url = format!("http://{}/hook", listener.local_addr().expect("address"));
+        let (held, held_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.expect("accepts incoming callback");
+            let mut request = [0_u8; 4096];
+            let _ = first
+                .read(&mut request)
+                .await
+                .expect("reads incoming event");
+            held.send(()).expect("reports held callback");
+            let mut drained = [0_u8; 256];
+            while first.read(&mut drained).await.expect("waits for timeout") != 0 {}
+
+            let (mut terminal, _) = listener.accept().await.expect("accepts terminal callback");
+            let mut body = Vec::new();
+            loop {
+                let read = terminal
+                    .read(&mut request)
+                    .await
+                    .expect("reads terminal event");
+                assert_ne!(read, 0, "the terminal request is complete");
+                body.extend_from_slice(&request[..read]);
+                if body
+                    .windows(b"call.ended".len())
+                    .any(|window| window == b"call.ended")
+                {
+                    break;
+                }
+                assert!(body.len() <= 16 * 1024, "the request stays bounded");
+            }
+            terminal
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("acknowledges terminal event");
+        });
+        (url, held_rx, task)
+    }
+
+    async fn answering_until_disconnected_webhook() -> (
+        String,
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+        let url = format!("http://{}/hook", listener.local_addr().expect("address"));
+        let (held, held_rx) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.expect("accepts incoming callback");
+            let mut request = [0_u8; 4096];
+            let _ = first
+                .read(&mut request)
+                .await
+                .expect("reads incoming event");
+            let body =
+                r#"{"contract":"sipx.app.v1","instructions":[{"id":"answer","do":"answer"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            first
+                .write_all(response.as_bytes())
+                .await
+                .expect("answers with answer instruction");
+
+            let (mut second, _) = listener.accept().await.expect("accepts answered callback");
+            let _ = second
+                .read(&mut request)
+                .await
+                .expect("reads answered event");
+            held.send(()).expect("reports held callback");
+            released.await.expect("the test releases the server");
+            let _ = second
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        });
+        (url, held_rx, release, task)
     }
 
     async fn endpoint() -> (Handle, mpsc::Receiver<Incoming>) {
@@ -1190,21 +1630,13 @@ on_unreachable = { reject = 503 }
         assert_eq!(running.live_calls(), 1);
         assert!(running.policy_of("call-1").is_some());
 
-        let (ended, mut endings) = mpsc::channel::<String>(ENDINGS);
-        assert!(
-            drain(&mut endings).is_empty(),
-            "nothing has ended, so nothing is forgotten",
-        );
         assert_eq!(
             running.live_calls(),
             1,
             "a turn of the loop with no ending must not release a live call",
         );
 
-        ended.try_send("call-1".to_owned()).unwrap();
-        for call in drain(&mut endings) {
-            running.end(&call);
-        }
+        running.end("call-1");
         assert_eq!(running.live_calls(), 0);
         assert!(running.policy_of("call-1").is_none());
     }
@@ -1229,9 +1661,10 @@ on_unreachable = { reject = 503 }
             .await
             .expect("sends");
         let invitation = dispatched_invitation(&mut dispatcher).await;
-        let (ended, mut endings) = mpsc::channel(1);
+        let mut actors = ActorSupervisor::new();
 
-        host.admit(&callee, &listener, invitation, &ended).await;
+        host.admit(&callee, &listener, invitation, &mut actors)
+            .await;
         assert_eq!(host.running.live_calls(), 1, "the actor owns one admission");
         let refusal = tokio::time::timeout(Duration::from_secs(5), responses.final_response())
             .await
@@ -1239,18 +1672,107 @@ on_unreachable = { reject = 503 }
             .expect("a final refusal");
         assert_eq!(refusal.status.code(), 488);
 
-        let ended_call = tokio::time::timeout(Duration::from_secs(5), endings.recv())
+        let ended_call = tokio::time::timeout(Duration::from_secs(5), actors.join_next())
             .await
             .expect("the rejected actor finishes")
             .expect("the actor reports its call id");
-        assert_eq!(ended_call, "actor-ended@test.example");
-        host.running.end(&ended_call);
+        assert_eq!(ended_call.call_id(), "actor-ended@test.example");
+        host.running.complete(ended_call);
         assert_eq!(
             host.running.live_calls(),
             0,
             "the report releases admission"
         );
         webhook.await.expect("the webhook answered once");
+    }
+
+    #[tokio::test]
+    async fn a_saturated_actor_set_refuses_admission_with_503() {
+        let mut host = Host::start_with_secrets(
+            &webhook_document("http://127.0.0.1:9/hook"),
+            "127.0.0.1".parse().unwrap(),
+            |name| (name == "hook").then(|| b"test-secret".to_vec()),
+        )
+        .expect("the host starts");
+        let listener = host.call_listener().expect("a call listener");
+        let (callee, incoming) = endpoint().await;
+        let address = callee.local_addr();
+        let mut dispatcher = Dispatcher::new(callee.clone(), incoming);
+        let (peer, _incoming) = endpoint().await;
+        let invite = invitation(&peer, "saturated@test.example", "z9hG4bK-saturated");
+        let mut responses = peer
+            .send(invite, Target::udp(address))
+            .await
+            .expect("sends");
+        let invitation = dispatched_invitation(&mut dispatcher).await;
+        let mut actors = ActorSupervisor::with_limit(0);
+
+        host.admit(&callee, &listener, invitation, &mut actors)
+            .await;
+        let refusal = tokio::time::timeout(Duration::from_secs(5), responses.final_response())
+            .await
+            .expect("the saturated host answers")
+            .expect("a final refusal");
+        assert_eq!(refusal.status.code(), 503);
+        assert_eq!(host.running.live_calls(), 0, "admission is rolled back");
+        actors.finish(&mut host.running).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_during_the_initial_callback_releases_the_actor_and_admission() {
+        let (url, held, webhook) = holding_initial_webhook().await;
+        let mut host = Host::start_with_secrets(
+            &webhook_document(&url),
+            "127.0.0.1".parse().unwrap(),
+            |name| (name == "hook").then(|| b"test-secret".to_vec()),
+        )
+        .expect("the host starts");
+        let listener = host.call_listener().expect("a call listener");
+        let (callee, incoming) = endpoint().await;
+        let address = callee.local_addr();
+        let mut dispatcher = Dispatcher::new(callee.clone(), incoming);
+        let (peer, _incoming) = endpoint().await;
+        let invite = invitation(
+            &peer,
+            "initial-cancel@test.example",
+            "z9hG4bK-initial-cancel",
+        );
+        let mut invite_responses = peer
+            .send(invite.clone(), Target::udp(address))
+            .await
+            .expect("sends");
+        let invitation = dispatched_invitation(&mut dispatcher).await;
+        let mut actors = ActorSupervisor::new();
+
+        host.admit(&callee, &listener, invitation, &mut actors)
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), held)
+            .await
+            .expect("the initial callback starts")
+            .expect("the webhook reports it");
+        let pump = tokio::spawn(async move { while dispatcher.next().await.is_some() {} });
+
+        let cancelled = final_response(&peer, address, cancel_for(&invite)).await;
+        assert_eq!(cancelled.status.code(), 200, "CANCEL is acknowledged");
+        let invite_final =
+            tokio::time::timeout(Duration::from_secs(5), invite_responses.final_response())
+                .await
+                .expect("the INVITE transaction finishes")
+                .expect("the dispatcher sends 487");
+        assert_eq!(invite_final.status.code(), 487);
+
+        let ended = tokio::time::timeout(Duration::from_secs(5), actors.join_next())
+            .await
+            .expect("the cancelled actor finishes")
+            .expect("the supervisor reports its call id");
+        assert_eq!(ended.call_id(), "initial-cancel@test.example");
+        host.running.complete(ended);
+        assert_eq!(host.running.live_calls(), 0, "the admission is released");
+        webhook.await.expect("the terminal callback is delivered");
+
+        callee.shutdown().await;
+        pump.await.expect("the dispatcher stops cooperatively");
+        actors.finish(&mut host.running).await;
     }
 
     #[tokio::test]
@@ -1276,15 +1798,16 @@ on_unreachable = { reject = 503 }
         let mut events = invitation
             .events()
             .expect("an invitation has one event stream");
-        let (ended, mut endings) = mpsc::channel(1);
+        let mut actors = ActorSupervisor::new();
 
-        host.admit(&callee, &listener, invitation, &ended).await;
+        host.admit(&callee, &listener, invitation, &mut actors)
+            .await;
         let refusal = tokio::time::timeout(Duration::from_secs(5), responses.final_response())
             .await
             .expect("the actor answers")
             .expect("a final refusal");
         assert_eq!(refusal.status.code(), 488, "the webhook refusal wins");
-        let _ = tokio::time::timeout(Duration::from_secs(5), endings.recv())
+        let _ = tokio::time::timeout(Duration::from_secs(5), actors.join_next())
             .await
             .expect("the actor finishes")
             .expect("the actor reports its end");
@@ -1304,7 +1827,98 @@ on_unreachable = { reject = 503 }
             events.try_recv().is_none(),
             "a late CANCEL must not replace the already-sent 488 with a 487"
         );
-        pump.abort();
+        callee.shutdown().await;
+        pump.await.expect("the dispatcher stops cooperatively");
+        actors.finish(&mut host.running).await;
         webhook.await.expect("the webhook answered once");
+    }
+
+    #[tokio::test]
+    async fn a_bye_is_answered_while_the_webhook_callback_is_still_in_flight() {
+        let (url, held, webhook) = answering_then_holding_webhook().await;
+        let (callee, incoming) = endpoint().await;
+        let address = callee.local_addr();
+        let shutdown = callee.clone();
+        let mut host = Host::start_with_secrets(
+            &webhook_document(&url),
+            "127.0.0.1".parse().unwrap(),
+            |name| (name == "hook").then(|| b"test-secret".to_vec()),
+        )
+        .expect("the host starts");
+        let host_task = tokio::spawn(async move { host.serve(callee, incoming).await });
+        let (peer, _incoming) = endpoint().await;
+        let mut call = dial(
+            &peer,
+            Target::udp(address),
+            &callee_uri(),
+            &DialOptions::new("<sip:caller@test.example>", "127.0.0.1".parse().unwrap()),
+        )
+        .await
+        .expect("the webhook answers the call");
+        tokio::time::timeout(Duration::from_secs(5), held)
+            .await
+            .expect("the answered callback starts")
+            .expect("the webhook reports it");
+
+        tokio::time::timeout(Duration::from_secs(1), call.hang_up())
+            .await
+            .expect("BYE receives its 200 while HTTP remains held")
+            .expect("the caller hangs up");
+        tokio::time::timeout(Duration::from_secs(5), webhook)
+            .await
+            .expect("the terminal callback is delivered")
+            .expect("the webhook task succeeds");
+        shutdown.shutdown().await;
+        host_task
+            .await
+            .expect("the host task does not panic")
+            .expect("the host stops cooperatively");
+    }
+
+    #[tokio::test]
+    async fn dropping_serve_cooperatively_ends_a_live_actor() {
+        let (url, held, release_webhook, webhook) = answering_until_disconnected_webhook().await;
+        let (callee, incoming) = endpoint().await;
+        let address = callee.local_addr();
+        let document = webhook_document(&url).replace("timeout_ms = 250", "timeout_ms = 30000");
+        let mut host = Host::start_with_secrets(&document, "127.0.0.1".parse().unwrap(), |name| {
+            (name == "hook").then(|| b"test-secret".to_vec())
+        })
+        .expect("the host starts");
+        let (peer, mut peer_incoming) = endpoint().await;
+        let mut serving = Box::pin(host.serve(callee, incoming));
+        let setup = async {
+            let call = dial(
+                &peer,
+                Target::udp(address),
+                &callee_uri(),
+                &DialOptions::new("<sip:caller@test.example>", "127.0.0.1".parse().unwrap()),
+            )
+            .await
+            .expect("the webhook answers the call");
+            tokio::time::timeout(Duration::from_secs(5), held)
+                .await
+                .expect("the answered callback starts")
+                .expect("the webhook reports it");
+            call
+        };
+        tokio::pin!(setup);
+        let mut call = tokio::select! {
+            result = &mut serving => panic!("the host stopped before cancellation: {result:?}"),
+            call = &mut setup => call,
+        };
+        drop(serving);
+        let bye = tokio::time::timeout(Duration::from_secs(20), peer_incoming.recv())
+            .await
+            .expect("the actor sends BYE during cancellation")
+            .expect("the peer endpoint stays open");
+        assert_eq!(bye.request.method, Method::Bye);
+        call.handle(&bye).await.expect("the peer answers BYE");
+        tokio::time::timeout(Duration::from_secs(5), host.running.wait_until_idle())
+            .await
+            .expect("the actor-owned lease releases admission");
+        assert_eq!(host.running.live_calls(), 0);
+        let _ = release_webhook.send(());
+        webhook.await.expect("the webhook task ends");
     }
 }

@@ -46,6 +46,7 @@ use crate::call::{Call, Codecs, token};
 use crate::dialog::{Dialog, cseq_number, from_tag, to_tag};
 use crate::error::{Error, Result};
 use crate::event::{CallEvents, EndCause, EventSink};
+use crate::identity::InboundIdentityPolicy;
 
 /// How many requests one call's inbox holds before the dispatcher sheds for it.
 ///
@@ -436,6 +437,8 @@ pub struct DispatchCounts {
     pub malformed: u64,
     /// INVITEs answered `482 Loop Detected` as merged requests (RFC 3261 §8.2.2.2).
     pub merged: u64,
+    /// Initial INVITEs refused by the caller-selected authenticated-identity policy.
+    pub identity: u64,
 }
 
 impl DispatchCounts {
@@ -453,6 +456,7 @@ impl DispatchCounts {
             .saturating_add(self.unsupported)
             .saturating_add(self.malformed)
             .saturating_add(self.merged)
+            .saturating_add(self.identity)
     }
 }
 
@@ -535,6 +539,7 @@ struct Counters {
     unsupported: AtomicU64,
     malformed: AtomicU64,
     merged: AtomicU64,
+    identity: AtomicU64,
 }
 
 /// Which counter a request that was not delivered belongs on.
@@ -546,6 +551,7 @@ enum Kind {
     Unsupported,
     Malformed,
     Merged,
+    Identity,
 }
 
 /// The set of calls a dispatcher routes to: a cheap, cloneable handle to its routing table.
@@ -605,6 +611,7 @@ impl Calls {
             unsupported: counts.unsupported.load(Ordering::Relaxed),
             malformed: counts.malformed.load(Ordering::Relaxed),
             merged: counts.merged.load(Ordering::Relaxed),
+            identity: counts.identity.load(Ordering::Relaxed),
         }
     }
 
@@ -622,6 +629,7 @@ impl Calls {
             Kind::Unsupported => &counts.unsupported,
             Kind::Malformed => &counts.malformed,
             Kind::Merged => &counts.merged,
+            Kind::Identity => &counts.identity,
         }
         .fetch_add(1, Ordering::Relaxed);
     }
@@ -747,6 +755,7 @@ pub struct Dispatcher {
     endpoint: Handle,
     incoming: mpsc::Receiver<Incoming>,
     calls: Calls,
+    identity: Option<InboundIdentityPolicy>,
 }
 
 impl Dispatcher {
@@ -770,7 +779,19 @@ impl Dispatcher {
                 counts: Counters::default(),
                 queue: queue.max(1),
             })),
+            identity: None,
         }
+    }
+
+    /// Verify new inbound INVITEs before they become answerable application invitations.
+    ///
+    /// A verification failure is sent on the INVITE transaction with its RFC 8224 status and the
+    /// request is not surfaced. With no selected policy, dispatch remains wire-compatible and
+    /// performs no credential acquisition or time read.
+    #[must_use]
+    pub fn with_identity(mut self, identity: InboundIdentityPolicy) -> Self {
+        self.identity = Some(identity);
+        self
     }
 
     /// A handle for registering calls this dispatcher did not itself surface.
@@ -829,6 +850,16 @@ impl Dispatcher {
                 // absorbs those — so a match here is always a different branch.
                 self.calls.counted(Kind::Merged);
                 self.refuse(&incoming, 482, "Loop Detected", None).await;
+                return None;
+            }
+            let verification = self
+                .identity
+                .as_mut()
+                .map(|identity| identity.verify(&incoming.request));
+            if let Some(Err(failure)) = verification {
+                self.calls.counted(Kind::Identity);
+                self.refuse(&incoming, failure.status(), failure.reason(), None)
+                    .await;
                 return None;
             }
             // Anything else is a fresh call attempt, and that includes the §8.1.3.5 retry that

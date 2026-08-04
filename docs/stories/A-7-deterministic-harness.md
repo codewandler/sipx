@@ -32,17 +32,16 @@ test cases.
 ## Progress
 - Done, in `crates/sipx-app/src/harness/` — the crate's first code, as the design says it should be.
   Six modules: `time` (the clock), `contract` (the vocabulary), `policy` (§9.2), `binding` (the
-  app), `scenario` (the model and its runner), `vectors` (§11 and the knobs). 20 tests.
+  app), `scenario` (the model and its runner), `vectors` (§11 and the knobs).
 - **A scenario is data, and so is its expectation.** `Scenario` carries the app's script with
   per-reply delays, the call events in time order, redeliveries, and the failure declaration;
   `Expectation` carries the effects, the conclusion, the delivered `seq`s, the knobs consulted, the
   legs and what must *not* have happened. Keeping the expectation data rather than a closure is
   what lets `A-2`/`A-4` reuse a vector's verdict instead of restating it.
-- **AC-1 … AC-9 all run**, before `C-3` and `C-5` existed, which was the story's point. The harness
-  still carries the provisional instruction-execution half it needed then. `C-5` has since landed,
-  so migrating that half to `sipx_app_protocol::Interpreter` is now an open `A-2` requirement;
-  until then these scenarios remain useful actor-policy evidence but do not prove a
-  sole-interpreter architecture.
+- **AC-1 … AC-9 all run**, as they did before `C-3` and `C-5` existed. Now that `C-5` has landed,
+  the harness drives `sipx_app_protocol::Interpreter` directly: its old instruction vocabulary,
+  pending-program queue and verb dispatcher are gone. The scenario and expectation shapes remain
+  harness-owned data, while the contract vocabulary is re-exported from the protocol crate.
 - **Acceptance 4 is enforced by a type, not by review.** `Binding::respond` returns what the app
   *will* say **and how long that will take**. A real HTTP client cannot answer the second half
   before making the call, so it cannot implement the trait in good faith; combined with a `Virtual`
@@ -51,13 +50,10 @@ test cases.
 - Every §9.2 knob has a scenario **per declared action** — twelve, generated from `Failure::all()`
   so adding a fifth knob without a scenario fails a test rather than going quietly untested. A test
   also shows a foreign binding being held to them, and being *failed* when it misbehaves.
-- **Two readings the spec leaves implicit** are recorded in `scenario`'s module docs, because a
-  vector's outcome depends on each. The protocol interpreter now owns the normative reading; the
-  provisional harness interpreter must be migrated rather than treated as a second authority:
-  1. An empty document does not replace the program — §6.3 calls a response "the entire new
-     program" *and* calls an empty one "keep going", which only reconcile if empty changes nothing.
-  2. A digit consumed by a running `gather` is not also delivered as `call.dtmf`. AC-3's barge-in is
-     a digit during a `play`, where no gather runs, so that case is untouched.
+- **The continuation reading the spec once left implicit** is now exercised through the sole
+  protocol interpreter rather than copied into the scenario runner: an empty document does not
+  replace the program. Section 6.3 calls a response "the entire new program" and also calls an
+  empty one "keep going"; the interpreter owns the only reconciliation of those statements.
 - AC-1's wording says "after `timeout_ms`", but the harness fails an unreachable app immediately:
   §9.2 gives "absent" and "slow" separate knobs, and a host that could not tell them apart could not
   honour both. Which one a connect failure reports is `A-2`'s call; the vector's real claim — the
@@ -68,6 +64,10 @@ test cases.
 - Mutation-tested: appending instead of replacing (AC-3), applying a redelivery's answer (AC-4),
   letting `call.ended` be dropped like any other event (AC-9), and skipping an unknown verb instead
   of rejecting the document whole (AC-5) — each fails a vector.
+- The migration itself found one last split-semantics defect: the provisional runner ignored a bad
+  answer to `call.ended`, while the protocol interpreter could apply its failure policy and issue a
+  second teardown. The guard and its regression now live in the protocol interpreter, so webhook,
+  future session and deterministic bindings all share it.
 - The harness schedules on `sipx-transport`'s own `TimerQueue`, which `X-21` made generic over its
   instant. This is that parameter's second caller and the reason it was worth adding.
 

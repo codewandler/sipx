@@ -155,11 +155,12 @@ that adds a feature.** M9 to M12 are defined and their stories are cut. **M10 is
 checked its four **Done when** clauses against the tests and CI jobs meant to demonstrate them and
 found three held and the fourth short in the same way M10's two were; `X-54` closed that fourth —
 [where M12 stands](#m12--provable) records which evidence carries each clause. M9 is two thirds
-done: `S-19` and `C-2` closed, with `C-1` substantially implemented but still open on three
-offer/answer axes. M11 has its identity service, diversion-history and overload pieces (`S-20`,
-`S-21`, `T-22`); only live-call identity evidence (`S-34`) remains. The in-progress
-work is the [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host)
-epics below, which are not milestones because they are not RFC gaps.
+done: `S-19` and `C-2` closed, with `C-1` substantially implemented but still open on delayed
+reliable-provisional relay and a true off-media signalling mode. **M11 is delivered**: `S-20`,
+`S-21`, `T-22` and `S-34` provide the identity, diversion-history, overload and live-call evidence.
+Application-host phase 1 is delivered by `A-2`; the remaining in-progress work is the later
+[app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host) phases below, which
+are not milestones because they are not RFC gaps.
 
 **Next release cut.** Cut the next alpha after `C-1`, `A-2` and `S-34` close. That boundary completes
 M9, document-host phase 1 and M11 together, and gives the release three coherent public proofs: two

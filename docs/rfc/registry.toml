@@ -510,26 +510,32 @@ number = 8224
 title = "Authenticated Identity Management in SIP (STIR)"
 layer = "security"
 status = "implemented"
+roles = ["uac", "uas"]
 headers = ["Identity"]
 evidence = [
   "crates/sipx-sip/src/identity.rs",
   "crates/sipx-ua/src/identity.rs",
   "crates/sipx-ua/tests/identity.rs",
+  "crates/sipx-call/src/identity.rs",
+  "crates/sipx-call/tests/identity.rs",
   "docs/specs/sip-identity.md",
 ]
-note = "The authentication and verification services are sans-I/O: callers supply authority policy, time, credential acquisition, and credential trust. The verifier applies the RFC's ordered checks and distinct 428, 436, 437, 438, and stale-Date 403 outcomes. No call-layer path selects these services yet, so this row claims the library mechanism but no UAC or UAS role."
+note = "UAC calls explicitly select an authentication service through `DialOptions`; UAS dispatchers explicitly select required or optional verification before an invitation can reach the application. The services remain sans-I/O: callers supply authority policy, time, credential acquisition, and credential trust. Live tests cover the ordinary silent default, independent verification of an outbound wire signature, and distinct 428 and 438 inbound refusals before answer."
 
 [[rfc]]
 number = 8225
 title = "PASSporT: Personal Assertion Token"
 layer = "security"
 status = "implemented"
+roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-sip/src/identity.rs",
   "crates/sipx-ua/tests/identity.rs",
+  "crates/sipx-call/src/identity.rs",
+  "crates/sipx-call/tests/identity.rs",
   "docs/specs/sip-identity.md",
 ]
-note = "Full-form baseline PASSporT with deterministic `typ`, `alg`, `x5u`, `dest`, `iat`, and `orig` serialization and ES256 signing and verification. Unsupported `ppt` values are refused; later-profile attestation levels and `origid` are deliberately not claimed. No call-layer path selects the token services yet, so this row claims no UAC or UAS role."
+note = "UAC and UAS calls reach full-form baseline PASSporT with deterministic `typ`, `alg`, `x5u`, `dest`, `iat`, and `orig` serialization and ES256 signing and verification. The outbound live-call proof parses the wire token independently and verifies its signature without sipx's serializer or verifier. Unsupported `ppt` values are refused; later-profile attestation levels and `origid` are deliberately not claimed."
 
 # ---------------------------------------------------------------------------------------------
 # Media: describing it, carrying it, encoding it
@@ -881,14 +887,14 @@ note = "The UA side for both call roles: History-Info is a typed ordered list wi
 number = 7092
 title = "A Taxonomy of Session Initiation Protocol (SIP) Back-to-Back User Agents"
 layer = "services"
-status = "implemented"
+status = "partial"
 roles = ["uac", "uas"]
 spec = "docs/specs/call-coupling.md"
 evidence = [
   "crates/sipx-call/src/coupling.rs",
   "crates/sipx-call/tests/coupling.rs",
 ]
-note = "The taxonomy is informational rather than a protocol conformance claim. sipx supplies the logical UAS/UAC concatenation as one owner of two dialogs: per-leg offer/answer state covers the initial INVITE, reliable provisional, PRACK, UPDATE and re-INVITE axes; glare is refused before forwarding; and a BYE on either confirmed leg ends its peer. Leaving the media bridge unattached is the §3.1.3 signalling policy; attaching it gives §3.2.3 media termination with explicit transcoding. Both `uac` and `uas` are named because a B2BUA is their logical concatenation, not because sipx ships routing, a registrar or a dial plan."
+note = "The taxonomy is informational rather than a protocol conformance claim. sipx supplies much of the logical UAS/UAC concatenation as one owner of two dialogs: its owning constructor creates the target initial INVITE from the source offer; the call layer can originate a reliable-provisional offer and answer it in PRACK; per-leg policy covers every carrier; UPDATE and re-INVITE relay live; glare is refused before forwarding; and a BYE on either confirmed leg ends its peer. Attaching the media bridge gives §3.2.3 media termination with explicit transcoding. Partial because delayed reliable-provisional/PRACK negotiation is not yet relayed across both coupling legs, and leaving the bridge unattached still leaves two locally terminating media sessions rather than the truly off-media-path §3.1.3 role. Both `uac` and `uas` are named because a B2BUA is their logical concatenation, not because sipx ships routing, a registrar or a dial plan."
 
 [[rfc]]
 number = 7865

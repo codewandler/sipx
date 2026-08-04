@@ -49,6 +49,12 @@ The request's UAC owns the later randomised retry; retaining an `Incoming` after
 attempt to reuse a finished server transaction. The full table and lifecycle mapping are normative in
 [`specs/call-coupling.md`](../specs/call-coupling.md).
 
+The confirmed driver also asks the source `Call` whether it can accept an offer before opening the
+policy exchange or sending on the other leg. This is a read-only use of the same renegotiation
+preparation the call later applies, including codec and keying checks. Consequently a wrong-dialog,
+malformed, or well-formed-but-unnegotiable offer is refused entirely on its source leg; it cannot
+move the peer and then fail while the source call tries to answer.
+
 The split is deliberate: endpoint routing decides which two user-agent legs to create.
 `EarlyCoupling` then owns the inbound `Invitation`/`Ringing`, outbound `Dialing`, and their routed
 inboxes; it executes PRACK, early UPDATE, CANCEL and final-status mapping before producing a
@@ -56,13 +62,17 @@ inboxes; it executes PRACK, early UPDATE, CANCEL and final-status mapping before
 confirmed calls. Listener configuration, target selection, forking and location lookup remain
 product work.
 
-The present call API always puts an offer in each initial INVITE and treats provisional SDP as its
-answer. It cannot originate an offer in a reliable provisional or negotiate an offer/answer in a
-PRACK body. The application also creates those initial INVITE legs before `EarlyCoupling` owns their
-pending state, so the owner does not relay that already-sent axis. Those carrier shapes remain an
-explicit C-1 gap; the concrete extensions are an owning initial dial constructor, `Ringing` support
-for sending an offer-bearing provisional, `Dialing` support for surfacing it as an offer rather than
-an answer, and SDP negotiation in `Ringing::on_prack`.
+`EarlyCoupling::dial` is the owning initial constructor: it consumes the inbound invitation, maps
+the source offer's direction onto a fresh target-leg offer, and retains cancellation responsibility
+while the outbound early dialog is created. The two user-agent legs regenerate endpoint-specific
+SDP rather than copying addresses or keys. The delayed-offer branch is carried by the ordinary call
+types: `ring_offer_early` originates an offer in a reliable provisional,
+`dial_early_without_offer` answers it in PRACK, and `Ringing::on_prack` adopts that answer before it
+acknowledges the exchange. The coupling consequently does not carry a parallel SDP interpreter or a
+second dialog sequence space for those axes. It does not yet suspend the target PRACK while the
+source leg returns an answer, so the two-leg delayed-offer relay remains open. Likewise, omitting
+`bridge_media` creates no forwarding task but does not make the two terminating `Call` sessions
+off-path; transparent SDP mapping for RFC 7092 section 3.1.3 remains open.
 
 ## Alternatives considered
 

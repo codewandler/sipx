@@ -2084,9 +2084,12 @@ dependencies = [
 name = "sipx-call"
 version = "1.0.0-alpha.5"
 dependencies = [
+ "base64",
  "bytes",
+ "openssl",
  "pretty_assertions",
  "rand 0.9.5",
+ "serde_json",
  "sipx-audio",
  "sipx-media",
  "sipx-rtp",
