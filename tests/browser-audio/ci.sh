@@ -50,6 +50,19 @@ export SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256
 export SIPX_BROWSER_AUDIO_WEBDRIVER_CMD="$ROOT/tests/browser-audio/webdriver.sh"
 export SIPX_BROWSER_AUDIO_PROOF_BIN="${CARGO_TARGET_DIR:-$ROOT/target}/debug/examples/browser_audio_proof"
 export SIPX_BROWSER_AUDIO_EVIDENCE_DIR="$EVIDENCE_ROOT"
+SIPX_BROWSER_AUDIO_MEDIA_ADDRESS=$(python3 - <<'PY'
+import ipaddress
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+    route.connect(("192.0.2.1", 9))
+    address = ipaddress.ip_address(route.getsockname()[0])
+if address.is_loopback or address.is_unspecified:
+    raise SystemExit(f"browser-audio proof: no non-loopback host media address: {address}")
+print(address)
+PY
+)
+export SIPX_BROWSER_AUDIO_MEDIA_ADDRESS
 
 "$ROOT/tests/browser-audio/run.sh"
 "$ROOT/tests/browser-audio/driver.py" validate-proof \

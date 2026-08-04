@@ -89,6 +89,7 @@ impl Case {
 struct Arguments {
     role: Role,
     case: Case,
+    media_address: IpAddr,
     certificate: PathBuf,
     key: PathBuf,
     result: PathBuf,
@@ -98,6 +99,7 @@ impl Arguments {
     fn read() -> Result<Self, String> {
         let mut role = None;
         let mut case = None;
+        let mut media_address = None;
         let mut certificate = None;
         let mut key = None;
         let mut result = None;
@@ -109,6 +111,13 @@ impl Arguments {
             match flag.as_str() {
                 "--role" => role = Some(Role::parse(&value)?),
                 "--case" => case = Some(Case::parse(&value)?),
+                "--media-address" => {
+                    media_address = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("invalid media address {value}"))?,
+                    );
+                }
                 "--cert" => certificate = Some(PathBuf::from(value)),
                 "--key" => key = Some(PathBuf::from(value)),
                 "--result" => result = Some(PathBuf::from(value)),
@@ -118,6 +127,7 @@ impl Arguments {
         Ok(Self {
             role: role.ok_or_else(|| "--role is required".to_owned())?,
             case: case.ok_or_else(|| "--case is required".to_owned())?,
+            media_address: media_address.ok_or_else(|| "--media-address is required".to_owned())?,
             certificate: certificate.ok_or_else(|| "--cert is required".to_owned())?,
             key: key.ok_or_else(|| "--key is required".to_owned())?,
             result: result.ok_or_else(|| "--result is required".to_owned())?,
@@ -175,7 +185,7 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
             answer_with_policy_at(
                 &endpoint,
                 &invitation,
-                MediaAddress::new(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                MediaAddress::new(arguments.media_address),
                 MediaPolicy::browser_audio(),
             )
             .await
@@ -195,7 +205,7 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
             .build();
             endpoint.respond(&readiness.key, response).await?;
             let to = Uri::sip(Host::Name(HostName::new("localhost")?));
-            let options = DialOptions::new("<sip:sipx@localhost>", IpAddr::V4(Ipv4Addr::LOCALHOST))
+            let options = DialOptions::new("<sip:sipx@localhost>", arguments.media_address)
                 .with_media_policy(MediaPolicy::browser_audio())
                 .with_timeout(Duration::from_secs(20));
             dial(&endpoint, target, &to, &options).await

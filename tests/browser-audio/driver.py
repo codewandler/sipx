@@ -181,6 +181,21 @@ def load_json(path: pathlib.Path) -> Any:
         raise ProofError(f"malformed JSON evidence in {path}") from error
 
 
+def write_json_evidence(path: pathlib.Path, value: Any) -> None:
+    encoded = (json.dumps(value, separators=(",", ":")) + "\n").encode("utf-8")
+    require(len(encoded) <= MAX_EVIDENCE_BYTES, "browser evidence exceeds the evidence cap")
+    path.write_bytes(encoded)
+
+
+def unwrap_webdriver_value(value: Any) -> Any:
+    if not isinstance(value, dict) or "value" not in value:
+        return value
+    result = value["value"]
+    if isinstance(result, dict) and result.get("error") and result.get("contract") != CONTRACT:
+        raise ProofError(f"WebDriver: {result['error']}: {result.get('message', '')}")
+    return result
+
+
 def _mapping(value: Any, name: str) -> dict[str, Any]:
     require(isinstance(value, dict), f"{name} must be an object")
     return value
@@ -313,7 +328,10 @@ def validate_negative(value: Any, expected: str, roles: dict[str, Any]) -> None:
     if expected == "FingerprintMismatch":
         require(facts.get("selected_pair") is True, "fingerprint negative selected no ICE pair")
         require(facts.get("nominated") is True, "fingerprint negative nominated no ICE pair")
-        require(facts.get("dtls_state") in ("failed", "closed"), "fingerprint negative did not observe DTLS failure")
+        require(
+            facts.get("dtls_state") in ("connecting", "connected", "failed", "closed"),
+            "fingerprint negative did not reach DTLS verification",
+        )
     elif expected == "NoNominatedPair":
         require(facts.get("ice_started") is True, "nomination negative never started ICE")
         require(facts.get("nominated") is False, "nomination negative reports a nominated pair")
@@ -356,13 +374,13 @@ class WebDriver:
         self.base = base.rstrip("/")
         self.session: str | None = None
 
-    def request(self, method: str, path: str, payload: Any | None = None) -> Any:
+    def request(self, method: str, path: str, payload: Any | None = None, timeout: float = 10) -> Any:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base}{path}", data=data, method=method, headers={"Content-Type": "application/json"}
         )
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 encoded = response.read(MAX_EVIDENCE_BYTES + 1)
         except urllib.error.HTTPError as error:
             encoded = error.read(MAX_EVIDENCE_BYTES + 1)
@@ -381,11 +399,7 @@ class WebDriver:
             raise ProofError(f"WebDriver HTTP {error.code}: {detail}") from error
         require(len(encoded) <= MAX_EVIDENCE_BYTES, "WebDriver response exceeds the evidence cap")
         value = json.loads(encoded.decode("utf-8"))
-        if isinstance(value, dict) and "value" in value:
-            if isinstance(value["value"], dict) and value["value"].get("error"):
-                raise ProofError(f"WebDriver: {value['value']['error']}: {value['value'].get('message', '')}")
-            return value["value"]
-        return value
+        return unwrap_webdriver_value(value)
 
     def start(self, capabilities: dict[str, Any], expected_pin: str) -> None:
         require(capabilities.get("acceptInsecureCerts") is not True, "acceptInsecureCerts would bypass WSS identity")
@@ -420,7 +434,12 @@ class WebDriver:
                 }));
             });
         """
-        return self.request("POST", f"/session/{self.session}/execute/async", {"script": script, "args": [config]})
+        return self.request(
+            "POST",
+            f"/session/{self.session}/execute/async",
+            {"script": script, "args": [config]},
+            timeout=timeout + 10,
+        )
 
 
 def wait_webdriver(url: str, timeout: float) -> None:
@@ -594,8 +613,8 @@ def main() -> int:
         try:
             driver.start(load_json(args.capabilities), args.pin)
             result = driver.run(args.page, config, args.timeout)
+            write_json_evidence(args.output, result)
             validate_browser_result(result, args.role, args.pin)
-            args.output.write_text(json.dumps(result, separators=(",", ":")) + "\n", encoding="utf-8")
         finally:
             driver.close()
     elif args.command == "run-negative":
@@ -607,10 +626,10 @@ def main() -> int:
         try:
             driver.start(load_json(args.capabilities), args.pin)
             result = driver.run(args.page, config, args.timeout)
+            write_json_evidence(args.output, result)
             require(result.get("contract") == CONTRACT, "negative browser result contract is wrong")
             require(result.get("type") == "proof.negative-browser", "negative browser run did not fail")
             require(result.get("mutation") == args.mutation, "negative browser result names the wrong mutation")
-            args.output.write_text(json.dumps(result, separators=(",", ":")) + "\n", encoding="utf-8")
         finally:
             driver.close()
     elif args.command == "validate-proof":

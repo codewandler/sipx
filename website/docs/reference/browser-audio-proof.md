@@ -36,8 +36,10 @@ Process exit is not accepted as a substitute for any of those facts.
 Every negative is paired with an already validated positive from the same browser role and bound to
 the SHA-256 digest of that positive evidence.
 
-- A changed SDP fingerprint keeps the browser's real certificate. ICE must nominate, DTLS must
-  fail, sipx must return `FingerprintMismatch`, and no RTP may pass.
+- A changed SDP fingerprint keeps the browser's real certificate. ICE must nominate and reach DTLS
+  certificate verification, sipx must return `FingerprintMismatch`, and no RTP may reach the
+  browser. Chrome may remain in DTLS `connecting` or briefly report `connected` before observing
+  the peer's typed refusal; sipx's refusal is the key-install boundary.
 - For missing nomination, the browser sends a complete answer and then closes its peer connection
   immediately after ACK. ICE must have started without selecting a pair; sipx must return
   `NoNominatedPair`, with no DTLS or RTP path.

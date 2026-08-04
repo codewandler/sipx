@@ -96,8 +96,11 @@ Each negative names a positive role and carries the canonical SHA-256 digest of 
 validated browser and sipx terminal objects. The validator recomputes that digest; a boolean claim
 that a paired positive ran is not evidence. Each negative binds the exact typed sipx refusal to the
 native browser's independent statistics from that mutation. The wrong-fingerprint case must select
-and nominate ICE, reach a failed DTLS state, and carry no RTP. Missing nomination must show that ICE
-started and the native peer closed before any pair was selected or nominated, fail as
+and nominate ICE, reach DTLS certificate verification, and deliver no RTP to the browser. The
+browser may remain in DTLS `connecting` or briefly report `connected` before it observes the peer's
+typed fingerprint refusal; the sipx `FingerprintMismatch` result is the authoritative key-install
+boundary. Missing nomination must show that ICE started and the native peer closed before any pair
+was selected or nominated, fail as
 `NoNominatedPair`, show no DTLS start, and carry no RTP. The weaker answer must fail as
 `WeakerMedia` before browser ICE/DTLS and
 must show that no fallback was attempted. A peer that could not

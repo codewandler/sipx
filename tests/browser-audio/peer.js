@@ -244,13 +244,13 @@
     const transport = [...entries.values()].find((value) => value.type === "transport");
     const pair = transport && entries.get(transport.selectedCandidatePairId)
       || [...entries.values()].find((value) => value.type === "candidate-pair" && value.nominated && value.state === "succeeded");
-    if (!transport || !pair) fail("statistics expose no selected candidate pair");
+    if (!transport || !pair) return null;
     const local = entries.get(pair.localCandidateId);
     const remote = entries.get(pair.remoteCandidateId);
-    if (!local || !remote) fail("selected candidate statistics omit an endpoint");
+    if (!local || !remote) return null;
     const inbound = [...entries.values()].find((value) => value.type === "inbound-rtp" && value.kind === "audio");
     const outbound = [...entries.values()].find((value) => value.type === "outbound-rtp" && value.kind === "audio");
-    if (!inbound || !outbound) fail("statistics expose no two-way audio RTP");
+    if (!inbound || !outbound) return {transport, pair, local, remote, inbound: null, outbound: null, codec: null};
     const codec = entries.get(inbound.codecId) || entries.get(outbound.codecId);
     if (!codec) fail("statistics expose no selected codec");
     return {transport, pair, local, remote, inbound, outbound, codec};
@@ -348,9 +348,28 @@
     }
 
     await waitConnected(pc, config.iceTimeoutMs || 15000);
+    if (config.mutation === "FingerprintMismatch") {
+      proofState.negativeFacts = await withDeadline("selected pair evidence", 1000, async () => {
+        while (true) {
+          const selected = await selectedStats(pc);
+          if (selected) {
+            return {
+              selected_pair: true,
+              nominated: selected.pair.nominated === true,
+              dtls_state: selected.transport.dtlsState || "not-started",
+            };
+          }
+          await waitEvent(pc, "connectionstatechange", null, 50).catch(() => undefined);
+        }
+      });
+    }
     const stats = await withDeadline("two-way RTP evidence", config.mediaTimeoutMs || 20000, async () => {
       while (true) {
         const current = await selectedStats(pc);
+        if (!current || !current.inbound || !current.outbound) {
+          await waitEvent(pc, "connectionstatechange", null, 250).catch(() => undefined);
+          continue;
+        }
         const energy = current.inbound.totalAudioEnergy || current.inbound.audioLevel || 0;
         if (current.inbound.packetsReceived > 0 && current.outbound.packetsSent > 0 && energy > 0) return current;
         // Sampling cadence: getStats(), not this duration, decides whether media evidence exists.
@@ -437,6 +456,7 @@
       .reduce((sum, value) => sum + (value.packetsReceived || 0), 0);
     const outbound = values.filter((value) => value.type === "outbound-rtp")
       .reduce((sum, value) => sum + (value.packetsSent || 0), 0);
+    const negativeFacts = proofState && proofState.negativeFacts || {};
     return {
       contract: CONTRACT,
       type: "proof.negative-browser",
@@ -446,10 +466,11 @@
       facts: {
         ice_started: Boolean(pc && (pc.iceGatheringState !== "new" || pc.iceConnectionState !== "new")),
         ice_state: pc ? pc.iceConnectionState : "not-started",
-        selected_pair: Boolean(selectedId),
-        nominated: Boolean(pair && pair.nominated),
-        dtls_state: transport && transport.dtlsState || "not-started",
-        rtp_packets: inbound + outbound,
+        selected_pair: negativeFacts.selected_pair || Boolean(selectedId),
+        nominated: negativeFacts.nominated || Boolean(pair && pair.nominated),
+        dtls_state: negativeFacts.dtls_state || transport && transport.dtlsState || "not-started",
+        rtp_packets: inbound,
+        outbound_rtp_attempts: outbound,
         fallback_attempted: false,
       },
       sip: {order: proofState ? proofState.events : []},

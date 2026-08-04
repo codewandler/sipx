@@ -187,6 +187,10 @@ class BrowserAudioProofTest(unittest.TestCase):
         changed["browser"]["facts"]["dtls_state"] = "new"
         target.write_text(json.dumps(changed), encoding="utf-8")
         self.assert_refused()
+        changed = copy.deepcopy(original)
+        changed["browser"]["facts"]["dtls_state"] = "connecting"
+        target.write_text(json.dumps(changed), encoding="utf-8")
+        DRIVER.validate_proof(self.directory, PIN)
 
     def test_the_two_ends_must_report_the_same_reversed_pair(self) -> None:
         target = self.directory / "browser-answerer/sipx.json"
@@ -315,6 +319,12 @@ class BrowserAudioProofTest(unittest.TestCase):
         self.assertEqual(b"ready\n", stdout.read_bytes())
         marker.touch()
         self.assertEqual(0, process.wait(timeout=3))
+
+    def test_application_negative_is_not_a_webdriver_protocol_error(self) -> None:
+        observation = {"contract": DRIVER.CONTRACT, "error": "FingerprintMismatch"}
+        self.assertEqual(observation, DRIVER.unwrap_webdriver_value({"value": observation}))
+        with self.assertRaisesRegex(DRIVER.ProofError, "WebDriver: timeout"):
+            DRIVER.unwrap_webdriver_value({"value": {"error": "timeout", "message": "late"}})
 
 
 if __name__ == "__main__":
