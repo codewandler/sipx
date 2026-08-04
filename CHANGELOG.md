@@ -7,6 +7,78 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A named browser-audio call policy now negotiates or refuses as one unit** (`M-49`).
+  `MediaPolicy::browser_audio()` and CLI `--profile browser-audio` require WSS, Opus, ICE,
+  DTLS-SRTP, RTCP multiplexing, a SHA-256 fingerprint/setup role, and the required audio
+  vocabulary; no missing part falls back to ordinary SIP media. The pure SDP boundary accepts a
+  completed native-browser offer shape (including safe extra formats, `trickle` capability, and
+  the muxed port-9 RTCP placeholder), answers with the five supported required mappings, and pins
+  typed downgrade/restart failures. Terminal JSON reports the negotiated codec/keying and the
+  media-owned nominated component rather than copying requested settings.
+  The offerer's full answer-exchange check now precedes generic codec settlement, ICE description
+  acceptance and ACK, so a missing profile fact or reordered payload set changes no media state.
+  Candidate validation is also all-or-nothing for this profile: malformed, peer-reflexive and
+  relayed extras are refused even beside a usable host candidate.
+  Reliable-provisional media is refused before binding or signalling rather than entering the
+  ordinary early-media path without the profile's ICE/DTLS owner.
+  Adding `MediaPolicy::profile` is a deliberate beta API break for external struct literals;
+  constructor/builder callers keep `MediaProfile::Standard`, and literal callers add that value.
+
+- **One nominated component now owns the complete browser-audio runtime** (`M-50`). ICE nomination
+  precedes DTLS, verified exporter keys are installed atomically, and the same bounded socket owner
+  classifies STUN, DTLS, SRTP and SRTCP without a bind/drop/rebind race. Source-address binding,
+  fixed packet and queue ceilings, typed ingress counters, cancellation and joined shutdown are
+  pinned below the call layer; two real CLI processes carry protected Opus and multiplexed control
+  traffic across the composed path.
+
+- **A native-browser CI proof now exercises that profile at the public product boundary** (`M-51`).
+  In both SIP roles it requires authenticated WSS, an ICE-nominated host or server-reflexive pair,
+  verified DTLS-SRTP, multiplexed RTP/RTCP, negotiated Opus and non-silent audio in both directions.
+  Separate wrong-fingerprint, missing-nomination and weaker-answer cases must fail at their named
+  layer, and every process and evidence stream is bounded. This proves one audio path; TURN-required
+  networks, video, browser APIs, data channels and a general WebRTC stack remain out of scope.
+
+- **The browser-audio target is now a normative, bounded profile rather than a feature list**
+  (`M-48`). `docs/specs/webrtc-audio.md` fixes the exact offer/answer vocabulary, fail-closed state
+  transitions, ICE-before-DTLS-before-key-install ordering, one-component packet classification,
+  queue and packet ceilings, cancellation ownership, byte-exact SDP vectors and the omissions that
+  keep this first profile from claiming video, data channels, TURN or a general browser API.
+
+- **Applications can bind media locally while advertising a different deployment address**
+  (`M-42`). `MediaAddress` and `DialOptions::with_media_bind_address` keep public NAT mappings out
+  of socket binds, preserve both roles through early media and renegotiation, and reject an
+  unspecified advertised address before signalling. The CLI exposes `--advertise`, reports bound
+  and advertised media addresses in JSON, and documents caller-resolved outbound proxy targets.
+  Adding `DialOptions::media_bind_address` is a deliberate beta API break for external struct
+  literals; constructor-and-builder callers keep bind-equals-advertise compatibility by default.
+
+- **RTCP multiplexing and typed DTLS setup-role negotiation now reach live calls** (`M-46`). Offers
+  and answers negotiate `a=rtcp-mux`; agreement sends authenticated RTP/RTCP on one owned socket,
+  omission retains the separate-port fallback, and ICE advertises the required fallback before
+  reducing an agreed mux answer to component 1. DTLS answers select a complementary supported role,
+  session-level setup is honored, and invalid or in-dialog mode changes fail before media mutates.
+
+### Fixed
+
+- **Authenticated SRTCP packets are now accepted once, not replayable for the key's lifetime**
+  (`M-47`). The receiver holds a replay window over the explicit 31-bit SRTCP index, separate from
+  SRTP's sequence/rollover window; authentication precedes every state change, too-old packets are
+  refused, and the window crosses the index boundary without forgetting the last packets before it.
+
+- **Malformed SIP is refused consistently before response construction or oversized WebSocket
+  allocation** (`X-64`). Response building now returns a typed error when an incoming request lacks
+  any header a response must copy. UDP, TCP, TLS, WS and WSS share named short/long-body and
+  pre-allocation regression tables, and the WS decoder applies the endpoint's SIP message ceiling
+  before assembling a frame or fragmented message.
+
+### Security
+
+- **Via branches and dialog tags now require a cryptographic random source by construction**
+  (`X-65`). Both retain 64 random bits; 4,096-sample per-bit tests pin the documented width and
+  cookie, while the generator seams reject a non-cryptographic `RngCore` at compile time.
+
 ## [1.0.0-beta.3] — 2026-08-04
 
 This prerelease ships the latest `main` after beta.2 without moving or overwriting the existing

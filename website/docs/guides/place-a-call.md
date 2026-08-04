@@ -40,11 +40,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
 
     // Port 0 asks the operating system for one. The address sipx advertises to the far end is
-    // separate from the one it binds, because behind a NAT they differ.
-    let (endpoint, _incoming) = bind(Config::new("0.0.0.0:0".parse()?)).await?;
+    // separate from the one it binds, because behind a NAT they differ. Use one advertised host
+    // for Via, Contact and SDP so the far end is never given three different ways back.
+    let mut config = Config::new("0.0.0.0:0".parse()?);
+    config.sent_by = "198.51.100.44".to_owned();
+    let (endpoint, _incoming) = bind(config).await?;
 
     let to = Uri::sip(Host::Name(HostName::new("callee.example")?));
-    let options = DialOptions::new("<sip:alice@example.net>", "127.0.0.1".parse()?)
+    let options = DialOptions::new("<sip:alice@example.net>", "198.51.100.44".parse()?)
+        // The public mapping above belongs in SDP but cannot be bound on this host.
+        .with_media_bind_address("0.0.0.0".parse()?)
         // Without this the attempt runs until the transaction layer gives up, which is 32
         // seconds. With it, sipx sends CANCEL — so the far end stops ringing rather than being
         // answered by somebody after the caller has gone.
@@ -88,15 +93,40 @@ is not looks identical from the outside to one where both are. sipx negotiates S
 transport protects the key and not otherwise, and says which happened.
 
 **The advertised address is separate from the bound one.** Behind a NAT they differ, and the
-socket's view is the wrong one to put in a `Contact`.
+socket's view is the wrong one to put in SDP. `DialOptions::with_media_bind_address` keeps RTP on
+a local interface while `media_address` remains the SDP destination. Set `Config::sent_by` from
+the same advertised host when Via and Contact must name that mapping too. With ICE enabled, its
+nominated pair wins; symmetric RTP never replaces an ICE result.
+
+This beta adds the public `media_bind_address` field to `DialOptions`. Code built with
+`DialOptions::new` keeps its prior behavior; external struct literals must add that field (usually
+equal to `media_address`) or migrate to the constructor and builder methods.
+
+## The named browser-audio policy
+
+Use `DialOptions::with_media_policy(MediaPolicy::browser_audio())` only with a verified WSS
+`Target`. The policy is one decision: Opus plus PCMU/PCMA/CN/telephone-event, ICE, DTLS-SRTP, a
+SHA-256 fingerprint/setup role, and multiplexed RTCP. A missing build feature, non-WSS target, or
+weaker answer is a typed error; it never retries as ordinary SIP media. After establishment,
+`Call::browser_component()` reports the media-owned nominated pair, generation, state, and ingress
+counters without exposing key material.
+
+Reliable provisional media is deliberately outside this first profile. Use `dial`, not
+`dial_early`: the early-dialog APIs return `Error::DtlsEarlyMedia` before binding or signalling,
+because this profile does not start ICE or DTLS from a provisional answer.
 
 ## From the command line
 
 The same thing without writing any Rust:
 
 ```bash
-sipx dial sip:bob@192.0.2.1:5060 --play hello.wav --record reply.wav --timeout 20
+sipx dial sip:bob@192.0.2.1:5060 --local 0.0.0.0:0 --advertise 198.51.100.44 \
+  --play hello.wav --record reply.wav --timeout 20
 ```
+
+The diagnostic form is `sipx dial ... --transport wss --profile browser-audio --json`. It requires
+a trusted WSS server and an Opus+DTLS build. Its nominated-component fields prove what the running
+sipx call selected; they do not by themselves prove interoperability with an independent browser.
 
 Every command speaks `--json` and returns a distinct exit code per outcome — see the
 [CLI reference](../reference/cli.md).

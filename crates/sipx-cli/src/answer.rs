@@ -20,10 +20,12 @@ OPTIONS:
     --duration <S>    Hang up after this many seconds (default 30)
     --wait <S>        Give up if no call arrives within this many seconds (default 60)
     --local <ADDR>    Local address to bind (default 0.0.0.0:5060)
+    --advertise <IP>  Address to put in Via, Contact and SDP independently of --local
     --transport <T>   Signalling: udp, tcp, tls, ws or wss (no flag keeps UDP/TCP)
     --tcp             Legacy alias for --transport tcp
     --tls-cert <FILE> Server certificate chain for TLS/WSS (with --tls-key)
     --tls-key <FILE>  Server private key for TLS/WSS (with --tls-cert)
+    --profile <P>     Media profile: standard or browser-audio (default standard)
     --codec <C>       Ordered codec preference; repeat pcmu, pcma or opus (default pcmu, pcma)
     --media-security <M>  auto, plain, sdes or dtls-srtp (default auto)
     --ice <P>         disabled, host or stun (default disabled)
@@ -84,9 +86,24 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Ok(local) => local,
         Err(_) => return fail(format, Exit::Usage, "--local must be host:port"),
     };
+    let advertised = match args.value("advertise") {
+        Some(value) => match value.parse::<IpAddr>() {
+            Ok(address) if !address.is_unspecified() => Some(address),
+            _ => {
+                return fail(
+                    format,
+                    Exit::Usage,
+                    "--advertise must be a non-unspecified IP",
+                );
+            }
+        },
+        None => None,
+    };
 
     let mut config = TransportConfig::new(local);
-    if local.ip().is_unspecified() {
+    if let Some(advertised) = advertised {
+        config.sent_by = advertised.to_string();
+    } else if local.ip().is_unspecified() {
         "127.0.0.1".clone_into(&mut config.sent_by);
     }
     crate::apply_capture(&args, &mut config);
@@ -160,18 +177,14 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         .await;
     }
 
-    let media_address: IpAddr = if local.ip().is_unspecified() {
-        // Answer on the address the caller reached us at, which is the one they can hear.
-        request.source.ip()
-    } else {
-        local.ip()
-    };
+    let media_addresses = crate::advertise::media_addresses(local, request.source.ip(), advertised);
+    let media_address = media_addresses.advertised;
 
     let started = std::time::Instant::now();
-    let mut call = match sipx_call::answer_with_policy_and_headers(
+    let mut call = match sipx_call::answer_with_policy_and_headers_at(
         &handle,
         &request,
-        media_address,
+        sipx_call::MediaAddress::new(media_address).with_bind(media_addresses.bind),
         media.policy(),
         &headers,
     )
@@ -239,6 +252,8 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Report::new()
             .text("status", "answered")
             .text("caller", caller)
+            .text("media_advertised", media_address.to_string())
+            .text("media_bound", call.media().local_addr().to_string())
             .number(
                 "duration_ms",
                 i64::try_from(started.elapsed().as_millis()).unwrap_or(0),
@@ -249,7 +264,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             )
             .boolean("heard_audio", samples_received != 0),
     );
-    let report = media.negotiated_report(report, &call);
+    let report = media.negotiated_report(report, &call, "browser-answerer");
     let mut report = devices.report(transport.report(report, request.transport));
 
     if !digits.is_empty() {

@@ -51,18 +51,20 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 | `--play <FILE>` | Play mono 16-bit WAV at the negotiated codec clock: 8 kHz for G.711 or 48 kHz for Opus |
 | `--record <FILE>` | Record the far end to WAV with that negotiated clock in its header |
 | `--dtmf <DIGITS>` | Send these digits once the call is up |
-| `--early-media` | Receive a reliable provisional media session before the final answer |
+| `--early-media` | Receive a reliable provisional media session before the final answer; incompatible with `--profile browser-audio` |
 | `--duration <S>` | Hang up after this many seconds once connected (default 30) |
 | `--timeout <S>` | Give up if not answered in this many seconds (default 20). `0` waits as long as the transaction layer does — 32 seconds |
 | `--from <URI>` | Our own address (default `sip:sipx@<local>`) |
 | `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is world-readable |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
+| `--advertise <IP>` | Address written consistently into Via, Contact, and SDP; independent of `--local` |
 | `--transport <T>` | Use `udp`, `tcp`, `tls`, `ws`, or `wss` (default `udp`) |
 | `--tcp` | Legacy alias for `--transport tcp` |
 | `--tls-server-name <N>` | Certificate identity to verify (default URI host) |
 | `--tls-ca <FILE>` | Add PEM trust roots to the platform store |
 | `--tls-cert <FILE>` | Mutual-TLS client certificate chain; requires `--tls-key` |
 | `--tls-key <FILE>` | Mutual-TLS client private key; requires `--tls-cert` |
+| `--profile <P>` | Select `standard` (default) or fail-closed `browser-audio`. The latter requires WSS plus the Opus and DTLS build features; it fixes codecs/keying and defaults ICE to `host` |
 | `--codec <C>` | Select `pcmu`, `pcma`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`). Opus requires the optional build feature |
 | `--media-security <M>` | Select `auto`, `plain`, `sdes`, or `dtls-srtp` (default `auto`). Explicit SDES requires TLS/WSS signalling |
 | `--ice <P>` | Select `disabled`, `host`, or `stun` (default `disabled`) |
@@ -74,15 +76,20 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 | `--capture <FILE>` | Record the signalling to this [pcapng](https://en.wikipedia.org/wiki/Pcap) file for a bug report. Credentials are redacted — digest responses and opaque `Bearer`/`Basic` tokens, SRTP keys (`a=crypto`, `k=`), push tokens, instance URNs. **TLS and WSS are recorded decrypted**, because capturing ciphertext from inside the process would be worse than capturing outside it. What redaction cannot remove is identity: the file still says who called whom, when, and from where, so treat it as sensitive |
 | `--counters <FILE>` | Write flattened signalling counters as JSON; `--capture` implies `<capture>.counters.json` |
 
-Report fields: `status`, `peer`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
+Report fields: `status`, `peer`, `media_advertised`, `media_bound`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
 `recording` when `--record` was given, and `loss`, `packets_lost`, `jitter_ms`, `mos`,
 `round_trip_ms` under `--stats`. `--early-media` adds `early_media` and
 `early_samples_recorded` to the terminal result. An explicit `--transport` also reports `requested_transport` and
 `negotiated_transport`; legacy no-flag and `--tcp` output remains byte-for-byte compatible.
-Any explicit media selector adds `requested_codecs`, `requested_media_security`, `requested_ice`,
+Any explicit media selector adds `media_profile`, `requested_codecs`, `requested_media_security`, `requested_ice`,
 `negotiated_codec`, `negotiated_media_security`, and `negotiated_ice`. Negotiated ICE is read from
 the selected candidate pair and may be `checking`, `host`, `server-reflexive`, `peer-reflexive`, or
 `relayed`; it is not copied from the request.
+An established browser-audio call additionally reports `browser_role`, `ice_component`,
+`negotiated_payload_type`, `negotiated_clock_rate`, `negotiated_keying`, `nominated_local`,
+`nominated_remote`, `ice_generation`, both candidate types, `media_state`, and
+`ingress_drops_total`. The nominated socket addresses and `running` state come from the live
+media-owned component after ICE nomination and verified DTLS key installation.
 When a device endpoint is selected, the result also names its exact stable identifier and effective
 rate/channel/format configuration. `device_input_dropped_samples`,
 `device_output_dropped_samples`, and `device_output_silence_samples` make callback pressure and
@@ -104,10 +111,12 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 | `--duration <S>` | Hang up after this many seconds (default 30) |
 | `--wait <S>` | Give up if no call arrives within this many seconds (default 60) |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:5060`) |
+| `--advertise <IP>` | Address written consistently into Via, Contact, and SDP; independent of `--local` |
 | `--transport <T>` | Listen for `udp`, `tcp`, `tls`, `ws`, or `wss` (default keeps the historical UDP/TCP listeners) |
 | `--tcp` | Select the historical TCP listener explicitly |
 | `--tls-cert <FILE>` | TLS/WSS server certificate chain; requires `--tls-key` |
 | `--tls-key <FILE>` | TLS/WSS server private key; requires `--tls-cert` |
+| `--profile <P>` | Select `standard` (default) or fail-closed `browser-audio`; the latter requires a WSS listener, Opus, DTLS, and ICE |
 | `--codec <C>` | Select `pcmu`, `pcma`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`) |
 | `--media-security <M>` | Select `auto`, `plain`, `sdes`, or `dtls-srtp` (default `auto`) |
 | `--ice <P>` | Select `disabled`, `host`, or `stun` (default `disabled`) |
@@ -122,10 +131,19 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 | `--counters <FILE>` | Write flattened signalling counters as JSON; `--capture` implies `<capture>.counters.json` |
 
 Reports twice: `status: "listening"` with the bound `address` first, then
-`status: "answered"` with `caller`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
+`status: "answered"` with `caller`, `media_advertised`, `media_bound`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
 `dtmf` when digits arrived and `recording` when `--record` was given. Explicit selection adds the
 requested transport to the listening report and both requested and negotiated transport to the
 terminal report.
+
+`--profile browser-audio` is valid on both `dial` and `answer`. It cannot be combined with
+`--codec` or `--media-security`, because the named profile fixes those choices; `--ice host` and
+`--ice stun --stun-server <ADDR>` are the permitted gathering policies. A non-WSS selection or a
+build without Opus/DTLS is refused before signalling or media I/O. Two sipx processes exercise the
+composition directly; independent native-browser interoperability remains a separate proof and is
+not inferred from this diagnostic command alone.
+`--early-media` is also refused with this profile before transport binding: the first profile starts
+ICE and DTLS only after a valid final answer, never from reliable provisional media.
 Explicit media selection adds the three requested fields to the listening report and the same six
 requested/negotiated fields documented for `dial` to the terminal report.
 Device results carry the same selected-configuration and callback-counter fields documented for

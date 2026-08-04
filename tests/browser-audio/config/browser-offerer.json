@@ -1,0 +1,11 @@
+{
+  "role": "browser-offerer",
+  "requestUri": "sip:sipx@localhost",
+  "fromUri": "sip:browser@localhost",
+  "contactUri": "sip:browser@localhost",
+  "iceServers": [],
+  "signallingTimeoutMs": 10000,
+  "iceTimeoutMs": 15000,
+  "mediaTimeoutMs": 20000,
+  "toneHz": 697
+}

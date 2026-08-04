@@ -17,7 +17,7 @@ use sipx_sip::update;
 use sipx_sip::{HeaderName, Method, Response, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
 
-use crate::call::{Early, EarlyOffer};
+use crate::call::{Early, EarlyOffer, MediaAddress};
 use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
 use crate::media_policy::{Codecs, MediaPolicy};
@@ -415,6 +415,28 @@ pub async fn ring_offer_early_with_policy(
     direction: Direction,
     policy: MediaPolicy,
 ) -> Result<Ringing> {
+    ring_offer_early_with_policy_at(
+        endpoint,
+        incoming,
+        status,
+        reason,
+        MediaAddress::new(media_address),
+        direction,
+        policy,
+    )
+    .await
+}
+
+/// [`ring_offer_early_with_policy`] with independent advertised and bound media addresses.
+pub async fn ring_offer_early_with_policy_at(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    status: u16,
+    reason: &'static str,
+    media_address: MediaAddress,
+    direction: Direction,
+    policy: MediaPolicy,
+) -> Result<Ringing> {
     if !incoming.request.body().is_empty() {
         return Err(Error::Rejected {
             status: 500,
@@ -517,6 +539,26 @@ pub async fn ring_early_with_policy(
     status: u16,
     reason: &'static str,
     media_address: IpAddr,
+    policy: MediaPolicy,
+) -> Result<Ringing> {
+    ring_early_with_policy_at(
+        endpoint,
+        incoming,
+        status,
+        reason,
+        MediaAddress::new(media_address),
+        policy,
+    )
+    .await
+}
+
+/// [`ring_early_with_policy`] with independent advertised and bound media addresses.
+pub async fn ring_early_with_policy_at(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    status: u16,
+    reason: &'static str,
+    media_address: MediaAddress,
     policy: MediaPolicy,
 ) -> Result<Ringing> {
     if !Offered::in_request(&incoming.request).supported {

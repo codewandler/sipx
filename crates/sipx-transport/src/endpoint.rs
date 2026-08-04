@@ -826,15 +826,21 @@ impl Handle {
     }
 }
 
+fn branch_with_rng<R>(rng: &mut R) -> String
+where
+    R: rand::CryptoRng + ?Sized,
+{
+    let value = rand::RngCore::next_u64(rng);
+    format!("z9hG4bK{value:016x}")
+}
+
 /// A `branch` token: the RFC's magic cookie plus 64 bits from a cryptographic RNG.
 ///
 /// The width is ours, not the RFC's. A guessable branch lets an off-path attacker inject
 /// responses into a transaction, so this is not a place for a counter.
 #[must_use]
 pub fn new_branch() -> String {
-    use rand::Rng;
-    let value: u64 = rand::rng().random();
-    format!("z9hG4bK{value:016x}")
+    branch_with_rng(&mut rand::rng())
 }
 
 /// Bind an endpoint and start its loop.
@@ -885,6 +891,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
                 config.bind.ip(),
                 port,
                 config.ws_keepalive,
+                config.limits,
                 &adopt_tx,
                 &handshakes,
             )
@@ -900,6 +907,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
                 port,
                 server,
                 config.ws_keepalive,
+                config.limits,
                 &adopt_tx,
                 &handshakes,
             )
@@ -1178,6 +1186,7 @@ async fn listen_ws(
     ip: std::net::IpAddr,
     port: u16,
     keepalive: std::time::Duration,
+    limits: Limits,
     adopt: &mpsc::Sender<Adopt>,
     runtime: &HandshakeRuntime,
 ) -> Result<SocketAddr> {
@@ -1226,7 +1235,10 @@ async fn listen_ws(
                 let upgraded = tokio::select! {
                     biased;
                     () = cancel.cancelled() => None,
-                    result = tokio::time::timeout(deadline, crate::ws::accept(stream, peer)) => Some(result),
+                    result = tokio::time::timeout(
+                        deadline,
+                        crate::ws::accept_with_limits(stream, peer, &limits),
+                    ) => Some(result),
                 };
                 match upgraded {
                     Some(Ok(result)) => {
@@ -1254,6 +1266,7 @@ async fn listen_wss(
     port: u16,
     server: crate::tls::ServerTls,
     keepalive: std::time::Duration,
+    limits: Limits,
     adopt: &mpsc::Sender<Adopt>,
     runtime: &HandshakeRuntime,
 ) -> Result<SocketAddr> {
@@ -1305,7 +1318,9 @@ async fn listen_wss(
                     () = cancel.cancelled() => None,
                     result = tokio::time::timeout(deadline, async move {
                         let tls = acceptor.accept(stream).await.map_err(|error| error.to_string())?;
-                        crate::ws::accept(tls, peer).await.map_err(|error| error.to_string())
+                        crate::ws::accept_with_limits(tls, peer, &limits)
+                            .await
+                            .map_err(|error| error.to_string())
                     }) => Some(result),
                 };
                 match upgraded {
@@ -2692,6 +2707,72 @@ mod tests {
     use super::{Adopt, HandshakeObservation, HandshakeRuntime};
     use super::{Background, Driver, Message, ShutdownState, Target, TransportKind};
 
+    const IDENTIFIER_SAMPLE_SIZE: u64 = 4096;
+
+    fn bit_counts(values: impl IntoIterator<Item = u64>) -> [usize; 64] {
+        let mut counts = [0; 64];
+        for value in values {
+            for (bit, count) in counts.iter_mut().enumerate() {
+                *count += usize::from(value & (1_u64 << bit) != 0);
+            }
+        }
+        counts
+    }
+
+    fn assert_full_width(counts: &[usize; 64], subject: &str) {
+        for (bit, ones) in counts.iter().copied().enumerate() {
+            assert!(
+                (1664..=2432).contains(&ones), // 128 positions * 2 * exp(-2 * 384^2 / 4096) < 1.4e-29.
+                "{subject} bit {bit} had {ones} ones in {IDENTIFIER_SAMPLE_SIZE} samples"
+            );
+        }
+    }
+
+    /// RFC 3261 §8.1.1.7 requires the magic cookie. The remaining sixteen hexadecimal digits
+    /// are the 64 random bits promised by `sip-transport.md` §7; checking every bit's balance
+    /// catches a truncated value and a counter whose high bits never change.
+    #[test]
+    fn via_branch_keeps_the_cookie_and_all_sixty_four_random_bits() {
+        let values = (0..IDENTIFIER_SAMPLE_SIZE).map(|_| {
+            let branch = super::new_branch();
+            let random = branch
+                .strip_prefix("z9hG4bK")
+                .expect("the RFC 3261 magic cookie");
+            assert_eq!(random.len(), 16, "exactly 64 bits in hexadecimal");
+            assert!(
+                random
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+                "the random portion is canonical lowercase hexadecimal: {random}"
+            );
+            u64::from_str_radix(random, 16).expect("the generator wrote hexadecimal")
+        });
+        assert_full_width(&bit_counts(values), "Via branch");
+    }
+
+    /// The bound on `branch_with_rng` is the non-statistical assertion: a generator that only
+    /// implements `RngCore` cannot be used here, however plausible its sample looks.
+    #[test]
+    fn via_branch_requires_a_cryptographic_rng_by_construction() {
+        fn draw<R: rand::CryptoRng + ?Sized>(rng: &mut R) -> String {
+            super::branch_with_rng(rng)
+        }
+
+        let branch = draw(&mut rand::rng());
+        assert!(branch.starts_with("z9hG4bK"));
+    }
+
+    /// The statistical guard is not the cryptographic proof; this shows that it detects the
+    /// cheaper counter substitution which the compiler's `CryptoRng` bound independently refuses.
+    #[test]
+    fn the_width_guard_rejects_a_counter() {
+        let counts = bit_counts(0..IDENTIFIER_SAMPLE_SIZE);
+        assert!(
+            counts.iter().any(|ones| !(1664..=2432).contains(ones)),
+            "a 12-bit counter must not look like a 64-bit generator"
+        );
+    }
+
     async fn driver_with_pool(
         pool: crate::tcp::Pool,
         net: mpsc::Receiver<crate::tcp::Event>,
@@ -3120,6 +3201,7 @@ mod tests {
             "127.0.0.1".parse().expect("loopback"),
             0,
             Duration::from_secs(60),
+            sipx_sip::Limits::stream(),
             &adopt,
             &runtime,
         )
@@ -3182,6 +3264,7 @@ mod tests {
             "127.0.0.1".parse().expect("loopback"),
             0,
             Duration::from_secs(60),
+            sipx_sip::Limits::stream(),
             &adopt,
             &runtime,
         )
@@ -3231,6 +3314,7 @@ mod tests {
             0,
             ServerTls::new(identity).expect("a server"),
             Duration::from_secs(60),
+            sipx_sip::Limits::stream(),
             &adopt,
             &runtime,
         )

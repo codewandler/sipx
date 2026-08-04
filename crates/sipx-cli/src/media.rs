@@ -5,7 +5,10 @@
 
 use std::net::SocketAddr;
 
-use sipx_call::{CodecPreference, Codecs, IcePolicy, Keying, MediaPolicy, NegotiatedKeying};
+use sipx_call::{
+    CodecPreference, Codecs, IcePolicy, Keying, MediaPolicy, MediaProfile, NegotiatedKeying,
+};
+use sipx_media::browser::ComponentState;
 use sipx_media::{Codec, IcePath};
 use sipx_transport::TransportKind;
 
@@ -42,6 +45,18 @@ impl Security {
 impl Selection {
     /// Parse and validate the media flags before transport binding.
     pub(crate) fn from_args(args: &Args<'_>, transport: TransportKind) -> Result<Self, String> {
+        let profile = match args.value("profile").unwrap_or("standard") {
+            "standard" => MediaProfile::Standard,
+            "browser-audio" => MediaProfile::BrowserAudio,
+            value => {
+                return Err(format!(
+                    "unsupported --profile {value:?}; expected standard or browser-audio"
+                ));
+            }
+        };
+        if profile == MediaProfile::BrowserAudio {
+            return Self::browser_audio(args, transport);
+        }
         let preferences = args
             .values("codec")
             .map(codec)
@@ -125,6 +140,63 @@ impl Selection {
         })
     }
 
+    fn browser_audio(args: &Args<'_>, transport: TransportKind) -> Result<Self, String> {
+        if transport != TransportKind::Wss {
+            return Err("--profile browser-audio requires --transport wss".to_owned());
+        }
+        if args.flag("early-media") {
+            return Err(
+                "--profile browser-audio does not support --early-media; wait for the final answer"
+                    .to_owned(),
+            );
+        }
+        if !cfg!(feature = "opus") {
+            return Err(
+                "--profile browser-audio requires a build with the `opus` feature".to_owned(),
+            );
+        }
+        if !cfg!(feature = "dtls") {
+            return Err(
+                "--profile browser-audio requires a build with the `dtls` feature".to_owned(),
+            );
+        }
+        if args.value("codec").is_some() || args.value("media-security").is_some() {
+            return Err(
+                "--profile browser-audio fixes codecs and media security; do not combine it with --codec or --media-security"
+                    .to_owned(),
+            );
+        }
+        let ice = match args.value("ice").unwrap_or("host") {
+            "host" => {
+                if args.value("stun-server").is_some() {
+                    return Err("--stun-server requires --ice stun".to_owned());
+                }
+                IcePolicy::Host
+            }
+            "stun" => IcePolicy::Stun(
+                args.value("stun-server")
+                    .ok_or_else(|| "--ice stun requires --stun-server host:port".to_owned())?
+                    .parse::<SocketAddr>()
+                    .map_err(|_| "--stun-server must be host:port".to_owned())?,
+            ),
+            "disabled" => {
+                return Err(
+                    "--profile browser-audio requires ICE; disabled is not allowed".to_owned(),
+                );
+            }
+            value => {
+                return Err(format!(
+                    "unsupported --ice {value:?}; browser-audio expects host or stun"
+                ));
+            }
+        };
+        Ok(Self {
+            policy: MediaPolicy::browser_audio().with_ice(ice),
+            security: Security::DtlsSrtp,
+            report: true,
+        })
+    }
+
     /// The exact public call policy to pass to dial or answer.
     #[must_use]
     pub(crate) const fn policy(self) -> MediaPolicy {
@@ -138,6 +210,7 @@ impl Selection {
             return report;
         }
         report
+            .text("media_profile", profile_name(self.policy.profile))
             .text("requested_codecs", codec_names(self.policy.codecs))
             .text("requested_media_security", self.security.name())
             .text("requested_ice", ice_name(self.policy.ice))
@@ -145,7 +218,12 @@ impl Selection {
 
     /// Add values read from the established call, not inferred from the offer.
     #[must_use]
-    pub(crate) fn negotiated_report(self, report: Report, call: &sipx_call::Call) -> Report {
+    pub(crate) fn negotiated_report(
+        self,
+        report: Report,
+        call: &sipx_call::Call,
+        browser_role: &str,
+    ) -> Report {
         if !self.report {
             return report;
         }
@@ -154,11 +232,71 @@ impl Selection {
             NegotiatedKeying::Sdes => "sdes",
             NegotiatedKeying::DtlsSrtp => "dtls-srtp",
         };
-        report
+        let mut report = report
+            .text("media_profile", profile_name(call.media_profile()))
             .text("negotiated_codec", codec_name(call.media().codec()))
+            .number(
+                "negotiated_payload_type",
+                i64::from(call.negotiated_payload_type()),
+            )
+            .number(
+                "negotiated_clock_rate",
+                i64::from(call.negotiated_clock_rate()),
+            )
+            .text("negotiated_keying", security)
             .text("negotiated_media_security", security)
-            .text("negotiated_ice", path_name(call.media().ice_path()))
+            .text("negotiated_ice", path_name(call.media().ice_path()));
+        if call.media_profile() == MediaProfile::BrowserAudio {
+            report = report
+                .text("browser_role", browser_role)
+                .number("ice_component", 1);
+            if let Some(snapshot) = call.browser_component() {
+                report = report
+                    .text("media_state", component_state(snapshot.state))
+                    .number(
+                        "ingress_drops_total",
+                        i64::try_from(snapshot.counts.total()).unwrap_or(i64::MAX),
+                    );
+                if let Some(selected) = snapshot.selected {
+                    report = report
+                        .text("nominated_local", selected.local.to_string())
+                        .text("nominated_remote", selected.remote.to_string())
+                        .number(
+                            "ice_generation",
+                            i64::try_from(selected.ice_generation).unwrap_or(i64::MAX),
+                        )
+                        .text("local_candidate_type", candidate_type(selected.local_kind))
+                        .text(
+                            "remote_candidate_type",
+                            candidate_type(selected.remote_kind),
+                        );
+                }
+            }
+        }
+        report
     }
+}
+
+const fn profile_name(profile: MediaProfile) -> &'static str {
+    match profile {
+        MediaProfile::Standard => "standard",
+        MediaProfile::BrowserAudio => "browser-audio",
+    }
+}
+
+const fn component_state(state: ComponentState) -> &'static str {
+    match state {
+        ComponentState::IceChecking => "ice-checking",
+        ComponentState::Nominated => "nominated",
+        ComponentState::DtlsHandshaking => "dtls-handshaking",
+        ComponentState::KeysInstalled => "keys-installed",
+        ComponentState::Running => "running",
+        ComponentState::Closed => "closed",
+    }
+}
+
+fn candidate_type(kind: sipx_sdp::ice::CandidateType) -> &'static str {
+    kind.as_str()
 }
 
 fn codec(value: &str) -> Result<CodecPreference, String> {
@@ -274,5 +412,16 @@ mod tests {
         let raw = raw(&["dial", "sip:bob@192.0.2.1", "--codec", "opus"]);
         let error = selection(&raw, TransportKind::Udp).unwrap_err();
         assert!(error.contains("`opus` feature"), "{error}");
+    }
+
+    #[cfg(not(feature = "opus"))]
+    #[test]
+    fn browser_audio_is_known_but_refused_when_opus_is_not_built() {
+        let raw = raw(&["dial", "sip:bob@192.0.2.1", "--profile", "browser-audio"]);
+        let error = selection(&raw, TransportKind::Wss).unwrap_err();
+        assert_eq!(
+            error,
+            "--profile browser-audio requires a build with the `opus` feature"
+        );
     }
 }

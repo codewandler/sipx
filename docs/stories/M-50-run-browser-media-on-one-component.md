@@ -2,7 +2,7 @@
 id: M-50
 title: Run ICE, DTLS, SRTP and SRTCP on one nominated component
 pillar: Media
-status: backlog
+status: in-progress
 priority: 8
 design: docs/specs/webrtc-audio.md
 epic: webrtc-audio
@@ -21,28 +21,33 @@ STUN, DTLS, SRTP and SRTCP classified and processed on one bound port.
 
 ## Acceptance
 
-- [ ] One bounded owner receives datagrams for the component and classifies STUN, DTLS, SRTP and
+- [x] One bounded owner receives datagrams for the component and classifies STUN, DTLS, SRTP and
       SRTCP by the rules and byte vectors in `M-48`; malformed and unknown input is refused and
       counted without panic or unbounded allocation.
-- [ ] ICE nomination chooses the DTLS peer. No handshake or protected-media packet is accepted from
+- [x] ICE nomination chooses the DTLS peer. No handshake or protected-media packet is accepted from
       a provisional SDP address or a non-nominated candidate pair.
-- [ ] DTLS key installation occurs only after nomination, compatible role selection and fingerprint
+- [x] DTLS key installation occurs only after nomination, compatible role selection and fingerprint
       verification; a mismatch yields no SRTP or SRTCP keys.
-- [ ] RTP and RTCP use the multiplexed component that SDP negotiated. The test proves an RTCP packet
+- [x] RTP and RTCP use the multiplexed component that SDP negotiated. The test proves an RTCP packet
       arriving on that port is processed rather than merely proving `a=rtcp-mux` was emitted.
-- [ ] There is no bind/drop/rebind window between ICE, DTLS and protected media. A deterministic
+- [x] There is no bind/drop/rebind window between ICE, DTLS and protected media. A deterministic
       ordering test injects a packet at every ownership transition and accounts for it.
-- [ ] Queues, task count, packet size and shutdown are bounded and cancellation-safe; cancellation
+- [x] Queues, task count, packet size and shutdown are bounded and cancellation-safe; cancellation
       leaves no receiver, timer or media task detached.
-- [ ] SRTCP uses `M-47`'s separate replay window, and repeated control traffic remains rejected when
+- [x] SRTCP uses `M-47`'s separate replay window, and repeated control traffic remains rejected when
       interleaved with advancing SRTP sequence numbers.
-- [ ] A two-sipx deterministic proof carries non-silent Opus both ways over the complete component
+- [x] A two-sipx deterministic proof carries non-silent Opus both ways over the complete component
       before the independent endpoint is introduced.
 - [ ] `./scripts/gate.py` green, including `check-fixed-sleep.py`.
 
 ## Progress
 
-- Blocked on `M-42`, `M-46`, `M-47` and `M-49`.
+- The runtime portion is complete: one persistent owner composes ICE nomination, verified DTLS,
+  SRTP and SRTCP; exact drop counters, independent replay state, live bidirectional Opus and
+  cancellation in checking, handshaking and running phases are executable tests.
+- The task census is tied to actual task lifetimes. It measures a preparation peak of four and a
+  running peak of six, with the supervisor ending before media workers attach. The story remains
+  in progress until the shared `M-49` integration tree passes the complete project gate.
 
 ## Notes
 

@@ -26,13 +26,14 @@
 //! by the owning application; stack-owned field policy remains the application's responsibility.
 //!
 //! **Experimental**: choosing what a call offers — [`CodecPreference`], [`Codecs`], [`IcePolicy`],
-//! [`Keying`], [`MediaPolicy`],
+//! [`Keying`], [`MediaPolicy`], [`MediaProfile`], [`MediaAddress`],
 //! [`OutboundIdentityPolicy`], [`InboundIdentityPolicy`],
 //! the two-dialog ownership and relay surface in [`coupling`],
 //! [`DialOptions::with_codecs`], [`DialOptions::with_initial_direction`],
 //! [`DialOptions::with_media_policy`],
 //! [`DialOptions::with_identity`], [`Dispatcher::with_identity`], and the answering entry
-//! points that take a selection or policy ([`answer_with`], [`answer_with_policy`],
+//! points that take a selection, policy, or independent media addresses ([`answer_at`],
+//! [`answer_with`], [`answer_with_policy`], [`answer_with_policy_at`],
 //! [`answer_ringing_with`], [`answer_ringing_with_policy`], [`answer_replacing_with`],
 //! [`Invitation::answer_with`], [`Invitation::answer_with_policy`], [`ring_early_with`],
 //! [`ring_early_with_policy`], [`ring_offer_early`], [`ring_offer_early_with_policy`] and
@@ -41,6 +42,9 @@
 //! The set is the G.711 pair unless a call says otherwise. An application may provide an exact
 //! non-empty order with [`Codecs::ordered`]; selecting Opus is a typed error unless this crate is
 //! built with its `opus` feature, which links libopus.
+//! [`MediaProfile::BrowserAudio`] is the fail-closed composition of WSS, ICE, DTLS-SRTP,
+//! multiplexed RTCP, and that required audio vocabulary. It is one bounded audio endpoint profile,
+//! not a browser API or a general WebRTC compatibility claim.
 //!
 //! Absent rather than experimental, so that nobody looks for it: a signalling-only coupling that
 //! leaves media endpoint-owned (`C-7`), and **multi-party** call bridging or conferencing. A
@@ -67,10 +71,11 @@ pub mod transfer;
 mod update;
 
 pub use call::{
-    Call, Credentials, DialOptions, Dialing, answer, answer_early, answer_replacing,
-    answer_replacing_with, answer_ringing, answer_ringing_with, answer_ringing_with_policy,
-    answer_with, answer_with_policy, answer_with_policy_and_headers, dial, dial_early,
-    dial_early_until, dial_early_without_offer, dial_once, dial_until, serve,
+    Call, Credentials, DialOptions, Dialing, MediaAddress, answer, answer_at, answer_early,
+    answer_replacing, answer_replacing_with, answer_ringing, answer_ringing_with,
+    answer_ringing_with_policy, answer_ringing_with_policy_at, answer_with, answer_with_policy,
+    answer_with_policy_and_headers, answer_with_policy_and_headers_at, answer_with_policy_at, dial,
+    dial_early, dial_early_until, dial_early_without_offer, dial_once, dial_until, serve,
 };
 pub use counters::SignallingCounts;
 pub use coupling::{
@@ -83,10 +88,11 @@ pub use error::{Error, Result};
 pub use event::{CallEvent, CallEvents, EndCause};
 pub use identity::{InboundIdentityPolicy, OutboundIdentityPolicy};
 pub use media_policy::{
-    CodecPreference, CodecSelectionError, Codecs, IcePolicy, Keying, MediaPolicy, NegotiatedKeying,
+    CodecPreference, CodecSelectionError, Codecs, IcePolicy, Keying, MediaPolicy, MediaProfile,
+    NegotiatedKeying,
 };
 pub use rel::{
-    Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_offer_early,
-    ring_offer_early_with_policy,
+    Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_early_with_policy_at,
+    ring_offer_early, ring_offer_early_with_policy, ring_offer_early_with_policy_at,
 };
 pub use transfer::{Referral, Replaces, Transfer, TransferState};

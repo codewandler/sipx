@@ -37,6 +37,7 @@
 //!   out its `MediaSession`, so two calls cannot be bridged yet (`C-6`).
 
 pub mod bridge;
+pub mod browser;
 pub mod conference;
 mod counters;
 pub mod dtls;

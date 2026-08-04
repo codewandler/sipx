@@ -37,11 +37,16 @@ endpoint is told to contact in SIP headers and SDP. They are often different on 
 in a container, or behind NAT.
 
 Never advertise `0.0.0.0`; it is not a destination. The CLI's automatic choices are intended for
-direct and local-network calls, and `answer` has no separate advertised-address flag. Bind it to a
-specific reachable interface for a non-loopback test. The CLI cannot discover an arbitrary public
-NAT mapping. Rust applications must set `Config::sent_by` and the call media address to values the
-peer can actually reach. `sipx-host` likewise separates a listener's `bind` and `advertise` values
-and takes its media address as a process argument.
+direct and local-network calls, and it cannot discover an arbitrary public NAT mapping. Use
+`--local` for the socket and `--advertise` for the reachable IP on `dial` and `answer`. Rust
+applications set `Config::sent_by` for signalling and use `MediaAddress::with_bind` (or
+`DialOptions::with_media_bind_address`) for media. `sipx-host` likewise separates a listener's
+`bind` and `advertise` values and takes its media address as a process argument.
+
+When `sipx answer` binds a wildcard address without `--advertise`, it asks the routing table which
+local interface faces the caller and binds media there, so ICE can gather a real local base. It
+never copies the caller's source address into local SDP. With an explicit public `--advertise`, the
+media bind stays on `--local` because a NAT mapping is normally not locally owned.
 
 If signalling arrives but replies do not, inspect the Via and Contact addresses. If the call
 connects but audio does not, inspect the `c=` address and `m=` port in SDP.
@@ -62,6 +67,8 @@ sipx supports symmetric RTP: after a valid packet arrives, media can be sent bac
 source instead of the address advertised in SDP. Calls can also gather host candidates or use a
 configured STUN server to gather server-reflexive candidates and run ICE connectivity checks. TURN
 and relayed candidates are not available, so topologies that require a media relay will still fail.
+When ICE is enabled, the nominated candidate pair owns the destination; ordinary RTP source
+learning cannot override it.
 WebSocket signalling does not solve media reachability; RTP uses its own network path.
 
 ## WAV input is rejected or sounds wrong

@@ -48,13 +48,13 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 | Layer | RFCs | implemented | partial | none | other | Reachability basis |
 |---|---|---|---|---|---|---|
 | core | 9 | 5 | 3 | 0 | 1 | application |
-| media | 16 | 5 | 10 | 0 | 1 | application + path check |
+| media | 22 | 5 | 16 | 0 | 1 | application + path check |
 | security | 11 | 10 | 0 | 0 | 1 | application + path check |
 | services | 16 | 5 | 7 | 2 | 2 | application |
 | transport | 14 | 8 | 6 | 0 | 0 | application |
 | wire | 6 | 3 | 2 | 0 | 1 | application |
 
-72 RFCs tracked. `implemented` means what [`docs/rfc/README.md`](rfc/README.md) says it means — *Behaviour present and tested for the roles listed* — and `rfc-report.py` is what enforces that. **`X-38` did not change the status words. It changed the basis of the last column**: every layer now has a shipped application under it, in place of the caveat this table carried for `core`, `services`, `transport` and `wire`, which said no caller had been found. `scripts/check-app-surface.py` fails the gate when a crate claims supported surface no application reaches. The two layers that also say *path check* carry `rfc-report.py`'s per-row check on top; the others are entered per crate, so a single row of them is not individually attested. The column is about reachability, not about which crate holds the code: what a row must cite is `docs/rfc/README.md`'s business, and `X-43` is where the one row citing no code is being weighed.
+78 RFCs tracked. `implemented` means what [`docs/rfc/README.md`](rfc/README.md) says it means — *Behaviour present and tested for the roles listed* — and `rfc-report.py` is what enforces that. **`X-38` did not change the status words. It changed the basis of the last column**: every layer now has a shipped application under it, in place of the caveat this table carried for `core`, `services`, `transport` and `wire`, which said no caller had been found. `scripts/check-app-surface.py` fails the gate when a crate claims supported surface no application reaches. The two layers that also say *path check* carry `rfc-report.py`'s per-row check on top; the others are entered per crate, so a single row of them is not individually attested. The column is about reachability, not about which crate holds the code: what a row must cite is `docs/rfc/README.md`'s business, and `X-43` is where the one row citing no code is being weighed.
 
 ## Open work, per pillar
 

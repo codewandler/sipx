@@ -2,6 +2,36 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MediaAddresses {
+    pub(crate) advertised: IpAddr,
+    pub(crate) bind: IpAddr,
+}
+
+/// Choose the two media address roles for a command.
+///
+/// An explicit advertised address may be a NAT mapping the host cannot bind, so `local` remains
+/// the bind choice. Without that override, the routing-table-selected address is locally owned:
+/// binding it preserves host and server-reflexive ICE gathering on a wildcard signalling bind.
+pub(crate) fn media_addresses(
+    local: SocketAddr,
+    peer: IpAddr,
+    advertised: Option<IpAddr>,
+) -> MediaAddresses {
+    if let Some(advertised) = advertised {
+        MediaAddresses {
+            advertised,
+            bind: local.ip(),
+        }
+    } else {
+        let selected = reachable_ip(local, peer);
+        MediaAddresses {
+            advertised: selected,
+            bind: selected,
+        }
+    }
+}
+
 /// The address this endpoint should advertise when talking to `peer`.
 ///
 /// Everything that carries an address — the `Via` sent-by (RFC 3261 §18.1.1), the `Contact`
@@ -61,5 +91,24 @@ mod tests {
         let advertised = reachable_ip(local, peer);
         assert_ne!(advertised, peer, "the peer's address is somebody else's");
         assert!(!advertised.is_unspecified());
+    }
+
+    #[test]
+    fn an_implicit_wildcard_choice_binds_the_reachable_local_address_for_ice() {
+        let local: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        let addresses = media_addresses(local, peer, None);
+        assert_eq!(addresses.bind, addresses.advertised);
+        assert_ne!(addresses.bind, peer);
+        assert!(!addresses.bind.is_unspecified());
+    }
+
+    #[test]
+    fn an_explicit_public_mapping_keeps_the_wildcard_bind_independent() {
+        let local: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let advertised: IpAddr = "198.51.100.44".parse().unwrap();
+        let addresses = media_addresses(local, "192.0.2.1".parse().unwrap(), Some(advertised));
+        assert_eq!(addresses.advertised, advertised);
+        assert_eq!(addresses.bind, local.ip());
     }
 }

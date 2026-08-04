@@ -2,7 +2,7 @@
 id: M-47
 title: Reject replayed SRTCP with a separate replay window
 pillar: Media
-status: ready
+status: in-progress
 priority: 4
 design: docs/specs/srtp.md
 epic: media-security-profiles
@@ -21,17 +21,17 @@ control traffic on the same exposed component as media.
 
 ## Acceptance
 
-- [ ] A failing-first test proves that one authenticated SRTCP packet is accepted once and rejected
+- [x] A failing-first test proves that one authenticated SRTCP packet is accepted once and rejected
       when replayed, while a distinct packet with the next index remains acceptable.
-- [ ] SRTCP owns a replay list separate from SRTP, keyed by the explicit 31-bit SRTCP index as RFC
+- [x] SRTCP owns a replay list separate from SRTP, keyed by the explicit 31-bit SRTCP index as RFC
       3711 §3.4 requires. Advancing either window cannot reject a valid packet in the other.
-- [ ] Authentication completes before decryption and before either replay window changes. A forged
+- [x] Authentication completes before decryption and before either replay window changes. A forged
       high-index packet cannot move the window or make a later authentic packet look old.
-- [ ] Wrap and too-old behavior are specified and tested at the boundary of the held window without
+- [x] Wrap and too-old behavior are specified and tested at the boundary of the held window without
       a wall-clock wait or an unbounded loop.
-- [ ] The mutation proof in Progress records that removing the SRTCP replay check makes the named
+- [x] The mutation proof in Progress records that removing the SRTCP replay check makes the named
       replay test fail; round-trip success alone is not evidence.
-- [ ] `docs/specs/srtp.md` §12.2 moves from open to fixed with the implementation and test named,
+- [x] `docs/specs/srtp.md` §12.2 moves from open to fixed with the implementation and test named,
       and the RFC 3711 registry evidence is updated in the same commit.
 - [ ] `./scripts/gate.py` green.
 
@@ -40,6 +40,16 @@ control traffic on the same exposed component as media.
 - Filed from the ownerless known gap already recorded in `docs/specs/srtp.md` §12.2. Because a
   replayed authenticated control packet is a known-wrong shipped path, this story bears on alpha
   predicate 4 until it is closed.
+- Failing first: `an_authenticated_srtcp_packet_is_accepted_once` did not compile before the typed
+  `ReplayedRtcp` result existed. With the result but the replay check removed, the same test failed
+  because the second delivery returned the plaintext report.
+- Implemented a 64-entry window over the 31-bit explicit SRTCP index, with modular forward-distance
+  handling at `0x7fff_ffff -> 0`. The SRTP and SRTCP windows are distinct fields.
+- Targeted evidence: all 25 original `srtp::tests` pass, including forged-high-index state
+  preservation, separate-window and wrap cases. Independent audit then found that the too-old case
+  sampled distance 65 but not the exact edge; `the_srtcp_replay_window_holds_exactly_sixty_four_indices`
+  now proves an unseen distance-63 packet is accepted once and distance 64 is refused. Full gate
+  remains before closure.
 
 ## Notes
 

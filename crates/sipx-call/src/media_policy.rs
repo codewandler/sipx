@@ -221,9 +221,25 @@ pub enum NegotiatedKeying {
     DtlsSrtp,
 }
 
+/// A named composition of call/media requirements.
+///
+/// `Standard` preserves the independently selectable SIP media policies. `BrowserAudio` is the
+/// fail-closed one-stream profile in `docs/specs/webrtc-audio.md`; selecting it never authorizes
+/// fallback to the standard policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaProfile {
+    /// Ordinary SIP audio with independently selected codec, ICE, and keying policies.
+    #[default]
+    Standard,
+    /// Opus-first audio over WSS, ICE, DTLS-SRTP, and multiplexed RTCP.
+    BrowserAudio,
+}
+
 /// The media choices shared by dialing and answering a call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MediaPolicy {
+    /// Named composition policy.
+    pub profile: MediaProfile,
     /// Which codecs are offered and accepted.
     pub codecs: Codecs,
     /// Whether and how the initial exchange gathers ICE candidates.
@@ -233,6 +249,35 @@ pub struct MediaPolicy {
 }
 
 impl MediaPolicy {
+    /// The fail-closed browser-audio policy.
+    ///
+    /// Feature availability and WSS are checked before media binding or gathering. The value is
+    /// constructible in every build so a missing Opus or DTLS feature produces a typed setup
+    /// error instead of turning a known profile name into an unknown configuration value.
+    #[must_use]
+    pub const fn browser_audio() -> Self {
+        #[cfg(feature = "opus")]
+        let codecs = Codecs::Opus;
+        #[cfg(not(feature = "opus"))]
+        let codecs = Codecs::G711;
+        Self {
+            profile: MediaProfile::BrowserAudio,
+            codecs,
+            ice: IcePolicy::Host,
+            keying: Keying::DtlsSrtp,
+        }
+    }
+
+    /// Select a named profile while retaining explicit lower-level choices.
+    ///
+    /// The browser-audio preflight still refuses any incompatible retained choice; this method
+    /// does not silently rewrite it.
+    #[must_use]
+    pub const fn with_profile(mut self, profile: MediaProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
     /// Select a codec set while retaining the other media choices.
     #[must_use]
     pub const fn with_codecs(mut self, codecs: Codecs) -> Self {

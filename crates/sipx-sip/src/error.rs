@@ -15,6 +15,13 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum BuildError {
+    /// A response cannot be routed or correlated because the request omitted a header every
+    /// response must copy (RFC 3261 §8.2.6.1 and §8.2.6.2).
+    #[error("request is missing required response header {header}")]
+    MissingRequiredResponseHeader {
+        /// The missing header's canonical name.
+        header: &'static str,
+    },
     /// A character that would end a line or terminate a string, in a field that must not
     /// contain one.
     #[error("illegal byte {byte:#04x} at offset {offset} in {field}")]

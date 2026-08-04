@@ -55,9 +55,11 @@ supports UDP, TCP, TLS, WebSocket, and secure WebSocket.
 | Core | Sans-I/O parsing, transactions, dialogs, and SDP offer/answer |
 
 sipx is a **user agent**, not a proxy, registrar, or configuration-driven PBX. It does not
-route calls or store registrations for other endpoints. TURN relay, video, and a complete browser
-media path are outside the current shipped surface. See [Does sipx fit?](guides/does-this-fit.md)
-for the boundary and the [RFC compliance table](reference/compliance.md) for protocol-level detail.
+route calls or store registrations for other endpoints. One narrow
+[browser-audio profile](reference/browser-audio-proof.md) composes WSS, ICE, DTLS-SRTP and Opus;
+TURN relay, video, and a general browser media stack remain outside the shipped surface. See
+[Does sipx fit?](guides/does-this-fit.md) for the boundary and the
+[RFC compliance table](reference/compliance.md) for protocol-level detail.
 
 ## Application host and contract
 

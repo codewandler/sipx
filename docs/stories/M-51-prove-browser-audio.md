@@ -2,7 +2,7 @@
 id: M-51
 title: Prove browser audio against an independent endpoint
 pillar: Media
-status: backlog
+status: in-progress
 priority: 9
 design: docs/specs/webrtc-audio.md
 epic: webrtc-audio
@@ -41,7 +41,13 @@ independently implemented browser SIP endpoint, and publish exactly the boundary
 
 ## Progress
 
-- Blocked on `M-50`.
+- The public-API sipx proof endpoint, independent native-browser page, WebDriver controller,
+  process-group-safe runner, CI job, structured evidence validator, three browser-driven negatives,
+  RFC evidence and public boundary pages are wired. Ten adversarial harness tests now cover
+  identity, completeness, fact reversal, bounded output and both timeout and normal-exit cleanup.
+  The story remains in progress until the hosted runner's matched browser and WebDriver complete
+  both positive roles and all three negatives; local ChromeDriver discovery selected a mismatched
+  browser binary and therefore cannot substitute for that result.
 
 ## Notes
 

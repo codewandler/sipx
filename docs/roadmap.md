@@ -686,12 +686,11 @@ host/server-reflexive path universally reachable.
 
 RFC 8834 supplies the RTP/SAVPF and RTP/RTCP multiplex requirements rather than a local profile.
 
-**Current status:** the prerequisites are separately reachable, but the composition is not. The
-call and CLI explicitly refuse ICE with DTLS-SRTP, sipx does not offer `RTP/SAVPF` or `a=rtcp-mux`,
-and no independently implemented browser SIP endpoint has carried audio with it. `M-38` is the
-tracker. Done when a normative profile precedes the code and a bounded shell proof carries
-non-silent Opus both ways with that endpoint in both SIP roles over WSS + ICE + DTLS-SRTP, while
-negative fingerprint and downgrade cases fail immediately. See
+**Current status:** the beta.4 tree now has the named fail-closed profile, `RTP/SAVPF`, RTCP
+multiplexing, one ICE-nominated component carrying DTLS-SRTP/SRTP/SRTCP, and the bounded native-browser
+CI proof in both SIP roles. That proof requires non-silent Opus in both directions and reverses the
+fingerprint, nomination and downgrade conditions independently. `M-38` remains the tracker until the
+hosted native-browser job and the complete release gate pass. See
 [design](designs/webrtc-audio.md).
 
 ### Video admission — `video`

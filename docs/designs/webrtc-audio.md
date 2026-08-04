@@ -1,6 +1,7 @@
 # Design: browser-compatible WebRTC audio
 
-**Status:** proposed; the component protocols exist, their browser-audio composition does not ·
+**Status:** implemented on the beta.4 branch; release evidence pending · **Normative profile:**
+[`docs/specs/webrtc-audio.md`](../specs/webrtc-audio.md) ·
 **Pillar:** Media · **Epic:** `webrtc-audio` · **Tracker:** `M-38`
 
 ## Scope
@@ -23,10 +24,11 @@ The public boundary must continue to say that relay-required networks are not se
 | SIP signalling | `T-8`, `T-9`, `T-23` | WS/WSS and non-root request paths are implemented and independently exercised |
 | Audio formats | `M-3`, `M-7`, `M-13`, `M-30`, `P-9`, `P-13` | G.711, telephone events and Opus are call- and CLI-reachable |
 | ICE | `M-19` … `M-23`, `M-27`, `P-9` | host and server-reflexive paths work; TURN remains `M-24` |
-| DTLS-SRTP | `M-15`, `M-28`, `P-9` | a call can use it, but the call layer refuses to combine it with ICE |
-| Browser media profile | none | no `RTP/SAVPF`, `a=rtcp-mux`, combined ICE/DTLS path, or browser-peer proof |
+| DTLS-SRTP | `M-15`, `M-28`, `P-9`, `M-46`, `M-49`, `M-50` | ordinary calls select it directly; the named browser-audio profile composes it with ICE after nomination |
+| Browser media profile | `M-48` … `M-51` | one fail-closed `RTP/SAVPF` + RTCP-mux profile and a bounded native-browser CI proof in both roles |
 
-The last row is the epic. The rows above are prerequisites to reuse, not work to reimplement.
+The last row is the epic delivered by beta.4. The rows above were prerequisites reused rather than
+reimplemented.
 
 ## Design direction
 
@@ -44,6 +46,25 @@ The last row is the epic. The rows above are prerequisites to reuse, not work to
   implemented browser SIP endpoint, exchanges audible, non-silent Opus in both directions over WSS +
   ICE + DTLS-SRTP, and reports the negotiated path. A wrong fingerprint, absent nominated pair, or
   weaker-media answer must fail explicitly.
+
+## Runtime composition
+
+`M-50` adds one media-owned ingress gate before it changes socket ownership. The gate is deliberately
+free of I/O: it classifies the byte vectors in the normative profile, records the nominated pair and
+ICE generation, refuses a wrong source or premature protocol, and accepts key installation only as
+the output of the fingerprint-verifying DTLS path. This gives the later socket refactor a small
+security boundary whose every transition can be exhausted deterministically.
+
+The bound port remains the lifetime owner. Gathering, connectivity checks, DTLS and protected media
+must be adapters around that same port; none receives permission to close and recreate it. The
+eventual receive owner uses bounded, non-blocking per-class handoffs so a stalled SRTP consumer cannot
+stop ICE retransmissions or DTLS progress. Shutdown closes admissions, cancels every adapter, joins
+them, then releases the port. Dropping a handle is not evidence that a detached task stopped.
+
+The component publishes facts rather than policy: selected local/remote addresses, ICE generation,
+security state and typed ingress counters. Codec identity remains on the media session. That split
+lets the `M-51` proof report Opus plus the actual nominated and keyed path without duplicating a
+codec field that could disagree with the decoder that ran.
 
 ## Exit
 

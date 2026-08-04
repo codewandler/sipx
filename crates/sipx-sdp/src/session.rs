@@ -238,6 +238,31 @@ pub struct MediaDescription {
     pub other: Vec<(char, String)>,
 }
 
+/// Whether one media section uses a separate RTCP port or multiplexes it with RTP (RFC 5761).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RtcpMode {
+    /// RTP uses the media port and RTCP uses its control port.
+    #[default]
+    Separate,
+    /// RTP and RTCP share the media port.
+    Mux,
+}
+
+impl RtcpMode {
+    /// Settle an offer/answer exchange.
+    ///
+    /// RFC 5761 §5.1.3: mux is active only when the offer and the answer both carry the flag.
+    /// Omission in the answer is the separate-port fallback and needs no second exchange.
+    #[must_use]
+    pub fn from_exchange(offer: &MediaDescription, answer: &MediaDescription) -> Self {
+        if !offer.is_rejected() && !answer.is_rejected() && offer.rtcp_mux() && answer.rtcp_mux() {
+            Self::Mux
+        } else {
+            Self::Separate
+        }
+    }
+}
+
 impl MediaDescription {
     /// An audio stream offering these payload types.
     #[must_use]
@@ -328,6 +353,14 @@ impl MediaDescription {
             .find(|attribute| attribute.name == "setup")
             .and_then(|attribute| attribute.value.as_deref())
             .and_then(crate::fingerprint::Setup::parse)
+    }
+
+    /// Whether this stream carries the `a=rtcp-mux` flag (RFC 5761 §5).
+    #[must_use]
+    pub fn rtcp_mux(&self) -> bool {
+        self.attributes
+            .iter()
+            .any(|attribute| attribute.name == "rtcp-mux" && attribute.value.is_none())
     }
 
     /// Every `a=candidate` under this stream that sipx can act on (RFC 8839 §5.1).

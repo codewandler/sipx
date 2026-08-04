@@ -12,13 +12,13 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use sipx_call::{
-    Call, CallEvent, DialOptions, Error, answer_early, answer_ringing, dial, dial_early, ring,
-    ring_early,
+    Call, CallEvent, DialOptions, Error, Keying, MediaPolicy, answer_early, answer_ringing, dial,
+    dial_early, dial_early_without_offer, ring, ring_early,
 };
 use sipx_media::Interrupt;
 use sipx_sip::rel::{RAck, RSeq};
 use sipx_sip::{HeaderName, Host, HostName, Method, Request, Uri};
-use sipx_transport::{Config, Handle, Incoming, Target, bind};
+use sipx_transport::{Config, Handle, Incoming, Target, TransportKind, bind};
 use tokio::sync::mpsc::Receiver;
 
 fn loopback() -> IpAddr {
@@ -29,6 +29,46 @@ async fn endpoint() -> (Handle, Receiver<Incoming>) {
     bind(Config::new("127.0.0.1:0".parse().expect("valid")))
         .await
         .expect("binds")
+}
+
+/// `M-49`: browser audio deliberately has no reliable-provisional media path. The named policy
+/// refuses before opening an invitation, and weakening its fixed keying cannot make the generic
+/// early-media machinery reachable.
+#[tokio::test]
+async fn browser_audio_refuses_early_media_before_signalling_without_a_weaker_retry() {
+    let (peer, mut peer_incoming) = endpoint().await;
+    let (caller, _caller_incoming) = endpoint().await;
+    let target = Target::udp(peer.local_addr());
+    let browser = DialOptions::new("<sip:caller@example.net>", loopback())
+        .with_media_policy(MediaPolicy::browser_audio());
+
+    assert!(matches!(
+        dial_early(&caller, target.clone(), &to_uri(), &browser).await,
+        Err(Error::DtlsEarlyMedia)
+    ));
+    assert!(matches!(
+        dial_early_without_offer(&caller, target.clone(), &to_uri(), &browser).await,
+        Err(Error::DtlsEarlyMedia)
+    ));
+
+    let weakened = DialOptions::new("<sip:caller@example.net>", loopback())
+        .with_media_policy(MediaPolicy::browser_audio().with_keying(Keying::Plain));
+    assert!(matches!(
+        dial_early(
+            &caller,
+            Target::new(peer.local_addr(), TransportKind::Wss),
+            &to_uri(),
+            &weakened,
+        )
+        .await,
+        Err(Error::Profile(
+            sipx_sdp::browser_audio::ProfileError::WeakerMedia
+        ))
+    ));
+    assert!(
+        peer_incoming.try_recv().is_err(),
+        "no early-profile attempt or weaker retry may reach SIP transport"
+    );
 }
 
 /// C-2's failing-first vector: the gateway-model session is audible before the final response,

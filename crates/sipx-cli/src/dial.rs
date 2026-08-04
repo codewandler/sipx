@@ -29,12 +29,14 @@ OPTIONS:
     --from <URI>      Our own address (default sip:sipx@<local>)
     --password <P>    Password. Prefer SIPX_PASSWORD, since argv is world-readable.
     --local <ADDR>    Local address to bind (default 0.0.0.0:0)
+    --advertise <IP>  Address to put in Via, Contact and SDP independently of --local
     --transport <T>   Signalling: udp, tcp, tls, ws or wss (default udp)
     --tcp             Legacy alias for --transport tcp
     --tls-server-name <N>  Certificate identity to verify (default URI host)
     --tls-ca <FILE>   Add PEM trust roots to the platform store
     --tls-cert <FILE> Client certificate chain for mutual TLS (with --tls-key)
     --tls-key <FILE>  Client private key for mutual TLS (with --tls-cert)
+    --profile <P>     Media profile: standard or browser-audio (default standard)
     --codec <C>       Ordered codec preference; repeat pcmu, pcma or opus (default pcmu, pcma)
     --media-security <M>  auto, plain, sdes or dtls-srtp (default auto)
     --ice <P>         disabled, host or stun (default disabled)
@@ -125,7 +127,21 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Err(_) => return fail(format, Exit::Usage, "--local must be host:port"),
     };
     // Media has to advertise something reachable, and an unspecified address is not.
-    let media_address: IpAddr = crate::advertise::reachable_ip(local, target_addr.ip());
+    let advertised = match args.value("advertise") {
+        Some(value) => match value.parse::<IpAddr>() {
+            Ok(address) if !address.is_unspecified() => Some(address),
+            _ => {
+                return fail(
+                    format,
+                    Exit::Usage,
+                    "--advertise must be a non-unspecified IP",
+                );
+            }
+        },
+        None => None,
+    };
+    let media_addresses = crate::advertise::media_addresses(local, target_addr.ip(), advertised);
+    let media_address = media_addresses.advertised;
     let from = args
         .value("from")
         .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
@@ -167,8 +183,9 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // inside the exchange can send the CANCEL that stops it ringing.
     let attempt = Duration::from_secs(args.number("timeout").unwrap_or(DEFAULT_TIMEOUT_SECS));
 
-    let mut options =
-        sipx_call::DialOptions::new(from, media_address).with_media_policy(media.policy());
+    let mut options = sipx_call::DialOptions::new(from, media_address)
+        .with_media_bind_address(media_addresses.bind)
+        .with_media_policy(media.policy());
     for header in headers {
         options = options.with_header(header);
     }
@@ -254,6 +271,8 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Report::new()
             .text("status", "answered")
             .text("peer", uri)
+            .text("media_advertised", media_address.to_string())
+            .text("media_bound", call.media().local_addr().to_string())
             .number(
                 "duration_ms",
                 i64::try_from(started.elapsed().as_millis()).unwrap_or(0),
@@ -264,7 +283,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             )
             .boolean("heard_audio", total_samples != 0),
     );
-    let report = media.negotiated_report(report, &call);
+    let report = media.negotiated_report(report, &call, "browser-offerer");
     let mut report = devices.report(transport.report(report, negotiated_transport));
     if early_requested {
         report = report.boolean("early_media", early_media).number(

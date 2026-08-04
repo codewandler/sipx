@@ -90,10 +90,16 @@ complete paths:
 - [Answer a call](answer-a-call.md)
 - [Register](register.md)
 
-Set the bound and advertised addresses explicitly. Behind NAT, sipx can use symmetric RTP or gather
-host and STUN-derived server-reflexive ICE candidates. TURN and relayed candidates are not
+Set the bound and advertised addresses explicitly. `sipx dial` and `sipx answer` take
+`--local` and `--advertise` separately; the terminal JSON reports `media_bound` and
+`media_advertised` so a deployment can verify the choice. Behind NAT, sipx can use symmetric RTP or
+gather host and STUN-derived server-reflexive ICE candidates. TURN and relayed candidates are not
 available, so some NAT pairs still have no working media path. Validate from the network where the
 endpoint will actually run, not only on loopback.
+
+`with_service_route` writes the preloaded `Route` headers but does not resolve them. Resolve the
+outermost proxy in the application and pass that address as the `Target` to `dial`; the called
+party remains in the Request-URI.
 
 ## Know the application boundary
 

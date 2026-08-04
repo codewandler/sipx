@@ -131,12 +131,12 @@ async fn status_peer(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<()>
 async fn refused_by_webhook(document: &str, expected: u16) {
     let address = webhook_host_on(document).await;
     let (caller, _incoming) = endpoint().await;
-    let error = within(dial(
+    let error = Box::pin(within(dial(
         &caller,
         Target::udp(address),
         &callee_uri(),
         &DialOptions::new("<sip:caller@test.example>", loopback()),
-    ))
+    )))
     .await
     .expect_err("the declared failure refuses the invitation");
     assert!(
@@ -163,12 +163,12 @@ async fn the_host_answers_an_invitation() {
     let address = host_on(&document(None)).await;
     let (caller, _incoming) = endpoint().await;
 
-    let call = within(dial(
+    let call = Box::pin(within(dial(
         &caller,
         Target::udp(address),
         &callee_uri(),
         &DialOptions::new("<sip:caller@test.example>", loopback()),
-    ))
+    )))
     .await
     .expect("the host answers the invitation");
 
@@ -186,12 +186,12 @@ async fn a_refusing_document_refuses_the_call_with_the_operators_status() {
     let address = host_on(&document(Some("{ reject = 603 }"))).await;
     let (caller, _incoming) = endpoint().await;
 
-    let outcome = within(dial(
+    let outcome = Box::pin(within(dial(
         &caller,
         Target::udp(address),
         &callee_uri(),
         &DialOptions::new("<sip:caller@test.example>", loopback()),
-    ))
+    )))
     .await;
 
     let error = outcome.expect_err("a refused invitation is not a call");
@@ -270,12 +270,12 @@ async fn the_admission_is_released_when_the_caller_hangs_up() {
     let address = host_on(&document(None)).await;
     let (caller, _incoming) = endpoint().await;
 
-    let mut call = within(dial(
+    let mut call = Box::pin(within(dial(
         &caller,
         Target::udp(address),
         &callee_uri(),
         &DialOptions::new("<sip:caller@test.example>", loopback()),
-    ))
+    )))
     .await
     .expect("the host answers");
 
@@ -286,14 +286,22 @@ async fn the_admission_is_released_when_the_caller_hangs_up() {
 #[tokio::test]
 async fn a_real_4xx_applies_the_declared_client_error_action_without_retry() {
     let (url, peer) = status_peer(vec![400]).await;
-    refused_by_webhook(&webhook_document(&url, "on_4xx", 488, 1_000), 488).await;
+    Box::pin(refused_by_webhook(
+        &webhook_document(&url, "on_4xx", 488, 1_000),
+        488,
+    ))
+    .await;
     peer.await.expect("one request, then the peer ends");
 }
 
 #[tokio::test]
 async fn real_5xx_retries_apply_the_declared_server_error_action_after_the_cap() {
     let (url, peer) = status_peer(vec![500, 503, 502]).await;
-    refused_by_webhook(&webhook_document(&url, "on_5xx", 502, 1_000), 502).await;
+    Box::pin(refused_by_webhook(
+        &webhook_document(&url, "on_5xx", 502, 1_000),
+        502,
+    ))
+    .await;
     peer.await.expect("three attempts, then the peer ends");
 }
 
@@ -305,6 +313,10 @@ async fn a_real_callback_timeout_applies_the_declared_timeout_action() {
         let (_socket, _) = listener.accept().await.expect("accepts");
         std::future::pending::<()>().await;
     });
-    refused_by_webhook(&webhook_document(&url, "on_timeout", 504, 50), 504).await;
+    Box::pin(refused_by_webhook(
+        &webhook_document(&url, "on_timeout", 504, 50),
+        504,
+    ))
+    .await;
     peer.abort();
 }

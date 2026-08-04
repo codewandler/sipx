@@ -64,6 +64,25 @@ silent. Real sockets belong in the transport and media drivers; the SIP and SDP 
 and fired-timer inputs. That separation lets tests choose hostile timing directly instead of hoping
 the operating system happens to produce it.
 
+Browser-compatible audio exposed the cost of keeping that order at a product boundary. The work
+was split into a profile before a runtime: first the exact SDP and fail-closed downgrade rules,
+then one owner for ICE, DTLS, SRTP and multiplexed RTCP on the nominated component, and finally an
+independent native-browser proof in both SIP roles. The browser page is intentionally small. It
+uses the browser's own peer-connection, WebSocket, audio and statistics interfaces and contains no
+sipx SDP, ICE, DTLS, RTP or codec implementation that could agree with itself.
+
+That final proof was built adversarially before it was allowed to make a compatibility claim. Its
+self-test kills an owner with a forking grandchild, reverses every structured media fact, supplies
+malformed and oversized evidence, removes one call role, and presents the wrong WSS public-key pin.
+Only the real proof may promote that infrastructure into evidence: Opus must be non-silent in both
+directions, the selected component and SRTP profile must come from runtime statistics, dialog
+teardown must finish, and fingerprint, nomination and weaker-media refusals must each reach the
+layer they name. A green harness self-test by itself says only that the measuring instrument fails
+closed.
+
+The public [native-browser proof](browser-audio-proof.md) describes the two roles, independent
+runtime facts, negative cases, and the boundary that result does not widen.
+
 ## Work survives the session that discovered it
 
 Every unit of work is a Markdown story in the repository. A story carries its goal, acceptance

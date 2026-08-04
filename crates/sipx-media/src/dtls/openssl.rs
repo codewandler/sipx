@@ -131,6 +131,10 @@ struct Datagrams {
     socket: UdpSocket,
 }
 
+trait DtlsIo: Read + Write + Send {}
+
+impl<T: Read + Write + Send> DtlsIo for T {}
+
 impl Read for Datagrams {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.socket.recv(buf)
@@ -149,9 +153,9 @@ impl Write for Datagrams {
 
 /// A DTLS-SRTP handshake over a media socket.
 pub struct Session {
-    stream: Option<SslStream<Datagrams>>,
+    stream: Option<SslStream<Box<dyn DtlsIo>>>,
     pending: Option<Ssl>,
-    socket: Option<UdpSocket>,
+    io: Option<Box<dyn DtlsIo>>,
 }
 
 impl std::fmt::Debug for Session {
@@ -178,6 +182,18 @@ impl Session {
         socket.set_read_timeout(Some(timeout))?;
         socket.set_write_timeout(Some(timeout))?;
 
+        Self::with_io(Datagrams { socket }, identity)
+    }
+
+    /// Prepare a handshake over an adapter owned by the browser component.
+    ///
+    /// The adapter is the only DTLS view of the component: it receives records already admitted
+    /// by ICE nomination and sends through the still-bound component socket. It never owns or
+    /// duplicates that socket descriptor.
+    pub(crate) fn with_io<I>(io: I, identity: &Identity) -> Result<Self, DtlsError>
+    where
+        I: Read + Write + Send + 'static,
+    {
         let mut context = SslContext::builder(SslMethod::dtls())?;
         context.set_certificate(&identity.certificate)?;
         context.set_private_key(&identity.key)?;
@@ -200,7 +216,7 @@ impl Session {
         Ok(Self {
             pending: Some(Ssl::new(&context.build())?),
             stream: None,
-            socket: Some(socket),
+            io: Some(Box::new(io)),
         })
     }
 }
@@ -209,12 +225,11 @@ impl Handshake for Session {
     type Error = DtlsError;
 
     fn run(&mut self, role: Role) -> Result<(), Self::Error> {
-        let (Some(ssl), Some(socket)) = (self.pending.take(), self.socket.take()) else {
+        let (Some(ssl), Some(io)) = (self.pending.take(), self.io.take()) else {
             // Already handshaken. Running twice would start a renegotiation nobody asked for.
             return Ok(());
         };
-        let datagrams = Datagrams { socket };
-        let mut stream = SslStream::new(ssl, datagrams)?;
+        let mut stream = SslStream::new(ssl, io)?;
         // The role is the negotiated `a=setup`, never a guess: a UA that connects when it agreed
         // to accept meets one coming the other way, and both time out.
         let outcome = match role {

@@ -127,6 +127,25 @@ pub struct Keys {
     material: crate::SrtpKeys,
 }
 
+/// DTLS-SRTP keys whose peer certificate and protection profile were verified.
+///
+/// Unlike [`Keys`], this value cannot be constructed from raw exporter bytes. The browser-audio
+/// component accepts this type at its key-installation boundary so a caller cannot accidentally
+/// advance media after key derivation while skipping RFC 8122's fingerprint check.
+pub struct VerifiedKeys(Keys);
+
+impl std::fmt::Debug for VerifiedKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerifiedKeys { .. }")
+    }
+}
+
+impl VerifiedKeys {
+    pub(crate) fn into_srtp_keys(self) -> crate::SrtpKeys {
+        self.0.into_srtp_keys()
+    }
+}
+
 impl Keys {
     /// Move the same directional master key and salt pairs into a live media session.
     ///
@@ -287,6 +306,18 @@ pub fn establish<H: Handshake>(
         .export(profile.exported_len())
         .map_err(|error| Error::Dtls(error.to_string()))?;
     Ok(keys_from_exported(&exported, profile, role)?)
+}
+
+/// Handshake, verify and return key material carrying proof that verification ran.
+///
+/// This has the same protocol behavior and errors as [`establish`]. Its distinct return type is
+/// for composition boundaries that must make skipping fingerprint verification unrepresentable.
+pub fn establish_verified<H: Handshake>(
+    handshake: &mut H,
+    role: Role,
+    peer_fingerprint: Option<&sipx_sdp::fingerprint::Fingerprint>,
+) -> Result<VerifiedKeys, Error> {
+    establish(handshake, role, peer_fingerprint).map(VerifiedKeys)
 }
 
 #[cfg(test)]

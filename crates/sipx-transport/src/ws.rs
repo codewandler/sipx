@@ -29,9 +29,10 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as Frame;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue, StatusCode};
-use tokio_tungstenite::{WebSocketStream, accept_hdr_async, client_async};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config, client_async_with_config};
 
-use crate::target::ConnectionKey;
+use crate::target::{ConnectionKey, TransportKind};
 use crate::tcp::Event;
 
 /// The subprotocol name RFC 7118 §4.2 registers.
@@ -81,6 +82,20 @@ pub async fn connect<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    connect_with_limits(stream, authority, path, secure, &Limits::stream()).await
+}
+
+/// The client handshake with the endpoint's actual SIP allocation limits.
+pub(crate) async fn connect_with_limits<S>(
+    stream: S,
+    authority: &str,
+    path: &str,
+    secure: bool,
+    limits: &Limits,
+) -> Result<Socket<S>, WsError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let failed = |detail: String| WsError::Handshake {
         peer: authority.to_owned(),
         detail,
@@ -89,9 +104,10 @@ where
     let request =
         upgrade_request(authority, path, secure).map_err(|error| failed(error.to_string()))?;
 
-    let (socket, response) = client_async(request, stream)
-        .await
-        .map_err(|error| failed(error.to_string()))?;
+    let (socket, response) =
+        client_async_with_config(request, stream, Some(websocket_config(limits)))
+            .await
+            .map_err(|error| failed(error.to_string()))?;
 
     // A server that ignores the subprotocol and upgrades anyway has agreed to nothing, and
     // taking the connection on that basis is exactly the guess RFC 7118 §4.2 forbids.
@@ -154,26 +170,52 @@ pub async fn accept<S>(stream: S, peer: SocketAddr) -> Result<Socket<S>, WsError
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    accept_hdr_async(stream, |request: &Request, mut response: Response| {
-        if !offers_sip(request.headers()) {
-            let mut refusal = ErrorResponse::new(Some(format!(
-                "this endpoint speaks the {SUBPROTOCOL} subprotocol only (RFC 7118 §4.2)"
-            )));
-            *refusal.status_mut() = StatusCode::BAD_REQUEST;
-            return Err(refusal);
-        }
-        // Echoing it is what makes the negotiation two-sided: the client is entitled to check
-        // this answer just as sipx checks the server's.
-        response
-            .headers_mut()
-            .insert(PROTOCOL_HEADER, HeaderValue::from_static(SUBPROTOCOL));
-        Ok(response)
-    })
+    accept_with_limits(stream, peer, &Limits::stream()).await
+}
+
+/// The server handshake with the endpoint's actual SIP allocation limits.
+// The callback's refusal is an HTTP response and is as large as one. The dependency fixes that
+// return type, so boxing it locally would only move the allocation after the frame bound.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn accept_with_limits<S>(
+    stream: S,
+    peer: SocketAddr,
+    limits: &Limits,
+) -> Result<Socket<S>, WsError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    accept_hdr_async_with_config(
+        stream,
+        |request: &Request, mut response: Response| {
+            if !offers_sip(request.headers()) {
+                let mut refusal = ErrorResponse::new(Some(format!(
+                    "this endpoint speaks the {SUBPROTOCOL} subprotocol only (RFC 7118 §4.2)"
+                )));
+                *refusal.status_mut() = StatusCode::BAD_REQUEST;
+                return Err(refusal);
+            }
+            // Echoing it is what makes the negotiation two-sided: the client is entitled to check
+            // this answer just as sipx checks the server's.
+            response
+                .headers_mut()
+                .insert(PROTOCOL_HEADER, HeaderValue::from_static(SUBPROTOCOL));
+            Ok(response)
+        },
+        Some(websocket_config(limits)),
+    )
     .await
     .map_err(|error| WsError::Handshake {
         peer: peer.to_string(),
         detail: error.to_string(),
     })
+}
+
+/// Cap the WebSocket implementation before it allocates from the peer's frame length.
+fn websocket_config(limits: &Limits) -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(limits.max_message_bytes))
+        .max_frame_size(Some(limits.max_message_bytes))
 }
 
 /// A `Via` sent-by for an endpoint that can never be connected back to (RFC 7118 §5.2).
@@ -219,10 +261,10 @@ pub(crate) async fn dial<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let secure = key.transport == crate::target::TransportKind::Wss;
+    let secure = key.transport == TransportKind::Wss;
     // The resource travels on the key rather than beside it, because it is part of what makes
     // this connection this connection — see [`ConnectionKey`].
-    match connect(stream, authority, key.ws_path(), secure).await {
+    match connect_with_limits(stream, authority, key.ws_path(), secure, &limits).await {
         Ok(socket) => pump(socket, key, id, outgoing, events, limits, keepalive).await,
         Err(error) => {
             tracing::warn!(%error, peer = %key.peer, "websocket handshake failed");
@@ -323,7 +365,18 @@ pub(crate) async fn pump<S>(
 /// says octets after a message in a *datagram* are noise to be ignored; RFC 7118 §5 says a
 /// WebSocket message carries one SIP message and no more, so the same octets here mean the peer
 /// is framing wrongly.
-fn parse_one(frame: Bytes, limits: &Limits) -> Result<Message, String> {
+#[derive(Debug, thiserror::Error)]
+enum WsFramingError {
+    #[error(transparent)]
+    Sip(#[from] ParseError),
+    #[error(
+        "a WebSocket message carries exactly one SIP message (RFC 7118 §5); \
+         this one held {complete} complete and {trailing} octets of another"
+    )]
+    Shape { complete: usize, trailing: usize },
+}
+
+fn parse_one(frame: Bytes, limits: &Limits) -> Result<Message, WsFramingError> {
     // The stream parser is reused rather than reimplemented: it already knows every rule about
     // where a message ends, and a second copy of those rules is a second place for them to
     // drift. What differs is only what is done with the answer — here, anything other than
@@ -338,20 +391,19 @@ fn parse_one(frame: Bytes, limits: &Limits) -> Result<Message, String> {
             {
                 return Ok(message);
             }
-            Err(format!(
-                "a WebSocket message carries exactly one SIP message (RFC 7118 §5); \
-                 this one held {} complete and {trailing} octets of another",
-                messages.len()
-            ))
+            Err(WsFramingError::Shape {
+                complete: messages.len(),
+                trailing,
+            })
         }
         // The one framing rule that does not carry over. `Content-Length` is mandatory on a
         // stream because nothing else says where a message ends. Here the frame says, so a
         // message without one is legal and its body runs to the end of the frame — which is
         // what RFC 3261 §20.14 already prescribes wherever the transport delimits.
         Err(ParseError::Framing(FramingError::ContentLengthRequired)) => {
-            parse_datagram(frame, limits).map_err(|error| error.to_string())
+            parse_datagram(frame, limits).map_err(WsFramingError::from)
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -385,7 +437,7 @@ mod tests {
          CSeq: 1 OPTIONS\r\n\
          Content-Length: 0\r\n\r\n";
 
-    fn parse(text: &str) -> Result<Message, String> {
+    fn parse(text: &str) -> Result<Message, WsFramingError> {
         parse_one(Bytes::copy_from_slice(text.as_bytes()), &Limits::stream())
     }
 
@@ -400,7 +452,7 @@ mod tests {
     fn a_message_split_across_frames_is_malformed() {
         let half = &OPTIONS[..OPTIONS.len() / 2];
         let error = parse(half).expect_err("half a message is not a message");
-        assert!(error.contains("exactly one"), "{error}");
+        assert!(error.to_string().contains("exactly one"), "{error}");
     }
 
     /// The other half: two messages in one frame is not two messages, it is a framing fault.
@@ -408,7 +460,7 @@ mod tests {
     #[test]
     fn two_messages_in_one_frame_are_malformed() {
         let error = parse(&format!("{OPTIONS}{OPTIONS}")).expect_err("two is not one");
-        assert!(error.contains("exactly one"), "{error}");
+        assert!(error.to_string().contains("exactly one"), "{error}");
     }
 
     /// Trailing octets are the same fault, and the case that separates this from
@@ -430,6 +482,276 @@ mod tests {
     #[test]
     fn a_frame_holding_nothing_like_sip_is_refused() {
         parse("hello").expect_err("not a SIP message");
+    }
+
+    // Production's enum is deliberate: its exhaustive matches stop compiling when a transport is
+    // added until X-64's framing expectations classify it. QUIC has its own one-stream/one-message
+    // tests; this table is the five paths named by X-64.
+    const RFC3261_FRAMING_PATHS: [TransportKind; 5] = [
+        TransportKind::Udp,
+        TransportKind::Tcp,
+        TransportKind::Tls,
+        TransportKind::Ws,
+        TransportKind::Wss,
+    ];
+
+    fn body_limit_refusal(path: TransportKind, frame: &[u8], limits: &Limits) -> ParseError {
+        match path {
+            TransportKind::Udp => parse_datagram(Bytes::copy_from_slice(frame), limits)
+                .expect_err("the datagram body limit must refuse"),
+            TransportKind::Tcp | TransportKind::Tls => {
+                let mut parser = StreamParser::new(*limits);
+                parser
+                    .push(frame)
+                    .expect_err("the stream body limit must refuse")
+            }
+            TransportKind::Ws | TransportKind::Wss => {
+                match parse_one(Bytes::copy_from_slice(frame), limits)
+                    .expect_err("the WebSocket body limit must refuse")
+                {
+                    WsFramingError::Sip(error) => error,
+                    error @ WsFramingError::Shape { .. } => {
+                        panic!("the SIP limit must run before frame-shape handling: {error}")
+                    }
+                }
+            }
+            TransportKind::Quic => {
+                panic!(
+                    "QUIC is bounded by its one-stream/one-message reader, not this RFC 3261 table"
+                )
+            }
+        }
+    }
+
+    async fn handshaken_pair(
+        secure: bool,
+        client_limits: Limits,
+        server_limits: Limits,
+    ) -> (
+        Socket<tokio::io::DuplexStream>,
+        Socket<tokio::io::DuplexStream>,
+    ) {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let peer = "127.0.0.1:5060".parse().expect("a peer address");
+        let (client, server) = tokio::join!(
+            connect_with_limits(client_io, "example.com", "/", secure, &client_limits),
+            accept_with_limits(server_io, peer, &server_limits),
+        );
+        (
+            client.expect("the client handshake completes"),
+            server.expect("the server handshake completes"),
+        )
+    }
+
+    fn limits_with_message_bound(max_message_bytes: usize) -> Limits {
+        Limits {
+            max_message_bytes,
+            max_body_bytes: max_message_bytes,
+            ..Limits::stream()
+        }
+    }
+
+    fn assert_message_too_long(
+        error: &tokio_tungstenite::tungstenite::Error,
+        expected_size: usize,
+        expected_limit: usize,
+    ) {
+        use tokio_tungstenite::tungstenite::error::CapacityError;
+        assert!(
+            matches!(
+                error,
+                tokio_tungstenite::tungstenite::Error::Capacity(
+                    CapacityError::MessageTooLong { size, max_size }
+                ) if *size == expected_size && *max_size == expected_limit
+            ),
+            "the handshake did not install the configured decoder bound: {error}"
+        );
+    }
+
+    /// RFC 6455 §5.2 and RFC 7118 §5: the actual client handshake installs the configured limit
+    /// in both WS and WSS modes. The oversized frame is refused by the WebSocket decoder itself,
+    /// before SIP parsing could hide a missing pre-allocation bound.
+    #[tokio::test]
+    async fn client_handshake_holds_the_frame_bound_for_ws_and_wss() {
+        const HELD: usize = 32;
+        const SENT: usize = 64;
+        for secure in [false, true] {
+            let (mut client, mut server) = handshaken_pair(
+                secure,
+                limits_with_message_bound(HELD),
+                limits_with_message_bound(256),
+            )
+            .await;
+            assert_eq!(client.get_config().max_frame_size, Some(HELD));
+            assert_eq!(client.get_config().max_message_size, Some(HELD));
+
+            server
+                .send(Frame::binary(vec![0; SENT]))
+                .await
+                .expect("the permissive peer sends the probe");
+            let error = client
+                .next()
+                .await
+                .expect("the probe has a decoder outcome")
+                .expect_err("an oversized frame is refused before SIP parsing");
+            assert_message_too_long(&error, SENT, HELD);
+        }
+    }
+
+    /// RFC 6455 §5.2 and RFC 7118 §5: the actual server handshake independently installs the
+    /// configured limit. Running both URI modes pins the shared WS/WSS server seam without
+    /// inferring its behavior from the client configuration.
+    #[tokio::test]
+    async fn server_handshake_holds_the_frame_bound_for_ws_and_wss() {
+        const HELD: usize = 32;
+        const SENT: usize = 64;
+        for secure in [false, true] {
+            let (mut client, mut server) = handshaken_pair(
+                secure,
+                limits_with_message_bound(256),
+                limits_with_message_bound(HELD),
+            )
+            .await;
+            assert_eq!(server.get_config().max_frame_size, Some(HELD));
+            assert_eq!(server.get_config().max_message_size, Some(HELD));
+
+            client
+                .send(Frame::binary(vec![0; SENT]))
+                .await
+                .expect("the permissive peer sends the probe");
+            let error = server
+                .next()
+                .await
+                .expect("the probe has a decoder outcome")
+                .expect_err("an oversized frame is refused before SIP parsing");
+            assert_message_too_long(&error, SENT, HELD);
+        }
+    }
+
+    /// RFC 3261 §20.14, RFC 7118 §5 and RFC 6455 §5.2: every network framing path refuses a
+    /// declared body above its bound before reserving it. WS and WSS additionally pass the same
+    /// bound into the WebSocket decoder, where the peer's frame length is first observed.
+    #[test]
+    fn pre_allocation_body_and_frame_bounds_hold_on_every_framing_path() {
+        let limits = Limits {
+            max_message_bytes: 256,
+            max_body_bytes: 4,
+            ..Limits::stream()
+        };
+        let frame = b"MESSAGE sip:a@b SIP/2.0\r\nContent-Length: 5\r\n\r\n";
+
+        for path in RFC3261_FRAMING_PATHS {
+            assert_eq!(
+                body_limit_refusal(path, frame, &limits),
+                ParseError::Limit {
+                    limit: sipx_sip::error::LimitKind::BodyBytes,
+                    value: 5,
+                },
+                "{path:?} did not return the typed body-size refusal"
+            );
+
+            if matches!(path, TransportKind::Ws | TransportKind::Wss) {
+                let config = websocket_config(&limits);
+                assert_eq!(
+                    config.max_frame_size,
+                    Some(limits.max_message_bytes),
+                    "{path:?} would allocate an oversized frame before SIP parsing"
+                );
+                assert_eq!(
+                    config.max_message_size,
+                    Some(limits.max_message_bytes),
+                    "{path:?} would assemble an oversized fragmented message"
+                );
+            }
+        }
+    }
+
+    /// RFC 3261 §20.14, RFC 4475 §3.1.2.2 and RFC 7118 §5: a short body is refused or held as
+    /// bounded incomplete input, while bytes beyond a declared body are never read into it. A
+    /// datagram ignores its RFC-permitted trailing noise; a byte stream holds it for the next
+    /// message; a WebSocket frame refuses it because one frame is exactly one message.
+    #[test]
+    fn body_length_disagreement_is_typed_or_bounded_on_every_framing_path() {
+        let limits = Limits {
+            max_message_bytes: 256,
+            max_body_bytes: 16,
+            ..Limits::stream()
+        };
+        let prefix = b"MESSAGE sip:a@b SIP/2.0\r\nContent-Length: 4\r\n\r\n";
+        let mut short = prefix.to_vec();
+        short.extend_from_slice(b"abc");
+        let mut long = prefix.to_vec();
+        long.extend_from_slice(b"abcde");
+
+        for path in RFC3261_FRAMING_PATHS {
+            match path {
+                TransportKind::Udp => {
+                    assert!(
+                        matches!(
+                            parse_datagram(Bytes::copy_from_slice(&short), &limits),
+                            Err(ParseError::Framing(FramingError::BodyTruncated))
+                        ),
+                        "UDP did not type the short-body refusal"
+                    );
+                    let message = parse_datagram(Bytes::copy_from_slice(&long), &limits)
+                        .expect("UDP ignores octets beyond the declared body");
+                    assert_eq!(message.body().as_ref(), b"abcd");
+                }
+                TransportKind::Tcp | TransportKind::Tls => {
+                    let mut short_parser = StreamParser::new(limits);
+                    assert!(
+                        short_parser.push(&short).expect("bounded wait").is_empty(),
+                        "{path:?} read a short body as complete"
+                    );
+                    assert_eq!(
+                        short_parser.pending(),
+                        3,
+                        "{path:?} did not bound pending input"
+                    );
+
+                    let mut long_parser = StreamParser::new(limits);
+                    let messages = long_parser.push(&long).expect("one complete message");
+                    assert_eq!(
+                        messages.len(),
+                        1,
+                        "{path:?} did not frame exactly one message"
+                    );
+                    assert_eq!(messages[0].body().as_ref(), b"abcd");
+                    assert_eq!(
+                        long_parser.pending(),
+                        1,
+                        "{path:?} read the next message's byte into this body"
+                    );
+                }
+                TransportKind::Ws | TransportKind::Wss => {
+                    assert!(
+                        matches!(
+                            parse_one(Bytes::copy_from_slice(&short), &limits),
+                            Err(WsFramingError::Shape {
+                                complete: 0,
+                                trailing: 3
+                            })
+                        ),
+                        "{path:?} did not type the short-frame refusal"
+                    );
+                    assert!(
+                        matches!(
+                            parse_one(Bytes::copy_from_slice(&long), &limits),
+                            Err(WsFramingError::Shape {
+                                complete: 1,
+                                trailing: 1
+                            })
+                        ),
+                        "{path:?} accepted bytes beyond the declared body"
+                    );
+                }
+                TransportKind::Quic => {
+                    panic!(
+                        "QUIC is bounded by its one-stream/one-message reader, not this RFC 3261 table"
+                    )
+                }
+            }
+        }
     }
 
     #[test]

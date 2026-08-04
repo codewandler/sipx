@@ -914,6 +914,150 @@ async fn dph_5_explicit_dtls_srtp_negotiates_and_carries_audio() {
     assert!(!heard.samples.is_empty(), "encrypted media carried audio");
 }
 
+/// `M-49`: the public diagnostic commands are the executable offerer and answerer proof roles.
+/// Their JSON is built from established `Call` and selected-component facts, not requested flags.
+#[cfg(all(feature = "dtls", feature = "opus"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_audio_profile_runs_both_cli_roles_and_reports_nominated_facts() {
+    let _scenario = process_scenario().await;
+    let tls = tls_fixture("browser-audio-profile");
+    let ca = tls.ca.to_string_lossy().into_owned();
+    let cert = tls.cert.to_string_lossy().into_owned();
+    let key = tls.key.to_string_lossy().into_owned();
+
+    let (mut answerer, address, mut lines) = start_answerer(&[
+        "--transport",
+        "wss",
+        "--tls-cert",
+        &cert,
+        "--tls-key",
+        &key,
+        "--profile",
+        "browser-audio",
+        "--duration",
+        "1",
+    ])
+    .await;
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:answer@{address}"),
+                "--transport",
+                "wss",
+                "--tls-ca",
+                &ca,
+                "--tls-server-name",
+                "sipx.test",
+                "--profile",
+                "browser-audio",
+                "--duration",
+                "1",
+                "--timeout",
+                "8",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("browser-audio CLI proof is bounded")
+    .expect("offerer runs");
+    let offerer = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{offerer} / {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let answerer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .expect("answerer report is bounded")
+        .expect("reads answerer report")
+        .expect("answerer report exists");
+
+    for (report, role) in [
+        (&*offerer, "browser-offerer"),
+        (&answerer_report, "browser-answerer"),
+    ] {
+        let value: serde_json::Value = serde_json::from_str(report).expect("terminal JSON parses");
+        assert_eq!(value["status"], "answered", "{report}");
+        assert_eq!(value["media_profile"], "browser-audio", "{report}");
+        assert_eq!(value["negotiated_codec"], "opus", "{report}");
+        assert_eq!(value["negotiated_keying"], "dtls-srtp", "{report}");
+        assert_eq!(value["browser_role"], role, "{report}");
+        assert_eq!(value["ice_component"], 1, "{report}");
+        assert!(value["nominated_local"].as_str().is_some(), "{report}");
+        assert!(value["nominated_remote"].as_str().is_some(), "{report}");
+        assert_eq!(value["ice_generation"], 0, "{report}");
+        assert_eq!(value["media_state"], "running", "{report}");
+        assert!(
+            value["negotiated_payload_type"].as_u64().is_some(),
+            "{report}"
+        );
+        assert_eq!(value["negotiated_clock_rate"], 48_000, "{report}");
+        assert_eq!(value["local_candidate_type"], "host", "{report}");
+        assert_eq!(value["remote_candidate_type"], "host", "{report}");
+        assert!(value["ingress_drops_total"].as_u64().is_some(), "{report}");
+    }
+    answerer_exits_cleanly(&mut answerer).await;
+}
+
+/// A named profile selected on clear signalling is rejected before any datagram leaves.
+#[tokio::test]
+async fn browser_audio_profile_refuses_non_wss_before_network_io() {
+    let observer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("observer binds");
+    let address = observer.local_addr().expect("observer address");
+    let output = sipx()
+        .args([
+            "dial",
+            &format!("sip:bob@{address}"),
+            "--profile",
+            "browser-audio",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("dial runs");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires --transport wss"));
+    let mut datagram = [0_u8; 1];
+    assert!(observer.try_recv_from(&mut datagram).is_err());
+}
+
+/// Browser audio starts media only after a final answer, ICE nomination and verified DTLS. The
+/// diagnostic command refuses its reliable-provisional mode while it is still pure configuration.
+#[cfg(all(feature = "dtls", feature = "opus"))]
+#[tokio::test]
+async fn browser_audio_profile_refuses_early_media_before_network_io() {
+    let observer = std::net::TcpListener::bind("127.0.0.1:0").expect("observer binds");
+    observer
+        .set_nonblocking(true)
+        .expect("observer is nonblocking");
+    let address = observer.local_addr().expect("observer address");
+    let output = sipx()
+        .args([
+            "dial",
+            &format!("sip:bob@{address}"),
+            "--transport",
+            "wss",
+            "--profile",
+            "browser-audio",
+            "--early-media",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("dial runs");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("does not support --early-media; wait for the final answer")
+    );
+    assert!(observer.accept().is_err());
+}
+
 /// Without the optional handshake implementation, `DPH-5` takes its other permitted result: a
 /// typed refusal before signalling and no downgrade to SDES or plain RTP.
 #[cfg(not(feature = "dtls"))]
@@ -1932,6 +2076,8 @@ async fn a_completed_silent_call_is_success_for_dial_and_answer() {
     let (mut answerer, address, mut lines) = start_answerer(&[
         "--duration",
         "1",
+        "--advertise",
+        "127.0.0.1",
         "--record",
         heard_by_answer.to_str().expect("an answer recording path"),
     ])
@@ -1945,6 +2091,8 @@ async fn a_completed_silent_call_is_success_for_dial_and_answer() {
                 &format!("sip:silence@{address}"),
                 "--local",
                 "127.0.0.1:0",
+                "--advertise",
+                "127.0.0.1",
                 "--json",
                 "--duration",
                 "1",
@@ -1965,24 +2113,35 @@ async fn a_completed_silent_call_is_success_for_dial_and_answer() {
         "dial completed a call but did not exit successfully: {caller_report} / {}",
         String::from_utf8_lossy(&caller.stderr)
     );
-    assert!(
-        caller_report.contains("\"status\":\"answered\"")
-            && caller_report.contains("\"samples_recorded\":0")
-            && caller_report.contains("\"heard_audio\":false"),
-        "dial must distinguish successful silence in its report: {caller_report}"
-    );
+    let caller_json: serde_json::Value =
+        serde_json::from_str(caller_report.trim()).expect("dial emits one JSON report");
+    assert_eq!(caller_json["status"], "answered", "{caller_report}");
+    assert_eq!(caller_json["samples_recorded"], 0, "{caller_report}");
+    assert_eq!(caller_json["heard_audio"], false, "{caller_report}");
 
     let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
         .await
         .expect("the answer report is bounded")
         .expect("reads answer stdout")
         .expect("the answerer emits its terminal report");
-    assert!(
-        answer_report.contains("\"status\":\"answered\"")
-            && answer_report.contains("\"samples_recorded\":0")
-            && answer_report.contains("\"heard_audio\":false"),
-        "answer must distinguish successful silence in its report: {answer_report}"
-    );
+    let answer_json: serde_json::Value =
+        serde_json::from_str(&answer_report).expect("answer emits one JSON report");
+    assert_eq!(answer_json["status"], "answered", "{answer_report}");
+    assert_eq!(answer_json["samples_recorded"], 0, "{answer_report}");
+    assert_eq!(answer_json["heard_audio"], false, "{answer_report}");
+    for (side, report) in [("dial", &caller_json), ("answer", &answer_json)] {
+        assert_eq!(
+            report["media_advertised"], "127.0.0.1",
+            "{side} must report the selected advertised media address: {report}"
+        );
+        let bound: std::net::SocketAddr = report["media_bound"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{side} media_bound must be a string: {report}"))
+            .parse()
+            .unwrap_or_else(|error| panic!("{side} media_bound must be a socket: {error}"));
+        assert_eq!(bound.ip(), "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
+        assert_ne!(bound.port(), 0, "{side} must report the allocated RTP port");
+    }
     let complaint = drain_stderr(&mut answerer).await;
     let answer_status = exits_cleanly(&mut answerer, &complaint).await;
     assert_eq!(
