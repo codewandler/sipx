@@ -162,12 +162,12 @@ Application-host phase 1 is delivered by `A-2`; the remaining in-progress work i
 [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host) phases below, which
 are not milestones because they are not RFC gaps.
 
-**Next release cut.** Cut the next alpha after `C-1`, `A-2` and `S-34` close. That boundary completes
-M9, document-host phase 1 and M11 together, and gives the release three coherent public proofs: two
-dialogs driven through every offer/answer axis, one webhook interpreter driving a real call, and
-caller identity accepted by an independent verifier. Cutting earlier would publish the first two
-public contracts with their known axes still open; waiting for the phone and later host phases would
-mix independent product work into a milestone-shaped release.
+**Next release cut.** `C-1`, `A-2` and `S-34` are closed, so the alpha boundary this paragraph used to
+describe has been reached. The next public boundary is now `1.0.0-beta.1`: one deliberate prerelease
+cut after the phone's DPH-1…DPH-12 matrix, registry-only consumer proof and public claims all
+agree. The cut includes its repository-native GitHub prerelease, but no broader publicity. The five
+generated predicates below measure hypothetical announcement readiness. Later host phases and optional
+features do not get mixed into it merely to make the release look larger.
 
 ### M9 — Bridgeable
 
@@ -404,6 +404,33 @@ honest about what it does not do.**
 A stack can be short of features and still be worth depending on. It cannot be *wrong about itself*
 and be worth depending on, because every consumer's design decision rests on what the table says.
 
+### `1.0.0-beta.1` — the hypothetical public-announcement predicates
+
+This is the threshold at which the prerelease could responsibly receive broader publicity: outside
+Rust users can install exact registry
+versions and exercise the whole advertised endpoint surface, while supported APIs are still allowed
+to break with a changelog entry. Meeting it does not authorize an announcement. The actual beta cut
+creates its GitHub prerelease only; later publicity requires separate explicit authorization. Only
+`1.0.0` freezes supported APIs.
+
+Stories declare the predicates they bear on through `announcement:` frontmatter, using the same
+single-source rule as the alpha's `predicate:` field. [`maturity.md`](maturity.md) generates the
+state and names blockers. All five are required; they are not a weighted score.
+
+1. **Every alpha integrity predicate still holds.** This is derived from the complete alpha table,
+   not from another story list.
+2. **The complete phone behavior is proven from a shell.** P-11 supplies correlated interactive
+   control; P-13 runs DPH-1 through DPH-12 as one bounded matrix.
+3. **Every claimed transport has two independent peers.** The beta claims UDP, TCP, TLS, WS and WSS.
+   QUIC stays experimental until T-13 and is not smuggled into this predicate through a crate map.
+4. **Registry distribution is reproducible and verified.** Every public package is rehearsed in
+   dependency order, then exact crates.io versions build in a clean consumer and install the CLI.
+5. **The public adoption surface is honest and current.** README, site, API docs, help, JSON schemas,
+   release notes and explicit omissions all describe the same release commit.
+
+No RFC total or completion percentage belongs here. The compliance table measures protocol scope;
+the hypothetical announcement gate measures whether the scope being offered is truthful and usable.
+
 ### `1.0.0-alpha` — the predicates
 
 The alpha is the point at which a v1 **could** technically be cut. Each item is checkable by a
@@ -522,6 +549,22 @@ buffer and reception statistics; G.711, with Opus behind a feature; symmetric-RT
 learning. Done when two sipx endpoints exchange audio that survives a bit-exactness check.
 See [design](designs/media.md).
 
+### Opus product support — `opus`
+
+The complete downstream path for Opus rather than the codec in isolation. `M-13` implements RFC
+6716 encode/decode and RFC 7587 payload mapping; `M-30` makes both call roles select it; `P-9` and
+`P-13` expose it through the diagnostic phone and prove that an Opus negotiation carries media
+between command processes; `M-37` makes construction failure typed instead of putting G.711 under
+the negotiated Opus payload type. Those are complete and are reused, not reopened.
+
+**Delivered:** `M-39` makes both CLI directions follow the negotiated media clock and packet size,
+proves distinct 48 kHz signals rather than non-empty one-way media, exercises the normalized
+Opus-only package graph, and passes Opus-only calls against an independent peer in both SIP roles.
+The peer proof asserts the dynamic payload number, 48 kHz RTP clock, non-silence and signal identity,
+so G.711 cannot satisfy it. Exact crates.io installation remains part of the beta distribution
+story, not missing codec behavior. Optional RFC 7587 `fmtp` controls remain a documented non-goal
+unless separately requested. See [design](designs/opus.md).
+
 ### Media runtime safety — `media-runtime-safety`
 
 The lifecycle and construction boundary around media workers: dropping a conference stops every
@@ -595,6 +638,48 @@ unscheduled. ICE-lite is deferred with its reason recorded — sipx is a UA behi
 case lite does not serve — but *interoperating* with a lite peer is not, because an implementation
 that only handles a full peer hangs waiting for checks a lite peer is never required to send.
 See [design](designs/media.md).
+
+### Browser-compatible WebRTC audio — `webrtc-audio`
+
+One browser audio path, not a full WebRTC stack. It composes the already delivered SIP-over-WSS,
+Opus/G.711/telephone-event, ICE and DTLS-SRTP work into the profile a browser can actually answer:
+one audio media section, `RTP/SAVPF`, RTCP multiplexing, ICE nomination followed by DTLS on the
+selected component, and fail-closed secure media. Video, browser APIs, data channels, SCTP,
+simulcast, multiple bundled media sections and a general browser media engine remain outside the
+repository's scope. `M-24`'s TURN client widens NAT coverage but is not permission to call a
+host/server-reflexive path universally reachable.
+
+RFC 8834 supplies the RTP/SAVPF and RTP/RTCP multiplex requirements rather than a local profile.
+
+**Current status:** the prerequisites are separately reachable, but the composition is not. The
+call and CLI explicitly refuse ICE with DTLS-SRTP, sipx does not offer `RTP/SAVPF` or `a=rtcp-mux`,
+and no independently implemented browser SIP endpoint has carried audio with it. `M-38` is the
+tracker. Done when a normative profile precedes the code and a bounded shell proof carries
+non-silent Opus both ways with that endpoint in both SIP roles over WSS + ICE + DTLS-SRTP, while
+negative fingerprint and downgrade cases fail immediately. See
+[design](designs/webrtc-audio.md).
+
+### Video admission — `video`
+
+Video remains a non-goal of the current [vision](vision.md), and this post-beta epic does not reverse
+that decision by appearing on the roadmap. `M-40` is an admission gate: measure the cost of one
+bounded send-and-receive profile, then either keep video outside sipx with the evidence recorded or
+explicitly amend the vision and write a normative spec before implementation. Until that decision,
+there is no video codec, SDP profile, packetizer, runtime or public support claim in scope.
+
+The proposed maturity ladder is deliberately separate from release maturity: **0 proposed** (the
+current state), **1 admitted** (vision, scope, budgets and spec agreed), **2 negotiable** (one
+feature-gated codec and offer/answer profile), **3 runnable** (bounded frame pipeline and RTCP
+feedback with no audio regression), **4 interoperable** (independent peer in both call roles under
+clean and impaired transport), and **5 public** (packaged-consumer proof plus measured docs). A
+decision not to admit video closes `M-40` at 0 rather than pretending the missing four levels are
+backlog debt.
+
+The browser-compatible audio epic is a prerequisite only for a future **browser** video claim. Its
+WSS, ICE, DTLS-SRTP, RTP/SAVPF and RTCP-mux composition can be reused, but video adds its own codec,
+packetization, feedback, congestion, timing and resource-safety obligations under RFC 3264, RFC
+3550, RFC 4585, RFC 5104, RFC 6184, RFC 7741, RFC 7742, RFC 8834 and RFC 9429. `M-40` must resolve
+that complete cost before any implementation child becomes ready.
 
 ### Endpoint discovery — `discovery` _(four stories)_
 

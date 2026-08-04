@@ -800,21 +800,21 @@ class TheRealWorkspace(unittest.TestCase):
             "no module or unreached published crate remains experimental",
         )
 
-    def test_opus_is_experimental_because_no_binary_can_select_it(self):
+    def test_opus_is_experimental_because_no_default_application_enables_it(self):
         """`X-38`'s worked example, pinned against the real tree.
 
-        RFC 6716 and 7587 are implemented, tested and selectable from `sipx-call`, and Opus is behind
-        `sipx-audio/opus`, which links libopus. No shipped binary enables it: `sipx-cli` has no flag
-        and no `[features]` table, and `sipx-app` deliberately does not. So it is *Experimental* under
-        this story's definition, and this fails if someone enables the feature from the host without
-        moving the declaration, or removes the declaration without enabling it.
+        RFC 6716 and 7587 are implemented, tested and selectable from `sipx-call` and an optional
+        `sipx-cli` build. Opus is behind `sipx-audio/opus`, which links libopus, and `sipx-app`
+        deliberately does not enable it. So it is *Experimental* under this check's application
+        definition, and this fails if someone enables the feature from the host without moving the
+        declaration, or removes the declaration without enabling it.
         """
         enabled = surface.resolve(surface.APPLICATIONS)
         self.assertIn("sipx-audio", enabled, "the host reaches the codec crate")
         self.assertNotIn(
             "opus",
             enabled["sipx-audio"],
-            "no application enables `opus`; if one now does, Opus graduates and this must change",
+            "no default application enables `opus`; if one now does, Opus graduates and this must change",
         )
         self.assertIn(
             ("sipx-audio", "opus"),

@@ -42,11 +42,12 @@ use sipx_sip::{HeaderName, Method, Request, StatusCode};
 use sipx_transport::{Handle, Incoming};
 use tokio::sync::{Notify, mpsc};
 
-use crate::call::{Call, Codecs, token};
+use crate::call::{Call, token};
 use crate::dialog::{Dialog, cseq_number, from_tag, to_tag};
 use crate::error::{Error, Result};
 use crate::event::{CallEvents, EndCause, EventSink};
 use crate::identity::InboundIdentityPolicy;
+use crate::media_policy::{Codecs, MediaPolicy};
 
 /// How many requests one call's inbox holds before the dispatcher sheds for it.
 ///
@@ -185,7 +186,7 @@ impl Invitation {
         self.answer_with_policy(
             endpoint,
             media_address,
-            crate::call::MediaPolicy::default().with_codecs(codecs),
+            MediaPolicy::default().with_codecs(codecs),
         )
         .await
     }
@@ -195,7 +196,7 @@ impl Invitation {
         &self,
         endpoint: &Handle,
         media_address: IpAddr,
-        policy: crate::call::MediaPolicy,
+        policy: MediaPolicy,
     ) -> Result<Call> {
         // Handed down rather than taken here, so that the invitation is taken immediately before
         // the `200` leaves rather than before the work that builds it — every step of which can
@@ -208,6 +209,7 @@ impl Invitation {
             self.pending.tag(),
             Some(&|| self.pending.claim()),
             policy,
+            &[],
         )
         .await
     }

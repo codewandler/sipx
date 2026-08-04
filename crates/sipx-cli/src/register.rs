@@ -30,6 +30,7 @@ OPTIONS:
     --tls-ca <FILE>      Add PEM trust roots to the platform store
     --tls-cert <FILE>    Client certificate chain for mutual TLS (with --tls-key)
     --tls-key <FILE>     Client private key for mutual TLS (with --tls-cert)
+    --header <H>         Add an application-owned REGISTER field; repeat 'Name: value'
     --keep-alive         Keep refreshing until interrupted
     --outbound           Register as one Outbound flow (RFC 5626), and report whether the
                          registrar accepted it
@@ -61,6 +62,10 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     let Some(aor) = args.positional() else {
         eprint!("{HELP}");
         return fail(format, Exit::Usage, "an address of record is required");
+    };
+    let headers = match crate::header::from_args(&args) {
+        Ok(headers) => headers,
+        Err(message) => return fail(format, Exit::Usage, &message),
     };
 
     let Ok(parsed_aor) = Uri::parse(bytes::Bytes::from(aor.to_owned())) else {
@@ -143,6 +148,9 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     let registrar = Uri::sip(Host::Name(host));
 
     let mut ua_config = Config::new(format!("<sip:{user}@{domain}>"), contact, registrar, target);
+    for header in headers {
+        ua_config = ua_config.with_header(header);
+    }
     ua_config.expires = Duration::from_secs(args.number("expires").unwrap_or(3600));
     if let Some(password) = password {
         ua_config = ua_config.with_credentials(Credentials::new(user.clone(), password));

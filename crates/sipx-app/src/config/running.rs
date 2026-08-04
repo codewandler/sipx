@@ -193,6 +193,27 @@ impl Running {
         Admission::App(Box::new(policy))
     }
 
+    /// Capture one app's policy for a session-originated call before asynchronous dialing.
+    #[must_use]
+    pub(crate) fn app_policy(&self, app: &str) -> Option<AppPolicy> {
+        let config = self.current.app(app)?;
+        Some(AppPolicy {
+            app: app.to_owned(),
+            binding: config.binding.clone(),
+            failure: config.failure.clone(),
+            grants: config.grants.clone(),
+        })
+    }
+
+    /// Record an outbound call under the policy captured when originate was accepted.
+    pub(crate) fn admit_outbound(&mut self, call: &str, policy: AppPolicy) {
+        self.reconcile();
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1);
+        self.live
+            .insert(call.to_owned(), LiveCall { policy, generation });
+    }
+
     /// The policy a live call is running under.
     #[must_use]
     pub fn policy_of(&self, call: &str) -> Option<&AppPolicy> {

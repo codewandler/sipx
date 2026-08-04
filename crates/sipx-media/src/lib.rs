@@ -47,6 +47,7 @@ pub use bridge::Bridge;
 pub use conference::{Conference, ConferenceError};
 pub use counters::MediaDiscardCounts;
 pub use dtls::{Arriving, Handshake, Profile, Role};
+pub use ice::IcePath;
 #[cfg(feature = "dtls")]
 pub use session::DtlsStartError;
 pub use session::{

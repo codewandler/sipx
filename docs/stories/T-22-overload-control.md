@@ -55,15 +55,17 @@ signal from downstream — instead of the 503-and-hope that `T-19` will otherwis
 ## Progress
 
 - Typed `oc`, `oc-algo`, `oc-validity` and `oc-seq` parameters now enforce which side may set each
-  field. Every client request offers `loss,rate`; responses update sequenced per-IP:port state, with
-  the 500 ms default, expiry and zero-validity stop semantics applied before admission.
+  field. An endpoint opting into client advertisement offers `loss,rate` on every request;
+  responses update sequenced per-IP:port state, with the 500 ms default, expiry and zero-validity
+  stop semantics applied before admission. The extension is off by default since `X-63`; the server
+  half still responds whenever the upstream request offered it.
 - Loss admission has deterministic seeded evidence for the RFC's two categories and a configurable
   policy hook. Rate admission is a driver-time leaky bucket with a configurable tolerance in target
   intervals, including strict pacing and a zero-rate refusal.
 - Local refusals are typed `Error::Overloaded` and increment `overload_rejections` before any
   transaction or network write exists. The existing T-19 queue-full path retains its 503 and shed
   count and now adds configured, sequenced feedback for an upstream peer that offered it.
-- A finite `sipx-testkit::load::run_bounded` endpoint scenario supplies the shared P-12 evidence:
+- A finite `sipx_call::load::run_bounded` endpoint scenario supplies the shared P-12 evidence:
   128 attempts, at most eight active, a two-second cleanup budget, both forwarded and rejected
   work, and exact agreement between rejected outcomes and the endpoint counter.
 - RFC 7339 and RFC 7415 are now `partial`; the registry names the remaining sequence-wrap and

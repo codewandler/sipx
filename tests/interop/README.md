@@ -40,7 +40,7 @@ A profile declares:
 | `PEER_TITLE` | one line, for the banner |
 | `PEER_IMAGE` | pinned, with an environment override |
 | `PEER_CONTAINER` | the container name |
-| `PEER_ROLES` | `server`, `user-agent`, `media-security`, or any combination — see below |
+| `PEER_ROLES` | `server`, `user-agent`, `media-security`, `opus-audio`, or any combination — see below |
 | `PEER_KEYINGS` | `sdes` and/or `dtls`, for a `media-security` peer — which SRTP keyings it can do |
 | `PEER_READY_MARKER` | the log line that means *listening*, not merely *started* |
 | `PEER_ENV` | environment the tests need to find this peer |
@@ -63,6 +63,10 @@ A profile declares:
   once done it with encrypted media. That is why `M-25`'s defect survived six releases — all 17
   SRTP unit tests were round trips, and a round trip between two ends that are wrong the same way
   is a round trip that works.
+- **`opus-audio`** — exact Opus-only calls in both offer/answer roles. Each sends a distinct
+  48 kHz signal through the peer's decoder and encoder and requires recognisable, non-silent
+  samples from sipx's decoder. It is separate from `user-agent` because Opus is an optional
+  capability and the role must fail closed when the peer's codec module is absent.
 
 SRTP's two keyings share no code path, so this role is run per keying and a peer declares which
 it can do. **Three different things can stop a keying from being exercised, and `run.sh` prints
@@ -120,6 +124,7 @@ Both peers run this list, unchanged:
 | `refuses_a_real_server_presenting_the_wrong_name` | …and a genuine server with a genuine certificate for *another* name is still refused |
 | `a_real_server_is_refused_when_its_issuer_is_unknown` | …and so is one whose issuer we do not know |
 | `registers_against_a_real_server_over_websocket` | RFC 7118 framing and the `sip` subprotocol are understood by a real WebSocket module |
+| `registers_against_a_real_server_over_secure_websocket` | The same upgrade succeeds only after certificate verification on the peer's HTTPS path |
 
 The user agent peer additionally runs:
 
@@ -128,19 +133,27 @@ The user agent peer additionally runs:
 | `an_independent_user_agent_answers_a_call_sipx_placed` | sipx's offer is read by a foreign answerer, its answer is read back, audio flows and a BYE sipx sends ends it |
 | `an_independent_user_agent_places_a_call_sipx_answers` | The other half of RFC 3264: sipx reads a foreign *offer* and writes the answer |
 | `a_real_peer_accepts_media_sipx_encrypted_with_sdes` | A peer that derived the SRTP session keys by its own reading of RFC 3711 authenticates sipx's packets — and says so when it cannot. Reverting `M-25`'s `SESSION_AUTH_LEN` makes this fail with the peer's own `SRTP unprotect failed`, which is the measure of whether it would have caught the defect it exists for |
+| `opus_audio_peer_answers_sipx_offer_and_echoes_real_audio` | The peer answers an Opus-only offer, decodes sipx's signal and re-encodes it; sipx requires a dynamic payload type, the 48 kHz RTP clock, and the recovered signal rather than silence |
+| `opus_audio_peer_offers_and_sipx_answers_with_real_audio` | The peer creates the Opus-only offer and the same decoded-signal proof exercises the inverse offer/answer role |
 
 The two TLS refusals assert that the failure is **immediate**, not merely that no lease was
 granted. A test that accepted a timeout would pass just as happily against a stack that had
 hung, or against a server that never started.
 
-The call tests assert on audio, not on "a session was set up". They run the media in relay mode
-and compare the µ-law bytes the peer echoed against the µ-law bytes sipx sent, because a decode
-step on the way in would be sipx's opinion of those bytes rather than the bytes. What is
-observed is the whole 600 ms clip returned byte for byte in both directions — `M-3`'s
-bit-exactness with a foreign implementation in the middle, relaxed not at all. Confirmed
-non-vacuous by pointing the same test at an extension that answers and stays silent: it fails on
-"a session was set up and nothing was heard", which is exactly the failure a weaker assertion
-would have hidden.
+The G.711 call tests assert on audio, not on "a session was set up". They run the media in relay
+mode and compare the µ-law bytes the peer echoed against the µ-law bytes sipx sent, because a
+decode step on the way in would be sipx's opinion of those bytes rather than the bytes. What is
+observed is the whole 600 ms clip returned byte for byte in both directions — `M-3`'s bit-exactness
+with a foreign implementation in the middle, relaxed not at all. Confirmed non-vacuous by pointing
+the same test at an extension that answers and stays silent: it fails on "a session was set up and
+nothing was heard", which is exactly the failure a weaker assertion would have hidden.
+
+Opus cannot use byte equality: it is lossy, and its encoder and decoder retain state. Its pair of
+tests therefore sends different 48 kHz tones in the two call roles and measures the recovered
+waveform after the peer has decoded and re-encoded it. The assertions require a negotiated dynamic
+payload type, a 48 kHz RTP clock, substantial non-silent output, strong correlation with the sent
+tone, and weak correlation with an unrelated tone. Both endpoint configurations permit only Opus,
+so G.711 cannot turn a codec failure into a pass.
 
 ## What the second peer disagreed with
 
@@ -198,11 +211,9 @@ precisely when the thing it looked for was present. The log is read into a varia
 
 ## Still to do
 
-WSS. Both peers serve it, and plain WebSocket now passes against both. For the first, the module
-wants its own TLS domain configuration; for the second, the HTTP server needs its own TLS
-binding. The certificate policy it would exercise is the same code
-`registers_against_a_real_server_over_tls` already proves against a third party. Worth adding,
-not urgent.
+The five released signalling transports run against both profiles. A profile can put WS and WSS on
+different ports and paths; the shared tests read those facts from the profile and do not assume the
+two upgrades share an HTTP listener.
 
 A third peer with a different implementation language would be worth more than a fourth C one.
 Both peers here are C, and a whole class of assumption — about integer widths, about what a

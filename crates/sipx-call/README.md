@@ -1,11 +1,12 @@
 # sipx-call
 
-Call framework: answer and dial calls with playback, recording, DTMF and transfer.
+Call framework: dial, answer, couple dialogs, play, record, send DTMF, and transfer.
 
 ## What this is
 
 The layer where SIP dialogs, SDP negotiation, and media sessions become a call. It owns the
-single-call lifecycle and exposes the operations and typed events an application uses.
+single-call lifecycle, can couple two dialogs with optional bridged media, and exposes the
+operations and typed events an application uses.
 
 ## Stability
 
@@ -15,11 +16,13 @@ That is the contract; it is linked rather than copied here so the two cannot dri
 
 ## Deliberately absent
 
-A `Call` does not yet expose multi-party bridging or conferencing. That is a call-layer capability
-rather than a workaround for an application to build around private media state.
+A coupling still terminates media at sipx even when no bridge is attached, so the signalling-only,
+off-media role is absent. Multi-party call bridging and conferencing are absent too; the media crate
+can mix sessions an application owns, but a `Call` keeps its media session private.
 
 ## See also
 
 - [`docs/specs/call-dispatch.md`](../../docs/specs/call-dispatch.md) — routing one endpoint to many calls.
+- [`docs/specs/call-coupling.md`](../../docs/specs/call-coupling.md) — driving two dialogs as one call.
 - [`docs/specs/sip-auth.md`](../../docs/specs/sip-auth.md) — bounded 401/407 retries for outbound calls.
 - [`sipx-media`](../sipx-media/README.md) — the media sessions owned by calls.

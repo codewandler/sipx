@@ -113,7 +113,8 @@ pub struct Config {
     /// `None` — the default — costs one `Option` check per message and opens nothing. **A capture
     /// contains call content and identities even after redaction**; see [`CaptureConfig`].
     pub capture: Option<CaptureConfig>,
-    /// Hop-by-hop overload feedback, rate tolerance, prioritization, and randomness.
+    /// Hop-by-hop overload feedback, client advertisement, rate tolerance, prioritization, and
+    /// randomness. Client advertisement is off by default; see [`OverloadConfig::advertise`].
     pub overload: OverloadConfig,
 }
 
@@ -480,6 +481,7 @@ pub struct Handle {
     /// request and its retransmission would be a different `Via`.
     #[cfg(feature = "ws")]
     ws_sent_by: Arc<str>,
+    advertise_overload: bool,
     sent_by: Arc<String>,
     sent_by_port: u16,
 }
@@ -541,7 +543,9 @@ impl Handle {
             let header = Header::build(HeaderName::Via, Bytes::from(via))?;
             request.headers.push_front(header);
         }
-        crate::overload::advertise(&mut request);
+        if self.advertise_overload {
+            crate::overload::advertise(&mut request);
+        }
 
         let (events_tx, events_rx) = mpsc::channel(32);
         let (failures_tx, failures_rx) = mpsc::channel(1);
@@ -578,7 +582,9 @@ impl Handle {
     ///
     /// Returns once the bytes have been handed to the socket.
     pub async fn send_directly(&self, mut request: Request, target: Target) -> Result<()> {
-        crate::overload::advertise(&mut request);
+        if self.advertise_overload {
+            crate::overload::advertise(&mut request);
+        }
         let (sent_tx, sent_rx) = oneshot::channel();
         self.commands
             .send(Command::Direct {
@@ -943,6 +949,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         quic_addr,
         #[cfg(feature = "ws")]
         ws_sent_by: Arc::from(crate::ws::invented_sent_by()),
+        advertise_overload: config.overload.advertise,
         sent_by: Arc::new(config.sent_by.clone()),
         sent_by_port,
     };
@@ -2608,6 +2615,9 @@ impl Driver {
     /// Accept feedback only after the transaction layer has authenticated it by matching a live
     /// client transaction. An unmatched response is application data, not controller input.
     fn observe_overload_response(&mut self, source: SocketAddr, response: Option<&Response>) {
+        if !self.overload_config.advertise {
+            return;
+        }
         if let Some(response) = response {
             let now = tokio::time::Instant::now().saturating_duration_since(self.overload_epoch);
             self.overload.observe(source, response, now);
@@ -2984,6 +2994,7 @@ mod tests {
             quic_addr: None,
             #[cfg(feature = "ws")]
             ws_sent_by: Arc::from("shutdown.invalid"),
+            advertise_overload: false,
             sent_by: Arc::new("127.0.0.1".to_owned()),
             sent_by_port: 5060,
         }

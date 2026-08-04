@@ -17,9 +17,10 @@ use sipx_sip::update;
 use sipx_sip::{HeaderName, Method, Response, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
 
-use crate::call::{Codecs, Early, EarlyOffer, MediaPolicy};
+use crate::call::{Early, EarlyOffer};
 use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
+use crate::media_policy::{Codecs, MediaPolicy};
 
 /// RFC 3261 §17 T1, the round-trip estimate every retransmission schedule is built from.
 const T1: Duration = Duration::from_millis(500);

@@ -20,25 +20,31 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
 - **SIP building blocks.** Use the parser, transaction and dialog machines, or SDP offer/answer
   without bringing in an async runtime, socket, or clock.
 - **Secure transports.** The transport layer and diagnostic CLI support TLS and secure WebSocket
-  with certificate verification. Calls over secure signalling can use SDES-keyed SRTP.
+  with certificate verification. Calls can select plain RTP, SDES-keyed SRTP, or DTLS-SRTP without
+  falling back to a weaker mode.
 - **A scriptable test endpoint.** The CLI emits JSON and distinct exit codes, and moves audio
-  through WAV files for repeatable automation.
+  through WAV files for repeatable automation. Its optional `device-audio` feature also opens an
+  explicitly selected microphone or speaker through a bounded leaf-only driver.
+- **NAT traversal without a relay.** Calls can gather host candidates and use a configured STUN
+  server to select a server-reflexive ICE path.
+- **A two-leg call controller.** `sipx-call::EarlyCoupling` and `Coupling` own both dialogs, relay
+  offer/answer changes and termination, and can attach the bounded media bridge.
 
 ## Choose something else when you need
 
 - **Proxy, registrar, or PBX behavior.** sipx does not fork or route other users' requests,
   add itself to a route set, store registrations for other endpoints, or provide dial plans.
-- **A desktop phone.** The CLI does not access a microphone, speaker, headset, or sound-device
-  mixer. It plays and records 8 kHz, 16-bit, mono WAV files.
-- **ICE or a general NAT traversal service.** `rport`, symmetric RTP, and Outbound cover many
-  registered-endpoint cases, but sipx does not perform ICE connectivity checks or provide a
-  relay. Some NAT topologies will have no working media path.
-- **A browser media endpoint.** WebSocket signalling alone is insufficient: the current call
-  path has neither ICE nor DTLS-keyed media, so browser interoperability is not a shipped use case.
+- **A desktop phone interface.** The optional device driver can open an exact microphone or speaker,
+  but sipx has no graphical call controls, headset integration, or sound-device mixer.
+- **A general NAT traversal service.** ICE connectivity checks and STUN-derived server-reflexive
+  candidates are available, but TURN and relayed candidates are not. Some NAT pairs therefore have
+  no working media path.
+- **A browser media endpoint.** Secure WebSocket signalling, ICE, and DTLS-keyed media are useful
+  pieces, but sipx deliberately does not ship the complete browser media protocol surface.
 - **Video or additional codecs.** The media stack is for telephony audio. Calls support G.711
   and optional Opus, not arbitrary application-supplied codecs.
-- **Bridging two `Call` values.** `sipx-media` can bridge or conference media sessions that you
-  own, but a `Call` owns its media session and cannot currently be handed to those operations.
+- **A ready-made routing product.** The two-dialog coupling primitive is available, but listener
+  configuration, routing policy, a location service, and dial plans belong to the application.
 - **Automatic presence from live stack state.** Subscription and event-package components are
   present, but applications must supply the documents they publish; live calls and registrations
   are not automatically projected into presence state.
@@ -48,19 +54,21 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
 
 TLS protects each signalling hop, not necessarily every intermediary. With SDES, SRTP key
 material is carried in SDP, so any intermediary terminating that secure signalling can read it.
-The DTLS fingerprint, certificate-checking, and handshake components exist in the SDP and media
-crates, but they are not connected to a media session or call today. There is no supported route
-to a DTLS-keyed call, and SRTP currently has one transform with no rekeying.
+DTLS-SRTP keeps that media key out of signalling and is selectable through both the call API and
+CLI, but it still has one SRTP transform with no rekeying. Reliable early media and ICE combined
+with DTLS-SRTP are refused rather than silently downgraded.
 
 See [Security](../reference/security.md) for the CLI-versus-library matrix and
 [RFC compliance](../reference/compliance.md) for the checked, protocol-by-protocol status.
 
 ## Application host status
 
-The experimental `sipx-host` binary exists. It reads configuration, binds a listener, answers
-a real call, and follows the configured policy for an unreachable application. None of the
-external or embedded application callback bindings is implemented, so handler programs cannot
-drive calls yet. Do not select it when application callbacks are a requirement.
+The `sipx-host` binary reads configuration, binds listeners, and serves real calls to document-mode
+webhooks or authenticated full-duplex sessions. A granted session can originate a call. The Rust
+host surfaces are Supported under the pre-1.0 policy, while the language-neutral `sipx.app.v1` wire
+contract remains Experimental. There is no embedded runtime or TypeScript SDK, so do not select it
+when either is a requirement. The [application host overview](../sdk/overview.md) gives the binding
+and trust boundaries.
 
 ## Make the decision
 

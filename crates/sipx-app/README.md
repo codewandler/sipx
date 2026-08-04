@@ -1,15 +1,14 @@
 # sipx-app
 
-SIP application host with document-mode webhooks, configuration, and a deterministic contract
-harness.
+SIP application host with webhook and full-duplex session bindings.
 
 ## What this is
 
 This is the leaf application over the sipx stack. It reads a host document, binds the declared
 listeners, answers calls through `sipx-call`, drives webhook applications through the contract
-interpreter, and provides the deterministic fake-time harness used to exercise host policy. The
-production document path uses `sipx-app-protocol::Interpreter`; the older public harness still has
-a provisional instruction runner whose migration to that interpreter remains open in `A-2`.
+interpreter, serves authenticated full-duplex sessions, and provides the deterministic fake-time
+harness used to exercise host policy. The production webhook and session paths share
+`sipx-app-protocol::Interpreter` with that harness.
 
 ## Stability
 
@@ -21,7 +20,9 @@ That is the contract; it is linked rather than copied here so the two cannot dri
 
 Document-mode webhooks are implemented. Response bodies stay opaque until
 `sipx-app-protocol::Interpreter` parses them; the host executes only effects the interpreter yields.
-Full-duplex sessions and the embedded runtime remain separate host phases.
+Authenticated full-duplex sessions can replace programs and originate calls when granted. The
+embedded runtime and packaged TypeScript SDK are not implemented, and the language-neutral wire
+contract remains Experimental.
 
 ## See also
 

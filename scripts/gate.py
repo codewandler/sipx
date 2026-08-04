@@ -90,6 +90,8 @@ NOT_RUN_LOCALLY = {
     "fuzz": "a nightly toolchain and a cargo-fuzz install, for a run that is time-boxed anyway",
     "deny": "runs as a packaged action against a freshly fetched advisory database, not local state",
     "deploy-site": "publishes what `site` built; there is nothing to verify",
+    "device-linux": "the local all-feature suite runs the x86 vector; CI adds the arm64 release architecture",
+    "device-portable": "requires the macOS and Windows platform audio SDKs unavailable on a Linux gate host",
 }
 
 #: Run commands that are runner provisioning rather than checks. Kept deliberately short: every
@@ -112,6 +114,24 @@ def gate_steps(msrv: str) -> list[Step]:
         # is the kind of thing that can be quietly wrong for a long time. Milliseconds, and it also
         # asserts that every predicate names a story that exists.
         Step("maturity tests", "gate", ("python3", "scripts/test-maturity.py")),
+        # A-11: registry writes are deliberately absent from the gate. The release helper's
+        # adversarial fixtures prove its ordering and authority boundary without credentials or a
+        # registry connection; the exact clean release checkout runs the separate dry-run mode.
+        Step("release rehearsal tests", "gate", ("python3", "scripts/test-release.py")),
+        # A-12: the publication workflow is itself an authority boundary. Adversarial mutations
+        # hold its tag-selected dispatch, commit binding, finite frontier, GitHub prerelease order
+        # and prohibition on broader publicity;
+        # the structural check then holds the checked-in workflow to that contract.
+        Step(
+            "release workflow tests",
+            "gate",
+            ("python3", "scripts/test-release-workflow.py"),
+        ),
+        Step(
+            "release workflow",
+            "gate",
+            ("./scripts/check-release-workflow.py", "--check"),
+        ),
         # X-38: the surface checker decides which crates are on the reachable-from-a-call surface,
         # which makes its own bugs invisible — both the ones it had while being written reported
         # *nothing*, and a checker with no output looks exactly like a clean tree.
@@ -120,6 +140,18 @@ def gate_steps(msrv: str) -> list[Step]:
         # which `X-23` measured as both call tests timing out together. The suite stubs the
         # container runtime, so it belongs beside the others rather than in the `interop` job.
         Step("interop harness tests", "gate", ("python3", "scripts/test-interop-run.py")),
+        # P-13: this checker decides whether executable help and versioned output producers still
+        # agree with the public reference. Its reversed fixtures belong here because a checker that
+        # silently overlooks a command or schema is indistinguishable from an agreeing one.
+        Step("cli reference tests", "gate", ("python3", "scripts/test-cli-reference.py")),
+        # P-13: the proof runner maps the normative DPH vectors and wider release matrix onto
+        # executable process tests and independent-peer profiles. Test its discovery and failure
+        # rules separately so a runner that quietly drops a path cannot bless its own omission.
+        Step(
+            "diagnostic phone proof tests",
+            "gate",
+            ("python3", "scripts/test-diagnostic-phone-proof.py"),
+        ),
         Step(
             "provenance",
             "provenance",
@@ -188,6 +220,19 @@ def gate_steps(msrv: str) -> list[Step]:
         ),
         Step("test", "test", ("cargo", "test", "--workspace", "--all-features")),
         Step("examples", "test", ("cargo", "build", "--workspace", "--all-features", "--examples")),
+        # P-13: execute the built binary's root and subcommand help, then hold the versioned JSON
+        # producers against the public contract table. After the workspace builds so this observes
+        # the candidate command rather than a parsed copy of its help constants.
+        Step("cli reference", "test", ("./scripts/check-cli-reference.py", "--check")),
+        # P-13: the structural proof names every diagnostic-phone process vector, every complete
+        # product path and two independent profiles for each released signalling transport. The
+        # cargo suite above executes its Rust evidence; this check prevents that evidence from
+        # disappearing from the release matrix unnoticed.
+        Step(
+            "diagnostic phone proof",
+            "test",
+            ("./scripts/diagnostic-phone-proof.py", "--check"),
+        ),
         # C-5: the app contract's end-to-end proof — the interpreter driving a real call, with no
         # host, asserted from a shell. It is a `.sh` and not a `#[test]` because what it checks is
         # the *trace the example prints*, which is the thing a reader of the docs actually sees.

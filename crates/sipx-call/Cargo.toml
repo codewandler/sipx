@@ -1,6 +1,6 @@
 [package]
 name = "sipx-call"
-description = "Call framework: answer and dial calls with playback, recording, DTMF and transfer"
+description = "Call framework: dial, answer, couple dialogs, play, record, send DTMF, and transfer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -32,6 +32,7 @@ bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "fs", "macros"] }
+tokio-util.workspace = true
 
 [dev-dependencies]
 openssl.workspace = true
@@ -39,7 +40,8 @@ base64.workspace = true
 serde_json.workspace = true
 sipx-rtp.workspace = true
 bytes.workspace = true
-sipx-testkit.workspace = true
+# Path-only so Cargo omits unpublished test support from the normalized registry manifest.
+sipx-testkit = { path = "../sipx-testkit" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 pretty_assertions.workspace = true
 

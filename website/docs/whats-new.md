@@ -1,15 +1,49 @@
 ---
 title: What's new
-description: Release highlights for sipx 1.0.0-alpha.5 and guidance on the newer main-branch documentation.
+description: Release highlights and adoption notes for the sipx 1.0.0-beta.1 public beta.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-alpha.5 — 2026-08-03
+## 1.0.0-beta.1 — 2026-08-04
 <!-- END generated:release-heading -->
 
-This is the current tagged release. It establishes a measured alpha baseline for the SIP,
+The first public beta is published as exact crates.io packages from one immutable release tag. Its
+release threshold is all-or-nothing: the complete shell phone, independent transport peers,
+exact registry packages, installed CLI, public documentation, and the retained integrity gate agree
+on the same candidate. See [How sipx is built](reference/development-process.md) for the measured
+process and [Diagnostic-phone proof](reference/diagnostic-phone-proof.md) for the executable product
+matrix.
+
+Install the exact CLI release with:
+
+```bash
+cargo install --locked --version =1.0.0-beta.1 sipx-cli
+```
+
+The adoption surface leads with the modular Rust crates: applications select the protocol, transport,
+user-agent, media, call, or host layer they need rather than taking a facade crate. The `sipx` CLI is
+the shell-testable proof of those layers. This beta covers all five released signalling
+transports, selectable codec/media-security/ICE policy, optional live devices, interactive scenarios,
+bounded load, and reliable early media. The application host now serves real calls through
+document-mode webhooks and authenticated full-duplex sessions; the latter can originate calls when
+granted.
+
+Public APIs are not frozen before 1.0. Supported APIs receive a changelog entry and migration
+guidance when they break. Experimental APIs may change shape or be removed without a migration
+note; that includes the language-neutral `sipx.app.v1` wire contract and SIP over QUIC.
+
+The release intentionally does not provide a proxy, registrar, PBX, routing product, dial plan,
+TURN relay, graphical desktop phone, headset mixer, video, arbitrary application codecs, complete
+browser-media stack, automatic live-state presence, or SIP instant-message behavior. It also does
+not ship an embedded application runtime, subprocess binding, or packaged TypeScript SDK. The
+two-dialog coupling primitive is public, but the truly off-media relay role is not complete. The
+[fit guide](guides/does-this-fit.md) is the maintained deployment boundary.
+
+## 1.0.0-alpha.5 — 2026-08-03
+
+This previous tagged release established a measured alpha baseline for the SIP,
 transport, call, and media stack; it is not an API-stability promise. Breaking API changes are
 still possible before 1.0.
 
@@ -91,10 +125,10 @@ instead of sound devices.
 The experimental `sipx-host` process can bind and
 answer calls, but application callback bindings are not implemented.
 
-## Changes on `main`
+## Changes after the beta
 
 This website is built from `main`, so a page or API link may describe work newer than the tagged
-alpha. Use the tag above when reproducibility matters, and consult the
+beta. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-alpha.5` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-beta.1` merely because it appears on this
 site.

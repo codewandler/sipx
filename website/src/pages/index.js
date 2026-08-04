@@ -6,7 +6,7 @@ import Layout from '@theme/Layout';
 const CARDS = [
   {
     title: 'A scriptable CLI',
-    body: 'Place, answer, and register from a shell with JSON results and distinct exit codes. Playback and recording use WAV files, not a microphone or speaker.',
+    body: 'Place, answer, and register from a shell with JSON results and distinct exit codes. WAV files are the reproducible audio default; an optional feature enables explicitly selected live devices.',
     to: '/docs/reference/cli',
   },
   {
@@ -16,7 +16,7 @@ const CARDS = [
   },
   {
     title: 'Telephony audio',
-    body: 'G.711 in both directions, WAV playback and recording, DTMF, jitter buffering, and quality statistics. Opus is selectable through an optional library feature.',
+    body: 'G.711 in both directions, WAV playback and recording, DTMF, jitter buffering, and quality statistics. Opus is selectable through an optional Cargo feature.',
     to: '/docs/guides/answer-a-call',
   },
   {

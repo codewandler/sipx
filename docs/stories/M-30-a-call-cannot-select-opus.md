@@ -4,8 +4,8 @@ title: Let a call select Opus, or stop shipping a codec nothing can reach
 pillar: Media
 status: done
 priority: 4
-design: docs/designs/media.md
-epic: media
+design: docs/designs/opus.md
+epic: opus
 areas: [sipx-call, sipx-media, sipx-sdp]
 note: M-13 built the codec, not the selection — sipx-call hardcodes G.711 at six sites and Codec::from_payload_type deliberately never returns Opus, so X-33 demoted RFC 6716 and 7587 to partial
 ---

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the distance to `1.0.0-alpha`, from the sources that are already checked.
+"""Generate alpha integrity and beta-announcement readiness from checked sources.
 
 Someone asked how far sipx is from v1, and the honest first answer was that the question had no
 denominator: the roadmap ran M0-M12 with a deferral list and never named 1.0, and the only `v1` in
@@ -11,7 +11,7 @@ from what it described: the gate's command list (`X-22`, which hid a red `msrv` 
 and the pool-key prose (`X-24`, wrong through two changes to the type). The roadmap's own Status
 block said "941 tests pass" through four releases that took the real number past 1300. A maturity
 number is the *most* tempting thing to hand-maintain and the least useful when stale, because the
-only decision it feeds is when to cut a release.
+only decision it feeds is whether a release could responsibly be announced.
 
 **What this deliberately is not.** Not a dashboard. One page, from two machine-read sources plus git,
 that a release decision can be made from. If it grows a second page it has failed — the vision's
@@ -114,6 +114,11 @@ class Predicate:
 #: a typo that reported as progress is the whole failure mode here.
 PREDICATE_FIELD = "predicate"
 
+#: The corresponding story-owned association for hypothetical public-prerelease publicity. It is a
+#: separate field because beta readiness and stable-API readiness answer different questions: a
+#: story may block public adoption without describing a correctness defect in an alpha predicate.
+ANNOUNCEMENT_FIELD = "announcement"
+
 #: The seven predicates from `docs/roadmap.md`. A predicate is met when every story declaring it is
 #: `done`; that is the whole rule. What is written here is the predicate — its number, its name, and
 #: whether it can be computed at all — never which stories bear on it.
@@ -151,6 +156,17 @@ ALPHA = (
         "where that is not a gap.",
     ),
     Predicate(7, "The distance to v1 is generated, not asserted", "computed"),
+)
+
+#: The all-or-nothing hypothetical announcement threshold for `1.0.0-beta.1`. No feature or RFC percentage appears
+#: here: a truthful smaller surface is ready and an overstated larger one is not. Predicate 1 is
+#: derived from every alpha predicate and therefore deliberately has no declaring story of its own.
+BETA = (
+    Predicate(1, "Every alpha integrity predicate still holds", "derived"),
+    Predicate(2, "The complete phone behavior is proven from a shell", "computed"),
+    Predicate(3, "Every claimed transport has two independent peers", "computed"),
+    Predicate(4, "Registry distribution is reproducible and verified", "computed"),
+    Predicate(5, "The public adoption surface is honest and current", "computed"),
 )
 
 
@@ -821,8 +837,8 @@ def story_key(story_id):
     return (prefix, int(number) if number.isdigit() else 0, story_id)
 
 
-def story_predicates(story_id, fields):
-    """The alpha predicates one story declares, from its `predicate:` frontmatter field.
+def story_declarations(story_id, fields, field):
+    """The numbered predicates one story declares through one frontmatter field.
 
     Accepts `3` and `[3, 7]`, because a defect can falsify two predicates and forcing a filer to pick
     one would leave the other reading `met` — the failure this field exists to remove. An empty field
@@ -831,7 +847,7 @@ def story_predicates(story_id, fields):
     A field that is not a list of numbers exits with a message rather than raising: a malformed
     frontmatter line is a thing to fix, not a traceback to read.
     """
-    raw = fields.get(PREDICATE_FIELD, "").partition("#")[0].strip()
+    raw = fields.get(field, "").partition("#")[0].strip()
     if not raw:
         return ()
     numbers = []
@@ -841,57 +857,94 @@ def story_predicates(story_id, fields):
             continue
         if not token.isdigit():
             raise SystemExit(
-                f"maturity: {story_id} has `{PREDICATE_FIELD}: {raw}`, and `{token}` is not a "
-                f"predicate number; write `{PREDICATE_FIELD}: 3` or `{PREDICATE_FIELD}: [3, 7]`"
+                f"maturity: {story_id} has `{field}: {raw}`, and `{token}` is not a predicate "
+                f"number; write `{field}: 3` or `{field}: [3, 5]`"
             )
         numbers.append(int(token))
     return tuple(numbers)
 
 
-def predicate_stories(found):
+def story_predicates(story_id, fields):
+    """The alpha predicates one story declares, retained as the public helper for tests."""
+    return story_declarations(story_id, fields, PREDICATE_FIELD)
+
+
+def predicate_stories(found, predicates=ALPHA, field=PREDICATE_FIELD, gate="alpha"):
     """Every story declaring each predicate, by predicate number.
 
     **The single source of the association.** Nothing else in this file may hold a list of which
     stories bear on which predicate; if it did, the two would drift and the drift is `X-42`.
     """
-    known = {predicate.number for predicate in ALPHA}
+    known = {predicate.number for predicate in predicates}
     declared = collections.defaultdict(list)
     for story_id in sorted(found, key=story_key):
-        for number in story_predicates(story_id, found[story_id]):
+        for number in story_declarations(story_id, found[story_id], field):
             if number not in known:
                 raise SystemExit(
-                    f"maturity: {story_id} declares `{PREDICATE_FIELD}: {number}`, and there is no "
-                    f"alpha predicate {number} — `docs/roadmap.md` has "
+                    f"maturity: {story_id} declares `{field}: {number}`, and there is no "
+                    f"{gate} predicate {number} — `docs/roadmap.md` has "
                     f"{', '.join(str(item) for item in sorted(known))}"
                 )
             declared[number].append(story_id)
     return declared
 
 
-def predicate_state(predicate, found):
+def predicate_state(
+    predicate,
+    found,
+    predicates=ALPHA,
+    field=PREDICATE_FIELD,
+    gate="alpha",
+):
     """Which of a predicate's stories are still open, and every story that declares it.
 
     Both halves are returned because the report needs to tell two different things apart: a predicate
     whose stories are all closed, and a predicate no story claims at all. Calling the second one met
     would mean deleting the last story that named a predicate looked like finishing it.
     """
-    declared = predicate_stories(found).get(predicate.number, [])
+    declared = predicate_stories(found, predicates, field, gate).get(predicate.number, [])
     open_stories = [
         story_id for story_id in declared if found[story_id].get("status", "ready") in OPEN
     ]
     return open_stories, declared
 
 
-def predicate_row(predicate, found):
+def predicate_row(
+    predicate,
+    found,
+    predicates=ALPHA,
+    field=PREDICATE_FIELD,
+    gate="alpha",
+):
     """The `State` and `Waiting on` cells for one predicate."""
-    open_stories, declared = predicate_state(predicate, found)
+    open_stories, declared = predicate_state(predicate, found, predicates, field, gate)
     if predicate.kind == "computed" and not declared:
         # Not met: unrecorded. A computed predicate is computed over stories, and there are none to
         # compute over — so the honest report is that nobody has said what would close it.
-        return "**unknown**", f"no story declares `{PREDICATE_FIELD}: {predicate.number}`"
+        return "**unknown**", f"no story declares `{field}: {predicate.number}`"
     if open_stories:
         return "open", ", ".join(f"`{story_id}`" for story_id in open_stories)
     return ("met" if predicate.kind == "computed" else "met (attested)"), "—"
+
+
+def announcement_predicate_row(predicate, found, alpha=ALPHA):
+    """One beta-announcement row, including integrity derived from the complete alpha gate."""
+    if predicate.kind != "derived":
+        return predicate_row(
+            predicate,
+            found,
+            predicates=BETA,
+            field=ANNOUNCEMENT_FIELD,
+            gate="beta-announcement",
+        )
+    waiting = []
+    for alpha_predicate in alpha:
+        state, _ = predicate_row(alpha_predicate, found, predicates=alpha)
+        if not state.startswith("met"):
+            waiting.append(f"alpha predicate {alpha_predicate.number} ({state.strip('*')})")
+    if waiting:
+        return "open", ", ".join(waiting)
+    return "met", "—"
 
 
 def render(reseed=False):
@@ -912,6 +965,7 @@ def render(reseed=False):
             met += 1
         lines.append(f"| {predicate.number} | {predicate.name} | {state} | {waiting} |")
     lines.append("")
+
     lines.append(
         f"**{met} of {len(ALPHA)} predicates met.** A predicate is met when every story declaring it "
         f"is `done`. **A story declares its predicate itself**, in its own `{PREDICATE_FIELD}:` "
@@ -930,6 +984,28 @@ def render(reseed=False):
         else:
             label = f"Predicate {predicate.number} is computed, not attested."
         lines.append(f"- **{label}** {predicate.detail}")
+    lines.append("")
+
+    # ---- hypothetical prerelease publicity, deliberately separate from the stable v1 gate
+    beta_met = 0
+    lines.append("## Hypothetical announcement readiness for `1.0.0-beta.1`")
+    lines.append("")
+    lines.append("| # | Predicate | State | Waiting on |")
+    lines.append("|---|---|---|---|")
+    for predicate in BETA:
+        state, waiting = announcement_predicate_row(predicate, found)
+        if state.startswith("met"):
+            beta_met += 1
+        lines.append(f"| {predicate.number} | {predicate.name} | {state} | {waiting} |")
+    lines.append("")
+    lines.append(
+        f"**{beta_met} of {len(BETA)} predicates met. All five are required; this is not a weighted "
+        "score.** Integrity is derived from the alpha table above. Every other association lives in "
+        f"the blocking story's own `{ANNOUNCEMENT_FIELD}:` frontmatter, so the report has no second "
+        "list to drift. RFC coverage is intentionally absent from this gate: a smaller truthful "
+        "surface is announceable and an overstated larger one is not. This informational threshold "
+        "does not authorize publicity."
+    )
     lines.append("")
 
     # ---- RFCs per layer. One aggregate percentage would call unlike layers alike.
@@ -1051,8 +1127,9 @@ def render(reseed=False):
     )
     lines.append(
         "- **A predicate's stories are whichever stories declare it, so what this cannot see is a "
-        f"story that declares nothing.** Every predicate above is read from the `{PREDICATE_FIELD}:` "
-        "field of the stories themselves; a story naming a predicate that does not exist fails the "
+        f"story that declares nothing.** Alpha associations are read from `{PREDICATE_FIELD}:` and "
+        f"beta associations from `{ANNOUNCEMENT_FIELD}:` on the stories themselves; a story naming "
+        "a predicate that does not exist fails the "
         "gate rather than being dropped, and a computed predicate no story declares reads "
         "**unknown** rather than met. What no script can decide is which predicate a story *should* "
         "have named — so a filer who leaves the field empty is the one remaining way a predicate "
@@ -1158,8 +1235,10 @@ def main():
                 file=sys.stderr,
             )
             return 1
-        met = generated.count("| met")
-        print(f"maturity: {len(ALPHA)} alpha predicates, report current")
+        print(
+            f"maturity: {len(ALPHA)} alpha predicates and {len(BETA)} beta-announcement "
+            "predicates, report current"
+        )
         return 0
 
     write(generated)

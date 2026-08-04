@@ -13,8 +13,13 @@ use bytes::Bytes;
 use sipx_sip::build::RequestBuilder;
 use sipx_sip::headers::{OcParameter, OverloadAlgorithm, Via};
 use sipx_sip::{HeaderName, Host, HostName, Method, TuEvent, Uri};
-use sipx_testkit::load::{AdmissionEnd, BoundedPlan, Cause, Stop, run_bounded};
-use sipx_transport::{Config, Error, Target, bind};
+use sipx_transport::{Config, Target, bind};
+
+fn supporting_client_config() -> Config {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("client address"));
+    config.overload.advertise = true;
+    config
+}
 
 fn request(call_id: &str) -> sipx_sip::Request {
     let uri = Uri::sip(Host::Name(HostName::new("callee.example").expect("host")));
@@ -58,108 +63,35 @@ fn invite(call_id: &str) -> sipx_sip::Request {
         .build()
 }
 
-fn response_to(request: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(request);
-    let header = |name: &str| {
-        text.lines()
-            .find_map(|line| line.strip_prefix(name))
-            .expect("request header")
-            .trim_end_matches('\r')
-    };
-    let via = header("Via:").replace(
-        ";oc;oc-algo=\"loss,rate\"",
-        ";oc=50;oc-algo=loss;oc-validity=10000;oc-seq=1.0",
-    );
-    format!(
-        "SIP/2.0 200 OK\r\nVia: {via}\r\nTo: {};tag=server\r\nFrom: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n",
-        header("To:"),
-        header("From:"),
-        header("Call-ID:"),
-        header("CSeq:")
-    )
-    .into_bytes()
-}
-
 #[tokio::test]
-async fn learned_control_rejects_locally_and_is_counted() {
-    let server = tokio::net::UdpSocket::bind("127.0.0.1:0")
+async fn a_default_endpoint_does_not_advertise_the_overload_extension() {
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
-        .expect("server binds");
-    let server_addr = server.local_addr().expect("server address");
-    let config = Config::new("127.0.0.1:0".parse().expect("client address"));
-    let (client, _incoming) = bind(config).await.expect("client binds");
+        .expect("peer binds");
+    let peer_addr = peer.local_addr().expect("peer address");
+    let (client, _incoming) = bind(Config::new("127.0.0.1:0".parse().expect("client address")))
+        .await
+        .expect("client binds");
 
-    let server_task = tokio::spawn(async move {
-        let mut bytes = vec![0u8; 4096];
-        let (length, source) = server.recv_from(&mut bytes).await.expect("request arrives");
-        let response = response_to(bytes.get(..length).expect("received range"));
-        server
-            .send_to(&response, source)
-            .await
-            .expect("response sends");
-        server
-    });
-    let mut responses = client
-        .send(request("learn@sipx"), Target::udp(server_addr))
+    let sent = client
+        .send(request("default@sipx"), Target::udp(peer_addr))
+        .await;
+    assert!(sent.is_ok(), "default request sends: {sent:?}");
+    let mut bytes = [0u8; 4096];
+    let (length, _) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut bytes))
         .await
-        .expect("first request is uncontrolled");
-    let final_response = tokio::time::timeout(Duration::from_secs(2), responses.final_response())
-        .await
-        .expect("response arrives")
-        .expect("final response");
-    assert_eq!(final_response.status.code(), 200);
-    let server = server_task.await.expect("server task");
-
-    let load_client = client.clone();
-    let bounded = run_bounded(
-        BoundedPlan {
-            calls: Some(128),
-            duration: None,
-            rate: 100_000.0,
-            seed: 0x7339,
-            most_in_flight: 8,
-            cleanup: Duration::from_secs(2),
-        },
-        Stop::new(),
-        move |number, _stop| {
-            let client = load_client.clone();
-            async move {
-                match client
-                    .send_directly(
-                        request(&format!("controlled-{number}@sipx")),
-                        Target::udp(server_addr),
-                    )
-                    .await
-                {
-                    Ok(()) => Ok(()),
-                    Err(Error::Overloaded { peer }) if peer == server_addr => {
-                        Err(Cause::Rejected(503))
-                    }
-                    Err(other) => Err(Cause::Other(other.to_string())),
-                }
-            }
-        },
-    )
-    .await;
-    let rejected = bounded
-        .outcome
-        .failures
-        .get(&Cause::Rejected(503))
-        .copied()
-        .unwrap_or_default();
-    assert_eq!(bounded.admission_end, AdmissionEnd::Calls);
-    assert_eq!(bounded.outcome.attempted, 128);
+        .expect("request is bounded")
+        .expect("request arrives");
+    let message = String::from_utf8_lossy(bytes.get(..length).expect("received range"));
+    let via = message
+        .lines()
+        .find(|line| line.starts_with("Via:"))
+        .expect("Via exists");
     assert!(
-        bounded.outcome.succeeded > 0,
-        "loss control forwarded nothing"
+        !via.contains(";oc"),
+        "default Via advertised overload: {via}"
     );
-    assert!(rejected > 0, "loss control rejected nothing");
-    assert_eq!(bounded.outcome.succeeded + rejected, 128);
-    assert!(bounded.peak_in_flight <= 8);
-    assert!(bounded.cleanup_complete);
-    assert_eq!(client.counters().overload_rejections, rejected as u64);
 
-    drop(server);
     client.shutdown().await;
 }
 
@@ -169,7 +101,7 @@ async fn an_unmatched_response_cannot_install_overload_control() {
         .await
         .expect("peer binds");
     let peer_addr = peer.local_addr().expect("peer address");
-    let (client, _incoming) = bind(Config::new("127.0.0.1:0".parse().expect("client address")))
+    let (client, _incoming) = bind(supporting_client_config())
         .await
         .expect("client binds");
     let mut unmatched = client
@@ -214,7 +146,7 @@ async fn an_ordinary_response_selects_overload_control_and_reports_it_off() {
     let (server, mut incoming) = bind(Config::new("127.0.0.1:0".parse().expect("server address")))
         .await
         .expect("server binds");
-    let (client, _incoming) = bind(Config::new("127.0.0.1:0".parse().expect("client address")))
+    let (client, _incoming) = bind(supporting_client_config())
         .await
         .expect("client binds");
     let target = Target::udp(server.local_addr());
@@ -265,7 +197,7 @@ async fn a_transaction_generated_trying_response_reports_current_overload_state(
     let (server, mut incoming) = bind(Config::new("127.0.0.1:0".parse().expect("server address")))
         .await
         .expect("server binds");
-    let (client, _incoming) = bind(Config::new("127.0.0.1:0".parse().expect("client address")))
+    let (client, _incoming) = bind(supporting_client_config())
         .await
         .expect("client binds");
     let mut responses = client

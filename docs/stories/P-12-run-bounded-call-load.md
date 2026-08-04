@@ -20,7 +20,8 @@ assert.
 ## Acceptance
 
 - [x] `sipx load` enforces every bound and cleanup rule in `diagnostic-phone.md` §5 before starting.
-- [x] The runner reuses `sipx-testkit` rather than creating a second load scheduler.
+- [x] The runner reuses the one generic `sipx_call::load` scheduler rather than creating a second
+      CLI-only scheduler.
 - [x] Seed, effective limits, call outcomes, response codes, setup distribution and media quality are
       emitted in the stable JSON summary.
 - [x] Interrupt, timeout and internal error stop admission, terminate the whole owned workload and
@@ -33,7 +34,7 @@ assert.
   positive call-count or duration bound before binding. The command shares transport identity and
   digest policy with `dial`, and a seed deterministically controls both paced arrival jitter and a
   bounded generated media frame per connected call.
-- `sipx-testkit::load::run_bounded` owns admission, the concurrency ceiling, the stop signal and the
+- `sipx_call::load::run_bounded` owns admission, the concurrency ceiling, the stop signal and the
   cleanup join. Count, duration, Ctrl-C and internal-task failure all close admission; every call
   receives the stop signal; cleanup has the normative 40-second failure bound and no task is
   detached on return.

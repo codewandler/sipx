@@ -1,6 +1,6 @@
 [package]
 name = "sipx-app"
-description = "SIP application host with document-mode webhooks, configuration, and a deterministic contract harness"
+description = "SIP application host with webhook and full-duplex session bindings"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -33,6 +33,8 @@ reqwest.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 bytes.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 
 [lints]
 workspace = true

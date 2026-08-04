@@ -52,9 +52,10 @@ and capture a machine-readable result:
 sipx dial sip:probe@192.0.2.10:5060 --play probe.wav --timeout 15 --json
 ```
 
-The CLI consumes and produces WAV files; it does not use a microphone or headset. It selects UDP,
-TCP, TLS, WS, or WSS signalling; secure signalling uses mandatory certificate verification and
-SDES-keyed SRTP. See the
+The CLI consumes and produces WAV files by default. Builds with the optional `device-audio` feature
+can open an exact microphone or speaker identifier. It selects UDP, TCP, TLS, WS, or WSS
+signalling; secure signalling uses mandatory certificate verification, and calls expose explicit
+plain-RTP, SDES-SRTP, or optional DTLS-SRTP policy. See the
 [CLI reference](../reference/cli.md) and [Security](../reference/security.md) before treating the
 probe as a production security test.
 
@@ -89,21 +90,23 @@ complete paths:
 - [Answer a call](answer-a-call.md)
 - [Register](register.md)
 
-Set the bound and advertised addresses explicitly. Behind NAT, sipx's symmetric RTP behavior can
-handle common endpoint mappings after valid media arrives, but a complete ICE path and media relay
-fallback are not available. Validate from the network where the endpoint will actually run, not
-only on loopback.
+Set the bound and advertised addresses explicitly. Behind NAT, sipx can use symmetric RTP or gather
+host and STUN-derived server-reflexive ICE candidates. TURN and relayed candidates are not
+available, so some NAT pairs still have no working media path. Validate from the network where the
+endpoint will actually run, not only on loopback.
 
 ## Know the application boundary
 
 Rust applications can already answer, play, record, send or collect DTMF, and transfer. Do not plan
-a proxy or registrar replacement around those endpoint APIs. Coupling and bridging two independent
-`Call` objects is also not yet a finished public call-layer workflow.
+a proxy or registrar replacement around those endpoint APIs. Public early and confirmed coupling
+owns two dialogs and can attach the bounded media bridge. It does not yet provide the truly
+off-media relay role, and routing policy remains application work.
 
-`sipx-host` is an Experimental host process. It can bind a SIP listener, admit and answer inbound
-calls, and carry them until the caller ends them. It cannot yet invoke a webhook, accept a session
-controller, or run an embedded handler, so the language-neutral contract is not a production
-application integration path. Its precise status is on the [SDK overview](../sdk/overview.md).
+`sipx-host` can bind a SIP listener and serve calls to document-mode webhooks or authenticated
+full-duplex sessions; a granted session can also originate a call. Those Rust host surfaces are
+Supported under the pre-1.0 policy. The language-neutral wire contract remains Experimental, and
+there is no embedded runtime or TypeScript SDK. Its precise status is on the
+[application host overview](../sdk/overview.md).
 
 ## Validate before expanding
 

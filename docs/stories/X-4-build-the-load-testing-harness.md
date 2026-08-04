@@ -24,8 +24,9 @@ Find out what sipx does under load before someone else does.
 - [x] Failing-first test: `the_harness_reports_a_failure_it_was_given`.
 
 ## Progress
-- Done. `sipx_testkit::load` — generic over what "a call" means, so the same harness drives
-  sipx against itself and sipx against a third party. That is not generality for its own sake:
+- Done. The generic harness now ships as `sipx_call::load`, so the published CLI does not depend on
+  an unpublished fixture crate. It remains generic over what "a call" means, so the same harness
+  drives sipx against itself and sipx against a third party. That is not generality for its own sake:
   a limit found with sipx on both ends cannot be attributed to either half.
 - Two reporting rules, each written down because breaking it makes the numbers worse than
   useless. **Failures by cause, never aggregated** — a run slipping from 99% to 97% may be a new

@@ -7,8 +7,10 @@
     clippy::indexing_slicing
 )]
 
-use std::net::IpAddr;
+use std::future::{Future, poll_fn};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -16,9 +18,10 @@ use sipx_call::{
     Calls, Coupling, CouplingEnd, DialOptions, Dispatched, Dispatcher, EarlyCoupling, Error, Leg,
     dial, dial_early, dial_early_without_offer, ring, ring_early, ring_offer_early,
 };
-use sipx_sdp::Direction;
-use sipx_sip::build::RequestBuilder;
-use sipx_sip::{HeaderName, Host, HostName, Method, Request, Uri};
+use sipx_sdp::{Capabilities, Direction};
+use sipx_sip::build::{RequestBuilder, ResponseBuilder};
+use sipx_sip::rel::RSeq;
+use sipx_sip::{HeaderName, Host, HostName, Method, Request, StatusCode, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, Receiver};
@@ -157,6 +160,236 @@ fn peer_request(
             .body(Bytes::from(body.to_owned()));
     }
     builder.build()
+}
+
+fn offerless_invite(endpoint: &Handle, call_id: &'static str) -> Request {
+    RequestBuilder::new(
+        Method::Invite,
+        Uri::sip(Host::Name(HostName::new("edge.example").unwrap())),
+    )
+    .header(
+        HeaderName::Via,
+        Bytes::from(format!(
+            "SIP/2.0/UDP {};rport;branch={}",
+            endpoint.sent_by_for(sipx_transport::TransportKind::Udp),
+            sipx_transport::new_branch()
+        )),
+    )
+    .unwrap()
+    .header(HeaderName::To, "<sip:edge.example>")
+    .unwrap()
+    .header(HeaderName::From, "<sip:caller@example.net>;tag=source")
+    .unwrap()
+    .header(HeaderName::CallId, call_id)
+    .unwrap()
+    .cseq(1, &Method::Invite)
+    .unwrap()
+    .header(HeaderName::Supported, "100rel")
+    .unwrap()
+    .header(
+        HeaderName::Contact,
+        format!("<sip:caller@{}>", endpoint.local_addr()),
+    )
+    .unwrap()
+    .max_forwards(70)
+    .build()
+}
+
+fn prack_answer(endpoint: &Handle, invite: &Request, provisional: &sipx_sip::Response) -> Request {
+    let rseq = provisional.headers.typed::<RSeq>().unwrap().unwrap().0;
+    let offer = sipx_sdp::parse(&String::from_utf8_lossy(provisional.body())).unwrap();
+    let answer = sipx_sdp::answer(&offer, &Capabilities::g711(loopback(), 46_000));
+    RequestBuilder::new(Method::Prack, invite.uri.clone())
+        .header(
+            HeaderName::Via,
+            Bytes::from(format!(
+                "SIP/2.0/UDP {};rport;branch={}",
+                endpoint.sent_by_for(sipx_transport::TransportKind::Udp),
+                sipx_transport::new_branch()
+            )),
+        )
+        .unwrap()
+        .header(
+            HeaderName::To,
+            Bytes::from(
+                provisional
+                    .headers
+                    .value(&HeaderName::To)
+                    .unwrap()
+                    .into_owned(),
+            ),
+        )
+        .unwrap()
+        .header(
+            HeaderName::From,
+            Bytes::from(
+                invite
+                    .headers
+                    .value(&HeaderName::From)
+                    .unwrap()
+                    .into_owned(),
+            ),
+        )
+        .unwrap()
+        .header(
+            HeaderName::CallId,
+            Bytes::from(
+                invite
+                    .headers
+                    .value(&HeaderName::CallId)
+                    .unwrap()
+                    .into_owned(),
+            ),
+        )
+        .unwrap()
+        .cseq(2, &Method::Prack)
+        .unwrap()
+        .header(HeaderName::RAck, format!("{rseq} 1 INVITE"))
+        .unwrap()
+        .header(HeaderName::ContentType, "application/sdp")
+        .unwrap()
+        .body(Bytes::from(answer.to_string_sdp()))
+        .max_forwards(70)
+        .build()
+}
+
+fn cancel_for(invite: &Request) -> Request {
+    let value = |name: &HeaderName| Bytes::from(invite.headers.value(name).unwrap().into_owned());
+    RequestBuilder::new(Method::Cancel, invite.uri.clone())
+        .header(HeaderName::Via, value(&HeaderName::Via))
+        .unwrap()
+        .header(HeaderName::To, value(&HeaderName::To))
+        .unwrap()
+        .header(HeaderName::From, value(&HeaderName::From))
+        .unwrap()
+        .header(HeaderName::CallId, value(&HeaderName::CallId))
+        .unwrap()
+        .cseq(1, &Method::Cancel)
+        .unwrap()
+        .max_forwards(70)
+        .build()
+}
+
+async fn next_reliable_provisional(
+    responses: &mut sipx_transport::Responses,
+) -> sipx_sip::Response {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(sipx_sip::transaction::TuEvent::Response(response)) = responses.next().await
+                && response.status.is_provisional()
+                && response.headers.typed::<RSeq>().is_some()
+            {
+                return *response;
+            }
+        }
+    })
+    .await
+    .expect("a reliable provisional arrives")
+}
+
+async fn delayed_relay(
+    call_id: &'static str,
+) -> (
+    Handle,
+    SocketAddr,
+    Request,
+    sipx_transport::Responses,
+    sipx_call::Ringing,
+    Receiver<Incoming>,
+    sipx_call::CallEvents,
+    EarlyCoupling,
+) {
+    let (edge, edge_incoming) = endpoint().await;
+    let edge_addr = edge.local_addr();
+    let mut edge_pumped = pump(&edge, edge_incoming);
+    let (source, _source_incoming) = endpoint().await;
+    let source_invite = offerless_invite(&source, call_id);
+    let source_responses = source
+        .send(source_invite.clone(), Target::udp(edge_addr))
+        .await
+        .expect("the offerless source INVITE leaves");
+    let inbound = edge_pumped.invitation().await;
+
+    let (target_endpoint, target_incoming) = endpoint().await;
+    let mut target_pumped = pump(&target_endpoint, target_incoming);
+    let edge_for_coupling = edge.clone();
+    let calls = edge_pumped.calls.clone();
+    let target = Target::udp(target_endpoint.local_addr());
+    let outbound_to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let coupling_task = tokio::spawn(async move {
+        Box::pin(EarlyCoupling::dial(
+            inbound,
+            &calls,
+            &edge_for_coupling,
+            target,
+            &outbound_to,
+            &DialOptions::new("<sip:edge@example.net>", loopback()),
+            loopback(),
+        ))
+        .await
+        .expect("the coupling reaches the target early dialog")
+    });
+
+    let mut target_invitation = target_pumped.invitation().await;
+    assert!(target_invitation.request().request.body().is_empty());
+    let target_ringing = ring_offer_early(
+        &target_endpoint,
+        target_invitation.request(),
+        183,
+        "Session Progress",
+        loopback(),
+        Direction::SendRecv,
+    )
+    .await
+    .expect("the target sends its offer reliably");
+    let target_events = target_invitation
+        .events()
+        .expect("the target observes source cancellation");
+    let (_target_invite, target_requests) = target_invitation.into_parts();
+    let early = coupling_task.await.expect("the coupling task finishes");
+
+    (
+        source,
+        edge_addr,
+        source_invite,
+        source_responses,
+        target_ringing,
+        target_requests,
+        target_events,
+        early,
+    )
+}
+
+fn accepted_target_response(
+    incoming: &Incoming,
+    target_endpoint: &Handle,
+    tag: &str,
+) -> sipx_sip::Response {
+    let original_to = incoming
+        .request
+        .headers
+        .value(&HeaderName::To)
+        .expect("the target INVITE has To");
+    ResponseBuilder::to_request(
+        &incoming.request,
+        StatusCode::new(200).expect("valid status"),
+        "OK",
+    )
+    .expect("the target final response builds")
+    .set_header(
+        &HeaderName::To,
+        Bytes::from(format!(
+            "{};tag={tag}",
+            String::from_utf8_lossy(&original_to)
+        )),
+    )
+    .expect("the target dialog tag is valid")
+    .header(
+        HeaderName::Contact,
+        Bytes::from(format!("<sip:callee@{}>", target_endpoint.local_addr())),
+    )
+    .expect("the target Contact is valid")
+    .build()
 }
 
 async fn rejected_offer_does_not_reach_peer(
@@ -875,4 +1108,307 @@ async fn a_reliable_provisional_offer_is_answered_in_prack() {
     assert!(dialing.media().is_some());
     assert!(ringing.media().is_some());
     dialing.cancel().await;
+}
+
+/// C-1 E3: neither leg may invent the answer to a delayed offer. The target's reliable
+/// provisional offer is held at the coupling until the source answers it in PRACK; only then may
+/// the corresponding target PRACK leave.
+#[tokio::test]
+async fn a_target_provisional_offer_crosses_both_legs_before_its_prack_leaves() {
+    let (
+        source,
+        edge_addr,
+        source_invite,
+        mut source_responses,
+        mut target_ringing,
+        mut target_requests,
+        mut target_events,
+        early,
+    ) = delayed_relay("coupled-delayed-offer@sipx").await;
+    let coupled = tokio::spawn(early.confirmed());
+
+    let source_provisional = next_reliable_provisional(&mut source_responses).await;
+    assert!(
+        !source_provisional.body().is_empty(),
+        "the target offer reaches the source reliable provisional"
+    );
+    assert!(
+        matches!(
+            target_requests.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "the target PRACK waits for the source's answer"
+    );
+
+    let source_prack = prack_answer(&source, &source_invite, &source_provisional);
+    let mut source_prack_responses = source
+        .send(source_prack, Target::udp(edge_addr))
+        .await
+        .expect("the source PRACK leaves");
+    let target_prack = tokio::time::timeout(Duration::from_secs(10), target_requests.recv())
+        .await
+        .expect("the target PRACK arrives")
+        .expect("the target request inbox remains open");
+    assert_eq!(target_prack.request.method, Method::Prack);
+    assert!(
+        !target_prack.request.body().is_empty(),
+        "the source answer reaches the target PRACK"
+    );
+    assert!(
+        target_ringing
+            .on_prack(&target_prack)
+            .await
+            .expect("the target adopts the relayed answer")
+    );
+    assert!(target_ringing.has_early_session());
+    let source_prack_response = tokio::time::timeout(
+        Duration::from_secs(10),
+        source_prack_responses.final_response(),
+    )
+    .await
+    .expect("the source PRACK is answered")
+    .expect("the source PRACK has a final response");
+    assert_eq!(source_prack_response.status.code(), 200);
+
+    let mut cancel_responses = source
+        .send(cancel_for(&source_invite), Target::udp(edge_addr))
+        .await
+        .expect("the source CANCEL leaves");
+    let (coupled_result, cancelled, cancel_response) = tokio::join!(
+        coupled,
+        target_events.recv(),
+        cancel_responses.final_response()
+    );
+    assert!(matches!(
+        coupled_result.expect("the coupling task finishes"),
+        Err(Error::InvitationCancelled)
+    ));
+    assert!(matches!(
+        cancelled,
+        Some(sipx_call::CallEvent::Ended(
+            sipx_call::EndCause::RemoteCancel
+        ))
+    ));
+    assert_eq!(
+        cancel_response
+            .expect("the CANCEL has a final response")
+            .status
+            .code(),
+        200
+    );
+}
+
+/// With the answer still outstanding, source cancellation owns the target cleanup and cannot
+/// leak the held target PRACK.
+#[tokio::test]
+async fn cancelling_a_delayed_offer_cancels_the_target_without_pracking_it() {
+    let (
+        source,
+        edge_addr,
+        source_invite,
+        mut source_responses,
+        _target_ringing,
+        mut target_requests,
+        mut target_events,
+        early,
+    ) = delayed_relay("coupled-delayed-cancel@sipx").await;
+    let source_provisional = next_reliable_provisional(&mut source_responses).await;
+    assert!(!source_provisional.body().is_empty());
+    let coupled = tokio::spawn(early.confirmed());
+    assert!(matches!(
+        target_requests.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+
+    let mut cancel_responses = source
+        .send(cancel_for(&source_invite), Target::udp(edge_addr))
+        .await
+        .expect("the source CANCEL leaves");
+    let (coupled_result, target_end, cancel_response, invite_response) = tokio::join!(
+        coupled,
+        target_events.recv(),
+        cancel_responses.final_response(),
+        source_responses.final_response(),
+    );
+    assert!(matches!(
+        coupled_result.expect("the coupling task finishes"),
+        Err(Error::InvitationCancelled)
+    ));
+    assert!(matches!(
+        target_end,
+        Some(sipx_call::CallEvent::Ended(
+            sipx_call::EndCause::RemoteCancel
+        ))
+    ));
+    assert_eq!(cancel_response.unwrap().status.code(), 200);
+    assert_eq!(invite_response.unwrap().status.code(), 487);
+    assert!(
+        !matches!(target_requests.try_recv(), Ok(request) if request.request.method == Method::Prack),
+        "cancellation must not release the held target PRACK"
+    );
+}
+
+/// A malformed source answer is refused on its own leg and tears down the still-pending target
+/// invitation. The invalid bytes never become a target PRACK body.
+#[tokio::test]
+async fn a_malformed_source_prack_answer_refuses_and_cleans_both_pending_legs() {
+    let (
+        source,
+        edge_addr,
+        source_invite,
+        mut source_responses,
+        _target_ringing,
+        mut target_requests,
+        mut target_events,
+        early,
+    ) = delayed_relay("coupled-delayed-malformed@sipx").await;
+    let source_provisional = next_reliable_provisional(&mut source_responses).await;
+    let mut source_prack = prack_answer(&source, &source_invite, &source_provisional);
+    let declared_length = source_prack.body().len();
+    source_prack.set_body(Bytes::from(vec![b'x'; declared_length]));
+    let coupled = tokio::spawn(early.confirmed());
+    let mut prack_responses = source
+        .send(source_prack, Target::udp(edge_addr))
+        .await
+        .expect("the malformed source PRACK leaves");
+
+    let prack_response =
+        tokio::time::timeout(Duration::from_secs(10), prack_responses.final_response())
+            .await
+            .expect("the malformed PRACK is answered");
+    let invite_response =
+        tokio::time::timeout(Duration::from_secs(10), source_responses.final_response())
+            .await
+            .expect("the source INVITE is refused");
+    let target_end = tokio::time::timeout(Duration::from_secs(10), target_events.recv())
+        .await
+        .expect("the target invitation is cancelled");
+    let coupled_result = tokio::time::timeout(Duration::from_secs(10), coupled)
+        .await
+        .expect("the coupling finishes after malformed SDP");
+    assert!(matches!(
+        coupled_result.expect("the coupling task finishes"),
+        Err(Error::Sdp(_))
+    ));
+    assert!(matches!(
+        target_end,
+        Some(sipx_call::CallEvent::Ended(
+            sipx_call::EndCause::RemoteCancel
+        ))
+    ));
+    assert_eq!(prack_response.unwrap().status.code(), 488);
+    assert_eq!(invite_response.unwrap().status.code(), 488);
+    assert!(
+        !matches!(target_requests.try_recv(), Ok(request) if request.request.method == Method::Prack),
+        "malformed source SDP must not cross into a target PRACK"
+    );
+}
+
+/// A target 2xx can cross the held PRACK. If the source answer then fails, the coupling still
+/// owns the now-confirmed target dialog and must ACK and BYE it rather than sending a stale CANCEL
+/// or abandoning the accepted response.
+#[tokio::test]
+async fn a_crossed_target_final_is_acked_and_ended_when_the_source_answer_fails() {
+    let (edge, edge_incoming) = endpoint().await;
+    let edge_addr = edge.local_addr();
+    let mut edge_pumped = pump(&edge, edge_incoming);
+    let (source, _source_incoming) = endpoint().await;
+    let source_invite = offerless_invite(&source, "coupled-delayed-crossed-final@sipx");
+    let mut source_responses = source
+        .send(source_invite.clone(), Target::udp(edge_addr))
+        .await
+        .expect("the offerless source INVITE leaves");
+    let inbound = edge_pumped.invitation().await;
+
+    let (target_endpoint, target_incoming) = endpoint().await;
+    let mut target_pumped = pump(&target_endpoint, target_incoming);
+    let edge_for_coupling = edge.clone();
+    let calls = edge_pumped.calls.clone();
+    let target = Target::udp(target_endpoint.local_addr());
+    let outbound_to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let coupling_task = tokio::spawn(async move {
+        Box::pin(EarlyCoupling::dial(
+            inbound,
+            &calls,
+            &edge_for_coupling,
+            target,
+            &outbound_to,
+            &DialOptions::new("<sip:edge@example.net>", loopback()),
+            loopback(),
+        ))
+        .await
+        .expect("the coupling reaches the target early dialog")
+    });
+
+    let target_invitation = target_pumped.invitation().await;
+    let target_ringing = ring_offer_early(
+        &target_endpoint,
+        target_invitation.request(),
+        183,
+        "Session Progress",
+        loopback(),
+        Direction::SendRecv,
+    )
+    .await
+    .expect("the target sends its offer reliably");
+    let (target_invite, mut target_requests) = target_invitation.into_parts();
+    let crossed_final =
+        accepted_target_response(&target_invite, &target_endpoint, target_ringing.tag());
+    target_endpoint
+        .respond(&target_invite.key, crossed_final)
+        .await
+        .expect("the target final crosses the held PRACK");
+
+    let early = coupling_task.await.expect("the coupling task finishes");
+    let source_provisional = next_reliable_provisional(&mut source_responses).await;
+    let mut confirmed = Box::pin(early.confirmed());
+    let first_poll = poll_fn(|context| Poll::Ready(confirmed.as_mut().poll(context))).await;
+    assert!(
+        first_poll.is_pending(),
+        "the target final is held until the source answers"
+    );
+
+    let mut source_prack = prack_answer(&source, &source_invite, &source_provisional);
+    let declared_length = source_prack.body().len();
+    source_prack.set_body(Bytes::from(vec![b'x'; declared_length]));
+    let mut prack_responses = source
+        .send(source_prack, Target::udp(edge_addr))
+        .await
+        .expect("the malformed source PRACK leaves");
+    let coupled_result = tokio::time::timeout(Duration::from_secs(10), confirmed.as_mut())
+        .await
+        .expect("crossed-final cleanup finishes");
+    assert!(matches!(coupled_result, Err(Error::Sdp(_))));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), prack_responses.final_response())
+            .await
+            .expect("the malformed PRACK is answered")
+            .expect("the malformed PRACK has a final response")
+            .status
+            .code(),
+        488
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), source_responses.final_response())
+            .await
+            .expect("the source INVITE is refused")
+            .expect("the source INVITE has a final response")
+            .status
+            .code(),
+        488
+    );
+
+    let mut methods = Vec::new();
+    while methods.len() < 2 {
+        let request = tokio::time::timeout(Duration::from_secs(10), target_requests.recv())
+            .await
+            .expect("the target cleanup request arrives")
+            .expect("the target request inbox remains open");
+        methods.push(request.request.method);
+    }
+    assert_eq!(methods, vec![Method::Ack, Method::Bye]);
+    assert!(
+        !methods.contains(&Method::Prack),
+        "the failed source answer never releases the target PRACK"
+    );
 }

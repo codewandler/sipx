@@ -6,15 +6,23 @@ description: The crates are useful separately — a parser and transaction machi
 # Use sipx as a library
 
 The crates are useful separately. Take the pure protocol core, the async transport and user-agent
-layers, or the complete call framework.
+layers, or the complete call framework. The current public beta is on crates.io; `main` can move
+ahead of it.
+
+## Stability policy
+
+Public APIs are not frozen before 1.0. Each crate-level API page labels its surface Supported or
+Experimental. Breaking Supported APIs receive a changelog entry and migration guidance;
+Experimental APIs may change shape or be removed without a migration note. The labels describe
+support intent, not semantic-version stability.
 
 ## Add a dependency
 
-sipx is not on crates.io yet. Pin the tagged alpha release in `Cargo.toml`:
+Pin the exact public beta in `Cargo.toml` so every sipx crate resolves to the same release:
 
 ```toml
 [dependencies]
-sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.5" }
+sipx-call = "=1.0.0-beta.1"
 ```
 
 This website documents `main`, which can be tested explicitly with:
@@ -25,17 +33,36 @@ sipx-call = { git = "https://github.com/codewandler/sipx", branch = "main" }
 ```
 
 Commit `Cargo.lock` for applications and binaries so the selected Git revision is reproducible.
-For a library, use the tagged dependency unless you intentionally require unreleased work.
+For a library, use the crates.io dependency unless you intentionally require unreleased work.
 
 Optional behavior is opt-in. For example, make Opus selectable by `sipx-call` like this:
 
 ```toml
 [dependencies]
-sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.5", features = ["opus"] }
+sipx-call = { version = "=1.0.0-beta.1", features = ["opus"] }
 ```
 
 Opus links a C library. Enabling the feature makes `Codecs::Opus` available; it does not silently
 change the codecs a call offers. G.711 remains the default selection.
+
+### Opus packaging policy
+
+Opus is off by default in `sipx-audio`, `sipx-media`, `sipx-call`, and `sipx-cli`; no shipped
+application enables it implicitly. Selecting it brings in the native `libopus` boundary through the
+optional `opus` and `audiopus_sys` Rust packages, so a deployment needs the native library available
+or must deliberately accept building it from source.
+
+The Rust packages carry MIT OR Apache-2.0 licensing and remain inside the workspace's permissive
+Cargo licence policy. Native-library distribution is a separate packaging boundary and should be
+reviewed for the target platform. The unmaintained `audiopus_sys` advisory RUSTSEC-2026-0150 is the
+one narrow exception in `deny.toml`: CI uses a system `libopus` through `pkg-config`, avoiding the
+advisory's source-build failure, and the exception ends when a maintained encoding-capable binding
+is available or the opt-in codec no longer justifies it. This is why enabling Opus is an explicit
+deployment decision rather than a default.
+
+The current implementation uses the mandatory `opus/48000/2` RTP mapping with mono audio. It does
+not advertise or apply optional RFC 7587 `fmtp` controls such as bitrate limits, in-band FEC, DTX,
+CBR, or stereo preferences.
 
 ## Parse without a runtime
 
@@ -126,23 +153,26 @@ Those properties make the core deterministic to drive from another runtime or a 
 | Calls with playback, recording, DTMF, transfer | `sipx-call` |
 | A phone to run rather than embed — the `sipx` binary | `sipx-cli` |
 | The `sipx.app.v1` contract: its types, wire format and interpreter | `sipx-app-protocol` |
-| The experimental host process and deterministic application-contract harness | `sipx-app` |
+| The application host, webhook/session bindings, and deterministic contract harness | `sipx-app` |
 
-`sipx-app` includes a `sipx-host` process that can bind a listener and answer a call. It does not
-yet implement webhook, session, or embedded callback bindings, so handler programs cannot drive
-those calls.
+`sipx-app` includes a `sipx-host` process that serves real calls to document-mode webhooks or
+authenticated full-duplex sessions. A granted session can originate calls. The Rust host surfaces
+are Supported under the policy above; the `sipx.app.v1` wire line remains Experimental, and no
+embedded runtime or TypeScript SDK is shipped.
 
 ## Runtime and feature boundaries
 
 - `sipx-sip` and `sipx-sdp` are sans-I/O and have no async runtime.
 - `sipx-transport`, `sipx-ua`, `sipx-media`, and `sipx-call` use Tokio for I/O-facing work.
-- `sipx-transport` enables UDP, TCP, DNS, TLS, WebSocket, and secure WebSocket by default. Use
-  `default-features = false` with an explicit feature list for a smaller transport build.
+- `sipx-transport` enables UDP, TCP, DNS, TLS, WebSocket, secure WebSocket, and the Experimental
+  SIP-over-QUIC mapping by default. Use `default-features = false` with an explicit feature list
+  for a smaller transport build.
 - `sipx-ua` enables its `runtime` feature by default. Disable defaults only when using its
   authentication and other non-runtime primitives without the transport-backed user agent.
 - `sipx-media` has no default features. `opus` links the optional codec library; `dtls` links the
-  optional handshake backend. The DTLS components cannot yet key a `Call` or `MediaSession`.
-- `sipx-call`'s only optional feature is `opus`; its default call codec set is G.711.
+  optional handshake backend. Its DTLS components can key a media session through explicit policy.
+- `sipx-call` exposes optional `opus` and `dtls` features. The default call codec set is G.711, and
+  selecting DTLS-SRTP is always explicit.
 
 ## The API reference
 

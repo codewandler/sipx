@@ -17,12 +17,14 @@ selects a call path that provides both.
 | TLS and secure WebSocket (WSS) | Yes, selected explicitly with `--transport tls` or `--transport wss` | Yes. `sipx-transport` supports TLS and WSS when their Cargo features are enabled |
 | Certificate verification | Mandatory. Platform roots, additional PEM roots, service identity and optional mutual-TLS identity are configurable; verification cannot be disabled | Mandatory for outgoing TLS and WSS; there is no skip-verification option |
 | SDES-keyed SRTP | Yes. A CLI call over TLS or WSS selects the call layer's protected-signalling path | Yes. `sipx-call` negotiates SDES-keyed SRTP when the selected signalling transport is secure |
-| DTLS-SRTP | No command-line selection yet | Yes, through explicit `sipx-call::Keying::DtlsSrtp` policy when the off-by-default `dtls` feature is enabled |
+| DTLS-SRTP | Yes, with `--media-security dtls-srtp` when the off-by-default `dtls` feature is enabled | Yes, through explicit `sipx-call::Keying::DtlsSrtp` policy with the same feature |
+| ICE | Host candidates or a configured STUN server with `--ice`; disabled by default | Host and server-reflexive candidates through `sipx-call::IcePolicy`; no TURN relay |
 | Signalling capture | `--capture <FILE>` writes a redacted pcapng file | `sipx-transport::CaptureConfig` enables capture; redaction is on by default |
 
 For a protected command-line call, select TLS or WSS and provide any private trust root explicitly;
 the result reports both requested and negotiated transport. Media remains SDES-keyed SRTP until the
-CLI media remains SDES-keyed SRTP until its media-policy selector lands.
+caller explicitly selects another policy. Explicit SDES over cleartext signalling is refused before
+network I/O; strict DTLS-SRTP never falls back to SDES or plain RTP.
 
 ## TLS and WSS protect one hop
 
@@ -64,8 +66,10 @@ peer that waits for SIP confirmation cannot deadlock with the handshake.
 The Cargo feature supplies the OpenSSL handshake and remains off by default. Enabling it does
 **not** turn an ordinary call into a DTLS-keyed call; the default remains SDES on protected
 signalling and plain RTP otherwise. Selecting DTLS in a build without the feature is a typed error,
-never a cleartext fallback. Reliable early media and DTLS combined with ICE are currently refused,
-also without fallback. The CLI has no media-keying flag yet.
+never a cleartext fallback. Reliable early media with DTLS-SRTP, and DTLS-SRTP combined with ICE,
+are currently refused, also without fallback. The CLI exposes the same strict policy through
+`--media-security` and reports the keying mode read from the established call rather than copying
+the requested value.
 
 ## Captures remain sensitive
 

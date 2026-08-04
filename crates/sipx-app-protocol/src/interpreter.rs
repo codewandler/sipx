@@ -264,6 +264,16 @@ pub enum Input {
         /// What it said.
         response: Response,
     },
+    /// A full-duplex binding accepted a document outside a delivery callback.
+    ///
+    /// Session mode has no webhook alternation rule: this atomically replaces the pending program
+    /// and leaves event delivery state unchanged.
+    Document(Document),
+    /// A full-duplex binding itself failed, whether or not an event callback was outstanding.
+    ///
+    /// This is the shared §9.2 engine: WebSocket death feeds `Unreachable` here and receives the
+    /// same reject/continue/hangup decision as another binding failure.
+    BindingFailed(Failure),
 }
 
 /// The instruction currently blocking the queue (§6.1).
@@ -374,11 +384,22 @@ impl Interpreter {
             Input::MediaGate { muted } if !self.ended && self.terminal_pending.is_none() => {
                 self.snapshot.media.muted = muted;
             }
-            Input::MediaGate { .. } => {}
             Input::TimerFired(timer) => self.fire(at, timer, &mut out),
             Input::Response { callback, response } => {
                 self.respond(at, &callback, response, &mut out);
             }
+            Input::Document(document) if !self.ended && self.snapshot.state != CallState::Ended => {
+                self.accept(document, &mut out);
+            }
+            Input::BindingFailed(failure)
+                if !self.ended && self.snapshot.state != CallState::Ended =>
+            {
+                if self.outstanding.take().is_some() {
+                    out.push(Output::ClearTimer(Timer::Callback));
+                }
+                self.fail(at, failure, &mut out);
+            }
+            Input::MediaGate { .. } | Input::Document(_) | Input::BindingFailed(_) => {}
         }
         out
     }

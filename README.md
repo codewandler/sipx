@@ -9,7 +9,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 <!-- BEGIN generated:badges -->
 <a href="https://codewandler.github.io/sipx/"><img alt="docs: codewandler.github.io/sipx" src="https://img.shields.io/static/v1?label=docs&message=codewandler.github.io%2Fsipx&color=blue"></a>
-<a href="CHANGELOG.md"><img alt="release: 1.0.0-alpha.5" src="https://img.shields.io/static/v1?label=release&message=1.0.0-alpha.5&color=blue"></a>
+<a href="CHANGELOG.md"><img alt="release: 1.0.0-beta.1" src="https://img.shields.io/static/v1?label=release&message=1.0.0-beta.1&color=blue"></a>
 <a href="#try-the-cli"><img alt="MSRV: rustc 1.88" src="https://img.shields.io/static/v1?label=MSRV&message=rustc%201.88&color=blue"></a>
 <a href="docs/compliance.md"><img alt="RFCs: 36 implemented of 72" src="https://img.shields.io/static/v1?label=RFCs&message=36%20implemented%20of%2072&color=blue"></a>
 <a href="docs/compliance.md"><img alt="codecs: G.711 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20Opus&color=blue"></a>
@@ -18,8 +18,10 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 </div>
 
-> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-alpha.5<!-- END generated:workspace-version -->.** The public site documents `main`, which can move ahead of the latest
-> tag. Public APIs are not frozen. Start with the tagged install below when reproducibility matters.
+> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-beta.1<!-- END generated:workspace-version -->.** This is the current public-beta release. `main` can move ahead of
+> the release tag. Public APIs are not frozen;
+> Supported APIs receive migration notes when they break, while Experimental APIs may change or be
+> removed without one. Start with the exact registry install below when reproducibility matters.
 
 ## Does it fit?
 
@@ -29,26 +31,27 @@ PBX, browser media engine, or video stack.
 | Need | Today |
 |---|---|
 | Calls | Place and answer, hold and resume, blind and attended transfer, session timers |
-| Audio | G.711, DTMF, WAV playback and recording; selectable Opus behind a Cargo feature |
-| Security | TLS and secure WebSocket in the library; SRTP with SDES when signalling protects the key |
-| Reachability | `rport`, symmetric RTP, Path, Service-Route, Outbound, GRUU and push refresh; no ICE |
-| Automation | Single-line JSON reports, distinct outcome exit codes, quality statistics and signalling capture |
-| Multi-party | Media-session bridging and N−1 conferencing; connecting two `Call` values is not exposed yet |
+| Audio | G.711, DTMF, WAV playback and recording; optional Opus and explicitly selected live devices behind Cargo features |
+| Security | TLS and secure WebSocket; selectable plain RTP, SDES-keyed SRTP, and optional DTLS-SRTP |
+| Reachability | `rport`, symmetric RTP, Path, Service-Route, Outbound, GRUU and push refresh; host and STUN-derived ICE candidates, but no TURN relay |
+| Automation | Single-line JSON reports, distinct outcome exit codes, interactive scenarios, bounded load, quality statistics and signalling capture |
+| Two-leg calls | Public early and confirmed coupling of two dialogs, with optional media bridging; the off-media relay role remains unfinished |
 
-The `sipx` CLI is intentionally a scriptable phone, not a desktop softphone: it reads and writes
-WAV files and does not open a microphone or speaker. Its `dial` and `register` commands currently
-select UDP or TCP only, so encrypted calls require the Rust library. Read
+The `sipx` CLI is intentionally a scriptable phone, not a desktop softphone. WAV files are the
+reproducible default; builds with the optional `device-audio` feature can open an exact microphone
+or speaker identifier. `dial`, `answer`, and `register` select UDP, TCP, TLS, WebSocket, or secure
+WebSocket, and call commands expose codec, media-security, and ICE policy. Read
 **[Does sipx fit?](https://codewandler.github.io/sipx/docs/guides/does-this-fit)** and the
 **[security matrix](https://codewandler.github.io/sipx/docs/reference/security)** before choosing a
 deployment shape.
 
 ## Try the CLI
 
-The <!-- BEGIN generated:release-tag -->v1.0.0-alpha.5<!-- END generated:release-tag --> release needs
+The <!-- BEGIN generated:release-tag -->v1.0.0-beta.1<!-- END generated:release-tag --> beta release needs
 Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```sh
-cargo install --locked --git https://github.com/codewandler/sipx --tag v1.0.0-alpha.5 sipx-cli
+cargo install --locked --version =1.0.0-beta.1 sipx-cli
 sipx version
 ```
 
@@ -65,18 +68,20 @@ sipx dial sip:you@127.0.0.1:5060 --duration 2 --timeout 5 --json
 ```
 
 That proves the signalling and media session without needing an account. Add `--play hello.wav` or
-`--record reply.wav` to move audio samples; WAV input is 8 kHz, 16-bit, mono. The
+`--record reply.wav` to move audio samples; WAV input is 16-bit mono at the negotiated clock
+(8 kHz for G.711, or 48 kHz for an Opus-only call), and recordings preserve that rate. The
 **[getting-started guide](https://codewandler.github.io/sipx/docs/getting-started)** continues with
 registration, expected output, and installing from `main`.
 
 ## Use the Rust libraries
 
-Until the crates are published, pin Git dependencies to the same tag:
+The workspace deliberately publishes modular crates rather than one facade crate. Pin every sipx
+dependency to the same exact beta while the API remains pre-1.0:
 
 ```toml
 [dependencies]
-sipx-call = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.5" }
-sipx-transport = { git = "https://github.com/codewandler/sipx", tag = "v1.0.0-alpha.5" }
+sipx-call = "=1.0.0-beta.1"
+sipx-transport = "=1.0.0-beta.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -86,6 +91,12 @@ The call guides inline real example files that CI compiles:
 - [Answer a call](https://codewandler.github.io/sipx/docs/guides/answer-a-call)
 - [Register](https://codewandler.github.io/sipx/docs/guides/register)
 - [Choose crates and features](https://codewandler.github.io/sipx/docs/guides/as-a-library)
+
+The beta release is for programmable SIP endpoints, not a promise of every telephony role. It
+does not provide proxy, registrar, PBX, TURN relay, video, or complete browser-media behavior, and
+the language-neutral application contract remains Experimental. The public
+**[fit guide](https://codewandler.github.io/sipx/docs/guides/does-this-fit)** is the canonical list
+of shipped boundaries and intentional omissions.
 
 ## Why the core is different
 
@@ -101,17 +112,17 @@ workspace, parsers are fuzzed, and unknown headers survive a parse/serialize rou
 <!-- BEGIN generated:crate-map -->
 | Crate | What it does |
 |---|---|
-| `sipx-app` | SIP application host with document-mode webhooks, configuration, and a deterministic contract harness |
+| `sipx-app` | SIP application host with webhook and full-duplex session bindings |
 | `sipx-app-protocol` | The sipx.app.v1 application contract: its types, JSON wire format, and sans-IO instruction interpreter |
 | `sipx-audio` | Telephony audio: G.711 µ-law and A-law, PCM mixing, WAV I/O, and Opus behind the `opus` feature |
-| `sipx-call` | Call framework: answer and dial calls with playback, recording, DTMF and transfer |
+| `sipx-call` | Call framework: dial, answer, couple dialogs, play, record, send DTMF, and transfer |
 | `sipx-cli` | sipx — a command line SIP softphone |
 | `sipx-media` | Media sessions: RTP/RTCP sockets bound to negotiated SDP with NAT handling, bridging and conferencing |
 | `sipx-rtp` | RTP and RTCP packet handling, sequencing, jitter buffering, quality statistics and SRTP (RFC 3550) |
 | `sipx-sdp` | SDP session descriptions (RFC 8866) and offer/answer negotiation (RFC 3264) |
 | `sipx-sip` | Sans-IO SIP core: messages, parser and transactions (RFC 3261) |
-| `sipx-transport` | Async SIP transports: UDP, TCP, TLS, WebSocket, QUIC, and RFC 3263 resolution |
-| `sipx-ua` | SIP user agent: registration, digest authentication, subscriptions and presence |
+| `sipx-transport` | Async SIP transports: UDP, TCP, TLS, WebSocket, experimental QUIC, and RFC 3263 resolution |
+| `sipx-ua` | SIP user agent: registration, digest authentication, and experimental subscriptions and presence |
 <!-- END generated:crate-map -->
 
 Each crate states its supported and experimental surface in its crate-level API documentation.
@@ -122,8 +133,11 @@ See the [API reference](https://codewandler.github.io/sipx/api/) for the exact c
 The [public site](https://codewandler.github.io/sipx/) is for users and integrators. It includes:
 
 - [Getting started](https://codewandler.github.io/sipx/docs/getting-started)
+- [What's new](https://codewandler.github.io/sipx/docs/whats-new)
 - [CLI reference](https://codewandler.github.io/sipx/docs/reference/cli)
 - [Troubleshooting](https://codewandler.github.io/sipx/docs/guides/troubleshooting)
+- [How sipx is built](https://codewandler.github.io/sipx/docs/reference/development-process)
+- [Diagnostic-phone proof](https://codewandler.github.io/sipx/docs/reference/diagnostic-phone-proof)
 - [RFC compliance](https://codewandler.github.io/sipx/docs/reference/compliance)
 
 The compliance registry currently tracks <!-- BEGIN generated:rfc-count -->72<!-- END generated:rfc-count --> RFCs; its public table is generated rather than copied by hand.

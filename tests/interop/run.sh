@@ -28,12 +28,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   server          registration, digest, refresh, a wrong password, OPTIONS, TLS, WebSocket
 #   user-agent      a call answered, a call placed, SDP negotiated, audio, BYE
 #   media-security  a call whose media is encrypted, keyed the way the peer declares below
+#   opus-audio      Opus-only calls in both offer/answer roles with decoded signal evidence
 declare -A ROLE_TESTS=(
     [server]="-p sipx-ua --test interop"
     [user-agent]="-p sipx-cli --test interop_call"
     [media-security]="-p sipx-cli --features dtls --test interop_srtp"
+    [opus-audio]="-p sipx-cli --features opus --test interop_opus"
 )
-ROLE_ORDER=(server user-agent media-security)
+ROLE_ORDER=(server user-agent media-security opus-audio)
 
 # ---------------------------------------------------------------------------- the keyings ----
 # SRTP can be keyed two ways and they share no code path: SDES carries the master key in the SDP
@@ -200,7 +202,12 @@ run_peer() {
             return 1
         fi
 
-        peer_check "$(logs)"
+        if ! peer_check "$(logs)"; then
+            # `run_peer` is called as an `if` condition below, so Bash disables `errexit` in this
+            # whole function. Make a failed capability guard terminal explicitly: continuing
+            # would let later tests turn "the required peer feature is absent" into a green run.
+            return 1
+        fi
 
         # The tests need the fixture authority to trust, which is the only thing that makes the
         # TLS result mean anything: without it every certificate would be refused and the
@@ -244,8 +251,13 @@ run_peer() {
             [[ " $PEER_ROLES " == *" $role "* ]] || continue
             echo "==> running the $role tests against $peer"
             # shellcheck disable=SC2086  # the role's target words are meant to split
-            cargo test ${ROLE_TESTS[$role]} -- --ignored --test-threads=1 \
-                ${skips+"${skips[@]}"} ${cargo_args+"${cargo_args[@]}"}
+            if ! cargo test ${ROLE_TESTS[$role]} -- --ignored --test-threads=1 \
+                ${skips+"${skips[@]}"} ${cargo_args+"${cargo_args[@]}"}; then
+                # `run_peer` is called as an `if` condition below. Bash disables `errexit` inside
+                # a function used that way, so relying on `set -e` lets a failed Cargo test fall
+                # through the loop and become the status of a later successful command (`X-62`).
+                return 1
+            fi
         done
     )
 }

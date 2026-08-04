@@ -13,7 +13,7 @@ PEER_CONTAINER="sipx-asterisk"
 
 # This one answers calls, so it runs the call list as well as the server list — and it keys
 # media, so it runs the encrypted-media list too.
-PEER_ROLES="server user-agent media-security"
+PEER_ROLES="server user-agent media-security opus-audio"
 
 # Both SRTP keyings, which this peer does support: `media_encryption=sdes` and `=dtls` are both
 # settable on a `pjsip` endpoint. Declared honestly rather than trimmed to what sipx can
@@ -35,8 +35,13 @@ PEER_ENV=(
     "SIPX_INTEROP_DTLS_FROM=<sip:sipx-dtls@127.0.0.1>"
     "SIPX_INTEROP_UA_PORT=5080"
     "SIPX_INTEROP_ORIGINATE=PJSIP/sipx-ua"
+    "SIPX_INTEROP_OPUS_URI=sip:echo@127.0.0.1:5060"
+    "SIPX_INTEROP_OPUS_UA_PORT=5082"
+    "SIPX_INTEROP_OPUS_ORIGINATE=PJSIP/sipx-opus-ua"
     "SIPX_INTEROP_WS_PORT=8088"
     "SIPX_INTEROP_WS_PATH=/ws"
+    "SIPX_INTEROP_WSS_PORT=8089"
+    "SIPX_INTEROP_WSS_PATH=/ws"
 )
 
 # What this peer and sipx disagree about, with the story that settles it. Recorded here rather
@@ -84,11 +89,25 @@ peer_check() {
         printf '%s\n' "$endpoints" >&2
         return 1
     fi
+    if ! grep -qE "Endpoint:  sipx-opus[[:space:]]" <<<"$endpoints" || \
+       ! grep -qE "Endpoint:  sipx-opus-ua[[:space:]]" <<<"$endpoints"; then
+        echo "!! the Opus endpoints did not load; Opus interop results would be meaningless" >&2
+        printf '%s\n' "$endpoints" >&2
+        return 1
+    fi
+
+    local modules
+    modules="$(docker exec "$PEER_CONTAINER" asterisk -rx "module show like opus" 2>&1 || true)"
+    if ! grep -q "codec_opus_open_source" <<<"$modules"; then
+        echo "!! the independent Opus codec did not load; Opus interop results would be meaningless" >&2
+        printf '%s\n' "$modules" >&2
+        return 1
+    fi
 
     local transports
     transports="$(docker exec "$PEER_CONTAINER" asterisk -rx "pjsip show transports" 2>&1 || true)"
-    if ! grep -q "transport-tls" <<<"$transports"; then
-        echo "!! the TLS transport is not configured; the TLS results would be meaningless" >&2
+    if ! grep -q "transport-tls" <<<"$transports" || ! grep -q "transport-wss" <<<"$transports"; then
+        echo "!! a secure transport is not configured; the TLS/WSS results would be meaningless" >&2
         printf '%s\n' "$transports" >&2
         return 1
     fi

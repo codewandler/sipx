@@ -24,9 +24,8 @@
 //!   you are prepared to follow it.
 //!
 //!
-//! **Supported**, except `with_dtls_srtp` and the ICE attribute helpers, which are **Experimental**:
-//! they are implemented and tested here, and nothing in `sipx-call` selects either, so their shape is
-//! still free to change when a caller arrives (`M-27`, `M-28`).
+//! **Supported.** This includes `with_dtls_srtp` and the ICE attribute helpers: `sipx-call`
+//! consumes both for explicit media policy in dial and answer roles (`M-27`, `M-28`).
 
 pub mod answer;
 pub mod crypto;

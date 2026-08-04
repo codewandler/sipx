@@ -1,6 +1,6 @@
 [package]
 name = "sipx-ua"
-description = "SIP user agent: registration, digest authentication, subscriptions and presence"
+description = "SIP user agent: registration, digest authentication, and experimental subscriptions and presence"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -33,7 +33,8 @@ subtle.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"], optional = true }
 
 [dev-dependencies]
-sipx-testkit.workspace = true
+# Path-only so Cargo omits unpublished test support from the normalized registry manifest.
+sipx-testkit = { path = "../sipx-testkit" }
 sipx-transport.workspace = true
 tokio = { workspace = true, features = ["full"] }
 pretty_assertions.workspace = true

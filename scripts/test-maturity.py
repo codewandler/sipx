@@ -178,6 +178,71 @@ class ThePredicateRule(unittest.TestCase):
                 )
 
 
+class TheAnnouncementPredicateRule(unittest.TestCase):
+    """The beta gate is separate from v1 and owns its story associations the same safe way."""
+
+    def test_an_open_announcement_story_holds_its_predicate_open(self):
+        predicate = maturity.Predicate(2, "Shell proof", "computed")
+        found = {
+            "P-11": {"status": "done", "announcement": "2"},
+            "P-13": {"status": "backlog", "announcement": "[2, 3]"},
+        }
+        state, waiting = maturity.predicate_row(
+            predicate,
+            found,
+            predicates=maturity.BETA,
+            field=maturity.ANNOUNCEMENT_FIELD,
+            gate="beta-announcement",
+        )
+        self.assertEqual(state, "open")
+        self.assertEqual(waiting, "`P-13`")
+
+    def test_an_invalid_announcement_number_is_an_error(self):
+        with self.assertRaises(SystemExit) as caught:
+            maturity.predicate_stories(
+                {"A-1": {"status": "backlog", "announcement": "6"}},
+                predicates=maturity.BETA,
+                field=maturity.ANNOUNCEMENT_FIELD,
+                gate="beta-announcement",
+            )
+        self.assertIn("no beta-announcement predicate 6", str(caught.exception))
+
+    def test_an_undeclared_computed_announcement_predicate_is_unknown(self):
+        predicate = maturity.Predicate(3, "Interop", "computed")
+        state, waiting = maturity.predicate_row(
+            predicate,
+            {},
+            predicates=(predicate,),
+            field=maturity.ANNOUNCEMENT_FIELD,
+            gate="beta-announcement",
+        )
+        self.assertEqual(state, "**unknown**")
+        self.assertIn("announcement: 3", waiting)
+
+    def test_announcement_integrity_reopens_with_any_alpha_predicate(self):
+        alpha = (maturity.Predicate(1, "Alpha integrity", "computed"),)
+        found = {"X-1": {"status": "ready", "predicate": "1"}}
+        state, waiting = maturity.announcement_predicate_row(
+            maturity.BETA[0], found, alpha=alpha
+        )
+        self.assertEqual(state, "open")
+        self.assertIn("alpha predicate 1", waiting)
+
+        found["X-1"]["status"] = "done"
+        state, waiting = maturity.announcement_predicate_row(
+            maturity.BETA[0], found, alpha=alpha
+        )
+        self.assertEqual((state, waiting), ("met", "—"))
+
+    def test_every_real_announcement_declaration_names_a_real_predicate(self):
+        maturity.predicate_stories(
+            maturity.stories(),
+            predicates=maturity.BETA,
+            field=maturity.ANNOUNCEMENT_FIELD,
+            gate="beta-announcement",
+        )
+
+
 class APredicateSeesEveryStoryFiledAgainstIt(unittest.TestCase):
     """`X-42`: the association is declared by the story, so filing one cannot be forgotten.
 

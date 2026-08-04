@@ -20,8 +20,8 @@ ARGS:
     <URI>    Who to call, e.g. sip:bob@192.0.2.1:5060
 
 OPTIONS:
-    --play <FILE>     Play this WAV into the call (8 kHz 16-bit mono)
-    --record <FILE>   Record the far end to this WAV
+    --play <FILE>     Play mono 16-bit WAV at the negotiated codec clock
+    --record <FILE>   Record the far end to WAV at the negotiated codec clock
     --dtmf <DIGITS>   Send these digits once the call is up
     --duration <S>    Hang up after this many seconds once connected (default 30)
     --timeout <S>     Give up if the call is not answered in this many seconds (default 20).
@@ -35,6 +35,14 @@ OPTIONS:
     --tls-ca <FILE>   Add PEM trust roots to the platform store
     --tls-cert <FILE> Client certificate chain for mutual TLS (with --tls-key)
     --tls-key <FILE>  Client private key for mutual TLS (with --tls-cert)
+    --codec <C>       Ordered codec preference; repeat pcmu, pcma or opus (default pcmu, pcma)
+    --media-security <M>  auto, plain, sdes or dtls-srtp (default auto)
+    --ice <P>         disabled, host or stun (default disabled)
+    --stun-server <ADDR>  STUN server for --ice stun, as host:port
+    --audio-input <E>  Local source: wav:<path>, device:<id> or null
+    --audio-output <E> Local sink: wav:<path>, device:<id> or null
+    --early-media     Receive a reliable provisional media session before the final answer
+    --header <H>      Add an application-owned INVITE field; repeat 'Name: value'
     --stats           Report call quality on exit: loss, jitter, round trip, MOS estimate
     --capture <FILE>  Record signalling to this pcapng file. Credentials are redacted;
                       TLS is recorded decrypted. Still identifies who called whom
@@ -67,6 +75,18 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Ok(transport) => transport,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
+    let media = match crate::media::Selection::from_args(&args, transport.kind()) {
+        Ok(media) => media,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
+    let audio = match crate::device::Selection::from_args(&args) {
+        Ok(audio) => audio,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
+    let headers = match crate::header::from_args(&args) {
+        Ok(headers) => headers,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
 
     // A password on the command line is visible to every process on the machine, so the
     // environment is the documented route and the flag is the convenience.
@@ -90,10 +110,14 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     // Audio to play is read before the call is placed: failing after the far end has answered
     // means hanging up on someone for a mistake that was visible beforehand.
-    let clip = match args.value("play").map(read_clip) {
+    let clip = match audio.wav_input().map(read_clip) {
         Some(Ok(clip)) => Some(clip),
         Some(Err(message)) => return fail(format, Exit::Usage, &message),
         None => None,
+    };
+    let mut devices = match audio.open() {
+        Ok(devices) => devices,
+        Err(message) => return fail(format, Exit::Failed, &message),
     };
 
     let local: std::net::SocketAddr = match args.value("local").unwrap_or("0.0.0.0:0").parse() {
@@ -143,7 +167,11 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // inside the exchange can send the CANCEL that stops it ringing.
     let attempt = Duration::from_secs(args.number("timeout").unwrap_or(DEFAULT_TIMEOUT_SECS));
 
-    let mut options = sipx_call::DialOptions::new(from, media_address);
+    let mut options =
+        sipx_call::DialOptions::new(from, media_address).with_media_policy(media.policy());
+    for header in headers {
+        options = options.with_header(header);
+    }
     if !attempt.is_zero() {
         options = options.with_timeout(attempt);
     }
@@ -159,17 +187,70 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // allowed to narrate it.
     tracing::info!(peer = uri, transport = ?negotiated_transport, "calling");
 
+    let duration = Duration::from_secs(args.number("duration").unwrap_or(30));
+    let early_requested = args.flag("early-media");
     let started = std::time::Instant::now();
-    let mut call = match sipx_call::dial(&handle, target, &to, &options).await {
-        Ok(call) => call,
-        Err(error) => return report_failure(format, &error),
+    let (mut call, early_recorded, early_media) = if early_requested {
+        let mut dialing = match sipx_call::dial_early(&handle, target, &to, &options).await {
+            Ok(dialing) => dialing,
+            Err(error) => return report_failure(format, &error),
+        };
+        let early_media = match dialing.wait_for_early_media().await {
+            Ok(available) => available,
+            Err(error) => return report_failure(format, &error),
+        };
+        let early_recorded = if early_media {
+            let Some(session) = dialing.media() else {
+                return fail(
+                    format,
+                    Exit::Failed,
+                    "early media was reported without a running media session",
+                );
+            };
+            crate::record_media(session, duration, crate::RECORD_IDLE).await
+        } else {
+            Vec::new()
+        };
+        let call = match dialing.answered().await {
+            Ok(call) => call,
+            Err(error) => return report_failure(format, &error),
+        };
+        (call, early_recorded, early_media)
+    } else {
+        let call = match sipx_call::dial(&handle, target, &to, &options).await {
+            Ok(call) => call,
+            Err(error) => return report_failure(format, &error),
+        };
+        (call, Vec::new(), false)
     };
     tracing::info!(peer = uri, setup = ?started.elapsed(), "answered");
 
-    let duration = Duration::from_secs(args.number("duration").unwrap_or(30));
-    let recorded = exchange(&mut call, clip.as_ref(), args.value("dtmf"), duration).await;
+    if let (Some(path), Some(clip)) = (audio.wav_input(), clip.as_ref())
+        && let Err(message) = validate_clip(path, clip, call.media().codec().clock_rate())
+    {
+        let _ = call.hang_up().await;
+        return fail(format, Exit::Usage, &message);
+    }
 
-    let mut report = transport.report(
+    let exchanged = match exchange(
+        &mut call,
+        clip.as_ref(),
+        args.value("dtmf"),
+        duration,
+        &mut devices,
+    )
+    .await
+    {
+        Ok(exchanged) => exchanged,
+        Err(message) => {
+            let _ = call.hang_up().await;
+            return fail(format, Exit::Failed, &message);
+        }
+    };
+
+    let early_samples = early_recorded.len();
+    let total_samples = early_samples.saturating_add(exchanged.samples_received);
+    let report = media.requested_report(
         Report::new()
             .text("status", "answered")
             .text("peer", uri)
@@ -179,18 +260,27 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             )
             .number(
                 "samples_recorded",
-                i64::try_from(recorded.len()).unwrap_or(0),
+                i64::try_from(total_samples).unwrap_or(i64::MAX),
             )
-            .boolean("heard_audio", !recorded.is_empty()),
-        negotiated_transport,
+            .boolean("heard_audio", total_samples != 0),
     );
+    let report = media.negotiated_report(report, &call);
+    let mut report = devices.report(transport.report(report, negotiated_transport));
+    if early_requested {
+        report = report.boolean("early_media", early_media).number(
+            "early_samples_recorded",
+            i64::try_from(early_samples).unwrap_or(i64::MAX),
+        );
+    }
 
     if args.flag("stats") {
         report = with_quality(report, &call.media().quality().await);
     }
 
-    if let Some(path) = args.value("record") {
-        match write_clip(path, &recorded) {
+    if let Some(path) = audio.wav_output() {
+        let mut recorded = early_recorded;
+        recorded.extend_from_slice(&exchanged.recorded);
+        match write_clip(path, &recorded, call.media().codec().clock_rate()) {
             Ok(()) => report = report.text("recording", path),
             Err(message) => return fail(format, Exit::Failed, &message),
         }
@@ -200,7 +290,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     tracing::info!(
         peer = uri,
         elapsed = ?started.elapsed(),
-        samples_recorded = recorded.len(),
+        samples_recorded = exchanged.samples_received,
         "hung up"
     );
     report = match export.into_report(report) {
@@ -217,12 +307,13 @@ async fn exchange(
     clip: Option<&Wav>,
     dtmf: Option<&str>,
     duration: Duration,
-) -> Vec<i16> {
+    devices: &mut crate::device::Driver,
+) -> Result<Exchange, String> {
     let media = call.media();
 
     let playing = async {
         if let Some(clip) = clip {
-            media.play(&clip.samples, 160).await;
+            call.play(&clip.samples).await;
         }
         if let Some(digits) = dtmf {
             // After the audio, so a menu hears the prompt before the keypress.
@@ -236,10 +327,36 @@ async fn exchange(
     // answered both questions, so audio that began later than it was not recorded at all. The cap
     // lives inside `crate::record` now, which is also what stops a recording the cap cut short from
     // being discarded by an `unwrap_or_default` out here.
-    let recording = crate::record(call, duration, crate::RECORD_IDLE);
+    let output_device = devices.has_output();
+    let recording = async {
+        if output_device {
+            Vec::new()
+        } else {
+            crate::record(call, duration, crate::RECORD_IDLE).await
+        }
+    };
+    let device_audio = devices.run(media, duration);
 
-    let (_, recorded) = tokio::join!(tokio::time::timeout(duration, playing), recording);
-    recorded
+    let (_, recorded, device_samples) = tokio::join!(
+        tokio::time::timeout(duration, playing),
+        recording,
+        device_audio
+    );
+    let device_samples = device_samples?;
+    let samples_received = if output_device {
+        usize::try_from(device_samples).unwrap_or(usize::MAX)
+    } else {
+        recorded.len()
+    };
+    Ok(Exchange {
+        recorded,
+        samples_received,
+    })
+}
+
+struct Exchange {
+    recorded: Vec<i16>,
+    samples_received: usize,
 }
 
 /// How long to wait for an answer.
@@ -258,24 +375,33 @@ fn report_failure(format: Format, error: &sipx_call::Error) -> Exit {
     fail(format, exit, &error.to_string())
 }
 
-/// Read a clip, insisting on the format the codec needs.
-fn read_clip(path: &str) -> Result<Wav, String> {
+/// Read and structurally validate a clip before signalling starts.
+pub(crate) fn read_clip(path: &str) -> Result<Wav, String> {
     let file = std::fs::File::open(path).map_err(|error| format!("{path}: {error}"))?;
-    let clip = read_wav(file).map_err(|error| format!("{path}: {error}"))?;
-    if clip.sample_rate != 8000 {
-        // Resampling is a real feature, not a silent one. Playing 44.1 kHz samples at 8 kHz
-        // produces audio that is recognisably wrong rather than obviously broken.
-        return Err(format!(
-            "{path}: {} Hz; G.711 needs 8000 Hz — resample it first",
-            clip.sample_rate
-        ));
-    }
-    Ok(clip)
+    read_wav(file).map_err(|error| format!("{path}: {error}"))
 }
 
-fn write_clip(path: &str, samples: &[i16]) -> Result<(), String> {
+/// Require the WAV's rate to be the clock the running session negotiated.
+pub(crate) fn validate_clip(path: &str, clip: &Wav, negotiated_rate: u32) -> Result<(), String> {
+    if clip.sample_rate != negotiated_rate {
+        return Err(format!(
+            "{path}: {} Hz; the negotiated media clock is {negotiated_rate} Hz — resample it first",
+            clip.sample_rate,
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn write_clip(path: &str, samples: &[i16], sample_rate: u32) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|error| format!("{path}: {error}"))?;
-    write_wav(file, &Wav::narrowband(samples.to_vec())).map_err(|error| format!("{path}: {error}"))
+    write_wav(
+        file,
+        &Wav {
+            sample_rate,
+            samples: samples.to_vec(),
+        },
+    )
+    .map_err(|error| format!("{path}: {error}"))
 }
 
 /// The address and port a URI names, if it names one directly.
@@ -457,7 +583,9 @@ mod tests {
         };
         write_wav(std::fs::File::create(&path).expect("creates"), &wide).expect("writes");
 
-        let error = read_clip(path.to_str().expect("a path")).expect_err("refused");
+        let clip = read_clip(path.to_str().expect("a path")).expect("structurally valid");
+        let error =
+            validate_clip(path.to_str().expect("a path"), &clip, 8_000).expect_err("refused");
         assert!(error.contains("44100"), "{error}");
         assert!(error.contains("8000"), "{error}");
 
@@ -474,6 +602,7 @@ mod tests {
         write_wav(std::fs::File::create(&path).expect("creates"), &clip).expect("writes");
 
         let read = read_clip(path.to_str().expect("a path")).expect("accepted");
+        validate_clip(path.to_str().expect("a path"), &read, 8_000).expect("rate accepted");
         assert_eq!(read.samples, clip.samples);
 
         let _ = std::fs::remove_dir_all(&dir);

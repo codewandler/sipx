@@ -5,9 +5,9 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use sipx_call::load::{AdmissionEnd, BoundedPlan, Cause, Stop, run_bounded};
 use sipx_call::{Credentials, DialOptions};
 use sipx_sip::{Address, Uri};
-use sipx_testkit::load::{AdmissionEnd, BoundedPlan, Cause, Stop, run_bounded};
 use sipx_transport::{Config as TransportConfig, bind};
 
 use crate::output::{Exit, Format, fail};
@@ -371,7 +371,7 @@ fn has_internal_failure(failures: &BTreeMap<Cause, usize>) -> bool {
 }
 
 fn response_counts(
-    outcome: &sipx_testkit::load::Outcome,
+    outcome: &sipx_call::load::Outcome,
     measurements: &[Measurement],
 ) -> BTreeMap<String, usize> {
     let mut responses = BTreeMap::<String, usize>::new();
@@ -410,7 +410,7 @@ fn emit_summary(
     format: Format,
     target: &str,
     limits: Limits,
-    bounded: &sipx_testkit::load::BoundedOutcome,
+    bounded: &sipx_call::load::BoundedOutcome,
     measurements: &[Measurement],
 ) {
     let outcome = &bounded.outcome;
@@ -639,7 +639,7 @@ mod tests {
                 mos: 4.4,
             },
         }];
-        let mut outcome = sipx_testkit::load::Outcome::default();
+        let mut outcome = sipx_call::load::Outcome::default();
         outcome.failures.insert(Cause::Rejected(486), 2);
 
         let responses = response_counts(&outcome, &measurements);

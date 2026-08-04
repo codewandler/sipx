@@ -4,8 +4,8 @@ title: Add the Opus codec
 pillar: Media
 status: done
 priority: 11
-design: docs/designs/media.md
-epic: depth
+design: docs/designs/opus.md
+epic: opus
 areas: [sipx-audio]
 note:
 ---

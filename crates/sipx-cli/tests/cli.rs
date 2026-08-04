@@ -60,17 +60,39 @@ fn scratch(name: &str) -> std::path::PathBuf {
 
 /// A 440 Hz tone with an envelope, so a recording of silence cannot pass for it.
 fn tone(milliseconds: usize) -> Wav {
-    let samples = milliseconds * 8;
-    Wav::narrowband(
-        (0..samples)
+    tone_at(8_000, milliseconds, 440.0)
+}
+
+/// A deterministic signal at a media clock, with an onset envelope so silence cannot pass.
+fn tone_at(sample_rate: u32, milliseconds: usize, frequency: f64) -> Wav {
+    let samples = milliseconds * usize::try_from(sample_rate).unwrap_or(0) / 1_000;
+    Wav {
+        sample_rate,
+        samples: (0..samples)
             .map(|i| {
-                let t = f64::from(u32::try_from(i).unwrap_or(0)) / 8000.0;
+                let t = f64::from(u32::try_from(i).unwrap_or(0)) / f64::from(sample_rate);
                 let envelope = (t * 4.0).min(1.0);
-                let value = (t * 440.0 * 2.0 * std::f64::consts::PI).sin() * 12000.0 * envelope;
+                let value = (t * frequency * 2.0 * std::f64::consts::PI).sin() * 12000.0 * envelope;
                 i16::try_from(value.round() as i32).unwrap_or(0)
             })
             .collect(),
-    )
+    }
+}
+
+/// Squared projection on one frequency, used to distinguish the two ends of a real call.
+#[cfg(feature = "opus")]
+fn spectral_power(wav: &Wav, frequency: f64) -> f64 {
+    let angular = 2.0 * std::f64::consts::PI * frequency / f64::from(wav.sample_rate);
+    let (sine, cosine) =
+        wav.samples
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(sine, cosine), (index, sample)| {
+                let phase = angular * f64::from(u32::try_from(index).unwrap_or(0));
+                let sample = f64::from(*sample);
+                (sine + sample * phase.sin(), cosine + sample * phase.cos())
+            });
+    sine.mul_add(sine, cosine * cosine)
 }
 
 /// Start `sipx answer` and wait for it to announce the port it bound.
@@ -212,6 +234,176 @@ fn tls_fixture(name: &str) -> TlsFixture {
     }
 }
 
+/// A finite fake STUN server that reports the source address it actually observed.
+async fn start_stun_server() -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("STUN server binds");
+    let address = socket.local_addr().expect("STUN address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(async move {
+        let (stop_relays, _) = tokio::sync::watch::channel(false);
+        let mut relays = tokio::task::JoinSet::new();
+        let mut stopped = std::pin::pin!(stopped);
+        let mut datagram = [0u8; 1_500];
+        loop {
+            let received = tokio::select! {
+                _ = &mut stopped => break,
+                received = socket.recv_from(&mut datagram) => received,
+            };
+            let Ok((length, source)) = received else {
+                break;
+            };
+            let Some(transaction) = datagram
+                .get(..length)
+                .and_then(|packet| packet.get(8..20))
+                .and_then(|bytes| <[u8; 12]>::try_from(bytes).ok())
+            else {
+                continue;
+            };
+            // A loopback source address is already a host candidate and would be deduplicated.
+            // Give it a distinct, functioning mapped port: the relay below is the fixture's
+            // finite stand-in for the address/port mapping a STUN client is trying to discover.
+            let mapped = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("mapped port binds");
+            let mapped_address = mapped.local_addr().expect("mapped address");
+            relays.spawn(mapped_relay(mapped, source, stop_relays.subscribe()));
+            let response = stun_binding_response(transaction, mapped_address);
+            let _ = socket.send_to(&response, source).await;
+        }
+        let _ = stop_relays.send(true);
+        while relays.join_next().await.is_some() {}
+    });
+    (address, stop, serving)
+}
+
+/// Forward one finite fake address mapping in both directions until its STUN server stops.
+async fn mapped_relay(
+    socket: tokio::net::UdpSocket,
+    internal: std::net::SocketAddr,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut peer = None;
+    let mut datagram = vec![0u8; 65_535];
+    loop {
+        let received = tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    return;
+                }
+                continue;
+            }
+            received = socket.recv_from(&mut datagram) => received,
+        };
+        let Ok((length, source)) = received else {
+            return;
+        };
+        let destination = if source == internal {
+            let Some(peer) = peer else {
+                continue;
+            };
+            peer
+        } else {
+            peer = Some(source);
+            internal
+        };
+        let _ = socket.send_to(&datagram[..length], destination).await;
+    }
+}
+
+/// RFC 5389 §15.2's XOR-MAPPED-ADDRESS in a Binding success response.
+fn stun_binding_response(transaction: [u8; 12], mapped: std::net::SocketAddr) -> Vec<u8> {
+    let std::net::SocketAddr::V4(mapped) = mapped else {
+        panic!("the loopback fixture is IPv4");
+    };
+    let cookie = sipx_transport::stun::MAGIC_COOKIE;
+    let mut value = vec![0u8, 0x01];
+    value.extend_from_slice(
+        &(mapped.port() ^ u16::try_from(cookie >> 16).expect("cookie half")).to_be_bytes(),
+    );
+    value.extend_from_slice(&(u32::from(*mapped.ip()) ^ cookie).to_be_bytes());
+
+    let mut message = vec![0x01, 0x01];
+    message.extend_from_slice(
+        &u16::try_from(value.len() + 4)
+            .expect("small attribute")
+            .to_be_bytes(),
+    );
+    message.extend_from_slice(&cookie.to_be_bytes());
+    message.extend_from_slice(&transaction);
+    message.extend_from_slice(&0x0020u16.to_be_bytes());
+    message.extend_from_slice(
+        &u16::try_from(value.len())
+            .expect("small address")
+            .to_be_bytes(),
+    );
+    message.extend_from_slice(&value);
+    message
+}
+
+async fn dead_media_path() -> (tokio::net::UdpSocket, std::net::SocketAddr) {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("dead media socket binds");
+    let address = socket.local_addr().expect("dead media address");
+    (socket, address)
+}
+
+/// Replace the high-priority/default host path with a bound socket nobody reads while retaining
+/// the STUN-discovered server-reflexive candidate. Component two is omitted so the scenario has
+/// one selected path and one fact to assert.
+fn silence_host_path(message: &[u8], dead: std::net::SocketAddr) -> Vec<u8> {
+    let text = String::from_utf8_lossy(message);
+    let (headers, body) = text.split_once("\r\n\r\n").expect("SIP has a body");
+    assert!(
+        body.contains("typ srflx"),
+        "STUN produced a candidate:\n{body}"
+    );
+
+    let mut rewritten = Vec::new();
+    for line in body.lines() {
+        if line.starts_with("c=IN IP") {
+            rewritten.push(format!("c=IN IP4 {}", dead.ip()));
+        } else if let Some(rest) = line.strip_prefix("m=audio ") {
+            let (_, tail) = rest.split_once(' ').expect("media line fields");
+            rewritten.push(format!("m=audio {} {tail}", dead.port()));
+        } else if let Some(candidate) = line.strip_prefix("a=candidate:") {
+            let fields = candidate.split_whitespace().collect::<Vec<_>>();
+            if fields.get(1) == Some(&"1") && fields.get(7) == Some(&"srflx") {
+                rewritten.push(line.to_owned());
+            }
+        } else if !line.is_empty() {
+            rewritten.push(line.to_owned());
+        }
+    }
+    rewritten.push(format!(
+        "a=candidate:dead 1 UDP 2130706431 {} {} typ host",
+        dead.ip(),
+        dead.port()
+    ));
+    let body = format!("{}\r\n", rewritten.join("\r\n"));
+    let headers = headers
+        .lines()
+        .map(|line| {
+            if line
+                .split_once(':')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            {
+                format!("Content-Length: {}", body.len())
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    format!("{headers}\r\n\r\n{body}").into_bytes()
+}
+
 /// `DPH-1`, plus the cleartext transports around it: every released signalling transport is
 /// selected through the command line and carries a complete, bounded call. The assertions are on
 /// both processes' terminal reports so a flag accepted and then ignored cannot pass.
@@ -335,6 +527,849 @@ async fn dph_2_wss_name_mismatch_fails_without_downgrade() {
 
     answerer.kill().await.expect("stops the answerer");
     let _ = answerer.wait().await;
+}
+
+/// `DPH-3`: a known codec that this binary cannot run is rejected before even one signalling
+/// datagram leaves. The socket is read only after the process exits, so an empty queue is a causal
+/// assertion rather than a sleep standing in for one.
+#[cfg(not(feature = "opus"))]
+#[tokio::test]
+async fn dph_3_opus_without_the_feature_fails_before_network_io() {
+    let observer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("observer binds");
+    let address = observer.local_addr().expect("observer address");
+    let output = sipx()
+        .args([
+            "dial",
+            &format!("sip:bob@{address}"),
+            "--codec",
+            "opus",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("dial runs");
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{complaint}");
+    assert!(complaint.contains("`opus` feature"), "{complaint}");
+    let mut datagram = [0u8; 1];
+    assert!(
+        observer.try_recv_from(&mut datagram).is_err(),
+        "an unsupported codec reached signalling"
+    );
+}
+
+/// The positive command-process Opus claim: two distinguishable 48 kHz signals cross in opposite
+/// directions. Rate, duration and identity are all asserted, so an 8 kHz header, a 160-sample
+/// answer frame, a one-way path or a merely non-empty recording cannot satisfy this case.
+#[cfg(feature = "opus")]
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostic_phone_opus_is_rate_and_direction_correct() {
+    const CALLER_HZ: f64 = 431.0;
+    const ANSWER_HZ: f64 = 947.0;
+
+    let _scenario = process_scenario().await;
+    let dir = scratch("opus");
+    let caller_input = dir.join("caller-input.wav");
+    let answer_input = dir.join("answer-input.wav");
+    let heard_by_answer = dir.join("heard-by-answer.wav");
+    let heard_by_dial = dir.join("heard-by-dial.wav");
+    write_wav(
+        std::fs::File::create(&caller_input).expect("creates caller input"),
+        &tone_at(48_000, 1_000, CALLER_HZ),
+    )
+    .expect("writes caller input");
+    write_wav(
+        std::fs::File::create(&answer_input).expect("creates answer input"),
+        &tone_at(48_000, 1_000, ANSWER_HZ),
+    )
+    .expect("writes answer input");
+
+    let (mut answerer, address, mut lines) = start_answerer(&[
+        "--codec",
+        "opus",
+        "--duration",
+        "3",
+        "--play",
+        answer_input.to_str().expect("answer input path"),
+        "--record",
+        heard_by_answer.to_str().expect("answer recording path"),
+    ])
+    .await;
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:answer@{address}"),
+                "--codec",
+                "opus",
+                "--duration",
+                "3",
+                "--timeout",
+                "8",
+                "--play",
+                caller_input.to_str().expect("caller input path"),
+                "--record",
+                heard_by_dial.to_str().expect("dial recording path"),
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("Opus call is bounded")
+    .expect("dial runs");
+    let dial_report = String::from_utf8_lossy(&output.stdout);
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{dial_report} / {complaint}");
+    assert!(
+        dial_report.contains("\"requested_codecs\":\"opus\"")
+            && dial_report.contains("\"negotiated_codec\":\"opus\""),
+        "{dial_report}"
+    );
+
+    let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .expect("answer report is bounded")
+        .expect("reads answer report")
+        .expect("answer report exists");
+    assert!(
+        answer_report.contains("\"requested_codecs\":\"opus\"")
+            && answer_report.contains("\"negotiated_codec\":\"opus\"")
+            && answer_report.contains("\"heard_audio\":true"),
+        "{answer_report}"
+    );
+    answerer_exits_cleanly(&mut answerer).await;
+    for (path, expected_hz, local_hz, direction) in [
+        (&heard_by_answer, CALLER_HZ, ANSWER_HZ, "dial to answer"),
+        (&heard_by_dial, ANSWER_HZ, CALLER_HZ, "answer to dial"),
+    ] {
+        let heard =
+            read_wav(std::fs::File::open(path).expect("opens recording")).expect("reads recording");
+        assert_eq!(heard.sample_rate, 48_000, "{direction}: WAV media clock");
+        assert!(
+            (44_160..=48_000).contains(&heard.samples.len()),
+            "{direction}: expected 920-1000 ms, got {} samples ({:.1} ms)",
+            heard.samples.len(),
+            f64::from(u32::try_from(heard.samples.len()).unwrap_or(u32::MAX)) * 1_000.0
+                / f64::from(heard.sample_rate)
+        );
+        let expected = spectral_power(&heard, expected_hz);
+        let local = spectral_power(&heard, local_hz);
+        assert!(
+            expected > local * 20.0,
+            "{direction}: recording does not identify the far-end signal ({expected} versus {local})"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The executable, not only the call library, consumes a reliable provisional answer and records
+/// its media before the final response. The fixture sends that final response only after playback
+/// completes, so the reported early samples are a causal assertion with no sleep standing in for
+/// ordering.
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostic_phone_records_reliable_provisional_audio_before_final_answer() {
+    let _scenario = process_scenario().await;
+    let dir = scratch("early-media");
+    let recorded = dir.join("recorded.wav");
+    let (callee, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("loopback address"),
+    ))
+    .await
+    .expect("callee binds");
+    let address = callee.local_addr();
+
+    let answering = tokio::spawn(async move {
+        let invite = incoming.recv().await.expect("INVITE arrives");
+        let mut ringing = sipx_call::ring_early(
+            &callee,
+            &invite,
+            183,
+            "Session Progress",
+            "127.0.0.1".parse().expect("loopback"),
+        )
+        .await
+        .expect("starts reliable provisional media");
+        let prack = incoming.recv().await.expect("PRACK arrives");
+        assert!(
+            ringing.on_prack(&prack).await.expect("handles PRACK"),
+            "the diagnostic phone acknowledged the provisional answer"
+        );
+        let media = ringing.media().expect("early media is running");
+        let clip = tone(1_200);
+        assert!(
+            media.play(&clip.samples, media.samples_per_packet()).await,
+            "early announcement completes before the final answer"
+        );
+        sipx_call::answer_early(&callee, &invite, &mut ringing)
+            .await
+            .expect("sends final answer after early playback")
+    });
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:early@{address}"),
+                "--early-media",
+                "--duration",
+                "1",
+                "--timeout",
+                "8",
+                "--record",
+                recorded.to_str().expect("recording path"),
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("early-media call is bounded")
+    .expect("dial runs");
+    let report = String::from_utf8_lossy(&output.stdout);
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{report} / {complaint}");
+    assert!(report.contains("\"early_media\":true"), "{report}");
+    assert!(
+        report.contains("\"early_samples_recorded\":")
+            && !report.contains("\"early_samples_recorded\":0"),
+        "{report}"
+    );
+    assert!(report.contains("\"heard_audio\":true"), "{report}");
+    let _callee_call = answering.await.expect("answering task joins");
+    let heard = read_wav(std::fs::File::open(&recorded).expect("opens recording"))
+        .expect("reads recording");
+    assert!(!heard.samples.is_empty(), "WAV contains early media");
+}
+
+/// `DPH-4`: SDES carries its master key in SDP, so selecting it over UDP is a setup error and no
+/// INVITE may be emitted.
+#[tokio::test]
+async fn dph_4_explicit_sdes_over_udp_fails_before_network_io() {
+    let observer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("observer binds");
+    let address = observer.local_addr().expect("observer address");
+    let output = sipx()
+        .args([
+            "dial",
+            &format!("sip:bob@{address}"),
+            "--media-security",
+            "sdes",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("dial runs");
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{complaint}");
+    assert!(complaint.contains("requires protected"), "{complaint}");
+    let mut datagram = [0u8; 1];
+    assert!(
+        observer.try_recv_from(&mut datagram).is_err(),
+        "an unsafe keying selection reached signalling"
+    );
+}
+
+/// Strict `plain` and `sdes` remain distinct even on the same protected signalling path. This is
+/// a real call assertion on `Call::is_encrypted`, surfaced through the terminal result, not an SDP
+/// string check in the command layer.
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_plain_and_sdes_report_what_the_tls_calls_actually_negotiated() {
+    let _scenario = process_scenario().await;
+    let tls = tls_fixture("media-security");
+    let ca = tls.ca.to_string_lossy().into_owned();
+    let cert = tls.cert.to_string_lossy().into_owned();
+    let key = tls.key.to_string_lossy().into_owned();
+
+    for (selected, negotiated) in [("plain", "plain"), ("sdes", "sdes")] {
+        let (mut answerer, address, mut lines) = start_answerer(&[
+            "--transport",
+            "tls",
+            "--tls-cert",
+            &cert,
+            "--tls-key",
+            &key,
+            "--media-security",
+            selected,
+            "--duration",
+            "1",
+        ])
+        .await;
+        let output = sipx()
+            .args([
+                "dial",
+                &format!("sip:answer@{address}"),
+                "--transport",
+                "tls",
+                "--tls-ca",
+                &ca,
+                "--tls-server-name",
+                "sipx.test",
+                "--media-security",
+                selected,
+                "--duration",
+                "1",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output()
+            .await
+            .expect("dial runs");
+        let dial_report = String::from_utf8_lossy(&output.stdout);
+        let complaint = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{dial_report} / {complaint}");
+        assert!(
+            dial_report.contains(&format!("\"negotiated_media_security\":\"{negotiated}\"")),
+            "{dial_report}"
+        );
+        let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+            .await
+            .expect("answer report is bounded")
+            .expect("reads answer report")
+            .expect("answer report exists");
+        assert!(
+            answer_report.contains(&format!("\"negotiated_media_security\":\"{negotiated}\"")),
+            "{answer_report}"
+        );
+        answerer_exits_cleanly(&mut answerer).await;
+    }
+}
+
+/// `DPH-5`: both command processes select DTLS-SRTP, report it from their running calls, and
+/// carry a real clip through the encrypted media session.
+#[cfg(feature = "dtls")]
+#[tokio::test(flavor = "multi_thread")]
+async fn dph_5_explicit_dtls_srtp_negotiates_and_carries_audio() {
+    let _scenario = process_scenario().await;
+    let dir = scratch("dph-5");
+    let played = dir.join("played.wav");
+    let recorded = dir.join("recorded.wav");
+    let clip = tone(1_500);
+    write_wav(
+        std::fs::File::create(&played).expect("creates input"),
+        &clip,
+    )
+    .expect("writes input");
+
+    let (mut answerer, address, mut lines) = start_answerer(&[
+        "--media-security",
+        "dtls-srtp",
+        "--duration",
+        "3",
+        "--record",
+        recorded.to_str().expect("recording path"),
+    ])
+    .await;
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:answer@{address}"),
+                "--media-security",
+                "dtls-srtp",
+                "--duration",
+                "3",
+                "--timeout",
+                "8",
+                "--play",
+                played.to_str().expect("input path"),
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("DTLS call is bounded")
+    .expect("dial runs");
+    let dial_report = String::from_utf8_lossy(&output.stdout);
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{dial_report} / {complaint}");
+    assert!(
+        dial_report.contains("\"requested_media_security\":\"dtls-srtp\"")
+            && dial_report.contains("\"negotiated_media_security\":\"dtls-srtp\""),
+        "{dial_report}"
+    );
+
+    let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .expect("answer report is bounded")
+        .expect("reads answer report")
+        .expect("answer report exists");
+    assert!(
+        answer_report.contains("\"requested_media_security\":\"dtls-srtp\"")
+            && answer_report.contains("\"negotiated_media_security\":\"dtls-srtp\""),
+        "{answer_report}"
+    );
+    assert!(
+        answer_report.contains("\"heard_audio\":true"),
+        "{answer_report}"
+    );
+    answerer_exits_cleanly(&mut answerer).await;
+    let heard = read_wav(std::fs::File::open(&recorded).expect("opens recording"))
+        .expect("reads recording");
+    assert!(!heard.samples.is_empty(), "encrypted media carried audio");
+}
+
+/// Without the optional handshake implementation, `DPH-5` takes its other permitted result: a
+/// typed refusal before signalling and no downgrade to SDES or plain RTP.
+#[cfg(not(feature = "dtls"))]
+#[tokio::test]
+async fn dph_5_dtls_srtp_without_the_feature_is_a_typed_pre_io_failure() {
+    let observer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("observer binds");
+    let address = observer.local_addr().expect("observer address");
+    let output = sipx()
+        .args([
+            "dial",
+            &format!("sip:bob@{address}"),
+            "--media-security",
+            "dtls-srtp",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("dial runs");
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{complaint}");
+    assert!(complaint.contains("`dtls` feature"), "{complaint}");
+    let mut datagram = [0u8; 1];
+    assert!(observer.try_recv_from(&mut datagram).is_err());
+}
+
+/// `DPH-6`: both default/high-priority host destinations are silent. The only usable addresses
+/// are the candidates learned from the selected STUN server, so the clip and terminal reports
+/// prove a nominated server-reflexive pair replaced the defaults.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one end-to-end vector keeps the mapped-path fixture and both process reports together"
+)]
+async fn dph_6_stun_ice_reports_and_carries_audio_on_a_server_reflexive_pair() {
+    let _scenario = process_scenario().await;
+    let dir = scratch("dph-6");
+    let played = dir.join("played.wav");
+    let recorded = dir.join("recorded.wav");
+    write_wav(
+        std::fs::File::create(&played).expect("creates input"),
+        &tone(4_000),
+    )
+    .expect("writes input");
+
+    let (stun, stop_stun, serving_stun) = start_stun_server().await;
+    let stun = stun.to_string();
+    let (mut answerer, answer_address, mut lines) = start_answerer(&[
+        "--codec",
+        "pcma",
+        "--ice",
+        "stun",
+        "--stun-server",
+        &stun,
+        "--duration",
+        "6",
+        "--record",
+        recorded.to_str().expect("recording path"),
+    ])
+    .await;
+
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("proxy binds");
+    let proxy_address = proxy.local_addr().expect("proxy address");
+    let answer_address: std::net::SocketAddr = answer_address.parse().expect("answer address");
+    let (_caller_dead_socket, caller_dead) = dead_media_path().await;
+    let (_answer_dead_socket, answer_dead) = dead_media_path().await;
+    let forwarding = tokio::spawn(async move {
+        let mut datagram = vec![0u8; 65_535];
+        let (length, caller_address) = proxy.recv_from(&mut datagram).await.expect("INVITE");
+        let offer = silence_host_path(&datagram[..length], caller_dead);
+        proxy
+            .send_to(&offer, answer_address)
+            .await
+            .expect("forwards INVITE");
+
+        let (length, _) = proxy.recv_from(&mut datagram).await.expect("final answer");
+        let answer = silence_host_path(&datagram[..length], answer_dead);
+        proxy
+            .send_to(&answer, caller_address)
+            .await
+            .expect("forwards answer");
+    });
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:answer@{proxy_address}"),
+                "--codec",
+                "pcma",
+                "--ice",
+                "stun",
+                "--stun-server",
+                &stun,
+                "--duration",
+                "6",
+                "--timeout",
+                "10",
+                "--play",
+                played.to_str().expect("input path"),
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("ICE call is bounded")
+    .expect("dial runs");
+    forwarding.await.expect("proxy task");
+    let dial_report = String::from_utf8_lossy(&output.stdout);
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{dial_report} / {complaint}");
+    assert!(
+        dial_report.contains("\"requested_ice\":\"stun\"")
+            && dial_report.contains("\"negotiated_ice\":\"server-reflexive\"")
+            && dial_report.contains("\"requested_codecs\":\"pcma\"")
+            && dial_report.contains("\"negotiated_codec\":\"pcma\""),
+        "{dial_report}"
+    );
+
+    let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .expect("answer report is bounded")
+        .expect("reads answer report")
+        .expect("answer report exists");
+    assert!(
+        answer_report.contains("\"requested_ice\":\"stun\"")
+            && answer_report.contains("\"negotiated_ice\":\"server-reflexive\"")
+            && answer_report.contains("\"negotiated_codec\":\"pcma\"")
+            && answer_report.contains("\"heard_audio\":true"),
+        "{answer_report}"
+    );
+    answerer_exits_cleanly(&mut answerer).await;
+    let heard = read_wav(std::fs::File::open(&recorded).expect("opens recording"))
+        .expect("reads recording");
+    assert!(
+        !heard.samples.is_empty(),
+        "the nominated pair carried audio"
+    );
+
+    let _ = stop_stun.send(());
+    serving_stun.await.expect("STUN server stops");
+}
+
+/// `DPH-7`: an explicit stable identifier either opens that exact device or fails before the
+/// signalling observer sees a byte. The observer is read only after the process exits, so this is
+/// a causal assertion and needs no wall-clock sleep.
+#[cfg(feature = "device-audio")]
+#[tokio::test]
+async fn dph_7_a_missing_requested_device_fails_before_network_io() {
+    let observer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("observer binds");
+    let address = observer.local_addr().expect("observer address");
+    let output = sipx()
+        .args([
+            "dial",
+            &format!("sip:missing@{address}"),
+            "--audio-input",
+            "device:alsa:missing",
+            "--duration",
+            "0",
+            "--timeout",
+            "1",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("dial runs");
+
+    assert_eq!(output.status.code(), Some(1), "typed setup failure");
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert!(complaint.contains("audio input"), "{complaint}");
+    assert!(complaint.contains("alsa:missing"), "{complaint}");
+    assert!(complaint.contains("not available"), "{complaint}");
+    let mut datagram = [0u8; 1];
+    assert!(
+        observer.try_recv_from(&mut datagram).is_err(),
+        "device validation happened after signalling I/O"
+    );
+}
+
+/// The feature-off half of the same boundary: accepting a device selector and then silently using
+/// the null endpoint would make the small binary look successful while carrying no microphone.
+#[cfg(not(feature = "device-audio"))]
+#[tokio::test]
+async fn a_device_endpoint_without_the_feature_fails_before_network_io() {
+    let observer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("observer binds");
+    let address = observer.local_addr().expect("observer address");
+    let output = sipx()
+        .args([
+            "dial",
+            &format!("sip:feature@{address}"),
+            "--audio-input",
+            "device:alsa:anything",
+            "--duration",
+            "0",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("dial runs");
+    assert_eq!(output.status.code(), Some(1));
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert!(complaint.contains("device-audio"), "{complaint}");
+    let mut datagram = [0u8; 1];
+    assert!(observer.try_recv_from(&mut datagram).is_err());
+}
+
+#[cfg(not(feature = "device-audio"))]
+#[test]
+fn listing_devices_without_the_feature_is_a_typed_failure() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_sipx"))
+        .args(["devices", "--json"])
+        .output()
+        .expect("devices command runs");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("device-audio"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `DPH-12`: the Linux file-backed virtual microphone contains the same deterministic clip as the
+/// WAV run, so two independent calls hold the callback path against the existing file path. The
+/// 48 kHz conversion arithmetic is pinned separately at the converter boundary, where it can be
+/// exact rather than dependent on which formats the machine's virtual PCM advertises.
+#[cfg(all(feature = "device-audio", target_os = "linux"))]
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the two complete process calls stay together so their fixture and comparison cannot drift"
+)]
+async fn dph_12_wav_and_virtual_device_carry_the_same_clip() {
+    let _scenario = process_scenario().await;
+    let dir = scratch("dph-12");
+    let source = tone(500);
+    let wav_path = dir.join("source.wav");
+    write_wav(
+        std::fs::File::create(&wav_path).expect("creates WAV input"),
+        &source,
+    )
+    .expect("writes WAV input");
+
+    let raw_path = dir.join("virtual-mic.raw");
+    let mut raw = Vec::with_capacity(source.samples.len() * 2);
+    for sample in &source.samples {
+        raw.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(&raw_path, raw).expect("writes virtual microphone PCM");
+
+    let sink_path = dir.join("virtual-speaker.raw");
+    let alsa_path = dir.join("alsa.conf");
+    let alsa = format!(
+        "</usr/share/alsa/alsa.conf>\n\
+         pcm.sipx_dph12 {{\n\
+           type file\n\
+           hint {{\n\
+             show on\n\
+             description \"sipx DPH-12 virtual microphone\"\n\
+           }}\n\
+           slave.pcm \"null\"\n\
+           file \"{}\"\n\
+           infile \"{}\"\n\
+           format raw\n\
+         }}\n",
+        sink_path.display(),
+        raw_path.display(),
+    );
+    std::fs::write(&alsa_path, alsa).expect("writes the virtual-device configuration");
+
+    let mut listing = sipx();
+    listing
+        .env("ALSA_CONFIG_PATH", &alsa_path)
+        .args(["devices", "--json"]);
+    let listing = tokio::time::timeout(Duration::from_secs(10), listing.output())
+        .await
+        .expect("device enumeration is bounded")
+        .expect("device enumeration runs");
+    assert!(
+        listing.status.success(),
+        "{} / {}",
+        String::from_utf8_lossy(&listing.stdout),
+        String::from_utf8_lossy(&listing.stderr)
+    );
+    let listing: serde_json::Value =
+        serde_json::from_slice(&listing.stdout).expect("device inventory is JSON");
+    let listed = listing["devices"]
+        .as_array()
+        .expect("device inventory contains an array")
+        .iter()
+        .find(|device| device["id"] == "alsa:sipx_dph12")
+        .expect("the stable virtual-device identifier is listed");
+    assert_eq!(listed["input"], true);
+    assert_eq!(listed["output"], true);
+
+    let wav_recording = dir.join("wav-heard.wav");
+    let (mut wav_answerer, wav_address, mut wav_lines) = start_answerer(&[
+        "--duration",
+        "2",
+        "--record",
+        wav_recording.to_str().expect("WAV recording path"),
+    ])
+    .await;
+    let wav_output = tokio::time::timeout(
+        Duration::from_secs(15),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:wav@{wav_address}"),
+                "--audio-input",
+                &format!("wav:{}", wav_path.display()),
+                "--duration",
+                "1",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("WAV call is bounded")
+    .expect("WAV dial runs");
+    assert!(
+        wav_output.status.success(),
+        "{} / {}",
+        String::from_utf8_lossy(&wav_output.stdout),
+        String::from_utf8_lossy(&wav_output.stderr)
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(10), wav_lines.next_line())
+        .await
+        .expect("WAV answer report is bounded")
+        .expect("reads WAV answer report")
+        .expect("WAV answer report exists");
+    answerer_exits_cleanly(&mut wav_answerer).await;
+
+    let device_recording = dir.join("device-heard.wav");
+    let (mut device_answerer, device_address, mut device_lines) = start_answerer(&[
+        "--duration",
+        "2",
+        "--record",
+        device_recording.to_str().expect("device recording path"),
+    ])
+    .await;
+    let mut command = sipx();
+    command.env("ALSA_CONFIG_PATH", &alsa_path).args([
+        "dial",
+        &format!("sip:device@{device_address}"),
+        "--audio-input",
+        "device:alsa:sipx_dph12",
+        "--duration",
+        "1",
+        "--timeout",
+        "5",
+        "--json",
+    ]);
+    let device_output = tokio::time::timeout(Duration::from_secs(15), command.output())
+        .await
+        .expect("device call is bounded")
+        .expect("device dial runs");
+    let device_report = String::from_utf8_lossy(&device_output.stdout);
+    assert!(
+        device_output.status.success(),
+        "{device_report} / {}",
+        String::from_utf8_lossy(&device_output.stderr)
+    );
+    assert!(
+        device_report.contains("\"audio_input_device\":\"alsa:sipx_dph12\""),
+        "{device_report}"
+    );
+    for counter in [
+        "device_input_dropped_samples",
+        "device_output_dropped_samples",
+        "device_output_silence_samples",
+    ] {
+        assert!(
+            device_report.contains(counter),
+            "{counter}: {device_report}"
+        );
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(10), device_lines.next_line())
+        .await
+        .expect("device answer report is bounded")
+        .expect("reads device answer report")
+        .expect("device answer report exists");
+    answerer_exits_cleanly(&mut device_answerer).await;
+
+    let wav_heard = read_wav(std::fs::File::open(&wav_recording).expect("opens WAV result"))
+        .expect("reads WAV result");
+    let device_heard =
+        read_wav(std::fs::File::open(&device_recording).expect("opens virtual-device result"))
+            .expect("reads virtual-device result");
+    let compared = wav_heard
+        .samples
+        .len()
+        .min(device_heard.samples.len())
+        .min(source.samples.len());
+    assert!(compared >= 3_200, "both paths carry most of the clip");
+    let mean_difference = wav_heard
+        .samples
+        .iter()
+        .zip(&device_heard.samples)
+        .take(compared)
+        .map(|(wav, device)| i64::from((i32::from(*wav) - i32::from(*device)).abs()))
+        .sum::<i64>()
+        / i64::try_from(compared).expect("positive comparison length");
+    assert!(
+        mean_difference < 600,
+        "device conversion diverged from WAV by {mean_difference} mean sample units"
+    );
+
+    // The input run above proves callback conversion with real samples. A zero-duration second
+    // call proves that the same exact identifier opens as an output and is causally stopped,
+    // without letting the file-backed null sink spin merely to simulate elapsed playback.
+    let (mut output_answerer, output_address, mut output_lines) =
+        start_answerer(&["--duration", "1"]).await;
+    let mut command = sipx();
+    command.env("ALSA_CONFIG_PATH", &alsa_path).args([
+        "dial",
+        &format!("sip:output@{output_address}"),
+        "--audio-output",
+        "device:alsa:sipx_dph12",
+        "--duration",
+        "0",
+        "--timeout",
+        "5",
+        "--json",
+    ]);
+    let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+        .await
+        .expect("output-device call is bounded")
+        .expect("output-device dial runs");
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{report} / {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        report.contains("\"audio_output_device\":\"alsa:sipx_dph12\""),
+        "{report}"
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(10), output_lines.next_line())
+        .await
+        .expect("output answer report is bounded")
+        .expect("reads output answer report")
+        .expect("output answer report exists");
+    answerer_exits_cleanly(&mut output_answerer).await;
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Registration uses the same selection and certificate policy as calls. This is deliberately a
@@ -718,6 +1753,16 @@ async fn version_and_help_succeed() {
     let output = sipx().arg("help").output().await.expect("runs");
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("USAGE"));
+
+    let output = sipx()
+        .args(["devices", "--help"])
+        .output()
+        .await
+        .expect("runs");
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("stable audio device identifiers"), "{help}");
+    assert!(help.contains("opens no stream"), "{help}");
 }
 
 /// An unknown command is a usage error with its own exit code, and the complaint goes to
@@ -949,6 +1994,10 @@ async fn a_completed_silent_call_is_success_for_dial_and_answer() {
     for recording in [&heard_by_answer, &heard_by_dial] {
         let heard = read_wav(std::fs::File::open(recording).expect("opens silent recording"))
             .expect("reads silent recording");
+        assert_eq!(
+            heard.sample_rate, 8_000,
+            "the default G.711 recording keeps its 8 kHz clock: {recording:?}"
+        );
         assert!(
             heard.samples.is_empty(),
             "the test must not pass by accidentally carrying audio: {recording:?}"
@@ -1370,6 +2419,149 @@ async fn a_refusal_carries_a_to_tag() {
     );
 
     let _ = answerer.kill().await;
+}
+
+/// DPH-8: an application-owned Supported field reaches the INVITE exactly as supplied, while a
+/// stack-owned Via is refused by name before the command reaches bind or dial.
+#[tokio::test]
+async fn custom_supported_header_is_sent_and_stack_owned_via_is_refused_before_bind() {
+    let _scenario = process_scenario().await;
+    let (handle, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("peer binds");
+    let address = handle.local_addr();
+    let peer = tokio::spawn(async move {
+        let invite = incoming.recv().await.expect("the INVITE arrives");
+        let supported: Vec<_> = invite
+            .request
+            .headers
+            .get_all(&HeaderName::Supported)
+            .map(|header| String::from_utf8_lossy(header.raw_value()).into_owned())
+            .collect();
+        assert!(
+            supported.iter().any(|value| value == "dph-eight"),
+            "custom field missing: {supported:?}"
+        );
+        let response = sipx_sip::build::ResponseBuilder::to_request(
+            &invite.request,
+            StatusCode::new(486).expect("valid"),
+            "Busy Here",
+        )
+        .expect("response")
+        .build();
+        handle
+            .respond(&invite.key, response)
+            .await
+            .expect("refuses");
+    });
+    let sent = sipx()
+        .args([
+            "dial",
+            &format!("sip:header@{address}"),
+            "--header",
+            "Supported: dph-eight",
+            "--timeout",
+            "5",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("dial runs");
+    peer.await.expect("peer finishes");
+    assert_eq!(sent.status.code(), Some(6));
+
+    let refused = sipx()
+        .args([
+            "dial",
+            "sip:header@127.0.0.1:9",
+            "--header",
+            "Via: SIP/2.0/UDP injected.invalid",
+            "--local",
+            "this-is-not-an-address",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("refusal runs");
+    assert_eq!(refused.status.code(), Some(2));
+    let complaint = String::from_utf8_lossy(&refused.stderr);
+    assert!(complaint.contains("stack-owned field Via"), "{complaint}");
+    assert!(
+        !complaint.contains("--local must"),
+        "header validation must win: {complaint}"
+    );
+}
+
+/// DPH-9: the real process reads a finite shell pipeline, waits for the answer event instead of a
+/// delay, sends DTMF, hangs up, and correlates every completion in causal sequence.
+#[tokio::test]
+async fn scenario_waits_for_answer_then_sends_dtmf_and_hangs_up_in_causal_order() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let _scenario = process_scenario().await;
+    let (mut answerer, address, _lines) = start_answerer(&["--duration", "2"]).await;
+    let mut child = sipx()
+        .args(["scenario", "--local", "127.0.0.1:0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("scenario starts");
+    let script = format!(
+        "{{\"id\":\"dial-1\",\"command\":\"dial\",\"uri\":\"sip:scenario@{address}\",\"timeout_ms\":5000}}\n\
+         {{\"id\":\"wait-1\",\"command\":\"wait_for\",\"event\":\"call.answered\",\"timeout_ms\":5000}}\n\
+         {{\"id\":\"digit-1\",\"command\":\"send_dtmf\",\"digits\":\"5\"}}\n\
+         {{\"id\":\"hangup-1\",\"command\":\"hangup\"}}\n\
+         {{\"id\":\"shutdown-1\",\"command\":\"shutdown\"}}\n"
+    );
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(script.as_bytes())
+        .await
+        .expect("script writes");
+    let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+        .await
+        .expect("scenario is bounded")
+        .expect("scenario exits");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .expect("UTF-8 NDJSON")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one JSON object per line"))
+        .collect();
+    assert!(lines.len() >= 8, "ready, events and completions: {lines:?}");
+    for (index, line) in lines.iter().enumerate() {
+        assert_eq!(line["contract"], "sipx.app.v1");
+        assert_eq!(
+            line["seq"].as_u64(),
+            Some(u64::try_from(index + 1).expect("small index"))
+        );
+    }
+    let position = |event: &str, id: Option<&str>| {
+        lines
+            .iter()
+            .position(|line| {
+                line["event"]["type"] == event && id.is_none_or(|id| line["event"]["id"] == id)
+            })
+            .unwrap_or_else(|| panic!("missing {event} {id:?}: {lines:?}"))
+    };
+    let answered = position("call.answered", None);
+    let waited = position("scenario.command.completed", Some("wait-1"));
+    let digit = position("scenario.command.completed", Some("digit-1"));
+    let ended = position("call.ended", None);
+    let hung_up = position("scenario.command.completed", Some("hangup-1"));
+    assert!(answered < waited && waited < digit && digit < ended && ended < hung_up);
+
+    answerer_exits_cleanly(&mut answerer).await;
 }
 
 /// Logging must never reach stdout, or one verbosity flag turns every JSON result into a parse

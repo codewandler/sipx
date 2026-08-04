@@ -60,6 +60,72 @@ CONTEXT_VERSION = re.compile(
 )
 RUST_VERSION = re.compile(r"\bRust\s+(?P<version>\d+\.\d+)\b", re.IGNORECASE)
 RFC_COUNT = re.compile(r"\*\*(?P<count>\d+) RFCs tracked\.\*\*")
+CARGO_INSTALL_VERSION = re.compile(
+    r"\bcargo\s+install\b[^\n]*--version\s+(?P<exact>=)?"
+    r"(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b",
+    re.IGNORECASE,
+)
+SIPX_DEPENDENCY_VERSION = re.compile(
+    r"^\s*sipx-[a-z0-9-]+\s*=.*?[\"'](?P<exact>=)?"
+    r"(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)[\"']",
+    re.IGNORECASE,
+)
+PUBLIC_RELEASE_HEADING = re.compile(
+    r"^## (?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?) — \d{4}-\d{2}-\d{2}$"
+)
+
+# These entry points jointly define whether somebody can adopt the current public beta
+# without first reading the repository's internal roadmap. Unlike a copied capability table, the
+# guard asks only for the release boundary and stability contract that must be present on each
+# public front door. Detailed capability truth remains in the fit and CLI references.
+ADOPTION_REQUIREMENTS = {
+    "README.md": (
+        ("published public-beta status", re.compile(r"current public-beta\s+release", re.I)),
+        ("pre-1.0 non-frozen policy", re.compile(r"Public APIs are not frozen", re.I)),
+        ("Supported migration policy", re.compile(r"Supported APIs receive migration", re.I)),
+        ("Experimental change policy", re.compile(r"Experimental APIs may change", re.I)),
+    ),
+    "website/docs/intro.md": (
+        ("published public-beta status", re.compile(r"current public-beta\s+release", re.I)),
+        ("pre-1.0 non-frozen policy", re.compile(r"Public APIs are not frozen", re.I)),
+    ),
+    "website/docs/whats-new.md": (
+        ("published beta heading", re.compile(r"first public beta is published", re.I)),
+        ("registry honesty", re.compile(r"published as exact crates\.io packages", re.I)),
+        ("Rust-crates-first adoption", re.compile(r"adoption surface leads with the modular Rust crates", re.I)),
+        ("intentional omissions", re.compile(r"release intentionally does not provide", re.I)),
+    ),
+    "website/docs/sdk/overview.md": (
+        ("implemented webhook binding", re.compile(r"\| Webhook \|.*\| Implemented \|", re.I)),
+        ("implemented session binding", re.compile(r"\| Session \|.*\| Implemented \|", re.I)),
+        ("absent embedded binding", re.compile(r"\| Embedded handler \|.*\| Not implemented \|", re.I)),
+    ),
+}
+
+# These were once truthful alpha statements and remained on current-main pages after the
+# corresponding paths shipped. Historical release notes are deliberately excluded.
+CURRENT_SURFACE_PAGES = (
+    "README.md",
+    "website/docs/intro.md",
+    "website/docs/getting-started.md",
+    "website/docs/guides/as-a-library.md",
+    "website/docs/guides/does-this-fit.md",
+    "website/docs/guides/integrate-existing-system.md",
+    "website/docs/guides/troubleshooting.md",
+    "website/docs/sdk/overview.md",
+    "website/docs/sdk/contract.md",
+)
+STALE_CURRENT_CLAIMS = (
+    re.compile(r"\bno ICE\b", re.I),
+    re.compile(r"\b(?:never|does not) opens? a microphone", re.I),
+    re.compile(r"\b(?:select|use)s? UDP or TCP only\b", re.I),
+    re.compile(r"\bbut not TLS\b", re.I),
+    re.compile(r"\bcomplete ICE path (?:is|and).*not available\b", re.I),
+    re.compile(r"\bcannot yet invoke a webhook\b", re.I),
+    re.compile(r"\bcallback bindings? (?:are|is) not implemented\b", re.I),
+    re.compile(r"\ball three binding adapters are unavailable\b", re.I),
+    re.compile(r"\bDTLS components cannot yet key\b", re.I),
+)
 
 AUDIO_CLAIMS = ROOT / "scripts" / "check-audio-claims.py"
 #: The codec sentence `check-audio-claims.py` prints when it passes. Parsed rather than
@@ -330,19 +396,54 @@ def public_fact_problems(text: str, source: str) -> list[str]:
     """Reject copied public facts that disagree with their canonical sources."""
     facts = canonical_facts()
     problems = []
+    historical_release = False
     for line_number, line in enumerate(text.splitlines(), start=1):
-        for match in TAGGED_VERSION.finditer(line):
-            if match.group("version") != facts.workspace_version:
-                problems.append(
-                    f"{source}:{line_number}: version {match.group(0)!r} differs from "
-                    f"workspace version {facts.workspace_version!r}"
-                )
-        for match in CONTEXT_VERSION.finditer(line):
-            if match.group("version") != facts.workspace_version:
-                problems.append(
-                    f"{source}:{line_number}: release version {match.group('version')!r} differs "
-                    f"from workspace version {facts.workspace_version!r}"
-                )
+        if source == "website/docs/whats-new.md":
+            release_heading = PUBLIC_RELEASE_HEADING.fullmatch(line)
+            if release_heading is not None:
+                historical_release = release_heading.group("version") != facts.workspace_version
+            elif line.startswith("## "):
+                historical_release = False
+
+        if not historical_release:
+            dependency = SIPX_DEPENDENCY_VERSION.search(line)
+            for match in TAGGED_VERSION.finditer(line):
+                if match.group("version") != facts.workspace_version:
+                    problems.append(
+                        f"{source}:{line_number}: version {match.group(0)!r} differs from "
+                        f"workspace version {facts.workspace_version!r}"
+                    )
+            if dependency is None:
+                for match in CONTEXT_VERSION.finditer(line):
+                    if match.group("version") != facts.workspace_version:
+                        problems.append(
+                            f"{source}:{line_number}: release version "
+                            f"{match.group('version')!r} differs from workspace version "
+                            f"{facts.workspace_version!r}"
+                        )
+            for match in CARGO_INSTALL_VERSION.finditer(line):
+                if match.group("version") != facts.workspace_version:
+                    problems.append(
+                        f"{source}:{line_number}: install version {match.group('version')!r} "
+                        f"differs from workspace version {facts.workspace_version!r}"
+                    )
+                elif match.group("exact") is None:
+                    problems.append(
+                        f"{source}:{line_number}: current release install must use an exact "
+                        "--version requirement"
+                    )
+            if dependency is not None:
+                if dependency.group("version") != facts.workspace_version:
+                    problems.append(
+                        f"{source}:{line_number}: dependency version "
+                        f"{dependency.group('version')!r} differs from workspace version "
+                        f"{facts.workspace_version!r}"
+                    )
+                elif dependency.group("exact") is None:
+                    problems.append(
+                        f"{source}:{line_number}: current sipx dependency must use an exact "
+                        "version requirement"
+                    )
         for match in RUST_VERSION.finditer(line):
             if match.group("version") != facts.msrv:
                 problems.append(
@@ -355,6 +456,25 @@ def public_fact_problems(text: str, source: str) -> list[str]:
                     f"{source}:{line_number}: RFC count {match.group('count')} differs from "
                     f"registry count {facts.rfc_count}"
                 )
+    return problems
+
+
+def public_adoption_problems(contents: dict[str, str]) -> list[str]:
+    """Hold the public beta entry points to their adoption and stability boundary."""
+    problems = []
+    for source, requirements in ADOPTION_REQUIREMENTS.items():
+        text = contents.get(source, "")
+        for label, pattern in requirements:
+            if not pattern.search(text):
+                problems.append(f"{source}: missing {label}")
+    for source in CURRENT_SURFACE_PAGES:
+        text = contents.get(source, "")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for pattern in STALE_CURRENT_CLAIMS:
+                if pattern.search(line):
+                    problems.append(
+                        f"{source}:{line_number}: stale current-main capability claim"
+                    )
     return problems
 
 
@@ -397,12 +517,15 @@ def process(update: bool) -> int:
     if regions == 0:
         failures.append("no generated regions found in public docs — the guard is not guarding")
 
+    public_contents = {}
     for page in public_files():
         text = page.read_text(encoding="utf-8")
         source = str(page.relative_to(ROOT))
+        public_contents[source] = text
         failures.extend(public_content_problems(text, source))
         if page.suffix == ".md":
             failures.extend(public_fact_problems(text, source))
+    failures.extend(public_adoption_problems(public_contents))
 
     for failure in failures:
         print(f"sync-website: {failure}", file=sys.stderr)

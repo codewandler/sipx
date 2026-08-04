@@ -150,8 +150,12 @@ pub enum Output {
         component: ComponentId,
         /// The socket to send it from.
         local: LocalBase,
+        /// How this side gathered the selected local candidate.
+        local_kind: CandidateType,
         /// The address to send it to.
         remote: SocketAddr,
+        /// How the peer described the selected remote candidate.
+        remote_kind: CandidateType,
     },
     /// ICE failed for a component. The call layer decides what that means.
     Failed {
@@ -1492,8 +1496,16 @@ impl Agent {
         }
 
         for (component, pair, local, remote, priority) in &chosen {
-            let Some(base) =
-                find_local(&self.local, *local).map(|candidate| candidate.gathered.base)
+            let Some(local_candidate) = find_local(&self.local, *local) else {
+                continue;
+            };
+            let base = local_candidate.gathered.base;
+            let local_kind = local_candidate.gathered.kind;
+            let Some(remote_kind) = self
+                .set
+                .pair(*pair)
+                .and_then(|candidate_pair| find_remote(&self.remote, candidate_pair.remote))
+                .map(|candidate| candidate.kind)
             else {
                 continue;
             };
@@ -1516,7 +1528,9 @@ impl Agent {
             out.push(Output::Selected {
                 component: *component,
                 local: base,
+                local_kind,
                 remote: *remote,
+                remote_kind,
             });
             // §8.1.2's pruning, for the agent that knows there will be no second nomination.
             // A controlled agent must not do it: §8.1.1 requires it to tolerate a peer that

@@ -7,6 +7,10 @@ Telephony audio: G.711 µ-law and A-law, PCM mixing, WAV I/O, and Opus behind th
 Sample-domain audio machinery for the rest of sipx: G.711 conversion, saturating PCM mixing, WAV
 reading and writing, and the optional stateful Opus encoder and decoder.
 
+Opus is off by default and crosses a native-library boundary. The deployment and advisory policy is
+documented in the public
+[library guide](https://codewandler.github.io/sipx/docs/guides/as-a-library#opus-packaging-policy).
+
 ## Stability
 
 The supported and experimental surfaces are maintained in the

@@ -281,6 +281,23 @@ fn ws_path() -> String {
     std::env::var("SIPX_INTEROP_WS_PATH").unwrap_or_else(|_| "/".to_owned())
 }
 
+/// Where the peer serves secure SIP WebSocket. Some profiles share the SIP TLS listener and some
+/// use a distinct HTTPS listener, so this is independent of both `secure_server` and `ws_server`.
+fn wss_server() -> std::net::SocketAddr {
+    let mut addr = secure_server();
+    if let Some(port) = std::env::var("SIPX_INTEROP_WSS_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+    {
+        addr.set_port(port);
+    }
+    addr
+}
+
+fn wss_path() -> String {
+    std::env::var("SIPX_INTEROP_WSS_PATH").unwrap_or_else(|_| "/".to_owned())
+}
+
 /// SIP over WebSocket against a real server's own WebSocket module.
 ///
 /// Note the address: some peers serve WebSocket on the SIP port — the reason the connection
@@ -298,5 +315,22 @@ async fn registers_against_a_real_server_over_websocket() {
         .await
         .expect("no timeout")
         .expect("the registrar accepts our credentials over a websocket");
+    assert!(lease.granted > Duration::ZERO);
+}
+
+/// Secure SIP WebSocket is its own peer path. Separate TLS and WebSocket successes cannot prove
+/// that an independent server accepts the HTTP upgrade after the verified TLS handshake.
+#[tokio::test]
+#[ignore = "needs a SIP server; see tests/interop/README.md"]
+async fn registers_against_a_real_server_over_secure_websocket() {
+    let target = Target::new(wss_server(), TransportKind::Wss)
+        .verifying("sipx.test")
+        .at_path(wss_path());
+    let mut ua = agent_to(target, Some(interop_anchors())).await;
+
+    let lease = tokio::time::timeout(Duration::from_secs(15), ua.register())
+        .await
+        .expect("no timeout")
+        .expect("the registrar accepts our credentials over a secure websocket");
     assert!(lease.granted > Duration::ZERO);
 }

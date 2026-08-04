@@ -1,23 +1,24 @@
 ---
-title: SDK overview
-description: Experimental application hosting — what sipx-host does now and which customer-code bindings are still unavailable.
+title: Application host overview
+description: Application hosting through webhooks and full-duplex sessions, plus the language-neutral contract's experimental boundary.
 ---
 
-# SDK overview
+# Application host overview
 
-:::caution Experimental
+:::caution Contract stability
 
-The application host and `sipx.app.v1` contract may change without a migration path. There is no
-supported language-neutral SDK or callback binding today.
+The Rust host surfaces are Supported under sipx's pre-1.0 policy: incompatible changes receive
+migration guidance, but APIs are not frozen. The `sipx.app.v1` wire contract remains Experimental
+and may change without a migration path. There is no packaged language-specific SDK today.
 
 :::
 
 ## What exists today
 
-`sipx-host` is a real process. Given a host configuration, it binds the first declared SIP
-listener, admits incoming invitations under that configuration, answers or refuses them according
-to the declared failure policy, and carries answered calls until the caller ends them. It also
-answers the out-of-dialog requests a call listener must handle.
+`sipx-host` is a real process. Given a host configuration, it binds a configured SIP listener and
+application-session listener, admits incoming invitations under that configuration, and serves each
+call through the selected application binding. It also answers the out-of-dialog requests a call
+listener must handle.
 
 The surrounding implementation includes:
 
@@ -25,29 +26,31 @@ The surrounding implementation includes:
 - the `sipx.app.v1` Rust types and JSON wire format in `sipx-app-protocol`;
 - a sans-I/O instruction interpreter;
 - a deterministic harness for contract events, instructions, timing, retries, and failure policy;
-- a host binary whose real SIP path is exercised by tests.
+- an HMAC-signed, bounded document-mode webhook client;
+- a bearer-authenticated, bounded full-duplex session server with call pinning and origination;
+- a host binary whose real SIP and application paths are exercised by tests.
 
-That is enough to prove that the host can run and answer a call. It is not yet enough for customer
-code to control that call.
+Webhook and session controllers can drive real calls. Both feed the same interpreter, so callback
+failure, replacement, and call effects have one implementation rather than separate meanings per
+transport.
 
-## What is unavailable
+## Binding status
 
-None of the customer-code bindings is implemented:
-
-| Intended mode | Boundary | Status |
+| Mode | Boundary | Status |
 |---|---|---|
-| Webhook | The host sends an event document to an HTTP endpoint and applies its returned program | Unavailable |
-| Session | A controller exchanges events and instructions over a full-duplex connection | Unavailable |
-| Embedded handler | The host runs a handler in-process | Unavailable |
+| Webhook | The host sends an event document to an HTTP endpoint and applies its returned program | Implemented |
+| Session | An authenticated controller exchanges events and instructions over a full-duplex connection and may originate calls when granted | Implemented |
+| Embedded handler | The host runs a handler in-process | Not implemented |
 
-The host accepts configuration that describes these modes because the configuration and failure
-semantics are implemented first. It treats the app as unreachable at runtime. The configured
-`on_unreachable` action therefore decides whether an incoming call is rejected, answered and held,
-or answered and then hung up. A successful host start does not prove that a configured callback is
-being invoked.
+Document mode permits one outstanding callback per call. A successful response replaces the
+pending instruction program. Session mode multiplexes calls, accepts replacement programs without
+request/response alternation, and pins each call to one live session for its lifetime. Queue and
+connection limits are finite; a dead or overloaded session applies each pinned call's configured
+`on_unreachable` policy.
 
-There is also no TypeScript package, no WebSocket session server, no webhook delivery client, and
-no embedded TypeScript engine in this repository today.
+The session listener accepts cleartext WebSocket on a loopback or protected private network; put a
+TLS terminator in front of it for a public network. There is no TypeScript package, subprocess
+binding, embedded runtime, or embedded TypeScript engine in this repository today.
 
 ## The intended model
 
@@ -62,15 +65,16 @@ The contract expresses call behavior as data:
 
 The normative contract is
 [`docs/specs/app-contract.md`](https://github.com/codewandler/sipx/blob/main/docs/specs/app-contract.md).
-The [contract tour](contract.md) describes its envelope and vocabulary while keeping the missing
-runtime boundary explicit.
+The [contract tour](contract.md) describes its envelope, vocabulary, implemented bindings, and
+remaining embedded-runtime boundary.
 
 ## What to use now
 
 Use the [CLI](../reference/cli.md) for shell automation and bounded call tasks. Use
-[`sipx-call`](../guides/as-a-library.md) when a Rust application needs to own call behavior. Do not
-build a deployment that depends on webhook, session, or embedded callbacks until those bindings
-exist and this page no longer labels them unavailable.
+[`sipx-call`](../guides/as-a-library.md) when a Rust application needs to own call behavior in
+process. Use webhook or session mode when a separately deployed controller can accept the
+Experimental wire contract. Do not plan around an embedded handler or packaged TypeScript SDK;
+neither exists.
 
 The host is not intended to become a proxy, registrar, routing engine, voicemail system, or
 configuration-driven exchange. Those are separate roles; see

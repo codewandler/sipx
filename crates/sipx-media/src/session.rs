@@ -576,6 +576,7 @@ pub struct MediaSession {
     /// its way to the application. What an [`Interrupt::OnDigit`] playback watches.
     keypresses: Arc<watch::Sender<u64>>,
     codec: Codec,
+    wire_payload_type: u8,
     local_addr: SocketAddr,
     samples_per_packet: usize,
     packet_duration: Duration,
@@ -1196,6 +1197,7 @@ impl MediaSession {
         let packet_duration = config.packet_duration;
         let clock_rate = config.clock_rate;
         let config_codec = config.codec;
+        let wire_payload_type = config.wire_payload_type();
         let rtcp_interval = config.rtcp_interval;
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(64);
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
@@ -1302,6 +1304,7 @@ impl MediaSession {
             outstanding: Arc::new(AtomicUsize::new(0)),
             keypresses: shared.keypresses,
             codec: config_codec,
+            wire_payload_type,
             local_addr,
             samples_per_packet,
             packet_duration,
@@ -1331,6 +1334,19 @@ impl MediaSession {
     #[must_use]
     pub fn runs_ice(&self) -> bool {
         self.ice.is_some()
+    }
+
+    /// The candidate path ICE actually selected for RTP.
+    ///
+    /// `Checking` is honest intermediate state: an ICE exchange was negotiated, but no nominated
+    /// pair has replaced the default destination yet. A terminal diagnostic can therefore report
+    /// what happened without inferring it from the policy that was requested.
+    #[must_use]
+    pub fn ice_path(&self) -> crate::ice::IcePath {
+        self.ice.as_ref().map_or(
+            crate::ice::IcePath::Disabled,
+            crate::ice::driver::Handle::path,
+        )
     }
 
     /// Rebuild codec and packet workers on this session's existing sockets.
@@ -1552,6 +1568,25 @@ impl MediaSession {
     #[must_use]
     pub fn codec(&self) -> Codec {
         self.codec
+    }
+
+    /// The payload type this negotiated stream puts on the wire.
+    ///
+    /// Static codecs usually return their assigned number. Dynamic codecs return the number
+    /// from the negotiated description, which need not be the number this endpoint prefers in
+    /// an offer.
+    #[must_use]
+    pub fn wire_payload_type(&self) -> u8 {
+        self.wire_payload_type
+    }
+
+    /// The RTP timestamp clock negotiated for this stream.
+    ///
+    /// This is intentionally the wire clock rather than an inferred playback rate. In
+    /// particular, RFC 7587 fixes Opus at 48 kHz on the RTP timeline.
+    #[must_use]
+    pub fn clock_rate(&self) -> u32 {
+        self.clock_rate
     }
 
     /// Hand received packets on still encoded, rather than decoding them to samples.

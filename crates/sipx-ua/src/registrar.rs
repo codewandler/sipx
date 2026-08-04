@@ -172,6 +172,8 @@ pub struct Registration {
     ///
     /// `None` registers without push, which is every client that holds a connection of its own.
     pub push: Option<sipx_sip::push::Device>,
+    /// Validated application-owned fields repeated on retries and refreshes.
+    pub headers: Vec<sipx_sip::Header>,
 }
 
 /// The proxies a registrar recorded as being on the path back to this contact (RFC 3327).
@@ -366,28 +368,32 @@ impl Registration {
     /// Note the two URIs that are easy to confuse: the Request-URI names the *registrar*, the
     /// `To` names the *user*. A REGISTER addressed to the user reaches nothing.
     pub fn request(&self) -> Result<Request, sipx_sip::error::BuildError> {
-        Ok(
-            RequestBuilder::new(Method::Register, self.registrar.clone())
-                .header(HeaderName::To, Bytes::from(self.aor.clone()))?
-                .header(
-                    HeaderName::From,
-                    Bytes::from(format!("{};tag={}", self.aor, new_cnonce())),
-                )?
-                .header(HeaderName::CallId, Bytes::from(self.call_id.clone()))?
-                .cseq(self.cseq, &Method::Register)?
-                .header(HeaderName::Contact, Bytes::from(self.contact()))?
-                // RFC 3327 §5.1: a UA "SHOULD include the option tag 'path' ... in all
-                // Supported header fields". Without it §5.2 tells intermediate proxies not to
-                // add themselves, so a UA that stays quiet here is unreachable from behind the
-                // very proxies the mechanism exists to traverse.
-                .header(HeaderName::Supported, Bytes::from(self.supported()))?
-                .header(
-                    HeaderName::Expires,
-                    Bytes::from(self.expires.as_secs().to_string()),
-                )?
-                .max_forwards(70)
-                .build(),
-        )
+        let mut builder = RequestBuilder::new(Method::Register, self.registrar.clone())
+            .header(HeaderName::To, Bytes::from(self.aor.clone()))?
+            .header(
+                HeaderName::From,
+                Bytes::from(format!("{};tag={}", self.aor, new_cnonce())),
+            )?
+            .header(HeaderName::CallId, Bytes::from(self.call_id.clone()))?
+            .cseq(self.cseq, &Method::Register)?
+            .header(HeaderName::Contact, Bytes::from(self.contact()))?
+            // RFC 3327 §5.1: a UA "SHOULD include the option tag 'path' ... in all
+            // Supported header fields". Without it §5.2 tells intermediate proxies not to
+            // add themselves, so a UA that stays quiet here is unreachable from behind the
+            // very proxies the mechanism exists to traverse.
+            .header(HeaderName::Supported, Bytes::from(self.supported()))?
+            .header(
+                HeaderName::Expires,
+                Bytes::from(self.expires.as_secs().to_string()),
+            )?
+            .max_forwards(70);
+        for header in &self.headers {
+            builder = builder.header(
+                header.name().clone(),
+                Bytes::copy_from_slice(header.raw_value()),
+            )?;
+        }
+        Ok(builder.build())
     }
 
     /// The `Contact` to register: the configured one, plus whatever the instance identity adds.
@@ -614,6 +620,7 @@ mod tests {
             reg_id: None,
             gruu: None,
             push: None,
+            headers: Vec::new(),
         }
     }
 
@@ -1214,6 +1221,29 @@ mod tests {
                 .as_ref(),
             b"2 REGISTER"
         );
+    }
+
+    #[test]
+    fn application_owned_fields_are_preserved_on_register_refreshes() {
+        let mut registration = registration();
+        registration.headers.push(
+            sipx_sip::Header::build(
+                HeaderName::Supported,
+                Bytes::from_static(b"deployment-feature"),
+            )
+            .expect("a validated header"),
+        );
+        let first = registration.request().expect("builds");
+        registration.advance();
+        let second = registration.request().expect("builds");
+        for request in [first, second] {
+            assert!(
+                request
+                    .headers
+                    .get_all(&HeaderName::Supported)
+                    .any(|header| header.raw_value() == b"deployment-feature")
+            );
+        }
     }
 
     /// The credentials are computed over the Request-URI of the request they authorize.

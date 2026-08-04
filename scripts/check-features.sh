@@ -97,6 +97,50 @@ for features in "${call_combinations[@]}"; do
     rm -f /tmp/sipx-features.$$
 done
 
+# Live sound and Opus are leaf-binary concerns. Each build has to compile on its own and together,
+# while the file-only diagnostic binary must not resolve a platform audio package merely because
+# the source for that optional driver exists. The Opus-only row is the package feature a downstream
+# diagnostic-phone user selects; omitting it would let the libraries build while the shipped binary
+# failed at their boundary.
+cli_combinations=(
+    ""
+    "opus"
+    "device-audio"
+    "device-audio,opus"
+)
+
+for features in "${cli_combinations[@]}"; do
+    label="sipx-cli ${features:-<none>}"
+    printf '  %-24s ' "$label"
+    if cargo check --quiet -p sipx-cli --all-targets --no-default-features \
+        ${features:+--features "$features"} 2>/tmp/sipx-features.$$; then
+        echo "ok"
+    else
+        echo "FAILED"
+        cat /tmp/sipx-features.$$
+        status=1
+    fi
+    rm -f /tmp/sipx-features.$$
+done
+
+printf '  %-24s ' "sipx-cli no device dep"
+if cargo tree --quiet -p sipx-cli --no-default-features --edges normal --prefix none \
+    2>/dev/null | grep -qE '^cpal '; then
+    echo "FAILED"
+    echo "    the file-only sipx binary still resolves a platform audio dependency"
+    status=1
+else
+    echo "ok"
+fi
+
+# A workspace build still consumes workspace-inherited dependency declarations. Cargo publishes a
+# normalized manifest with those declarations rewritten, and that boundary is where a feature can
+# disappear even though every in-tree combination above stays green. Adversarial fixtures hold the
+# checker itself; the proof then packages the current tree, resolves both feature graphs from those
+# archives, and builds and runs the packaged CLI with only Opus selected.
+python3 scripts/test-packaged-opus.py
+./scripts/check-packaged-opus.py --check
+
 # `sipx-media` reuses `sipx_transport::stun` for RFC 5389's header, and takes it with
 # `default-features = false` — twenty bytes of header layout must not drag rustls, a WebSocket
 # stack and a DNS client behind them into every crate that plays audio. Nothing about the build

@@ -26,7 +26,7 @@ pub mod timing;
 pub use agent::{Agent, Config, Input, Output, Timer};
 pub use candidate::{Gathered, LocalBase, LocalCandidate, RemoteCandidate};
 pub use checklist::{ChecklistState, PairState, Role};
-pub use driver::Local;
+pub use driver::{IcePath, Local};
 pub use gather::{Gathering, LocalDescription};
 pub use negotiate::{ICE_MISMATCH, Negotiation, negotiate};
 pub use timing::Timers;

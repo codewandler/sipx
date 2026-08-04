@@ -9,7 +9,6 @@
 
 pub mod certs;
 pub mod link;
-pub mod load;
 pub mod rfc4475;
 pub mod rfc5118;
 pub mod soak;

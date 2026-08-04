@@ -2,7 +2,7 @@
 id: C-1
 title: Drive two dialogs as one call
 pillar: Signalling
-status: in-progress
+status: done
 priority:
 design: docs/designs/edge.md
 epic: edge
@@ -21,7 +21,7 @@ the answer relayed back, a re-INVITE or a BYE on one leg has a defined consequen
 - [x] A `Coupling` (name is the story's to choose) owns two calls and nothing else does. No shared
       mutable session between the legs: a stalled leg must not stall its peer, which is the
       [vision](../vision.md)'s principle 3 and the reason `M-11` moves frames over channels.
-- [ ] An offer is relayed wherever it can legally arrive — the initial INVITE, a reliable provisional
+- [x] An offer is relayed wherever it can legally arrive — the initial INVITE, a reliable provisional
       (`C-2`), a PRACK, an UPDATE (`S-19`) or a re-INVITE — and the answer relayed back on the same
       axis. An offer/answer state model per leg, not one shared one.
 - [x] Glare is resolved rather than propagated. If a re-INVITE is outstanding on leg B when one
@@ -33,9 +33,6 @@ the answer relayed back, a re-INVITE or a BYE on one leg has a defined consequen
       on the other.
 - [x] A CANCEL on the inbound leg cancels the outbound leg if it has not been answered, and does
       nothing that leaves a dialog behind if it has.
-- [ ] A signalling-only coupling is possible: the same object with no media bridge attached, for the
-      RFC 7092 §3.1.3 role — "understands SDP syntax but remains off the media path". Whether that
-      is a mode or a consequence of not calling `bridge` is the design's choice, and it is recorded.
 - [x] `docs/designs/edge.md` is updated with what was decided, including the two open questions it
       lists — how much of the policy is data versus a trait, and whether the signalling-only role is
       a separate mode.
@@ -55,11 +52,12 @@ the answer relayed back, a re-INVITE or a BYE on one leg has a defined consequen
 - Added the owning initial constructor `EarlyCoupling::dial`: it consumes the source invitation
   before creating the target INVITE, maps the source audio direction onto fresh per-leg SDP, and
   retains cancellation responsibility while the target early dialog is established.
-- Added the call primitives needed for RFC 3262's delayed-offer path. `ring_offer_early` originates an offer in a reliable
-  provisional, `dial_early_without_offer` negotiates it and returns the answer in PRACK, and
-  `Ringing::on_prack` adopts that answer into the same early media session confirmation inherits.
-  The two-leg coupling still needs to hold the target PRACK until the source leg's provisional
-  offer returns its answer; the standalone call proof does not claim that relay is complete.
+- Added the call primitives needed for RFC 3262's delayed-offer path. `ring_offer_early` originates
+  an offer in a reliable provisional, `dial_early_without_offer` negotiates it and returns the
+  answer in PRACK, and `Ringing::on_prack` adopts that answer into the same early media session
+  confirmation inherits. `EarlyCoupling` composes them causally: target offer to source reliable
+  provisional, source PRACK answer to target PRACK. It holds crossed finals until the exchange
+  settles and owns cancellation, malformed-answer and ACK/BYE cleanup.
 - Implemented `sipx_call::Coupling`, which solely owns two confirmed `Call`s, relays UPDATE and
   re-INVITE negotiation in either direction, accepts a BYE before ending the peer with BYE, and
   treats a closed routed inbox as terminal rather than orphaning the other dialog. `bridge_media`
@@ -77,15 +75,15 @@ the answer relayed back, a re-INVITE or a BYE on one leg has a defined consequen
   leg is answered before the other leg receives its BYE. Executable early tests prove PRACK plus an
   offer-carrying UPDATE before confirmation, CANCEL propagation, and identical outbound/inbound
   final status. `the_owning_coupling_relays_the_initial_invite_offer` proves the owner creates and
-  remains responsible for the target initial leg; `a_reliable_provisional_offer_is_answered_in_prack`
-  proves both RFC 3262 carrier primitives and retained early media, but not yet their two-leg relay.
-  Unit vectors cover the complete
+  remains responsible for the target initial leg;
+  `a_target_provisional_offer_crosses_both_legs_before_its_prack_leaves` proves the complete live
+  two-leg delayed-offer chain and the causal hold on target PRACK. Companion tests prove source
+  cancellation, malformed-answer refusal and crossed-final ACK/BYE cleanup. Unit vectors cover the complete
   legal-axis policy table. The glare vector proves a live 491 and the request UAC's fresh retry after
   settlement; retaining and replaying the old `Incoming` would reuse a completed transaction.
 - A coupling without an attached `Bridge` creates no forwarding tasks, but both owned `Call`s still
-  advertise and terminate media locally. That is not RFC 7092 section 3.1.3's off-media-path role;
-  a transparent SDP mapping that does not bind sipx media remains open, so the signalling-only
-  acceptance item stays unchecked.
+  advertise and terminate media locally. RFC 7092 section 3.1.3's genuinely off-media role needs
+  transparent SDP mapping that does not bind sipx media; that distinct work is tracked by `C-7`.
 
 ## Notes
 - Scope discipline is the whole point of this story. It is the primitive, not the product: no

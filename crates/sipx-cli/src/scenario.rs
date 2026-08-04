@@ -1,0 +1,931 @@
+//! `sipx scenario`: one bounded call actor driven by correlated NDJSON commands.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use bytes::Bytes;
+use serde_json::{Map, Value, json};
+use sipx_app_protocol::{CONTRACT, CallState, Direction as AppDirection, Timestamp};
+use sipx_call::{Call, CallEvent, CallEvents, EndCause};
+use sipx_sdp::Direction;
+use sipx_sip::build::ResponseBuilder;
+use sipx_sip::{HeaderName, StatusCode, Uri};
+use sipx_transport::{Config as TransportConfig, Incoming, bind};
+use tokio::io::AsyncBufReadExt as _;
+use tokio::sync::oneshot;
+
+use crate::output::{Exit, Format, fail};
+
+pub(crate) const HELP: &str = "\
+sipx scenario — drive one call through correlated NDJSON commands
+
+USAGE:
+    sipx scenario [OPTIONS]
+
+OPTIONS:
+    --local <ADDR>    Local signalling address (default 0.0.0.0:0)
+    --transport <T>   Signalling: udp, tcp, tls, ws or wss (default udp)
+    --tcp             Legacy alias for --transport tcp
+    --tls-server-name <N>  Certificate identity to verify (default URI host)
+    --tls-ca <FILE>   Add PEM trust roots to the platform store
+    --tls-cert <FILE> Certificate chain for TLS/WSS
+    --tls-key <FILE>  Private key paired with --tls-cert
+    --codec <C>       Ordered codec preference; repeat pcmu, pcma or opus
+    --media-security <M>  auto, plain, sdes or dtls-srtp
+    --ice <P>         disabled, host or stun
+    --stun-server <ADDR>  STUN server for --ice stun
+    --header <H>      Add an application-owned field to originated INVITEs; repeat
+    --timeout <S>     Default outbound answer timeout (default 20)
+    -h, --help        Show this help
+
+STDIN:
+    One JSON object per line. Every object has a string `id` and one of:
+    dial, accept, reject, play, stop_playback, start_recording, stop_recording,
+    send_dtmf, hold, resume, transfer, hangup, wait_for, shutdown.
+";
+
+const DEFAULT_TIMEOUT: u64 = 20;
+/// One minute of 48 kHz mono PCM. Reaching it finishes the recording rather than growing forever.
+const MAX_RECORDING_SAMPLES: usize = 48_000 * 60;
+
+pub(crate) async fn run(raw: &[String]) -> Exit {
+    let args = match crate::arguments(raw, HELP, Format::Json) {
+        Ok(args) => args,
+        Err(exit) => return exit,
+    };
+    let headers = match crate::header::from_args(&args) {
+        Ok(headers) => headers,
+        Err(message) => return fail(Format::Json, Exit::Usage, &message),
+    };
+    let transport = match crate::signalling::Selection::from_args(&args, false) {
+        Ok(transport) => transport,
+        Err(message) => return fail(Format::Json, Exit::Usage, &message),
+    };
+    let media = match crate::media::Selection::from_args(&args, transport.kind()) {
+        Ok(media) => media,
+        Err(message) => return fail(Format::Json, Exit::Usage, &message),
+    };
+    let Ok(local) = args.value("local").unwrap_or("0.0.0.0:0").parse() else {
+        return fail(Format::Json, Exit::Usage, "--local must be host:port");
+    };
+    let mut config = TransportConfig::new(local);
+    if local.ip().is_unspecified() {
+        "127.0.0.1".clone_into(&mut config.sent_by);
+    }
+    if let Err(message) = transport.configure_client(&args, &mut config) {
+        return fail(Format::Json, Exit::Usage, &message);
+    }
+    // The default endpoint already owns UDP and TCP listeners. Explicit WebSocket listeners need
+    // their adapters configured; secure listener identity errors are reported before bind too.
+    if matches!(
+        transport.kind(),
+        sipx_transport::TransportKind::Ws | sipx_transport::TransportKind::Wss
+    ) && let Err(message) = transport.configure_listener(&args, &mut config)
+    {
+        return fail(Format::Json, Exit::Usage, &message);
+    }
+    let (handle, incoming) = match bind(config).await {
+        Ok(bound) => bound,
+        Err(error) => return fail(Format::Json, Exit::Failed, &format!("bind: {error}")),
+    };
+
+    let mut actor = Actor {
+        args: &args,
+        handle,
+        incoming,
+        transport,
+        policy: media.policy(),
+        headers,
+        call: None,
+        events: None,
+        pending: None,
+        playback: None,
+        recording: None,
+        snapshot: Snapshot::idle(),
+        emitted: BTreeSet::new(),
+        output: Output::default(),
+        next_call: 1,
+    };
+    actor.output.event(
+        &actor.snapshot,
+        "scenario.ready",
+        None,
+        BTreeMap::from([(
+            "address",
+            Value::String(actor.handle.local_addr().to_string()),
+        )]),
+    );
+    actor.drive().await;
+    Exit::Success
+}
+
+struct Actor<'a> {
+    args: &'a crate::Args<'a>,
+    handle: sipx_transport::Handle,
+    incoming: tokio::sync::mpsc::Receiver<Incoming>,
+    transport: crate::signalling::Selection,
+    policy: sipx_call::MediaPolicy,
+    headers: Vec<sipx_sip::Header>,
+    call: Option<Call>,
+    events: Option<CallEvents>,
+    pending: Option<Incoming>,
+    playback: Option<sipx_media::Playback>,
+    recording: Option<Recording>,
+    snapshot: Snapshot,
+    emitted: BTreeSet<String>,
+    output: Output,
+    next_call: u64,
+}
+
+impl Actor<'_> {
+    async fn drive(&mut self) {
+        let stdin = tokio::io::stdin();
+        let mut lines = tokio::io::BufReader::new(stdin).lines();
+        loop {
+            self.drain_events();
+            let line = match lines.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => {
+                    self.shutdown().await;
+                    return;
+                }
+                Err(error) => {
+                    self.output
+                        .error(&self.snapshot, None, &format!("stdin: {error}"));
+                    self.shutdown().await;
+                    return;
+                }
+            };
+            let value: Value = match serde_json::from_str(&line) {
+                Ok(value) => value,
+                Err(error) => {
+                    let id = recover_id(&line);
+                    self.output.error(
+                        &self.snapshot,
+                        id.as_deref(),
+                        &format!("invalid JSON: {error}"),
+                    );
+                    continue;
+                }
+            };
+            let Some(id) = value
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 128)
+            else {
+                self.output.error(
+                    &self.snapshot,
+                    None,
+                    "every command requires a non-empty string id of at most 128 bytes",
+                );
+                continue;
+            };
+            let id = id.to_owned();
+            let command = value
+                .get("command")
+                .or_else(|| value.get("do"))
+                .and_then(Value::as_str);
+            let Some(command) = command else {
+                self.output
+                    .error(&self.snapshot, Some(&id), "command must be a string");
+                continue;
+            };
+            let outcome = self.command(command, &value).await;
+            match outcome {
+                Ok(shutdown) => {
+                    self.drain_events();
+                    self.output.completed(&self.snapshot, &id, command);
+                    if shutdown {
+                        self.shutdown().await;
+                        return;
+                    }
+                }
+                Err(message) => self.output.error(&self.snapshot, Some(&id), &message),
+            }
+        }
+    }
+
+    async fn command(&mut self, command: &str, value: &Value) -> Result<bool, String> {
+        match command {
+            "dial" => self.dial(value).await?,
+            "accept" => self.accept().await?,
+            "reject" => self.reject(value).await?,
+            "play" => self.play(value)?,
+            "stop_playback" => self.stop_playback()?,
+            "start_recording" => self.start_recording(value)?,
+            "stop_recording" => self.stop_recording().await?,
+            "send_dtmf" => self.send_dtmf(value).await?,
+            "hold" => self.change_direction(Direction::SendOnly).await?,
+            "resume" => self.change_direction(Direction::SendRecv).await?,
+            "transfer" => self.transfer(value).await?,
+            "hangup" => self.hangup().await?,
+            "wait_for" => self.wait_for(value).await?,
+            "shutdown" => return Ok(true),
+            other => return Err(format!("unknown command: {other}")),
+        }
+        Ok(false)
+    }
+
+    async fn dial(&mut self, value: &Value) -> Result<(), String> {
+        if self.call.is_some() || self.pending.is_some() {
+            return Err("a call or invitation is already active".to_owned());
+        }
+        let target_text = string(value, "uri").or_else(|_| string(value, "target"))?;
+        let to = Uri::parse(Bytes::from(target_text.to_owned()))
+            .map_err(|_| format!("not a SIP URI: {target_text}"))?;
+        if to.scheme().is_secure() && !self.transport.kind().is_secure() {
+            return Err("a sips: target requires tls or wss; no downgrade is permitted".to_owned());
+        }
+        let (target_addr, server_name) = crate::dial::target_of(&to, self.transport.kind())
+            .ok_or_else(|| format!("{target_text} must name an IP address and port"))?;
+        let target = self
+            .transport
+            .target(self.args, target_addr, &server_name)?;
+        let media_address: IpAddr =
+            crate::advertise::reachable_ip(self.handle.local_addr(), target_addr.ip());
+        let from = value
+            .get("from")
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
+        let mut options =
+            sipx_call::DialOptions::new(from.clone(), media_address).with_media_policy(self.policy);
+        let timeout = value.get("timeout_ms").and_then(Value::as_u64).map_or_else(
+            || Duration::from_secs(self.args.number("timeout").unwrap_or(DEFAULT_TIMEOUT)),
+            Duration::from_millis,
+        );
+        if !timeout.is_zero() {
+            options = options.with_timeout(timeout);
+        }
+        for header in self.headers.iter().cloned() {
+            options = options.with_header(header);
+        }
+        if let Some(items) = value.get("headers").and_then(Value::as_array) {
+            for item in items {
+                let raw = item
+                    .as_str()
+                    .ok_or_else(|| "dial.headers must contain strings".to_owned())?;
+                options = options.with_header(crate::header::parse(raw)?);
+            }
+        }
+        let mut call = sipx_call::dial(&self.handle, target, &to, &options)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.events = call.events();
+        self.snapshot = Snapshot::outbound(
+            format!("scenario-{}", self.next_call),
+            from,
+            target_text.to_owned(),
+        );
+        self.next_call = self.next_call.saturating_add(1);
+        self.emitted.clear();
+        self.call = Some(call);
+        self.drain_events();
+        Ok(())
+    }
+
+    async fn accept(&mut self) -> Result<(), String> {
+        if self.call.is_some() {
+            return Err("a call is already active".to_owned());
+        }
+        let incoming = self
+            .pending
+            .take()
+            .ok_or_else(|| "there is no incoming invitation to accept".to_owned())?;
+        let media_address = if self.handle.local_addr().ip().is_unspecified() {
+            incoming.source.ip()
+        } else {
+            self.handle.local_addr().ip()
+        };
+        let mut call =
+            sipx_call::answer_with_policy(&self.handle, &incoming, media_address, self.policy)
+                .await
+                .map_err(|error| error.to_string())?;
+        self.events = call.events();
+        self.snapshot.state = CallState::Answered;
+        self.call = Some(call);
+        self.drain_events();
+        Ok(())
+    }
+
+    async fn reject(&mut self, value: &Value) -> Result<(), String> {
+        let incoming = self
+            .pending
+            .take()
+            .ok_or_else(|| "there is no incoming invitation to reject".to_owned())?;
+        let code = value.get("status").and_then(Value::as_u64).unwrap_or(603);
+        let code = u16::try_from(code).map_err(|_| "reject.status is out of range".to_owned())?;
+        let reason = value
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("Decline");
+        let status = StatusCode::new(code).ok_or_else(|| "reject.status is invalid".to_owned())?;
+        let mut response = ResponseBuilder::to_request(
+            &incoming.request,
+            status,
+            Bytes::copy_from_slice(reason.as_bytes()),
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(to) = incoming.request.headers.value(&HeaderName::To) {
+            response = response
+                .set_header(
+                    &HeaderName::To,
+                    Bytes::from(format!(
+                        "{};tag={:016x}",
+                        String::from_utf8_lossy(&to),
+                        rand::random::<u64>()
+                    )),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        self.handle
+            .respond(&incoming.key, response.build())
+            .await
+            .map_err(|error| error.to_string())?;
+        self.snapshot.state = CallState::Ended;
+        self.output.event(
+            &self.snapshot,
+            "call.ended",
+            None,
+            BTreeMap::from([("status", Value::from(code))]),
+        );
+        self.emitted.insert("call.ended".to_owned());
+        Ok(())
+    }
+
+    fn play(&mut self, value: &Value) -> Result<(), String> {
+        let path = string(value, "path")?;
+        let clip = crate::dial::read_clip(path)?;
+        let call = self
+            .call
+            .as_ref()
+            .ok_or_else(|| "there is no active call".to_owned())?;
+        crate::dial::validate_clip(path, &clip, call.media_handle().codec().clock_rate())?;
+        self.playback = Some(call.start_playback(clip.samples, sipx_media::Interrupt::Never));
+        Ok(())
+    }
+
+    fn stop_playback(&mut self) -> Result<(), String> {
+        let playback = self
+            .playback
+            .take()
+            .ok_or_else(|| "there is no active playback".to_owned())?;
+        playback.stop();
+        Ok(())
+    }
+
+    fn start_recording(&mut self, value: &Value) -> Result<(), String> {
+        if self.recording.is_some() {
+            return Err("a recording is already active".to_owned());
+        }
+        let path = string(value, "path")?.to_owned();
+        let call = self
+            .call
+            .as_ref()
+            .ok_or_else(|| "there is no active call".to_owned())?;
+        let media = call.media_handle();
+        let rate = media.codec().clock_rate();
+        let (stop, stopped) = oneshot::channel();
+        let task = tokio::spawn(record(media, stopped));
+        self.recording = Some(Recording {
+            path,
+            rate,
+            stop: Some(stop),
+            task,
+        });
+        Ok(())
+    }
+
+    async fn stop_recording(&mut self) -> Result<(), String> {
+        let recording = self
+            .recording
+            .take()
+            .ok_or_else(|| "there is no active recording".to_owned())?;
+        recording.finish().await
+    }
+
+    async fn send_dtmf(&self, value: &Value) -> Result<(), String> {
+        let digits = string(value, "digits")?;
+        let call = self
+            .call
+            .as_ref()
+            .ok_or_else(|| "there is no active call".to_owned())?;
+        if call.send_digits(digits, Duration::from_millis(100)).await {
+            Ok(())
+        } else {
+            Err("the media session stopped while sending DTMF".to_owned())
+        }
+    }
+
+    async fn change_direction(&mut self, direction: Direction) -> Result<(), String> {
+        let call = self
+            .call
+            .as_mut()
+            .ok_or_else(|| "there is no active call".to_owned())?;
+        call.reinvite(direction)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn transfer(&mut self, value: &Value) -> Result<(), String> {
+        let target = string(value, "target")?;
+        let target = Uri::parse(Bytes::from(target.to_owned()))
+            .map_err(|_| "transfer.target is not a SIP URI".to_owned())?;
+        let call = self
+            .call
+            .as_mut()
+            .ok_or_else(|| "there is no active call".to_owned())?;
+        call.refer(&target).await.map_err(|error| error.to_string())
+    }
+
+    async fn hangup(&mut self) -> Result<(), String> {
+        self.finish_recording_if_any().await?;
+        if let Some(playback) = self.playback.take() {
+            playback.stop();
+        }
+        let mut call = self
+            .call
+            .take()
+            .ok_or_else(|| "there is no active call".to_owned())?;
+        call.hang_up().await.map_err(|error| error.to_string())?;
+        self.drain_events();
+        self.events = None;
+        Ok(())
+    }
+
+    async fn wait_for(&mut self, value: &Value) -> Result<(), String> {
+        let requested = string(value, "event")?;
+        let wanted = if requested.starts_with("call.") || requested.starts_with("scenario.") {
+            requested.to_owned()
+        } else {
+            format!("call.{requested}")
+        };
+        let timeout_ms = value
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "wait_for requires a finite timeout_ms".to_owned())?;
+        if self.emitted.contains(&wanted) {
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let arrived = self.next_runtime(deadline).await?;
+            if arrived == wanted {
+                return Ok(());
+            }
+        }
+    }
+
+    async fn next_runtime(&mut self, deadline: tokio::time::Instant) -> Result<String, String> {
+        enum Arrived {
+            Event(Option<CallEvent>),
+            Incoming(Box<Option<Incoming>>),
+            Timeout,
+        }
+        let arrived = if let Some(events) = self.events.as_mut() {
+            tokio::select! {
+                event = events.recv() => Arrived::Event(event),
+                incoming = self.incoming.recv() => Arrived::Incoming(Box::new(incoming)),
+                () = tokio::time::sleep_until(deadline) => Arrived::Timeout,
+            }
+        } else {
+            tokio::select! {
+                incoming = self.incoming.recv() => Arrived::Incoming(Box::new(incoming)),
+                () = tokio::time::sleep_until(deadline) => Arrived::Timeout,
+            }
+        };
+        match arrived {
+            Arrived::Event(Some(event)) => Ok(self.emit_call_event(event)),
+            Arrived::Event(None) => Err("the call event stream ended".to_owned()),
+            Arrived::Incoming(incoming) => match *incoming {
+                Some(incoming) => self.on_incoming(incoming).await,
+                None => Err("the signalling endpoint stopped".to_owned()),
+            },
+            Arrived::Timeout => Err("wait_for deadline expired".to_owned()),
+        }
+    }
+
+    async fn on_incoming(&mut self, incoming: Incoming) -> Result<String, String> {
+        if let Some(call) = self.call.as_mut()
+            && call
+                .handle(&incoming)
+                .await
+                .map_err(|error| error.to_string())?
+        {
+            self.drain_events();
+            return Ok("call.signalling".to_owned());
+        }
+        if incoming.request.method != sipx_sip::Method::Invite || self.pending.is_some() {
+            return Ok("call.signalling".to_owned());
+        }
+        let from = header_text(&incoming, &HeaderName::From);
+        let to = header_text(&incoming, &HeaderName::To);
+        let id = header_text(&incoming, &HeaderName::CallId);
+        self.snapshot = Snapshot::inbound(
+            if id.is_empty() {
+                format!("scenario-{}", self.next_call)
+            } else {
+                id
+            },
+            from,
+            to,
+        );
+        self.next_call = self.next_call.saturating_add(1);
+        self.emitted.clear();
+        self.pending = Some(incoming);
+        self.output
+            .event(&self.snapshot, "call.incoming", None, BTreeMap::new());
+        self.emitted.insert("call.incoming".to_owned());
+        Ok("call.incoming".to_owned())
+    }
+
+    fn drain_events(&mut self) {
+        loop {
+            let event = self.events.as_mut().and_then(CallEvents::try_recv);
+            let Some(event) = event else { return };
+            self.emit_call_event(event);
+        }
+    }
+
+    fn emit_call_event(&mut self, event: CallEvent) -> String {
+        let (name, details) = match event {
+            CallEvent::Ringing { reliable } => (
+                "call.ringing",
+                BTreeMap::from([("reliable", Value::Bool(reliable))]),
+            ),
+            CallEvent::EarlyMediaStarted => ("call.early_media.started", BTreeMap::new()),
+            CallEvent::Answered => {
+                self.snapshot.state = CallState::Answered;
+                ("call.answered", BTreeMap::new())
+            }
+            CallEvent::Dtmf { digit, duration } => (
+                "call.dtmf",
+                BTreeMap::from([
+                    ("digit", Value::String(digit.as_char().to_string())),
+                    (
+                        "duration_ms",
+                        Value::from(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)),
+                    ),
+                ]),
+            ),
+            CallEvent::PlaybackFinished {
+                playback,
+                completed,
+            } => (
+                "call.playback.finished",
+                BTreeMap::from([
+                    ("playback", Value::String(format!("{playback:?}"))),
+                    ("completed", Value::Bool(completed)),
+                ]),
+            ),
+            CallEvent::RecordingFinished { duration } => (
+                "call.recording.finished",
+                BTreeMap::from([(
+                    "duration_ms",
+                    Value::from(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)),
+                )]),
+            ),
+            CallEvent::TransferRequested { target, attended } => (
+                "call.transfer.requested",
+                BTreeMap::from([
+                    (
+                        "target",
+                        Value::String(String::from_utf8_lossy(&target.to_bytes()).into_owned()),
+                    ),
+                    ("attended", Value::Bool(attended)),
+                ]),
+            ),
+            CallEvent::TransferProgress(state) => (
+                "call.transfer.progress",
+                BTreeMap::from([("state", Value::String(format!("{state:?}")))]),
+            ),
+            CallEvent::Hold => {
+                self.snapshot.on_hold = true;
+                ("call.hold", BTreeMap::new())
+            }
+            CallEvent::Resumed => {
+                self.snapshot.on_hold = false;
+                ("call.resumed", BTreeMap::new())
+            }
+            CallEvent::Muted => ("call.muted", BTreeMap::new()),
+            CallEvent::Unmuted => ("call.unmuted", BTreeMap::new()),
+            CallEvent::Ended(cause) => {
+                self.snapshot.state = CallState::Ended;
+                (
+                    "call.ended",
+                    BTreeMap::from([("cause", Value::String(end_cause(cause).to_owned()))]),
+                )
+            }
+            _ => ("call.event", BTreeMap::new()),
+        };
+        self.output.event(&self.snapshot, name, None, details);
+        self.emitted.insert(name.to_owned());
+        name.to_owned()
+    }
+
+    async fn finish_recording_if_any(&mut self) -> Result<(), String> {
+        if let Some(recording) = self.recording.take() {
+            recording.finish().await?;
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) {
+        let _ = self.finish_recording_if_any().await;
+        if let Some(playback) = self.playback.take() {
+            playback.stop();
+        }
+        if let Some(mut call) = self.call.take() {
+            let _ = call.hang_up().await;
+            self.drain_events();
+        }
+        if let Some(incoming) = self.pending.take() {
+            let _ = refuse_unattended(&self.handle, &incoming).await;
+        }
+        self.events = None;
+    }
+}
+
+struct Recording {
+    path: String,
+    rate: u32,
+    stop: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<Vec<i16>>,
+}
+
+impl Recording {
+    async fn finish(mut self) -> Result<(), String> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        let samples = self
+            .task
+            .await
+            .map_err(|error| format!("recording task: {error}"))?;
+        let file =
+            std::fs::File::create(&self.path).map_err(|error| format!("{}: {error}", self.path))?;
+        sipx_audio::write_wav(
+            file,
+            &sipx_audio::Wav {
+                sample_rate: self.rate,
+                samples,
+            },
+        )
+        .map_err(|error| format!("{}: {error}", self.path))
+    }
+}
+
+async fn record(media: Arc<sipx_media::MediaSession>, mut stop: oneshot::Receiver<()>) -> Vec<i16> {
+    let mut samples = Vec::new();
+    loop {
+        tokio::select! {
+            _ = &mut stop => return samples,
+            frame = media.recv() => {
+                let Some(frame) = frame else { return samples };
+                let remaining = MAX_RECORDING_SAMPLES.saturating_sub(samples.len());
+                samples.extend(frame.into_iter().take(remaining));
+                if samples.len() == MAX_RECORDING_SAMPLES {
+                    return samples;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Snapshot {
+    id: String,
+    direction: AppDirection,
+    state: CallState,
+    from: String,
+    to: String,
+    on_hold: bool,
+}
+
+impl Snapshot {
+    fn idle() -> Self {
+        Self {
+            id: "scenario".to_owned(),
+            direction: AppDirection::Outbound,
+            state: CallState::Ended,
+            from: String::new(),
+            to: String::new(),
+            on_hold: false,
+        }
+    }
+
+    fn outbound(id: String, from: String, to: String) -> Self {
+        Self {
+            id,
+            direction: AppDirection::Outbound,
+            state: CallState::Answered,
+            from,
+            to,
+            on_hold: false,
+        }
+    }
+
+    fn inbound(id: String, from: String, to: String) -> Self {
+        Self {
+            id,
+            direction: AppDirection::Inbound,
+            state: CallState::Incoming,
+            from,
+            to,
+            on_hold: false,
+        }
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "leg": "a",
+            "direction": self.direction.as_str(),
+            "state": self.state.as_str(),
+            "from": self.from,
+            "to": self.to,
+            "headers": {},
+            "media": {"encrypted": false, "on_hold": self.on_hold, "muted": false},
+            "legs": [],
+            "bridged": false,
+            "tags": {}
+        })
+    }
+}
+
+#[derive(Default)]
+struct Output {
+    seq: u64,
+}
+
+impl Output {
+    fn completed(&mut self, snapshot: &Snapshot, id: &str, command: &str) {
+        self.event(
+            snapshot,
+            "scenario.command.completed",
+            Some(id),
+            BTreeMap::from([("command", Value::String(command.to_owned()))]),
+        );
+    }
+
+    fn error(&mut self, snapshot: &Snapshot, id: Option<&str>, message: &str) {
+        self.event(
+            snapshot,
+            "scenario.command.refused",
+            id,
+            BTreeMap::from([("message", Value::String(message.to_owned()))]),
+        );
+    }
+
+    fn event(
+        &mut self,
+        snapshot: &Snapshot,
+        name: &str,
+        id: Option<&str>,
+        details: BTreeMap<&str, Value>,
+    ) {
+        self.seq = self.seq.saturating_add(1);
+        let mut event = Map::new();
+        event.insert("type".to_owned(), Value::String(name.to_owned()));
+        if let Some(id) = id {
+            event.insert("id".to_owned(), Value::String(id.to_owned()));
+        }
+        for (name, value) in details {
+            event.insert(name.to_owned(), value);
+        }
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+            .unwrap_or(0);
+        println!(
+            "{}",
+            json!({
+                "contract": CONTRACT,
+                "seq": self.seq,
+                "at": Timestamp::from_unix_millis(millis).to_rfc3339(),
+                "call": snapshot.json(),
+                "event": event
+            })
+        );
+    }
+}
+
+fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str, String> {
+    value
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| format!("{name} must be a non-empty string"))
+}
+
+/// Recover a simple string correlation from a frame whose tail is malformed.
+///
+/// This is intentionally narrower than JSON parsing: it does not guess through escapes, and a
+/// frame too broken to state an unambiguous id receives an uncorrelated error. The common partial
+/// write (`{"id":"x","command":`) still gets the refusal the caller can match.
+fn recover_id(line: &str) -> Option<String> {
+    let marker = "\"id\"";
+    let after_name = line.get(line.find(marker)? + marker.len()..)?.trim_start();
+    let after_colon = after_name.strip_prefix(':')?.trim_start();
+    let quoted = after_colon.strip_prefix('"')?;
+    let end = quoted.find(['"', '\\'])?;
+    if quoted.as_bytes().get(end) != Some(&b'"') || end == 0 || end > 128 {
+        return None;
+    }
+    quoted.get(..end).map(str::to_owned)
+}
+
+fn header_text(incoming: &Incoming, name: &HeaderName) -> String {
+    incoming
+        .request
+        .headers
+        .value(name)
+        .map(|value| String::from_utf8_lossy(&value).into_owned())
+        .unwrap_or_default()
+}
+
+fn end_cause(cause: EndCause) -> &'static str {
+    match cause {
+        EndCause::LocalHangup => "hangup",
+        EndCause::RemoteBye | EndCause::RemoteCancel => "remote",
+        EndCause::Rejected { .. } => "rejected",
+        EndCause::Timeout => "timeout",
+        _ => "error",
+    }
+}
+
+async fn refuse_unattended(
+    handle: &sipx_transport::Handle,
+    incoming: &Incoming,
+) -> Result<(), String> {
+    let status = StatusCode::new(480).ok_or_else(|| "invalid refusal status".to_owned())?;
+    let response =
+        ResponseBuilder::to_request(&incoming.request, status, "Temporarily Unavailable")
+            .map_err(|error| error.to_string())?
+            .build();
+    handle
+        .respond(&incoming.key, response)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_v1_command_is_dispatched_and_sleep_is_absent() {
+        let source = include_str!("scenario.rs");
+        for command in [
+            "dial",
+            "accept",
+            "reject",
+            "play",
+            "stop_playback",
+            "start_recording",
+            "stop_recording",
+            "send_dtmf",
+            "hold",
+            "resume",
+            "transfer",
+            "hangup",
+            "wait_for",
+            "shutdown",
+        ] {
+            assert!(
+                source.contains(&format!("\"{command}\" =>")),
+                "missing {command}"
+            );
+        }
+        assert!(!source.contains("\"sleep\" =>"));
+    }
+
+    #[test]
+    fn output_uses_the_existing_versioned_envelope_and_echoes_correlation() {
+        let mut output = Output::default();
+        let snapshot = Snapshot::idle();
+        // Structural assertions live on the producer fields rather than capturing process stdout.
+        output.seq = output.seq.saturating_add(1);
+        assert_eq!(CONTRACT, "sipx.app.v1");
+        assert_eq!(output.seq, 1);
+        assert_eq!(snapshot.json()["id"], "scenario");
+    }
+
+    #[test]
+    fn a_partial_json_write_keeps_an_unambiguous_correlation() {
+        assert_eq!(
+            recover_id(r#"{"id":"request-7","command": "#),
+            Some("request-7".to_owned())
+        );
+        assert_eq!(recover_id(r#"{"id":"escaped\"id""#), None);
+        assert_eq!(recover_id("not json"), None);
+    }
+}

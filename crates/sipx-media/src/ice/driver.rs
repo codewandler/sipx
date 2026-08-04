@@ -22,12 +22,12 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use sipx_sdp::ice::{Candidate, ComponentId, Credentials};
+use sipx_sdp::ice::{Candidate, CandidateType, ComponentId, Credentials};
 
 use super::agent::{Agent, Input, Output, Timer};
 use super::candidate::LocalBase;
@@ -40,6 +40,62 @@ use crate::counters::DiscardMeters;
 /// receive loop or a send loop for: a driver that has fallen this far behind will not catch up by
 /// being given more.
 const EVENTS: usize = 64;
+
+/// The candidate path an ICE-backed media session actually selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IcePath {
+    /// The session did not negotiate ICE.
+    Disabled,
+    /// ICE is running but has not selected an RTP pair yet.
+    Checking,
+    /// Both ends of the selected pair are host candidates.
+    Host,
+    /// At least one end of the selected pair is server-reflexive.
+    ServerReflexive,
+    /// At least one end is peer-reflexive, and neither is relayed or server-reflexive.
+    PeerReflexive,
+    /// At least one end of the selected pair is relayed.
+    Relayed,
+}
+
+impl IcePath {
+    const fn encoded(self) -> u8 {
+        match self {
+            Self::Disabled => 0,
+            Self::Checking => 1,
+            Self::Host => 2,
+            Self::ServerReflexive => 3,
+            Self::PeerReflexive => 4,
+            Self::Relayed => 5,
+        }
+    }
+
+    fn decoded(encoded: u8) -> Self {
+        match encoded {
+            2 => Self::Host,
+            3 => Self::ServerReflexive,
+            4 => Self::PeerReflexive,
+            5 => Self::Relayed,
+            _ => Self::Checking,
+        }
+    }
+
+    fn selected(local: CandidateType, remote: CandidateType) -> Self {
+        if matches!(local, CandidateType::Relayed) || matches!(remote, CandidateType::Relayed) {
+            Self::Relayed
+        } else if matches!(local, CandidateType::ServerReflexive)
+            || matches!(remote, CandidateType::ServerReflexive)
+        {
+            Self::ServerReflexive
+        } else if matches!(local, CandidateType::PeerReflexive)
+            || matches!(remote, CandidateType::PeerReflexive)
+        {
+            Self::PeerReflexive
+        } else {
+            Self::Host
+        }
+    }
+}
 
 /// What the media path tells the driver about.
 ///
@@ -112,9 +168,14 @@ pub(crate) struct Handle {
     /// them to be about. §11's keepalive is only ever on a selected pair, so before there is one
     /// the agent would discard every one of them.
     selected: Arc<AtomicBool>,
+    path: Arc<AtomicU8>,
 }
 
 impl Handle {
+    /// The RTP candidate path selected so far.
+    pub(crate) fn path(&self) -> IcePath {
+        IcePath::decoded(self.path.load(Ordering::Relaxed))
+    }
     /// Hand the driver a datagram. Non-blocking: a full queue drops it.
     ///
     /// Dropping is right and not merely convenient. A connectivity check is a retransmitted
@@ -200,6 +261,7 @@ struct Driver {
     events: mpsc::Receiver<Event>,
     destinations: Destinations,
     selected: Arc<AtomicBool>,
+    path: Arc<AtomicU8>,
     stop: Arc<crate::session::Stop>,
     discards: Arc<DiscardMeters>,
 }
@@ -215,6 +277,7 @@ pub(crate) fn spawn(
 ) -> Handle {
     let (events_tx, events_rx) = mpsc::channel(EVENTS);
     let selected = Arc::new(AtomicBool::new(false));
+    let path = Arc::new(AtomicU8::new(IcePath::Checking.encoded()));
     let driver = Driver {
         agent,
         sockets,
@@ -222,6 +285,7 @@ pub(crate) fn spawn(
         events: events_rx,
         destinations,
         selected: Arc::clone(&selected),
+        path: Arc::clone(&path),
         stop,
         discards: Arc::clone(&discards),
     };
@@ -229,6 +293,7 @@ pub(crate) fn spawn(
     Handle {
         events: events_tx,
         selected,
+        path,
         discards,
     }
 }
@@ -376,8 +441,13 @@ impl Driver {
                 Output::Selected {
                     component,
                     local,
+                    local_kind,
                     remote,
-                } => self.select(component, local, remote).await,
+                    remote_kind,
+                } => {
+                    self.select(component, local, local_kind, remote, remote_kind)
+                        .await;
+                }
                 Output::Failed { component } => {
                     // The call layer decides what a failed component means ([spec] §2). What the
                     // media path does is nothing: the stream keeps sending to the default
@@ -396,7 +466,14 @@ impl Driver {
     /// and it is also the moment symmetric RTP stops applying — the receive loop was told at
     /// startup not to learn, because on an ICE stream the address is ICE's to choose and an
     /// unauthenticated packet must not be able to move it.
-    async fn select(&mut self, component: ComponentId, local: LocalBase, remote: SocketAddr) {
+    async fn select(
+        &mut self,
+        component: ComponentId,
+        local: LocalBase,
+        local_kind: CandidateType,
+        remote: SocketAddr,
+        remote_kind: CandidateType,
+    ) {
         if component == ComponentId::RTP {
             if local != LocalBase(0) {
                 // RTP leaves the media socket, which is base 0 by construction. A selected pair
@@ -410,9 +487,39 @@ impl Driver {
             }
             *self.destinations.rtp.lock().await = remote;
             self.selected.store(true, Ordering::Relaxed);
+            self.path.store(
+                IcePath::selected(local_kind, remote_kind).encoded(),
+                Ordering::Relaxed,
+            );
         } else {
             *self.destinations.rtcp.lock().await = Some(remote);
         }
         tracing::debug!(component = component.get(), %remote, "ice selected a pair");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_reported_path_is_derived_from_the_selected_pair_not_the_requested_policy() {
+        assert_eq!(
+            IcePath::selected(CandidateType::Host, CandidateType::Host),
+            IcePath::Host
+        );
+        assert_eq!(
+            IcePath::selected(CandidateType::Host, CandidateType::ServerReflexive),
+            IcePath::ServerReflexive
+        );
+        assert_eq!(
+            IcePath::selected(CandidateType::PeerReflexive, CandidateType::Host),
+            IcePath::PeerReflexive
+        );
+        assert_eq!(
+            IcePath::selected(CandidateType::Host, CandidateType::Relayed),
+            IcePath::Relayed
+        );
     }
 }

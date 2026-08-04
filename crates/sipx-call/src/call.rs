@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use bytes::Bytes;
-use sipx_media::ice::{Gathering, LocalDescription, Negotiation as IceNegotiation};
+use sipx_media::ice::{LocalDescription, Negotiation as IceNegotiation};
 use sipx_media::{Codec, Interrupt, MediaPort, MediaSession, Playback};
 use sipx_sdp::ice::{ComponentId, Credentials as IceCredentials};
 use sipx_sdp::{Capabilities, Connection, Direction, SessionDescription};
@@ -27,6 +27,7 @@ use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
 use crate::event::{CallEvent, CallEvents, EndCause, EventSink};
 use crate::identity::OutboundIdentityPolicy;
+use crate::media_policy::{Codecs, IcePolicy, Keying, MediaPolicy, NegotiatedKeying};
 use crate::transfer::{
     Referral, Replaces, Transfer, TransferState, is_terminated, parse_sipfrag, sipfrag,
 };
@@ -177,11 +178,12 @@ impl Call {
         &self.media
     }
 
-    /// The media handle used by an owning two-call coupling.
+    /// A shared media handle for an owning actor that must move one operation into a bounded task.
     ///
-    /// Kept crate-private: applications operate through [`Self::media`], while the coupling needs
-    /// one handle per bridge worker without transferring the session out of the call that owns it.
-    pub(crate) fn media_handle(&self) -> Arc<MediaSession> {
+    /// Most applications should use [`Self::media`]. This form exists for interactive owners that
+    /// must keep accepting control commands while a recording receives frames; sharing the session
+    /// does not share or clone the `Call`'s signalling state.
+    pub fn media_handle(&self) -> Arc<MediaSession> {
         Arc::clone(&self.media)
     }
 
@@ -383,6 +385,21 @@ impl Call {
     #[must_use]
     pub fn is_encrypted(&self) -> bool {
         self.encrypted
+    }
+
+    /// The keying mechanism this established call actually negotiated.
+    ///
+    /// Unlike the initial [`Keying`] policy, the result contains no `Auto`: by confirmation the
+    /// compatibility choice has resolved to either plain RTP or SDES-SRTP.
+    #[must_use]
+    pub fn negotiated_keying(&self) -> NegotiatedKeying {
+        if !self.encrypted {
+            NegotiatedKeying::Plain
+        } else if self.keying == Keying::DtlsSrtp {
+            NegotiatedKeying::DtlsSrtp
+        } else {
+            NegotiatedKeying::Sdes
+        }
     }
 
     /// Whether the call has ended, from either side.
@@ -1991,138 +2008,6 @@ fn bye_request(dialog: &Dialog, cseq: u32, reason: &ReasonValue) -> Result<Reque
     Ok(add_routes(builder, &routes)?.build())
 }
 
-/// Which codecs a call offers and accepts, in preference order (`M-30`).
-///
-/// The default is the G.711 pair: it is mandatory-to-implement (RFC 3551 §4.5.14), needs no C
-/// library, and is what practically every endpoint accepts. Opus is better on a lossy network
-/// but links libopus, so it sits behind the `opus` feature and can never become the default by
-/// accident — selecting it is always a decision the application made.
-///
-/// Whichever set is chosen, G.711 stays in the offer alongside anything better: an endpoint
-/// that offered only Opus would fail to call most of the telephone network.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Codecs {
-    /// PCMU and PCMA, plus RFC 4733 DTMF.
-    #[default]
-    G711,
-    /// Opus (RFC 6716, carried per RFC 7587) first, then the G.711 pair, then DTMF.
-    ///
-    /// Order matters in an offer — it is how this side says what it would rather use. Answering
-    /// still honours the offerer's order (RFC 3264 §6.1), so a peer that puts G.711 first is
-    /// answered G.711 first.
-    #[cfg(feature = "opus")]
-    Opus,
-}
-
-impl Codecs {
-    /// What this side offers or answers with.
-    fn capabilities(self, address: IpAddr, audio_port: u16) -> Capabilities {
-        match self {
-            Self::G711 => Capabilities::g711(address, audio_port),
-            #[cfg(feature = "opus")]
-            Self::Opus => Capabilities::with_opus(address, audio_port),
-        }
-    }
-
-    /// Whether this set carries a codec, so negotiation never settles on one the application
-    /// did not select — an Opus offer answered from a G.711 set is answered G.711, not Opus.
-    /// Each arm lists what [`Self::capabilities`] actually offers, rather than the `Opus` arm
-    /// answering `true`. `true` is correct only for as long as every [`Codec`] variant happens to
-    /// be in `Capabilities::with_opus`; the day a codec is added to `sipx-media` that this set does
-    /// not offer, `true` would let negotiation settle on it and build a session for a codec the
-    /// answer never named. Listing them means a new variant is simply not carried until someone
-    /// says it is, which is the safe direction to fail in.
-    fn carries(self, codec: Codec) -> bool {
-        match self {
-            Self::G711 => matches!(codec, Codec::Pcmu | Codec::Pcma),
-            #[cfg(feature = "opus")]
-            Self::Opus => matches!(codec, Codec::Pcmu | Codec::Pcma | Codec::Opus),
-        }
-    }
-}
-
-/// Whether an initial call exchange uses ICE (`docs/specs/ice.md` §13.4).
-///
-/// Disabled is the default and preserves the historical symmetric-RTP path byte for byte. Host
-/// and STUN policies gather only after the media sockets have bound; a silent STUN server leaves
-/// the host candidates in place rather than failing the call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum IcePolicy {
-    /// Emit no ICE attributes and start no connectivity-check worker.
-    #[default]
-    Disabled,
-    /// Gather host candidates from the bound media sockets.
-    Host,
-    /// Gather host candidates and ask this STUN server for server-reflexive candidates.
-    Stun(SocketAddr),
-}
-
-/// How the initial audio stream is keyed.
-///
-/// The default preserves sipx's existing behaviour: SDES is offered only when the signalling
-/// transport protects the SDP, and a clear signalling path therefore carries plain RTP.
-/// DTLS-SRTP is always an explicit application choice because it has a different trust boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Keying {
-    /// SDES over protected signalling, or plain RTP when signalling is clear.
-    #[default]
-    Sdes,
-    /// DTLS-SRTP on the media port (RFC 5763 and RFC 5764).
-    DtlsSrtp,
-}
-
-/// The media choices shared by dialing and answering a call.
-///
-/// This is the call-layer boundary the diagnostic phone consumes. It deliberately contains
-/// policy, not a pre-built ICE agent: credentials, tiebreakers and sockets are fresh per call and
-/// remain owned by the media path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct MediaPolicy {
-    /// Which codecs are offered and accepted.
-    pub codecs: Codecs,
-    /// Whether and how the initial exchange gathers ICE candidates.
-    pub ice: IcePolicy,
-    /// Which media keying mechanism the application selected.
-    pub keying: Keying,
-}
-
-impl MediaPolicy {
-    /// Select a codec set while retaining the other media choices.
-    #[must_use]
-    pub const fn with_codecs(mut self, codecs: Codecs) -> Self {
-        self.codecs = codecs;
-        self
-    }
-
-    /// Select an ICE policy while retaining the other media choices.
-    #[must_use]
-    pub const fn with_ice(mut self, ice: IcePolicy) -> Self {
-        self.ice = ice;
-        self
-    }
-
-    /// Select the media keying mechanism while retaining the codec and ICE choices.
-    #[must_use]
-    pub const fn with_keying(mut self, keying: Keying) -> Self {
-        self.keying = keying;
-        self
-    }
-
-    /// Build fresh per-call gathering state when ICE was selected.
-    fn gathering(self, offerer: bool) -> Result<Option<Gathering>> {
-        if self.ice == IcePolicy::Disabled {
-            return Ok(None);
-        }
-        let credentials = IceCredentials::new(token(), format!("{}{}", token(), token()))
-            .ok_or_else(|| Error::Sdp("could not generate valid ICE credentials".to_owned()))?;
-        let mut gathering = Gathering::new(credentials, offerer);
-        if let IcePolicy::Stun(server) = self.ice {
-            gathering.stun_server = Some(server);
-        }
-        Ok(Some(gathering))
-    }
-}
-
 /// How a call is placed.
 #[derive(Debug, Clone)]
 pub struct DialOptions {
@@ -2156,6 +2041,13 @@ pub struct DialOptions {
     /// registration says outbound requests must traverse proxies. Without it, a call placed
     /// through a registration reaches a proxy holding no state for it.
     pub service_route: Vec<String>,
+    /// Application-supplied fields on the initial INVITE.
+    ///
+    /// Values have already passed [`sipx_sip::Header::build`]'s line-injection checks. The call
+    /// layer retains them in the options so authentication and session-timer retries send the
+    /// same request metadata as the first attempt. Applications remain responsible for refusing
+    /// stack-owned routing and dialog fields before constructing these values.
+    pub headers: Vec<sipx_sip::Header>,
     /// The media policy for this call.
     ///
     /// The default is G.711, no ICE. In particular, enabling a crate feature never changes what
@@ -2186,6 +2078,7 @@ impl DialOptions {
             timeout: None,
             session_expires: None,
             service_route: Vec::new(),
+            headers: Vec::new(),
             media: MediaPolicy::default(),
             credentials: None,
             identity: None,
@@ -2231,6 +2124,13 @@ impl DialOptions {
     #[must_use]
     pub fn with_service_route(mut self, hops: Vec<String>) -> Self {
         self.service_route = hops;
+        self
+    }
+
+    /// Add a validated application-owned field to every initial INVITE attempt.
+    #[must_use]
+    pub fn with_header(mut self, header: sipx_sip::Header) -> Self {
+        self.headers.push(header);
         self
     }
 
@@ -2298,10 +2198,19 @@ fn media_capabilities(
     }
     let capabilities = policy.codecs.capabilities(address, port);
     match policy.keying {
-        Keying::Sdes => Ok((
+        Keying::Auto => Ok((
             capabilities.with_srtp(secure_signalling),
             PendingKeying::Sdes,
         )),
+        Keying::Plain => Ok((capabilities, PendingKeying::Sdes)),
+        Keying::Sdes => {
+            if !secure_signalling {
+                return Err(Error::Sdp(
+                    "SDES-SRTP requires protected signalling".to_owned(),
+                ));
+            }
+            Ok((capabilities.with_srtp(true), PendingKeying::Sdes))
+        }
         Keying::DtlsSrtp => {
             #[cfg(feature = "dtls")]
             {
@@ -2514,6 +2423,8 @@ struct Invitation<'a> {
     identity: &'a Identity,
     /// The pre-loaded route set, outermost first (RFC 3608 §6.1).
     service_route: &'a [String],
+    /// Validated application-owned fields, preserved across retries.
+    headers: &'a [sipx_sip::Header],
 }
 
 fn build_invite(
@@ -2529,6 +2440,7 @@ fn build_invite(
         session_expires,
         identity,
         service_route,
+        headers,
     } = invitation;
     let Identity {
         call_id,
@@ -2597,6 +2509,12 @@ fn build_invite(
                 HeaderName::MinSe,
                 Bytes::from(session::ABSOLUTE_MIN_INTERVAL.as_secs().to_string()),
             )?;
+    }
+    for header in headers {
+        builder = builder.header(
+            header.name().clone(),
+            Bytes::copy_from_slice(header.raw_value()),
+        )?;
     }
     // Pre-loaded Route, before the request goes anywhere. RFC 3608 §6.1 has the service route
     // used "as a preloaded Route header field in outgoing initial requests", and §6.1 requires
@@ -2826,6 +2744,7 @@ async fn open_invitation(
             session_expires: options.session_expires,
             identity,
             service_route: &options.service_route,
+            headers: &options.headers,
         },
     )?;
     if let Some(authorization) = authorization {
@@ -2866,6 +2785,7 @@ fn open_offerless_invitation(
             session_expires: options.session_expires,
             identity,
             service_route: &options.service_route,
+            headers: &options.headers,
         },
     )?;
     if let Some(identity) = &options.identity {
@@ -3338,6 +3258,7 @@ pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAdd
         &token(),
         None,
         MediaPolicy::default(),
+        &[],
     )
     .await
 }
@@ -3372,7 +3293,36 @@ pub async fn answer_with_policy(
     media_address: IpAddr,
     policy: MediaPolicy,
 ) -> Result<Call> {
-    answer_tagged(endpoint, incoming, media_address, &token(), None, policy).await
+    answer_tagged(
+        endpoint,
+        incoming,
+        media_address,
+        &token(),
+        None,
+        policy,
+        &[],
+    )
+    .await
+}
+
+/// Answer using one coherent media policy and validated application-owned response fields.
+pub async fn answer_with_policy_and_headers(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    policy: MediaPolicy,
+    headers: &[sipx_sip::Header],
+) -> Result<Call> {
+    answer_tagged(
+        endpoint,
+        incoming,
+        media_address,
+        &token(),
+        None,
+        policy,
+        headers,
+    )
+    .await
 }
 
 /// The same, with the `To` tag chosen by the caller rather than freshly minted.
@@ -3390,6 +3340,7 @@ pub(crate) async fn answer_tagged(
     tag: &str,
     claim: Option<Claim<'_>>,
     policy: MediaPolicy,
+    headers: &[sipx_sip::Header],
 ) -> Result<Call> {
     // Ahead of the claim, deliberately: an offer that cannot be read fails here with nothing
     // sent, and an invitation that was never taken is one a CANCEL can still end.
@@ -3405,6 +3356,7 @@ pub(crate) async fn answer_tagged(
         None,
         claim,
         policy,
+        headers,
     )
     .await
 }
@@ -3466,6 +3418,10 @@ pub struct Dialing {
     seen: sipx_sip::rel::Sequence,
     /// `None` only after [`Self::answered`] has handed the port to the [`Call`].
     media: Option<EarlyMedia>,
+    /// A delayed offer prepared for the target leg but not `PRACKed` until the source answers it.
+    coupled_prack: Option<CoupledPrack>,
+    /// A final response that crossed the held PRACK; confirmed only after that PRACK leaves.
+    coupled_final: Option<Box<Response>>,
     /// The ICE agent gathered for the same port, retained until an answer supplies its peer half.
     ice: Option<LocalDescription>,
     /// What the INVITE offered, kept because an SRTP answer has to be paired with the offer it
@@ -3517,10 +3473,19 @@ enum Arrived {
 pub(crate) enum CouplingDialEvent {
     /// A provisional was consumed and any required PRACK was sent.
     Progress,
+    /// A reliable provisional carried an offer whose PRACK is held for the source leg's answer.
+    ReliableOffer(Direction),
     /// The outbound invitation confirmed.
     Answered(Box<Call>),
     /// One routed in-dialog request arrived, or that route closed.
     Incoming(Box<Option<Incoming>>),
+}
+
+#[derive(Debug)]
+struct CoupledPrack {
+    response: Box<Response>,
+    rseq: u32,
+    answer: SessionDescription,
 }
 
 /// Place a call and get the early dialog, rather than waiting for the call itself.
@@ -3557,6 +3522,54 @@ pub async fn dial_early(
     to: &Uri,
     options: &DialOptions,
 ) -> Result<Dialing> {
+    let mut dialing = begin_dial_early(endpoint, target, to, options).await?;
+    dialing.reach_early_dialog().await?;
+    Ok(dialing)
+}
+
+/// Place a call until an early dialog exists or `cancelled` resolves.
+///
+/// This is the cancellation-safe early-dialog counterpart of [`dial_until`]. If cancellation
+/// wins after the INVITE has left, the invitation is withdrawn before this returns, including
+/// the ACK-then-BYE cleanup when a successful final response crossed the cancellation. A caller
+/// that continues waiting for confirmation can use [`Dialing::answered_until`] with the same
+/// cancellation signal.
+///
+/// # Errors
+///
+/// The same setup and early-dialog errors as [`dial_early`]. Local cancellation returns
+/// [`Error::Cancelled`] after the outstanding invitation has been cleaned up.
+pub async fn dial_early_until<F>(
+    endpoint: &Handle,
+    target: Target,
+    to: &Uri,
+    options: &DialOptions,
+    cancelled: F,
+) -> Result<Dialing>
+where
+    F: Future<Output = ()> + Send,
+{
+    let mut dialing = begin_dial_early(endpoint, target, to, options).await?;
+    tokio::pin!(cancelled);
+    tokio::select! {
+        biased;
+        () = cancelled.as_mut() => {
+            dialing.give_up().await;
+            Err(Error::Cancelled(Duration::ZERO))
+        }
+        result = dialing.reach_early_dialog() => {
+            result?;
+            Ok(dialing)
+        }
+    }
+}
+
+async fn begin_dial_early(
+    endpoint: &Handle,
+    target: Target,
+    to: &Uri,
+    options: &DialOptions,
+) -> Result<Dialing> {
     if options.media.keying == Keying::DtlsSrtp {
         return Err(Error::DtlsEarlyMedia);
     }
@@ -3565,7 +3578,7 @@ pub async fn dial_early(
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
 
     let (events, events_rx) = EventSink::new();
-    let mut dialing = Dialing {
+    Ok(Dialing {
         endpoint: endpoint.clone(),
         in_dialog: target.clone(),
         invite,
@@ -3575,6 +3588,8 @@ pub async fn dial_early(
         dialog: None,
         seen: sipx_sip::rel::Sequence::default(),
         media: Some(EarlyMedia::Offered(port)),
+        coupled_prack: None,
+        coupled_final: None,
         ice,
         capabilities: Some(capabilities),
         // RFC 3264: the INVITE carried our offer, so an exchange is open until the far end
@@ -3591,9 +3606,7 @@ pub async fn dial_early(
         answered_already: None,
         events: Some(events),
         events_rx: Some(events_rx),
-    };
-    dialing.reach_early_dialog().await?;
-    Ok(dialing)
+    })
 }
 
 /// Place an offerless INVITE and answer an offer from a reliable provisional in PRACK.
@@ -3631,6 +3644,8 @@ pub async fn dial_early_without_offer(
         dialog: None,
         seen: sipx_sip::rel::Sequence::default(),
         media: Some(EarlyMedia::WaitingForOffer),
+        coupled_prack: None,
+        coupled_final: None,
         ice: None,
         capabilities: None,
         negotiation: update::Negotiation::idle(),
@@ -3648,6 +3663,50 @@ pub async fn dial_early_without_offer(
     };
     dialing.reach_early_dialog().await?;
     Ok(dialing)
+}
+
+pub(crate) async fn dial_early_without_offer_for_coupling(
+    endpoint: &Handle,
+    target: Target,
+    to: &Uri,
+    options: &DialOptions,
+) -> Result<(Dialing, Option<Direction>)> {
+    if options.media.keying == Keying::DtlsSrtp {
+        return Err(Error::DtlsEarlyMedia);
+    }
+    let identity = Identity::fresh();
+    let (via, invite) = open_offerless_invitation(endpoint, &target, to, options, &identity)?;
+    let responses = endpoint.send(invite.clone(), target.clone()).await?;
+    let (events, events_rx) = EventSink::new();
+    let mut dialing = Dialing {
+        endpoint: endpoint.clone(),
+        in_dialog: target.clone(),
+        invite,
+        via,
+        target,
+        responses: Some(responses),
+        dialog: None,
+        seen: sipx_sip::rel::Sequence::default(),
+        media: Some(EarlyMedia::WaitingForOffer),
+        coupled_prack: None,
+        coupled_final: None,
+        ice: None,
+        capabilities: None,
+        negotiation: update::Negotiation::idle(),
+        peer_allows_update: false,
+        hold: Direction::SendRecv,
+        ringing: None,
+        provisional: false,
+        deadline: options
+            .timeout
+            .map(|limit| tokio::time::Instant::now() + limit),
+        options: options.clone(),
+        answered_already: None,
+        events: Some(events),
+        events_rx: Some(events_rx),
+    };
+    let direction = dialing.reach_early_dialog_for_coupling().await?;
+    Ok((dialing, direction))
 }
 
 impl Dialing {
@@ -3806,20 +3865,41 @@ impl Dialing {
         if let Some(call) = self.answered_already.take() {
             return Ok(CouplingDialEvent::Answered(call));
         }
+        if self.coupled_prack.is_none()
+            && let Some(response) = self.coupled_final.take()
+        {
+            return self
+                .confirm(*response)
+                .await
+                .map(Box::new)
+                .map(CouplingDialEvent::Answered);
+        }
         tokio::select! {
             request = incoming.recv() => Ok(CouplingDialEvent::Incoming(Box::new(request))),
             arrived = self.next_response() => match arrived {
                 Arrived::Provisional(response) => {
+                    if self.is_coupled_offer_candidate(&response) {
+                        return match self.stage_coupled_offer(*response).await {
+                            Ok(direction) => Ok(CouplingDialEvent::ReliableOffer(direction)),
+                            Err(error) => Err(self.abandon(error).await),
+                        };
+                    }
                     if let Err(error) = self.observe(&response).await {
                         return Err(self.abandon(error).await);
                     }
                     Ok(CouplingDialEvent::Progress)
                 }
-                Arrived::Final(response) => self
-                    .confirm(*response)
-                    .await
-                    .map(Box::new)
-                    .map(CouplingDialEvent::Answered),
+                Arrived::Final(response) => {
+                    if self.coupled_prack.is_some() {
+                        self.coupled_final = Some(response);
+                        Ok(CouplingDialEvent::Progress)
+                    } else {
+                        self.confirm(*response)
+                            .await
+                            .map(Box::new)
+                            .map(CouplingDialEvent::Answered)
+                    }
+                },
                 Arrived::GaveUp => {
                     self.give_up().await;
                     Err(Error::Cancelled(
@@ -3829,6 +3909,14 @@ impl Dialing {
                 Arrived::Gone => Err(Error::NoResponse),
             }
         }
+    }
+
+    pub(crate) async fn complete_coupled_prack(&mut self) -> Result<()> {
+        let Some(pending) = self.coupled_prack.take() else {
+            return Err(Error::NoDialog);
+        };
+        self.acknowledge(&pending.response, pending.rseq, Some(pending.answer))
+            .await
     }
 
     /// Wait for the invitation to be answered, and take the call it becomes.
@@ -3851,11 +3939,47 @@ impl Dialing {
     /// 3261 §9.1) rather than waiting for a 2xx to fail on, because a far end that answered no
     /// offer of ours may never send one.
     pub async fn answered(mut self) -> Result<Call> {
+        self.drive_answered(None).await
+    }
+
+    /// Wait for confirmation until `cancelled` resolves.
+    ///
+    /// Cancellation withdraws the owned invitation before returning, including ACK-then-BYE
+    /// cleanup for a successful final response already in flight. This closes the ownership gap
+    /// between [`dial_early_until`] returning an early handle and the final answer arriving.
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`Self::answered`]. Local cancellation returns [`Error::Cancelled`]
+    /// after cleanup completes.
+    pub async fn answered_until<F>(mut self, cancelled: F) -> Result<Call>
+    where
+        F: Future<Output = ()> + Send,
+    {
+        tokio::pin!(cancelled);
+        let cancelled: Pin<&mut (dyn Future<Output = ()> + Send)> = cancelled.as_mut();
+        self.drive_answered(Some(cancelled)).await
+    }
+
+    async fn drive_answered(&mut self, mut cancelled: Option<Cancelled<'_>>) -> Result<Call> {
         if let Some(call) = self.answered_already.take() {
             return Ok(*call);
         }
         loop {
-            match self.next_response().await {
+            let arrived = match cancelled.as_mut() {
+                None => self.next_response().await,
+                Some(cancelled) => {
+                    tokio::select! {
+                        biased;
+                        () = cancelled.as_mut() => {
+                            self.give_up().await;
+                            return Err(Error::Cancelled(Duration::ZERO));
+                        }
+                        arrived = self.next_response() => arrived,
+                    }
+                }
+            };
+            match arrived {
                 Arrived::Provisional(response) => {
                     if let Err(error) = self.observe(&response).await {
                         return Err(self.abandon(error).await);
@@ -3936,6 +4060,39 @@ impl Dialing {
         }
     }
 
+    async fn reach_early_dialog_for_coupling(&mut self) -> Result<Option<Direction>> {
+        loop {
+            match self.next_response().await {
+                Arrived::Provisional(response) => {
+                    if self.is_coupled_offer_candidate(&response) {
+                        return match self.stage_coupled_offer(*response).await {
+                            Ok(direction) => Ok(Some(direction)),
+                            Err(error) => Err(self.abandon(error).await),
+                        };
+                    }
+                    if let Err(error) = self.observe(&response).await {
+                        return Err(self.abandon(error).await);
+                    }
+                    if self.dialog.is_some() {
+                        return Ok(None);
+                    }
+                }
+                Arrived::Final(response) => {
+                    let call = self.confirm(*response).await?;
+                    self.answered_already = Some(Box::new(call));
+                    return Ok(None);
+                }
+                Arrived::GaveUp => {
+                    self.give_up().await;
+                    return Err(Error::Cancelled(
+                        self.options.timeout.unwrap_or(Duration::ZERO),
+                    ));
+                }
+                Arrived::Gone => return Err(Error::NoResponse),
+            }
+        }
+    }
+
     /// One response from the INVITE transaction, bounded by the invitation's own deadline.
     async fn next_response(&mut self) -> Arrived {
         let deadline = self.deadline;
@@ -3973,45 +4130,10 @@ impl Dialing {
     /// do: everything else here is either optional (a dialog it did not establish, an `Allow` it
     /// did not carry) or recoverable (a PRACK that did not get through).
     async fn observe(&mut self, response: &Response) -> Result<()> {
-        /// A bare `100 Trying` only acknowledges that the request arrived (RFC 3261 §17.2.1); it
-        /// is not the far end's phone ringing, and 100rel does not apply to it (RFC 3262 §3).
-        const TRYING: u16 = 100;
-
-        self.provisional = true;
-        let reliable = crate::rel::reliable_sequence(response);
-        if response.status.code() > TRYING && self.ringing.is_none() {
-            let is_reliable = reliable.is_some();
-            self.ringing = Some(is_reliable);
-            if let Some(events) = self.events.as_ref() {
-                events.emit(CallEvent::Ringing {
-                    reliable: is_reliable,
-                });
-            }
-        }
-
-        if self.dialog.is_none() {
-            if let Some(dialog) = Dialog::from_response(&self.invite, response) {
-                self.in_dialog = in_dialog_target(&dialog, self.target.clone());
-                self.dialog = Some(dialog);
-            }
-        } else if !self.belongs(response) {
-            // A provisional bearing a different `To` tag is a *different* early dialog — the
-            // far end forked, and two branches are ringing. This handle names one of them, and
-            // adopting the other's description or acknowledging its `RSeq` against this one's
-            // sequence space would mix them. Ignored rather than merged; giving an application
-            // a handle per branch is `C-2`'s to design, and nothing here forecloses it.
-            //
-            // `Ok` and not an error: another branch's description is not this invitation's
-            // problem, and ending this one over it would be refusing a call on the strength of a
-            // response addressed to somebody else.
+        if !self.observe_metadata(response) {
             return Ok(());
         }
-
-        if update::peer_allows(&response.headers) {
-            // §4 is a statement of capability, and a capability does not lapse because a later
-            // response omitted the header.
-            self.peer_allows_update = true;
-        }
+        let reliable = crate::rel::reliable_sequence(response);
 
         if let Some(rseq) = reliable {
             // RFC 3262 §5: an answer may only travel in a reliable provisional, so this is the
@@ -4045,6 +4167,69 @@ impl Dialing {
             adopted?;
         }
         Ok(())
+    }
+
+    fn is_coupled_offer_candidate(&self, response: &Response) -> bool {
+        matches!(self.media, Some(EarlyMedia::WaitingForOffer))
+            && !response.body().is_empty()
+            && crate::rel::reliable_sequence(response).is_some()
+    }
+
+    async fn stage_coupled_offer(&mut self, response: Response) -> Result<Direction> {
+        if !self.observe_metadata(&response) {
+            return Err(Error::NoDialog);
+        }
+        let rseq = crate::rel::reliable_sequence(&response).ok_or(Error::NoDialog)?;
+        let offer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
+            .map_err(|error| Error::Sdp(error.to_string()))?;
+        let direction = offer
+            .media
+            .iter()
+            .find(|media| media.media == "audio" && !media.is_rejected())
+            .map(sipx_sdp::MediaDescription::direction)
+            .ok_or_else(|| {
+                Error::Sdp("the reliable provisional carried no usable audio offer".to_owned())
+            })?;
+        let answer = self.adopt_early_offer(&response).await?;
+        if let Some(dialog) = self.dialog.as_mut() {
+            dialog.refresh_target(&response.headers);
+        }
+        self.coupled_prack = Some(CoupledPrack {
+            response: Box::new(response),
+            rseq,
+            answer,
+        });
+        Ok(direction)
+    }
+
+    fn observe_metadata(&mut self, response: &Response) -> bool {
+        const TRYING: u16 = 100;
+
+        self.provisional = true;
+        let reliable = crate::rel::reliable_sequence(response);
+        if response.status.code() > TRYING && self.ringing.is_none() {
+            let is_reliable = reliable.is_some();
+            self.ringing = Some(is_reliable);
+            if let Some(events) = self.events.as_ref() {
+                events.emit(CallEvent::Ringing {
+                    reliable: is_reliable,
+                });
+            }
+        }
+
+        if self.dialog.is_none() {
+            if let Some(dialog) = Dialog::from_response(&self.invite, response) {
+                self.in_dialog = in_dialog_target(&dialog, self.target.clone());
+                self.dialog = Some(dialog);
+            }
+        } else if !self.belongs(response) {
+            return false;
+        }
+
+        if update::peer_allows(&response.headers) {
+            self.peer_allows_update = true;
+        }
+        true
     }
 
     /// Answer a reliable provisional's offer for an offerless INVITE.
@@ -4140,6 +4325,7 @@ impl Dialing {
             settled,
             media_address: self.options.media_address,
             codecs: self.options.media.codecs,
+            keying: self.options.media.keying,
         })));
         self.negotiation.received_answer();
         if let Some(events) = self.events.as_ref() {
@@ -4404,6 +4590,12 @@ impl Dialing {
     }
 
     async fn give_up_with_reason(&mut self, reason: &ReasonValue) {
+        if let Some(response) = self.coupled_final.take() {
+            if response.status.is_success() {
+                ack_then_bye(&self.endpoint, &self.invite, &response, self.target.clone()).await;
+            }
+            return;
+        }
         let Some(responses) = self.responses.as_mut() else {
             return;
         };
@@ -4436,6 +4628,7 @@ fn ok_with_answer(
     to_with_tag: &str,
     answer: &SessionDescription,
     agreed: Option<session::Accepted>,
+    headers: &[sipx_sip::Header],
 ) -> Result<Response> {
     let mut response = ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?
         .set_header(&HeaderName::To, Bytes::from(to_with_tag.to_owned()))?
@@ -4468,7 +4661,20 @@ fn ok_with_answer(
             response = response.header(HeaderName::Require, Bytes::from_static(b"timer"))?;
         }
     }
-    Ok(response.build())
+    Ok(add_response_headers(response, headers)?.build())
+}
+
+fn add_response_headers(
+    mut response: ResponseBuilder,
+    headers: &[sipx_sip::Header],
+) -> std::result::Result<ResponseBuilder, sipx_sip::error::BuildError> {
+    for header in headers {
+        response = response.header(
+            header.name().clone(),
+            Bytes::copy_from_slice(header.raw_value()),
+        )?;
+    }
+    Ok(response)
 }
 
 /// Read the offer's ICE half and gather for the answer if the policy selects it (`ice.md` §13.4).
@@ -4524,6 +4730,8 @@ pub(crate) struct Early {
     /// over: an UPDATE may reoffer before the 200, and it has to be answered from the same set
     /// rather than from the default one.
     pub(crate) codecs: Codecs,
+    /// The exact application policy retained when the provisional becomes a confirmed call.
+    pub(crate) keying: Keying,
 }
 
 /// A media offer placed in a reliable provisional and awaiting its answer in PRACK.
@@ -4534,6 +4742,7 @@ pub(crate) struct EarlyOffer {
     offer: SessionDescription,
     ice: Option<LocalDescription>,
     keying: PendingKeying,
+    policy_keying: Keying,
     media_address: IpAddr,
     codecs: Codecs,
 }
@@ -4572,6 +4781,7 @@ impl EarlyOffer {
             offer,
             ice: local_ice,
             keying,
+            policy_keying: policy.keying,
             media_address,
             codecs: policy.codecs,
         })
@@ -4600,6 +4810,7 @@ impl EarlyOffer {
             settled,
             media_address: self.media_address,
             codecs: self.codecs,
+            keying: self.policy_keying,
         })
     }
 }
@@ -4657,6 +4868,7 @@ impl Early {
                 settled,
                 media_address,
                 codecs: policy.codecs,
+                keying: policy.keying,
             },
             answer,
         ))
@@ -4808,6 +5020,7 @@ pub async fn answer_ringing_with_policy(
         Some(ringing.is_reliable()),
         None,
         policy,
+        &[],
     )
     .await
 }
@@ -4914,7 +5127,7 @@ pub async fn answer_early(
         peer_ice: peer_ice_credentials(incoming.request.body()),
         hold: Direction::SendRecv,
         encrypted: early.settled.is_encrypted(),
-        keying: Keying::Sdes,
+        keying: early.keying,
         referral: None,
         transfer: None,
         session: agreed.map(|accepted| {
@@ -5011,6 +5224,10 @@ pub(crate) type Claim<'a> = &'a (dyn Fn() -> Result<()> + Send + Sync);
 // this does not. Bundling them into a struct would be a struct with one construction site per
 // caller and no behaviour, which moves the argument list rather than shortening it.
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the answer lifecycle remains in wire order; custom fields add one retained input"
+)]
 async fn answer_negotiated(
     endpoint: &Handle,
     incoming: &Incoming,
@@ -5020,6 +5237,7 @@ async fn answer_negotiated(
     reliable_ringing: Option<bool>,
     claim: Option<Claim<'_>>,
     policy: MediaPolicy,
+    headers: &[sipx_sip::Header],
 ) -> Result<Call> {
     let negotiated = negotiated(&offer, policy.codecs)?;
 
@@ -5075,7 +5293,14 @@ async fn answer_negotiated(
 
     let agreed = negotiate_session(endpoint, incoming).await?;
 
-    let response = ok_with_answer(endpoint, incoming, &to_with_tag, &answer_sdp, agreed)?;
+    let response = ok_with_answer(
+        endpoint,
+        incoming,
+        &to_with_tag,
+        &answer_sdp,
+        agreed,
+        headers,
+    )?;
 
     // Before the 200, not after. An INVITE with no usable `Contact` cannot form a dialog
     // (RFC 3261 §12.1.1), and answering first would put a 2xx on the wire for a call this side

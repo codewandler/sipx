@@ -291,6 +291,38 @@ pub struct EarlyCoupling {
     media_address: IpAddr,
     state: CouplingState,
     deferred: PerLeg<VecDeque<Incoming>>,
+    delayed_offer_pending: bool,
+}
+
+async fn ring_source_leg(
+    endpoint: &sipx_transport::Handle,
+    incoming: &Incoming,
+    media_address: IpAddr,
+    delayed_direction: Option<Direction>,
+    answered_early: bool,
+) -> Result<Ringing> {
+    if let Some(direction) = delayed_direction {
+        crate::ring_offer_early(
+            endpoint,
+            incoming,
+            183,
+            "Session Progress",
+            media_address,
+            direction,
+        )
+        .await
+    } else if answered_early {
+        crate::ring_early(endpoint, incoming, 183, "Session Progress", media_address).await
+    } else {
+        crate::ring(endpoint, incoming, 180, "Ringing", true).await
+    }
+}
+
+fn outbound_failure_response(error: &Error) -> (u16, String) {
+    match error {
+        Error::Rejected { status, reason } => (*status, reason.clone()),
+        _ => (503, "Service Unavailable".to_owned()),
+    }
 }
 
 impl EarlyCoupling {
@@ -308,40 +340,57 @@ impl EarlyCoupling {
         options: &DialOptions,
         media_address: IpAddr,
     ) -> Result<Self> {
-        let Some(direction) = relayed_direction(&invitation.request().request) else {
+        let source_offer = !invitation.request().request.body().is_empty();
+        let direction = relayed_direction(&invitation.request().request);
+        if source_offer && direction.is_none() {
             invitation
                 .refuse(endpoint, 488, "Not Acceptable Here")
                 .await?;
             return Err(Error::Sdp(
                 "the source initial INVITE carried no usable audio offer".to_owned(),
             ));
-        };
+        }
         let invitation = invitation.into_coupling();
         let mut state = CouplingState::new();
-        let _relay = state.begin_offer(Leg::One, OfferAxis::InitialInvite);
+        if direction.is_some() {
+            let _relay = state.begin_offer(Leg::One, OfferAxis::InitialInvite);
+        }
         let cancellation = invitation.cancellation();
-        let options = options.clone().with_initial_direction(direction);
-        let mut dialing = Box::pin(crate::dial_early(endpoint, target, to, &options));
+        let options = direction.map_or_else(
+            || options.clone(),
+            |direction| options.clone().with_initial_direction(direction),
+        );
+        let mut dialing = Box::pin(async {
+            match direction {
+                Some(_) => crate::dial_early(endpoint, target, to, &options)
+                    .await
+                    .map(|dialing| (dialing, None)),
+                None => {
+                    crate::call::dial_early_without_offer_for_coupling(
+                        endpoint, target, to, &options,
+                    )
+                    .await
+                }
+            }
+        });
         let outbound = tokio::select! {
             result = &mut dialing => match result {
                 Ok(outbound) => outbound,
                 Err(error) => {
-                    let (status, reason) = match &error {
-                        Error::Rejected { status, reason } => (*status, reason.clone()),
-                        _ => (503, "Service Unavailable".to_owned()),
-                    };
+                    let (status, reason) = outbound_failure_response(&error);
                     invitation.refuse(endpoint, status, reason).await?;
                     return Err(error);
                 }
             },
             () = cancellation.cancelled() => {
                 match dialing.await {
-                    Ok(dialing) => dialing.cancel().await,
+                    Ok((dialing, _)) => dialing.cancel().await,
                     Err(error) => tracing::debug!(%error, "outbound leg ended while cancellation waited for a provisional"),
                 }
                 return Err(Error::InvitationCancelled);
             }
         };
+        let (outbound, delayed_direction) = outbound;
         let Some(dialog) = outbound.dialog() else {
             let mut call = outbound.answered().await?;
             call.hang_up().await?;
@@ -352,26 +401,22 @@ impl EarlyCoupling {
         };
         let outgoing_incoming = calls.register(dialog);
         let answered_early = outbound.has_early_session();
-        let ringing = if answered_early {
-            crate::ring_early(
-                endpoint,
-                &invitation.incoming,
-                183,
-                "Session Progress",
-                media_address,
-            )
-            .await
-        } else {
-            crate::ring(endpoint, &invitation.incoming, 180, "Ringing", true).await
-        };
+        if delayed_direction.is_some() {
+            let _relay = state.begin_offer(Leg::Two, OfferAxis::ReliableProvisional);
+        }
+        let ringing = ring_source_leg(
+            endpoint,
+            &invitation.incoming,
+            media_address,
+            delayed_direction,
+            answered_early,
+        )
+        .await;
         let ringing = match ringing {
             Ok(ringing) => ringing,
             Err(error) => {
                 outbound.cancel().await;
-                let (status, reason) = match &error {
-                    Error::Rejected { status, reason } => (*status, reason.clone()),
-                    _ => (503, "Service Unavailable".to_owned()),
-                };
+                let (status, reason) = outbound_failure_response(&error);
                 invitation.refuse(endpoint, status, reason).await?;
                 return Err(error);
             }
@@ -388,6 +433,7 @@ impl EarlyCoupling {
             media_address,
             state,
             deferred: PerLeg::new(VecDeque::new(), VecDeque::new()),
+            delayed_offer_pending: delayed_direction.is_some(),
         })
     }
 
@@ -414,6 +460,7 @@ impl EarlyCoupling {
             media_address,
             state: CouplingState::new(),
             deferred: PerLeg::new(VecDeque::new(), VecDeque::new()),
+            delayed_offer_pending: false,
         }
     }
 
@@ -501,6 +548,27 @@ impl EarlyCoupling {
     ) -> Result<()> {
         match event {
             Ok(CouplingDialEvent::Progress) => Ok(()),
+            Ok(CouplingDialEvent::ReliableOffer(direction)) => {
+                match self
+                    .state
+                    .begin_offer(Leg::Two, OfferAxis::ReliableProvisional)
+                {
+                    OfferAction::Relay { .. } => {}
+                    OfferAction::Refuse { .. } => return Err(Error::NoDialog),
+                }
+                let ringing = crate::ring_offer_early(
+                    &self.endpoint,
+                    &self.invitation.incoming,
+                    183,
+                    "Session Progress",
+                    self.media_address,
+                    direction,
+                )
+                .await?;
+                self.ringing = ringing;
+                self.delayed_offer_pending = true;
+                Ok(())
+            }
             Ok(CouplingDialEvent::Answered(call)) => {
                 self.state.confirm(Leg::Two);
                 *outbound_call = Some(*call);
@@ -606,7 +674,35 @@ impl EarlyCoupling {
         outbound_call: &mut Option<Call>,
     ) -> Result<()> {
         if leg == Leg::One && incoming.request.method == Method::Prack {
-            let _matched = self.ringing.on_prack(&incoming).await?;
+            let matched = match self.ringing.on_prack(&incoming).await {
+                Ok(matched) => matched,
+                Err(error) => {
+                    if self.delayed_offer_pending {
+                        let _failed = self.state.fail(Leg::Two);
+                        if let Some(dialing) = self.dialing.take() {
+                            dialing.cancel().await;
+                        }
+                        self.invitation
+                            .refuse(&self.endpoint, 488, "Not Acceptable Here")
+                            .await?;
+                    }
+                    return Err(error);
+                }
+            };
+            if matched && self.delayed_offer_pending {
+                let Some(dialing) = self.dialing.as_mut() else {
+                    return Err(Error::NoDialog);
+                };
+                if let Err(error) = dialing.complete_coupled_prack().await {
+                    let _failed = self.state.fail(Leg::Two);
+                    if let Some(dialing) = self.dialing.take() {
+                        dialing.cancel().await;
+                    }
+                    return Err(error);
+                }
+                self.delayed_offer_pending = false;
+                let _completed = self.state.complete(Leg::Two);
+            }
             return Ok(());
         }
         if incoming.request.method != Method::Update {

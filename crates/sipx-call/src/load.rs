@@ -276,6 +276,7 @@ impl Outcome {
     pub fn report(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
+        // discard: writing formatted text into a String is infallible
         let _ = writeln!(
             out,
             "{} attempted, {} succeeded, {} failed in {:.1}s ({:.1} calls/s)",
@@ -287,11 +288,13 @@ impl Outcome {
         );
         for (label, fraction) in [("p50", 0.50), ("p95", 0.95), ("p99", 0.99)] {
             if let Some(at) = self.percentile(fraction) {
+                // discard: writing formatted text into a String is infallible
                 let _ = writeln!(out, "  setup {label}: {:.0} ms", at.as_secs_f64() * 1000.0);
             }
         }
         // Every cause on its own line. Which one is growing is the whole question.
         for (cause, count) in &self.failures {
+            // discard: writing formatted text into a String is infallible
             let _ = writeln!(out, "  {count} × {cause}");
         }
         out

@@ -3,11 +3,11 @@ id: A-10
 title: Publish the stable crate set and diagnostic CLI artifacts
 pillar: Application
 status: backlog
-priority: 12
+priority: 13
 design: docs/roadmap.md
 epic: app-sdk
 areas: [release, docs, sipx-cli]
-note: blocked by A-9, P-13 and every v1 predicate; publication is part of the capability gate
+note: promote the public beta only after every v1 predicate; stable archives and SBOM live here
 ---
 
 # Publish the stable crate set and diagnostic CLI artifacts

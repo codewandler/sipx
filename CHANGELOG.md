@@ -7,7 +7,76 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+No changes yet.
+
+## [1.0.0-beta.1] — 2026-08-04
+
+This is the first public beta. sipx is
+pre-1.0: Supported APIs receive a changelog entry and migration guidance when they break, while
+Experimental APIs may change or be removed without one. Adoption starts with the modular Rust
+crates, and the `sipx` CLI is their executable shell proof.
+
+The release deliberately omits proxy, registrar, PBX, routing and dial-plan behavior; TURN relay;
+video, arbitrary application codecs and a complete browser-media stack; a graphical desktop phone
+and headset mixer; automatic live-state presence and SIP instant-message behavior; the truly
+off-media two-dialog role; and embedded, subprocess, or packaged TypeScript application bindings.
+The language-neutral application wire contract and SIP over QUIC remain Experimental.
+
 ### Added
+
+- **The diagnostic phone has one executable release proof (`P-13`).** A bounded runner executes
+  `DPH-1` through `DPH-12`, verifies the wider codec, media-security, authentication, ICE, device
+  and early-media product paths, and requires two independent profiles for UDP, TCP, TLS, WebSocket
+  and secure WebSocket. `sipx dial --early-media` now PRACKs and records a reliable provisional
+  session before the final answer, while terminal output reports whether it occurred and how many
+  samples arrived. The runner's discovery rules and structural matrix are enforced by the gate.
+
+- **The diagnostic phone is interactively scriptable (`P-11`).** `sipx scenario` reads correlated
+  NDJSON commands, emits the existing `sipx.app.v1` event envelope, supports the complete call-action
+  vocabulary, requires finite event-predicate waits and shuts active work down on EOF. `dial`,
+  `answer`, `register` and scenario origination accept repeatable validated application-owned SIP
+  fields while refusing routing, dialog and framing fields before network work.
+
+- **Beta announcement readiness is generated (`X-61`).** Five all-or-nothing predicates measure
+  retained alpha integrity, shell behavior, independent transport peers, registry distribution and
+  public-surface honesty. Stories declare their own beta associations, invalid declarations fail the
+  gate, and RFC coverage remains descriptive rather than becoming a weighted release score.
+
+- **The public docs explain how sipx was built (`A-13`).** A curated process page follows the path
+  from a normative spec and byte vector through a failing-first test, implementation, generated
+  evidence and the release gate, while stating the blind spots and pre-1.0 change policy candidly.
+
+- **Registry publication now has a side-effect-free rehearsal (`A-11`).** A release helper derives
+  package order from Cargo metadata, verifies one workspace version plus README and license
+  metadata, rejects unpublished/path/Git dependency escapes, and reserves registry writes for a
+  clean exact release tag with explicit local confirmation or exact-tag GitHub Actions authority.
+  Adversarial fixtures cover graph order, partial registry propagation and every publication refusal
+  boundary. A dirty-candidate
+  diagnostic also compares every public package listing with its local archive and audits the
+  normalized manifest; unpublished test support is path-only and absent from those manifests.
+
+- **Applications can hold full-duplex sessions and originate calls (`A-4`).** The host accepts
+  authenticated WebSocket sessions, pins each inbound call to one bounded app connection, and
+  multiplexes contract events and replacement documents with correlated typed replies. Session
+  loss applies each call's declared failure semantics without migration; outbound overflow closes
+  1013. Granted apps can originate through the real call framework, with ownership and pinning
+  established before success is reported. Webhook and session apps coexist in one host; the
+  subprocess variant remains deferred pending a separate supervision and framing contract.
+
+- **The diagnostic phone selects and reports codec, media-security and ICE policy (`P-9`).**
+  Repeatable `--codec`, `--media-security`, `--ice` and `--stun-server` flags on `dial` and `answer`
+  map directly into the call framework's policy. Unsupported Opus builds and unsafe SDES over
+  clear signalling fail before network I/O; explicit DTLS-SRTP never downgrades. Terminal results
+  distinguish requested values from the codec, encryption and nominated ICE path read from the
+  running call. `Keying::Auto` is the compatibility default; callers that previously selected
+  `Keying::Sdes` explicitly for its automatic clear/protected behavior should select `Auto`, while
+  `Sdes` now means strict SDES over protected signalling.
+
+- **The diagnostic phone can use explicitly selected live audio devices (`P-10`).** The optional
+  `device-audio` CLI feature adds stable device discovery plus bounded microphone and speaker
+  callbacks, deterministic format conversion, observable loss and silence counters, and typed
+  failures for absent, busy or unsupported devices. WAV and null endpoints remain available with
+  no device dependency; platform I/O stays outside the media core.
 
 - **Live calls can select authenticated caller identity (`S-34`).** `DialOptions` can sign each
   outbound INVITE attempt with a caller-owned authentication service and time source; `Dispatcher`
@@ -23,7 +92,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   provisional responses—with sequenced feedback while saturation remains active. Per-peer state is
   bounded, unmatched responses cannot install policy, and local shedding is counted before I/O.
 
-- **Two live dialogs can be owned and driven through one coupling (`C-1`, partial).** The coupling
+- **Two live dialogs can be owned and driven through one coupling (`C-1`).** The coupling
   propagates final failure, cancellation, BYE, confirmed UPDATE and re-INVITE offer/answer while
   retaining optional media bridging. Its early state owns both pending legs, handles reliable
   provisional acknowledgements and early UPDATE, and closes crossed-answer races with BYE. Its
@@ -31,8 +100,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pending state. The delayed-offer path can originate an offer in a reliable provisional, negotiate
   its answer in PRACK, and retain that early media through confirmation. Confirmed relays prove the
   source call can accept an offer—including codec and keying constraints—before sending anything
-  on the far leg. Relaying that delayed exchange across both coupled legs, and a truly
-  off-media-path SDP mapping, remain open.
+  on the far leg. The delayed reliable-provisional exchange now crosses both coupled legs in
+  causal order: the target PRACK waits for the source PRACK answer, while cancellation, malformed
+  answers and crossed target finals cleanly cancel or ACK-and-BYE everything the coupling owns.
+  The distinct truly off-media-path SDP mapping remains tracked by `C-7`.
 
 - **Webhook applications can drive real calls through the document-mode host (`A-2`).**
   `sipx-app` resolves named signing keys at startup, sends stable HMAC-signed contract envelopes
@@ -52,7 +123,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so a late actor cannot retire a replacement call with the same Call-ID.
 
 - **The diagnostic phone can run finite, reproducible call load (`P-12`).** `sipx load` reuses the
-  paced `sipx-testkit` scheduler, requires rate, concurrency and a call-count or duration bound, and
+  paced `sipx_call::load` scheduler, requires rate, concurrency and a call-count or duration bound, and
   shares one stop signal across admission and every owned call. Count, duration and Ctrl-C paths
   drain cleanup under a documented finite budget before emitting one `sipx.load.v1` summary with
   effective limits, cause-separated outcomes, response codes, setup percentiles and media quality.
@@ -110,6 +181,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inspect the result rather than infer it from `$?`.
 
 ### Fixed
+
+- **The independent-peer runner no longer prints success after a role test failed (`X-62`).** Each
+  Cargo role result is checked explicitly because shell error propagation is disabled inside the
+  condition that owns a peer run; a copied-runner fixture now proves failure reaches the top-level
+  exit status.
+
+- **Ordinary endpoints no longer advertise overload control unless configured (`X-63`).** Client
+  advertisement is explicit and off by default, preserving base SIP compatibility; enabling it
+  retains the complete `loss,rate` offer, feedback and local admission behavior. With truthful role
+  exits restored, both independent profiles pass all five released signalling transports.
+
+- **Diagnostic-phone Opus audio is rate- and direction-correct (`M-39`).** Both command roles now
+  validate WAV input against the negotiated media clock, use the session's packet size, and write
+  recordings with that clock. A two-process proof carries distinguishable 48 kHz signals both ways
+  and checks their duration and identity; normalized-package and exact-registry consumers enable
+  the Opus feature explicitly, and an Opus-only independent peer passes in both SIP roles without a
+  G.711 fallback. The default G.711 WAV path remains 8 kHz.
 
 - **The recording-cap and dead-anchor gate checks no longer fail spuriously under load (`X-60`).**
   The recording fixture binds its caller before starting the answerer's wait clock and reports the
@@ -2538,7 +2626,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.5...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.1...HEAD
+[1.0.0-beta.1]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.5...v1.0.0-beta.1
 [1.0.0-alpha.5]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.4...v1.0.0-alpha.5
 [1.0.0-alpha.4]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.3...v1.0.0-alpha.4
 [1.0.0-alpha.3]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.2...v1.0.0-alpha.3

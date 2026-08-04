@@ -30,6 +30,8 @@ pub struct Config {
     pub expires: Duration,
     /// What to put in `User-Agent`.
     pub user_agent: String,
+    /// Validated application-owned fields preserved on every REGISTER attempt and refresh.
+    pub headers: Vec<sipx_sip::Header>,
     /// The device identity this agent registers under (RFC 5626 §4.1, RFC 5627 §4.1).
     ///
     /// One field for both mechanisms, because both name the instance with the same
@@ -84,6 +86,7 @@ impl Config {
             credentials: None,
             expires: Duration::from_secs(3600),
             user_agent: concat!("sipx/", env!("CARGO_PKG_VERSION")).to_owned(),
+            headers: Vec::new(),
             instance: None,
             reg_id: None,
             gruu: None,
@@ -137,6 +140,13 @@ impl Config {
     #[must_use]
     pub fn with_credentials(mut self, credentials: Credentials) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    /// Add a validated application-owned field to every REGISTER request.
+    #[must_use]
+    pub fn with_header(mut self, header: sipx_sip::Header) -> Self {
+        self.headers.push(header);
         self
     }
 
@@ -216,6 +226,7 @@ impl UserAgent {
             reg_id: config.reg_id,
             gruu: config.gruu,
             push: config.push.clone(),
+            headers: config.headers.clone(),
         };
         Self {
             endpoint,

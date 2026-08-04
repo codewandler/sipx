@@ -8,6 +8,10 @@ A scriptable diagnostic phone for registering, placing, answering, and inspectin
 output, exit statuses, and separation of logs from stdout make the call outcome assertable from a
 shell.
 
+WAV input is mono 16-bit PCM at the negotiated media clock: 8 kHz for G.711 or 48 kHz for Opus.
+The phone refuses a mismatched rate instead of silently changing playback speed, takes packet size
+from the running session in both call roles, and writes that same clock into recording headers.
+
 ## Stability
 
 The supported command-line contract is maintained in the

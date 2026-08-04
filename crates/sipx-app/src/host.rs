@@ -22,29 +22,34 @@
 //! this module reaches, and `scripts/check-app-surface.py` reads that definition off the workspace
 //! rather than off a list somebody keeps.
 //!
-//! **What this host deliberately is not.** Document-mode webhooks are real; session and embedded
-//! bindings remain later phases. Their absence is not papered over — it is routed through the
-//! document's own §9.2 `on_unreachable` declaration. The document actor similarly returns HTTP,
-//! timeout and document failures to the contract interpreter, which is the sole component deciding
-//! whether the invitation is answered, refused or ended.
+//! **What this host deliberately is not.** Document-mode webhooks and authenticated full-duplex
+//! sessions are real; an embedded binding is not. An absent configured binding is routed through
+//! the document's own §9.2 `on_unreachable` declaration. The document actor similarly returns HTTP,
+//! timeout, session-loss, and document failures to the contract interpreter, which is the sole
+//! component deciding whether the invitation is answered, refused or ended.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use sipx_app_protocol::{
-    CallSnapshot, Direction, Effect, EventKind, Input, Interpreter, OnFailure as ContractOnFailure,
-    Output, Policy, Source, Timer, Timestamp,
+    CallSnapshot, Direction, Effect, EventKind, Failure, Input, Interpreter,
+    OnFailure as ContractOnFailure, Output, Policy, Response, Source, Timer, Timestamp,
 };
-use sipx_call::{Call, CallEvent, CallEvents, Dispatched, Dispatcher, Invitation};
+use sipx_call::{
+    Call, CallEvent, CallEvents, Calls, DialOptions, Dispatched, Dispatcher, Invitation,
+    dial_early_until,
+};
 use sipx_media::{Interrupt, Playback, PlaybackId};
 use sipx_sip::{HeaderName, StatusCode, Uri, build::ResponseBuilder, uri::Host as UriHost};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use sipx_ua::{Config as AgentConfig, UserAgent};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -54,6 +59,10 @@ use crate::config::{
     Protocol, Running,
 };
 use crate::harness::policy::OnFailure;
+use crate::session::{
+    CallInput, DeliverError, MAX_CONNECTION_TASKS, OriginateRequest, SessionApp, SessionCall,
+    SessionEndpoint, SessionHub, accept_websocket,
+};
 use crate::webhook::{Webhook, WebhookClient, WebhookError};
 
 /// The status a host answers with when it cannot place a call at all — a bug on this side, and
@@ -79,6 +88,8 @@ pub enum HostError {
     Transport(sipx_transport::Error),
     /// A document-mode binding could not be constructed.
     Webhook(WebhookError),
+    /// A session listener could not be bound or accept connections.
+    SessionIo(std::io::Error),
     /// A named signing secret was absent when the host started.
     MissingSecret(String),
     /// The document declares no `sip` listener, so there is nothing for a call to arrive on. A
@@ -86,8 +97,32 @@ pub enum HostError {
     NoCallListener,
 }
 
-/// One admitted webhook call. It owns the call, its event receiver and its interpreter; no value
+/// One admitted document call. It owns the call, its event receiver and its interpreter; no value
 /// is shared between actors, which is the design's one-call/one-program rule in process form.
+#[derive(Debug)]
+enum DocumentBinding {
+    Webhook { webhook: Webhook, budget: Duration },
+    Session(SessionCall),
+}
+
+impl DocumentBinding {
+    async fn next_session_input(&mut self) -> SessionInput {
+        let Self::Session(call) = self else {
+            return std::future::pending().await;
+        };
+        match call.next_input().await {
+            CallInput::Document(document) => SessionInput::Document(document),
+            CallInput::Dead => SessionInput::Dead,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SessionInput {
+    Document(sipx_app_protocol::Document),
+    Dead,
+}
+
 struct DocumentCall {
     handle: Handle,
     invitation: Option<Invitation>,
@@ -98,14 +133,21 @@ struct DocumentCall {
     call_id: String,
     media_address: IpAddr,
     grants: Grants,
-    callback_budget: Duration,
     interpreter: Interpreter,
-    webhook: Webhook,
+    binding: DocumentBinding,
     timers: [Option<Instant>; 3],
     playbacks: BTreeMap<PlaybackId, (String, Playback)>,
     shutdown: watch::Receiver<bool>,
     stopping: bool,
     terminal: bool,
+    initial: Option<EventKind>,
+}
+
+struct OutboundCall {
+    call: Call,
+    events: CallEvents,
+    inbox: mpsc::Receiver<Incoming>,
+    call_id: String,
 }
 
 impl DocumentCall {
@@ -115,7 +157,7 @@ impl DocumentCall {
         call_id: String,
         media_address: IpAddr,
         policy: AppPolicy,
-        webhook: Webhook,
+        binding: DocumentBinding,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         let invitation_events = invitation.events();
@@ -133,22 +175,61 @@ impl DocumentCall {
             call_id,
             media_address,
             grants: policy.grants,
-            callback_budget: policy.failure.timeout,
             interpreter,
-            webhook,
+            binding,
             timers: [None; 3],
             playbacks: BTreeMap::new(),
             shutdown,
             stopping: false,
             terminal: false,
+            initial: Some(EventKind::Incoming),
+        }
+    }
+
+    fn new_outbound(
+        handle: Handle,
+        outbound: OutboundCall,
+        media_address: IpAddr,
+        policy: AppPolicy,
+        session: SessionCall,
+        shutdown: watch::Receiver<bool>,
+    ) -> Self {
+        let OutboundCall {
+            call,
+            events,
+            inbox,
+            call_id,
+        } = outbound;
+        let interpreter_policy = protocol_policy(&policy);
+        Self {
+            handle,
+            invitation: None,
+            invitation_events: None,
+            call: Some(call),
+            events: Some(events),
+            inbox: Some(inbox),
+            call_id: call_id.clone(),
+            media_address,
+            grants: policy.grants,
+            interpreter: Interpreter::new(
+                CallSnapshot::new(call_id, Direction::Outbound),
+                interpreter_policy,
+            ),
+            binding: DocumentBinding::Session(session),
+            timers: [None; 3],
+            playbacks: BTreeMap::new(),
+            shutdown,
+            stopping: false,
+            terminal: false,
+            initial: None,
         }
     }
 
     async fn run(mut self) -> String {
-        let outputs = self
-            .interpreter
-            .handle(timestamp(), Input::Event(EventKind::Incoming));
-        self.drive(outputs).await;
+        if let Some(initial) = self.initial.take() {
+            let outputs = self.interpreter.handle(timestamp(), Input::Event(initial));
+            self.drive(outputs).await;
+        }
 
         if self.stopping {
             self.teardown().await;
@@ -203,6 +284,7 @@ impl DocumentCall {
             return ActorAction::Closed;
         };
         let shutdown = &mut self.shutdown;
+        let binding = &mut self.binding;
         tokio::select! {
             _ = shutdown.changed() => ActorAction::Shutdown,
             event = events.recv() => event.map_or(ActorAction::Closed, ActorAction::CallEvent),
@@ -217,6 +299,7 @@ impl DocumentCall {
                 contract_timer.map_or(ActorAction::Closed, |(_, timer)| ActorAction::Timer(timer))
             }
             () = sleep_until(session_deadline) => ActorAction::SessionDeadline,
+            input = binding.next_session_input() => ActorAction::Session(input),
         }
     }
 
@@ -225,9 +308,11 @@ impl DocumentCall {
             return std::future::pending().await;
         };
         let shutdown = &mut self.shutdown;
+        let binding = &mut self.binding;
         tokio::select! {
             _ = shutdown.changed() => ActorAction::Shutdown,
             event = events.recv() => event.map_or(ActorAction::Closed, ActorAction::CallEvent),
+            input = binding.next_session_input() => ActorAction::Session(input),
         }
     }
 
@@ -276,6 +361,12 @@ impl DocumentCall {
                 }
                 Vec::new()
             }
+            ActorAction::Session(SessionInput::Document(document)) => self
+                .interpreter
+                .handle(timestamp(), Input::Document(document)),
+            ActorAction::Session(SessionInput::Dead) => self
+                .interpreter
+                .handle(timestamp(), Input::BindingFailed(Failure::Unreachable)),
         }
     }
 
@@ -368,10 +459,26 @@ impl DocumentCall {
         envelope: sipx_app_protocol::Envelope,
         callback: sipx_app_protocol::Callback,
     ) -> Vec<Output> {
-        let webhook = self.webhook.clone();
-        let budget = self.callback_budget;
-        let sent_at = unix_seconds();
-        let delivery = webhook.deliver(&envelope, budget, sent_at);
+        if let DocumentBinding::Session(call) = &self.binding {
+            if matches!(
+                call.deliver(&envelope),
+                Err(DeliverError::UnknownCall | DeliverError::SessionOverflow)
+            ) {
+                return self.interpreter.handle(
+                    timestamp(),
+                    Input::Response {
+                        callback,
+                        response: Response::Failed(Failure::Unreachable),
+                    },
+                );
+            }
+            return self.deliver_session_while_serving(callback).await;
+        }
+        let (webhook, budget) = match &self.binding {
+            DocumentBinding::Webhook { webhook, budget } => (webhook.clone(), *budget),
+            DocumentBinding::Session(_) => return Vec::new(),
+        };
+        let delivery = webhook.deliver(&envelope, budget, unix_seconds());
         tokio::pin!(delivery);
         let mut deferred = Vec::new();
 
@@ -396,6 +503,41 @@ impl DocumentCall {
             self.perform_while_callback(outputs, &mut deferred).await;
         };
 
+        deferred.extend(
+            self.interpreter
+                .handle(timestamp(), Input::Response { callback, response }),
+        );
+        deferred
+    }
+
+    async fn deliver_session_while_serving(
+        &mut self,
+        callback: sipx_app_protocol::Callback,
+    ) -> Vec<Output> {
+        let mut deferred = Vec::new();
+        let response = loop {
+            let action = if self.call.is_some() {
+                self.next_answered_action().await
+            } else {
+                self.next_invitation_action().await
+            };
+            match action {
+                ActorAction::Session(SessionInput::Document(document)) => {
+                    break Response::Document(document);
+                }
+                ActorAction::Session(SessionInput::Dead) => {
+                    break Response::Failed(Failure::Unreachable);
+                }
+                ActorAction::Closed | ActorAction::Shutdown => {
+                    self.stopping = true;
+                    return deferred;
+                }
+                other => {
+                    let outputs = self.apply_action(other).await;
+                    self.perform_while_callback(outputs, &mut deferred).await;
+                }
+            }
+        };
         deferred.extend(
             self.interpreter
                 .handle(timestamp(), Input::Response { callback, response }),
@@ -585,6 +727,7 @@ enum ActorAction {
     Digit(Option<(char, u32)>),
     Timer(Timer),
     SessionDeadline,
+    Session(SessionInput),
     Shutdown,
     Closed,
 }
@@ -822,6 +965,7 @@ impl fmt::Display for HostError {
             Self::Config(error) => write!(formatter, "{error}"),
             Self::Transport(error) => write!(formatter, "{error}"),
             Self::Webhook(error) => write!(formatter, "{error}"),
+            Self::SessionIo(error) => write!(formatter, "session listener: {error}"),
             Self::MissingSecret(name) => write!(
                 formatter,
                 "signing secret `{name}` is not available as `SIPX_SECRET_{name}`"
@@ -840,6 +984,7 @@ impl std::error::Error for HostError {
             Self::Config(error) => Some(error),
             Self::Transport(error) => Some(error),
             Self::Webhook(error) => Some(error),
+            Self::SessionIo(error) => Some(error),
             Self::MissingSecret(_) | Self::NoCallListener => None,
         }
     }
@@ -863,6 +1008,169 @@ impl From<WebhookError> for HostError {
     }
 }
 
+struct PreparedOriginated {
+    call_id: String,
+    call: Call,
+    events: CallEvents,
+    inbox: mpsc::Receiver<Incoming>,
+    policy: AppPolicy,
+    session: SessionCall,
+    permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+struct OriginateContext {
+    handle: Handle,
+    calls: Calls,
+    endpoint: SessionEndpoint,
+    media_address: IpAddr,
+    policy: AppPolicy,
+    permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+enum OriginateOutcome {
+    Ready(Box<PreparedOriginated>),
+    Failed(OriginateRequest),
+}
+
+struct OriginateTasks {
+    tasks: JoinSet<OriginateOutcome>,
+    shutdown: watch::Sender<bool>,
+}
+
+impl OriginateTasks {
+    fn new() -> Self {
+        let (shutdown, _) = watch::channel(false);
+        Self {
+            tasks: JoinSet::new(),
+            shutdown,
+        }
+    }
+
+    fn spawn(&mut self, task: impl Future<Output = OriginateOutcome> + Send + 'static) {
+        self.tasks.spawn(task);
+    }
+
+    async fn join_next(&mut self) -> Option<OriginateOutcome> {
+        self.tasks.join_next().await.and_then(Result::ok)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    fn receiver(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
+    fn stop(&self) {
+        let _ = self.shutdown.send(true);
+    }
+}
+
+impl Drop for OriginateTasks {
+    fn drop(&mut self) {
+        self.stop();
+        // Setup tasks retain their own cancellation signal and perform ACK/BYE or CANCEL cleanup.
+        // Detaching lets that bounded cleanup finish after a cancelled host future drops this
+        // owner; aborting here would recreate the invitation leak `dial_early_until` closes.
+        self.tasks.detach_all();
+    }
+}
+
+async fn prepare_originated(
+    context: OriginateContext,
+    request: OriginateRequest,
+    mut shutdown: watch::Receiver<bool>,
+) -> OriginateOutcome {
+    let OriginateContext {
+        handle,
+        calls,
+        endpoint,
+        media_address,
+        policy,
+        permit,
+    } = context;
+    let Some(uri) = Uri::parse(Bytes::copy_from_slice(request.target.as_bytes())).ok() else {
+        return OriginateOutcome::Failed(request);
+    };
+    let valid_from = Uri::parse(Bytes::copy_from_slice(request.from.as_bytes()))
+        .is_ok_and(|from| from.scheme().is_sip());
+    if !uri.scheme().is_sip() || !valid_from {
+        return OriginateOutcome::Failed(request);
+    }
+    let Some(target) = resolve_originate_target(&uri).await else {
+        return OriginateOutcome::Failed(request);
+    };
+    let options = DialOptions::new(request.from.clone(), media_address);
+    let Ok(dialing) = dial_early_until(
+        &handle,
+        target,
+        &uri,
+        &options,
+        shutdown_signal(&mut shutdown),
+    )
+    .await
+    else {
+        return OriginateOutcome::Failed(request);
+    };
+    let Some(dialog) = dialing.dialog().cloned() else {
+        return OriginateOutcome::Failed(request);
+    };
+    let call_id = String::from_utf8_lossy(&dialog.id.call_id).into_owned();
+    let inbox = calls.register(&dialog);
+    let mut dialing = dialing;
+    let Some(events) = dialing.events() else {
+        calls.forget(&dialog);
+        return OriginateOutcome::Failed(request);
+    };
+    let Ok(call) = dialing.answered_until(shutdown_signal(&mut shutdown)).await else {
+        return OriginateOutcome::Failed(request);
+    };
+    let Ok((session, reply)) = endpoint.originated(&request, call_id.clone()) else {
+        let mut call = call;
+        let _ = call.hang_up().await;
+        return OriginateOutcome::Failed(request);
+    };
+    if endpoint.send_reply(request.session, &reply).is_err() {
+        // The actor below applies this app's own `on_unreachable`; sending the result and call
+        // events use the same bounded queue, so a failure here has already marked the session dead.
+    }
+    OriginateOutcome::Ready(Box::new(PreparedOriginated {
+        call_id,
+        call,
+        events,
+        inbox,
+        policy,
+        session,
+        permit,
+    }))
+}
+
+async fn resolve_originate_target(uri: &Uri) -> Option<Target> {
+    match uri.host()? {
+        UriHost::Ip(ip) => Some(Target::udp(std::net::SocketAddr::new(
+            *ip,
+            uri.port().unwrap_or(5060),
+        ))),
+        UriHost::Name(_) => {
+            let resolver = Arc::new(sipx_transport::dns::DnsResolver::from_system().ok()?);
+            let mut rng = FirstCandidate;
+            sipx_transport::dns::resolve_uri(uri, &resolver, &mut rng)
+                .await
+                .into_iter()
+                .next()
+        }
+    }
+}
+
+struct FirstCandidate;
+
+impl sipx_transport::resolve::Rng for FirstCandidate {
+    fn below(&mut self, _max: u32) -> u32 {
+        0
+    }
+}
+
 /// A host with a configuration in force.
 ///
 /// Constructed from a document rather than from parts, because the document is the unit a reload
@@ -872,6 +1180,7 @@ pub struct Host {
     running: Running,
     media_address: IpAddr,
     webhooks: BTreeMap<String, Webhook>,
+    sessions: SessionEndpoint,
 }
 
 impl Host {
@@ -902,6 +1211,7 @@ impl Host {
     ) -> Result<Self, HostError> {
         let config = HostConfig::parse(document)?;
         let mut webhooks = BTreeMap::new();
+        let mut session_apps = BTreeMap::new();
         let has_webhooks = config
             .apps()
             .any(|app| matches!(&app.binding, AppBinding::Webhook { .. }));
@@ -911,35 +1221,57 @@ impl Host {
             None
         };
         for app in config.apps() {
-            let AppBinding::Webhook {
-                url,
-                signing_secrets,
-            } = &app.binding
-            else {
-                continue;
-            };
-            let mut secrets = Vec::with_capacity(signing_secrets.len());
-            for name in signing_secrets {
-                let Some(secret) = resolve(name.as_str()) else {
-                    return Err(HostError::MissingSecret(name.to_string()));
-                };
-                secrets.push(secret);
+            match &app.binding {
+                AppBinding::Webhook {
+                    url,
+                    signing_secrets,
+                } => {
+                    let mut secrets = Vec::with_capacity(signing_secrets.len());
+                    for name in signing_secrets {
+                        let Some(secret) = resolve(name.as_str()) else {
+                            return Err(HostError::MissingSecret(name.to_string()));
+                        };
+                        secrets.push(secret);
+                    }
+                    let Some(http) = http.as_ref() else {
+                        continue;
+                    };
+                    webhooks.insert(app.name.clone(), Webhook::with_client(http, url, secrets)?);
+                }
+                AppBinding::Session { bearer_secret } => {
+                    let Some(secret) = resolve(bearer_secret.as_str()) else {
+                        return Err(HostError::MissingSecret(bearer_secret.to_string()));
+                    };
+                    session_apps.insert(
+                        app.name.clone(),
+                        SessionApp::new(secret, app.grants.originate),
+                    );
+                }
+                AppBinding::Embedded { .. } => {}
             }
-            let Some(http) = http.as_ref() else {
-                continue;
-            };
-            webhooks.insert(app.name.clone(), Webhook::with_client(http, url, secrets)?);
         }
+        let sessions = SessionEndpoint::new(SessionHub::new(), session_apps);
         Ok(Self {
             running: Running::start(config),
             media_address,
             webhooks,
+            sessions,
         })
     }
 
     /// The configuration new calls are admitted under.
     pub fn running(&self) -> &Running {
         &self.running
+    }
+
+    /// The live full-duplex session registry.
+    pub fn sessions(&self) -> &SessionHub {
+        self.sessions.hub()
+    }
+
+    /// The authenticated session frame endpoint.
+    pub fn session_endpoint(&self) -> &SessionEndpoint {
+        &self.sessions
     }
 
     /// The first `sip` listener in the document, which is the one [`Host::run`] answers on.
@@ -956,6 +1288,27 @@ impl Host {
             .find(|listener| listener.protocol == Protocol::Sip)
             .cloned()
             .ok_or(HostError::NoCallListener)
+    }
+
+    /// The first configured application-session listener.
+    #[must_use]
+    pub fn session_listener(&self) -> Option<Listener> {
+        self.running
+            .current()
+            .listeners()
+            .find(|listener| listener.protocol == Protocol::Session)
+            .cloned()
+    }
+
+    /// Bind the configured session listener, if there is one.
+    pub async fn bind_session_endpoint(&self) -> Result<Option<TcpListener>, HostError> {
+        let Some(listener) = self.session_listener() else {
+            return Ok(None);
+        };
+        TcpListener::bind(listener.bind)
+            .await
+            .map(Some)
+            .map_err(HostError::SessionIo)
     }
 
     /// Bind the first `sip` listener and answer calls on it until the endpoint closes.
@@ -997,6 +1350,13 @@ impl Host {
         let listener = self.call_listener()?;
         let agent = UserAgent::new(handle.clone(), Self::agent_config(&listener));
         let mut dispatcher = Dispatcher::new(handle.clone(), incoming);
+        let outbound_calls = dispatcher.calls();
+        let session_listener = self.bind_session_endpoint().await?;
+        let (originates, mut originate_rx) = mpsc::channel::<OriginateRequest>(64);
+        let (socket_shutdown, _) = watch::channel(false);
+        let socket_limit = Arc::new(Semaphore::new(MAX_CONNECTION_TASKS));
+        let mut sockets = JoinSet::new();
+        let mut originating = OriginateTasks::new();
         // The serving future owns every call task. N11 is why admission cannot end at spawn time,
         // and ownership is why endpoint shutdown cannot silently discard a live SIP dialog: the
         // stop signal reaches every actor, then this future joins every actor before returning.
@@ -1018,6 +1378,45 @@ impl Host {
                                 self.running.complete(completion);
                             }
                         }
+                        accepted = accept_session(session_listener.as_ref()) => {
+                            let stream = accepted.map_err(HostError::SessionIo)?;
+                            if let Ok(permit) = Arc::clone(&socket_limit).try_acquire_owned() {
+                                let endpoint = self.sessions.clone();
+                                let originates = originates.clone();
+                                let shutdown = socket_shutdown.subscribe();
+                                sockets.spawn(async move {
+                                    let _permit = permit;
+                                    let _ = accept_websocket(stream, endpoint, originates, shutdown).await;
+                                });
+                            }
+                        }
+                        Some(request) = originate_rx.recv() => {
+                            let policy = self.running.app_policy(&request.app);
+                            let permit = actors.reserve();
+                            if let (Some(policy), Some(permit)) = (policy, permit) {
+                                originating.spawn(prepare_originated(
+                                    OriginateContext {
+                                        handle: handle.clone(),
+                                        calls: outbound_calls.clone(),
+                                        endpoint: self.sessions.clone(),
+                                        media_address: self.media_address,
+                                        policy,
+                                        permit,
+                                    },
+                                    request,
+                                    originating.receiver(),
+                                ));
+                            } else {
+                                let reply = SessionEndpoint::originate_failed(&request);
+                                let _ = self.sessions.send_reply(request.session, &reply);
+                            }
+                        }
+                        outcome = originating.join_next(), if !originating.is_empty() => {
+                            if let Some(outcome) = outcome {
+                                self.handle_originated(outcome, &handle, &mut actors).await;
+                            }
+                        }
+                        Some(_) = sockets.join_next(), if !sockets.is_empty() => {}
                     }
                 }
             };
@@ -1034,6 +1433,12 @@ impl Host {
                 }
                 _ => {}
             }
+        }
+        let _ = socket_shutdown.send(true);
+        while sockets.join_next().await.is_some() {}
+        originating.stop();
+        while let Some(outcome) = originating.join_next().await {
+            self.handle_originated(outcome, &handle, &mut actors).await;
         }
         actors.finish(&mut self.running).await;
         Ok(())
@@ -1068,6 +1473,7 @@ impl Host {
     }
 
     /// Admit one invitation under the document's routing, and act on the answer.
+    #[allow(clippy::too_many_lines)]
     fn admit<'a>(
         &'a mut self,
         handle: &'a Handle,
@@ -1094,13 +1500,14 @@ impl Host {
                             self.running.end(&call_id);
                             return;
                         };
+                        let budget = policy.failure.timeout;
                         let actor = DocumentCall::new(
                             handle.clone(),
                             invitation,
                             call_id,
                             self.media_address,
                             *policy,
-                            webhook,
+                            DocumentBinding::Webhook { webhook, budget },
                             actors.receiver(),
                         );
                         actors
@@ -1115,8 +1522,44 @@ impl Host {
                         return;
                     }
 
-                    // Session and embedded bindings are later phases. Until their drivers exist they
-                    // are unreachable in the document's own vocabulary.
+                    if matches!(&policy.binding, AppBinding::Session { .. })
+                        && let Ok(session) = self.sessions.hub().pin(&policy.app, call_id.clone())
+                    {
+                        let Some(permit) = actors.reserve() else {
+                            let _ = invitation.refuse(handle, 503, "Service Unavailable").await;
+                            self.running.end(&call_id);
+                            return;
+                        };
+                        let Some(lease) = self.running.completion_lease(call_id.clone()) else {
+                            let _ = invitation
+                                .refuse(handle, INTERNAL_ERROR, "Server Internal Error")
+                                .await;
+                            self.running.end(&call_id);
+                            return;
+                        };
+                        let actor = DocumentCall::new(
+                            handle.clone(),
+                            invitation,
+                            call_id,
+                            self.media_address,
+                            *policy,
+                            DocumentBinding::Session(session),
+                            actors.receiver(),
+                        );
+                        actors
+                            .spawn(Box::pin(async move {
+                                let _permit = permit;
+                                let _call_id = actor.run().await;
+                                let completion = lease.completion();
+                                drop(lease);
+                                completion
+                            }))
+                            .await;
+                        return;
+                    }
+
+                    // An absent session and the later embedded binding are unreachable in the
+                    // document's own vocabulary.
                     match policy.failure.on_unreachable {
                         OnFailure::Reject { status } => {
                             let _ = invitation.refuse(handle, status, "Unavailable").await;
@@ -1152,6 +1595,60 @@ impl Host {
     ///
     /// The owned task returns `call_id` whichever way the call finishes, so the admission is
     /// forgotten exactly once and only after the call is really over.
+    async fn handle_originated(
+        &mut self,
+        outcome: OriginateOutcome,
+        handle: &Handle,
+        actors: &mut ActorSupervisor,
+    ) {
+        let prepared = match outcome {
+            OriginateOutcome::Ready(prepared) => *prepared,
+            OriginateOutcome::Failed(request) => {
+                let reply = SessionEndpoint::originate_failed(&request);
+                let _ = self.sessions.send_reply(request.session, &reply);
+                return;
+            }
+        };
+        let PreparedOriginated {
+            call_id,
+            call,
+            events,
+            inbox,
+            policy,
+            session,
+            permit,
+        } = prepared;
+        self.running.admit_outbound(&call_id, policy.clone());
+        let Some(lease) = self.running.completion_lease(call_id.clone()) else {
+            let mut call = call;
+            let _ = call.hang_up().await;
+            self.running.end(&call_id);
+            return;
+        };
+        let actor = DocumentCall::new_outbound(
+            handle.clone(),
+            OutboundCall {
+                call,
+                events,
+                inbox,
+                call_id,
+            },
+            self.media_address,
+            policy,
+            session,
+            actors.receiver(),
+        );
+        actors
+            .spawn(Box::pin(async move {
+                let _permit = permit;
+                let _call_id = actor.run().await;
+                let completion = lease.completion();
+                drop(lease);
+                completion
+            }))
+            .await;
+    }
+
     async fn carry(
         &mut self,
         handle: &Handle,
@@ -1208,6 +1705,13 @@ async fn shutdown_signal(shutdown: &mut watch::Receiver<bool>) {
         return;
     }
     let _ = shutdown.changed().await;
+}
+
+async fn accept_session(listener: Option<&TcpListener>) -> std::io::Result<TcpStream> {
+    let Some(listener) = listener else {
+        return std::future::pending().await;
+    };
+    listener.accept().await.map(|(stream, _)| stream)
 }
 
 /// Answer a request that arrived outside any dialog.
@@ -1565,6 +2069,152 @@ bind = \"127.0.0.1:0\"
         ));
     }
 
+    /// SB-6 coexistence and SB-7 total binding.
+    #[test]
+    fn sb_6_coexistence_and_sb_7_total_binding() {
+        let document = r#"
+[listener.web]
+protocol = "sip"
+transport = "udp"
+bind = "127.0.0.1:0"
+app = "webhook"
+
+[listener.live]
+protocol = "sip"
+transport = "udp"
+bind = "127.0.0.1:0"
+app = "session"
+
+[listener.apps]
+protocol = "session"
+bind = "127.0.0.1:0"
+
+[app.webhook]
+binding = "webhook"
+url = "https://apps.example.test/calls"
+signing_secrets = ["hook"]
+
+[app.session]
+binding = "session"
+bearer_secret = "bearer"
+"#;
+        let mut host =
+            Host::start_with_secrets(document, "127.0.0.1".parse().unwrap(), |name| match name {
+                "hook" => Some(b"hook material".to_vec()),
+                "bearer" => Some(b"session material".to_vec()),
+                _ => None,
+            })
+            .unwrap();
+        let connection = host
+            .session_endpoint()
+            .connect("session", b"session material")
+            .unwrap();
+        let Admission::App(webhook) = host.running.admit("web-call", "web") else {
+            panic!("the webhook listener is total");
+        };
+        assert!(matches!(webhook.binding, AppBinding::Webhook { .. }));
+        let Admission::App(session) = host.running.admit("session-call", "live") else {
+            panic!("the session listener is total");
+        };
+        assert!(matches!(session.binding, AppBinding::Session { .. }));
+        let pin = host.sessions().pin("session", "pinned").unwrap();
+        assert_eq!(pin.session(), connection.id());
+        host.running.end("web-call");
+        host.running.end("session-call");
+    }
+
+    /// SB-5 through the real call framework rather than only frame validation.
+    #[tokio::test]
+    async fn sb_5_real_originate_returns_a_pinned_call() {
+        let document = r#"
+[listener.edge]
+protocol = "sip"
+transport = "udp"
+bind = "127.0.0.1:0"
+app = "session"
+
+[listener.apps]
+protocol = "session"
+bind = "127.0.0.1:0"
+
+[app.session]
+binding = "session"
+bearer_secret = "bearer"
+
+[app.session.grants]
+originate = true
+"#;
+        let host = Host::start_with_secrets(document, "127.0.0.1".parse().unwrap(), |name| {
+            (name == "bearer").then(|| b"session material".to_vec())
+        })
+        .unwrap();
+        let mut connection = host
+            .session_endpoint()
+            .connect("session", b"session material")
+            .unwrap();
+        let (origin, origin_incoming) = endpoint().await;
+        let origin_dispatcher = Dispatcher::new(origin.clone(), origin_incoming);
+        let calls = origin_dispatcher.calls();
+        let (callee, callee_incoming) = endpoint().await;
+        let target = callee.local_addr();
+        let callee_handle = callee.clone();
+        let far = tokio::spawn(async move {
+            let mut dispatcher = Dispatcher::new(callee_handle.clone(), callee_incoming);
+            let invitation = dispatched_invitation(&mut dispatcher).await;
+            let mut call = invitation
+                .answer(&callee_handle, "127.0.0.1".parse().unwrap())
+                .await
+                .unwrap();
+            let (_, mut inbox) = invitation.into_parts();
+            let serving = sipx_call::serve(&mut call, &mut inbox);
+            tokio::pin!(serving);
+            loop {
+                tokio::select! {
+                    result = &mut serving => {
+                        result.unwrap();
+                        break;
+                    }
+                    event = dispatcher.next() => {
+                        assert!(event.is_some(), "the far endpoint remains live");
+                    }
+                }
+            }
+        });
+        let request = OriginateRequest {
+            session: connection.id(),
+            app: "session".to_owned(),
+            request: "dial-real".to_owned(),
+            target: format!("sip:bob@{target}"),
+            from: "sip:alerts@example.test".to_owned(),
+        };
+        let policy = host.running.app_policy("session").unwrap();
+        let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+        let (_stop, shutdown) = watch::channel(false);
+        let outcome = prepare_originated(
+            OriginateContext {
+                handle: origin.clone(),
+                calls,
+                endpoint: host.sessions.clone(),
+                media_address: "127.0.0.1".parse().unwrap(),
+                policy,
+                permit,
+            },
+            request,
+            shutdown,
+        )
+        .await;
+        let OriginateOutcome::Ready(mut prepared) = outcome else {
+            panic!("the real outbound call is established");
+        };
+        assert_eq!(prepared.session.session(), connection.id());
+        let reply = connection.recv().await.unwrap();
+        assert!(reply.contains(&prepared.call_id));
+        prepared.call.hang_up().await.unwrap();
+        far.await.unwrap();
+        origin.shutdown().await;
+        callee.shutdown().await;
+    }
+
     #[test]
     fn a_refused_document_names_its_line_rather_than_panicking() {
         let error = Host::start(
@@ -1845,7 +2495,7 @@ on_unreachable = { reject = 503 }
             |name| (name == "hook").then(|| b"test-secret".to_vec()),
         )
         .expect("the host starts");
-        let host_task = tokio::spawn(async move { host.serve(callee, incoming).await });
+        let host_task = tokio::spawn(async move { Box::pin(host.serve(callee, incoming)).await });
         let (peer, _incoming) = endpoint().await;
         let mut call = dial(
             &peer,

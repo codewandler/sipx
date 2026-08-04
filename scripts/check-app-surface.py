@@ -663,7 +663,8 @@ def reached_experimental(enabled: dict[str, set[str]]) -> list[str]:
     A module behind a feature no application enables is skipped however loudly the closure names it.
     `sipx-media` writes `sipx_audio::opus` under `#[cfg(feature = "opus")]`; a checker that read the
     reference and not the gate would demand Opus graduate to `Supported` on the strength of code that
-    no shipped binary compiles.
+    the application closure being measured does not compile. The optional diagnostic-CLI build is a
+    separate product surface and does not make the default host enable a native codec dependency.
     """
     reached = set(enabled)
     problems = []
@@ -691,15 +692,15 @@ def unselectable_and_unmarked(enabled: dict[str, set[str]]) -> list[str]:
     """Modules behind a feature no application enables, that do not say they are experimental.
 
     This is the direction the worked example needed. Opus (RFC 6716, 7587) is implemented, tested,
-    selectable from `sipx-call` and compiled by every `--all-features` run — and behind
-    `sipx-audio/opus`, which links libopus, is off by default, and which **no shipped binary can turn
-    on**: `sipx-cli` takes no flag for it and declares no `[features]` table to forward one, and
-    `sipx-app` deliberately does not enable it (see its `# Stability` section for why).
+    selectable from `sipx-call` and from an optional `sipx-cli` build, and compiled by every
+    `--all-features` run — and behind `sipx-audio/opus`, which links libopus, is off by default, and
+    which `sipx-app` deliberately does not enable (see its `# Stability` section for why).
 
     A capability that is library-reachable and binary-unreachable is the exact shape alpha predicate 1
     is about, and the reason a path check could never settle it: every path is real. What settles it is
-    that no application selects it. So the rule is symmetric with graduation — such a module must say
-    it is experimental, and it stops having to the moment an application enables the feature.
+    that no application in this check's declared closure selects it by default. So the rule is
+    symmetric with graduation — such a module must say it is experimental, and it stops having to the
+    moment one of those applications enables the feature.
     """
     problems = []
     marked = set(experimental_modules())

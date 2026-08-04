@@ -1,15 +1,15 @@
 ---
 title: The experimental contract
-description: A tour of sipx.app.v1, whose types and interpreter exist but whose webhook, session, and embedded bindings do not.
+description: A tour of sipx.app.v1 as used by the implemented webhook and full-duplex session bindings.
 ---
 
 # The experimental contract
 
-:::caution Experimental and not connected to customer code
+:::caution Experimental wire contract
 
-The contract types, JSON format, interpreter, and deterministic vectors exist. `sipx-host` answers
-calls, but it does not deliver these events to a webhook or session and does not run an embedded
-handler. The wire shape may change before those bindings ship.
+`sipx-host` uses this contract with document-mode webhooks and authenticated full-duplex sessions.
+The Rust vocabulary and interpreter are Supported under the pre-1.0 policy, but the wire shape may
+change without a migration path. An embedded handler and packaged language SDK are not implemented.
 
 :::
 
@@ -68,12 +68,14 @@ a new program therefore removes queued prompt work without a separate cancel ins
 one callback is outstanding per call; events that happen meanwhile queue and are delivered in
 sequence with a current snapshot.
 
-Session mode is specified as full duplex for actions that need not alternate with callbacks, such
+Session mode is full duplex for actions that need not alternate with callbacks, such
 as originating a call or acting on an external command. The embedded mode is intended to preserve
 the same session semantics without a wire boundary.
 
-These are contract rules tested by the interpreter and harness. They are not usable deployment
-modes yet because all three binding adapters are unavailable.
+The host implements both rules: document-mode webhook responses replace the pending program, and a
+session controller may send correlated replacement documents without waiting for a callback.
+Session calls remain pinned to one authenticated connection, and an app granted `originate` may
+place a call through that connection. Embedded mode remains an intended carrier, not a shipped one.
 
 ## Failure policy
 
@@ -82,9 +84,9 @@ The configuration declares a callback timeout and an action for timeout, an unre
 hang up, or reject the call. The default preserves already-scripted work instead of ending an
 active call merely because the next callback cannot be reached.
 
-This policy is active in the current host for the one failure it can encounter without a binding:
-the app is always unreachable. It does not mean the host has attempted an HTTP request, opened a
-session, or loaded a handler.
+This policy is active in the current host. Webhook connection, timeout, and HTTP failures are fed
+to the interpreter; session loss applies `on_unreachable` independently to every pinned call. An
+embedded handler cannot be selected as a working binding because no embedded runtime is shipped.
 
-See the [SDK overview](overview.md) for the implementation boundary and the supported alternatives
-available today.
+See the [application host overview](overview.md) for the implementation boundary and the supported
+alternatives available today.

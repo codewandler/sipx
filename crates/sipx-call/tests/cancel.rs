@@ -15,12 +15,14 @@
 )]
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use sipx_call::{Dispatched, Dispatcher, Invitation, answer, ring, serve};
+use sipx_call::{DialOptions, Dispatched, Dispatcher, Error, Invitation, answer, ring, serve};
 use sipx_sip::{HeaderName, Host, HostName, Method, Request, Response, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
+use tokio::sync::Notify;
 use tokio::sync::mpsc::Receiver;
 
 fn loopback() -> IpAddr {
@@ -683,4 +685,106 @@ async fn a_ringing_host_is_told_the_caller_gave_up_and_why() {
         ),
         "an invitation that was cancelled must not be answerable afterwards"
     );
+}
+
+/// A-4: cancellation is an input to early dialing, not a dropped future. Once the INVITE has
+/// left, the API retains ownership long enough to wait for the provisional RFC 3261 §9.1 requires
+/// and then sends the matching CANCEL.
+#[tokio::test]
+async fn cancelling_while_early_dial_waits_withdraws_the_invitation() {
+    let (callee, callee_incoming) = endpoint().await;
+    let mut pumped = pump(&callee, callee_incoming);
+    let (source_endpoint, _source_incoming) = endpoint().await;
+    let cancelled = Arc::new(Notify::new());
+    let cancellation = Arc::clone(&cancelled);
+    let target = Target::udp(callee.local_addr());
+    let dialing = tokio::spawn(async move {
+        sipx_call::call::dial_early_until(
+            &source_endpoint,
+            target,
+            &callee_uri(),
+            &DialOptions::new("<sip:caller@example.net>", loopback()),
+            cancellation.notified_owned(),
+        )
+        .await
+    });
+
+    let mut invitation = pumped.invitation().await;
+    let mut events = invitation
+        .events()
+        .expect("the pending invitation has a cancellation stream");
+    cancelled.notify_one();
+    let _ringing = ring(&callee, invitation.request(), 180, "Ringing", false)
+        .await
+        .expect("the provisional permits cancellation");
+
+    let (result, ended) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(10), dialing),
+        tokio::time::timeout(Duration::from_secs(10), events.recv()),
+    );
+    assert!(matches!(
+        result
+            .expect("the cancellation-safe dial finishes")
+            .expect("the dial task finishes"),
+        Err(Error::Cancelled(duration)) if duration == Duration::ZERO
+    ));
+    assert!(matches!(
+        ended.expect("the target is told to stop ringing"),
+        Some(sipx_call::CallEvent::Ended(
+            sipx_call::EndCause::RemoteCancel
+        ))
+    ));
+    assert!(invitation.is_cancelled());
+}
+
+/// The cancellation-safe ownership continues after the early handle is returned and while its
+/// final answer is outstanding.
+#[tokio::test]
+async fn cancelling_while_an_early_handle_awaits_confirmation_withdraws_it() {
+    let (callee, callee_incoming) = endpoint().await;
+    let mut pumped = pump(&callee, callee_incoming);
+    let (source_endpoint, _source_incoming) = endpoint().await;
+    let target = Target::udp(callee.local_addr());
+    let dialing = tokio::spawn(async move {
+        sipx_call::dial_early(
+            &source_endpoint,
+            target,
+            &callee_uri(),
+            &DialOptions::new("<sip:caller@example.net>", loopback()),
+        )
+        .await
+        .expect("the early handle is returned")
+    });
+
+    let mut invitation = pumped.invitation().await;
+    let mut events = invitation
+        .events()
+        .expect("the pending invitation has a cancellation stream");
+    let _ringing = ring(&callee, invitation.request(), 180, "Ringing", false)
+        .await
+        .expect("the early dialog is established");
+    let dialing = dialing.await.expect("the dialing task finishes");
+    let cancelled = Arc::new(Notify::new());
+    let cancellation = Arc::clone(&cancelled);
+    let confirming =
+        tokio::spawn(async move { dialing.answered_until(cancellation.notified_owned()).await });
+    cancelled.notify_one();
+
+    let (result, ended) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(10), confirming),
+        tokio::time::timeout(Duration::from_secs(10), events.recv()),
+    );
+    assert!(matches!(
+        result
+            .expect("confirmation cancellation finishes")
+            .expect("the confirmation task finishes"),
+        Err(Error::Cancelled(duration)) if duration == Duration::ZERO
+    ));
+    assert!(matches!(
+        ended.expect("the target is told to stop ringing"),
+        Some(sipx_call::CallEvent::Ended(
+            sipx_call::EndCause::RemoteCancel
+        ))
+    ));
+    assert!(invitation.is_cancelled());
 }

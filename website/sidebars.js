@@ -39,12 +39,14 @@ const sidebars = {
       items: [
         'reference/security',
         'reference/compliance',
+        'reference/development-process',
+        'reference/diagnostic-phone-proof',
         'whats-new',
       ],
     },
     {
       type: 'category',
-      label: 'Experimental',
+      label: 'Application host',
       items: ['sdk/overview', 'sdk/contract'],
     },
   ],

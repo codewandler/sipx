@@ -1,6 +1,6 @@
 [package]
 name = "sipx-transport"
-description = "Async SIP transports: UDP, TCP, TLS, WebSocket, QUIC, and RFC 3263 resolution"
+description = "Async SIP transports: UDP, TCP, TLS, WebSocket, experimental QUIC, and RFC 3263 resolution"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -44,7 +44,8 @@ tokio-util = { workspace = true, features = ["rt"] }
 rcgen.workspace = true
 sipx-sip.workspace = true
 hickory-resolver.workspace = true
-sipx-testkit.workspace = true
+# Path-only so Cargo omits unpublished test support from the normalized registry manifest.
+sipx-testkit = { path = "../sipx-testkit" }
 # test-util gives the paused clock the timer-queue tests need: they assert on ordering and
 # cancellation, which would otherwise mean sleeping for real.
 tokio = { workspace = true, features = ["full", "test-util"] }

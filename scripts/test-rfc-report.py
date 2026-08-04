@@ -672,7 +672,7 @@ class ClaimReachability(unittest.TestCase):
                     " from the crate that could never provide it",
                 )
 
-        # The inverse of what this asserted before `M-30`: `Capabilities::with_opus` now has a
+        # The inverse of what this asserted before `M-30`: the public Opus preference now has a
         # caller above `sipx-sdp`, and that caller is the selector.
         #
         # Read over code with comments stripped, which matters more here than it looks. `X-33`
@@ -686,7 +686,7 @@ class ClaimReachability(unittest.TestCase):
         selectors = [
             path
             for path in (ROOT / "crates" / "sipx-call" / "src").rglob("*.rs")
-            if "with_opus" in rust_code_only(path.read_text())
+            if "CodecPreference::Opus" in rust_code_only(path.read_text())
         ]
         self.assertNotEqual(
             [], selectors, "something in sipx-call asks for Opus in code, not in a comment"
@@ -705,16 +705,20 @@ class ClaimReachability(unittest.TestCase):
         exported = rust_code_only((ROOT / "crates" / "sipx-call" / "src" / "lib.rs").read_text())
         self.assertIn("Codecs", exported, "the codec set is exported, or no caller can select one")
 
-        # And the claim the `6716` note makes about the binary, which `X-33` held for both crates
-        # and the inversion dropped. Absence, so this one is still conclusive: while `sipx-cli`
-        # names Opus nowhere, no flag can reach it and the note stays true.
-        for path in (ROOT / "crates" / "sipx-cli" / "src").rglob("*.rs"):
-            with self.subTest(path=path.name):
-                self.assertNotIn(
-                    "with_opus",
-                    path.read_text(),
-                    "sipx-cli reaches Opus now, so the note saying it cannot is stale",
-                )
+        # `P-9` made the binary another selector. The registry must cite that layer and its note
+        # must no longer preserve the old, now-false reachability gap.
+        cli_selectors = [
+            path
+            for path in (ROOT / "crates" / "sipx-cli" / "src").rglob("*.rs")
+            if "CodecPreference::Opus" in rust_code_only(path.read_text())
+        ]
+        self.assertNotEqual(
+            [], cli_selectors, "something in sipx-cli selects Opus in code, not in a comment"
+        )
+        for number in (6716, 7587):
+            with self.subTest(rfc=number):
+                self.assertIn("crates/sipx-cli/src/media.rs", by_number[number]["evidence"])
+                self.assertNotIn("cannot select Opus", by_number[number]["note"])
 
         # What has *not* changed, and must not be quietly dropped: RFC 7587 §7.1's optional
         # parameters are neither offered nor read, so the row states that boundary. An

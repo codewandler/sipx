@@ -8,6 +8,7 @@ design:
 epic:
 areas:
 predicate:
+announcement:
 note:
 ---
 
@@ -28,3 +29,6 @@ One or two sentences: the outcome this delivers and which value/pillar it serves
 - If this story bears on an alpha predicate (`docs/roadmap.md`), set `predicate:` in the frontmatter —
   `3`, or `[3, 7]` for one that bears on two. That field is the **only** place the association is
   recorded, and `docs/maturity.md` reports the predicate open until every story declaring it is `done`.
+- If it bears on a beta-announcement predicate, use `announcement:` the same way. The roadmap defines
+  those five predicates; the report treats an invalid number as an error and an undeclared computed
+  predicate as unknown.

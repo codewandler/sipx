@@ -15,8 +15,9 @@
 //! variables and exit codes documented in `website/docs/reference/cli.md` and asserted in
 //! `tests/cli.rs`.
 //!
-//! **Supported**: `register`, `dial`, `answer`, `peers`, their flags, `SIPX_PASSWORD`, the `--book`
-//! lookup order, signalling transport selection and the exit codes.
+//! **Supported**: `register`, `dial`, `answer`, `load`, `peers`, optional device-audio selection,
+//! their flags, `SIPX_PASSWORD`, the `--book` lookup order, signalling transport selection and the
+//! exit codes.
 //!
 //! Refused rather than silently unsupported, because a flag that is accepted and dropped is worse
 //! than one that errors: for example, a cleartext transport for a `sips:` URI.
@@ -25,11 +26,15 @@
 mod advertise;
 mod answer;
 mod counters;
+mod device;
 mod dial;
+mod header;
 mod load;
+mod media;
 mod output;
 mod peers;
 mod register;
+mod scenario;
 mod signalling;
 
 use std::process::ExitCode;
@@ -46,8 +51,10 @@ COMMANDS:
     register    Register with a registrar
     dial        Place a call
     answer      Wait for and answer a call
+    devices     List stable audio device identifiers
     load        Place a finite, reproducible call load
     peers       List what can be called
+    scenario    Drive a call through correlated NDJSON commands
     help        Show this message
     version     Show the version
 
@@ -85,10 +92,12 @@ async fn main() -> ExitCode {
         Some("register") => register::run(&args, format).await,
         Some("dial") => dial::run(&args, format).await,
         Some("answer") => answer::run(&args, format).await,
+        Some("devices") => device::list(&args, format),
         Some("load") => load::run(&args, format).await,
         // Not async, and deliberately so: listing what can be called reads a file and opens no
         // socket. The registrar and local-link sources are separate stories.
         Some("peers") => peers::run(&args, format),
+        Some("scenario") => scenario::run(&args).await,
         Some("version" | "--version" | "-V") => {
             println!("sipx {}", env!("CARGO_PKG_VERSION"));
             Exit::Success
@@ -235,7 +244,19 @@ async fn record(
     within: std::time::Duration,
     idle: std::time::Duration,
 ) -> Vec<i16> {
-    let media = call.media();
+    record_media(call.media(), within, idle).await
+}
+
+/// The recording lifecycle shared by confirmed and reliable-provisional media sessions.
+///
+/// `Dialing` intentionally is not a `Call`: a final answer has not arrived. Keeping this helper
+/// on the media session lets the diagnostic phone capture that phase without manufacturing a
+/// confirmed-call handle or duplicating the two-bound recording rule above.
+async fn record_media(
+    media: &sipx_media::MediaSession,
+    within: std::time::Duration,
+    idle: std::time::Duration,
+) -> Vec<i16> {
     let deadline = tokio::time::Instant::now() + within;
     let mut recorded = Vec::new();
 
@@ -379,6 +400,20 @@ impl<'a> Args<'a> {
         None
     }
 
+    /// Every value of a repeatable option, in command-line order.
+    ///
+    /// The constructor has already established that each occurrence has a non-empty value.
+    /// Keeping the order is load-bearing for `--codec`, where order is preference.
+    pub(crate) fn values(&self, name: &str) -> impl Iterator<Item = &'a str> + '_ {
+        let flag = format!("--{name}");
+        self.raw.iter().enumerate().filter_map(move |(index, arg)| {
+            if arg == &flag {
+                return self.raw.get(index + 1).map(String::as_str);
+            }
+            arg.strip_prefix(&format!("{flag}="))
+        })
+    }
+
     /// Whether `--name` is present.
     #[must_use]
     pub(crate) fn flag(&self, name: &str) -> bool {
@@ -445,6 +480,13 @@ const VALUED_FLAGS: &[&str] = &[
     "--tls-ca",
     "--tls-cert",
     "--tls-key",
+    "--codec",
+    "--media-security",
+    "--ice",
+    "--stun-server",
+    "--audio-input",
+    "--audio-output",
+    "--header",
     "--rate",
     "--concurrency",
     "--calls",
@@ -561,13 +603,14 @@ mod tests {
     #[test]
     fn every_valued_flag_in_the_help_text_is_registered() {
         let help = format!(
-            "{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}",
             USAGE,
             crate::register::HELP,
             crate::dial::HELP,
             crate::answer::HELP,
             crate::peers::HELP,
-            crate::load::HELP
+            crate::load::HELP,
+            crate::scenario::HELP
         );
 
         // A documented flag takes a value if its help line shows a placeholder after it.
@@ -689,13 +732,14 @@ mod tests {
     #[test]
     fn every_seconds_flag_is_registered_as_numeric() {
         let help = format!(
-            "{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}",
             USAGE,
             crate::register::HELP,
             crate::dial::HELP,
             crate::answer::HELP,
             crate::peers::HELP,
-            crate::load::HELP
+            crate::load::HELP,
+            crate::scenario::HELP
         );
         let documented: Vec<String> = help
             .lines()

@@ -69,10 +69,11 @@ SDP rather than copying addresses or keys. The delayed-offer branch is carried b
 types: `ring_offer_early` originates an offer in a reliable provisional,
 `dial_early_without_offer` answers it in PRACK, and `Ringing::on_prack` adopts that answer before it
 acknowledges the exchange. The coupling consequently does not carry a parallel SDP interpreter or a
-second dialog sequence space for those axes. It does not yet suspend the target PRACK while the
-source leg returns an answer, so the two-leg delayed-offer relay remains open. Likewise, omitting
-`bridge_media` creates no forwarding task but does not make the two terminating `Call` sessions
-off-path; transparent SDP mapping for RFC 7092 section 3.1.3 remains open.
+second dialog sequence space for those axes. It suspends the target PRACK while a fresh reliable
+provisional offer obtains the source leg's PRACK answer; malformed answers and cancellation clean
+both pending legs, and a crossed target final is ACKed and ended with BYE. Omitting `bridge_media`
+creates no forwarding task but does not make the two terminating `Call` sessions off-path; `C-7`
+owns transparent SDP mapping for RFC 7092 section 3.1.3.
 
 ## Alternatives considered
 

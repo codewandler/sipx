@@ -126,6 +126,56 @@ class PublicGuardTests(unittest.TestCase):
         )
         self.assertEqual(4, len(problems))
 
+    def test_fact_guard_requires_exact_current_registry_versions(self) -> None:
+        version = SYNC.canonical_facts().workspace_version
+        problems = SYNC.public_fact_problems(
+            f"cargo install --version {version} sipx-cli\n"
+            f'sipx-call = "{version}"',
+            "README.md",
+        )
+        self.assertEqual(2, len(problems))
+        self.assertTrue(all("exact" in problem for problem in problems))
+
+    def test_fact_guard_rejects_stale_registry_versions(self) -> None:
+        problems = SYNC.public_fact_problems(
+            "cargo install --version =1.0.0-alpha.5 sipx-cli\n"
+            'sipx-call = "=1.0.0-alpha.5"',
+            "website/docs/getting-started.md",
+        )
+        self.assertEqual(2, len(problems))
+        self.assertTrue(all("differs from workspace version" in problem for problem in problems))
+
+    def test_fact_guard_preserves_historical_release_versions(self) -> None:
+        historical = (
+            "## 1.0.0-alpha.5 — 2026-08-03\n\n"
+            "Install v1.0.0-alpha.5 with:\n\n"
+            "cargo install --version =1.0.0-alpha.5 sipx-cli\n"
+        )
+        self.assertEqual(
+            [], SYNC.public_fact_problems(historical, "website/docs/whats-new.md")
+        )
+        self.assertNotEqual([], SYNC.public_fact_problems(historical, "README.md"))
+
+    def test_adoption_guard_accepts_the_current_public_entry_points(self) -> None:
+        sources = set(SYNC.ADOPTION_REQUIREMENTS) | set(SYNC.CURRENT_SURFACE_PAGES)
+        contents = {
+            source: (ROOT / source).read_text(encoding="utf-8") for source in sources
+        }
+        self.assertEqual([], SYNC.public_adoption_problems(contents))
+
+    def test_adoption_guard_rejects_a_missing_policy_and_stale_capability(self) -> None:
+        sources = set(SYNC.ADOPTION_REQUIREMENTS) | set(SYNC.CURRENT_SURFACE_PAGES)
+        contents = {
+            source: (ROOT / source).read_text(encoding="utf-8") for source in sources
+        }
+        contents["README.md"] = contents["README.md"].replace(
+            "current public-beta release", "development branch", 1
+        )
+        contents["website/docs/getting-started.md"] += "\nThe CLI can use UDP or TCP only.\n"
+        problems = SYNC.public_adoption_problems(contents)
+        self.assertTrue(any("missing published public-beta status" in p for p in problems))
+        self.assertTrue(any("stale current-main capability claim" in p for p in problems))
+
 
 if __name__ == "__main__":
     unittest.main()

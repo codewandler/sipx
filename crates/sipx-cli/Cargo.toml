@@ -13,6 +13,8 @@ categories.workspace = true
 [features]
 default = []
 dtls = ["sipx-call/dtls"]
+opus = ["sipx-call/opus", "sipx-media/opus"]
+device-audio = ["dep:cpal"]
 
 [[bin]]
 name = "sipx"
@@ -23,19 +25,24 @@ sipx-sip.workspace = true
 sipx-rtp.workspace = true
 bytes.workspace = true
 sipx-call.workspace = true
+sipx-app-protocol.workspace = true
+sipx-media.workspace = true
+sipx-sdp.workspace = true
 sipx-ua = { workspace = true, features = ["runtime"] }
 sipx-transport.workspace = true
 sipx-audio.workspace = true
-sipx-testkit.workspace = true
 anyhow.workspace = true
 rand.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["full"] }
+cpal = { workspace = true, optional = true }
 
 [dev-dependencies]
 sipx-audio.workspace = true
+# Path-only so Cargo omits unpublished test support from the normalized registry manifest.
+sipx-testkit = { path = "../sipx-testkit" }
 tokio = { workspace = true, features = ["full"] }
 
 [lints]

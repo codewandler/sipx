@@ -20,23 +20,29 @@ fail or disable that route explicitly instead of processing a different codec un
 
 ## Acceptance
 
-- [ ] Specify codec-construction failure behavior in the media design/spec before implementation,
+- [x] Specify codec-construction failure behavior in the media design/spec before implementation,
       including offer, answer and receive-side setup.
-- [ ] Opus encoder or decoder construction failure cannot produce a direct PCMU pipeline carrying an
+- [x] Opus encoder or decoder construction failure cannot produce a direct PCMU pipeline carrying an
       Opus payload type.
-- [ ] A required negotiated codec failure returns a typed setup error; an optional route may be
+- [x] A required negotiated codec failure returns a typed setup error; an optional route may be
       omitted only when negotiation and observable diagnostics remain consistent with that omission.
-- [ ] Failing-first tests inject encoder and decoder construction failure independently and prove that
+- [x] Failing-first tests inject encoder and decoder construction failure independently and prove that
       no PCMU bytes are emitted or decoded under the Opus payload type.
-- [ ] Existing successful Opus and PCMU paths retain packet-level round-trip tests, including dynamic
+- [x] Existing successful Opus and PCMU paths retain packet-level round-trip tests, including dynamic
       payload-type mapping.
-- [ ] Diagnostics identify codec construction failure without logging media or key material.
+- [x] Diagnostics identify codec construction failure without logging media or key material.
 
 ## Progress
 
 - Filed from R-08 in `docs/reviews/2026-07-30T07-50-49+02-00-repository-review.md`.
 - M-13 tracks successful Opus support. It has no acceptance case for construction failure, so this
   story records the distinct wire-correctness defect rather than reopening that completed feature.
+- Done. `MediaPort::start` constructs the negotiated encoder and decoder before starting a worker and
+  returns `SetupError::Codec` with the codec and direction on failure. The injected three-channel
+  encoder and decoder cases prove no datagram is emitted and no G.711 fallback state is installed;
+  the successful Opus and dynamic-payload round trips remain alongside them. The normative boundary
+  is `docs/specs/media-runtime.md` and the ownership decision is in
+  `docs/designs/media-runtime-safety.md`.
 
 ## Notes
 

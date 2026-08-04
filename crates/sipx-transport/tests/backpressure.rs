@@ -47,6 +47,13 @@ async fn saturated() -> (Handle, Receiver<Incoming>) {
     bind(config).await.expect("binds")
 }
 
+async fn overload_sender() -> Handle {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.overload.advertise = true;
+    let (handle, _incoming) = bind(config).await.expect("binds");
+    handle
+}
+
 fn to_uri() -> Uri {
     Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")))
 }
@@ -139,9 +146,7 @@ async fn a_request_dropped_for_backpressure_is_counted() {
 #[tokio::test]
 async fn a_shed_request_is_refused_rather_than_ignored() {
     let (busy, _incoming) = saturated().await;
-    let (sender, _sender_incoming) = bind(Config::new("127.0.0.1:0".parse().expect("valid")))
-        .await
-        .expect("binds");
+    let sender = overload_sender().await;
     let busy_addr = busy.local_addr();
 
     // Two requests through the transaction layer, so the second finds the queue full. The first
@@ -192,9 +197,7 @@ async fn a_shed_request_is_refused_rather_than_ignored() {
 #[tokio::test]
 async fn an_application_response_reports_active_control_while_the_queue_remains_saturated() {
     let (busy, mut incoming) = saturated().await;
-    let (sender, _sender_incoming) = bind(Config::new("127.0.0.1:0".parse().expect("valid")))
-        .await
-        .expect("binds");
+    let sender = overload_sender().await;
     let busy_addr = busy.local_addr();
 
     let mut responses = sender

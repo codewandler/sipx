@@ -34,7 +34,7 @@ jobs:
       # Installing them means the FFI crates find the libraries through pkg-config instead of
       # building from source — which for Opus is the failure mode of the one advisory
       # `deny.toml` excepts.
-      - run: sudo apt-get update && sudo apt-get install -y libopus-dev libssl-dev pkg-config
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -46,13 +46,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libopus-dev libssl-dev pkg-config
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
       # The documentation guides include these files verbatim. A sample that no longer compiles
       # is worse than no sample: it is read as working code.
       - run: cargo build --workspace --all-features --examples
+      # P-13: run the candidate command's actual help and compare it, plus every versioned CLI JSON
+      # producer, with the public reference. A parsed Rust help constant would miss dispatch/build
+      # defects and is deliberately not substituted here.
+      - run: ./scripts/check-cli-reference.py --check
+      # P-13: cargo has executed the process evidence; this holds every vector and wider release
+      # path in that evidence matrix and requires two peer profiles for each released transport.
+      - run: ./scripts/diagnostic-phone-proof.py --check
       # C-5's end-to-end proof: the app contract interpreter driving a real call with no host,
       # asserted on the trace the example prints. Not a `#[test]`, so nothing else runs it.
       - run: bash crates/sipx-app-protocol/tests/canned_program.sh
@@ -62,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libopus-dev libssl-dev pkg-config
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       # --all-targets, so tests and dev-dependencies are covered too. Without it the declared
@@ -82,6 +89,35 @@ jobs:
       # cannot compile a branch out behind a `#[cfg]`, and an optional transport's branch
       # referred to a field that only existed with its feature on. Nothing here noticed.
       - run: ./scripts/check-features.sh
+
+  device-linux:
+    name: device audio (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The file plugin is a real ALSA input device with no kernel module or physical microphone.
+      # It gives both release architectures the same deterministic callback and shutdown proof.
+      - run: cargo test -p sipx-cli --test cli --features device-audio dph_12_wav_and_virtual_device_carry_the_same_clip -- --exact
+
+  device-portable:
+    name: device audio compiles (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p sipx-cli --all-targets --features device-audio
 
   # The gate in AGENTS.md used to be a list of commands, and a list can quietly omit one: the
   # `msrv` job above was red from v0.4.0 through v0.7.0 while every documented command passed.
@@ -106,6 +142,14 @@ jobs:
       - run: python3 scripts/test-pool-key.py
       - run: python3 scripts/test-audio-claims.py
       - run: python3 scripts/test-maturity.py
+      # A-11: exercise release ordering and the publication authority boundary without registry
+      # credentials. Its fixtures prove that CI publication needs the tag and commit authorization.
+      - run: python3 scripts/test-release.py
+      # A-12: mutate each workflow authority and evidence boundary, then hold the real workflow to
+      # the same tag-selected, least-privilege, finite and commit-bound structure, including the
+      # resumable GitHub prerelease and prohibition on broader publicity. Neither check performs a write.
+      - run: python3 scripts/test-release-workflow.py
+      - run: ./scripts/check-release-workflow.py --check
       # X-38: the surface checker's own suite. Both bugs it had while being written reported
       # nothing, which is indistinguishable from a clean tree — so it is tested on fabricated
       # workspaces whose claims the test wrote.
@@ -113,6 +157,12 @@ jobs:
       # X-23: the interop harness's own suite. It stubs the container runtime, so it runs here in
       # seconds rather than in the `interop` job that needs a peer.
       - run: python3 scripts/test-interop-run.py
+      # P-13: reverse each help/schema comparison on fixtures so an incomplete checker cannot
+      # report an agreeing public page merely because it observed nothing.
+      - run: python3 scripts/test-cli-reference.py
+      # P-13: reverse the proof runner's vector discovery, peer coverage and bounded execution
+      # rules so the matrix cannot silently bless a path it stopped observing.
+      - run: python3 scripts/test-diagnostic-phone-proof.py
 
   # The peer list is read from the repository rather than written here, so that adding an interop
   # peer stays what `tests/interop/README.md` promises it is: adding a profile. A matrix spelled
@@ -216,6 +266,7 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: website/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       # Builds the site *and* the API reference, with `-D warnings` on the latter: a public
       # item with no documentation, or an intra-doc link that resolves nowhere, fails here —
       # and the site build throws on any broken link (`onBrokenLinks` in docusaurus.config.js).

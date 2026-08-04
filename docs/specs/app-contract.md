@@ -206,17 +206,25 @@ value is rejected **whole** — no partial application — and the app's declare
 "keep going"). `2xx` is acceptance. Anything else, a timeout, or a connection failure invokes
 §9.2. Redelivery on failure repeats `seq`. Requests carry `Sipx-Signature` (§9.1).
 
-## 8. Session binding (WebSocket or a subprocess pipe)
+## 8. Session binding (WebSocket)
 
 Same envelope and document types as JSON text frames; the alternation rule of §6.3 does **not**
 apply — the app may send a document at any time (it still *replaces* that call's program), and
-one session multiplexes many calls. Additionally: an app may send
-`{"do": "originate", "target": …, "from": …}` to place a new outbound call — the contract is
+one session multiplexes many calls. Every app command carries a bounded `request` correlation and
+a document names the `call` whose program it replaces. Additionally, an app granted `originate`
+may send
+`{"contract":"sipx.app.v1","request":"r1","do":"originate","target": …,"from": …}`
+to place a new outbound call — the contract is
 not purely reactive, and the host also exposes the same originate as a management-API request.
 **[sipx] Backpressure is declared:** the per-session outbound queue is bounded; on overflow the
 host closes the session (WebSocket close code 1013) and applies §9.2 to every call it carried.
 Binary frames are reserved for a future media channel; in `v1` a binary frame is a protocol
 error and closes the session.
+
+The exact frames, typed errors, pin selection, queue and connection bounds, bearer-authenticated
+upgrade, and liveness timers are [the session-binding specification](session-binding.md). That
+spec also records why subprocess establishment is deferred until process framing and supervision
+have their own bounded contract.
 
 ## 9. Trust
 

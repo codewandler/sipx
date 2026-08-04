@@ -34,6 +34,11 @@ pub enum OverloadFeedback {
 /// Endpoint overload-control policy.
 #[derive(Debug, Clone)]
 pub struct OverloadConfig {
+    /// Advertise RFC 7339/7415 client support on every outgoing topmost `Via`.
+    ///
+    /// Off by default because overload control is an extension negotiated hop by hop. Enabling it
+    /// retains the complete `loss,rate` offer; it does not select a compatibility subset per peer.
+    pub advertise: bool,
     /// What to report upstream when the application queue is full.
     pub feedback: OverloadFeedback,
     /// How long that report remains valid.
@@ -51,6 +56,7 @@ pub struct OverloadConfig {
 impl Default for OverloadConfig {
     fn default() -> Self {
         Self {
+            advertise: false,
             feedback: OverloadFeedback::Loss(100),
             validity: Duration::from_millis(500),
             rate_tolerance_intervals: 5,

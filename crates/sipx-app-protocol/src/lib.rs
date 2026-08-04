@@ -57,6 +57,7 @@ mod event;
 mod interpreter;
 mod policy;
 mod program;
+mod session;
 mod tagged;
 mod time;
 
@@ -76,6 +77,9 @@ pub use crate::interpreter::{
     Callback, Effect, Input, Interpreter, MAX_QUEUED_EVENTS, Output, Response, Timer,
 };
 pub use crate::policy::{Failure, OnFailure, Policy};
+pub use crate::session::{
+    MAX_SESSION_REQUEST_BYTES, SessionErrorCode, SessionReply, SessionRequest,
+};
 pub use crate::time::Timestamp;
 
 #[cfg(feature = "call")]

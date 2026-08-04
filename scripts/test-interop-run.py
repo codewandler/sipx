@@ -91,6 +91,7 @@ test)
     say test-start
     sleep TEST_SECONDS_PLACEHOLDER
     say test-end
+    [[ "${FAIL_CARGO_TEST:-0}" == "1" ]] && exit 1
     ;;
 esac
 exit 0
@@ -109,7 +110,7 @@ PEER_DIVERGES_ON=()
 
 peer_prepare() { :; }
 peer_mounts() { printf '%s\\n' "$PEER_DIR/tls:/tls:ro"; }
-peer_check() { :; }
+peer_check() { [[ "${FAIL_PEER_CHECK:-0}" != "1" ]]; }
 """
 
 
@@ -182,6 +183,35 @@ class ConcurrentRuns(unittest.TestCase):
             "the two runs interleaved rather than taking turns — a concurrent run removed the "
             f"other's peer mid-test. Events: {' '.join(tags)}",
         )
+
+    def test_a_failed_role_test_makes_the_peer_and_runner_fail(self):
+        env = dict(self.env, RUN_TAG="failed", FAIL_CARGO_TEST="1")
+        completed = subprocess.run(
+            [str(self.run_sh), "--peer", "peer"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0, completed.stdout)
+        self.assertIn("peer: FAILED", completed.stdout)
+
+    def test_a_failed_peer_capability_check_stops_before_the_test_list(self):
+        env = dict(self.env, RUN_TAG="failed-check", FAIL_PEER_CHECK="1")
+        completed = subprocess.run(
+            [str(self.run_sh), "--peer", "peer"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0, completed.stdout)
+        self.assertIn("peer: FAILED", completed.stdout)
+        self.assertNotIn("test-start", self.events.read_text())
 
 
 if __name__ == "__main__":

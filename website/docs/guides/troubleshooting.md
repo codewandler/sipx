@@ -59,21 +59,22 @@ Check these in order:
    never arrived.
 
 sipx supports symmetric RTP: after a valid packet arrives, media can be sent back to its observed
-source instead of the address advertised in SDP. That handles common endpoint NAT mappings. A full
-ICE call path is not available, and there is no relay fallback, so topologies that require
-connectivity checks or a media relay will still fail. WebSocket signalling does not solve media
-reachability; RTP uses its own network path.
+source instead of the address advertised in SDP. Calls can also gather host candidates or use a
+configured STUN server to gather server-reflexive candidates and run ICE connectivity checks. TURN
+and relayed candidates are not available, so topologies that require a media relay will still fail.
+WebSocket signalling does not solve media reachability; RTP uses its own network path.
 
 ## WAV input is rejected or sounds wrong
 
-The CLI uses files, not a microphone or headset. `--play` accepts PCM WAV at **8 kHz, 16-bit,
-mono**. Convert other sample rates, sample widths, channel counts, or compressed audio before the
-call. Read the error emitted before dialling: sipx validates playback input before it lets the far
-end answer.
+The default CLI uses files rather than a microphone or headset. `--play` accepts **16-bit mono PCM
+at the negotiated codec clock**: 8 kHz for G.711 or 48 kHz for Opus. Convert other sample rates,
+sample widths, channel counts, or compressed audio before the call. Builds with the optional
+`device-audio` feature can open an explicitly selected device. Read an input error emitted before
+dialling as a local setup failure: sipx validates playback input before it lets the far end answer.
 
-Recordings written by `--record` use the same telephony format. Silence in a valid output file is
-usually a media-path problem, not a file-format problem; return to the SDP and firewall checks
-above.
+Recordings written by `--record` preserve that negotiated clock in the WAV header. Silence in a
+valid output file is usually a media-path problem, not a file-format problem; return to the SDP and
+firewall checks above.
 
 ## Authentication fails
 

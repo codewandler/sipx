@@ -3,7 +3,6 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use sipx_audio::{Wav, read_wav, write_wav};
 use sipx_sip::{HeaderName, StatusCode};
 use sipx_transport::{Config as TransportConfig, bind};
 
@@ -16,8 +15,8 @@ USAGE:
     sipx answer [OPTIONS]
 
 OPTIONS:
-    --play <FILE>     Play this WAV to the caller (8 kHz 16-bit mono)
-    --record <FILE>   Record the caller to this WAV
+    --play <FILE>     Play mono 16-bit WAV at the negotiated codec clock
+    --record <FILE>   Record the caller to WAV at the negotiated codec clock
     --duration <S>    Hang up after this many seconds (default 30)
     --wait <S>        Give up if no call arrives within this many seconds (default 60)
     --local <ADDR>    Local address to bind (default 0.0.0.0:5060)
@@ -25,6 +24,13 @@ OPTIONS:
     --tcp             Legacy alias for --transport tcp
     --tls-cert <FILE> Server certificate chain for TLS/WSS (with --tls-key)
     --tls-key <FILE>  Server private key for TLS/WSS (with --tls-cert)
+    --codec <C>       Ordered codec preference; repeat pcmu, pcma or opus (default pcmu, pcma)
+    --media-security <M>  auto, plain, sdes or dtls-srtp (default auto)
+    --ice <P>         disabled, host or stun (default disabled)
+    --stun-server <ADDR>  STUN server for --ice stun, as host:port
+    --audio-input <E>  Local source: wav:<path>, device:<id> or null
+    --audio-output <E> Local sink: wav:<path>, device:<id> or null
+    --header <H>      Add an application-owned final-response field; repeat 'Name: value'
     --reject          Answer 603 Decline instead
     --busy            Answer 486 Busy Here instead
     --once            Exit after one call (default; kept for clarity in scripts)
@@ -51,11 +57,27 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Ok(transport) => transport,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
+    let media = match crate::media::Selection::from_args(&args, transport.kind()) {
+        Ok(media) => media,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
+    let audio = match crate::device::Selection::from_args(&args) {
+        Ok(audio) => audio,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
+    let headers = match crate::header::from_args(&args) {
+        Ok(headers) => headers,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
 
-    let clip = match args.value("play").map(read_clip) {
+    let clip = match audio.wav_input().map(crate::dial::read_clip) {
         Some(Ok(clip)) => Some(clip),
         Some(Err(message)) => return fail(format, Exit::Usage, &message),
         None => None,
+    };
+    let mut devices = match audio.open() {
+        Ok(devices) => devices,
+        Err(message) => return fail(format, Exit::Failed, &message),
     };
 
     let local: std::net::SocketAddr = match args.value("local").unwrap_or("0.0.0.0:5060").parse() {
@@ -91,9 +113,11 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     };
     transport
         .requested_report(
-            Report::new()
-                .text("status", "listening")
-                .text("address", listening.to_string()),
+            media.requested_report(
+                Report::new()
+                    .text("status", "listening")
+                    .text("address", listening.to_string()),
+            ),
         )
         .emit(format);
 
@@ -131,6 +155,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             args.flag("busy"),
             transport,
             format,
+            &headers,
         )
         .await;
     }
@@ -143,13 +168,27 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     };
 
     let started = std::time::Instant::now();
-    let mut call = match sipx_call::answer(&handle, &request, media_address).await {
+    let mut call = match sipx_call::answer_with_policy_and_headers(
+        &handle,
+        &request,
+        media_address,
+        media.policy(),
+        &headers,
+    )
+    .await
+    {
         Ok(call) => call,
         Err(error) => return fail(format, Exit::Failed, &error.to_string()),
     };
 
     let duration = Duration::from_secs(args.number("duration").unwrap_or(30));
-    let media = call.media();
+    let session = call.media();
+    if let (Some(path), Some(clip)) = (audio.wav_input(), clip.as_ref())
+        && let Err(message) = crate::dial::validate_clip(path, clip, session.codec().clock_rate())
+    {
+        let _ = call.hang_up().await;
+        return fail(format, Exit::Usage, &message);
+    }
 
     // The recording bounds itself, and keeps whatever arrived (`X-40`). It used to be
     // `timeout(duration, media.record_until_idle(500ms))`, which spent one 500 ms window on both
@@ -162,17 +201,41 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // call — while `DIGIT_GAP` is left with the only question it can answer, whether the caller
     // has stopped dialling. `collect_digits` enforces the cap itself, so there is no timed-out
     // future left to `unwrap_or_default` the collected digits away.
-    let ((), recorded, digits) = tokio::join!(
+    let output_device = devices.has_output();
+    let ((), recorded, digits, device_samples) = tokio::join!(
         async {
             if let Some(clip) = &clip {
-                let _ = tokio::time::timeout(duration, media.play(&clip.samples, 160)).await;
+                let _ = tokio::time::timeout(
+                    duration,
+                    session.play(&clip.samples, session.samples_per_packet()),
+                )
+                .await;
             }
         },
-        crate::record(&call, duration, crate::RECORD_IDLE),
-        media.collect_digits(duration, crate::DIGIT_GAP),
+        async {
+            if output_device {
+                Vec::new()
+            } else {
+                crate::record(&call, duration, crate::RECORD_IDLE).await
+            }
+        },
+        session.collect_digits(duration, crate::DIGIT_GAP),
+        devices.run(session, duration),
     );
+    let device_samples = match device_samples {
+        Ok(samples) => samples,
+        Err(message) => {
+            let _ = call.hang_up().await;
+            return fail(format, Exit::Failed, &message);
+        }
+    };
+    let samples_received = if output_device {
+        usize::try_from(device_samples).unwrap_or(usize::MAX)
+    } else {
+        recorded.len()
+    };
 
-    let mut report = transport.report(
+    let report = media.requested_report(
         Report::new()
             .text("status", "answered")
             .text("caller", caller)
@@ -182,18 +245,19 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             )
             .number(
                 "samples_recorded",
-                i64::try_from(recorded.len()).unwrap_or(0),
+                i64::try_from(samples_received).unwrap_or(i64::MAX),
             )
-            .boolean("heard_audio", !recorded.is_empty()),
-        request.transport,
+            .boolean("heard_audio", samples_received != 0),
     );
+    let report = media.negotiated_report(report, &call);
+    let mut report = devices.report(transport.report(report, request.transport));
 
     if !digits.is_empty() {
         report = report.text("dtmf", digits);
     }
 
-    if let Some(path) = args.value("record") {
-        match write_clip(path, &recorded) {
+    if let Some(path) = audio.wav_output() {
+        match crate::dial::write_clip(path, &recorded, session.codec().clock_rate()) {
             Ok(()) => report = report.text("recording", path),
             Err(message) => return fail(format, Exit::Failed, &message),
         }
@@ -216,6 +280,7 @@ async fn refuse(
     busy: bool,
     transport: crate::signalling::Selection,
     format: Format,
+    headers: &[sipx_sip::Header],
 ) -> Exit {
     let (code, reason) = if busy {
         (486, "Busy Here")
@@ -232,7 +297,7 @@ async fn refuse(
         };
     // RFC 3261 §8.2.6.2: every response but 100 carries a To tag — it is what lets a caller
     // behind a forking proxy tell this branch's refusal from another's.
-    let builder = match request.request.headers.value(&HeaderName::To) {
+    let mut builder = match request.request.headers.value(&HeaderName::To) {
         Some(to) => {
             let to = tagged(&String::from_utf8_lossy(&to), &fresh_tag());
             match builder.set_header(&HeaderName::To, bytes::Bytes::from(to)) {
@@ -242,6 +307,15 @@ async fn refuse(
         }
         None => builder,
     };
+    for header in headers {
+        builder = match builder.header(
+            header.name().clone(),
+            bytes::Bytes::copy_from_slice(header.raw_value()),
+        ) {
+            Ok(builder) => builder,
+            Err(error) => return fail(format, Exit::Failed, &error.to_string()),
+        };
+    }
     let _ = handle.respond(&request.key, builder.build()).await;
 
     transport
@@ -291,23 +365,6 @@ fn fresh_tag() -> String {
     use rand::Rng as _;
     let value: u64 = rand::rng().random();
     format!("{value:016x}")
-}
-
-fn read_clip(path: &str) -> Result<Wav, String> {
-    let file = std::fs::File::open(path).map_err(|error| format!("{path}: {error}"))?;
-    let clip = read_wav(file).map_err(|error| format!("{path}: {error}"))?;
-    if clip.sample_rate != 8000 {
-        return Err(format!(
-            "{path}: {} Hz; G.711 needs 8000 Hz — resample it first",
-            clip.sample_rate
-        ));
-    }
-    Ok(clip)
-}
-
-fn write_clip(path: &str, samples: &[i16]) -> Result<(), String> {
-    let file = std::fs::File::create(path).map_err(|error| format!("{path}: {error}"))?;
-    write_wav(file, &Wav::narrowband(samples.to_vec())).map_err(|error| format!("{path}: {error}"))
 }
 
 #[cfg(test)]

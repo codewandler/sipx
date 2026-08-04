@@ -6,18 +6,19 @@ description: Install the sipx CLI and place a first call between two terminals w
 # Getting started
 
 This walkthrough makes a real local SIP call between two `sipx` processes. It needs no PBX,
-account, or configuration file.
+account, or configuration file. The exact public beta is available from crates.io; `main` may move
+ahead of it.
 
-## Install the tagged release
+## Install the public beta
 
-sipx is not on crates.io yet. Install it from Git with Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
+Install the exact release with Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```bash
-cargo install --git https://github.com/codewandler/sipx \
-  --tag v1.0.0-alpha.5 --locked sipx-cli
+cargo install --locked --version =1.0.0-beta.1 sipx-cli
 ```
 
-`--tag` makes the installation reproducible. This site follows the newer `main` branch; to
+The exact `--version` requirement makes the installation reproducible. This site follows the
+newer `main` branch; to
 try that development state instead, use:
 
 ```bash
@@ -26,20 +27,24 @@ cargo install --git https://github.com/codewandler/sipx \
 ```
 
 Confirm which version was installed. This documentation build covers
-<!-- BEGIN generated:workspace-version -->1.0.0-alpha.5<!-- END generated:workspace-version -->:
+<!-- BEGIN generated:workspace-version -->1.0.0-beta.1<!-- END generated:workspace-version -->:
 
 ```console
 $ sipx version
-sipx 1.0.0-alpha.5
+sipx 1.0.0-beta.1
 ```
 
 ## Prepare audio
 
-The CLI is a scriptable softphone, not a desktop audio phone. It never opens a microphone or
-speaker. Audio enters through `--play` and leaves through `--record`.
+The CLI is a scriptable softphone, not a desktop audio phone. WAV input through `--play` and WAV
+output through `--record` are the reproducible defaults. A build with the optional `device-audio`
+feature can instead open an exact microphone or speaker identifier; it does not add a graphical
+device picker or mixer.
 
-Input WAV files must be **8 kHz, 16-bit, mono PCM**. If you do not have one, omit `--play` on
-either command below. The call will still complete, but that side sends silence.
+Input WAV files must be **16-bit mono PCM at the negotiated codec clock**: 8 kHz for the default
+G.711 codecs or 48 kHz when both ends select Opus. sipx refuses a mismatched rate instead of
+silently changing the clip's speed. If you do not have one, omit `--play` on either command below.
+The call will still complete, but that side sends silence.
 
 ## Make a call
 
@@ -67,9 +72,10 @@ Both commands finish with an `answered` report. `caller.wav` contains audio sent
 dialler, and `reply.wav` contains the answerer's greeting. The reports also say how many
 samples were recorded and whether any audio was heard.
 
-The CLI defaults to UDP and selects TCP, TLS, WebSocket, or secure WebSocket with `--transport`.
-Secure paths verify the URI host against the peer certificate and never retry over cleartext; use
-`--tls-ca` to add a private authority.
+Outbound `dial` and `register` commands default to UDP. For compatibility, `answer` without a
+transport flag listens on both UDP and TCP; select exactly one of UDP, TCP, TLS, WebSocket, or
+secure WebSocket with `--transport`. Secure paths verify the URI host against the peer certificate
+and never retry over cleartext; use `--tls-ca` to add a private authority.
 
 ## Register an address
 
@@ -81,8 +87,9 @@ SIPX_PASSWORD='your-password' \
 ```
 
 Registration is a lease. `--keep-alive` refreshes it until the command is interrupted. The CLI
-can use UDP or TCP for registration, but not TLS; see [Register against a PBX](guides/register.md)
-for target selection, Outbound, and the library API.
+can use UDP, TCP, TLS, WebSocket, or secure WebSocket for registration; see
+[Register against a PBX](guides/register.md) for target selection, certificate verification,
+Outbound, and the library API.
 
 ## Script the result
 

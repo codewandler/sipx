@@ -33,9 +33,12 @@
 //!   you are prepared to follow it.
 //!
 //!
-//! **Supported.** G.711 both ways, mixing and WAV. Opus is behind the off-by-default `opus` feature and
-//! is **Experimental** for a reason that is not about this crate: no call can select it
-//! (`M-30`), so nothing above has ever constrained its shape.
+//! **Supported.** G.711 both ways, mixing and WAV. Opus is behind the off-by-default `opus` feature
+//! and remains **Experimental** at this crate boundary. `sipx-call` and an Opus-enabled diagnostic
+//! CLI can select it, but no default shipped application enables its native dependency. Cargo's
+//! normalized package manifests are checked with the feature off and on, including a clean packaged
+//! CLI build and run. `M-39` supplies rate-correct bidirectional CLI audio and independent-peer
+//! evidence in both SIP roles. Optional RFC 7587 `fmtp` controls are not implemented.
 
 pub mod g711;
 pub mod mix;

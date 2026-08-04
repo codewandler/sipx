@@ -214,7 +214,9 @@ tasks, pooled connections and endpoint sockets have been released.
 
 ## 10.2 Hop-by-hop overload control (RFC 7339 and RFC 7415)
 
-**[RFC 7339 §4]** A client-generated topmost `Via` carries valueless `oc` and
+**[RFC 7339 §2, §4]** Overload control is an explicit endpoint capability and is disabled by
+default. Setting `Config::overload.advertise` makes the endpoint a supporting client for this
+extension; every client-generated topmost `Via` then carries valueless `oc` and
 `oc-algo="loss,rate"`. A request never carries `oc-validity` or `oc-seq`. A server that received
 the offer fills `oc`, selects exactly one offered algorithm in a quoted `oc-algo` value, and adds
 `oc-validity` and an increasing `oc-seq` to the topmost `Via` of every response. A normal response
@@ -256,7 +258,10 @@ An overload refusal is local and typed: no transaction or network write is creat
 endpoint increments `Counters::overload_rejections`. This includes the direct ACK path; overload
 control applies to all downstream requests, while the policy hook is how an application protects
 an in-dialog or emergency request. Requests that are admitted continue to advertise both algorithms
-regardless of the algorithm currently selected by the server.
+regardless of the algorithm currently selected by the server. A default endpoint neither adds the
+capability parameters nor installs received client-control state; its server half still answers a
+peer that explicitly offered the extension, because the peer's offer—not this endpoint's client
+policy—is what scopes that response.
 
 **[sipx] Server feedback is tied to the existing backpressure path.** When the application queue is
 full, the 503 and `Retry-After` remain, the existing shed counter still increments, and a client that

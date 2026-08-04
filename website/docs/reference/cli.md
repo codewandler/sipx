@@ -5,8 +5,8 @@ description: Every sipx command, flag, exit code and JSON field — the surface 
 
 # CLI reference
 
-One binary, `sipx`. Five commands do work — `dial`, `answer`, `load`, `register` and `peers`, documented
-below — alongside `help` and `version`. Global: `--json` switches the report to a single-line JSON
+One binary, `sipx`. Seven commands do work — `dial`, `answer`, `load`, `register`, `peers`, `devices`
+and `scenario`, documented below — alongside `help` and `version`. Global: `--json` switches the report to a single-line JSON
 object on stdout; `-v`/`-vv` raise log verbosity on stderr (never stdout, so JSON stays
 parseable); `-h`/`--help` on any command.
 
@@ -32,8 +32,9 @@ asks the registrar to remove the binding.
 `--help` is answered before any of this, so it still prints when the rest of the line is wrong.
 
 `dial`, `answer`, and `register` select `udp`, `tcp`, `tls`, `ws`, or `wss` with
-`--transport <T>`. The default remains UDP; `--tcp` remains a compatible alias. TLS/WSS verify
-certificates with the platform trust store plus `--tls-ca <FILE>`, and use the URI host unless
+`--transport <T>`. `dial` and `register` default to UDP; `answer` without a transport flag keeps its
+historical UDP and TCP listeners. `--tcp` remains a compatible alias. TLS/WSS verify certificates
+with the platform trust store plus `--tls-ca <FILE>`, and use the URI host unless
 `--tls-server-name <NAME>` explicitly supplies the service identity. There is no flag that disables
 verification and a `sips:` URI cannot select a cleartext transport.
 
@@ -47,12 +48,14 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 
 | Flag | Meaning |
 |---|---|
-| `--play <FILE>` | Play this WAV into the call (8 kHz 16-bit mono) |
-| `--record <FILE>` | Record the far end to this WAV |
+| `--play <FILE>` | Play mono 16-bit WAV at the negotiated codec clock: 8 kHz for G.711 or 48 kHz for Opus |
+| `--record <FILE>` | Record the far end to WAV with that negotiated clock in its header |
 | `--dtmf <DIGITS>` | Send these digits once the call is up |
+| `--early-media` | Receive a reliable provisional media session before the final answer |
 | `--duration <S>` | Hang up after this many seconds once connected (default 30) |
 | `--timeout <S>` | Give up if not answered in this many seconds (default 20). `0` waits as long as the transaction layer does — 32 seconds |
 | `--from <URI>` | Our own address (default `sip:sipx@<local>`) |
+| `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is world-readable |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
 | `--transport <T>` | Use `udp`, `tcp`, `tls`, `ws`, or `wss` (default `udp`) |
 | `--tcp` | Legacy alias for `--transport tcp` |
@@ -60,13 +63,35 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 | `--tls-ca <FILE>` | Add PEM trust roots to the platform store |
 | `--tls-cert <FILE>` | Mutual-TLS client certificate chain; requires `--tls-key` |
 | `--tls-key <FILE>` | Mutual-TLS client private key; requires `--tls-cert` |
+| `--codec <C>` | Select `pcmu`, `pcma`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`). Opus requires the optional build feature |
+| `--media-security <M>` | Select `auto`, `plain`, `sdes`, or `dtls-srtp` (default `auto`). Explicit SDES requires TLS/WSS signalling |
+| `--ice <P>` | Select `disabled`, `host`, or `stun` (default `disabled`) |
+| `--stun-server <ADDR>` | STUN server as `host:port`; required by `--ice stun` and refused otherwise |
+| `--audio-input <E>` | Local source: `wav:<path>`, `device:<id>`, or `null`. `--play` is the WAV alias |
+| `--audio-output <E>` | Local sink: `wav:<path>`, `device:<id>`, or `null`. `--record` is the WAV alias |
+| `--header <H>` | Add an application-owned INVITE field; repeat `Name: value` |
 | `--stats` | Report call quality on exit: loss, jitter, round trip, MOS estimate |
 | `--capture <FILE>` | Record the signalling to this [pcapng](https://en.wikipedia.org/wiki/Pcap) file for a bug report. Credentials are redacted — digest responses and opaque `Bearer`/`Basic` tokens, SRTP keys (`a=crypto`, `k=`), push tokens, instance URNs. **TLS and WSS are recorded decrypted**, because capturing ciphertext from inside the process would be worse than capturing outside it. What redaction cannot remove is identity: the file still says who called whom, when, and from where, so treat it as sensitive |
+| `--counters <FILE>` | Write flattened signalling counters as JSON; `--capture` implies `<capture>.counters.json` |
 
 Report fields: `status`, `peer`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
 `recording` when `--record` was given, and `loss`, `packets_lost`, `jitter_ms`, `mos`,
-`round_trip_ms` under `--stats`. An explicit `--transport` also reports `requested_transport` and
+`round_trip_ms` under `--stats`. `--early-media` adds `early_media` and
+`early_samples_recorded` to the terminal result. An explicit `--transport` also reports `requested_transport` and
 `negotiated_transport`; legacy no-flag and `--tcp` output remains byte-for-byte compatible.
+Any explicit media selector adds `requested_codecs`, `requested_media_security`, `requested_ice`,
+`negotiated_codec`, `negotiated_media_security`, and `negotiated_ice`. Negotiated ICE is read from
+the selected candidate pair and may be `checking`, `host`, `server-reflexive`, `peer-reflexive`, or
+`relayed`; it is not copied from the request.
+When a device endpoint is selected, the result also names its exact stable identifier and effective
+rate/channel/format configuration. `device_input_dropped_samples`,
+`device_output_dropped_samples`, and `device_output_silence_samples` make callback pressure and
+conversion gaps visible. These fields are measurements from the run, not requested settings.
+
+WAV input is never silently reinterpreted or resampled. Its sample rate must equal the codec that
+the call actually negotiates; a mismatch fails by naming both rates. Packet sizing likewise comes
+from the running session (160 samples for a 20 ms G.711 packet, 960 for Opus), and recordings use
+that rate in their WAV headers.
 
 ## `sipx answer`
 
@@ -74,8 +99,8 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 
 | Flag | Meaning |
 |---|---|
-| `--play <FILE>` | Play this WAV to the caller (8 kHz 16-bit mono) |
-| `--record <FILE>` | Record the caller to this WAV |
+| `--play <FILE>` | Play mono 16-bit WAV at the negotiated codec clock: 8 kHz for G.711 or 48 kHz for Opus |
+| `--record <FILE>` | Record the caller to WAV with that negotiated clock in its header |
 | `--duration <S>` | Hang up after this many seconds (default 30) |
 | `--wait <S>` | Give up if no call arrives within this many seconds (default 60) |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:5060`) |
@@ -83,16 +108,28 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 | `--tcp` | Select the historical TCP listener explicitly |
 | `--tls-cert <FILE>` | TLS/WSS server certificate chain; requires `--tls-key` |
 | `--tls-key <FILE>` | TLS/WSS server private key; requires `--tls-cert` |
+| `--codec <C>` | Select `pcmu`, `pcma`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`) |
+| `--media-security <M>` | Select `auto`, `plain`, `sdes`, or `dtls-srtp` (default `auto`) |
+| `--ice <P>` | Select `disabled`, `host`, or `stun` (default `disabled`) |
+| `--stun-server <ADDR>` | STUN server as `host:port`; required by `--ice stun` and refused otherwise |
+| `--audio-input <E>` | Local source: `wav:<path>`, `device:<id>`, or `null`. `--play` is the WAV alias |
+| `--audio-output <E>` | Local sink: `wav:<path>`, `device:<id>`, or `null`. `--record` is the WAV alias |
+| `--header <H>` | Add an application-owned final-response field; repeat `Name: value` |
 | `--reject` | Answer 603 Decline instead |
 | `--busy` | Answer 486 Busy Here instead |
 | `--once` | Exit after one call (the default; kept for clarity in scripts) |
 | `--capture <FILE>` | Record the signalling to this [pcapng](https://en.wikipedia.org/wiki/Pcap) file for a bug report. Credentials are redacted — digest responses and opaque `Bearer`/`Basic` tokens, SRTP keys (`a=crypto`, `k=`), push tokens, instance URNs. **TLS and WSS are recorded decrypted**, because capturing ciphertext from inside the process would be worse than capturing outside it. What redaction cannot remove is identity: the file still says who called whom, when, and from where, so treat it as sensitive |
+| `--counters <FILE>` | Write flattened signalling counters as JSON; `--capture` implies `<capture>.counters.json` |
 
 Reports twice: `status: "listening"` with the bound `address` first, then
 `status: "answered"` with `caller`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
 `dtmf` when digits arrived and `recording` when `--record` was given. Explicit selection adds the
 requested transport to the listening report and both requested and negotiated transport to the
 terminal report.
+Explicit media selection adds the three requested fields to the listening report and the same six
+requested/negotiated fields documented for `dial` to the terminal report.
+Device results carry the same selected-configuration and callback-counter fields documented for
+`dial`.
 
 ## `sipx load <URI>`
 
@@ -115,7 +152,11 @@ sipx load sip:load@192.0.2.1:5060 --rate 10 --concurrency 32 --calls 100 --seed 
 | `--password <P>` | Digest password; prefer `SIPX_PASSWORD` |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
 | `--transport <T>` | Use `udp`, `tcp`, `tls`, `ws`, or `wss` (default `udp`) |
-| TLS options | The same verified-name, trust-root and client-identity options as `dial` |
+| `--tcp` | Legacy alias for `--transport tcp` |
+| `--tls-server-name <N>` | Certificate identity to verify (default URI host) |
+| `--tls-ca <FILE>` | Add PEM trust roots to the platform store |
+| `--tls-cert <FILE>` | Mutual-TLS client certificate chain; requires `--tls-key` |
+| `--tls-key <FILE>` | Mutual-TLS client private key; requires `--tls-cert` |
 
 At least one of `--calls` and `--duration` is required; when both are present, the first reached
 closes admission. Reaching a bound or receiving Ctrl-C signals all owned calls to end and waits for
@@ -144,6 +185,7 @@ Register with a registrar: `sipx register sip:alice@example.com`
 | `--tls-ca <FILE>` | Add PEM trust roots to the platform store |
 | `--tls-cert <FILE>` | Mutual-TLS client certificate chain; requires `--tls-key` |
 | `--tls-key <FILE>` | Mutual-TLS client private key; requires `--tls-cert` |
+| `--header <H>` | Add an application-owned REGISTER field; repeat `Name: value` |
 | `--keep-alive` | Keep refreshing until interrupted |
 | `--outbound` | Register as one Outbound flow (RFC 5626): `reg-id` and `+sip.instance` on the Contact, the `outbound` option tag offered |
 | `--instance <URN>` | With `--outbound`: present this device identity rather than a freshly generated one — §4.1 wants it stable across restarts, and the CLI keeps no state, so persisting one is the caller's job |
@@ -151,6 +193,7 @@ Register with a registrar: `sipx register sip:alice@example.com`
 | `--push-prid <T>` | The identifier the push service knows this device by. Requires `--push-provider` |
 | `--push-param <X>` | Service-specific extra, when the service needs one |
 | `--capture <FILE>` | Record the signalling to this [pcapng](https://en.wikipedia.org/wiki/Pcap) file for a bug report. Credentials are redacted — digest responses and opaque `Bearer`/`Basic` tokens, SRTP keys (`a=crypto`, `k=`), push tokens, instance URNs. **TLS and WSS are recorded decrypted**, because capturing ciphertext from inside the process would be worse than capturing outside it. What redaction cannot remove is identity: the file still says who called whom, when, and from where, so treat it as sensitive |
+| `--counters <FILE>` | Write flattened signalling counters as JSON; `--capture` implies `<capture>.counters.json` |
 | `--wake` | Act as though a push arrived once registered: send §4.1.3's binding-refresh REGISTER and report what it learned. Requires the push flags |
 
 Report fields: `status`, `aor`, `expires`, `refresh_in` — plus `flow` under `--outbound`
@@ -200,6 +243,52 @@ anyone". A book that exists and holds no peers prints nothing and exits 0.
 
 The command consults no network. It opens no socket and needs no registrar.
 
+## `sipx devices`
+
+List stable audio device identifiers: `sipx devices --json`
+
+This command is available in builds with the optional `device-audio` feature. Without that feature
+it exits 1 and names the feature; the file-only binary neither resolves nor links a platform audio
+dependency. The command enumerates devices but opens no stream.
+
+JSON is one `sipx.devices.v1` object whose `devices` array is sorted by `id`. Each entry carries
+`id`, human-readable `name`, and the `input`/`output` direction booleans. The identifier is opaque
+and backend-qualified, for example `alsa:hw:CARD=Loopback,DEV=0`; pass the complete returned string
+as `device:<id>` to `--audio-input` or `--audio-output`. Names are display text and cannot be used as
+selectors.
+
+An explicit selector never falls back to the default device. Missing, busy, permission-denied and
+unsupported devices fail before signalling is bound. Streams accept bounded linear PCM conversion,
+use one second of non-blocking callback queue per direction, report dropped or silent samples, and
+are stopped and joined before the terminal call result is emitted.
+
+## `sipx scenario`
+
+Drive one call actor with correlated newline-delimited JSON. The process emits a
+`scenario.ready` envelope, reads one command object per line from stdin, and echoes each command's
+string `id` in its completion or refusal event.
+
+| Flag | Meaning |
+|---|---|
+| `--local <ADDR>` | Local signalling address (default `0.0.0.0:0`) |
+| `--transport <T>` | Use `udp`, `tcp`, `tls`, `ws`, or `wss` (default `udp`) |
+| `--tcp` | Legacy alias for `--transport tcp` |
+| `--tls-server-name <N>` | Certificate identity to verify (default URI host) |
+| `--tls-ca <FILE>` | Add PEM trust roots to the platform store |
+| `--tls-cert <FILE>` | Certificate chain for TLS/WSS; pair with `--tls-key` |
+| `--tls-key <FILE>` | Private key paired with `--tls-cert` |
+| `--codec <C>` | Select `pcmu`, `pcma`, or `opus`; repeat in preference order |
+| `--media-security <M>` | Select `auto`, `plain`, `sdes`, or `dtls-srtp` |
+| `--ice <P>` | Select `disabled`, `host`, or `stun` |
+| `--stun-server <ADDR>` | STUN server as `host:port` for `--ice stun` |
+| `--header <H>` | Add an application-owned field to originated INVITEs; repeat |
+| `--timeout <S>` | Default outbound answer timeout (default 20) |
+
+The v1 commands are `dial`, `accept`, `reject`, `play`, `stop_playback`, `start_recording`,
+`stop_recording`, `send_dtmf`, `hold`, `resume`, `transfer`, `hangup`, `wait_for`, and `shutdown`.
+`wait_for` requires a finite timeout; there is no sleep command. EOF requests orderly shutdown.
+Malformed JSON and unknown commands produce a refusal envelope without corrupting later frames.
+
 ## Exit codes
 
 Scripts branch on the exit code, not on parsing prose:
@@ -232,3 +321,16 @@ than one thing to report, such as `answer`'s bound address or `peers`' list, emi
 each; failures emit
 `{"status": …, "error": …}` on **stderr**. The text and JSON forms carry the same field set —
 that equality is asserted by a test, so a field you see in one is in the other.
+
+Three outputs have versioned schemas or envelopes. The checked table below is held against the Rust
+producers by `./scripts/check-cli-reference.py --check`; the same checker executes root and
+subcommand help and compares their commands and long options with the sections above. Event-specific
+scenario details extend the `event` object and do not define a second envelope.
+
+<!-- BEGIN cli-json-contracts -->
+| Contract | Producer | Required structural fields |
+|---|---|---|
+| `sipx.devices.v1` | `device` | `schema`, `devices`, `id`, `name`, `input`, `output` |
+| `sipx.load.v1` | `load` | `schema`, `status`, `seed`, `target`, `limits`, `rate`, `concurrency`, `calls`, `duration_ms`, `call_duration_ms`, `setup_timeout_ms`, `cleanup_ms`, `outcomes`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency`, `response_codes`, `setup_ms`, `p50`, `p95`, `p99`, `media`, `snapshots`, `packets_lost`, `mean_loss`, `mean_jitter_ms`, `mean_mos` |
+| `sipx.app.v1` | `scenario` | `contract`, `seq`, `at`, `call`, `event`, `id`, `leg`, `direction`, `state`, `from`, `to`, `headers`, `media`, `encrypted`, `on_hold`, `muted`, `legs`, `bridged`, `tags`, `type`, `command` |
+<!-- END cli-json-contracts -->

@@ -19,14 +19,143 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
+use sipx_call::load::{AdmissionEnd, BoundedPlan, Cause, Plan, Stop, run, run_bounded};
 use sipx_call::{DialOptions, answer, dial};
+use sipx_sip::build::RequestBuilder;
 use sipx_sip::{HeaderName, Host, HostName, Method, Uri};
-use sipx_testkit::load::{Cause, Plan, run};
 use sipx_testkit::soak::{SETTLE_PAST_TIMERS, Tolerance, soak};
-use sipx_transport::{Config, Handle, Incoming, Target, bind};
+use sipx_transport::{Config, Error, Handle, Incoming, Target, bind};
 
 fn loopback() -> IpAddr {
     "127.0.0.1".parse().expect("valid")
+}
+
+fn overload_request(call_id: &str) -> sipx_sip::Request {
+    let uri = Uri::sip(Host::Name(HostName::new("callee.example").expect("host")));
+    RequestBuilder::new(Method::Options, uri)
+        .header(HeaderName::To, Bytes::from_static(b"<sip:callee.example>"))
+        .expect("to")
+        .header(
+            HeaderName::From,
+            Bytes::from_static(b"<sip:caller.example>;tag=one"),
+        )
+        .expect("from")
+        .header(
+            HeaderName::CallId,
+            Bytes::copy_from_slice(call_id.as_bytes()),
+        )
+        .expect("call-id")
+        .cseq(1, &Method::Options)
+        .expect("cseq")
+        .max_forwards(70)
+        .build()
+}
+
+fn overload_response_to(request: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(request);
+    let header = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .expect("request header")
+            .trim_end_matches('\r')
+    };
+    let via = header("Via:").replace(
+        ";oc;oc-algo=\"loss,rate\"",
+        ";oc=50;oc-algo=loss;oc-validity=10000;oc-seq=1.0",
+    );
+    format!(
+        "SIP/2.0 200 OK\r\nVia: {via}\r\nTo: {};tag=server\r\nFrom: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n",
+        header("To:"),
+        header("From:"),
+        header("Call-ID:"),
+        header("CSeq:")
+    )
+    .into_bytes()
+}
+
+#[tokio::test]
+async fn learned_overload_control_is_counted_by_the_bounded_load_runner() {
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("server binds");
+    let server_addr = server.local_addr().expect("server address");
+    let mut config = Config::new("127.0.0.1:0".parse().expect("client address"));
+    config.overload.advertise = true;
+    let (client, _incoming) = bind(config).await.expect("client binds");
+
+    let server_task = tokio::spawn(async move {
+        let mut bytes = vec![0u8; 4096];
+        let (length, source) = server.recv_from(&mut bytes).await.expect("request arrives");
+        let response = overload_response_to(bytes.get(..length).expect("received range"));
+        server
+            .send_to(&response, source)
+            .await
+            .expect("response sends");
+        server
+    });
+    let mut responses = client
+        .send(overload_request("learn@sipx"), Target::udp(server_addr))
+        .await
+        .expect("first request is uncontrolled");
+    let final_response = tokio::time::timeout(Duration::from_secs(2), responses.final_response())
+        .await
+        .expect("response arrives")
+        .expect("final response");
+    assert_eq!(final_response.status.code(), 200);
+    let server = server_task.await.expect("server task");
+
+    let load_client = client.clone();
+    let bounded = run_bounded(
+        BoundedPlan {
+            calls: Some(128),
+            duration: None,
+            rate: 100_000.0,
+            seed: 0x7339,
+            most_in_flight: 8,
+            cleanup: Duration::from_secs(2),
+        },
+        Stop::new(),
+        move |number, _stop| {
+            let client = load_client.clone();
+            async move {
+                match client
+                    .send_directly(
+                        overload_request(&format!("controlled-{number}@sipx")),
+                        Target::udp(server_addr),
+                    )
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(Error::Overloaded { peer }) if peer == server_addr => {
+                        Err(Cause::Rejected(503))
+                    }
+                    Err(other) => Err(Cause::Other(other.to_string())),
+                }
+            }
+        },
+    )
+    .await;
+    let rejected = bounded
+        .outcome
+        .failures
+        .get(&Cause::Rejected(503))
+        .copied()
+        .unwrap_or_default();
+    assert_eq!(bounded.admission_end, AdmissionEnd::Calls);
+    assert_eq!(bounded.outcome.attempted, 128);
+    assert!(
+        bounded.outcome.succeeded > 0,
+        "loss control forwarded nothing"
+    );
+    assert!(rejected > 0, "loss control rejected nothing");
+    assert_eq!(bounded.outcome.succeeded + rejected, 128);
+    assert!(bounded.peak_in_flight <= 8);
+    assert!(bounded.cleanup_complete);
+    assert_eq!(client.counters().overload_rejections, rejected as u64);
+
+    drop(server);
+    client.shutdown().await;
 }
 
 /// Place one call and hang up, classified the way the harness wants to hear about it.
