@@ -220,16 +220,22 @@ async fn a_peer_that_offers_no_ice_keeps_symmetric_rtp() {
     .encode();
     peer.send_to(&packet, local).await.unwrap();
 
+    // `send_to` proves only that the peer's kernel accepted the datagram. The received frame is the
+    // causal proof that this session parsed the packet and latched its source before replying.
+    let samples = session.samples_per_packet();
+    let received = tokio::time::timeout(Duration::from_secs(3), session.recv())
+        .await
+        .expect("the peer packet reached the receive path")
+        .expect("the media session remains open");
+    assert_eq!(
+        received.len(),
+        samples,
+        "one complete RTP frame was accepted"
+    );
+
     // Now this side speaks, and it must arrive at the observed source rather than the advertised
     // address — which is exactly what a stream with no ICE must go on doing.
-    let samples = session.samples_per_packet();
-    tokio::spawn(async move {
-        for _ in 0..100 {
-            if !session.send(tone(samples)).await {
-                return;
-            }
-        }
-    });
+    assert!(session.send(tone(samples)).await, "the reply was queued");
 
     let mut datagram = vec![0u8; 2048];
     let (len, from) = tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut datagram))
