@@ -2,7 +2,7 @@
 id: A-12
 title: Publish and verify 1.0.0-beta.2
 pillar: Application
-status: in-progress
+status: done
 priority: 12
 design: docs/roadmap.md
 epic: app-sdk
@@ -22,20 +22,20 @@ broader announcement remains a separate hypothetical decision.
 
 ## Acceptance
 
-- [ ] Before any registry write, hypothetical announcement-readiness predicates 1–3 are met,
+- [x] Before any registry write, hypothetical announcement-readiness predicates 1–3 are met,
       `A-11` is done, the workspace and every internal requirement name `1.0.0-beta.2`, and the full
       gate passes on the clean release commit. Completing this story then makes the generated report
       read five of five.
-- [ ] One immutable annotated tag supplies every published package; internal packages are published
+- [x] One immutable annotated tag supplies every published package; internal packages are published
       in derived dependency order and registry availability is polled under a finite bound.
-- [ ] A clean project builds exact crates.io versions with no path/Git override, and a
+- [x] A clean project builds exact crates.io versions with no path/Git override, and a
       crates.io-installed `sipx-cli` completes the bounded loopback proof.
 - [x] README, public site, API docs and the reviewed release record name the unstable API policy and
       intentional omissions; the adoption surface leads with Rust crates and uses the CLI as proof.
-- [ ] The published pages are verified from the immutable release commit after the registry and CLI
+- [x] The published pages are verified from the immutable release commit after the registry and CLI
       proofs; only then is the reviewed GitHub prerelease created or verified. The workflow posts no
       broader publicity.
-- [ ] A partial publication is resumed only from unchanged bytes; a required code change yanks the
+- [x] A partial publication is resumed only from unchanged bytes; a required code change yanks the
       affected beta and increments the prerelease rather than moving the tag.
 
 ## Progress
@@ -76,6 +76,13 @@ broader announcement remains a separate hypothetical decision.
   stopped before every irreversible step because the workflow did not pass `SIPX_DENYLIST` to the
   provenance check. Exact crates.io API queries found all eleven versions absent and no GitHub
   Release exists. The tag remains unchanged; the corrected candidate is `1.0.0-beta.2`.
+- Annotated tag `v1.0.0-beta.2` resolves to release commit
+  `4aa64caaf38c59961b746a2cfabbed1bc6394501`. Protected run `30912030744` passed the complete gate
+  and rehearsal before publishing its first frontier; checksum-bound recovery run `30915437072`
+  completed all eleven exact packages on attempt 5, then passed the clean registry consumer,
+  crates.io-installed Opus CLI loopback and release-commit Pages proof. Its dependent job created
+  the prerelease at <https://github.com/codewandler/sipx/releases/tag/v1.0.0-beta.2> on
+  2026-08-04. No broader announcement was posted.
 
 ## Notes
 

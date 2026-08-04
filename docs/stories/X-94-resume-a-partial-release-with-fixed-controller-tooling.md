@@ -2,7 +2,7 @@
 id: X-94
 title: Resume a partial release with fixed controller tooling
 pillar: Build
-status: in-progress
+status: done
 priority: 1
 design: docs/specs/release-workflow.md
 epic: conformance
@@ -36,10 +36,10 @@ publication authority.
       protected recovery workflow, exact tag, release SHA, failed run ID, controller SHA and positive
       Actions run identity. Branch CI, another repository/workflow, a moved tag or a dirty release
       checkout dispatches no upload.
-- [ ] Every already-visible crate is reproduced from the tag and matches crates.io byte-for-byte
+- [x] Every already-visible crate is reproduced from the tag and matches crates.io byte-for-byte
       before the missing dependency frontier is published. Publication remains bounded, then the
       exact consumer/Opus CLI, Pages and idempotent GitHub-prerelease proofs run unchanged.
-- [ ] Structural mutation tests hold both authority paths, the recovery evidence query, credential
+- [x] Structural mutation tests hold both authority paths, the recovery evidence query, credential
       scopes and ordering; `./scripts/gate.py` is green.
 
 ## Progress
@@ -58,6 +58,12 @@ publication authority.
   exact package before it can dispatch anything. The workflow has 26 structural and mutation tests;
   it pins tag object `04a19dff6a7d7b6c072c98d18ad4b42407955d4b` and Cargo `1.97.1`, the identities
   used by the failed run.
+- Controller commit `7c9f1d6b1b0bf48fb2c76a4afa097b146e9cfea6` passed exact-SHA CI run
+  `30915422367` after its local 32-step gate passed. Protected recovery run `30915437072` then
+  reproduced every visible archive from the immutable tag before each bounded frontier. Attempt 5
+  completed after the registry's new-crate windows: all eleven packages, the exact registry
+  consumer, installed Opus CLI loopback and Pages proof passed, and dependent job `92022813919`
+  created the idempotent GitHub prerelease.
 
 ## Notes
 

@@ -32,6 +32,11 @@ Pages binding, and immutable-tag authority.
       seconds, and a miss or corrupt entry still runs every one of the gate's steps.
 - [ ] A measured exact-lock Node dependency cache may skip only installation, never site, anchor or
       rustdoc builds; it is retained only if its wall-time and storage tradeoff are material.
+- [ ] Publication models crates.io's new-crate rate limit explicitly: a first multi-crate release
+      uses registry-provided retry deadlines or measured conservative pacing, retains a finite total
+      bound, and resumes from checksum-proven visible archives without manual deadline arithmetic.
+      Tests cover repeated 429 responses and prove that an ordinary version update is not delayed
+      merely because first-name creation once required pacing.
 - [ ] Structural tests refuse cache placement before tag validation, loss of the complete gate, or
       substitution of CI success for any normative release proof; the complete gate stays green.
 
@@ -45,6 +50,11 @@ Pages binding, and immutable-tag authority.
   Its gate reuses one ordinary workspace target across serial steps, which is intentional. Package
   rehearsal/frontier/consumer targets and Cargo homes stay isolated because their independence is
   part of the release evidence rather than incidental build work.
+- Beta.2 created eleven new crate names. crates.io accepted the first four in one frontier, then
+  enforced approximately ten-minute creation windows: recovery attempts added four, one, one and
+  finally `sipx-cli`. The checksum-bound resume path kept this safe, but a human had to read each
+  429 deadline, rerun and approve the protected environment. The beta.3 workflow must turn that
+  observed registry behavior into bounded controller policy rather than rediscovering it live.
 
 ## Notes
 
