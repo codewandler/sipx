@@ -589,7 +589,7 @@ class Beta1ReplayMutations(unittest.TestCase):
     def test_prerelease_is_dependent_superseded_and_not_latest(self) -> None:
         mutations = (
             ("    needs: replay\n", "", "beta.1 replay GitHub prerelease is not dependent"),
-            ("              --latest=false \\\n", "              --latest \\\n", "beta.1 replay may become latest"),
+            ('--notes-file "$RELEASE_NOTES"', '--latest \\\n              --notes-file "$RELEASE_NOTES"', "beta.1 replay may become latest"),
             ('--notes-file "$RELEASE_NOTES"', "--notes generated", "beta.1 replay does not consume reviewed notes"),
             ("              --prerelease \\\n", "", "beta.1 replay GitHub Release is not a prerelease"),
         )

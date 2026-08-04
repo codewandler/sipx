@@ -424,7 +424,6 @@ jobs:
               --verify-tag \
               --target "$RELEASE_SHA" \
               --prerelease \
-              --latest=false \
               --title "sipx $RELEASE_VERSION" \
               --notes-file "$RELEASE_NOTES"
           fi

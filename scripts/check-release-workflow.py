@@ -314,7 +314,6 @@ def beta1_replay_workflow_problems(text: str) -> list[str]:
         ("beta.1 replay GitHub prerelease lacks write authority", r"\n\s*github_release:\s*\n.*?permissions:\s*\n\s+contents:\s*write"),
         ("beta.1 replay does not recheck tag before GitHub Release", r"Create or verify the replayed beta\.1 GitHub prerelease.*?local_tag_object=.*?remote_tag_object=.*?RELEASE_TAG_OBJECT.*?gh release view"),
         ("beta.1 replay GitHub Release is not a prerelease", r"gh release create .*?--prerelease"),
-        ("beta.1 replay may become latest", r"gh release create .*?--latest=false"),
         ("beta.1 replay does not consume reviewed notes", r"gh release create .*?--notes-file [\"']\$RELEASE_NOTES[\"']"),
         ("beta.1 replay does not verify an existing release", r"gh release view .*?target_commitish.*?reviewed replay notes differ"),
     )
@@ -325,6 +324,8 @@ def beta1_replay_workflow_problems(text: str) -> list[str]:
         problems.append("beta.1 replay has an automatic entry")
     if re.search(r"(?m)^\s*cargo\s+publish\b", text):
         problems.append("beta.1 replay calls cargo publish directly")
+    if re.search(r"gh release create .*?--latest(?:=true)?(?:\s|\\)", text, re.DOTALL):
+        problems.append("beta.1 replay may become latest")
     replay_job = re.search(r"(?ms)^  replay:\s*$.*?(?=^  github_release:\s*$)", text)
     if replay_job is not None and re.search(r"(?m)^\s+contents:\s*write\s*$", replay_job.group()):
         problems.append("beta.1 replay publication job can write repository contents")
