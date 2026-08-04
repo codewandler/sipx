@@ -128,7 +128,9 @@ declared endpoint/event and the overall deadline bounds failure.
 
 Each terminal object, WebDriver response and process output is capped at 1 MiB. Candidate and pair
 identifiers are capped at 256 characters and retained browser errors at 4,096 characters. Cleanup runs on success and every
-failure, including malformed evidence and an interrupted shell.
+failure, including malformed evidence and an interrupted shell. The timeout-path self-test arms the
+per-role deadline after group admission; the complete-proof deadline remains a larger outer bound
+and does not stand in for evidence that a probe process started.
 
 ## 7. CI and harness self-test
 

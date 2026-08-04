@@ -16,7 +16,7 @@ does not turn RFC coverage into a weighted release score.
 |---|---|---|---|
 | 1 | No claim outlives its caller, at any layer | met | — |
 | 2 | Adversarial input and adversarial timing are both fuzzed | met | — |
-| 3 | A red gate means a defect | open | `X-95` |
+| 3 | A red gate means a defect | open | `X-95`, `X-96` |
 | 4 | No known-wrong shipped path | met (attested) | — |
 | 5 | The public API says what it guarantees | met | — |
 | 6 | Testable from a shell for everything the CLI exposes | met (attested) | — |
@@ -60,19 +60,19 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Build | 7 |
+| Build | 8 |
 | Media | 7 |
 | Signalling | 6 |
 | Application | 5 |
 | Transport | 4 |
 | Phone | 2 |
-| **total** | **31** |
+| **total** | **32** |
 
 203 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:3428259bd3c48a40f3bc9d119a19db00f72ce324ad91e4d37fa3e1ef5756e74a","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":50}} -->
+<!-- maturity-event-days: {"basis":"sha256:c8c03e2ead96878320ecd7b5b28d956f2404787ed3f8800a2a491755450634e9","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -84,7 +84,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-07-31 | 3 | 5 | +2 |
 | 2026-08-01 | 0 | 1 | +1 |
 | 2026-08-03 | 1 | 12 | +11 |
-| 2026-08-04 | 50 | 39 | -11 |
+| 2026-08-04 | 51 | 39 | -12 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 
