@@ -9,7 +9,9 @@ import hashlib
 import http.client
 import ipaddress
 import json
+import os
 import pathlib
+import selectors
 import socket
 import ssl
 import subprocess
@@ -35,6 +37,57 @@ class ProofError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ProofError(message)
+
+
+def bounded_run(command: list[str], stdout_path: pathlib.Path, stderr_path: pathlib.Path, limit: int) -> int:
+    """Run a command while draining both streams and retaining at most ``limit`` bytes of each."""
+    require(bool(command), "bounded command is empty")
+    require(limit > 0, "bounded output limit must be positive")
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    require(process.stdout is not None and process.stderr is not None, "bounded command pipes are absent")
+    streams = {
+        process.stdout.fileno(): (process.stdout, stdout_path.open("wb"), 0),
+        process.stderr.fileno(): (process.stderr, stderr_path.open("wb"), 0),
+    }
+    selected = selectors.DefaultSelector()
+    for file_descriptor, (stream, _output, _retained) in streams.items():
+        os.set_blocking(file_descriptor, False)
+        selected.register(stream, selectors.EVENT_READ, file_descriptor)
+
+    def drain(file_descriptor: int) -> bool:
+        stream, output, retained = streams[file_descriptor]
+        try:
+            chunk = os.read(file_descriptor, 64 * 1024)
+        except BlockingIOError:
+            return True
+        if not chunk:
+            selected.unregister(stream)
+            stream.close()
+            output.close()
+            return False
+        remaining = limit - retained
+        if remaining > 0:
+            kept = chunk[:remaining]
+            output.write(kept)
+            retained += len(kept)
+            streams[file_descriptor] = (stream, output, retained)
+        return True
+
+    try:
+        while process.poll() is None:
+            for key, _events in selected.select(timeout=0.05):
+                drain(key.data)
+        # Drain bytes already queued by the direct child, then close even if an orphan inherited a
+        # pipe. The outer process-group owner will reap that orphan; its descriptor cannot keep this
+        # bounded wrapper alive.
+        for key, _events in selected.select(timeout=0):
+            drain(key.data)
+    finally:
+        selected.close()
+        for stream, output, _retained in streams.values():
+            stream.close()
+            output.close()
+    return process.wait()
 
 
 def pin_bytes(pin: str) -> bytes:
@@ -505,6 +558,12 @@ def main() -> int:
     combine.add_argument("--pin", required=True)
     combine.add_argument("--output", type=pathlib.Path, required=True)
 
+    bounded = commands.add_parser("bounded-run")
+    bounded.add_argument("--stdout", type=pathlib.Path, required=True)
+    bounded.add_argument("--stderr", type=pathlib.Path, required=True)
+    bounded.add_argument("--limit", type=int, required=True)
+    bounded.add_argument("program", nargs=argparse.REMAINDER)
+
     args = parser.parse_args()
     if args.command == "preflight-cert":
         preflight_certificate(args.cert, args.host, args.pin)
@@ -559,6 +618,9 @@ def main() -> int:
             args.pin,
             args.output,
         )
+    elif args.command == "bounded-run":
+        program = args.program[1:] if args.program[:1] == ["--"] else args.program
+        return bounded_run(program, args.stdout, args.stderr, args.limit)
     return 0
 
 

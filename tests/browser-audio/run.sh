@@ -6,7 +6,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 DRIVER="$ROOT/tests/browser-audio/driver.py"
 TOTAL_TIMEOUT=${SIPX_BROWSER_AUDIO_TOTAL_TIMEOUT:-300}
 ROLE_TIMEOUT=${SIPX_BROWSER_AUDIO_ROLE_TIMEOUT:-120}
-OUTPUT_BLOCKS=1024 # Bash ulimit -f units: cap each stdout/stderr file at 1 MiB.
+OUTPUT_BYTES=1048576 # Retain at most 1 MiB from each process stream while draining the rest.
 declare -a OWNED_GROUPS=()
 declare -a LEADERS=()
 ADMIT=true
@@ -111,7 +111,11 @@ start_group() {
     shift 2
     "$ADMIT" || die "process admission is closed"
     mkdir -p "$(dirname "$stdout")" "$(dirname "$stderr")"
-    setsid bash -c 'ulimit -f "$1"; shift; exec "$@"' _ "$OUTPUT_BLOCKS" "$@" >"$stdout" 2>"$stderr" &
+    setsid "$DRIVER" bounded-run \
+        --stdout "$stdout" \
+        --stderr "$stderr" \
+        --limit "$OUTPUT_BYTES" \
+        -- "$@" &
     STARTED_PID=$!
     OWNED_GROUPS+=("$STARTED_PID")
     LEADERS+=("$STARTED_PID")

@@ -265,7 +265,12 @@ class BrowserAudioProofTest(unittest.TestCase):
         self.assertFalse([pid for pid in pids if pathlib.Path(f"/proc/{pid}").exists()])
 
     def test_process_capture_is_hard_capped(self) -> None:
-        flood = executable(self.directory / "flood.sh", "while :; do printf '0123456789abcdef'; done\n")
+        flood = executable(
+            self.directory / "flood.sh",
+            'head -c 2097152 /dev/zero >"$(dirname "$0")/product-output"\n'
+            "head -c 2097152 /dev/zero\n"
+            "head -c 2097152 /dev/zero >&2\n",
+        )
         output = self.directory / "capture"
         completed = subprocess.run(
             [str(RUNNER), "--capture-probe", str(flood), str(output)],
@@ -274,8 +279,10 @@ class BrowserAudioProofTest(unittest.TestCase):
             text=True,
             timeout=15,
         )
-        self.assertNotEqual(0, completed.returncode)
-        self.assertLessEqual((output / "capture.stdout").stat().st_size, DRIVER.MAX_EVIDENCE_BYTES)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(DRIVER.MAX_EVIDENCE_BYTES, (output / "capture.stdout").stat().st_size)
+        self.assertEqual(DRIVER.MAX_EVIDENCE_BYTES, (output / "capture.stderr").stat().st_size)
+        self.assertEqual(2 * DRIVER.MAX_EVIDENCE_BYTES, (self.directory / "product-output").stat().st_size)
 
 
 if __name__ == "__main__":
