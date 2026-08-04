@@ -27,7 +27,7 @@ use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
 use crate::event::{CallEvent, CallEvents, EndCause, EventSink};
 use crate::identity::OutboundIdentityPolicy;
-use crate::media_policy::{Codecs, IcePolicy, Keying, MediaPolicy, NegotiatedKeying};
+use crate::media_policy::{Codecs, IcePolicy, Keying, MediaPolicy, MediaProfile, NegotiatedKeying};
 use crate::transfer::{
     Referral, Replaces, Transfer, TransferState, is_terminated, parse_sipfrag, sipfrag,
 };
@@ -59,10 +59,77 @@ pub(crate) fn emit_construction_events(events: &EventSink, ringing: Option<bool>
 /// Its own function rather than the user agent's digest `cnonce`: a dialog identifier is not an
 /// authentication nonce, and borrowing one ties this layer to the one that handles credentials
 /// for no reason beyond both wanting random hex.
-pub(crate) fn token() -> String {
-    use rand::Rng as _;
-    let value: u64 = rand::rng().random();
+fn token_with_rng<R>(rng: &mut R) -> String
+where
+    R: rand::CryptoRng + ?Sized,
+{
+    let value = rand::RngCore::next_u64(rng);
     format!("{value:016x}")
+}
+
+pub(crate) fn token() -> String {
+    token_with_rng(&mut rand::rng())
+}
+
+/// The two address roles of one media socket.
+///
+/// `advertised` is written into SDP and may be a public NAT mapping the host does not own.
+/// `bind` selects the local interface on which the RTP socket is opened. Passing an [`IpAddr`]
+/// keeps the historical behaviour by using it for both roles.
+///
+/// When ICE is enabled, these addresses are only the local gathering base and initial SDP
+/// default. A nominated ICE pair owns the live destination; symmetric RTP cannot replace it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaAddress {
+    advertised: IpAddr,
+    bind: IpAddr,
+}
+
+impl MediaAddress {
+    /// Advertise and bind the same address.
+    #[must_use]
+    pub const fn new(advertised: IpAddr) -> Self {
+        Self {
+            advertised,
+            bind: advertised,
+        }
+    }
+
+    /// Bind RTP on `bind` while continuing to advertise the address passed to [`Self::new`].
+    ///
+    /// An unspecified bind address is valid. The advertised address must be reachable by the
+    /// peer; an unspecified one is refused before signalling. With ICE enabled,
+    /// the nominated pair takes precedence over symmetric-RTP source learning.
+    #[must_use]
+    pub const fn with_bind(mut self, bind: IpAddr) -> Self {
+        self.bind = bind;
+        self
+    }
+
+    /// The address serialized into SDP.
+    #[must_use]
+    pub const fn advertised(self) -> IpAddr {
+        self.advertised
+    }
+
+    /// The local address supplied to the RTP socket bind.
+    #[must_use]
+    pub const fn bind(self) -> IpAddr {
+        self.bind
+    }
+
+    fn validate(self) -> Result<Self> {
+        if self.advertised.is_unspecified() {
+            return Err(Error::UnspecifiedMediaAddress);
+        }
+        Ok(self)
+    }
+}
+
+impl From<IpAddr> for MediaAddress {
+    fn from(address: IpAddr) -> Self {
+        Self::new(address)
+    }
 }
 
 /// A call in progress.
@@ -85,9 +152,13 @@ pub struct Call {
     ended: bool,
     /// Where this side receives media, so a re-offer can name the same address.
     media_address: IpAddr,
+    /// Where replacement media sockets bind during an in-dialog renegotiation.
+    media_bind_address: IpAddr,
     /// The codec set this call was placed or answered with, so a re-offer offers the same
     /// set — a re-INVITE that silently narrowed to G.711 would move an Opus call mid-call.
     codecs: Codecs,
+    /// Named composition policy retained for renegotiation and diagnostics.
+    profile: MediaProfile,
     /// What the running session negotiated, for comparison against a re-offer.
     current: Negotiated,
     /// The peer's ICE credentials as this side last saw them (RFC 8839 §4.4.1.1.1).
@@ -142,6 +213,40 @@ struct PreparedRenegotiation {
     negotiated: Negotiated,
     answer: SessionDescription,
     direction: Direction,
+}
+
+/// Refuse a socket-ownership change until renegotiation can replace the media session atomically.
+fn preserve_rtcp_mode(current: sipx_sdp::RtcpMode, proposed: sipx_sdp::RtcpMode) -> Result<()> {
+    if current == proposed {
+        Ok(())
+    } else {
+        Err(Error::RtcpModeChange { current, proposed })
+    }
+}
+
+/// The mode one answer selected for its corresponding offered audio section.
+fn exchanged_rtcp_mode(
+    offer: &SessionDescription,
+    answer: &SessionDescription,
+) -> sipx_sdp::RtcpMode {
+    offer
+        .media
+        .iter()
+        .zip(&answer.media)
+        .find(|(offered, _)| offered.media == "audio")
+        .map_or(sipx_sdp::RtcpMode::Separate, |(offered, answered)| {
+            sipx_sdp::RtcpMode::from_exchange(offered, answered)
+        })
+}
+
+/// The RTCP shape this implementation will select when answering `offer`.
+fn answering_rtcp_mode(offer: &SessionDescription) -> sipx_sdp::RtcpMode {
+    offer
+        .media
+        .iter()
+        .find(|media| media.media == "audio" && !media.is_rejected())
+        .filter(|media| media.rtcp_mux())
+        .map_or(sipx_sdp::RtcpMode::Separate, |_| sipx_sdp::RtcpMode::Mux)
 }
 
 /// A negotiated session timer and the deadline it is currently counting down to.
@@ -400,6 +505,30 @@ impl Call {
         } else {
             NegotiatedKeying::Sdes
         }
+    }
+
+    /// The named media profile this established call retained.
+    #[must_use]
+    pub const fn media_profile(&self) -> MediaProfile {
+        self.profile
+    }
+
+    /// Nominated-pair, generation, state, and bounded ingress facts for browser audio.
+    #[must_use]
+    pub fn browser_component(&self) -> Option<sipx_media::browser::BrowserComponentSnapshot> {
+        self.media.browser_component()
+    }
+
+    /// RTP payload type selected for the established audio codec.
+    #[must_use]
+    pub fn negotiated_payload_type(&self) -> u8 {
+        self.current.wire_payload_type()
+    }
+
+    /// RTP clock rate selected for the established audio codec.
+    #[must_use]
+    pub fn negotiated_clock_rate(&self) -> u32 {
+        self.media.clock_rate()
     }
 
     /// Whether the call has ended, from either side.
@@ -686,11 +815,14 @@ impl Call {
             return None;
         }
         let offer = sipx_sdp::parse(&String::from_utf8_lossy(body)).ok()?;
-        let negotiated = negotiated(&offer, self.codecs).ok()?;
+        let mut negotiated = negotiated(&offer, self.codecs).ok()?;
 
-        let capabilities = self
+        let mut capabilities = self
             .codecs
             .capabilities(self.media_address, self.media.local_addr().port());
+        if self.current.rtcp_mode == sipx_sdp::RtcpMode::Mux {
+            capabilities = capabilities.with_rtcp_mux();
+        }
         let answer = sipx_sdp::answer(&offer, &capabilities);
         if answer
             .media
@@ -699,6 +831,12 @@ impl Call {
         {
             return None;
         }
+        let proposed_mode = exchanged_rtcp_mode(&offer, &answer);
+        // A muxed session owns one receive socket. Answering an offer that removed mux while
+        // silently retaining that owner would put the wire and the running state in disagreement.
+        // Refuse the offer with 488; the typed error is shared with the outbound paths below.
+        preserve_rtcp_mode(self.current.rtcp_mode, proposed_mode).ok()?;
+        negotiated.rtcp_mode = proposed_mode;
         let direction = offer
             .media
             .iter()
@@ -973,6 +1111,9 @@ impl Call {
     /// is unanswered or one of theirs is unanswered by us (§5.1, RFC 3264): the far end would
     /// answer 491 or 500 and the round trip would have told us only what we already knew.
     pub async fn update(&mut self, direction: Direction) -> Result<()> {
+        if self.profile == MediaProfile::BrowserAudio {
+            return Err(sipx_sdp::browser_audio::ProfileError::ProfileRemoved.into());
+        }
         if self.keying == Keying::DtlsSrtp {
             return Err(Error::DtlsRenegotiation);
         }
@@ -986,6 +1127,9 @@ impl Call {
         let mut capabilities = self
             .codecs
             .capabilities(self.media_address, self.media.local_addr().port());
+        if self.current.rtcp_mode == sipx_sdp::RtcpMode::Mux {
+            capabilities = capabilities.with_rtcp_mux();
+        }
         capabilities.direction = direction;
         // As for a re-INVITE: the version must increase with each modified offer, so the far
         // end can tell a changed description from a repeated one.
@@ -1016,8 +1160,11 @@ impl Call {
             // checks a path nobody is answering on. On an ordinary re-offer it is the same half
             // again, which the agent merges (RFC 8839 §4.2) rather than replaces — so a
             // re-answer cannot silence ICE on a call that is working.
-            self.accept_answer_ice(&answer).await;
             if let Ok(renegotiated) = negotiated(&answer, self.codecs) {
+                preserve_rtcp_mode(self.current.rtcp_mode, renegotiated.rtcp_mode)?;
+                // Do not let an answer that failed the mode guard mutate the running ICE
+                // generation. Socket ownership and candidate state move together or neither does.
+                self.accept_answer_ice(&answer).await;
                 self.move_media_if_changed(renegotiated).await?;
             }
         }
@@ -1205,8 +1352,9 @@ impl Call {
         if to.remote != self.current.remote
             || to.codec != self.current.codec
             || to.wire_payload_type() != self.current.wire_payload_type()
+            || to.rtcp_mode != self.current.rtcp_mode
         {
-            let port = MediaPort::bind(SocketAddr::new(self.media_address, 0))
+            let port = MediaPort::bind(SocketAddr::new(self.media_bind_address, 0))
                 .await
                 .map_err(Error::Io)?;
             let replacement = port.start(to.media_config())?;
@@ -1270,6 +1418,9 @@ impl Call {
     /// objection is right: a flag set before a call and cleared after it is a state machine
     /// written in the hardest way to read.
     async fn reoffer(&mut self, direction: Direction, ice: IceOffer) -> Result<()> {
+        if self.profile == MediaProfile::BrowserAudio {
+            return Err(sipx_sdp::browser_audio::ProfileError::ProfileRemoved.into());
+        }
         if self.keying == Keying::DtlsSrtp {
             return Err(Error::DtlsRenegotiation);
         }
@@ -1279,6 +1430,9 @@ impl Call {
         let mut capabilities = self
             .codecs
             .capabilities(self.media_address, self.media.local_addr().port());
+        if self.current.rtcp_mode == sipx_sdp::RtcpMode::Mux {
+            capabilities = capabilities.with_rtcp_mux();
+        }
         capabilities.direction = direction;
         // The session version must increase with each modified offer, so the far end can tell
         // a changed description from a repeated one.
@@ -1379,8 +1533,9 @@ impl Call {
             // checks a path nobody is answering on. On an ordinary re-offer it is the same half
             // again, which the agent merges (RFC 8839 §4.2) rather than replaces — so a
             // re-answer cannot silence ICE on a call that is working.
-            self.accept_answer_ice(&answer).await;
             if let Ok(renegotiated) = negotiated(&answer, self.codecs) {
+                preserve_rtcp_mode(self.current.rtcp_mode, renegotiated.rtcp_mode)?;
+                self.accept_answer_ice(&answer).await;
                 self.move_media_if_changed(renegotiated).await?;
             }
         }
@@ -2015,6 +2170,19 @@ pub struct DialOptions {
     pub from: String,
     /// Where this side receives media.
     pub media_address: IpAddr,
+    /// The local interface on which the media socket is opened.
+    ///
+    /// This defaults to [`Self::media_address`] when constructed with [`Self::new`]. Set it
+    /// independently when the SDP address is a public mapping which is not locally bindable. ICE
+    /// nomination still owns the eventual media path when ICE is enabled; ordinary RTP cannot
+    /// override that result.
+    ///
+    /// # Beta API migration
+    ///
+    /// Adding this public field deliberately breaks external `DialOptions` struct literals and
+    /// exhaustive patterns. Add `media_bind_address` (normally equal to `media_address`) or move
+    /// to [`Self::new`] and the builder methods. Constructor-based callers remain compatible.
+    pub media_bind_address: IpAddr,
     /// Direction advertised by the initial SDP offer.
     ///
     /// `SendRecv` is the ordinary endpoint default. A two-dialog owner uses this to map the
@@ -2039,7 +2207,10 @@ pub struct DialOptions {
     /// Empty by default: the INVITE goes to `target` and no further. Set it from a registrar's
     /// `Service-Route` — `UserAgent::service_route().rendered()` produces exactly this — when the
     /// registration says outbound requests must traverse proxies. Without it, a call placed
-    /// through a registration reaches a proxy holding no state for it.
+    /// through a registration reaches a proxy holding no state for it. This field serializes the
+    /// `Route` headers; the application must resolve the outer hop and supply that transport
+    /// destination as the [`Target`] passed to [`dial`]. The call layer does not resolve a Route
+    /// URI or override the caller's target.
     pub service_route: Vec<String>,
     /// Application-supplied fields on the initial INVITE.
     ///
@@ -2074,6 +2245,7 @@ impl DialOptions {
         Self {
             from: from.into(),
             media_address,
+            media_bind_address: media_address,
             initial_direction: Direction::SendRecv,
             timeout: None,
             session_expires: None,
@@ -2116,11 +2288,19 @@ impl DialOptions {
         self
     }
 
+    /// Bind RTP on this local address without changing the address advertised in SDP.
+    #[must_use]
+    pub const fn with_media_bind_address(mut self, address: IpAddr) -> Self {
+        self.media_bind_address = address;
+        self
+    }
+
     /// Traverse these proxies on the way out, outermost first (RFC 3608).
     ///
     /// The values are `Route` header values — `<sip:proxy.example;lr>` — which is what
     /// `ServiceRoute::rendered` returns. Order is normative: §6.1 requires a UA that exercises a
-    /// service route to preserve the order the registrar listed.
+    /// service route to preserve the order the registrar listed. This only serializes headers:
+    /// resolve the outer hop in the application and pass that address as the `target` to [`dial`].
     #[must_use]
     pub fn with_service_route(mut self, hops: Vec<String>) -> Self {
         self.service_route = hops;
@@ -2184,6 +2364,37 @@ enum PendingKeying {
     Dtls(sipx_media::dtls::openssl::Identity),
 }
 
+/// Refuse an impossible named profile before binding, gathering, certificate creation, or SIP I/O.
+fn validate_profile_preflight(policy: MediaPolicy, transport: TransportKind) -> Result<()> {
+    if policy.profile == MediaProfile::Standard {
+        return Ok(());
+    }
+    if !cfg!(feature = "opus") {
+        return Err(sipx_sdp::browser_audio::ProfileError::OpusUnavailable.into());
+    }
+    if !cfg!(feature = "dtls") {
+        return Err(Error::DtlsUnavailable);
+    }
+    if transport != TransportKind::Wss {
+        return Err(sipx_sdp::browser_audio::ProfileError::InsecureSignalling.into());
+    }
+    if policy.ice == IcePolicy::Disabled {
+        return Err(sipx_sdp::browser_audio::ProfileError::IceRequired.into());
+    }
+    if policy.keying != Keying::DtlsSrtp {
+        return Err(sipx_sdp::browser_audio::ProfileError::WeakerMedia.into());
+    }
+    #[cfg(feature = "opus")]
+    if policy.codecs != Codecs::Opus {
+        return if policy.codecs.carries(Codec::Opus) {
+            Err(sipx_sdp::browser_audio::ProfileError::CodecSetIncomplete.into())
+        } else {
+            Err(sipx_sdp::browser_audio::ProfileError::OpusUnavailable.into())
+        };
+    }
+    Ok(())
+}
+
 /// Build the capabilities selected by policy and retain anything the later handshake needs.
 fn media_capabilities(
     policy: MediaPolicy,
@@ -2191,12 +2402,17 @@ fn media_capabilities(
     port: u16,
     secure_signalling: bool,
 ) -> Result<(Capabilities, PendingKeying)> {
-    if policy.keying == Keying::DtlsSrtp && policy.ice != IcePolicy::Disabled {
+    if policy.profile == MediaProfile::Standard
+        && policy.keying == Keying::DtlsSrtp
+        && policy.ice != IcePolicy::Disabled
+    {
         return Err(Error::Sdp(
             "DTLS-SRTP cannot yet be combined with ICE on one media port".to_owned(),
         ));
     }
-    let capabilities = policy.codecs.capabilities(address, port);
+    // Offer mux on every ordinary audio exchange. A peer that omits it in the answer selects the
+    // established adjacent-port fallback; no retry or second offer is needed (RFC 5761 §5.1.1).
+    let capabilities = policy.codecs.capabilities(address, port).with_rtcp_mux();
     match policy.keying {
         Keying::Auto => Ok((
             capabilities.with_srtp(secure_signalling),
@@ -2243,7 +2459,16 @@ async fn offered_media(
     PendingKeying,
 )> {
     let local_ice = match options.media.gathering(true)? {
-        Some(gathering) => Some(port.gather(&gathering).await),
+        // An initial offer has not settled mux yet, so retain component 2 and its `a=rtcp`
+        // destination for RFC 5761's no-second-exchange fallback.
+        Some(gathering) => {
+            let rtcp_mode = if options.media.profile == MediaProfile::BrowserAudio {
+                sipx_sdp::RtcpMode::Mux
+            } else {
+                sipx_sdp::RtcpMode::Separate
+            };
+            Some(port.gather_with_rtcp_mode(&gathering, rtcp_mode).await)
+        }
         None => None,
     };
     let advertised = local_ice
@@ -2258,10 +2483,32 @@ async fn offered_media(
     )?;
     let mut capabilities = capabilities;
     capabilities.direction = options.initial_direction;
-    let mut offer = offer_from(&capabilities);
-    if let Some(local) = &local_ice {
-        add_ice(&mut offer, local, &[]);
-    }
+    let offer = if options.media.profile == MediaProfile::BrowserAudio {
+        let local = local_ice
+            .as_ref()
+            .ok_or(sipx_sdp::browser_audio::ProfileError::IceRequired)?;
+        let fingerprint = capabilities
+            .dtls()
+            .cloned()
+            .ok_or(sipx_sdp::browser_audio::ProfileError::FingerprintRequired)?;
+        sipx_sdp::browser_audio::offer(&sipx_sdp::browser_audio::BrowserAudioLocal {
+            address: advertised.ip(),
+            port: advertised.port(),
+            session_id: capabilities.session_id,
+            session_version: capabilities.session_version,
+            direction: options.initial_direction,
+            ice: local.credentials().clone(),
+            candidates: local.candidates().to_vec(),
+            fingerprint,
+            setup: sipx_sdp::fingerprint::SetupCapabilities::both(),
+        })?
+    } else {
+        let mut offer = offer_from(&capabilities);
+        if let Some(local) = &local_ice {
+            add_ice(&mut offer, local, &[]);
+        }
+        offer
+    };
     Ok((capabilities, offer, local_ice, keying))
 }
 
@@ -2277,6 +2524,13 @@ fn add_ice(
     description.connection = Some(Connection::new(default.ip()));
     if let Some(audio) = description.media.first_mut() {
         audio.port = default.port();
+        if let Some(control) = local.default_destination(ComponentId::RTCP) {
+            let address_type = if control.is_ipv6() { "IP6" } else { "IP4" };
+            audio.attributes.push(sipx_sdp::Attribute::valued(
+                "rtcp",
+                format!("{} IN {address_type} {}", control.port(), control.ip()),
+            ));
+        }
         audio.attributes.extend(local.attributes());
         audio.attributes.extend_from_slice(additional);
     }
@@ -2713,9 +2967,13 @@ async fn open_invitation(
     String,
     Request,
 )> {
+    validate_profile_preflight(options.media, target.transport)?;
+    MediaAddress::new(options.media_address)
+        .with_bind(options.media_bind_address)
+        .validate()?;
     // The offer has to name the port audio will arrive on, and only a bound socket knows it.
     // So the port is bound now and the session started once the answer says where and in what.
-    let port = MediaPort::bind(SocketAddr::new(options.media_address, 0))
+    let port = MediaPort::bind(SocketAddr::new(options.media_bind_address, 0))
         .await
         .map_err(Error::Io)?;
 
@@ -2768,6 +3026,9 @@ fn open_offerless_invitation(
     options: &DialOptions,
     identity: &Identity,
 ) -> Result<(String, Request)> {
+    MediaAddress::new(options.media_address)
+        .with_bind(options.media_bind_address)
+        .validate()?;
     let via = format!(
         "SIP/2.0/{} {};rport;branch={}",
         target.transport.as_str(),
@@ -3034,25 +3295,34 @@ async fn dial_with(
             // RFC 5763 peers are allowed to wait for the SIP exchange to complete before opening
             // the media connection. In particular, the ACK must be on the wire before a selected
             // DTLS handshake can wait for that peer, or two correct endpoints can deadlock.
-            let (media, settled) =
-                match key_and_start(port, ice, settled, keying, &answer, false).await {
-                    Ok(started) => started,
-                    Err(error) => {
-                        // The 2xx was already acknowledged, so RFC 3261 §15 tears down the dialog
-                        // whose selected media path could not be keyed. The transport counts an
-                        // unsent BYE; the result is discarded so it cannot mask the DTLS error.
-                        if let Ok(bye) = bye_request(
-                            &dialog,
-                            dialog.local_cseq.saturating_add(1),
-                            &normal_clearing_reason(),
-                        ) {
-                            // discard: the original DTLS failure is the cause returned to the
-                            // caller; a best-effort teardown failure must not replace it.
-                            let _ = endpoint.send(bye, in_dialog).await;
-                        }
-                        return Err(error);
+            let (media, settled) = match key_and_start(
+                port,
+                ice,
+                settled,
+                keying,
+                &answer,
+                false,
+                options.media.profile,
+            )
+            .await
+            {
+                Ok(started) => started,
+                Err(error) => {
+                    // The 2xx was already acknowledged, so RFC 3261 §15 tears down the dialog
+                    // whose selected media path could not be keyed. The transport counts an
+                    // unsent BYE; the result is discarded so it cannot mask the DTLS error.
+                    if let Ok(bye) = bye_request(
+                        &dialog,
+                        dialog.local_cseq.saturating_add(1),
+                        &normal_clearing_reason(),
+                    ) {
+                        // discard: the original DTLS failure is the cause returned to the
+                        // caller; a best-effort teardown failure must not replace it.
+                        let _ = endpoint.send(bye, in_dialog).await;
                     }
-                };
+                    return Err(error);
+                }
+            };
             // Emitted at construction — the earliest point this call has a stream anyone could
             // read from — from what was actually observed while waiting for the final response,
             // not reconstructed later from anything left lying around.
@@ -3067,10 +3337,13 @@ async fn dial_with(
                 awaiting_ack: None,
                 ended: false,
                 media_address,
+                media_bind_address: options.media_bind_address,
                 codecs: options.media.codecs,
+                profile: options.media.profile,
                 current: settled.negotiated,
                 peer_ice: peer_ice_credentials(response.body()),
-                encrypted: settled.srtp.is_some(),
+                encrypted: options.media.profile == MediaProfile::BrowserAudio
+                    || settled.srtp.is_some(),
                 keying: options.media.keying,
                 hold: Direction::SendRecv,
                 referral: None,
@@ -3125,7 +3398,8 @@ fn establish(
 )> {
     let answer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
         .map_err(|error| Error::Sdp(error.to_string()))?;
-    let settled = settle_answer(offered.crypto.as_slice(), &answer, options.media.codecs)?;
+    validate_establishment_answer(options.media.profile, invite.body(), &answer)?;
+    let settled = settle_answer(offered, &answer, options.media.codecs)?;
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
     let ice = match ice {
@@ -3144,6 +3418,30 @@ fn establish(
     Ok((dialog, port, target, settled, ice, answer))
 }
 
+/// Hold the named profile boundary ahead of every stateful part of answer application.
+///
+/// The generic codec settlement below this function is intentionally more permissive than the
+/// browser-audio contract. Running the complete exchange validator here keeps an invalid answer
+/// from reaching `LocalDescription::accept`, ACK transmission, ICE checks, or DTLS setup.
+fn validate_establishment_answer(
+    profile: MediaProfile,
+    offered: &[u8],
+    answer: &SessionDescription,
+) -> Result<()> {
+    if profile == MediaProfile::BrowserAudio {
+        let offered = sipx_sdp::parse(&String::from_utf8_lossy(offered))
+            .map_err(|error| Error::Sdp(error.to_string()))?;
+        // discard: the complete relation is checked here; the generic settlement immediately
+        // below derives the retained codec/ICE facts from this same validated answer.
+        let _ = sipx_sdp::browser_audio::validate_answer(
+            &offered,
+            answer,
+            sipx_sdp::fingerprint::SetupCapabilities::both(),
+        )?;
+    }
+    Ok(())
+}
+
 /// What the far end's answer to *our* offer settles.
 ///
 /// The calling side's counterpart of [`Early::settle`], and the reason it is a function is that
@@ -3152,7 +3450,7 @@ fn establish(
 /// all (RFC 3262 §5). There is no port to bind on either path, because ours was bound before the
 /// INVITE named it.
 fn settle_answer(
-    offered: &[sipx_sdp::crypto::Crypto],
+    offered: &Capabilities,
     answer: &SessionDescription,
     codecs: Codecs,
 ) -> Result<Settled> {
@@ -3161,10 +3459,48 @@ fn settle_answer(
     // on an answer that echoed a tag nobody sent is a call encrypted to nothing. Neither is
     // worth having, so both come back as `Error::Sdp` rather than as a quietly plain call.
     let answered = answered_crypto(answer);
+    let mut negotiated = negotiated(answer, codecs)?;
+    let answered_mux = answer
+        .media
+        .iter()
+        .find(|media| media.media == "audio" && !media.is_rejected())
+        .is_some_and(sipx_sdp::MediaDescription::rtcp_mux);
+    negotiated.rtcp_mode = if offered.rtcp_mux && answered_mux {
+        sipx_sdp::RtcpMode::Mux
+    } else {
+        sipx_sdp::RtcpMode::Separate
+    };
     Ok(Settled {
-        negotiated: negotiated(answer, codecs)?,
-        srtp: srtp_keys(offered, answered.as_ref())?,
+        negotiated,
+        srtp: srtp_keys(offered.crypto.as_slice(), answered.as_ref())?,
     })
+}
+
+/// Resolve the local handshake role from the peer description using SDP's shared level fallback.
+fn dtls_local_setup(
+    peer_description: &SessionDescription,
+    local_is_answerer: bool,
+) -> Result<sipx_sdp::fingerprint::Setup> {
+    let audio = peer_description.media.first().ok_or(Error::NoCommonCodec)?;
+    let peer_setup = sipx_sdp::answer::setup_of(peer_description, audio);
+    let roles = sipx_sdp::fingerprint::SetupCapabilities::both();
+    if local_is_answerer {
+        roles
+            .answer_to(peer_setup.unwrap_or(sipx_sdp::fingerprint::Setup::ActPass))
+            .map_err(Error::from)
+    } else {
+        roles.from_answer(peer_setup).map_err(Error::from)
+    }
+}
+
+/// Reject an unusable DTLS offer before binding or gathering for its answer.
+fn validate_dtls_offer_setup(offer: &SessionDescription, policy: MediaPolicy) -> Result<()> {
+    if policy.keying == Keying::DtlsSrtp {
+        // discard: validation is the side effect; the selected role is resolved again when the
+        // handshake starts, after the successful answer has been transmitted.
+        let _ = dtls_local_setup(offer, true)?;
+    }
+    Ok(())
 }
 
 /// Complete selected keying and only then start the media workers on the same bound port.
@@ -3176,10 +3512,55 @@ async fn key_and_start(
     keying: PendingKeying,
     peer_description: &SessionDescription,
     local_is_answerer: bool,
+    profile: MediaProfile,
 ) -> Result<(MediaSession, Settled)> {
     #[cfg(not(feature = "dtls"))]
     // discard: these inputs select DTLS roles only; the feature-off build has no such branch.
-    let _ = (peer_description, local_is_answerer);
+    let _ = (peer_description, local_is_answerer, profile);
+    #[cfg(feature = "dtls")]
+    if profile == MediaProfile::BrowserAudio {
+        let remote_role = if local_is_answerer {
+            sipx_sdp::browser_audio::BrowserAudioRole::Offerer
+        } else {
+            sipx_sdp::browser_audio::BrowserAudioRole::Answerer
+        };
+        let remote = sipx_sdp::browser_audio::validate(peer_description, remote_role)?;
+        if !local_is_answerer
+            && remote.payloads
+                != (sipx_sdp::browser_audio::BrowserAudioPayloads {
+                    opus: 111,
+                    pcmu: 0,
+                    pcma: 8,
+                    comfort_noise: 13,
+                    telephone_event: 101,
+                })
+        {
+            return Err(sipx_sdp::browser_audio::ProfileError::CodecSetIncomplete.into());
+        }
+        let local = ice.ok_or(sipx_sdp::browser_audio::ProfileError::IceRequired)?;
+        let PendingKeying::Dtls(identity) = keying else {
+            return Err(sipx_sdp::browser_audio::ProfileError::WeakerMedia.into());
+        };
+        let local_setup = dtls_local_setup(peer_description, local_is_answerer)?;
+        let role = match local_setup {
+            sipx_sdp::fingerprint::Setup::Active => sipx_media::dtls::Role::Client,
+            sipx_sdp::fingerprint::Setup::Passive => sipx_media::dtls::Role::Server,
+            _ => return Err(sipx_sdp::browser_audio::ProfileError::SetupRole.into()),
+        };
+        let media = port
+            .start_browser_audio(
+                settled.media_config(),
+                local,
+                0,
+                identity,
+                role,
+                remote.fingerprint,
+                Duration::from_secs(5),
+            )
+            .await
+            .map_err(browser_start_error)?;
+        return Ok((media, settled));
+    }
     match keying {
         PendingKeying::Sdes => {}
         #[cfg(feature = "dtls")]
@@ -3189,30 +3570,7 @@ async fn key_and_start(
                 .fingerprint()
                 .or_else(|| peer_description.fingerprint())
                 .ok_or_else(|| Error::Sdp("the DTLS peer supplied no fingerprint".to_owned()))?;
-            let peer_setup = match audio.setup() {
-                Some(setup) => setup,
-                None if local_is_answerer => sipx_sdp::fingerprint::Setup::ActPass,
-                None => {
-                    return Err(Error::Sdp(
-                        "the DTLS answer supplied no setup role".to_owned(),
-                    ));
-                }
-            };
-            let local_setup = if local_is_answerer {
-                // `peer_description` is the offer. The answerer follows the role selected by
-                // `sipx_sdp::answer`: actpass/passive -> active, active -> passive.
-                sipx_sdp::fingerprint::Setup::answer(peer_setup)
-            } else {
-                match peer_setup {
-                    sipx_sdp::fingerprint::Setup::Active => sipx_sdp::fingerprint::Setup::Passive,
-                    sipx_sdp::fingerprint::Setup::Passive => sipx_sdp::fingerprint::Setup::Active,
-                    _ => {
-                        return Err(Error::Sdp(
-                            "the DTLS answer did not select active or passive".to_owned(),
-                        ));
-                    }
-                }
-            };
+            let local_setup = dtls_local_setup(peer_description, local_is_answerer)?;
             let role = match local_setup {
                 sipx_sdp::fingerprint::Setup::Active => sipx_media::dtls::Role::Client,
                 sipx_sdp::fingerprint::Setup::Passive => sipx_media::dtls::Role::Server,
@@ -3242,6 +3600,28 @@ async fn key_and_start(
     Ok((media, settled))
 }
 
+#[cfg(feature = "dtls")]
+fn browser_start_error(error: sipx_media::browser::BrowserStartError) -> Error {
+    use sipx_media::browser::BrowserStartError;
+    match error {
+        BrowserStartError::IceFailed | BrowserStartError::IceStopped => {
+            sipx_sdp::browser_audio::ProfileError::NoNominatedPair.into()
+        }
+        BrowserStartError::RtcpMuxRequired => {
+            sipx_sdp::browser_audio::ProfileError::RtcpMuxRequired.into()
+        }
+        BrowserStartError::DtlsTimeout => sipx_sdp::browser_audio::ProfileError::DtlsTimeout.into(),
+        BrowserStartError::Dtls(sipx_media::dtls::Error::FingerprintMismatch) => {
+            sipx_sdp::browser_audio::ProfileError::FingerprintMismatch.into()
+        }
+        BrowserStartError::Dtls(sipx_media::dtls::Error::NoProfile) => {
+            sipx_sdp::browser_audio::ProfileError::NoSrtpProfile.into()
+        }
+        BrowserStartError::Setup(error) => Error::Media(error),
+        other => Error::Dtls(other.to_string()),
+    }
+}
+
 /// Answer an incoming INVITE.
 ///
 /// The 200 OK is retransmitted until the ACK arrives, which is the transaction user's job:
@@ -3251,6 +3631,15 @@ async fn key_and_start(
 ///
 /// Answers from the default codec set, [`Codecs::G711`]. [`answer_with`] takes a selection.
 pub async fn answer(endpoint: &Handle, incoming: &Incoming, media_address: IpAddr) -> Result<Call> {
+    answer_at(endpoint, incoming, MediaAddress::new(media_address)).await
+}
+
+/// [`answer`] with independent advertised and bound media addresses.
+pub async fn answer_at(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: MediaAddress,
+) -> Result<Call> {
     answer_tagged(
         endpoint,
         incoming,
@@ -3277,10 +3666,10 @@ pub async fn answer_with(
     media_address: IpAddr,
     codecs: Codecs,
 ) -> Result<Call> {
-    answer_with_policy(
+    answer_with_policy_at(
         endpoint,
         incoming,
-        media_address,
+        MediaAddress::new(media_address),
         MediaPolicy::default().with_codecs(codecs),
     )
     .await
@@ -3291,6 +3680,16 @@ pub async fn answer_with_policy(
     endpoint: &Handle,
     incoming: &Incoming,
     media_address: IpAddr,
+    policy: MediaPolicy,
+) -> Result<Call> {
+    answer_with_policy_at(endpoint, incoming, MediaAddress::new(media_address), policy).await
+}
+
+/// [`answer_with_policy`] with independent advertised and bound media addresses.
+pub async fn answer_with_policy_at(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: MediaAddress,
     policy: MediaPolicy,
 ) -> Result<Call> {
     answer_tagged(
@@ -3310,6 +3709,24 @@ pub async fn answer_with_policy_and_headers(
     endpoint: &Handle,
     incoming: &Incoming,
     media_address: IpAddr,
+    policy: MediaPolicy,
+    headers: &[sipx_sip::Header],
+) -> Result<Call> {
+    answer_with_policy_and_headers_at(
+        endpoint,
+        incoming,
+        MediaAddress::new(media_address),
+        policy,
+        headers,
+    )
+    .await
+}
+
+/// [`answer_with_policy_and_headers`] with independent advertised and bound media addresses.
+pub async fn answer_with_policy_and_headers_at(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: MediaAddress,
     policy: MediaPolicy,
     headers: &[sipx_sip::Header],
 ) -> Result<Call> {
@@ -3336,7 +3753,7 @@ pub async fn answer_with_policy_and_headers(
 pub(crate) async fn answer_tagged(
     endpoint: &Handle,
     incoming: &Incoming,
-    media_address: IpAddr,
+    media_address: MediaAddress,
     tag: &str,
     claim: Option<Claim<'_>>,
     policy: MediaPolicy,
@@ -4242,7 +4659,8 @@ impl Dialing {
         let offer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
             .map_err(|error| Error::Sdp(error.to_string()))?;
         let (early, answer) = Early::settle(
-            self.options.media_address,
+            MediaAddress::new(self.options.media_address)
+                .with_bind(self.options.media_bind_address),
             self.target.transport.is_secure(),
             &offer,
             self.options.media,
@@ -4306,11 +4724,7 @@ impl Dialing {
         let Some(capabilities) = self.capabilities.clone() else {
             return Err(Error::NoDialog);
         };
-        let settled = settle_answer(
-            capabilities.crypto.as_slice(),
-            &answer,
-            self.options.media.codecs,
-        )?;
+        let settled = settle_answer(&capabilities, &answer, self.options.media.codecs)?;
         self.accept_remote_ice(&answer);
         let Some(EarlyMedia::Offered(port)) = self.media.take() else {
             return Ok(());
@@ -4324,6 +4738,7 @@ impl Dialing {
             capabilities,
             settled,
             media_address: self.options.media_address,
+            media_bind_address: self.options.media_bind_address,
             codecs: self.options.media.codecs,
             keying: self.options.media.keying,
         })));
@@ -4441,10 +4856,13 @@ impl Dialing {
                     awaiting_ack: None,
                     ended: false,
                     media_address: self.options.media_address,
+                    media_bind_address: self.options.media_bind_address,
                     codecs: self.options.media.codecs,
+                    profile: self.options.media.profile,
                     current: settled.negotiated,
                     peer_ice: peer_ice_credentials(response.body()),
-                    encrypted: settled.srtp.is_some(),
+                    encrypted: self.options.media.profile == MediaProfile::BrowserAudio
+                        || settled.srtp.is_some(),
                     keying: self.options.media.keying,
                     hold: self.hold,
                     referral: None,
@@ -4558,11 +4976,7 @@ impl Dialing {
         let Some(capabilities) = self.capabilities.as_ref() else {
             return Err(Error::NoEarlySession);
         };
-        let settled = settle_answer(
-            capabilities.crypto.as_slice(),
-            &answer,
-            self.options.media.codecs,
-        )?;
+        let settled = settle_answer(capabilities, &answer, self.options.media.codecs)?;
         self.accept_remote_ice(&answer);
         // Our INVITE's offer is answered here rather than in a provisional, so the exchange
         // closes now. Without this the first UPDATE on the confirmed call would be refused as
@@ -4704,7 +5118,10 @@ async fn answer_gathering(
         return Ok((remote, None));
     }
     let local = match policy.gathering(false)? {
-        Some(gathering) => Some(port.gather(&gathering).await),
+        Some(gathering) => Some(
+            port.gather_with_rtcp_mode(&gathering, answering_rtcp_mode(offer))
+                .await,
+        ),
         None => None,
     };
     Ok((remote, local))
@@ -4726,6 +5143,7 @@ pub(crate) struct Early {
     pub(crate) capabilities: Capabilities,
     pub(crate) settled: Settled,
     pub(crate) media_address: IpAddr,
+    pub(crate) media_bind_address: IpAddr,
     /// The codec set the provisional's answer was built from, kept because the exchange is not
     /// over: an UPDATE may reoffer before the 200, and it has to be answered from the same set
     /// rather than from the default one.
@@ -4743,31 +5161,38 @@ pub(crate) struct EarlyOffer {
     ice: Option<LocalDescription>,
     keying: PendingKeying,
     policy_keying: Keying,
-    media_address: IpAddr,
+    media_address: MediaAddress,
     codecs: Codecs,
 }
 
 impl EarlyOffer {
     pub(crate) async fn bind(
-        media_address: IpAddr,
+        media_address: MediaAddress,
         secure: bool,
         direction: Direction,
         policy: MediaPolicy,
     ) -> Result<Self> {
+        let media_address = media_address.validate()?;
         if policy.keying == Keying::DtlsSrtp {
             return Err(Error::DtlsEarlyMedia);
         }
-        let port = MediaPort::bind(SocketAddr::new(media_address, 0))
+        let port = MediaPort::bind(SocketAddr::new(media_address.bind(), 0))
             .await
             .map_err(Error::Io)?;
         let local_ice = match policy.gathering(true)? {
-            Some(gathering) => Some(port.gather(&gathering).await),
+            // As with the ordinary initial offer, mux is not settled until the answer arrives.
+            Some(gathering) => Some(
+                port.gather_with_rtcp_mode(&gathering, sipx_sdp::RtcpMode::Separate)
+                    .await,
+            ),
             None => None,
         };
         let advertised = local_ice
             .as_ref()
             .and_then(|local| local.default_destination(ComponentId::RTP))
-            .unwrap_or_else(|| SocketAddr::new(media_address, port.local_addr().port()));
+            .unwrap_or_else(|| {
+                SocketAddr::new(media_address.advertised(), port.local_addr().port())
+            });
         let (mut capabilities, keying) =
             media_capabilities(policy, advertised.ip(), advertised.port(), secure)?;
         capabilities.direction = direction;
@@ -4792,7 +5217,7 @@ impl EarlyOffer {
     }
 
     pub(crate) async fn settle(mut self, answer: &SessionDescription) -> Result<Early> {
-        let settled = settle_answer(self.capabilities.crypto.as_slice(), answer, self.codecs)?;
+        let settled = settle_answer(&self.capabilities, answer, self.codecs)?;
         if let Some(local) = self.ice.as_mut() {
             let remote = answer
                 .media
@@ -4802,13 +5227,22 @@ impl EarlyOffer {
                 });
             local.accept(&remote);
         }
-        let (media, settled) =
-            key_and_start(self.port, self.ice, settled, self.keying, answer, false).await?;
+        let (media, settled) = key_and_start(
+            self.port,
+            self.ice,
+            settled,
+            self.keying,
+            answer,
+            false,
+            MediaProfile::Standard,
+        )
+        .await?;
         Ok(Early {
             media,
             capabilities: self.capabilities,
             settled,
-            media_address: self.media_address,
+            media_address: self.media_address.advertised(),
+            media_bind_address: self.media_address.bind(),
             codecs: self.codecs,
             keying: self.policy_keying,
         })
@@ -4818,23 +5252,26 @@ impl EarlyOffer {
 impl Early {
     /// Bind a port and answer `offer` with it.
     pub(crate) async fn settle(
-        media_address: IpAddr,
+        media_address: MediaAddress,
         secure: bool,
         offer: &SessionDescription,
         policy: MediaPolicy,
     ) -> Result<(Self, SessionDescription)> {
+        let media_address = media_address.validate()?;
         if policy.keying == Keying::DtlsSrtp {
             return Err(Error::DtlsEarlyMedia);
         }
         let negotiated = negotiated(offer, policy.codecs)?;
-        let port = MediaPort::bind(SocketAddr::new(media_address, 0))
+        let port = MediaPort::bind(SocketAddr::new(media_address.bind(), 0))
             .await
             .map_err(Error::Io)?;
         let (remote_ice, mut local_ice) = answer_gathering(&port, offer, policy).await?;
         let advertised = local_ice
             .as_ref()
             .and_then(|local| local.default_destination(ComponentId::RTP))
-            .unwrap_or_else(|| SocketAddr::new(media_address, port.local_addr().port()));
+            .unwrap_or_else(|| {
+                SocketAddr::new(media_address.advertised(), port.local_addr().port())
+            });
         let (capabilities, _keying) =
             media_capabilities(policy, advertised.ip(), advertised.port(), secure)?;
         let mut answer = sipx_sdp::answer(offer, &capabilities);
@@ -4866,7 +5303,8 @@ impl Early {
                 media,
                 capabilities,
                 settled,
-                media_address,
+                media_address: media_address.advertised(),
+                media_bind_address: media_address.bind(),
                 codecs: policy.codecs,
                 keying: policy.keying,
             },
@@ -5000,6 +5438,24 @@ pub async fn answer_ringing_with_policy(
     ringing: &crate::Ringing,
     policy: MediaPolicy,
 ) -> Result<Call> {
+    answer_ringing_with_policy_at(
+        endpoint,
+        incoming,
+        MediaAddress::new(media_address),
+        ringing,
+        policy,
+    )
+    .await
+}
+
+/// [`answer_ringing_with_policy`] with independent advertised and bound media addresses.
+pub async fn answer_ringing_with_policy_at(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: MediaAddress,
+    ringing: &crate::Ringing,
+    policy: MediaPolicy,
+) -> Result<Call> {
     // RFC 3262 §3 and §5: a 2xx must not go out while a reliable provisional carrying a session
     // description is unacknowledged. This path never puts a description in one — `ring` sends a
     // bodiless provisional, and `ring_early` is the entry point that does, where
@@ -5122,7 +5578,9 @@ pub async fn answer_early(
         awaiting_ack: Some(acked),
         ended: false,
         media_address: early.media_address,
+        media_bind_address: early.media_bind_address,
         codecs: early.codecs,
+        profile: MediaProfile::Standard,
         current: early.settled.negotiated,
         peer_ice: peer_ice_credentials(incoming.request.body()),
         hold: Direction::SendRecv,
@@ -5231,7 +5689,7 @@ pub(crate) type Claim<'a> = &'a (dyn Fn() -> Result<()> + Send + Sync);
 async fn answer_negotiated(
     endpoint: &Handle,
     incoming: &Incoming,
-    media_address: IpAddr,
+    media_address: MediaAddress,
     offer: SessionDescription,
     tag: &str,
     reliable_ringing: Option<bool>,
@@ -5239,12 +5697,21 @@ async fn answer_negotiated(
     policy: MediaPolicy,
     headers: &[sipx_sip::Header],
 ) -> Result<Call> {
+    validate_profile_preflight(policy, incoming.transport)?;
+    let media_address = media_address.validate()?;
+    if policy.profile == MediaProfile::BrowserAudio {
+        sipx_sdp::browser_audio::validate(
+            &offer,
+            sipx_sdp::browser_audio::BrowserAudioRole::Offerer,
+        )?;
+    }
+    validate_dtls_offer_setup(&offer, policy)?;
     let negotiated = negotiated(&offer, policy.codecs)?;
 
     // The port is bound before the session starts, because the answer has to name it *and* the
     // session has to be created with the keys that answer settles on. Starting the session first
     // — as this did — leaves nowhere to put them.
-    let port = MediaPort::bind(SocketAddr::new(media_address, 0))
+    let port = MediaPort::bind(SocketAddr::new(media_address.bind(), 0))
         .await
         .map_err(Error::Io)?;
 
@@ -5252,17 +5719,43 @@ async fn answer_negotiated(
     let advertised = local_ice
         .as_ref()
         .and_then(|local| local.default_destination(ComponentId::RTP))
-        .unwrap_or_else(|| SocketAddr::new(media_address, port.local_addr().port()));
+        .unwrap_or_else(|| SocketAddr::new(media_address.advertised(), port.local_addr().port()));
     let (capabilities, keying) = media_capabilities(
         policy,
         advertised.ip(),
         advertised.port(),
         incoming.transport.is_secure(),
     )?;
-    let mut answer_sdp = sipx_sdp::answer(&offer, &capabilities);
+    let mut answer_sdp = if policy.profile == MediaProfile::BrowserAudio {
+        let local = local_ice
+            .as_ref()
+            .ok_or(sipx_sdp::browser_audio::ProfileError::IceRequired)?;
+        let fingerprint = capabilities
+            .dtls()
+            .cloned()
+            .ok_or(sipx_sdp::browser_audio::ProfileError::FingerprintRequired)?;
+        sipx_sdp::browser_audio::answer(
+            &offer,
+            &sipx_sdp::browser_audio::BrowserAudioLocal {
+                address: advertised.ip(),
+                port: advertised.port(),
+                session_id: capabilities.session_id,
+                session_version: capabilities.session_version,
+                direction: capabilities.direction,
+                ice: local.credentials().clone(),
+                candidates: local.candidates().to_vec(),
+                fingerprint,
+                setup: sipx_sdp::fingerprint::SetupCapabilities::both(),
+            },
+        )?
+    } else {
+        sipx_sdp::answer(&offer, &capabilities)
+    };
     if let Some(local) = local_ice.as_mut() {
         local.accept(&remote_ice);
-        add_ice(&mut answer_sdp, local, &remote_ice.answer_attributes());
+        if policy.profile == MediaProfile::Standard {
+            add_ice(&mut answer_sdp, local, &remote_ice.answer_attributes());
+        }
     } else if policy.ice != IcePolicy::Disabled
         && let Some(audio) = answer_sdp.media.first_mut()
     {
@@ -5343,7 +5836,16 @@ async fn answer_negotiated(
 
     // The answer must leave before an active answerer sends ClientHello. A caller is permitted to
     // wait for the final SDP (and then its ACK) before opening the media path.
-    let (media, settled) = key_and_start(port, local_ice, settled, keying, &offer, true).await?;
+    let (media, settled) = key_and_start(
+        port,
+        local_ice,
+        settled,
+        keying,
+        &offer,
+        true,
+        policy.profile,
+    )
+    .await?;
 
     // As in `dial_with`: emitted at construction, from what was actually observed (ringing
     // first, if this path came through it) rather than recomputed afterwards.
@@ -5358,12 +5860,14 @@ async fn answer_negotiated(
         target,
         awaiting_ack: Some(acked),
         ended: false,
-        media_address,
+        media_address: media_address.advertised(),
+        media_bind_address: media_address.bind(),
         codecs: policy.codecs,
+        profile: policy.profile,
         current: settled.negotiated,
         peer_ice: peer_ice_credentials(incoming.request.body()),
         hold: Direction::SendRecv,
-        encrypted: settled.srtp.is_some(),
+        encrypted: policy.profile == MediaProfile::BrowserAudio || settled.srtp.is_some(),
         keying: policy.keying,
         referral: None,
         transfer: None,
@@ -5759,6 +6263,9 @@ pub(crate) fn offer_from(capabilities: &Capabilities) -> SessionDescription {
             sipx_sdp::fingerprint::Setup::ActPass.as_str().to_owned(),
         ));
     }
+    if capabilities.rtcp_mux {
+        audio.attributes.push(sipx_sdp::Attribute::flag("rtcp-mux"));
+    }
     audio.set_direction(capabilities.direction);
     sdp.media.push(audio);
     sdp
@@ -5781,6 +6288,8 @@ pub(crate) struct Negotiated {
     /// what sipx offers, not what everyone uses, and assuming it would send keypresses on
     /// whatever the far end put that number to.
     dtmf: Option<u8>,
+    /// Whether RTCP shares the RTP port or uses its adjacent control port.
+    rtcp_mode: sipx_sdp::RtcpMode,
 }
 
 /// What negotiation settled on, plus the keys — which are not `Copy` and do not belong in a
@@ -5807,6 +6316,7 @@ impl Negotiated {
         let mut config = sipx_media::Config::new(self.remote, self.codec);
         config.payload_type = self.payload_type;
         config.dtmf_payload_type = self.dtmf;
+        config.rtcp_mode = self.rtcp_mode;
         config
     }
 }
@@ -5956,6 +6466,13 @@ pub(crate) fn negotiated(sdp: &SessionDescription, codecs: Codecs) -> Result<Neg
         codec,
         payload_type,
         dtmf: telephone_event_payload_type(audio),
+        // On the answering side this is the offer's request, which sipx accepts. On the offering
+        // side `settle_answer` additionally requires that this side actually offered the flag.
+        rtcp_mode: if audio.rtcp_mux() {
+            sipx_sdp::RtcpMode::Mux
+        } else {
+            sipx_sdp::RtcpMode::Separate
+        },
     })
 }
 
@@ -6157,6 +6674,261 @@ mod tests {
 
     use super::*;
 
+    /// M-49's pre-I/O boundary is pure: failure cannot have bound or gathered a socket.
+    #[cfg(all(feature = "opus", feature = "dtls"))]
+    #[test]
+    fn browser_audio_preflight_is_fail_closed_before_io() {
+        let policy = MediaPolicy::browser_audio();
+        assert!(validate_profile_preflight(policy, TransportKind::Wss).is_ok());
+        assert!(matches!(
+            validate_profile_preflight(policy, TransportKind::Udp),
+            Err(Error::Profile(
+                sipx_sdp::browser_audio::ProfileError::InsecureSignalling
+            ))
+        ));
+        assert!(matches!(
+            validate_profile_preflight(policy.with_ice(IcePolicy::Disabled), TransportKind::Wss),
+            Err(Error::Profile(
+                sipx_sdp::browser_audio::ProfileError::IceRequired
+            ))
+        ));
+        assert!(matches!(
+            validate_profile_preflight(policy.with_keying(Keying::Plain), TransportKind::Wss),
+            Err(Error::Profile(
+                sipx_sdp::browser_audio::ProfileError::WeakerMedia
+            ))
+        ));
+        let opus_only = Codecs::ordered(&[crate::CodecPreference::Opus]).expect("Opus build");
+        assert!(matches!(
+            validate_profile_preflight(policy.with_codecs(opus_only), TransportKind::Wss),
+            Err(Error::Profile(
+                sipx_sdp::browser_audio::ProfileError::CodecSetIncomplete
+            ))
+        ));
+    }
+
+    #[cfg(not(feature = "opus"))]
+    #[test]
+    fn browser_audio_reports_missing_opus_as_a_typed_pre_io_error() {
+        assert!(matches!(
+            validate_profile_preflight(MediaPolicy::browser_audio(), TransportKind::Wss),
+            Err(Error::Profile(
+                sipx_sdp::browser_audio::ProfileError::OpusUnavailable
+            ))
+        ));
+    }
+
+    #[cfg(all(feature = "opus", feature = "dtls"))]
+    async fn browser_answer_fixture() -> (
+        SessionDescription,
+        SessionDescription,
+        sipx_media::ice::LocalDescription,
+        MediaPort,
+    ) {
+        let loopback: IpAddr = "127.0.0.1".parse().expect("loopback");
+        let port = MediaPort::bind(SocketAddr::new(loopback, 0))
+            .await
+            .expect("offer port binds");
+        let options = DialOptions::new("<sip:caller@example.invalid>", loopback)
+            .with_media_policy(MediaPolicy::browser_audio());
+        let (_capabilities, offer, local, _keying) =
+            offered_media(&options, &port, TransportKind::Wss)
+                .await
+                .expect("browser offer gathers");
+        let local = local.expect("browser offer retains ICE");
+        let identity = sipx_media::dtls::openssl::Identity::generate().expect("answer identity");
+        let fingerprint = identity.fingerprint().expect("answer fingerprint");
+        let answer = sipx_sdp::browser_audio::answer(
+            &offer,
+            &sipx_sdp::browser_audio::BrowserAudioLocal {
+                address: loopback,
+                port: 40_000,
+                session_id: 9_002,
+                session_version: 1,
+                direction: Direction::SendRecv,
+                ice: sipx_sdp::ice::Credentials::new("peer", "peerPassword0123456789AB")
+                    .expect("answer credentials"),
+                candidates: vec![
+                    sipx_sdp::ice::Candidate::parse(
+                        "peer 1 UDP 2130706431 127.0.0.1 40000 typ host",
+                    )
+                    .expect("answer candidate"),
+                ],
+                fingerprint,
+                setup: sipx_sdp::fingerprint::SetupCapabilities::both(),
+            },
+        )
+        .expect("complete browser answer");
+        (offer, answer, local, port)
+    }
+
+    /// `M-49`: an incomplete final answer is refused at the call boundary before the retained ICE
+    /// description accepts the peer half or any media owner can start.
+    #[cfg(all(feature = "opus", feature = "dtls"))]
+    #[tokio::test]
+    async fn browser_answer_is_fully_validated_before_ice_state_changes() {
+        let (offer, mut answer, local, _port) = browser_answer_fixture().await;
+        answer.media[0]
+            .attributes
+            .retain(|attribute| attribute.name != "rtcp-mux");
+        let ice_before = format!("{local:?}");
+
+        assert!(matches!(
+            validate_establishment_answer(
+                MediaProfile::BrowserAudio,
+                offer.to_string_sdp().as_bytes(),
+                &answer,
+            ),
+            Err(Error::Profile(
+                sipx_sdp::browser_audio::ProfileError::RtcpMuxRequired
+            ))
+        ));
+        assert_eq!(
+            format!("{local:?}"),
+            ice_before,
+            "a refused answer did not reach LocalDescription::accept"
+        );
+    }
+
+    /// Generic codec negotiation permits an answer to change preference order; the named profile
+    /// does not. The call boundary therefore uses the complete exchange validator, not only the
+    /// parser for the answer in isolation.
+    #[cfg(all(feature = "opus", feature = "dtls"))]
+    #[tokio::test]
+    async fn browser_answer_cannot_reorder_the_payloads_selected_by_the_offer() {
+        let (offer, mut answer, local, _port) = browser_answer_fixture().await;
+        answer.media[0].formats.swap(0, 1);
+        let ice_before = format!("{local:?}");
+
+        assert!(matches!(
+            validate_establishment_answer(
+                MediaProfile::BrowserAudio,
+                offer.to_string_sdp().as_bytes(),
+                &answer,
+            ),
+            Err(Error::Profile(
+                sipx_sdp::browser_audio::ProfileError::CodecSetIncomplete
+            ))
+        ));
+        assert_eq!(
+            format!("{local:?}"),
+            ice_before,
+            "a refused answer did not reach LocalDescription::accept"
+        );
+    }
+
+    /// The call boundary does not inherit the generic parser's extensible-candidate tolerance.
+    /// Every browser-profile line must belong to the bounded host/server-reflexive set before the
+    /// retained ICE generation is allowed to see any of them.
+    #[cfg(all(feature = "opus", feature = "dtls"))]
+    #[tokio::test]
+    async fn browser_answer_rejects_every_unusable_candidate_before_ice_acceptance() {
+        let (offer, answer, local, _port) = browser_answer_fixture().await;
+        let ice_before = format!("{local:?}");
+        for candidate in [
+            "not a candidate",
+            "relay 1 UDP 2130706430 127.0.0.1 40001 typ relay raddr 0.0.0.0 rport 9",
+            "prflx 1 UDP 2130706429 127.0.0.1 40002 typ prflx raddr 0.0.0.0 rport 9",
+        ] {
+            let mut rejected = answer.clone();
+            rejected.media[0]
+                .attributes
+                .push(sipx_sdp::Attribute::valued("candidate", candidate));
+            assert!(matches!(
+                validate_establishment_answer(
+                    MediaProfile::BrowserAudio,
+                    offer.to_string_sdp().as_bytes(),
+                    &rejected,
+                ),
+                Err(Error::Profile(
+                    sipx_sdp::browser_audio::ProfileError::IceRequired
+                ))
+            ));
+            assert_eq!(
+                format!("{local:?}"),
+                ice_before,
+                "candidate refusal changed retained ICE state: {candidate}"
+            );
+        }
+    }
+
+    const IDENTIFIER_SAMPLE_SIZE: u64 = 4096;
+
+    fn bit_counts(values: impl IntoIterator<Item = u64>) -> [usize; 64] {
+        let mut counts = [0; 64];
+        for value in values {
+            for (bit, count) in counts.iter_mut().enumerate() {
+                *count += usize::from(value & (1_u64 << bit) != 0);
+            }
+        }
+        counts
+    }
+
+    /// Both reliable-provisional shapes use the same address pair: an offer in a 183 for an
+    /// offerless INVITE, and an answer in a 183 for an INVITE carrying an offer.
+    #[tokio::test]
+    async fn early_media_binds_locally_and_advertises_the_chosen_address_in_both_roles() {
+        let advertised: IpAddr = "198.51.100.44".parse().expect("valid");
+        let bind: IpAddr = "127.0.0.1".parse().expect("valid");
+        let addresses = MediaAddress::new(advertised).with_bind(bind);
+
+        let offered_early = EarlyOffer::bind(
+            addresses,
+            false,
+            Direction::SendRecv,
+            MediaPolicy::default(),
+        )
+        .await
+        .expect("binds an early offer");
+        assert_eq!(offered_early.port.local_addr().ip(), bind);
+        assert_eq!(
+            offered_early.description().connection,
+            Some(Connection::new(advertised))
+        );
+
+        let remote_offer = offered("0", &[]);
+        let (answered_early, answer) =
+            Early::settle(addresses, false, &remote_offer, MediaPolicy::default())
+                .await
+                .expect("binds an early answer");
+        assert_eq!(answered_early.media.local_addr().ip(), bind);
+        assert_eq!(answer.connection, Some(Connection::new(advertised)));
+    }
+
+    /// RFC 3261 §19.3 makes a dialog tag a peer-visible identifier which must be hard to guess.
+    /// Every hexadecimal position is sampled, rather than accepting a 64-bit-looking string whose
+    /// high half is fixed by truncation or by a counter.
+    #[test]
+    fn dialog_tag_keeps_all_sixty_four_random_bits() {
+        let values = (0..IDENTIFIER_SAMPLE_SIZE).map(|_| {
+            let tag = token();
+            assert_eq!(tag.len(), 16, "exactly 64 bits in hexadecimal");
+            assert!(
+                tag.bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+                "the tag is canonical lowercase hexadecimal: {tag}"
+            );
+            u64::from_str_radix(&tag, 16).expect("the generator wrote hexadecimal")
+        });
+        for (bit, ones) in bit_counts(values).iter().copied().enumerate() {
+            assert!(
+                (1664..=2432).contains(&ones), // 128 positions * 2 * exp(-2 * 384^2 / 4096) < 1.4e-29.
+                "dialog tag bit {bit} had {ones} ones in {IDENTIFIER_SAMPLE_SIZE} samples"
+            );
+        }
+    }
+
+    /// `token_with_rng` makes the source property part of type checking, not an inference from a
+    /// finite sample. A deterministic `RngCore` without `CryptoRng` cannot instantiate this call.
+    #[test]
+    fn dialog_tag_requires_a_cryptographic_rng_by_construction() {
+        fn draw<R: rand::CryptoRng + ?Sized>(rng: &mut R) -> String {
+            token_with_rng(rng)
+        }
+
+        assert_eq!(draw(&mut rand::rng()).len(), 16);
+    }
+
     /// An audio description with the given formats and rtpmaps, as a peer would send it.
     fn offered(formats: &str, rtpmaps: &[&str]) -> SessionDescription {
         let mut body = format!(
@@ -6302,10 +7074,260 @@ mod tests {
     #[test]
     fn an_answer_outside_the_selected_set_is_refused() {
         let opus_only = offered("111", &["111 opus/48000/2"]);
+        let capabilities =
+            Capabilities::g711("127.0.0.1".parse().expect("loopback address"), 40_000);
         assert!(matches!(
-            settle_answer(&[], &opus_only, Codecs::G711),
+            settle_answer(&capabilities, &opus_only, Codecs::G711),
             Err(Error::NoCommonCodec)
         ));
+    }
+
+    #[test]
+    fn the_initial_call_offer_requests_rtcp_mux() {
+        let (capabilities, _keying) = media_capabilities(
+            MediaPolicy::default(),
+            "127.0.0.1".parse().expect("loopback address"),
+            40_000,
+            false,
+        )
+        .expect("default media capabilities");
+        let offer = offer_from(&capabilities);
+
+        assert!(capabilities.rtcp_mux);
+        assert!(offer.media.first().expect("audio offer").rtcp_mux());
+    }
+
+    #[test]
+    fn the_answer_settles_mux_or_the_separate_port_fallback_without_a_retry() {
+        let capabilities =
+            Capabilities::g711("127.0.0.1".parse().expect("loopback address"), 40_000)
+                .with_rtcp_mux();
+        let separate_answer = offered("0", &["0 PCMU/8000"]);
+        let separate = settle_answer(&capabilities, &separate_answer, Codecs::G711)
+            .expect("the answer remains usable");
+        assert_eq!(separate.negotiated.rtcp_mode, sipx_sdp::RtcpMode::Separate);
+
+        let mut mux_answer = separate_answer;
+        mux_answer
+            .media
+            .first_mut()
+            .expect("audio answer")
+            .attributes
+            .push(sipx_sdp::Attribute::flag("rtcp-mux"));
+        let mux = settle_answer(&capabilities, &mux_answer, Codecs::G711)
+            .expect("the muxed answer remains usable");
+        assert_eq!(mux.negotiated.rtcp_mode, sipx_sdp::RtcpMode::Mux);
+
+        let not_offered =
+            Capabilities::g711("127.0.0.1".parse().expect("loopback address"), 40_000);
+        let unasked = settle_answer(&not_offered, &mux_answer, Codecs::G711)
+            .expect("an unasked attribute does not break the answer");
+        assert_eq!(
+            unasked.negotiated.rtcp_mode,
+            sipx_sdp::RtcpMode::Separate,
+            "an answer cannot negotiate a feature that was not offered"
+        );
+    }
+
+    /// A running one-port session cannot accept an in-dialog offer that drops mux while retaining
+    /// its old socket owner. The same typed guard is used before inbound state is applied.
+    #[test]
+    fn an_inbound_reoffer_cannot_remove_the_running_mux_mode() {
+        let offered_without_mux = offered("0", &["0 PCMU/8000"]);
+        let answered_without_mux = offered("0", &["0 PCMU/8000"]);
+        let proposed = exchanged_rtcp_mode(&offered_without_mux, &answered_without_mux);
+
+        assert!(matches!(
+            preserve_rtcp_mode(sipx_sdp::RtcpMode::Mux, proposed),
+            Err(Error::RtcpModeChange {
+                current: sipx_sdp::RtcpMode::Mux,
+                proposed: sipx_sdp::RtcpMode::Separate,
+            })
+        ));
+    }
+
+    /// The outbound mirror: omission in an answer to a later offer is an explicit failure and
+    /// leaves the established mux session in place instead of binding an unadvertised replacement.
+    #[test]
+    fn an_outbound_reoffer_answer_cannot_remove_the_running_mux_mode() {
+        let answer_without_mux = offered("0", &["0 PCMU/8000"]);
+        let renegotiated = negotiated(&answer_without_mux, Codecs::G711).expect("PCMU answer");
+
+        assert!(matches!(
+            preserve_rtcp_mode(sipx_sdp::RtcpMode::Mux, renegotiated.rtcp_mode),
+            Err(Error::RtcpModeChange {
+                current: sipx_sdp::RtcpMode::Mux,
+                proposed: sipx_sdp::RtcpMode::Separate,
+            })
+        ));
+    }
+
+    /// Session-level RFC 4145 roles are resolved identically by both call roles, including the
+    /// passive answer that makes the offerer the DTLS client.
+    #[test]
+    fn session_level_setup_selects_the_complementary_call_role() {
+        let mut offer = offered("0", &["0 PCMU/8000"]);
+        offer
+            .attributes
+            .push(sipx_sdp::Attribute::valued("setup", "actpass"));
+        assert_eq!(
+            dtls_local_setup(&offer, true).expect("answerer role"),
+            sipx_sdp::fingerprint::Setup::Active
+        );
+
+        for (answer, expected) in [
+            ("active", sipx_sdp::fingerprint::Setup::Passive),
+            ("passive", sipx_sdp::fingerprint::Setup::Active),
+        ] {
+            let mut description = offered("0", &["0 PCMU/8000"]);
+            description
+                .attributes
+                .push(sipx_sdp::Attribute::valued("setup", answer));
+            assert_eq!(
+                dtls_local_setup(&description, false).expect("offerer role"),
+                expected
+            );
+        }
+    }
+
+    /// `SETUP-2` through the actual call/media boundary: a passive answer makes the sipx offerer
+    /// run the DTLS client handshake, and a real server completes it with both fingerprints
+    /// verified before the returned media session starts.
+    #[cfg(feature = "dtls")]
+    #[tokio::test]
+    async fn a_passive_answer_wires_the_offerer_as_the_dtls_client() {
+        let client_port = MediaPort::bind("127.0.0.1:0".parse().expect("client address"))
+            .await
+            .expect("binds client");
+        let server_port = MediaPort::bind("127.0.0.1:0".parse().expect("server address"))
+            .await
+            .expect("binds server");
+        let client_address = client_port.local_addr();
+        let server_address = server_port.local_addr();
+        let client_identity =
+            sipx_media::dtls::openssl::Identity::generate().expect("client identity");
+        let server_identity =
+            sipx_media::dtls::openssl::Identity::generate().expect("server identity");
+        let client_fingerprint = client_identity.fingerprint().expect("client fingerprint");
+        let server_fingerprint = server_identity.fingerprint().expect("server fingerprint");
+
+        let mut passive_answer = offered("0", &["0 PCMU/8000"]);
+        passive_answer.attributes.extend([
+            sipx_sdp::Attribute::valued("setup", "passive"),
+            sipx_sdp::Attribute::valued("fingerprint", server_fingerprint.to_value()),
+        ]);
+        let settled = Settled {
+            negotiated: Negotiated {
+                remote: server_address,
+                codec: Codec::Pcmu,
+                payload_type: Some(0),
+                dtmf: None,
+                rtcp_mode: sipx_sdp::RtcpMode::Separate,
+            },
+            srtp: None,
+        };
+        let handshake_bound = Duration::from_secs(5); // Bounds a failed handshake; not ordering.
+        let server = server_port.key_with_dtls(
+            server_identity,
+            client_address,
+            sipx_media::dtls::Role::Server,
+            client_fingerprint,
+            handshake_bound,
+        );
+        let client = key_and_start(
+            client_port,
+            None,
+            settled,
+            PendingKeying::Dtls(client_identity),
+            &passive_answer,
+            false,
+            MediaProfile::Standard,
+        );
+
+        let (server, client) = tokio::join!(server, client);
+        let (_server_port, _server_keys) = server.expect("server handshake completes");
+        let (client_session, client_settled) = client.expect("offerer handshake completes");
+        assert!(client_settled.is_encrypted());
+        client_session.stop();
+    }
+
+    /// A `holdconn` DTLS offer is rejected by the call preflight before the answering path can
+    /// bind a media port or send a successful response.
+    #[test]
+    fn a_holdconn_dtls_offer_is_a_typed_pre_response_refusal() {
+        let mut offer = offered("0", &["0 PCMU/8000"]);
+        offer
+            .attributes
+            .push(sipx_sdp::Attribute::valued("setup", "holdconn"));
+        let policy = MediaPolicy::default().with_keying(Keying::DtlsSrtp);
+
+        assert!(matches!(
+            validate_dtls_offer_setup(&offer, policy),
+            Err(Error::DtlsSetup(
+                sipx_sdp::fingerprint::SetupRoleError::UnresolvedOffer(
+                    sipx_sdp::fingerprint::Setup::HoldConn
+                )
+            ))
+        ));
+    }
+
+    /// An initial mux offer retains component 2 and advertises its explicit `a=rtcp` destination,
+    /// so an answer omitting mux can take the fallback without a second offer.
+    #[tokio::test]
+    async fn an_initial_mux_ice_offer_carries_the_control_fallback() {
+        let loopback: IpAddr = "127.0.0.1".parse().expect("loopback");
+        let port = MediaPort::bind(SocketAddr::new(loopback, 0))
+            .await
+            .expect("binds media");
+        let options = DialOptions::new("<sip:caller@example.invalid>", loopback)
+            .with_media_policy(MediaPolicy::default().with_ice(IcePolicy::Host));
+        let (_capabilities, offer, local, _keying) =
+            offered_media(&options, &port, TransportKind::Udp)
+                .await
+                .expect("gathers an offer");
+        let local = local.expect("ICE description");
+        let audio = offer.media.first().expect("audio offer");
+
+        assert!(audio.rtcp_mux(), "mux is offered");
+        assert!(
+            local
+                .candidates()
+                .iter()
+                .any(|candidate| candidate.component == ComponentId::RTCP),
+            "the initial offer retains the component-2 fallback"
+        );
+        assert!(
+            audio.attribute("rtcp").is_some(),
+            "the fallback control destination is explicit"
+        );
+    }
+
+    /// Once an answer agrees to mux, its local ICE half contains component 1 alone.
+    #[tokio::test]
+    async fn a_muxed_ice_answer_gathers_one_component() {
+        let mut offer = offered("0", &["0 PCMU/8000"]);
+        let audio = offer.media.first_mut().expect("audio offer");
+        audio.attributes.extend([
+            sipx_sdp::Attribute::flag("rtcp-mux"),
+            sipx_sdp::Attribute::valued("ice-ufrag", "peer"),
+            sipx_sdp::Attribute::valued("ice-pwd", "peerPassword0123456789AB"),
+            sipx_sdp::Attribute::valued("candidate", "1 1 UDP 2130706431 192.0.2.1 40000 typ host"),
+        ]);
+        let port = MediaPort::bind("127.0.0.1:0".parse().expect("loopback"))
+            .await
+            .expect("binds media");
+        let (_remote, local) = answer_gathering(
+            &port,
+            &offer,
+            MediaPolicy::default().with_ice(IcePolicy::Host),
+        )
+        .await
+        .expect("gathers answer");
+        let local = local.expect("ICE description");
+
+        assert_eq!(local.candidates().len(), 1);
+        assert_eq!(local.candidates()[0].component, ComponentId::RTP);
+        assert_eq!(local.default_destination(ComponentId::RTCP), None);
     }
 
     /// An offer with nothing sipx carries is refused rather than answered on a guess.

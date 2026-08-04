@@ -195,7 +195,7 @@ async fn a_peer_that_offers_no_ice_keeps_symmetric_rtp() {
     );
 
     // Where the peer said to send, and where it actually is. Symmetric RTP is the difference.
-    let (_advertised, advertised) = dead_end().await;
+    let (advertised_sink, advertised) = dead_end().await;
     let peer = UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
         .await
         .unwrap();
@@ -241,6 +241,17 @@ async fn a_peer_that_offers_no_ice_keeps_symmetric_rtp() {
         sipx_media::dtls::classify(&datagram[..len]),
         sipx_media::Arriving::Rtp,
         "a stream with no ice sends media and never a connectivity check"
+    );
+
+    let mut leaked = vec![0u8; 2048];
+    let offered_destination_received = tokio::time::timeout(
+        Duration::from_millis(200),
+        advertised_sink.recv_from(&mut leaked),
+    )
+    .await;
+    assert!(
+        offered_destination_received.is_err(),
+        "RTP still reached the bound SDP sink after the observed source took over"
     );
 }
 

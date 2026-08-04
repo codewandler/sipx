@@ -18,7 +18,7 @@
           "note": "non-negotiable 3, which also forbids panics on network input"
         }
       ],
-      "version_evaluated": "1.0.0-beta.3",
+      "version_evaluated": "1.0.0-beta.4",
       "evaluated_at": "2026-08-04"
     },
     {
@@ -42,7 +42,7 @@
           "note": "the per-feature build matrix"
         }
       ],
-      "version_evaluated": "1.0.0-beta.3",
+      "version_evaluated": "1.0.0-beta.4",
       "evaluated_at": "2026-08-04"
     },
     {
@@ -51,7 +51,7 @@
       "generated_from": [
         "codecs"
       ],
-      "summary": "Terminates media. Codecs claimed and backed by an encoder and a decoder: {codecs}. SRTP, DTLS-SRTP and ICE are implemented and reachable from the call layer, which is checked rather than asserted.",
+      "summary": "Terminates media. Codecs claimed and backed by an encoder and a decoder: {codecs}. SRTP, DTLS-SRTP and ICE are implemented and reachable from the call layer, which is checked rather than asserted. One fail-closed browser-audio profile composes WSS, ICE, DTLS-SRTP and Opus and has a native-browser proof in both SIP roles; it is not a general browser, TURN or video stack.",
       "evidence": [
         {
           "path": "crates/sipx-audio/src",
@@ -64,9 +64,17 @@
         {
           "path": "docs/compliance.md",
           "note": "the generated RFC table, including the media and security layers"
+        },
+        {
+          "path": "docs/specs/browser-audio-proof.md",
+          "note": "the exact native-browser positives, negatives and evidence contract"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "note": "the native-browser compatibility job that runs the proof"
         }
       ],
-      "version_evaluated": "1.0.0-beta.3",
+      "version_evaluated": "1.0.0-beta.4",
       "evaluated_at": "2026-08-04"
     },
     {
@@ -87,7 +95,7 @@
           "note": "the generated maturity report, including what is still open"
         }
       ],
-      "version_evaluated": "1.0.0-beta.3",
+      "version_evaluated": "1.0.0-beta.4",
       "evaluated_at": "2026-08-04"
     },
     {
@@ -112,7 +120,7 @@
           "note": "every way the conformance check fails"
         }
       ],
-      "version_evaluated": "1.0.0-beta.3",
+      "version_evaluated": "1.0.0-beta.4",
       "evaluated_at": "2026-08-04"
     },
     {
@@ -133,7 +141,7 @@
           "note": "the two independent peers the suite runs against"
         }
       ],
-      "version_evaluated": "1.0.0-beta.3",
+      "version_evaluated": "1.0.0-beta.4",
       "evaluated_at": "2026-08-04"
     }
   ]

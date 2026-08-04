@@ -92,6 +92,7 @@ NOT_RUN_LOCALLY = {
     "deploy-site": "publishes what `site` built; there is nothing to verify",
     "device-linux": "the local all-feature suite runs the x86 vector; CI adds the arm64 release architecture",
     "device-portable": "requires the macOS and Windows platform audio SDKs unavailable on a Linux gate host",
+    "browser-audio": "requires the hosted runner's matched native browser/WebDriver; the local gate runs its adversarial harness suite",
 }
 
 #: Run commands that are runner provisioning rather than checks. Kept deliberately short: every
@@ -151,6 +152,14 @@ def gate_steps(msrv: str) -> list[Step]:
             "diagnostic phone proof tests",
             "gate",
             ("python3", "scripts/test-diagnostic-phone-proof.py"),
+        ),
+        # M-51: this reverses the proof harness's trust and lifecycle boundaries. Compatibility
+        # is enforced separately by CI's native-browser positives in both roles and its three
+        # real product-boundary mutations.
+        Step(
+            "browser audio proof harness tests",
+            "gate",
+            ("python3", "scripts/test-browser-audio-proof.py"),
         ),
         # X-71: the provenance gate now has an exception, and an exception is the part that rots.
         # A fourth pathspec added in a hurry, or a scope that stops reaching `git grep`, turns this

@@ -1,0 +1,13 @@
+{
+  "browserName": "chrome",
+  "acceptInsecureCerts": false,
+  "goog:chromeOptions": {
+    "args": [
+      "--headless=new",
+      "--autoplay-policy=no-user-gesture-required",
+      "--disable-dev-shm-usage",
+      "--disable-features=WebRtcHideLocalIpsWithMdns",
+      "--ignore-certificate-errors-spki-list=__SIPX_SPKI_PIN__"
+    ]
+  }
+}

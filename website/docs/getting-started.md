@@ -14,7 +14,7 @@ ahead of it.
 Install the exact release with Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```bash
-cargo install --locked --version =1.0.0-beta.3 sipx-cli
+cargo install --locked --version =1.0.0-beta.4 sipx-cli
 ```
 
 The exact `--version` requirement makes the installation reproducible. This site follows the
@@ -27,11 +27,11 @@ cargo install --git https://github.com/codewandler/sipx \
 ```
 
 Confirm which version was installed. This documentation build covers
-<!-- BEGIN generated:workspace-version -->1.0.0-beta.3<!-- END generated:workspace-version -->:
+<!-- BEGIN generated:workspace-version -->1.0.0-beta.4<!-- END generated:workspace-version -->:
 
 ```console
 $ sipx version
-sipx 1.0.0-beta.3
+sipx 1.0.0-beta.4
 ```
 
 ## Prepare audio
@@ -76,6 +76,19 @@ Outbound `dial` and `register` commands default to UDP. For compatibility, `answ
 transport flag listens on both UDP and TCP; select exactly one of UDP, TCP, TLS, WebSocket, or
 secure WebSocket with `--transport`. Secure paths verify the URI host against the peer certificate
 and never retry over cleartext; use `--tls-ca` to add a private authority.
+
+For the narrower browser-compatible path, install the same exact release with the optional `opus`
+and `dtls` features:
+
+```bash
+cargo install --locked --version =1.0.0-beta.4 --features opus,dtls sipx-cli
+```
+
+Then select the fail-closed `browser-audio` profile over WSS. It composes Opus, host or
+server-reflexive ICE, DTLS-SRTP, and multiplexed RTP/RTCP; the
+[native-browser proof](reference/browser-audio-proof.md) exercises both SIP roles and names the
+exact evidence. It does not cover TURN-required networks, video, data channels, browser-facing
+APIs, or a general WebRTC stack.
 
 ## Register an address
 

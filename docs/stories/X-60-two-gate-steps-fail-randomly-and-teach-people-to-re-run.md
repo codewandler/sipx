@@ -3,7 +3,6 @@ id: X-60
 title: Two gate steps fail randomly, which teaches people to re-run the gate
 pillar: Build
 status: done
-priority: 3
 epic: conformance
 areas: [sipx-cli, scripts, ci]
 predicate: 3
@@ -38,6 +37,10 @@ behind them.
 - [x] **A re-run must not be the documented remedy.** Whatever is done, it is not "run it again".
       `AGENTS.md` makes a green gate the precondition for calling a story done, so a step that is red
       one run in several converts that precondition into a coin toss.
+- [x] **The two-process playback fixture keeps the receiver alive through the sender's complete
+      causal drain bound.** Its peer lifetime must exceed the caller's exchange duration plus the
+      call layer's five-second media flush; an unchanged full gate and the isolated all-feature test
+      must both pass.
 
 ## Progress
 - Filed 2026-07-31, from two independent observations in a single coordinator run. The recording
@@ -65,6 +68,14 @@ behind them.
   now admits one process scenario at a time through an asynchronous semaphore. Caller and answerer
   inside a scenario still run concurrently; the next scenario begins when the preceding processes
   exit, with no sleep or widened duration standing in for capacity.
+- Reopened 2026-08-04 from the beta.4 clean gate. The same test failed with a healthy ten-second
+  answerer reporting zero received samples and passed immediately in both isolated default and
+  all-feature runs. The remaining fixture error is arithmetic: its caller may exchange for six
+  seconds and then causally drain media for five, while the answerer is held for only ten. Under
+  load the receiver can therefore close one second before the sender's legitimate drain bound.
+  The receiver now stays available for twelve seconds, strictly beyond the derived eleven-second
+  bound without changing production timing. The isolated all-feature test and the complete
+  beta.4 implementation gate both pass with that derived bound.
 
 ## Notes
 - **This is `X-34`'s doctrine again, from the other side.** `X-34` made the gate refuse to report

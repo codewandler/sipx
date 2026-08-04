@@ -25,8 +25,12 @@ async fn endpoint() -> (Handle, Receiver<Incoming>) {
 }
 
 fn options_to(handle: &Handle) -> sipx_sip::Request {
+    request_to(handle, &Method::Options, 1)
+}
+
+fn request_to(handle: &Handle, method: &Method, cseq: u32) -> sipx_sip::Request {
     let uri = Uri::sip(Host::Name(HostName::new("example.com").expect("valid")));
-    RequestBuilder::new(Method::Options, uri)
+    RequestBuilder::new(method.clone(), uri)
         .header(HeaderName::To, "<sip:callee@example.com>")
         .expect("valid")
         .header(HeaderName::From, "<sip:caller@example.net>;tag=t1")
@@ -36,10 +40,63 @@ fn options_to(handle: &Handle) -> sipx_sip::Request {
             Bytes::from(format!("call-{}@example.net", handle.local_addr().port())),
         )
         .expect("valid")
-        .cseq(1, &Method::Options)
+        .cseq(cseq, method)
         .expect("valid")
         .max_forwards(70)
         .build()
+}
+
+/// The registration path is one explicit RFC 3581 witness. The call-layer deployment-address
+/// suite establishes a real dialog before asserting the same fields on its BYE.
+#[tokio::test]
+async fn a_registration_request_records_received_and_rport() {
+    let (server, mut server_rx) = endpoint().await;
+    let (client, _client_rx) = endpoint().await;
+    let observed = client.local_addr();
+
+    let method = Method::Register;
+    let mut responses = client
+        .send(
+            request_to(&client, &method, 1),
+            Target::udp(server.local_addr()),
+        )
+        .await
+        .expect("sends request");
+    let incoming = tokio::time::timeout(Duration::from_secs(2), server_rx.recv())
+        .await
+        .expect("no timeout")
+        .expect("a request");
+    assert_eq!(incoming.request.method, method);
+
+    let via = incoming
+        .request
+        .headers
+        .typed::<Via>()
+        .expect("a Via")
+        .expect("it parses");
+    assert_eq!(
+        via.rport().flatten().map(<[u8]>::to_vec),
+        Some(observed.port().to_string().into_bytes()),
+        "REGISTER did not retain the observed source port"
+    );
+    assert_eq!(
+        via.received().map(<[u8]>::to_vec),
+        Some(observed.ip().to_string().into_bytes()),
+        "REGISTER did not retain the observed source address"
+    );
+
+    let response = ResponseBuilder::to_request(
+        &incoming.request,
+        StatusCode::new(200).expect("valid"),
+        "OK",
+    )
+    .expect("builds")
+    .build();
+    server
+        .respond(&incoming.key, response)
+        .await
+        .expect("responds");
+    responses.final_response().await.expect("a final response");
 }
 
 /// X1: the whole stack, end to end, over a real socket.

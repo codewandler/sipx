@@ -42,6 +42,7 @@ const sidebars = {
         'reference/comparison',
         'reference/development-process',
         'reference/diagnostic-phone-proof',
+        'reference/browser-audio-proof',
         'whats-new',
       ],
     },

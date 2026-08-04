@@ -84,8 +84,8 @@ What follows from it, and is easy to state wrongly:
 
 | Type | Fields / variants | Crate | Source |
 |---|---|---|---|
-| `srtp::Context` | `session`, `roc`, `highest_seq`, `replay`, `rtcp_index` | `sipx-rtp` | §3.2's cryptographic context, one direction |
-| `srtp::SrtpError` | `KeyLength`, `TooShort`, `NotAuthentic`, `Replayed` | `sipx-rtp` | §3.3 step 5, §4.2 |
+| `srtp::Context` | `session`, `roc`, `highest_seq`, `replay`, `rtcp_index`, `highest_rtcp_index`, `rtcp_replay` | `sipx-rtp` | §3.2's cryptographic context, one direction |
+| `srtp::SrtpError` | `KeyLength`, `TooShort`, `NotAuthentic`, `Replayed`, `ReplayedRtcp` | `sipx-rtp` | §3.3 step 5, §3.4, §4.2 |
 | `crypto::Suite` | `AesCm128HmacSha1_80` | `sipx-sdp` | RFC 4568 §6.1 |
 | `crypto::Crypto` | `tag`, `suite`, `key_and_salt` | `sipx-sdp` | RFC 4568 §4, §9.2 |
 | `fingerprint::HashFunc` | `Sha1`, `Sha224`, `Sha256`, `Sha384`, `Sha512` | `sipx-sdp` | RFC 8122 §5 |
@@ -282,7 +282,8 @@ SSRC — are not encrypted; the encrypted portion starts at the ninth octet.
 **Replay protection applies to SRTCP too**, "as defined in Section 3.3.2, but using the SRTCP index
 as the index `i` and a separate Replay List that is specific to the SRTCP stream" (§3.4). Separate
 is the operative word: SRTP and SRTCP indices are unrelated counters, and one shared list would
-reject valid packets of both. *(Not implemented; see §12.2.)*
+reject valid packets of both. `M-47` implements the separate 64-entry list; §12.2 records its
+closure and named boundary tests.
 
 ### 4.8 Replay (§3.3.2)
 
@@ -815,16 +816,18 @@ from it. Reproducing a vector is not the same as reading the parameter it was pu
 Fixed in `M-25` with §10.2's and §10.3's vectors. **Wire-visible:** a sipx built after that commit
 does not interoperate with one built before it. Neither interoperated with anything else.
 
-### 12.2 SRTCP has no replay list — open
+### 12.2 SRTCP replay list — **fixed by `M-47`; closed**
 
 §4.7 and RFC 3711 §3.4 require replay protection over the SRTCP index, with a **separate** list from
-SRTP's. `unprotect_rtcp` authenticates and decrypts and keeps no list, so a captured SRTCP packet can
-be replayed for as long as the key lives.
+SRTP's. `unprotect_rtcp` now authenticates first, refuses a repeated or too-old explicit SRTCP
+index, decrypts, and only then advances that separate window. A forged high index therefore cannot
+move trusted state, and SRTP sequence traffic cannot consume an SRTCP replay bit.
 
 It is RECOMMENDED rather than MUST, and the exposure is smaller than SRTP's — an attacker replays
 reception statistics, not audio, though a replayed receiver report can drive a congestion-control
-response. It is a behaviour change to a public method (`unprotect_rtcp` gains a `Replayed` return),
-so it is a story rather than something to fold into this one. **Owner: `M-47`.**
+response. `an_authenticated_srtcp_packet_is_accepted_once` pins the primary refusal;
+`srtp_and_srtcp_have_separate_replay_windows`, the forged-index, too-old and wrap tests pin the
+state boundaries. The typed result is `SrtpError::ReplayedRtcp(index)`.
 
 ### 12.3 The SDES tag is neither echoed nor verified — **echo fixed by `M-26`, check wired by `M-29`; closed**
 

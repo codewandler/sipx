@@ -23,6 +23,17 @@ use sipx_transport::tls::{ClientTls, Identity, ServerTls, TrustAnchors};
 use sipx_transport::{Config, Handle, Incoming, Target, TransportKind, bind};
 use tokio::sync::mpsc::Receiver;
 
+// Above the ordinary stream ceiling so these messages only cross when `Config::limits` is
+// propagated into the secure-WebSocket handshakes themselves, not merely into the SIP parser.
+const CUSTOM_LIMIT_BODY: usize = 1024 * 1024 + 1024;
+
+fn limits_above_default() -> sipx_sip::Limits {
+    let mut limits = sipx_sip::Limits::stream();
+    limits.max_message_bytes = CUSTOM_LIMIT_BODY + 4096;
+    limits.max_body_bytes = CUSTOM_LIMIT_BODY;
+    limits
+}
+
 fn trusting(ca: &Ca) -> TrustAnchors {
     let mut anchors = TrustAnchors::only();
     anchors.add_pem(ca.pem().as_bytes()).expect("a usable CA");
@@ -96,6 +107,73 @@ async fn a_request_and_response_cross_wss() {
 
     assert_eq!(response.status.code(), 200);
     responder.await.expect("the responder finishes");
+}
+
+/// X-64: the large request pins `Config::limits` at inbound WSS acceptance, while the large
+/// response pins it at the outbound WSS connection. A default substituted at either endpoint
+/// propagation site closes the connection at the WebSocket layer.
+#[tokio::test]
+async fn custom_endpoint_limits_reach_inbound_and_outbound_wss_handshakes() {
+    let ca = Ca::new();
+    let (cert, key) = ca.issue_for("localhost");
+    let identity = Identity::from_pem(cert.as_bytes(), key.as_bytes()).expect("an identity");
+    let mut server_config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    server_config.wss_server = Some((ServerTls::new(identity).expect("a server"), 0));
+    server_config.limits = limits_above_default();
+    let (server, mut server_rx) = bind(server_config).await.expect("server binds");
+    let server_address = server.wss_addr().expect("a WSS port was bound");
+
+    let mut client_config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    client_config.tls_client = Some(ClientTls::new(&trusting(&ca)).expect("a client"));
+    client_config.limits = limits_above_default();
+    let (client, _client_rx) = bind(client_config).await.expect("client binds");
+
+    let responder = tokio::spawn(async move {
+        let incoming = tokio::time::timeout(Duration::from_secs(5), server_rx.recv())
+            .await
+            .expect("custom inbound WSS limit admits the frame")
+            .expect("a request over WSS");
+        assert_eq!(incoming.request.body().len(), CUSTOM_LIMIT_BODY);
+        let response = ResponseBuilder::to_request(
+            &incoming.request,
+            StatusCode::new(200).expect("valid"),
+            "OK",
+        )
+        .expect("builds")
+        .body(Bytes::from(vec![b'r'; CUSTOM_LIMIT_BODY]))
+        .build();
+        server
+            .respond(&incoming.key, response)
+            .await
+            .expect("large response is sent");
+    });
+
+    let request = RequestBuilder::new(
+        Method::Options,
+        Uri::sip(Host::Name(HostName::new("localhost").expect("valid"))),
+    )
+    .header(HeaderName::To, "<sip:callee@localhost>")
+    .expect("valid")
+    .header(HeaderName::From, "<sip:caller@localhost>;tag=limits")
+    .expect("valid")
+    .header(HeaderName::CallId, "wss-limits@localhost")
+    .expect("valid")
+    .cseq(1, &Method::Options)
+    .expect("valid")
+    .max_forwards(70)
+    .body(Bytes::from(vec![b'q'; CUSTOM_LIMIT_BODY]))
+    .build();
+    let target = Target::new(server_address, TransportKind::Wss).verifying("localhost");
+    let mut responses = client
+        .send(request, target)
+        .await
+        .expect("request is queued");
+    let response = tokio::time::timeout(Duration::from_secs(5), responses.final_response())
+        .await
+        .expect("custom outbound WSS limit admits the frame")
+        .expect("a final response over WSS");
+    assert_eq!(response.body().len(), CUSTOM_LIMIT_BODY);
+    responder.await.expect("responder finishes");
 }
 
 /// The policy is `T-7`'s because it is `T-7`'s code: a certificate for another host is refused

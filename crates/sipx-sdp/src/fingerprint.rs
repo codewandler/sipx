@@ -194,6 +194,121 @@ pub enum Setup {
     HoldConn,
 }
 
+/// DTLS roles the local handshake implementation can hold.
+///
+/// Kept in the SDP crate because offer/answer has to refuse an impossible role before a media
+/// worker starts. It describes capability only; sockets and handshakes remain in `sipx-media`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetupCapabilities {
+    client: bool,
+    server: bool,
+}
+
+impl SetupCapabilities {
+    /// Both DTLS roles, which the default handshake implementation supports.
+    #[must_use]
+    pub const fn both() -> Self {
+        Self {
+            client: true,
+            server: true,
+        }
+    }
+
+    /// Only the active/client role.
+    #[must_use]
+    pub const fn client_only() -> Self {
+        Self {
+            client: true,
+            server: false,
+        }
+    }
+
+    /// Only the passive/server role.
+    #[must_use]
+    pub const fn server_only() -> Self {
+        Self {
+            client: false,
+            server: true,
+        }
+    }
+
+    /// No usable DTLS role. Useful for representing a feature or adapter that is unavailable.
+    #[must_use]
+    pub const fn neither() -> Self {
+        Self {
+            client: false,
+            server: false,
+        }
+    }
+
+    /// Select the answer to an offered setup value.
+    ///
+    /// `actpass` prefers active, as RFC 5763 §5 recommends, but a server-only implementation may
+    /// legally select passive. A fixed offer can be answered only with its complement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetupRoleError`] when this endpoint cannot hold the required role.
+    pub fn answer_to(self, offered: Setup) -> Result<Setup, SetupRoleError> {
+        match offered {
+            Setup::ActPass | Setup::Passive if self.client => Ok(Setup::Active),
+            Setup::ActPass | Setup::Active if self.server => Ok(Setup::Passive),
+            Setup::ActPass => Err(SetupRoleError::NoAnswerRole),
+            Setup::Passive => Err(SetupRoleError::UnsupportedLocalRole(Setup::Active)),
+            Setup::Active => Err(SetupRoleError::UnsupportedLocalRole(Setup::Passive)),
+            // DTLS-SRTP needs a handshake. `holdconn` deliberately establishes none, so carrying
+            // it into the answer would fail only after the successful SIP response had left.
+            Setup::HoldConn => Err(SetupRoleError::UnresolvedOffer(Setup::HoldConn)),
+        }
+    }
+
+    /// Resolve this offerer's local role from the answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed refusal for a missing or unresolved answer and when the complementary role
+    /// is not available locally. No caller needs to start a handshake to discover this.
+    pub fn from_answer(self, answered: Option<Setup>) -> Result<Setup, SetupRoleError> {
+        match answered {
+            None => Err(SetupRoleError::MissingAnswer),
+            Some(Setup::Active) if self.server => Ok(Setup::Passive),
+            Some(Setup::Active) => Err(SetupRoleError::UnsupportedLocalRole(Setup::Passive)),
+            Some(Setup::Passive) if self.client => Ok(Setup::Active),
+            Some(Setup::Passive) => Err(SetupRoleError::UnsupportedLocalRole(Setup::Active)),
+            Some(unresolved @ (Setup::ActPass | Setup::HoldConn)) => {
+                Err(SetupRoleError::UnresolvedAnswer(unresolved))
+            }
+        }
+    }
+}
+
+impl Default for SetupCapabilities {
+    fn default() -> Self {
+        Self::both()
+    }
+}
+
+/// A DTLS setup exchange that cannot select a local handshake role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SetupRoleError {
+    /// An offer selected no role with which a DTLS-SRTP handshake can be formed.
+    #[error("the DTLS offer did not select a usable setup role: {0:?}")]
+    UnresolvedOffer(Setup),
+    /// The answer omitted the role the offerer needs to act on.
+    #[error("the DTLS answer supplied no setup role")]
+    MissingAnswer,
+    /// An answer did not resolve the offer into one endpoint role.
+    #[error("the DTLS answer did not resolve its setup role: {0:?}")]
+    UnresolvedAnswer(Setup),
+    /// The peer's answer requires a role this local implementation cannot hold.
+    #[error("the DTLS answer requires an unsupported local setup role: {0:?}")]
+    UnsupportedLocalRole(Setup),
+    /// The answerer supports neither role available to an `actpass` offer.
+    #[error("no supported DTLS setup role is available for the answer")]
+    NoAnswerRole,
+}
+
 impl Setup {
     /// The token as it appears in SDP.
     #[must_use]

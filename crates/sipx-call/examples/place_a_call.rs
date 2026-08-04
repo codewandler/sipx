@@ -28,11 +28,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
 
     // Port 0 asks the operating system for one. The address sipx advertises to the far end is
-    // separate from the one it binds, because behind a NAT they differ.
-    let (endpoint, _incoming) = bind(Config::new("0.0.0.0:0".parse()?)).await?;
+    // separate from the one it binds, because behind a NAT they differ. Use one advertised host
+    // for Via, Contact and SDP so the far end is never given three different ways back.
+    let mut config = Config::new("0.0.0.0:0".parse()?);
+    config.sent_by = "198.51.100.44".to_owned();
+    let (endpoint, _incoming) = bind(config).await?;
 
     let to = Uri::sip(Host::Name(HostName::new("callee.example")?));
-    let options = DialOptions::new("<sip:alice@example.net>", "127.0.0.1".parse()?)
+    let options = DialOptions::new("<sip:alice@example.net>", "198.51.100.44".parse()?)
+        // The public mapping above belongs in SDP but cannot be bound on this host.
+        .with_media_bind_address("0.0.0.0".parse()?)
         // Without this the attempt runs until the transaction layer gives up, which is 32
         // seconds. With it, sipx sends CANCEL — so the far end stops ringing rather than being
         // answered by somebody after the caller has gone.

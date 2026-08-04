@@ -210,13 +210,16 @@ impl ResponseBuilder {
         reason: impl Into<Bytes>,
     ) -> Result<Self, BuildError> {
         let mut builder = Self::new(status, reason)?;
-        for name in [
-            HeaderName::Via,
-            HeaderName::From,
-            HeaderName::To,
-            HeaderName::CallId,
-            HeaderName::CSeq,
+        for (name, label) in [
+            (HeaderName::Via, "Via"),
+            (HeaderName::From, "From"),
+            (HeaderName::To, "To"),
+            (HeaderName::CallId, "Call-ID"),
+            (HeaderName::CSeq, "CSeq"),
         ] {
+            if request.headers.get(&name).is_none() {
+                return Err(BuildError::MissingRequiredResponseHeader { header: label });
+            }
             for header in request.headers.get_all(&name) {
                 builder.headers.push(header.clone());
             }
@@ -295,6 +298,20 @@ mod tests {
         Uri::sip(Host::Name(
             HostName::new(Bytes::from_static(b"example.com")).expect("a valid host"),
         ))
+    }
+
+    fn answerable_invite() -> RequestBuilder {
+        RequestBuilder::new(Method::Invite, uri())
+            .header(HeaderName::Via, "SIP/2.0/UDP host;branch=z9hG4bK1")
+            .expect("valid Via")
+            .header(HeaderName::From, "<sip:a@example.com>;tag=1")
+            .expect("valid From")
+            .header(HeaderName::To, "<sip:b@example.com>")
+            .expect("valid To")
+            .header(HeaderName::CallId, "call@example.com")
+            .expect("valid Call-ID")
+            .cseq(1, &Method::Invite)
+            .expect("valid CSeq")
     }
 
     /// Every field a caller can populate, in one table.
@@ -479,7 +496,7 @@ mod tests {
 
     #[test]
     fn history_is_returned_in_responses_other_than_100() {
-        let request = RequestBuilder::new(Method::Invite, uri())
+        let request = answerable_invite()
             .header(HeaderName::Supported, "histinfo")
             .unwrap()
             .build();
@@ -500,7 +517,7 @@ mod tests {
 
     #[test]
     fn repeated_history_rows_are_one_ordered_cache() {
-        let request = RequestBuilder::new(Method::Invite, uri())
+        let request = answerable_invite()
             .header(HeaderName::HistoryInfo, "<sip:first@example.com>;index=1")
             .unwrap()
             .header(
@@ -521,7 +538,7 @@ mod tests {
 
     #[test]
     fn history_privacy_anonymizes_a_response_cache() {
-        let request = RequestBuilder::new(Method::Invite, uri())
+        let request = answerable_invite()
             .header(
                 HeaderName::HistoryInfo,
                 "<sip:alice@example.com?Reason=SIP%3Bcause%3D302>;index=1",

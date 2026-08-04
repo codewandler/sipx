@@ -219,6 +219,17 @@ impl Invitation {
         media_address: IpAddr,
         policy: MediaPolicy,
     ) -> Result<Call> {
+        self.answer_with_policy_at(endpoint, crate::MediaAddress::new(media_address), policy)
+            .await
+    }
+
+    /// [`Self::answer_with_policy`] with independent advertised and bound media addresses.
+    pub async fn answer_with_policy_at(
+        &self,
+        endpoint: &Handle,
+        media_address: crate::MediaAddress,
+        policy: MediaPolicy,
+    ) -> Result<Call> {
         // Handed down rather than taken here, so that the invitation is taken immediately before
         // the `200` leaves rather than before the work that builds it — every step of which can
         // fail with nothing sent, and an invitation taken by one of those is one no CANCEL can

@@ -48,7 +48,10 @@ SDES's threat model, not end-to-end media keying; see
 [RFC 4568 §7.1](https://www.rfc-editor.org/rfc/rfc4568#section-7.1).
 
 The implemented SRTP transform is AES counter mode with a 128-bit key and HMAC-SHA1 with an 80-bit
-authentication tag. Rekeying and the other SRTP transforms are not implemented. The
+authentication tag. Receiving SRTP and SRTCP keep separate 64-packet replay windows: an authenticated
+packet is accepted once, and authentication succeeds before either window or rollover state changes.
+Packets older than the window are refused rather than accepted after waiting. Rekeying and the other
+SRTP transforms are not implemented. The
 [RFC compliance table](compliance.md) records these limits alongside the supported portions of
 RFC 3711 and RFC 4568.
 
@@ -66,10 +69,17 @@ peer that waits for SIP confirmation cannot deadlock with the handshake.
 The Cargo feature supplies the OpenSSL handshake and remains off by default. Enabling it does
 **not** turn an ordinary call into a DTLS-keyed call; the default remains SDES on protected
 signalling and plain RTP otherwise. Selecting DTLS in a build without the feature is a typed error,
-never a cleartext fallback. Reliable early media with DTLS-SRTP, and DTLS-SRTP combined with ICE,
-are currently refused, also without fallback. The CLI exposes the same strict policy through
+never a cleartext fallback. Reliable early media with DTLS-SRTP is currently refused, also without
+fallback. The named browser-audio profile is the one ICE + DTLS-SRTP composition: it additionally
+requires authenticated WSS, RTCP multiplexing, and Opus, and refuses any missing element rather
+than dropping to the ordinary media policy. The CLI exposes the same strict policy through
 `--media-security` and reports the keying mode read from the established call rather than copying
 the requested value.
+
+The [native-browser proof](browser-audio-proof.md) exercises that composition in both SIP roles and
+separately changes the fingerprint, prevents nomination, and supplies a weaker answer. Its coverage
+is host or server-reflexive audio; TURN-required networks and broader WebRTC behavior remain outside
+it.
 
 ## Captures remain sensitive
 

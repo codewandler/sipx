@@ -24,18 +24,37 @@ pub enum Error {
     /// The SDP could not be read.
     #[error("sdp: {0}")]
     Sdp(String),
+    /// A named browser-audio policy boundary refused setup or renegotiation.
+    #[error("browser-audio profile: {0}")]
+    Profile(#[from] sipx_sdp::browser_audio::ProfileError),
+    /// SDP was asked to advertise an unspecified address which no peer can reach.
+    #[error("the advertised media address must not be unspecified")]
+    UnspecifiedMediaAddress,
     /// DTLS-SRTP was selected in a build that does not contain its handshake implementation.
     #[error("DTLS-SRTP was selected, but sipx-call was built without its `dtls` feature")]
     DtlsUnavailable,
     /// A selected DTLS-SRTP media path could not be keyed.
     #[error("DTLS-SRTP: {0}")]
     Dtls(String),
+    /// The DTLS setup exchange selected no role this endpoint can hold.
+    #[error("DTLS setup: {0}")]
+    DtlsSetup(#[from] sipx_sdp::fingerprint::SetupRoleError),
     /// DTLS-SRTP was selected through an early-dialog API that cannot yet preserve its ordering.
     #[error("DTLS-SRTP is not available for early media")]
     DtlsEarlyMedia,
     /// A running DTLS-SRTP call was asked to renegotiate without a rekeying exchange.
     #[error("DTLS-SRTP renegotiation is not implemented; the existing call is unchanged")]
     DtlsRenegotiation,
+    /// An in-dialog description tried to change which sockets carry RTCP.
+    #[error(
+        "RTCP mode change from {current:?} to {proposed:?} is not implemented; the existing call is unchanged"
+    )]
+    RtcpModeChange {
+        /// The mode owned by the running media session.
+        current: sipx_sdp::RtcpMode,
+        /// The mode the new offer/answer exchange selected.
+        proposed: sipx_sdp::RtcpMode,
+    },
     /// The INVITE got no final response.
     #[error("no final response to the INVITE")]
     NoResponse,

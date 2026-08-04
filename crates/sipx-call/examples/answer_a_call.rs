@@ -12,16 +12,16 @@
 
 use std::time::Duration;
 
-use sipx_call::{answer, serve};
+use sipx_call::{MediaAddress, answer_at, serve};
 use sipx_sip::Method;
 use sipx_transport::{Config, bind};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::new("0.0.0.0:5060".parse()?);
-    // Bound to every address, so there is nothing sensible to advertise; say so explicitly
-    // rather than letting the far end be told to reply to 0.0.0.0.
-    config.sent_by = "127.0.0.1".to_owned();
+    // Bound to every address, but advertise one reachable deployment address consistently in
+    // Via, Contact and SDP rather than asking the far end to reply to 0.0.0.0.
+    config.sent_by = "198.51.100.44".to_owned();
 
     let (endpoint, mut incoming) = bind(config).await?;
     println!("listening on {}", endpoint.local_addr());
@@ -31,7 +31,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let mut call = answer(&endpoint, &request, "127.0.0.1".parse()?).await?;
+        let media = MediaAddress::new("198.51.100.44".parse()?).with_bind("0.0.0.0".parse()?);
+        let mut call = answer_at(&endpoint, &request, media).await?;
         println!("answered over {:?}", request.transport);
 
         // Record until the caller goes quiet for half a second.

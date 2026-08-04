@@ -28,6 +28,7 @@
 //! consumes both for explicit media policy in dial and answer roles (`M-27`, `M-28`).
 
 pub mod answer;
+pub mod browser_audio;
 pub mod crypto;
 pub mod fingerprint;
 pub mod ice;
@@ -42,7 +43,8 @@ pub use ice::{
 };
 pub use parse::parse;
 pub use session::{
-    Address, Attribute, Connection, Direction, MediaDescription, Origin, SessionDescription, Timing,
+    Address, Attribute, Connection, Direction, MediaDescription, Origin, RtcpMode,
+    SessionDescription, Timing,
 };
 
 /// What can go wrong reading SDP.

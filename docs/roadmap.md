@@ -10,9 +10,11 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-08-04:_ **`1.0.0-beta.2` and `1.0.0-beta.3` are published prereleases.** Beta.4 is the
-next measured wave: ten stories selected around secure browser audio and real-network connectivity,
-with the exact set and order recorded below. Stable `1.0.0` remains a separate promotion decision.
+_As of 2026-08-04:_ **`1.0.0-beta.2` and `1.0.0-beta.3` are published prereleases, and
+`1.0.0-beta.4` is the current release candidate.** Beta.4 is the measured feature-and-security wave
+around secure browser audio and real-network connectivity recorded below. It deliberately excludes
+TURN-required networks, video, data channels and a general browser API; stable `1.0.0` remains a
+separate promotion and compatibility decision.
 
 _As of 2026-07-30:_ **all seven `1.0.0-alpha` predicates are met**, and `1.0.0-alpha` is cut.
 [`maturity.md`](maturity.md) reports them, and it reports them as *computed* rather than asserted —
@@ -166,11 +168,12 @@ Application-host phase 1 is delivered by `A-2`; the remaining in-progress work i
 [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host) phases below, which
 are not milestones because they are not RFC gaps.
 
-**Next release cut.** Beta.3 is published. The next boundary is `1.0.0-beta.4`, a deliberately
-coherent feature-and-security wave rather than a bag of the ten shortest stories. Its product claim
-is narrow: audio connects securely through real networks, including one independently proven
-browser-compatible path. The six generated predicates below measure that boundary; they do not
-authorize broader publicity.
+**Next release cut.** Beta.3 is published and beta.4 is the current candidate. Its boundary is a
+deliberately coherent feature-and-security wave rather than a bag of the ten shortest stories. The
+product claim is narrow: audio connects securely through real networks, including one independently
+proven browser-compatible path. Publication still requires the complete clean release gate,
+exact-SHA main CI and Pages, the protected registry workflow and one immutable annotated tag. The
+six generated predicates below measure that boundary; they do not authorize broader publicity.
 
 ### Beta.4 — secure audio through real networks
 
@@ -686,12 +689,11 @@ host/server-reflexive path universally reachable.
 
 RFC 8834 supplies the RTP/SAVPF and RTP/RTCP multiplex requirements rather than a local profile.
 
-**Current status:** the prerequisites are separately reachable, but the composition is not. The
-call and CLI explicitly refuse ICE with DTLS-SRTP, sipx does not offer `RTP/SAVPF` or `a=rtcp-mux`,
-and no independently implemented browser SIP endpoint has carried audio with it. `M-38` is the
-tracker. Done when a normative profile precedes the code and a bounded shell proof carries
-non-silent Opus both ways with that endpoint in both SIP roles over WSS + ICE + DTLS-SRTP, while
-negative fingerprint and downgrade cases fail immediately. See
+**Current status:** the beta.4 tree now has the named fail-closed profile, `RTP/SAVPF`, RTCP
+multiplexing, one ICE-nominated component carrying DTLS-SRTP/SRTP/SRTCP, and the bounded native-browser
+CI proof in both SIP roles. That proof requires non-silent Opus in both directions and reverses the
+fingerprint, nomination and downgrade conditions independently. `M-38` remains the tracker until the
+hosted native-browser job and the complete release gate pass. See
 [design](designs/webrtc-audio.md).
 
 ### Video admission — `video`

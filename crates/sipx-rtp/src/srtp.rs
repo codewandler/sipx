@@ -86,6 +86,9 @@ pub enum SrtpError {
     /// The packet has been seen before, or is too old to judge (RFC 3711 §3.3.2).
     #[error("replayed or too old: sequence {0}")]
     Replayed(u16),
+    /// The SRTCP packet has been seen before, or its 31-bit index is too old to judge.
+    #[error("replayed or too old SRTCP index {0}")]
+    ReplayedRtcp(u32),
 }
 
 /// The six session keys one master key produces.
@@ -147,6 +150,10 @@ pub struct Context {
     replay: u64,
     /// The SRTCP index this side sends, 31 bits (§3.4).
     rtcp_index: u32,
+    /// The highest authenticated SRTCP index received, separate from the SRTP sequence/ROC (§3.4).
+    highest_rtcp_index: Option<u32>,
+    /// The SRTCP replay window, most recent authenticated index at bit 0 (§3.4, §3.3.2).
+    rtcp_replay: u64,
 }
 
 impl Context {
@@ -186,6 +193,8 @@ impl Context {
             highest_seq: None,
             replay: 0,
             rtcp_index: 0,
+            highest_rtcp_index: None,
+            rtcp_replay: 0,
         })
     }
 
@@ -320,6 +329,9 @@ impl Context {
         );
         let encrypted = trailer & 0x8000_0000 != 0;
         let index = trailer & 0x7FFF_FFFF;
+        // The explicit SRTCP index has authenticated by this point. Only now may it be compared
+        // with the replay window; a forged high index therefore cannot move trusted state.
+        self.check_rtcp_replay(index)?;
         let ssrc = u32::from_be_bytes(
             body.get(4..8)
                 .and_then(|s| s.try_into().ok())
@@ -337,6 +349,7 @@ impl Context {
             )
             .apply_keystream(payload);
         }
+        self.accept_rtcp(index);
         Ok(out)
     }
 
@@ -414,6 +427,55 @@ impl Context {
             }
         }
     }
+
+    fn check_rtcp_replay(&self, index: u32) -> Result<(), SrtpError> {
+        let Some(highest) = self.highest_rtcp_index else {
+            return Ok(());
+        };
+        if srtcp_forward_distance(highest, index).is_some() {
+            return Ok(());
+        }
+        let behind = highest.wrapping_sub(index) & SRTCP_INDEX_MASK;
+        if behind >= 64 || self.rtcp_replay & (1u64 << behind) != 0 {
+            return Err(SrtpError::ReplayedRtcp(index));
+        }
+        Ok(())
+    }
+
+    fn accept_rtcp(&mut self, index: u32) {
+        let Some(highest) = self.highest_rtcp_index else {
+            self.highest_rtcp_index = Some(index);
+            self.rtcp_replay = 1;
+            return;
+        };
+        if let Some(advance) = srtcp_forward_distance(highest, index) {
+            self.rtcp_replay = if advance >= 64 {
+                0
+            } else {
+                self.rtcp_replay << advance
+            };
+            self.rtcp_replay |= 1;
+            self.highest_rtcp_index = Some(index);
+        } else {
+            let behind = highest.wrapping_sub(index) & SRTCP_INDEX_MASK;
+            if behind < 64 {
+                self.rtcp_replay |= 1u64 << behind;
+            }
+        }
+    }
+}
+
+const SRTCP_INDEX_MASK: u32 = 0x7FFF_FFFF;
+const SRTCP_INDEX_HALF_RANGE: u32 = 0x4000_0000;
+
+/// The forward distance in the 31-bit SRTCP index space, or `None` when `incoming` is not newer.
+///
+/// RFC 3711 limits one key to the index space, but treating the modulo boundary normally keeps the
+/// held replay window correct at the last packet while the caller arranges rekeying. Exactly half
+/// the space is ambiguous and is deliberately not considered newer.
+fn srtcp_forward_distance(current: u32, incoming: u32) -> Option<u32> {
+    let distance = incoming.wrapping_sub(current) & SRTCP_INDEX_MASK;
+    (distance != 0 && distance < SRTCP_INDEX_HALF_RANGE).then_some(distance)
 }
 
 /// The 48-bit packet index: the rollover counter above the sequence number.
@@ -830,6 +892,107 @@ mod tests {
             "the report body must not appear on the wire"
         );
         assert_eq!(recv.unprotect_rtcp(&protected).expect("unprotects"), packet);
+    }
+
+    fn rtcp() -> Vec<u8> {
+        let mut packet = vec![0x80, 201, 0x00, 0x07];
+        packet.extend_from_slice(&0xCAFE_BABEu32.to_be_bytes());
+        packet.extend_from_slice(b"REPORTBODY-REPORTBODY-RE");
+        packet
+    }
+
+    /// RFC 3711 §3.4 applies §3.3.2's replay rule to the explicit SRTCP index. A genuine captured
+    /// report authenticates forever, so authentication alone cannot reject its second delivery.
+    #[test]
+    fn an_authenticated_srtcp_packet_is_accepted_once() {
+        let (mut send, mut recv) = pair();
+        let first = send.protect_rtcp(&rtcp()).expect("protects index zero");
+        let second = send.protect_rtcp(&rtcp()).expect("protects index one");
+
+        recv.unprotect_rtcp(&first).expect("accepted once");
+        assert_eq!(recv.unprotect_rtcp(&first), Err(SrtpError::ReplayedRtcp(0)));
+        recv.unprotect_rtcp(&second)
+            .expect("a distinct authenticated index remains acceptable");
+    }
+
+    /// RFC 3711 §3.4 says the SRTCP replay list is separate from the SRTP list. Both streams begin
+    /// at index zero, and advancing one must not consume the other's bit zero.
+    #[test]
+    fn srtp_and_srtcp_have_separate_replay_windows() {
+        let (mut send, mut recv) = pair();
+        let media = send.protect(&rtp(0, b"audio")).expect("protects RTP zero");
+        let control = send.protect_rtcp(&rtcp()).expect("protects RTCP zero");
+
+        recv.unprotect(&media).expect("RTP zero is accepted");
+        recv.unprotect_rtcp(&control)
+            .expect("SRTCP zero is independently accepted");
+        assert_eq!(recv.unprotect(&media), Err(SrtpError::Replayed(0)));
+        assert_eq!(
+            recv.unprotect_rtcp(&control),
+            Err(SrtpError::ReplayedRtcp(0))
+        );
+    }
+
+    /// RFC 3711 §3.3 step 5 authenticates before touching replay state. Changing the explicit index
+    /// without recomputing the tag is a forged high-index packet and cannot push the window ahead.
+    #[test]
+    fn a_forged_high_srtcp_index_does_not_advance_the_window() {
+        let (mut send, mut recv) = pair();
+        let authentic = send.protect_rtcp(&rtcp()).expect("protects");
+        let mut forged = authentic.clone();
+        let trailer = forged.len() - TAG_LEN - 4;
+        forged[trailer..trailer + 4].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+
+        assert_eq!(recv.unprotect_rtcp(&forged), Err(SrtpError::NotAuthentic));
+        recv.unprotect_rtcp(&authentic)
+            .expect("the authentic index zero was not made old");
+    }
+
+    /// A 64-packet window holds distances zero through 63. An unseen packet exactly 63 behind is
+    /// accepted once; one exactly 64 behind is too old. Testing both edges pins the comparison,
+    /// rather than merely observing a packet comfortably outside the window.
+    #[test]
+    fn the_srtcp_replay_window_holds_exactly_sixty_four_indices() {
+        let (mut send, mut recv) = pair();
+        let oldest_held = send.protect_rtcp(&rtcp()).expect("protects index zero");
+        send.rtcp_index = 63;
+        let newest = send.protect_rtcp(&rtcp()).expect("protects index 63");
+        recv.unprotect_rtcp(&newest).expect("establishes index 63");
+        recv.unprotect_rtcp(&oldest_held)
+            .expect("an unseen packet 63 places behind remains held");
+        assert_eq!(
+            recv.unprotect_rtcp(&oldest_held),
+            Err(SrtpError::ReplayedRtcp(0))
+        );
+
+        let (mut send, mut recv) = pair();
+        let too_old = send.protect_rtcp(&rtcp()).expect("protects index zero");
+        send.rtcp_index = 64;
+        let newest = send.protect_rtcp(&rtcp()).expect("protects index 64");
+        recv.unprotect_rtcp(&newest).expect("establishes index 64");
+        assert_eq!(
+            recv.unprotect_rtcp(&too_old),
+            Err(SrtpError::ReplayedRtcp(0))
+        );
+    }
+
+    /// The SRTCP index is 31 bits. The window treats `0x7fff_ffff -> 0` as one forward step, not as
+    /// an ancient packet, and still remembers the last pre-wrap packet after crossing the boundary.
+    #[test]
+    fn the_srtcp_replay_window_crosses_the_index_wrap() {
+        let (mut send, mut recv) = pair();
+        send.rtcp_index = 0x7FFF_FFFE;
+        let before = send.protect_rtcp(&rtcp()).expect("protects max minus one");
+        let last = send.protect_rtcp(&rtcp()).expect("protects max");
+        let wrapped = send.protect_rtcp(&rtcp()).expect("protects zero");
+
+        recv.unprotect_rtcp(&before).expect("accepts max minus one");
+        recv.unprotect_rtcp(&last).expect("accepts max");
+        recv.unprotect_rtcp(&wrapped).expect("accepts wrapped zero");
+        assert_eq!(
+            recv.unprotect_rtcp(&last),
+            Err(SrtpError::ReplayedRtcp(0x7FFF_FFFF))
+        );
     }
 
     #[test]

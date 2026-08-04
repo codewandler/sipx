@@ -43,8 +43,11 @@ claim and the places sipx loses stated plainly — see [How sipx compares](../re
 - **A general NAT traversal service.** ICE connectivity checks and STUN-derived server-reflexive
   candidates are available, but TURN and relayed candidates are not. Some NAT pairs therefore have
   no working media path.
-- **A browser media endpoint.** Secure WebSocket signalling, ICE, and DTLS-keyed media are useful
-  pieces, but sipx deliberately does not ship the complete browser media protocol surface.
+- **A general browser media endpoint.** sipx has one named, fail-closed browser-audio composition
+  over WSS, ICE, DTLS-SRTP and Opus. It deliberately does not ship browser APIs, video, data
+  channels, multiple media sections, incremental candidate trickling, TURN, or the complete WebRTC
+  protocol surface. The [native-browser proof](../reference/browser-audio-proof.md) covers that
+  exact profile in both SIP roles; selecting the profile alone is not an interoperability claim.
 - **Video or additional codecs.** The media stack is for telephony audio. Calls support G.711
   and optional Opus, not arbitrary application-supplied codecs.
 - **A ready-made routing product.** The two-dialog coupling primitive is available, but listener
@@ -59,8 +62,9 @@ claim and the places sipx loses stated plainly — see [How sipx compares](../re
 TLS protects each signalling hop, not necessarily every intermediary. With SDES, SRTP key
 material is carried in SDP, so any intermediary terminating that secure signalling can read it.
 DTLS-SRTP keeps that media key out of signalling and is selectable through both the call API and
-CLI, but it still has one SRTP transform with no rekeying. Reliable early media and ICE combined
-with DTLS-SRTP are refused rather than silently downgraded.
+CLI, but it still has one SRTP transform with no rekeying. The browser-audio profile composes ICE
+and DTLS-SRTP under its stricter policy; unsupported combinations are refused rather than silently
+downgraded.
 
 See [Security](../reference/security.md) for the CLI-versus-library matrix,
 [RFC compliance](../reference/compliance.md) for the checked, protocol-by-protocol status, and

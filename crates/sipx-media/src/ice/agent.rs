@@ -372,6 +372,12 @@ impl Agent {
         &self.credentials
     }
 
+    /// The short-term credential directions after a peer description was applied.
+    #[cfg(feature = "dtls")]
+    pub(crate) const fn peering(&self) -> Option<&Peering> {
+        self.peering.as_ref()
+    }
+
     /// The checklist set.
     #[must_use]
     pub const fn checklists(&self) -> &ChecklistSet {

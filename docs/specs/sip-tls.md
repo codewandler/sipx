@@ -154,6 +154,13 @@ mandatory on a stream because nothing else says where a message ends; a WebSocke
 so a body simply runs to the end of it. Requiring it anyway would reject messages this transport
 can frame perfectly well.
 
+**[sipx] The configured SIP message limit is also the WebSocket decoder's frame and
+assembled-message limit.** RFC 6455 §5.2 puts an attacker-controlled length before the payload.
+Checking only after the WebSocket implementation assembled its default-sized message would preserve
+parser correctness while leaving a much larger allocation path in front of it. WS and WSS pass
+`Limits::max_message_bytes` into the decoder before the handshake completes; TLS changes the bytes
+underneath, not this bound.
+
 **[sipx] Text frames where the bytes allow it, binary otherwise.** RFC 7118 §5 permits either.
 Text is what a browser's network panel and every capture tool show as readable SIP; a body that
 is not valid UTF-8 cannot go in a text frame at all (RFC 6455 §5.6).
@@ -238,6 +245,7 @@ DNS deciding which certificate is acceptable.
 | W11 | WS and TCP to one address | Two connections, not one reused |
 | W12 | WSS with a certificate for another host | Refused before the upgrade; nothing crosses |
 | W13 | Server serving SIP only at `/ws` | Reached when the target names it; `404` when it does not |
+| W14 | Frame or fragmented message above the configured SIP message limit | Refused by the WebSocket decoder before assembly |
 | I1 | Register over TLS against a third-party server | Accepted |
 | I2 | …presenting a certificate for another name | Refused, immediately |
 | I3 | …signed by an issuer we do not know | Refused, immediately |

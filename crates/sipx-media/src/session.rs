@@ -110,6 +110,9 @@ pub enum SetupError {
     /// A configured RTCP timer must make forward progress.
     #[error("RTCP interval must be at least 1 ms, got {0:?}")]
     RtcpIntervalTooShort(Duration),
+    /// RFC 5761 cannot distinguish this marked RTP payload from an RTCP packet type.
+    #[error("RTP payload type {0} collides with RTCP while rtcp-mux is active")]
+    RtcpMuxPayloadCollision(u8),
     /// The codec agreed through SDP could not create one of its stateful directions.
     #[error("cannot construct {codec:?} {direction}: {reason}")]
     Codec {
@@ -361,6 +364,8 @@ pub struct Config {
     /// directly rather than implementing a calculation that would always return the same
     /// answer.
     pub rtcp_interval: Option<Duration>,
+    /// Whether RTCP uses the RTP socket or its adjacent control socket (RFC 5761).
+    pub rtcp_mode: sipx_sdp::RtcpMode,
     /// The payload type carrying `telephone-event`, if the SDP negotiated one.
     ///
     /// It is dynamic, so the number is whatever the answer said — assuming 101 because that
@@ -392,6 +397,7 @@ impl Config {
             jitter_depth: 3,
             jitter_max_depth: Some(12),
             rtcp_interval: Some(Duration::from_secs(5)),
+            rtcp_mode: sipx_sdp::RtcpMode::Separate,
             dtmf_payload_type: Some(dtmf::DEFAULT_PAYLOAD_TYPE),
         }
     }
@@ -417,6 +423,16 @@ impl Config {
             && interval < Self::MIN_INTERVAL
         {
             return Err(SetupError::RtcpIntervalTooShort(interval));
+        }
+        if self.rtcp_mode == sipx_sdp::RtcpMode::Mux {
+            for payload in [Some(self.wire_payload_type()), self.dtmf_payload_type]
+                .into_iter()
+                .flatten()
+            {
+                if (64..=95).contains(&payload) {
+                    return Err(SetupError::RtcpMuxPayloadCollision(payload));
+                }
+            }
         }
         Ok(())
     }
@@ -595,6 +611,19 @@ pub struct MediaSession {
     /// layer's, and it is what makes a re-offer able to reach the agent at all. `None` is a stream
     /// with no ICE, which is the default and must stay indistinguishable from the pre-ICE session.
     ice: Option<crate::ice::driver::Handle>,
+    /// Browser-component security facts, when the one-owner path established this session.
+    browser_ingress: Option<Arc<std::sync::Mutex<crate::browser::ComponentIngress>>>,
+    /// The sole browser-component receiver. Retained so drop can cancel rather than detach it.
+    #[cfg(feature = "dtls")]
+    browser_owner: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(feature = "dtls")]
+    browser_ice_owner: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(feature = "dtls")]
+    browser_media_owners: Vec<tokio::task::JoinHandle<()>>,
+    #[cfg(all(test, feature = "dtls"))]
+    browser_profile_tasks: Option<Arc<crate::browser::ProfileTasks>>,
+    #[cfg(all(test, feature = "dtls"))]
+    browser_preparing_peak: Option<usize>,
     stop: Arc<Stop>,
 }
 
@@ -685,6 +714,10 @@ struct Shared {
 
 impl Shared {
     fn new(local_addr: SocketAddr, discards: Arc<DiscardMeters>) -> Self {
+        Self::with_stop(local_addr, discards, Arc::new(Stop::default()))
+    }
+
+    fn with_stop(local_addr: SocketAddr, discards: Arc<DiscardMeters>, stop: Arc<Stop>) -> Self {
         Self {
             sent: Arc::new(AtomicU64::new(0)),
             received: Arc::new(AtomicU64::new(0)),
@@ -692,7 +725,7 @@ impl Shared {
             outbound: Arc::new(Outbound::default()),
             feedback: Arc::new(Mutex::new(Feedback::default())),
             stats: Arc::new(Mutex::new(StreamStats::new(0))),
-            stop: Arc::new(Stop::default()),
+            stop,
             ssrc: rand::random(),
             // Unique in user@host form and stable for the session: a random token distinguishes
             // sessions on this host, the local address distinguishes hosts, and neither needs a
@@ -1077,13 +1110,28 @@ impl MediaPort {
     /// The result carries the `a=candidate` lines for the description
     /// ([`ice::LocalDescription::attributes`]) and the agent that will drive them.
     pub async fn gather(&self, gathering: &ice::Gathering) -> ice::LocalDescription {
+        self.gather_with_rtcp_mode(gathering, sipx_sdp::RtcpMode::Separate)
+            .await
+    }
+
+    /// Gather ICE candidates for the negotiated RTCP shape.
+    ///
+    /// A muxed stream has only component 1. The default [`Self::gather`] retains the historical
+    /// two-component behavior for callers that have not selected RFC 5761.
+    pub async fn gather_with_rtcp_mode(
+        &self,
+        gathering: &ice::Gathering,
+        rtcp_mode: sipx_sdp::RtcpMode,
+    ) -> ice::LocalDescription {
         let mut bases = vec![ice::gather::Base {
             index: ice::LocalBase(0),
             component: ComponentId::RTP,
             socket: &self.socket,
         }];
         // Component 2 only when the control port was actually obtained (`ice.md` §6.1).
-        if let Some(rtcp) = &self.rtcp {
+        if rtcp_mode == sipx_sdp::RtcpMode::Separate
+            && let Some(rtcp) = &self.rtcp
+        {
             bases.push(ice::gather::Base {
                 index: ice::LocalBase(1),
                 component: ComponentId::RTCP,
@@ -1153,6 +1201,55 @@ impl MediaPort {
             self.discards,
         ))
     }
+
+    /// Start the fail-closed browser-audio runtime on this already-bound component.
+    ///
+    /// ICE begins first on the retained socket. Its selected component becomes the only DTLS
+    /// peer; DTLS records pass through the component owner rather than a duplicated descriptor.
+    /// Only a verified handshake installs SRTP/SRTCP keys and attaches the media workers.
+    #[cfg(feature = "dtls")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_browser_audio(
+        self,
+        mut config: Config,
+        local_ice: ice::LocalDescription,
+        ice_generation: u64,
+        identity: crate::dtls::openssl::Identity,
+        role: crate::dtls::Role,
+        peer_fingerprint: sipx_sdp::fingerprint::Fingerprint,
+        timeout: Duration,
+    ) -> Result<MediaSession, crate::browser::BrowserStartError> {
+        if config.rtcp_mode != sipx_sdp::RtcpMode::Mux {
+            return Err(crate::browser::BrowserStartError::RtcpMuxRequired);
+        }
+        let prepared = Prepared::new(&config)?;
+        let stop = Arc::new(Stop::default());
+        let (runtime, keys) = crate::browser::prepare(
+            Arc::clone(&self.socket),
+            local_ice,
+            ice_generation,
+            identity,
+            role,
+            peer_fingerprint,
+            timeout,
+            Arc::clone(&stop),
+            Arc::clone(&self.discards),
+        )
+        .await?;
+        let selected = crate::browser::lock_ingress(&runtime.ingress)
+            .snapshot()
+            .selected
+            .ok_or(crate::browser::BrowserStartError::IceStopped)?;
+        config.remote = selected.remote;
+        config.srtp = Some(keys);
+        Ok(MediaSession::on_browser(
+            runtime,
+            self.local_addr,
+            config,
+            prepared,
+            self.discards,
+        ))
+    }
 }
 
 impl MediaSession {
@@ -1199,6 +1296,13 @@ impl MediaSession {
         let config_codec = config.codec;
         let wire_payload_type = config.wire_payload_type();
         let rtcp_interval = config.rtcp_interval;
+        let rtcp_mode = config.rtcp_mode;
+        // A muxed session has exactly one running socket owner. The adjacent socket was reserved
+        // before negotiation and is released now; no control worker may race the RTP reader.
+        let rtcp = match rtcp_mode {
+            sipx_sdp::RtcpMode::Separate => rtcp,
+            sipx_sdp::RtcpMode::Mux => None,
+        };
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(64);
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
         let (encoded_tx, encoded_rx) = mpsc::channel::<Encoded>(256);
@@ -1249,7 +1353,7 @@ impl MediaSession {
         ));
         let clips_tx = spawn_playback_queue(&outgoing_tx, &shared.stop);
         tokio::spawn(receive_loop(
-            Arc::clone(socket),
+            ReceiveInput::socket(Arc::clone(socket)),
             Inbound {
                 audio: incoming_tx,
                 encoded: encoded_tx,
@@ -1262,8 +1366,11 @@ impl MediaSession {
                 config,
                 received: Arc::clone(&shared.received),
                 stats: Arc::clone(&shared.stats),
+                feedback: Arc::clone(&shared.feedback),
+                ssrc: shared.ssrc,
                 symmetric: ice.is_none(),
                 ice: ice.clone(),
+                browser_ingress: None,
                 stop: Arc::clone(&shared.stop),
                 decoding: prepared.decoding,
                 discards: Arc::clone(&shared.discards),
@@ -1271,12 +1378,13 @@ impl MediaSession {
         ));
 
         let rtcp_socket = rtcp.clone();
-        spawn_control(Control {
+        let _control_owners = spawn_control(Control {
             media: Arc::clone(socket),
             rtcp,
             remote: Arc::clone(&remote),
             rtcp_remote,
             interval: rtcp_interval,
+            mode: rtcp_mode,
             ssrc: shared.ssrc,
             cname: shared.cname,
             stats: Arc::clone(&shared.stats),
@@ -1286,12 +1394,170 @@ impl MediaSession {
             ice: ice.clone(),
             stop: Arc::clone(&shared.stop),
             discards: Arc::clone(&shared.discards),
+            #[cfg(feature = "dtls")]
+            profile_tasks: None,
         });
 
         Self {
             socket: Arc::clone(socket),
             rtcp_socket,
             ice,
+            outgoing: outgoing_tx,
+            digits: Mutex::new(digits_rx),
+            tones: AtomicU64::new(0),
+            incoming: Mutex::new(incoming_rx),
+            encoded: Mutex::new(encoded_rx),
+            relay: shared.relay,
+            muted: shared.muted,
+            clips: clips_tx,
+            playbacks: AtomicU64::new(0),
+            outstanding: Arc::new(AtomicUsize::new(0)),
+            keypresses: shared.keypresses,
+            codec: config_codec,
+            wire_payload_type,
+            local_addr,
+            samples_per_packet,
+            packet_duration,
+            clock_rate,
+            sent: shared.sent,
+            received: shared.received,
+            discards: shared.discards,
+            stats: shared.stats,
+            feedback: shared.feedback,
+            browser_ingress: None,
+            #[cfg(feature = "dtls")]
+            browser_owner: None,
+            #[cfg(feature = "dtls")]
+            browser_ice_owner: None,
+            #[cfg(feature = "dtls")]
+            browser_media_owners: Vec::new(),
+            #[cfg(all(test, feature = "dtls"))]
+            browser_profile_tasks: None,
+            #[cfg(all(test, feature = "dtls"))]
+            browser_preparing_peak: None,
+            stop: shared.stop,
+        }
+    }
+
+    #[cfg(feature = "dtls")]
+    #[allow(clippy::too_many_lines)]
+    fn on_browser(
+        runtime: crate::browser::Runtime,
+        local_addr: SocketAddr,
+        config: Config,
+        prepared: Prepared,
+        discards: Arc<DiscardMeters>,
+    ) -> Self {
+        let crate::browser::Runtime {
+            socket,
+            media,
+            ice,
+            ingress,
+            owner,
+            ice_owner,
+            stop: runtime_stop,
+            profile_tasks,
+        } = runtime;
+        let samples_per_packet = config.samples_per_packet();
+        let packet_duration = config.packet_duration;
+        let clock_rate = config.clock_rate;
+        let config_codec = config.codec;
+        let wire_payload_type = config.wire_payload_type();
+        let rtcp_interval = config.rtcp_interval;
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(64);
+        let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
+        let (encoded_tx, encoded_rx) = mpsc::channel::<Encoded>(256);
+        let (digits_tx, digits_rx) = mpsc::channel::<(Digit, Duration)>(32);
+        let shared = Shared::with_stop(local_addr, discards, runtime_stop);
+        #[cfg(all(test, feature = "dtls"))]
+        let preparing_peak = profile_tasks.counts().1;
+        let remote = Arc::new(Mutex::new(config.remote));
+        let srtp_keys = config.srtp.clone();
+        let rtcp_remote: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+        let ice = Some(ice);
+
+        let send_owner = tokio::spawn(crate::browser::profile_task(
+            Arc::clone(&profile_tasks),
+            send_loop(
+                Arc::clone(&socket),
+                outgoing_rx,
+                Sending {
+                    remote: Arc::clone(&remote),
+                    config: config.clone(),
+                    ssrc: shared.ssrc,
+                    sent: Arc::clone(&shared.sent),
+                    outbound: Arc::clone(&shared.outbound),
+                    muted: Arc::clone(&shared.muted),
+                    ice: ice.clone(),
+                    stop: Arc::clone(&shared.stop),
+                    encoding: prepared.encoding,
+                    discards: Arc::clone(&shared.discards),
+                },
+            ),
+        ));
+        let (clips_tx, playback_owner) =
+            spawn_browser_playback_queue(&outgoing_tx, &shared.stop, Arc::clone(&profile_tasks));
+        let receive_owner = tokio::spawn(crate::browser::profile_task(
+            Arc::clone(&profile_tasks),
+            receive_loop(
+                ReceiveInput::Browser(media),
+                Inbound {
+                    audio: incoming_tx,
+                    encoded: encoded_tx,
+                    relay: Arc::clone(&shared.relay),
+                    digits: Keypresses {
+                        to: digits_tx,
+                        arrivals: Arc::clone(&shared.keypresses),
+                    },
+                    remote: Arc::clone(&remote),
+                    config,
+                    received: Arc::clone(&shared.received),
+                    stats: Arc::clone(&shared.stats),
+                    feedback: Arc::clone(&shared.feedback),
+                    ssrc: shared.ssrc,
+                    symmetric: false,
+                    ice: ice.clone(),
+                    browser_ingress: Some(Arc::clone(&ingress)),
+                    stop: Arc::clone(&shared.stop),
+                    decoding: prepared.decoding,
+                    discards: Arc::clone(&shared.discards),
+                },
+            ),
+        ));
+
+        let mut browser_media_owners = vec![send_owner, playback_owner, receive_owner];
+        browser_media_owners.extend(spawn_control(Control {
+            media: Arc::clone(&socket),
+            rtcp: None,
+            remote: Arc::clone(&remote),
+            rtcp_remote,
+            interval: rtcp_interval,
+            mode: sipx_sdp::RtcpMode::Mux,
+            ssrc: shared.ssrc,
+            cname: shared.cname,
+            stats: Arc::clone(&shared.stats),
+            outbound: shared.outbound,
+            feedback: Arc::clone(&shared.feedback),
+            srtp: srtp_keys,
+            ice: ice.clone(),
+            stop: Arc::clone(&shared.stop),
+            discards: Arc::clone(&shared.discards),
+            #[cfg(feature = "dtls")]
+            profile_tasks: Some(Arc::clone(&profile_tasks)),
+        }));
+
+        Self {
+            socket,
+            rtcp_socket: None,
+            ice,
+            browser_ingress: Some(ingress),
+            browser_owner: Some(owner),
+            browser_ice_owner: Some(ice_owner),
+            browser_media_owners,
+            #[cfg(all(test, feature = "dtls"))]
+            browser_profile_tasks: Some(profile_tasks),
+            #[cfg(all(test, feature = "dtls"))]
+            browser_preparing_peak: Some(preparing_peak),
             outgoing: outgoing_tx,
             digits: Mutex::new(digits_rx),
             tones: AtomicU64::new(0),
@@ -1347,6 +1613,29 @@ impl MediaSession {
             crate::ice::IcePath::Disabled,
             crate::ice::driver::Handle::path,
         )
+    }
+
+    /// Security and nominated-pair facts for a browser-audio component.
+    #[must_use]
+    pub fn browser_component(&self) -> Option<crate::browser::BrowserComponentSnapshot> {
+        self.browser_ingress
+            .as_ref()
+            .map(|ingress| crate::browser::lock_ingress(ingress).snapshot())
+    }
+
+    #[cfg(all(test, feature = "dtls"))]
+    pub(crate) fn browser_task_counts(&self) -> Option<(usize, usize, usize)> {
+        self.browser_profile_tasks.as_ref().and_then(|tasks| {
+            self.browser_preparing_peak.map(|preparing_peak| {
+                let (active, peak) = tasks.counts();
+                (preparing_peak, active, peak)
+            })
+        })
+    }
+
+    #[cfg(all(test, feature = "dtls"))]
+    pub(crate) fn browser_task_probe(&self) -> Option<Arc<crate::browser::ProfileTasks>> {
+        self.browser_profile_tasks.clone()
     }
 
     /// Rebuild codec and packet workers on this session's existing sockets.
@@ -1920,6 +2209,33 @@ impl MediaSession {
         self.stop.stop();
     }
 
+    /// Stop and join the browser component's sole receive owner.
+    ///
+    /// Ordinary sessions have no such owner and return immediately. Media workers observe the
+    /// same durable stop token, close their channels and drop their SRTP/SRTCP contexts.
+    #[cfg(feature = "dtls")]
+    pub async fn shutdown(mut self) {
+        self.stop.stop();
+        if let Some(ingress) = &self.browser_ingress {
+            crate::browser::lock_ingress(ingress).close();
+        }
+        if let Some(owner) = self.browser_owner.take() {
+            // discard: stop is the terminal outcome and this await is the proof of reaping; an
+            // already-cancelled JoinError cannot change the completed shutdown contract.
+            let _ = owner.await;
+        }
+        if let Some(owner) = self.browser_ice_owner.take() {
+            // discard: stop is the terminal outcome and this await is the proof of reaping; an
+            // already-cancelled JoinError cannot change the completed shutdown contract.
+            let _ = owner.await;
+        }
+        for owner in self.browser_media_owners.drain(..) {
+            // discard: every worker shares the observed stop token; awaiting proves it is reaped,
+            // while a cancellation JoinError adds no packet-level discard to count.
+            let _ = owner.await;
+        }
+    }
+
     /// Whether the session has been stopped.
     #[must_use]
     pub fn is_stopped(&self) -> bool {
@@ -1932,6 +2248,21 @@ impl Drop for MediaSession {
         // A session that outlives its call keeps a socket and two tasks alive. On a server
         // taking calls all day that is the difference between steady and unbounded.
         self.stop.stop();
+        if let Some(ingress) = &self.browser_ingress {
+            crate::browser::lock_ingress(ingress).close();
+        }
+        #[cfg(feature = "dtls")]
+        if let Some(owner) = self.browser_owner.take() {
+            owner.abort();
+        }
+        #[cfg(feature = "dtls")]
+        if let Some(owner) = self.browser_ice_owner.take() {
+            owner.abort();
+        }
+        #[cfg(feature = "dtls")]
+        for owner in self.browser_media_owners.drain(..) {
+            owner.abort();
+        }
     }
 }
 
@@ -1979,6 +2310,7 @@ fn authenticated(
     bytes: Bytes,
     source: SocketAddr,
     discards: &DiscardMeters,
+    browser_ingress: Option<&Arc<std::sync::Mutex<crate::browser::ComponentIngress>>>,
 ) -> Option<Bytes> {
     let Some(context) = context else {
         return Some(bytes);
@@ -1989,6 +2321,20 @@ fn authenticated(
             discards
                 .srtp_unprotect_failures
                 .fetch_add(1, Ordering::Relaxed);
+            if let Some(ingress) = browser_ingress {
+                let mut ingress = crate::browser::lock_ingress(ingress);
+                match &error {
+                    sipx_rtp::srtp::SrtpError::TooShort(_) => {
+                        ingress.note_malformed(crate::browser::IngressClass::Srtp);
+                    }
+                    sipx_rtp::srtp::SrtpError::Replayed(_) => {
+                        ingress.note_replay(crate::browser::IngressClass::Srtp);
+                    }
+                    _ => ingress.note_authentication_failure(crate::browser::IngressClass::Srtp),
+                }
+            }
+            // discard: `srtp_unprotect_failures` was incremented above; browser sessions also
+            // classified the same refusal into malformed, replay or authentication exactly once.
             tracing::debug!(%error, %source, "dropping a packet that failed SRTP");
             None
         }
@@ -2382,6 +2728,20 @@ fn spawn_playback_queue(outgoing: &mpsc::Sender<Frame>, stop: &Arc<Stop>) -> mps
     clips_tx
 }
 
+#[cfg(feature = "dtls")]
+fn spawn_browser_playback_queue(
+    outgoing: &mpsc::Sender<Frame>,
+    stop: &Arc<Stop>,
+    profile_tasks: Arc<crate::browser::ProfileTasks>,
+) -> (mpsc::Sender<Clip>, tokio::task::JoinHandle<()>) {
+    let (clips_tx, clips_rx) = mpsc::channel::<Clip>(Playback::QUEUE_DEPTH);
+    let owner = tokio::spawn(crate::browser::profile_task(
+        profile_tasks,
+        playback_loop(clips_rx, outgoing.clone(), Arc::clone(stop)),
+    ));
+    (clips_tx, owner)
+}
+
 /// The playback queue: one clip at a time, in the order they were started (`M-17`).
 ///
 /// One task owns it, which is what makes "clips queue" true by construction: the order clips are
@@ -2504,6 +2864,8 @@ struct Inbound {
     config: Config,
     received: Arc<AtomicU64>,
     stats: Arc<Mutex<StreamStats>>,
+    feedback: Arc<Mutex<Feedback>>,
+    ssrc: u32,
     /// Whether the first packet's source replaces the advertised address (symmetric RTP).
     ///
     /// False for a stream ICE is driving: RFC 8445 §8.1.1's selected pair replaces this, and it
@@ -2513,6 +2875,7 @@ struct Inbound {
     symmetric: bool,
     /// Where a STUN datagram goes (RFC 5764 §5.1.2), when ICE is running.
     ice: Option<crate::ice::driver::Handle>,
+    browser_ingress: Option<Arc<std::sync::Mutex<crate::browser::ComponentIngress>>>,
     stop: Arc<Stop>,
     /// Constructed before this worker is spawned, so startup cannot fail inside the task.
     decoding: Decoding,
@@ -2546,6 +2909,22 @@ fn demultiplex<'a>(
     }
 }
 
+/// The RFC 5761 second-stage class inside RFC 5764's RTP-or-RTCP first-byte range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MuxedPacket<'a> {
+    Rtp(&'a [u8]),
+    Rtcp(&'a [u8]),
+}
+
+fn classify_muxed(datagram: &[u8]) -> Option<MuxedPacket<'_>> {
+    let packet_type = *datagram.get(1)?;
+    if (192..=223).contains(&packet_type) {
+        Some(MuxedPacket::Rtcp(datagram))
+    } else {
+        Some(MuxedPacket::Rtp(datagram))
+    }
+}
+
 /// Everything the two RTCP loops need, grouped because they share most of it.
 struct Control {
     media: Arc<UdpSocket>,
@@ -2553,6 +2932,7 @@ struct Control {
     remote: Arc<Mutex<SocketAddr>>,
     rtcp_remote: Arc<Mutex<Option<SocketAddr>>>,
     interval: Option<Duration>,
+    mode: sipx_sdp::RtcpMode,
     ssrc: u32,
     cname: String,
     stats: Arc<Mutex<StreamStats>>,
@@ -2562,12 +2942,17 @@ struct Control {
     ice: Option<ice::driver::Handle>,
     stop: Arc<Stop>,
     discards: Arc<DiscardMeters>,
+    #[cfg(feature = "dtls")]
+    profile_tasks: Option<Arc<crate::browser::ProfileTasks>>,
 }
 
 /// Start the report loops, as far as this session's configuration and sockets allow.
-fn spawn_control(control: Control) {
+fn spawn_control(control: Control) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut owners = Vec::with_capacity(2);
+    #[cfg(feature = "dtls")]
+    let profile_tasks = control.profile_tasks.clone();
     if let Some(interval) = control.interval {
-        tokio::spawn(rtcp_loop(
+        let reporter = rtcp_loop(
             // Reports go out from the control port when there is one, which is what a peer
             // expects to see them come from; from the media port otherwise, which some peers
             // will refuse but is better than not reporting at all.
@@ -2575,6 +2960,7 @@ fn spawn_control(control: Control) {
             control.remote,
             control.rtcp_remote,
             interval,
+            control.mode,
             control.ssrc,
             control.cname,
             control.stats,
@@ -2582,10 +2968,21 @@ fn spawn_control(control: Control) {
             Arc::clone(&control.feedback),
             control.srtp.clone(),
             Arc::clone(&control.stop),
-        ));
+        );
+        #[cfg(feature = "dtls")]
+        let owner = if let Some(tasks) = profile_tasks.clone() {
+            tokio::spawn(crate::browser::profile_task(tasks, reporter))
+        } else {
+            tokio::spawn(reporter)
+        };
+        #[cfg(not(feature = "dtls"))]
+        let owner = tokio::spawn(reporter);
+        owners.push(owner);
     }
-    if let Some(port) = control.rtcp {
-        tokio::spawn(rtcp_receive_loop(
+    if control.mode == sipx_sdp::RtcpMode::Separate
+        && let Some(port) = control.rtcp
+    {
+        let receiver = rtcp_receive_loop(
             port,
             control.ssrc,
             control.feedback,
@@ -2593,8 +2990,18 @@ fn spawn_control(control: Control) {
             control.ice,
             control.stop,
             control.discards,
-        ));
+        );
+        #[cfg(feature = "dtls")]
+        let owner = if let Some(tasks) = profile_tasks {
+            tokio::spawn(crate::browser::profile_task(tasks, receiver))
+        } else {
+            tokio::spawn(receiver)
+        };
+        #[cfg(not(feature = "dtls"))]
+        let owner = tokio::spawn(receiver);
+        owners.push(owner);
     }
+    owners
 }
 
 /// Start the ICE driver for this session, over the sockets the session is running on.
@@ -2678,10 +3085,107 @@ async fn accept_source(
     }
 }
 
+enum ReceiveInput {
+    Socket {
+        socket: Arc<UdpSocket>,
+        datagram: Vec<u8>,
+    },
+    #[cfg(feature = "dtls")]
+    Browser(crate::browser::MediaIngress),
+}
+
+enum ReceivedDatagram {
+    Rtp { source: SocketAddr, bytes: Vec<u8> },
+    Rtcp { bytes: Vec<u8> },
+    Silence,
+    Closed,
+}
+
+impl ReceiveInput {
+    fn socket(socket: Arc<UdpSocket>) -> Self {
+        Self::Socket {
+            socket,
+            datagram: vec![0u8; 2048],
+        }
+    }
+
+    async fn next(
+        &mut self,
+        flush_after: Duration,
+        config: &Config,
+        ice: Option<&crate::ice::driver::Handle>,
+        stop: &Stop,
+    ) -> ReceivedDatagram {
+        loop {
+            match self {
+                Self::Socket { socket, datagram } => {
+                    let read = tokio::select! {
+                        () = stop.wait() => return ReceivedDatagram::Closed,
+                        read = tokio::time::timeout(flush_after, socket.recv_from(datagram)) => read,
+                    };
+                    let (length, source) = match read {
+                        Ok(Ok(received)) => received,
+                        Ok(Err(_)) => return ReceivedDatagram::Closed,
+                        Err(_elapsed) => return ReceivedDatagram::Silence,
+                    };
+                    let arrived = datagram.get(..length).unwrap_or_default();
+                    let Some(media) = demultiplex(arrived, source, crate::ice::LocalBase(0), ice)
+                    else {
+                        continue;
+                    };
+                    if config.rtcp_mode == sipx_sdp::RtcpMode::Mux {
+                        match classify_muxed(media) {
+                            Some(MuxedPacket::Rtp(media)) => {
+                                return ReceivedDatagram::Rtp {
+                                    source,
+                                    bytes: media.to_vec(),
+                                };
+                            }
+                            Some(MuxedPacket::Rtcp(control)) => {
+                                return ReceivedDatagram::Rtcp {
+                                    bytes: control.to_vec(),
+                                };
+                            }
+                            None => continue,
+                        }
+                    }
+                    return ReceivedDatagram::Rtp {
+                        source,
+                        bytes: media.to_vec(),
+                    };
+                }
+                #[cfg(feature = "dtls")]
+                Self::Browser(media) => {
+                    let next = tokio::select! {
+                        () = stop.wait() => return ReceivedDatagram::Closed,
+                        next = tokio::time::timeout(flush_after, async {
+                            tokio::select! {
+                                packet = media.srtp.recv() => packet.map(|packet| (false, packet)),
+                                packet = media.srtcp.recv() => packet.map(|packet| (true, packet)),
+                            }
+                        }) => next,
+                    };
+                    return match next {
+                        Err(_elapsed) => ReceivedDatagram::Silence,
+                        Ok(Some((true, packet))) => ReceivedDatagram::Rtcp {
+                            bytes: packet.bytes,
+                        },
+                        Ok(Some((false, packet))) => ReceivedDatagram::Rtp {
+                            source: packet.source,
+                            bytes: packet.bytes,
+                        },
+                        Ok(None) => ReceivedDatagram::Closed,
+                    };
+                }
+            }
+        }
+    }
+}
+
 // This is the single ordered path from demultiplexing through authentication, source pinning,
 // statistics and delivery. Its length keeps that security-sensitive order visible in one place.
 #[allow(clippy::too_many_lines)]
-async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
+async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
     let Inbound {
         audio: incoming,
         encoded,
@@ -2691,8 +3195,11 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
         config,
         received,
         stats,
+        feedback,
+        ssrc,
         symmetric,
         ice,
+        browser_ingress,
         stop,
         mut decoding,
         discards,
@@ -2702,7 +3209,7 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
         None => JitterBuffer::new(config.jitter_depth),
     };
     let mut unprotect = srtp_context(config.srtp.as_ref().map(|keys| &keys.remote));
-    let mut datagram = vec![0u8; 2048];
+    let mut unprotect_rtcp = srtp_context(config.srtp.as_ref().map(|keys| &keys.remote));
     let mut dtmf = sipx_rtp::dtmf::Receiver::new();
     let started = tokio::time::Instant::now();
     // The synchronisation source this session is carrying; see `accept_source` for why one is
@@ -2721,15 +3228,22 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
         if stop.is_stopped() {
             return;
         }
-        let read = tokio::select! {
-            () = stop.wait() => return,
-            read = tokio::time::timeout(flush_after, socket.recv_from(&mut datagram)) => read,
-        };
-
-        let (len, source) = match read {
-            Ok(Ok(received)) => received,
-            Ok(Err(_)) => return,
-            Err(_elapsed) => {
+        let (media, source) = match input.next(flush_after, &config, ice.as_ref(), &stop).await {
+            ReceivedDatagram::Rtp { source, bytes } => (bytes, source),
+            ReceivedDatagram::Rtcp { bytes } => {
+                process_rtcp(
+                    &bytes,
+                    ssrc,
+                    &feedback,
+                    &mut unprotect_rtcp,
+                    &discards,
+                    browser_ingress.as_ref(),
+                )
+                .await;
+                continue;
+            }
+            ReceivedDatagram::Closed => return,
+            ReceivedDatagram::Silence => {
                 // Silence. Release what is held rather than holding it against a packet that is
                 // not coming — otherwise the last `depth - 1` packets of every clip are lost.
                 if !flush(
@@ -2748,23 +3262,27 @@ async fn receive_loop(socket: Arc<UdpSocket>, inbound: Inbound) {
                 continue;
             }
         };
-
-        let arrived = datagram.get(..len).unwrap_or(&[]);
-        let Some(media) = demultiplex(arrived, source, ice::LocalBase(0), ice.as_ref()) else {
-            continue;
-        };
-
-        let bytes = Bytes::copy_from_slice(media);
+        let bytes = Bytes::from(media);
         // Authenticated before it is parsed. A packet that fails is dropped and nothing about it
         // reaches the parser, the jitter buffer or the statistics — which is the point of
         // authenticating at all: forged packets must not be able to move any state.
-        let Some(bytes) = authenticated(unprotect.as_mut(), bytes, source, &discards) else {
+        let Some(bytes) = authenticated(
+            unprotect.as_mut(),
+            bytes,
+            source,
+            &discards,
+            browser_ingress.as_ref(),
+        ) else {
             continue;
         };
         let Ok(packet) = Packet::decode(&bytes) else {
             // A malformed packet is dropped, not fatal. Media ports attract stray traffic —
             // STUN probes, port scans, the occasional scanner — and none of it should end a
             // call.
+            if let Some(ingress) = &browser_ingress {
+                crate::browser::lock_ingress(ingress)
+                    .note_malformed(crate::browser::IngressClass::Srtp);
+            }
             continue;
         };
 
@@ -2878,6 +3396,7 @@ async fn rtcp_loop(
     remote: Arc<Mutex<SocketAddr>>,
     rtcp_remote: Arc<Mutex<Option<SocketAddr>>>,
     interval: Duration,
+    mode: sipx_sdp::RtcpMode,
     ssrc: u32,
     cname: String,
     stats: Arc<Mutex<StreamStats>>,
@@ -2978,12 +3497,14 @@ async fn rtcp_loop(
         // RTCP conventionally travels on the RTP port plus one (RFC 3550 §11) — unless ICE has
         // selected a pair for component 2, in which case the checked path is where the reports
         // go and the convention is only what got them there.
-        let selected = *rtcp_remote.lock().await;
-        let rtcp_to = if let Some(pair) = selected {
-            pair
+        let destination = *remote.lock().await;
+        let rtcp_to = if mode == sipx_sdp::RtcpMode::Mux {
+            destination
         } else {
-            let destination = *remote.lock().await;
-            SocketAddr::new(destination.ip(), destination.port().saturating_add(1))
+            let selected = *rtcp_remote.lock().await;
+            selected.unwrap_or_else(|| {
+                SocketAddr::new(destination.ip(), destination.port().saturating_add(1))
+            })
         };
         if socket.send_to(&datagram, rtcp_to).await.is_err() {
             return;
@@ -3027,43 +3548,80 @@ async fn rtcp_receive_loop(
             continue;
         };
 
-        let bytes = Bytes::copy_from_slice(control);
-        let bytes = match unprotect.as_mut() {
-            Some(context) => match context.unprotect_rtcp(&bytes) {
-                Ok(plain) => Bytes::from(plain),
-                Err(error) => {
-                    discards
-                        .srtcp_unprotect_failures
-                        .fetch_add(1, Ordering::Relaxed);
-                    tracing::debug!(%error, "dropping a report that failed SRTCP");
-                    continue;
-                }
-            },
-            None => bytes,
-        };
-        // A malformed control packet is dropped, not fatal. The control port attracts the same
-        // stray traffic the media port does, and none of it should end a call.
-        let Ok(packets) = Rtcp::decode_compound(&bytes) else {
-            continue;
-        };
+        process_rtcp(control, ssrc, &feedback, &mut unprotect, &discards, None).await;
+    }
+}
 
-        let arrival = tokio::time::Instant::now();
-        for packet in packets {
-            match packet {
-                Rtcp::Sender(report) => {
-                    {
-                        let mut held = feedback.lock().await;
-                        held.last_sender_report =
-                            sipx_rtp::quality::middle_32(report.ntp_timestamp);
-                        held.received_at = Some(arrival);
+/// Authenticate, decode and apply one RTCP compound packet.
+///
+/// Called by either the adjacent control-port owner or the muxed media-port owner; there is never
+/// more than one caller for a running session.
+async fn process_rtcp(
+    control: &[u8],
+    ssrc: u32,
+    feedback: &Arc<Mutex<Feedback>>,
+    unprotect: &mut Option<sipx_rtp::SrtpContext>,
+    discards: &DiscardMeters,
+    browser_ingress: Option<&Arc<std::sync::Mutex<crate::browser::ComponentIngress>>>,
+) {
+    let bytes = Bytes::copy_from_slice(control);
+    let bytes = match unprotect.as_mut() {
+        Some(context) => match context.unprotect_rtcp(&bytes) {
+            Ok(plain) => Bytes::from(plain),
+            Err(error) => {
+                discards
+                    .srtcp_unprotect_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                if let Some(ingress) = browser_ingress {
+                    let mut ingress = crate::browser::lock_ingress(ingress);
+                    match &error {
+                        sipx_rtp::srtp::SrtpError::TooShort(_) => {
+                            ingress.note_malformed(crate::browser::IngressClass::Srtcp);
+                        }
+                        sipx_rtp::srtp::SrtpError::ReplayedRtcp(_) => {
+                            ingress.note_replay(crate::browser::IngressClass::Srtcp);
+                        }
+                        _ => {
+                            ingress
+                                .note_authentication_failure(crate::browser::IngressClass::Srtcp);
+                        }
                     }
-                    note_round_trip(feedback_of(&report.reports, ssrc), &feedback).await;
                 }
-                Rtcp::Receiver(report) => {
-                    note_round_trip(feedback_of(&report.reports, ssrc), &feedback).await;
-                }
-                Rtcp::Sdes(_) | Rtcp::Other { .. } => {}
+                // discard: `srtcp_unprotect_failures` was incremented above; browser sessions
+                // also classified the refusal into malformed, replay or authentication once.
+                tracing::debug!(%error, "dropping a report that failed SRTCP");
+                return;
             }
+        },
+        None => bytes,
+    };
+    // Malformed control input is a drop, not a session failure, on either socket shape.
+    let Ok(packets) = Rtcp::decode_compound(&bytes) else {
+        if let Some(ingress) = browser_ingress {
+            crate::browser::lock_ingress(ingress)
+                .note_malformed(crate::browser::IngressClass::Srtcp);
+        }
+        return;
+    };
+    if let Some(ingress) = browser_ingress {
+        crate::browser::lock_ingress(ingress).note_srtcp_processed();
+    }
+
+    let arrival = tokio::time::Instant::now();
+    for packet in packets {
+        match packet {
+            Rtcp::Sender(report) => {
+                {
+                    let mut held = feedback.lock().await;
+                    held.last_sender_report = sipx_rtp::quality::middle_32(report.ntp_timestamp);
+                    held.received_at = Some(arrival);
+                }
+                note_round_trip(feedback_of(&report.reports, ssrc), feedback).await;
+            }
+            Rtcp::Receiver(report) => {
+                note_round_trip(feedback_of(&report.reports, ssrc), feedback).await;
+            }
+            Rtcp::Sdes(_) | Rtcp::Other { .. } => {}
         }
     }
 }
@@ -3232,6 +3790,28 @@ mod tests {
             }
         }
         panic!("no adjacent port pair could be bound");
+    }
+
+    /// RFC 5761 mux has one ICE component even though [`MediaPort`] reserved an adjacent control
+    /// socket for the no-mux fallback. This pins the public gathering entry point rather than the
+    /// lower gatherer, so a call path cannot accidentally advertise a second receive owner.
+    #[tokio::test]
+    async fn mux_mode_gathers_exactly_one_ice_component() {
+        let port = MediaPort::bind(any()).await.expect("binds adjacent ports");
+        let credentials = sipx_sdp::ice::Credentials::new("mux1", "muxPassword0123456789AB")
+            .expect("valid ICE credentials");
+        let gathering = ice::Gathering::new(credentials, false);
+
+        let mux = port
+            .gather_with_rtcp_mode(&gathering, sipx_sdp::RtcpMode::Mux)
+            .await;
+        assert_eq!(mux.candidates().len(), 1);
+        assert!(
+            mux.candidates()
+                .iter()
+                .all(|candidate| candidate.component == ComponentId::RTP)
+        );
+        assert_eq!(mux.default_destination(ComponentId::RTCP), None);
     }
 
     /// How long a test here waits for audio it played to arrive before calling it lost (`X-28`).
@@ -3593,6 +4173,39 @@ mod tests {
         );
     }
 
+    /// ICE and symmetric RTP must not race to write the same destination. `on_socket` supplies
+    /// `symmetric = false` exactly when an ICE driver owns the session; a valid ordinary RTP
+    /// packet may establish the SSRC, but cannot replace the nominated pair.
+    #[tokio::test]
+    async fn an_ice_owned_destination_cannot_be_replaced_by_ordinary_rtp() {
+        let nominated: SocketAddr = "127.0.0.1:40000".parse().expect("valid");
+        let unsolicited: SocketAddr = "127.0.0.1:50000".parse().expect("valid");
+        let remote = Arc::new(Mutex::new(nominated));
+        let stats = Arc::new(Mutex::new(StreamStats::new(1)));
+        let discards = DiscardMeters::default();
+        let packet = Packet::new(0, 1, 160, 7, Bytes::from(vec![0xff; 160]));
+        let mut stream = None;
+
+        assert!(
+            accept_source(
+                &mut stream,
+                &packet,
+                unsolicited,
+                &remote,
+                &stats,
+                false,
+                &discards,
+            )
+            .await,
+            "the nominated path may still receive the stream"
+        );
+        assert_eq!(
+            *remote.lock().await,
+            nominated,
+            "RFC 8445 nomination, not the first ordinary RTP source, owns the destination"
+        );
+    }
+
     #[tokio::test]
     async fn packets_are_counted_on_both_sides() {
         let (left, right) = pair(Codec::Pcmu).await;
@@ -3919,6 +4532,24 @@ mod tests {
             .await
             .expect("rejected setup left no socket behind");
         drop(rebound);
+    }
+
+    #[test]
+    fn rtcp_mux_refuses_payload_types_that_collide_with_rtcp() {
+        let mut config = Config::new(any(), Codec::Pcmu);
+        config.rtcp_mode = sipx_sdp::RtcpMode::Mux;
+        config.payload_type = Some(72);
+        assert!(matches!(
+            config.validate(),
+            Err(SetupError::RtcpMuxPayloadCollision(72))
+        ));
+
+        config.payload_type = Some(0);
+        config.dtmf_payload_type = Some(95);
+        assert!(matches!(
+            config.validate(),
+            Err(SetupError::RtcpMuxPayloadCollision(95))
+        ));
     }
 
     #[tokio::test]
@@ -4368,6 +4999,105 @@ mod tests {
             "the NTP word counts seconds since 1900: {seconds}"
         );
         assert_eq!(report.reports.len(), 1, "reception is appended as a block");
+    }
+
+    fn peer_sender_report(ntp_timestamp: u64) -> Bytes {
+        Rtcp::encode_compound(&[
+            Rtcp::Sender(sipx_rtp::rtcp::SenderReport {
+                ssrc: 0x5EED_CAFE,
+                ntp_timestamp,
+                rtp_timestamp: 160,
+                packet_count: 1,
+                octet_count: 160,
+                reports: Vec::new(),
+            }),
+            Rtcp::Sdes(Sdes::cname(0x5EED_CAFE, "peer@example.invalid")),
+        ])
+    }
+
+    async fn wait_for_rtcp_echo(socket: &UdpSocket, expected: u32) -> SocketAddr {
+        let mut datagram = vec![0u8; 2048];
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (len, from) = socket.recv_from(&mut datagram).await.expect("receives");
+                let packets = Rtcp::decode_compound(&Bytes::copy_from_slice(&datagram[..len]))
+                    .expect("valid RTCP");
+                let echoed = packets.iter().any(|packet| match packet {
+                    Rtcp::Sender(report) => report
+                        .reports
+                        .iter()
+                        .any(|block| block.last_sender_report == expected),
+                    Rtcp::Receiver(report) => report
+                        .reports
+                        .iter()
+                        .any(|block| block.last_sender_report == expected),
+                    Rtcp::Sdes(_) | Rtcp::Other { .. } => false,
+                });
+                if echoed {
+                    return from;
+                }
+            }
+        })
+        .await
+        .expect("the peer sender report is processed and echoed")
+    }
+
+    /// `MUX-PKT-1`, failing first: RTCP arriving on the negotiated RTP port reaches RTCP state,
+    /// and the response leaves from and returns to that same port.
+    #[tokio::test]
+    async fn muxed_rtcp_arriving_on_the_rtp_port_is_processed_not_dropped() {
+        let peer = UdpSocket::bind(any()).await.expect("binds peer");
+        let mut config = Config::new(peer.local_addr().expect("peer address"), Codec::Pcmu);
+        config.rtcp_mode = sipx_sdp::RtcpMode::Mux;
+        config.rtcp_interval = Some(Duration::from_millis(20));
+        let session = MediaSession::start(any(), config).await.expect("starts");
+
+        let rtp = Packet::new(0, 1, 160, 0x5EED_CAFE, Bytes::from(vec![0xFF; 160]));
+        peer.send_to(&rtp.encode(), session.local_addr())
+            .await
+            .expect("sends RTP");
+        let ntp = 0x0123_4567_89AB_CDEF;
+        peer.send_to(&peer_sender_report(ntp), session.local_addr())
+            .await
+            .expect("sends RTCP on the RTP port");
+
+        let report_source = wait_for_rtcp_echo(&peer, sipx_rtp::quality::middle_32(ntp)).await;
+        assert_eq!(
+            report_source,
+            session.local_addr(),
+            "muxed RTCP leaves from the exact socket address advertised for RTP"
+        );
+        session.stop();
+    }
+
+    /// `MUX-PKT-2`: omission of mux leaves the established adjacent control-port path live.
+    #[tokio::test]
+    async fn separate_rtcp_still_uses_and_processes_the_control_port() {
+        let (peer_media, peer_control) = adjacent_ports().await;
+        let mut config = Config::new(peer_media.local_addr().expect("peer address"), Codec::Pcmu);
+        config.rtcp_mode = sipx_sdp::RtcpMode::Separate;
+        config.rtcp_interval = Some(Duration::from_millis(20));
+        let session = MediaSession::start(any(), config).await.expect("starts");
+
+        let rtp = Packet::new(0, 1, 160, 0x5EED_CAFE, Bytes::from(vec![0xFF; 160]));
+        peer_media
+            .send_to(&rtp.encode(), session.local_addr())
+            .await
+            .expect("sends RTP");
+        let control_addr = session
+            .rtcp_socket
+            .as_ref()
+            .expect("the session bound its adjacent control port")
+            .local_addr()
+            .expect("control address");
+        let ntp = 0x89AB_CDEF_0123_4567;
+        peer_control
+            .send_to(&peer_sender_report(ntp), control_addr)
+            .await
+            .expect("sends RTCP on the control port");
+
+        let _ = wait_for_rtcp_echo(&peer_control, sipx_rtp::quality::middle_32(ntp)).await;
+        session.stop();
     }
 
     /// RFC 3550 §6.3.1: each report interval is drawn uniformly from [0.5, 1.5] of the

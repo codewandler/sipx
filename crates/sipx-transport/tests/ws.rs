@@ -25,6 +25,19 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as Frame;
 use tokio_tungstenite::tungstenite::http::Request;
 
+// Deliberately above `Limits::stream()`'s one-megabyte default. A message below the custom
+// ceiling but above the default distinguishes propagation into the WebSocket handshake from
+// propagation into the SIP parser: replacing either endpoint call site with the default makes
+// tungstenite close the connection before the custom parser can accept the message.
+const CUSTOM_LIMIT_BODY: usize = 1024 * 1024 + 1024;
+
+fn limits_above_default() -> sipx_sip::Limits {
+    let mut limits = sipx_sip::Limits::stream();
+    limits.max_message_bytes = CUSTOM_LIMIT_BODY + 4096;
+    limits.max_body_bytes = CUSTOM_LIMIT_BODY;
+    limits
+}
+
 /// An OPTIONS whose `Via` names a WebSocket hop by an invented, unresolvable name — which is
 /// what RFC 7118 §5.2 requires of a client that has no listening port, and therefore what sipx
 /// will actually receive.
@@ -487,6 +500,69 @@ async fn two_endpoints_exchange_a_request_over_a_websocket() {
         .expect("a final response");
     assert_eq!(response.status.code(), 200);
     responder.await.expect("the responder finishes");
+}
+
+/// X-64: `Config::limits` reaches both endpoint-owned WS handshakes. The large request pins the
+/// inbound `accept_with_limits` call; the large response pins the outbound
+/// `connect_with_limits` call. Both remain small enough for the explicitly larger policy.
+#[tokio::test]
+async fn custom_endpoint_limits_reach_inbound_and_outbound_ws_handshakes() {
+    let mut server_config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    server_config.ws_server = Some(0);
+    server_config.limits = limits_above_default();
+    let (server, mut server_rx) = bind(server_config).await.expect("server binds");
+    let server_address = server.ws_addr().expect("a WS port was bound");
+
+    let mut client_config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    client_config.limits = limits_above_default();
+    let (client, _client_rx) = bind(client_config).await.expect("client binds");
+
+    let responder = tokio::spawn(async move {
+        let incoming = tokio::time::timeout(Duration::from_secs(5), server_rx.recv())
+            .await
+            .expect("custom inbound WS limit admits the frame")
+            .expect("a request over WS");
+        assert_eq!(incoming.request.body().len(), CUSTOM_LIMIT_BODY);
+        let response = ResponseBuilder::to_request(
+            &incoming.request,
+            StatusCode::new(200).expect("valid"),
+            "OK",
+        )
+        .expect("builds")
+        .body(Bytes::from(vec![b'r'; CUSTOM_LIMIT_BODY]))
+        .build();
+        server
+            .respond(&incoming.key, response)
+            .await
+            .expect("large response is sent");
+    });
+
+    let request = RequestBuilder::new(
+        Method::Options,
+        Uri::sip(Host::Name(HostName::new("example.com").expect("valid"))),
+    )
+    .header(HeaderName::To, "<sip:callee@example.com>")
+    .expect("valid")
+    .header(HeaderName::From, "<sip:caller@example.com>;tag=limits")
+    .expect("valid")
+    .header(HeaderName::CallId, "ws-limits@sipx")
+    .expect("valid")
+    .cseq(1, &Method::Options)
+    .expect("valid")
+    .max_forwards(70)
+    .body(Bytes::from(vec![b'q'; CUSTOM_LIMIT_BODY]))
+    .build();
+    let target = Target::new(server_address, TransportKind::Ws);
+    let mut responses = client
+        .send(request, target)
+        .await
+        .expect("request is queued");
+    let response = tokio::time::timeout(Duration::from_secs(5), responses.final_response())
+        .await
+        .expect("custom outbound WS limit admits the frame")
+        .expect("a final response over WS");
+    assert_eq!(response.body().len(), CUSTOM_LIMIT_BODY);
+    responder.await.expect("responder finishes");
 }
 
 /// A WebSocket and a TCP connection to one address are two connections.

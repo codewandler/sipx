@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use sipx_sdp::ice::{Candidate, CandidateType, ComponentId, Credentials};
 
@@ -169,6 +169,28 @@ pub(crate) struct Handle {
     /// the agent would discard every one of them.
     selected: Arc<AtomicBool>,
     path: Arc<AtomicU8>,
+    #[cfg_attr(not(feature = "dtls"), allow(dead_code))]
+    selection: watch::Receiver<Selection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "dtls"), allow(dead_code))]
+enum Selection {
+    Checking,
+    Selected(crate::browser::SelectedComponent),
+    Failed,
+}
+
+/// Why component 1 produced no nominated pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[cfg(feature = "dtls")]
+pub(crate) enum SelectionError {
+    /// ICE exhausted component 1 without a nominated pair.
+    #[error("ICE failed before nominating component 1")]
+    Failed,
+    /// The driver stopped before reporting either selection or failure.
+    #[error("ICE stopped before nominating component 1")]
+    Stopped,
 }
 
 impl Handle {
@@ -176,12 +198,35 @@ impl Handle {
     pub(crate) fn path(&self) -> IcePath {
         IcePath::decoded(self.path.load(Ordering::Relaxed))
     }
+
+    /// Wait for component 1's exact selected pair or its terminal failure.
+    #[cfg(feature = "dtls")]
+    pub(crate) async fn wait_selected(
+        &self,
+        ice_generation: u64,
+    ) -> Result<crate::browser::SelectedComponent, SelectionError> {
+        let mut selection = self.selection.clone();
+        loop {
+            match *selection.borrow_and_update() {
+                Selection::Selected(mut selected) => {
+                    selected.ice_generation = ice_generation;
+                    return Ok(selected);
+                }
+                Selection::Failed => return Err(SelectionError::Failed),
+                Selection::Checking => {}
+            }
+            selection
+                .changed()
+                .await
+                .map_err(|_| SelectionError::Stopped)?;
+        }
+    }
     /// Hand the driver a datagram. Non-blocking: a full queue drops it.
     ///
     /// Dropping is right and not merely convenient. A connectivity check is a retransmitted
     /// transaction (RFC 5389 §7.2.1) and the far end will send it again; blocking the receive loop
     /// on a slow driver would stall the *audio* to protect a check that is already redundant.
-    pub(crate) fn datagram(&self, from: SocketAddr, on: LocalBase, bytes: Vec<u8>) {
+    pub(crate) fn datagram(&self, from: SocketAddr, on: LocalBase, bytes: Vec<u8>) -> bool {
         if self
             .events
             .try_send(Event::Datagram { from, on, bytes })
@@ -191,6 +236,9 @@ impl Handle {
                 .ice_driver_queue_refusals
                 .fetch_add(1, Ordering::Relaxed);
             tracing::debug!(%from, "dropping a connectivity check the ice driver could not take");
+            false
+        } else {
+            true
         }
     }
 
@@ -262,8 +310,16 @@ struct Driver {
     destinations: Destinations,
     selected: Arc<AtomicBool>,
     path: Arc<AtomicU8>,
+    selection: watch::Sender<Selection>,
     stop: Arc<crate::session::Stop>,
     discards: Arc<DiscardMeters>,
+}
+
+/// A browser component retains both halves so shutdown can join the ICE task.
+#[cfg(feature = "dtls")]
+pub(crate) struct OwnedDriver {
+    pub(crate) handle: Handle,
+    pub(crate) task: tokio::task::JoinHandle<()>,
 }
 
 /// Start the driver for a stream, and hand the media path its end of it.
@@ -275,9 +331,47 @@ pub(crate) fn spawn(
     stop: Arc<crate::session::Stop>,
     discards: Arc<DiscardMeters>,
 ) -> Handle {
+    let (handle, _task) = spawn_parts(agent, pending, sockets, destinations, stop, discards, None);
+    handle
+}
+
+#[cfg(feature = "dtls")]
+pub(crate) fn spawn_owned(
+    agent: Agent,
+    pending: Vec<Output>,
+    sockets: Vec<Arc<UdpSocket>>,
+    destinations: Destinations,
+    stop: Arc<crate::session::Stop>,
+    discards: Arc<DiscardMeters>,
+    profile_tasks: Arc<crate::browser::ProfileTasks>,
+) -> OwnedDriver {
+    let (handle, task) = spawn_parts(
+        agent,
+        pending,
+        sockets,
+        destinations,
+        stop,
+        discards,
+        Some(profile_tasks),
+    );
+    OwnedDriver { handle, task }
+}
+
+fn spawn_parts(
+    agent: Agent,
+    pending: Vec<Output>,
+    sockets: Vec<Arc<UdpSocket>>,
+    destinations: Destinations,
+    stop: Arc<crate::session::Stop>,
+    discards: Arc<DiscardMeters>,
+    #[cfg_attr(not(feature = "dtls"), allow(unused_variables))] profile_tasks: Option<
+        Arc<crate::browser::ProfileTasks>,
+    >,
+) -> (Handle, tokio::task::JoinHandle<()>) {
     let (events_tx, events_rx) = mpsc::channel(EVENTS);
     let selected = Arc::new(AtomicBool::new(false));
     let path = Arc::new(AtomicU8::new(IcePath::Checking.encoded()));
+    let (selection, selected_pair) = watch::channel(Selection::Checking);
     let driver = Driver {
         agent,
         sockets,
@@ -286,16 +380,26 @@ pub(crate) fn spawn(
         destinations,
         selected: Arc::clone(&selected),
         path: Arc::clone(&path),
+        selection,
         stop,
         discards: Arc::clone(&discards),
     };
-    tokio::spawn(driver.run(pending));
-    Handle {
+    let task = if let Some(profile_tasks) = profile_tasks {
+        tokio::spawn(crate::browser::profile_task(
+            profile_tasks,
+            driver.run(pending),
+        ))
+    } else {
+        tokio::spawn(driver.run(pending))
+    };
+    let handle = Handle {
         events: events_tx,
         selected,
         path,
+        selection: selected_pair,
         discards,
-    }
+    };
+    (handle, task)
 }
 
 impl Driver {
@@ -455,6 +559,9 @@ impl Driver {
                     // discard: this is the agent's terminal outcome, not a payload with a later
                     // consumer; the default path remains active.
                     tracing::warn!(component = component.get(), "ice failed for a component");
+                    if component == ComponentId::RTP {
+                        self.selection.send_replace(Selection::Failed);
+                    }
                 }
             }
         }
@@ -485,12 +592,24 @@ impl Driver {
                 );
                 return;
             }
+            let Some(socket) = self.sockets.get(usize::from(local.0)) else {
+                tracing::warn!(base = local.0, "selected pair names an unbound local base");
+                return;
+            };
+            let Ok(local_address) = socket.local_addr() else {
+                tracing::warn!(base = local.0, "selected pair's local base has no address");
+                return;
+            };
             *self.destinations.rtp.lock().await = remote;
             self.selected.store(true, Ordering::Relaxed);
             self.path.store(
                 IcePath::selected(local_kind, remote_kind).encoded(),
                 Ordering::Relaxed,
             );
+            self.selection.send_replace(Selection::Selected(
+                crate::browser::SelectedComponent::new(local_address, remote, 0)
+                    .with_candidate_types(local_kind, remote_kind),
+            ));
         } else {
             *self.destinations.rtcp.lock().await = Some(remote);
         }

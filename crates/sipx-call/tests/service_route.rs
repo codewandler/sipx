@@ -32,10 +32,10 @@ fn to_uri() -> Uri {
 
 /// The story's failing-first test.
 #[tokio::test]
-async fn an_out_of_dialog_invite_follows_the_registrars_service_route() {
-    let (peer_endpoint, mut peer_incoming) = endpoint().await;
+async fn a_preloaded_route_is_serialized_while_the_caller_targets_its_resolved_proxy() {
+    let (proxy_endpoint, mut proxy_incoming) = endpoint().await;
     let (caller_endpoint, _caller_incoming) = endpoint().await;
-    let peer_addr = peer_endpoint.local_addr();
+    let resolved_proxy_target = proxy_endpoint.local_addr();
 
     // What a registrar handed back in the 2xx to REGISTER, in the order it listed them.
     let service_route = vec![
@@ -43,10 +43,12 @@ async fn an_out_of_dialog_invite_follows_the_registrars_service_route() {
         "<sip:core.example.net;lr>".to_owned(),
     ];
 
-    let seen = tokio::spawn(async move { peer_incoming.recv().await.expect("an INVITE") });
+    let seen = tokio::spawn(async move { proxy_incoming.recv().await.expect("an INVITE") });
     let _ = dial(
         &caller_endpoint,
-        Target::udp(peer_addr),
+        // The application resolved the outer Route hop. This transport target is deliberately
+        // distinct from the callee.example Request-URI below.
+        Target::udp(resolved_proxy_target),
         &to_uri(),
         &DialOptions::new("<sip:caller@example.net>", loopback())
             .with_timeout(Duration::from_millis(300))
@@ -66,6 +68,7 @@ async fn an_out_of_dialog_invite_follows_the_registrars_service_route() {
         "the INVITE did not carry the registrar's service route as a pre-loaded Route set"
     );
 
+    // Receipt at `proxy_endpoint` proves the caller-supplied Target selected the transport peer.
     // The Request-URI is untouched. RFC 3608 §5 requires every hop to carry `;lr`, which is
     // loose routing: the destination stays in the Request-URI and the proxies are named in
     // `Route`. A stack that moved the destination into the route set would be doing RFC 2543

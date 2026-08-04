@@ -123,6 +123,28 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p sipx-cli --all-targets --features device-audio
 
+  browser-audio:
+    name: native browser audio proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p sipx-call --example browser_audio_proof --features opus,dtls
+      # M-51: native browser APIs in both SIP roles, non-silent Opus both ways, and the three
+      # browser-driven fingerprint/nomination/downgrade negatives. The runner image inventories
+      # its matched browser and WebDriver; an unavailable one is a red environment, never a skip.
+      - run: ./tests/browser-audio/ci.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-audio-evidence
+          path: ${{ runner.temp }}/sipx-browser-audio-evidence
+          if-no-files-found: error
+          retention-days: 14
+
   # The gate in AGENTS.md used to be a list of commands, and a list can quietly omit one: the
   # `msrv` job above was red from v0.4.0 through v0.7.0 while every documented command passed.
   # `gate.py --check` reads this file and fails if any job here is neither a gate step nor
@@ -167,6 +189,10 @@ jobs:
       # P-13: reverse the proof runner's vector discovery, peer coverage and bounded execution
       # rules so the matrix cannot silently bless a path it stopped observing.
       - run: python3 scripts/test-diagnostic-phone-proof.py
+      # M-51: reverse the native-browser harness's identity, evidence, completeness, output-cap
+      # and process-group boundaries. The separate browser-audio job supplies the real native
+      # browser positives and product-boundary negatives this adversarial self-test cannot.
+      - run: python3 scripts/test-browser-audio-proof.py
       # X-71: the provenance gate now has an exception, and an exception is the part that rots.
       # This suite builds throwaway repositories to prove the scope admits the comparison
       # artifacts, rejects every other path, and never reaches the commit-message scan.

@@ -10,7 +10,7 @@ sipx is a SIP and VoIP stack in Rust for engineers building telephony systems. U
 `sipx` command for repeatable calls from a shell, or embed the crates for control over
 signalling, registration, calls, and media.
 
-The current public-beta release is **`1.0.0-beta.3`**. The latest `main` branch can move ahead of
+The current public-beta release is **`1.0.0-beta.4`**. The latest `main` branch can move ahead of
 that release, and this website documents the branch. Public APIs are not frozen before 1.0:
 Supported APIs receive migration notes when they break, while Experimental APIs may change or be
 removed without one. For a reproducible installation, use the tagged release in
@@ -24,7 +24,7 @@ Place or answer a call, register an address, play and record WAV audio, send DTM
 machine-readable results:
 
 ```bash
-cargo install --locked --version =1.0.0-beta.3 sipx-cli
+cargo install --locked --version =1.0.0-beta.4 sipx-cli
 sipx version
 ```
 
@@ -55,9 +55,11 @@ supports UDP, TCP, TLS, WebSocket, and secure WebSocket.
 | Core | Sans-I/O parsing, transactions, dialogs, and SDP offer/answer |
 
 sipx is a **user agent**, not a proxy, registrar, or configuration-driven PBX. It does not
-route calls or store registrations for other endpoints. TURN relay, video, and a complete browser
-media path are outside the current shipped surface. See [Does sipx fit?](guides/does-this-fit.md)
-for the boundary and the [RFC compliance table](reference/compliance.md) for protocol-level detail.
+route calls or store registrations for other endpoints. One narrow
+[browser-audio profile](reference/browser-audio-proof.md) composes WSS, ICE, DTLS-SRTP and Opus;
+TURN relay, video, and a general browser media stack remain outside the shipped surface. See
+[Does sipx fit?](guides/does-this-fit.md) for the boundary and the
+[RFC compliance table](reference/compliance.md) for protocol-level detail.
 
 ## Application host and contract
 

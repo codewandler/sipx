@@ -43,6 +43,10 @@ pub struct Capabilities {
     /// Exclusive with `crypto`: they are different `m=` protocols, and a stream cannot be keyed
     /// both ways at once.
     pub dtls: Option<crate::fingerprint::Fingerprint>,
+    /// Whether this side can put RTP and RTCP on the media port (RFC 5761).
+    pub rtcp_mux: bool,
+    /// DTLS roles the local handshake can hold.
+    pub dtls_setup: crate::fingerprint::SetupCapabilities,
 }
 
 impl Capabilities {
@@ -63,6 +67,8 @@ impl Capabilities {
             session_version: 1,
             crypto: None,
             dtls: None,
+            rtcp_mux: false,
+            dtls_setup: crate::fingerprint::SetupCapabilities::both(),
         }
     }
 
@@ -103,6 +109,8 @@ impl Capabilities {
             session_version: 1,
             crypto: None,
             dtls: None,
+            rtcp_mux: false,
+            dtls_setup: crate::fingerprint::SetupCapabilities::both(),
         }
     }
 
@@ -142,6 +150,23 @@ impl Capabilities {
         // so an offer cannot propose both on one stream, and leaving a stale `a=crypto` in place
         // would put a master key in an SDP whose whole purpose is not to carry one.
         self.crypto = None;
+        self
+    }
+
+    /// Offer or answer RTP/RTCP multiplexing on the media port (RFC 5761).
+    #[must_use]
+    pub fn with_rtcp_mux(mut self) -> Self {
+        self.rtcp_mux = true;
+        self
+    }
+
+    /// Limit the DTLS setup roles this capability set may negotiate.
+    #[must_use]
+    pub fn with_dtls_setup_capabilities(
+        mut self,
+        setup: crate::fingerprint::SetupCapabilities,
+    ) -> Self {
+        self.dtls_setup = setup;
         self
     }
 
@@ -256,9 +281,16 @@ fn answer_stream(
     // *offerer's*, because the offerer's first choice is the one it most wants used, and the
     // answerer expressing its own preference here is how two endpoints end up transcoding for
     // no reason.
+    let mux_agreed = capabilities.rtcp_mux && offered.rtcp_mux();
     let common: Vec<String> = offered
         .formats
         .iter()
+        .filter(|format| {
+            !mux_agreed
+                || format
+                    .parse::<u8>()
+                    .map_or(true, |payload| !(64..=95).contains(&payload))
+        })
         .filter(|format| supports(capabilities, offered, format))
         .cloned()
         .collect();
@@ -297,6 +329,12 @@ fn answer_stream(
     let direction = negotiate_direction(offered_direction, capabilities.direction);
     attributes.push(Attribute::flag(direction.as_str()));
 
+    // RFC 5761 §5.1.3: an answer includes the flag only when it was offered and this side can
+    // honour it. Otherwise omission selects the separate-port fallback without another exchange.
+    if mux_agreed {
+        attributes.push(Attribute::flag("rtcp-mux"));
+    }
+
     if let Some(crypto) = &answering_crypto {
         attributes.push(Attribute::valued("crypto", crypto.to_value()));
     }
@@ -306,15 +344,13 @@ fn answer_stream(
         // RFC 4145 §4.1, via RFC 5763 §5. The role is *answered*, never copied: two endpoints
         // that both say `active` both send a `ClientHello` and neither answers one, and two that
         // both say `passive` wait for each other until the call times out.
-        let role = crate::fingerprint::Setup::answer(
-            offered
-                .setup()
-                .or_else(|| session_setup(offer))
-                // §5 requires an offerer to send `actpass`. One that sends nothing is not
-                // conformant, and reading its silence as `actpass` — rather than refusing the
-                // stream — is what lets the answer name a role it can actually hold.
-                .unwrap_or(crate::fingerprint::Setup::ActPass),
-        );
+        let offered_role = setup_of(offer, offered)
+            // RFC 5763 §5 requires `actpass`, but the established interoperability behavior
+            // tolerates an omitted offer role as that value.
+            .unwrap_or(crate::fingerprint::Setup::ActPass);
+        let Ok(role) = capabilities.dtls_setup.answer_to(offered_role) else {
+            return rejected(offered);
+        };
         attributes.push(Attribute::valued("setup", role.as_str().to_owned()));
     }
 
@@ -343,14 +379,24 @@ pub fn fingerprint_of(
     stream.fingerprint().or_else(|| offer.fingerprint())
 }
 
-/// The `a=setup` at session level, if the offer gives one there.
-fn session_setup(offer: &SessionDescription) -> Option<crate::fingerprint::Setup> {
-    offer
-        .attributes
-        .iter()
-        .find(|attribute| attribute.name == "setup")
-        .and_then(|attribute| attribute.value.as_deref())
-        .and_then(crate::fingerprint::Setup::parse)
+/// The setup role that applies to a stream: media level first, then the session default.
+///
+/// RFC 4145 allows `a=setup` at either level. Offer/answer and the eventual handshake must use
+/// this same resolver or a session-level answer can be signalled correctly and acted on as though
+/// it were missing.
+#[must_use]
+pub fn setup_of(
+    description: &SessionDescription,
+    stream: &MediaDescription,
+) -> Option<crate::fingerprint::Setup> {
+    stream.setup().or_else(|| {
+        description
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name == "setup")
+            .and_then(|attribute| attribute.value.as_deref())
+            .and_then(crate::fingerprint::Setup::parse)
+    })
 }
 
 /// The direction an answer may carry, given what was offered and what this side wants.

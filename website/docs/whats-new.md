@@ -1,46 +1,67 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-beta.3 prerelease.
+description: Release highlights and adoption notes for the sipx 1.0.0-beta.4 prerelease.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-beta.3 — 2026-08-04
+## 1.0.0-beta.4 — 2026-08-04
 <!-- END generated:release-heading -->
 
-The first public beta is published and remains immutable. Beta.3 is
-published as exact crates.io packages from a new immutable tag without moving or overwriting
-beta.2. Its runtime library and CLI
-surface is unchanged from beta.2; the release adds the checked public stack comparison, a
-demand-led capability roadmap, and checksum-bound recovery for interrupted registry publication.
+The first public beta is published and remains immutable.
+Beta.4 is published as exact crates.io packages. It comes from a new immutable tag without moving
+or overwriting beta.2 or beta.3, and adds a bounded
+browser-audio profile, explicit non-ICE deployment addresses, RTCP multiplexing, replay-safe SRTCP,
+and stronger hostile-input and entropy invariants.
 See [How sipx is built](reference/development-process.md) for the measured process and
-[Diagnostic-phone proof](reference/diagnostic-phone-proof.md) for the executable product matrix.
+[Native-browser audio proof](reference/browser-audio-proof.md) for the executable example, complete
+harness command, evidence contract and deliberate boundary.
 
 Install the exact CLI release with:
 
 ```bash
-cargo install --locked --version =1.0.0-beta.3 sipx-cli
+cargo install --locked --version =1.0.0-beta.4 sipx-cli
 ```
 
-The adoption surface leads with the modular Rust crates: applications select the protocol, transport,
-user-agent, media, call, or host layer they need rather than taking a facade crate. The `sipx` CLI is
-the shell-testable proof of those layers. This beta covers all five released signalling
-transports, selectable codec/media-security/ICE policy, optional live devices, interactive scenarios,
-bounded load, and reliable early media. The application host now serves real calls through
-document-mode webhooks and authenticated full-duplex sessions; the latter can originate calls when
-granted.
+The optional browser-audio path needs the Opus and DTLS features:
+
+```bash
+cargo install --locked --version =1.0.0-beta.4 --features opus,dtls sipx-cli
+```
+
+The adoption surface leads with the modular Rust crates: applications select the protocol,
+transport, user-agent, media, call, or host layer they need rather than taking a facade crate. The
+`sipx` CLI is the shell-testable proof of those layers. Beta.4's named profile either negotiates
+authenticated WSS, one ICE-nominated component, DTLS-SRTP, multiplexed RTP/RTCP and Opus as a unit,
+or refuses before falling back to weaker media. A native-browser job exercises both SIP roles and
+requires non-silent audio in both directions. Ordinary calls keep their existing defaults.
+
+For deployments that do not use ICE, applications can now bind media locally while advertising a
+different address; the CLI exposes that split as `--advertise` and reports both values. SRTCP has
+its own authenticated replay window, and malformed SIP and oversized WebSocket input are refused
+before response construction or oversized allocation.
 
 Public APIs are not frozen before 1.0. Supported APIs receive a changelog entry and migration
 guidance when they break. Experimental APIs may change shape or be removed without a migration
 note; that includes the language-neutral `sipx.app.v1` wire contract and SIP over QUIC.
 
-The release intentionally does not provide a proxy, registrar, PBX, routing product, dial plan,
-TURN relay, graphical desktop phone, headset mixer, video, arbitrary application codecs, complete
-browser-media stack, automatic live-state presence, or SIP instant-message behavior. It also does
-not ship an embedded application runtime, subprocess binding, or packaged TypeScript SDK. The
-two-dialog coupling primitive is public, but the truly off-media relay role is not complete. The
+The release intentionally does not provide TURN for networks that require a relayed candidate,
+video, data channels, SCTP, browser-facing application APIs, or a general browser/WebRTC engine.
+It also does not promise stable `1.0` compatibility: Supported APIs may still change with migration
+guidance, and Experimental APIs may change or disappear without that guide. Proxy, registrar, PBX,
+routing-product and dial-plan roles remain outside the endpoint library. The
 [fit guide](guides/does-this-fit.md) is the maintained deployment boundary.
+
+## 1.0.0-beta.3 — 2026-08-04
+
+Beta.3 preserved beta.2's runtime library and CLI surface while adding the checked public stack
+comparison, a demand-led capability roadmap, and checksum-bound recovery for interrupted registry
+publication.
+
+```bash
+cargo install --locked --version =1.0.0-beta.3 sipx-cli
+```
 
 ## 1.0.0-beta.2 — 2026-08-04
 
@@ -52,7 +73,8 @@ installed diagnostic CLI, independent transport peers and release-commit documen
 cargo install --locked --version =1.0.0-beta.2 sipx-cli
 ```
 
-Use beta.3 for new installations; beta.2 remains immutable for reproducible existing consumers.
+Use beta.4 for new installations; beta.2 and beta.3 remain immutable for reproducible existing
+consumers.
 
 ## 1.0.0-alpha.5 — 2026-08-03
 
@@ -143,5 +165,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 beta. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-beta.3` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-beta.4` merely because it appears on this
 site.
