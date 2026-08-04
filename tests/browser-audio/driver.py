@@ -46,32 +46,36 @@ def bounded_run(command: list[str], stdout_path: pathlib.Path, stderr_path: path
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     require(process.stdout is not None and process.stderr is not None, "bounded command pipes are absent")
     streams = {
-        process.stdout.fileno(): (process.stdout, stdout_path.open("wb"), 0),
-        process.stderr.fileno(): (process.stderr, stderr_path.open("wb"), 0),
+        process.stdout.fileno(): (process.stdout, stdout_path.open("wb", buffering=0), 0),
+        process.stderr.fileno(): (process.stderr, stderr_path.open("wb", buffering=0), 0),
     }
+    active = set(streams)
     selected = selectors.DefaultSelector()
     for file_descriptor, (stream, _output, _retained) in streams.items():
         os.set_blocking(file_descriptor, False)
         selected.register(stream, selectors.EVENT_READ, file_descriptor)
 
-    def drain(file_descriptor: int) -> bool:
+    def drain(file_descriptor: int) -> int:
+        if file_descriptor not in active:
+            return 0
         stream, output, retained = streams[file_descriptor]
         try:
             chunk = os.read(file_descriptor, 64 * 1024)
         except BlockingIOError:
-            return True
+            return -1
         if not chunk:
             selected.unregister(stream)
+            active.remove(file_descriptor)
             stream.close()
             output.close()
-            return False
+            return 0
         remaining = limit - retained
         if remaining > 0:
             kept = chunk[:remaining]
             output.write(kept)
             retained += len(kept)
             streams[file_descriptor] = (stream, output, retained)
-        return True
+        return len(chunk)
 
     try:
         while process.poll() is None:
@@ -80,8 +84,11 @@ def bounded_run(command: list[str], stdout_path: pathlib.Path, stderr_path: path
         # Drain bytes already queued by the direct child, then close even if an orphan inherited a
         # pipe. The outer process-group owner will reap that orphan; its descriptor cannot keep this
         # bounded wrapper alive.
-        for key, _events in selected.select(timeout=0):
-            drain(key.data)
+        maximum_tail_reads = (limit + (64 * 1024) - 1) // (64 * 1024)
+        for file_descriptor in streams:
+            for _ in range(maximum_tail_reads):
+                if drain(file_descriptor) <= 0:
+                    break
     finally:
         selected.close()
         for stream, output, _retained in streams.values():

@@ -284,6 +284,38 @@ class BrowserAudioProofTest(unittest.TestCase):
         self.assertEqual(DRIVER.MAX_EVIDENCE_BYTES, (output / "capture.stderr").stat().st_size)
         self.assertEqual(2 * DRIVER.MAX_EVIDENCE_BYTES, (self.directory / "product-output").stat().st_size)
 
+    def test_small_readiness_output_is_visible_while_the_command_is_alive(self) -> None:
+        marker = self.directory / "release"
+        stdout = self.directory / "live.stdout"
+        stderr = self.directory / "live.stderr"
+        probe = executable(
+            self.directory / "live.sh",
+            'printf "ready\\n"\nwhile [[ ! -e $1 ]]; do sleep 0.02; done\n',
+        )
+        process = subprocess.Popen(
+            [
+                str(DRIVER_PATH),
+                "bounded-run",
+                "--stdout",
+                str(stdout),
+                "--stderr",
+                str(stderr),
+                "--limit",
+                str(DRIVER.MAX_EVIDENCE_BYTES),
+                "--",
+                str(probe),
+                str(marker),
+            ]
+        )
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if stdout.exists() and stdout.read_bytes() == b"ready\n":
+                break
+            time.sleep(0.02)  # poll interval: the live capture bytes are the readiness condition
+        self.assertEqual(b"ready\n", stdout.read_bytes())
+        marker.touch()
+        self.assertEqual(0, process.wait(timeout=3))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
