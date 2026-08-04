@@ -20,9 +20,6 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "crates-io.yml").read_text(encoding
 RESUME_WORKFLOW = (ROOT / ".github" / "workflows" / "crates-io-resume.yml").read_text(
     encoding="utf-8"
 )
-BETA1_REPLAY_WORKFLOW = (
-    ROOT / ".github" / "workflows" / "crates-io-beta1-replay.yml"
-).read_text(encoding="utf-8")
 SPEC_TEXT = (ROOT / "docs" / "specs" / "release-workflow.md").read_text(encoding="utf-8")
 
 
@@ -30,7 +27,6 @@ class CurrentWorkflow(unittest.TestCase):
     def test_current_workflow_satisfies_the_contract(self) -> None:
         self.assertEqual([], checker.workflow_problems(WORKFLOW))
         self.assertEqual([], checker.resume_workflow_problems(RESUME_WORKFLOW))
-        self.assertEqual([], checker.beta1_replay_workflow_problems(BETA1_REPLAY_WORKFLOW))
         self.assertEqual([], checker.specification_problems(SPEC_TEXT))
         self.assertEqual([], checker.check())
 
@@ -501,107 +497,6 @@ class RecoveryMutations(unittest.TestCase):
         self.assertIn(
             "recovery contains an external announcement or posting side effect",
             checker.resume_workflow_problems(mutated),
-        )
-
-
-class Beta1ReplayMutations(unittest.TestCase):
-    def assert_mutation(self, old: str, new: str, expected: str) -> None:
-        self.assertIn(old, BETA1_REPLAY_WORKFLOW, f"replay fixture no longer contains {old!r}")
-        problems = checker.beta1_replay_workflow_problems(
-            BETA1_REPLAY_WORKFLOW.replace(old, new, 1)
-        )
-        self.assertIn(expected, problems)
-
-    def test_replay_is_manual_protected_read_only_and_fixed(self) -> None:
-        mutations = (
-            ("  workflow_dispatch:\n", "  push:\n", "beta.1 replay has an automatic entry"),
-            ("      name: release\n", "      name: staging\n", "beta.1 replay runs outside the protected release environment"),
-            ("  cancel-in-progress: false\n", "  cancel-in-progress: true\n", "beta.1 replay concurrency can cancel publication"),
-            ("  contents: read\n", "  contents: write\n", "beta.1 replay permissions are not read-only"),
-            ("RELEASE_TAG: v1.0.0-beta.1", "RELEASE_TAG: v1.0.0-beta.2", "beta.1 replay tag constant differs"),
-            ("RELEASE_SHA: 3ab81709c7a235831638c62eba5fe73ce9eb7773", "RELEASE_SHA: 4aa64caaf38c59961b746a2cfabbed1bc6394501", "beta.1 replay commit constant differs"),
-            ("SIPX_FAILED_RELEASE_RUN_ID: 30906820031", "SIPX_FAILED_RELEASE_RUN_ID: 30912030744", "beta.1 replay failed-run constant differs"),
-            ("EXPECTED_RELEASE_TAG_OBJECT: b0bcadcc2a69a5824ec4a9549f7800c88c4f13fa", "EXPECTED_RELEASE_TAG_OBJECT: movable", "beta.1 replay tag-object constant differs"),
-        )
-        for old, new, expected in mutations:
-            with self.subTest(expected=expected):
-                self.assert_mutation(old, new, expected)
-
-    def test_replay_keeps_controller_and_release_bytes_separate(self) -> None:
-        self.assert_mutation(
-            "          ref: ${{ github.sha }}\n          path: controller\n",
-            "          ref: main\n          path: controller\n",
-            "beta.1 replay controller checkout is absent or mutable",
-        )
-        self.assert_mutation(
-            "          ref: refs/tags/v1.0.0-beta.1\n          path: release\n",
-            "          ref: ${{ github.sha }}\n          path: release\n",
-            "beta.1 replay immutable checkout is absent or not separate",
-        )
-        self.assert_mutation(
-            ".github/workflows/crates-io-beta1-replay.yml@refs/heads/main",
-            ".github/workflows/crates-io-beta1-replay.yml@refs/heads/replay",
-            "beta.1 replay workflow source is not exact main",
-        )
-
-    def test_original_failure_and_current_gate_rehearsal_are_all_required(self) -> None:
-        mutations = (
-            ('"Run the complete release gate": "failure"', '"Run the complete release gate": "success"', "beta.1 replay does not require the original gate failure"),
-            ('"Rehearse the locked registry packages": "skipped"', '"Rehearse the locked registry packages": "success"', "beta.1 replay does not require original rehearsal to be skipped"),
-            ("- name: Rerun the complete beta.1 gate", "- name: Trust old CI instead", "beta.1 replay does not rerun the complete gate"),
-            ("- name: Rehearse the immutable beta.1 packages", "- name: Skip immutable rehearsal", "beta.1 replay does not rerun locked rehearsal"),
-            ("SIPX_DENYLIST: ${{ secrets.SIPX_DENYLIST }}", "SIPX_DENYLIST: missing", "beta.1 replay gate lacks the provenance input"),
-        )
-        for old, new, expected in mutations:
-            with self.subTest(expected=expected):
-                self.assert_mutation(old, new, expected)
-
-    def test_secret_authority_follows_evidence_gate_and_rehearsal(self) -> None:
-        replay = BETA1_REPLAY_WORKFLOW
-        credential = "      - name: Require the approved Cargo credential for beta.1 replay\n"
-        replay = replay.replace(credential, "", 1)
-        position = replay.index(
-            "      - name: Authorize beta.1 replay from the failed release evidence"
-        )
-        replay = replay[:position] + credential + replay[position:]
-        self.assertIn(
-            "beta.1 replay credential precedes evidence, gate or rehearsal",
-            checker.beta1_replay_workflow_problems(replay),
-        )
-        self.assert_mutation(
-            '--authorize-ci-beta1-replay "$RELEASE_TAG@$RELEASE_SHA@$SIPX_FAILED_RELEASE_RUN_ID"',
-            '--authorize-ci-recovery "$RELEASE_TAG@$RELEASE_SHA@$SIPX_FAILED_RELEASE_RUN_ID"',
-            "beta.1 replay does not use its distinct helper authority",
-        )
-
-    def test_frontiers_consumer_and_pages_remain_exact_and_bounded(self) -> None:
-        mutations = (
-            ("max_invocations=$((public_count + 1))", "max_invocations=999999", "beta.1 replay frontier loop is not bounded"),
-            ("EXPECTED_PAGES_RUN_ID: 30906258443", "EXPECTED_PAGES_RUN_ID: latest", "beta.1 replay Pages run constant differs"),
-            ("EXPECTED_PAGES_ARTIFACT_ID: 8891214271", "EXPECTED_PAGES_ARTIFACT_ID: latest", "beta.1 replay Pages artifact constant differs"),
-            ("./docs/getting-started.html ./api/sipx_call/index.html", "./index.html", "beta.1 replay does not inspect both archived Pages surfaces"),
-            ("--verify-consumer", "--inspect-dirty-contents", "beta.1 replay exact consumer proof is absent"),
-        )
-        for old, new, expected in mutations:
-            with self.subTest(expected=expected):
-                self.assert_mutation(old, new, expected)
-
-    def test_prerelease_is_dependent_superseded_and_not_latest(self) -> None:
-        mutations = (
-            ("    needs: replay\n", "", "beta.1 replay GitHub prerelease is not dependent"),
-            ('--notes-file "$RELEASE_NOTES"', '--latest \\\n              --notes-file "$RELEASE_NOTES"', "beta.1 replay may become latest"),
-            ('--notes-file "$RELEASE_NOTES"', "--notes generated", "beta.1 replay does not consume reviewed notes"),
-            ("              --prerelease \\\n", "", "beta.1 replay GitHub Release is not a prerelease"),
-        )
-        for old, new, expected in mutations:
-            with self.subTest(expected=expected):
-                self.assert_mutation(old, new, expected)
-
-    def test_replay_posts_nothing_else(self) -> None:
-        replay = BETA1_REPLAY_WORKFLOW + "\n      - run: gh issue create --title replayed\n"
-        self.assertIn(
-            "beta.1 replay contains an external announcement or posting side effect",
-            checker.beta1_replay_workflow_problems(replay),
         )
 
 

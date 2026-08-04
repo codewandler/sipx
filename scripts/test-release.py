@@ -110,31 +110,6 @@ def github_recovery_environment(
     }
 
 
-def github_beta1_replay_environment(controller_sha: str) -> dict[str, str]:
-    """One complete GitHub context for the fixed historical beta.1 replay."""
-
-    return {
-        "CI": "true",
-        "GITHUB_ACTIONS": "true",
-        "GITHUB_SERVER_URL": "https://github.com",
-        "GITHUB_REPOSITORY": "codewandler/sipx",
-        "GITHUB_EVENT_NAME": "workflow_dispatch",
-        "GITHUB_REF": "refs/heads/main",
-        "GITHUB_REF_TYPE": "branch",
-        "GITHUB_REF_NAME": "main",
-        "GITHUB_SHA": controller_sha,
-        "GITHUB_WORKFLOW_SHA": controller_sha,
-        "GITHUB_WORKFLOW_REF": (
-            "codewandler/sipx/.github/workflows/"
-            "crates-io-beta1-replay.yml@refs/heads/main"
-        ),
-        "GITHUB_RUN_ID": "123456",
-        "GITHUB_RUN_ATTEMPT": "1",
-        "CARGO_REGISTRY_TOKEN": "fixture-secret-never-used",
-        "SIPX_FAILED_RELEASE_RUN_ID": "30906820031",
-    }
-
-
 class ThePublicPackageGraph(unittest.TestCase):
     def test_dependencies_are_before_dependants_with_a_stable_name_tiebreak(self) -> None:
         packages = release.package_records(
@@ -901,70 +876,6 @@ class ThePublicationBoundary(unittest.TestCase):
             ),
         )
 
-    def test_exact_beta1_replay_is_the_only_main_workflow_that_can_start_it(self) -> None:
-        tag = "v1.0.0-beta.1"
-        release_sha = "3ab81709c7a235831638c62eba5fe73ce9eb7773"
-        controller_sha = "b" * 40
-        authorization = f"{tag}@{release_sha}@30906820031"
-        self.assertEqual(
-            [],
-            release.checkout_problems(
-                "publish",
-                "1.0.0-beta.1",
-                dirty=False,
-                tags=(tag,),
-                annotated_tags=(tag,),
-                confirmation=tag,
-                ci=True,
-                head_sha=release_sha,
-                ci_beta1_replay_authorization=authorization,
-                controller_sha=controller_sha,
-                ci_environment=github_beta1_replay_environment(controller_sha),
-            ),
-        )
-        self.assertTrue(
-            release.recovery_visibility_problems(
-                f"{tag}@{release_sha}@30906820031", ()
-            ),
-            "the beta.1 exception must not weaken partial recovery's zero-visible refusal",
-        )
-
-    def test_every_beta1_replay_identity_mutation_is_refused(self) -> None:
-        tag = "v1.0.0-beta.1"
-        release_sha = "3ab81709c7a235831638c62eba5fe73ce9eb7773"
-        controller_sha = "b" * 40
-        authorization = f"{tag}@{release_sha}@30906820031"
-        base = github_beta1_replay_environment(controller_sha)
-        cases = (
-            ("version", {}, "beta.1", "1.0.0-beta.2", authorization),
-            ("event", {"GITHUB_EVENT_NAME": "push"}, "workflow_dispatch", "1.0.0-beta.1", authorization),
-            ("repository", {"GITHUB_REPOSITORY": "someone/sipx"}, "codewandler/sipx", "1.0.0-beta.1", authorization),
-            ("workflow", {"GITHUB_WORKFLOW_REF": base["GITHUB_WORKFLOW_REF"].replace("beta1-replay", "resume")}, "beta1-replay", "1.0.0-beta.1", authorization),
-            ("controller", {"GITHUB_SHA": "c" * 40}, "GITHUB_SHA", "1.0.0-beta.1", authorization),
-            ("run", {"SIPX_FAILED_RELEASE_RUN_ID": "30912030744"}, "30906820031", "1.0.0-beta.1", authorization),
-            ("current run", {"GITHUB_RUN_ID": "30906820031"}, "current replay run", "1.0.0-beta.1", authorization),
-            ("token", {"CARGO_REGISTRY_TOKEN": ""}, "CARGO_REGISTRY_TOKEN", "1.0.0-beta.1", authorization),
-            ("release", {}, "3ab817", "1.0.0-beta.1", f"{tag}@{'c' * 40}@30906820031"),
-        )
-        for label, changes, expected, version, supplied in cases:
-            environment = dict(base)
-            environment.update(changes)
-            with self.subTest(label=label):
-                problems = release.checkout_problems(
-                    "publish",
-                    version,
-                    dirty=False,
-                    tags=(f"v{version}",),
-                    annotated_tags=(f"v{version}",),
-                    confirmation=f"v{version}",
-                    ci=True,
-                    head_sha=release_sha,
-                    ci_beta1_replay_authorization=supplied,
-                    controller_sha=controller_sha,
-                    ci_environment=environment,
-                )
-                self.assertTrue(any(expected in problem for problem in problems), problems)
-
     def test_recovery_authority_is_distinct_and_every_identity_mismatch_refuses(self) -> None:
         tag = "v1.0.0-beta.1"
         release_sha = "a" * 40
@@ -1142,16 +1053,6 @@ class ThePublicationBoundary(unittest.TestCase):
                 1,
                 release.main(
                     ("--dry-run", "--authorize-ci-publish", "v1.0.0-beta.1@" + "a" * 40)
-                ),
-            )
-            self.assertEqual(
-                1,
-                release.main(
-                    (
-                        "--dry-run",
-                        "--authorize-ci-beta1-replay",
-                        "v1.0.0-beta.1@3ab81709c7a235831638c62eba5fe73ce9eb7773@30906820031",
-                    )
                 ),
             )
 

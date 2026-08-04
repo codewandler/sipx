@@ -29,10 +29,6 @@ CRATES_IO_LOCK_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 EXPECTED_GITHUB_REPOSITORY = "codewandler/sipx"
 EXPECTED_GITHUB_WORKFLOW = ".github/workflows/crates-io.yml"
 EXPECTED_GITHUB_RECOVERY_WORKFLOW = ".github/workflows/crates-io-resume.yml"
-EXPECTED_GITHUB_BETA1_REPLAY_WORKFLOW = ".github/workflows/crates-io-beta1-replay.yml"
-EXPECTED_BETA1_REPLAY_TAG = "v1.0.0-beta.1"
-EXPECTED_BETA1_REPLAY_SHA = "3ab81709c7a235831638c62eba5fe73ce9eb7773"
-EXPECTED_BETA1_FAILED_RUN_ID = "30906820031"
 _OWNED_GROUPS: dict[int, subprocess.Popen[bytes]] = {}
 
 
@@ -537,7 +533,6 @@ def checkout_problems(
     head_sha: str | None = None,
     ci_authorization: str | None = None,
     ci_recovery_authorization: str | None = None,
-    ci_beta1_replay_authorization: str | None = None,
     controller_sha: str | None = None,
     ci_environment: Mapping[str, str] | None = None,
 ) -> list[str]:
@@ -557,23 +552,8 @@ def checkout_problems(
         problems.append(f"publish requires the exact confirmation --confirm-publish {tag}")
     if mode == "publish" and ci:
         environment = {} if ci_environment is None else ci_environment
-        authorities = (
-            ci_authorization,
-            ci_recovery_authorization,
-            ci_beta1_replay_authorization,
-        )
-        if sum(authority is not None for authority in authorities) > 1:
+        if ci_authorization is not None and ci_recovery_authorization is not None:
             problems.append("CI publication accepts only one authorization mode")
-        elif ci_beta1_replay_authorization is not None:
-            problems.extend(
-                ci_beta1_replay_problems(
-                    version,
-                    release_sha=head_sha,
-                    controller_sha=controller_sha,
-                    authorization=ci_beta1_replay_authorization,
-                    environment=environment,
-                )
-            )
         elif ci_recovery_authorization is not None:
             problems.extend(
                 ci_recovery_problems(
@@ -598,10 +578,6 @@ def checkout_problems(
             problems.append("--authorize-ci-publish is valid only inside authorized GitHub Actions")
         if ci_recovery_authorization is not None:
             problems.append("--authorize-ci-recovery is valid only inside authorized GitHub Actions")
-        if ci_beta1_replay_authorization is not None:
-            problems.append(
-                "--authorize-ci-beta1-replay is valid only inside authorized GitHub Actions"
-            )
     return problems
 
 
@@ -735,92 +711,6 @@ def ci_recovery_problems(
         problems.append("CI recovery requires a positive numeric GITHUB_RUN_ATTEMPT")
     if not environment.get("CARGO_REGISTRY_TOKEN", "").strip():
         problems.append("CI recovery requires CARGO_REGISTRY_TOKEN")
-    return problems
-
-
-def ci_beta1_replay_problems(
-    version: str,
-    *,
-    release_sha: str | None,
-    controller_sha: str | None,
-    authorization: str | None,
-    environment: Mapping[str, str],
-) -> list[str]:
-    """Return reasons the one-purpose historical beta.1 replay lacks authority."""
-
-    release = release_sha or ""
-    controller = controller_sha or ""
-    problems = []
-    exact = {
-        "CI": "true",
-        "GITHUB_ACTIONS": "true",
-        "GITHUB_SERVER_URL": "https://github.com",
-        "GITHUB_REPOSITORY": EXPECTED_GITHUB_REPOSITORY,
-        "GITHUB_EVENT_NAME": "workflow_dispatch",
-        "GITHUB_REF": "refs/heads/main",
-        "GITHUB_REF_TYPE": "branch",
-        "GITHUB_REF_NAME": "main",
-    }
-    for name, expected in exact.items():
-        if environment.get(name) != expected:
-            problems.append(f"CI beta.1 replay requires {name}={expected!r}")
-
-    if version != EXPECTED_BETA1_REPLAY_TAG.removeprefix("v"):
-        problems.append(
-            f"CI beta.1 replay is fixed to {EXPECTED_BETA1_REPLAY_TAG}, not v{version}"
-        )
-    if release != EXPECTED_BETA1_REPLAY_SHA:
-        problems.append(
-            "CI beta.1 replay requires release HEAD " + EXPECTED_BETA1_REPLAY_SHA
-        )
-    if re.fullmatch(r"[0-9a-f]{40}", controller) is None:
-        problems.append(
-            "CI beta.1 replay requires the controller to be one full lowercase Git object ID"
-        )
-    else:
-        if environment.get("GITHUB_SHA") != controller:
-            problems.append("CI beta.1 replay requires GITHUB_SHA to equal controller HEAD")
-        if environment.get("GITHUB_WORKFLOW_SHA") != controller:
-            problems.append(
-                "CI beta.1 replay requires GITHUB_WORKFLOW_SHA to equal controller HEAD"
-            )
-
-    expected_workflow_ref = (
-        f"{EXPECTED_GITHUB_REPOSITORY}/{EXPECTED_GITHUB_BETA1_REPLAY_WORKFLOW}"
-        "@refs/heads/main"
-    )
-    if environment.get("GITHUB_WORKFLOW_REF") != expected_workflow_ref:
-        problems.append(
-            "CI beta.1 replay requires GITHUB_WORKFLOW_REF="
-            f"{expected_workflow_ref!r}"
-        )
-
-    failed_run_id = environment.get("SIPX_FAILED_RELEASE_RUN_ID", "")
-    if failed_run_id != EXPECTED_BETA1_FAILED_RUN_ID:
-        problems.append(
-            "CI beta.1 replay requires failed release run "
-            + EXPECTED_BETA1_FAILED_RUN_ID
-        )
-    expected_authorization = (
-        f"{EXPECTED_BETA1_REPLAY_TAG}@{EXPECTED_BETA1_REPLAY_SHA}"
-        f"@{EXPECTED_BETA1_FAILED_RUN_ID}"
-    )
-    if authorization != expected_authorization:
-        problems.append(
-            "CI beta.1 replay requires exact authorization "
-            f"--authorize-ci-beta1-replay {expected_authorization}"
-        )
-
-    run_id = environment.get("GITHUB_RUN_ID", "")
-    if not run_id.isascii() or not run_id.isdigit() or int(run_id) <= 0:
-        problems.append("CI beta.1 replay requires a positive numeric GITHUB_RUN_ID")
-    elif run_id == EXPECTED_BETA1_FAILED_RUN_ID:
-        problems.append("CI beta.1 replay requires the current replay run to differ from the failed run")
-    attempt = environment.get("GITHUB_RUN_ATTEMPT", "")
-    if not attempt.isascii() or not attempt.isdigit() or int(attempt) <= 0:
-        problems.append("CI beta.1 replay requires a positive numeric GITHUB_RUN_ATTEMPT")
-    if not environment.get("CARGO_REGISTRY_TOKEN", "").strip():
-        problems.append("CI beta.1 replay requires CARGO_REGISTRY_TOKEN")
     return problems
 
 
@@ -1500,11 +1390,6 @@ def _parser() -> argparse.ArgumentParser:
         metavar="TAG@SHA@FAILED_RUN_ID",
         help="exact release commit and failed run authorization for main-workflow recovery",
     )
-    authorizations.add_argument(
-        "--authorize-ci-beta1-replay",
-        metavar="TAG@SHA@FAILED_RUN_ID",
-        help="fixed beta.1 first-publication replay authorization",
-    )
     parser.add_argument(
         "--release-root",
         metavar="PATH",
@@ -1554,14 +1439,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.authorize_ci_recovery is not None and mode != "publish":
         print("--authorize-ci-recovery is valid only with --publish", file=sys.stderr)
         return 1
-    if args.authorize_ci_beta1_replay is not None and mode != "publish":
-        print("--authorize-ci-beta1-replay is valid only with --publish", file=sys.stderr)
-        return 1
     if args.authorize_ci_recovery is not None and args.release_root is None:
         print("--authorize-ci-recovery requires an explicit --release-root", file=sys.stderr)
-        return 1
-    if args.authorize_ci_beta1_replay is not None and args.release_root is None:
-        print("--authorize-ci-beta1-replay requires an explicit --release-root", file=sys.stderr)
         return 1
     if args.registry_wait_seconds <= 0:
         print("--registry-wait-seconds must be greater than zero", file=sys.stderr)
@@ -1605,19 +1484,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         head_sha = (
             _head_commit(release_root)
             if mode == "publish"
-            and (
-                ci
-                or args.authorize_ci_publish
-                or args.authorize_ci_recovery
-                or args.authorize_ci_beta1_replay
-            )
+            and (ci or args.authorize_ci_publish or args.authorize_ci_recovery)
             else None
         )
-        controller_sha = (
-            _head_commit(ROOT)
-            if ci and (args.authorize_ci_recovery or args.authorize_ci_beta1_replay)
-            else None
-        )
+        controller_sha = _head_commit(ROOT) if ci and args.authorize_ci_recovery else None
         problems.extend(
             checkout_problems(
                 mode,
@@ -1630,7 +1500,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 head_sha=head_sha,
                 ci_authorization=args.authorize_ci_publish,
                 ci_recovery_authorization=args.authorize_ci_recovery,
-                ci_beta1_replay_authorization=args.authorize_ci_beta1_replay,
                 controller_sha=controller_sha,
                 ci_environment=os.environ,
             )
