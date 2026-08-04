@@ -2,7 +2,7 @@
 id: A-15
 title: Publish and verify 1.0.0-beta.4
 pillar: Application
-status: in-progress
+status: done
 design: docs/specs/release-workflow.md
 epic: release
 areas: [release, docs, sipx-cli, beta4]
@@ -39,9 +39,9 @@ enough evidence to prove every public artifact came from one immutable release c
 
 ## Progress
 
-- The other nine beta.4 stories and the `M-38` epic exit are complete. Release metadata and public
-  documentation now consistently describe the beta.4 boundary; publication evidence remains open
-  until the protected workflow has produced and independently verified the immutable artifacts.
+- The other nine beta.4 stories and the `M-38` epic exit were complete before publication. Release
+  metadata and public documentation consistently describe the beta.4 boundary; the protected
+  workflow then produced and independently verified the immutable artifacts recorded below.
 - The complete local gate passed 36 of 36 steps. Exact-main workflow run `30955349652` passed at
   release commit `160a752cab18880ecf56efabbdbe84374249582e`, including Pages deployment job
   `92147482555` and native-browser proof job `92146965728`, before the tag was created.
