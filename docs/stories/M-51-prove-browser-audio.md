@@ -2,7 +2,8 @@
 id: M-51
 title: Prove browser audio against an independent endpoint
 pillar: Media
-status: done
+status: in-progress
+priority: 1
 design: docs/specs/webrtc-audio.md
 epic: webrtc-audio
 areas: [interop, ci, website, sipx-cli, beta4]
@@ -20,7 +21,7 @@ independently implemented browser SIP endpoint, and publish exactly the boundary
 
 ## Acceptance
 
-- [x] A bounded shell proof runs in CI in both call roles over WSS + ICE + DTLS-SRTP + multiplexed
+- [ ] A bounded shell proof runs in CI in both call roles over WSS + ICE + DTLS-SRTP + multiplexed
       RTP/RTCP + Opus and carries non-silent audio in both directions.
 - [x] The proof reports the negotiated codec, DTLS-SRTP profile, setup role and nominated candidate
       pair, and asserts those facts rather than inferring success from process exit alone.
@@ -35,7 +36,7 @@ independently implemented browser SIP endpoint, and publish exactly the boundary
 - [x] RFC registry evidence and the public development narrative name the independent proof without
       turning the peer implementation into design authority.
 - [x] `M-38` closes only when this proof and every preceding child are done.
-- [x] `./scripts/gate.py` green with the independent-peer job represented in the local gate contract
+- [ ] `./scripts/gate.py` green with the independent-peer job represented in the local gate contract
       or `NOT_RUN_LOCALLY` with a precise reason.
 
 ## Progress
@@ -50,6 +51,12 @@ independently implemented browser SIP endpoint, and publish exactly the boundary
   gate also passed every substantive implementation, feature, MSRV, packaging and documentation
   step; its only pre-closure finding was the expected generated maturity-page drift resolved while
   closing this wave.
+- Reopened after exact release-candidate workflow run `30950648054`, job `92131573628`. Under
+  hosted-runner contention the sipx role stopped waiting for its first browser method at ten
+  seconds even though the harness still owned a two-minute role budget. The browser then reported
+  `open exceeded 10000 ms` because its WSS peer had already exited. The correction must make first
+  method arrival the readiness condition under the enclosing operation bound; widening another
+  independent startup timer is not sufficient.
 
 ## Notes
 

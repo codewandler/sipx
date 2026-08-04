@@ -119,9 +119,12 @@ path:
 5. wait for every recorded leader before returning.
 
 The complete proof is bounded at five minutes; one role at two minutes; WebDriver readiness at ten
-seconds; browser setup, ICE, DTLS and media evidence at the smaller bounds owned by their specs. A
-timeout is failure and names the phase. No fixed sleep stands in for readiness: polling waits only
-for a declared endpoint/event and the overall deadline bounds failure.
+seconds; browser setup, ICE, DTLS and media evidence at the smaller bounds owned by their specs.
+After the sipx role reports its WSS listener, its first role-specific browser method is a causal
+readiness event: the role waits for that method without adding a separate first-method deadline;
+the sipx command's enclosing 90-second operation bound is its sole product-side bound. A timeout is
+failure and names the owning phase. No fixed sleep stands in for readiness: polling waits only for a
+declared endpoint/event and the overall deadline bounds failure.
 
 Each terminal object, WebDriver response and process output is capped at 1 MiB. Candidate and pair
 identifiers are capped at 256 characters and retained browser errors at 4,096 characters. Cleanup runs on success and every

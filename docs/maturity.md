@@ -36,10 +36,10 @@ does not turn RFC coverage into a weighted release score.
 | 2 | Hostile-input, entropy and SRTCP replay invariants are executable | met | — |
 | 3 | Browser-audio negotiation is complete and fail-closed | met | — |
 | 4 | One nominated component carries every browser-media protocol safely | met | — |
-| 5 | An independent browser endpoint carries Opus in both roles | met | — |
+| 5 | An independent browser endpoint carries Opus in both roles | open | `M-51` |
 | 6 | Exact registry, CLI, Pages and GitHub release evidence agrees | open | `A-15` |
 
-**5 of 6 predicates met. All 6 are required; this is not a weighted score.** Integrity is derived from the alpha table above. Every other association lives in the blocking story's own `announcement:` frontmatter, so the report has no second list to drift. RFC coverage is intentionally absent from this gate: a smaller truthful surface is announceable and an overstated larger one is not. This informational threshold does not authorize publicity.
+**4 of 6 predicates met. All 6 are required; this is not a weighted score.** Integrity is derived from the alpha table above. Every other association lives in the blocking story's own `announcement:` frontmatter, so the report has no second list to drift. RFC coverage is intentionally absent from this gate: a smaller truthful surface is announceable and an overstated larger one is not. This informational threshold does not authorize publicity.
 
 ## RFC coverage, per layer
 
@@ -60,15 +60,15 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Media | 7 |
+| Media | 9 |
 | Build | 6 |
 | Signalling | 6 |
 | Application | 5 |
 | Transport | 4 |
 | Phone | 2 |
-| **total** | **30** |
+| **total** | **32** |
 
-203 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+201 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 

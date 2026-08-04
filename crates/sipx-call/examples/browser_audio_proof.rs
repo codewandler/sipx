@@ -19,7 +19,7 @@ use sipx_media::browser::ComponentState;
 use sipx_sdp::browser_audio::ProfileError;
 use sipx_sip::{HeaderName, Host, HostName, Method, ResponseBuilder, StatusCode, Uri};
 use sipx_transport::tls::{Identity, ServerTls};
-use sipx_transport::{Config, Incoming, Target, TransportKind, bind};
+use sipx_transport::{Config, Target, TransportKind, bind};
 
 const OPERATION_BOUND: Duration = Duration::from_secs(90);
 const MEDIA_BOUND: Duration = Duration::from_secs(20);
@@ -181,7 +181,10 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
 
     let attempt = match arguments.role {
         Role::BrowserOfferer => {
-            let invitation = next_method(&mut incoming, Method::Invite).await?;
+            let invitation = next_method(&mut incoming, Method::Invite, |request| {
+                &request.request.method
+            })
+            .await?;
             answer_with_policy_at(
                 &endpoint,
                 &invitation,
@@ -191,7 +194,10 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
             .await
         }
         Role::BrowserAnswerer => {
-            let readiness = next_method(&mut incoming, Method::Options).await?;
+            let readiness = next_method(&mut incoming, Method::Options, |request| {
+                &request.request.method
+            })
+            .await?;
             let target = Target::new(readiness.source, TransportKind::Wss);
             let response = ResponseBuilder::to_request(
                 &readiness.request,
@@ -237,19 +243,17 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
     }
 }
 
-async fn next_method(
-    incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
+async fn next_method<T>(
+    incoming: &mut tokio::sync::mpsc::Receiver<T>,
     method: Method,
-) -> Result<Incoming, Box<dyn std::error::Error>> {
-    loop {
-        let request = tokio::time::timeout(Duration::from_secs(10), incoming.recv())
-            .await
-            .map_err(|_| std::io::Error::other(format!("no {method} before readiness deadline")))?
-            .ok_or_else(|| std::io::Error::other("WSS endpoint stopped"))?;
-        if request.request.method == method {
-            return Ok(request);
+    method_of: impl Fn(&T) -> &Method,
+) -> Result<T, Box<dyn std::error::Error>> {
+    while let Some(item) = incoming.recv().await {
+        if method_of(&item) == &method {
+            return Ok(item);
         }
     }
+    Err(std::io::Error::other("WSS endpoint stopped").into())
 }
 
 async fn exercise_media(call: &Call) -> Result<u16, Box<dyn std::error::Error>> {
@@ -331,4 +335,37 @@ fn positive_result(
         "packets_received": call.media().packets_received(),
         "received_audio_peak": received_audio_peak,
     }))
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use std::time::Duration;
+
+    use sipx_sip::Method;
+
+    use super::next_method;
+
+    #[tokio::test(start_paused = true)]
+    async fn first_browser_method_is_not_raced_by_a_shorter_startup_timer() {
+        let (sender, mut incoming) = tokio::sync::mpsc::channel(1);
+        let delayed_browser = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(11)).await;
+            sender
+                .send(Method::Invite)
+                .await
+                .expect("the role is still listening");
+        });
+
+        let method = next_method(&mut incoming, Method::Invite, |value| value).await;
+        delayed_browser
+            .await
+            .expect("the delayed browser task completes");
+        assert_eq!(method.expect("the method arrives"), Method::Invite);
+    }
 }
