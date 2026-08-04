@@ -8,8 +8,17 @@ design: docs/vision.md
 epic:
 areas: [docs]
 predicate:
-note: shorten the front doors, lead with shipped CLI and Rust workflows, make security and operational limits canonical, and demote experimental surfaces
+note: shorten the front doors, lead with shipped CLI and Rust workflows, make security and operational limits canonical, and demote experimental surfaces · one Acceptance clause superseded by X-71
 ---
+
+> **Superseded in part by `X-71` (2026-08-04).** This story's Acceptance required "no prior-art
+> project names left in the README or public site", and the vendor-neutral site it produced stood
+> for nine months. That clause no longer holds: a comparison page may name its subjects, within the
+> path scope `X-71` defines and enforces. Everything else here stands — the adoption-path structure,
+> the SIP-role framing of `integrate-existing-system.md`, and the rule that *design rationale* cites
+> RFCs and our own specs. This story's status and Acceptance are deliberately left as written; a
+> closed story is a record of what was decided then, not a live document. See
+> [`docs/archive/2026-08-04-vendor-neutral-public-site.md`](../archive/2026-08-04-vendor-neutral-public-site.md).
 
 # Make the public docs an adoption path instead of a status ledger
 

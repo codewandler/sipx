@@ -10,6 +10,21 @@ tie-breaker when a design choice is unclear.
    docs, story and design files, test fixture names, package metadata and commit messages.
    `scripts/check-provenance.sh` enforces it in CI and in the pre-commit hook; install the
    hook with `git config core.hooksPath .githooks`.
+
+   **One exception, and it is a path list rather than a judgement call** (`X-71`): a
+   *comparison subject* may be named in the comparison registry under `docs/comparison/`,
+   in the `docs/comparison.md` generated from it, and on the public page generated from
+   that. Nowhere else. The scope lives in `COMPARISON_SCOPE` in the check itself, so
+   widening it is a reviewable diff and not a re-reading of this paragraph. A comparison
+   whose subjects are anonymous cannot cite evidence anyone can check, which is why the
+   exception exists at all — and it buys nothing outside that one artifact.
+
+   Two things the exception does **not** cover. **Design rationale**, which still cites
+   RFCs and our own specs: `docs/vision.md` principle 5 is unchanged, and a spec or design
+   doc naming another implementation still fails. **Commit messages**, which stay denied
+   absolutely — `--history` has no exception, so name a subject in the data and never in
+   the message that lands it. That is what keeps the one failure with no cheap remedy,
+   *"history must be rewritten before this repository is published"*, out of reach.
 2. **The core does no I/O.** `sipx-sip` and `sipx-sdp` must not gain an async runtime, a
    socket, or a clock read. Time enters as a fired-timer input; bytes enter as data. If you
    find yourself wanting `tokio` in either crate, the logic belongs in `sipx-transport` or

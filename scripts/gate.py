@@ -152,6 +152,11 @@ def gate_steps(msrv: str) -> list[Step]:
             "gate",
             ("python3", "scripts/test-diagnostic-phone-proof.py"),
         ),
+        # X-71: the provenance gate now has an exception, and an exception is the part that rots.
+        # A fourth pathspec added in a hurry, or a scope that stops reaching `git grep`, turns this
+        # into a check that reports clean because it looked nowhere. The suite builds throwaway
+        # repositories rather than trusting the real one, so it needs no denylist to run.
+        Step("provenance tests", "gate", ("python3", "scripts/test-provenance.py")),
         Step(
             "provenance",
             "provenance",

@@ -7,6 +7,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The provenance gate has one scoped exception (`X-71`).** A comparison subject may now be named
+  in the comparison registry under `docs/comparison/`, in the `docs/comparison.md` generated from
+  it, and on the public page generated from that — nowhere else. The scope is the
+  `COMPARISON_SCOPE` array in `scripts/check-provenance.sh` rather than a sentence, so widening it
+  is a reviewable diff. It applies to the file scan only: a subject named in a **commit message**
+  still fails `--history`, which keeps the one failure with no cheap remedy — rewriting published
+  history — out of reach. Design rationale is unaffected and still cites RFCs and our own specs
+  (`docs/vision.md` principle 5). `scripts/test-provenance.py` pins the boundary in both directions
+  across throwaway repositories, and `X-47`'s "no prior-art project names left in the README or
+  public site" clause is superseded, with the decision and its reasoning recorded in
+  `docs/archive/2026-08-04-vendor-neutral-public-site.md`.
+
 ### Fixed
 
 - **Partial registry publication can be recovered without moving the release tag (`X-94`).** A

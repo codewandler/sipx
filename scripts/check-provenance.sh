@@ -7,6 +7,11 @@
 # committed here may name one — not in code, comments, specs, docs, story files, fixture
 # names, commit messages or package metadata.
 #
+# One exception, added by X-71 and scoped by COMPARISON_SCOPE below: the comparison
+# registry and the documents generated from it may name a comparison subject, because a
+# comparison whose subjects are anonymous cannot cite evidence that anyone can check.
+# Commit messages are NOT covered by that exception.
+#
 # The denylist itself is deliberately NOT stored in this repository, so that the terms we
 # refuse to mention are not mentioned by the check that refuses them. It is supplied by:
 #
@@ -66,6 +71,26 @@ if [[ ${#terms[@]} -eq 0 ]]; then
     exit 0
 fi
 
+# ------------------------------------------------------- the comparison exception ----
+# X-71: a comparison subject may be named in the comparison registry and in the documents
+# generated from it. Nowhere else, and never as design rationale — `docs/vision.md`
+# principle 5 is unchanged, so a spec or a design doc citing another implementation is
+# still a failure here.
+#
+# This array IS the boundary. Widening it is an edit to this file with a diff somebody
+# reviews, which is the point: the previous rule was a sentence, and a sentence can be
+# reinterpreted by whoever is in a hurry.
+#
+# The history scan below is deliberately NOT subject to it. A commit message naming a
+# subject still fails, so `--history` stays clean and the one failure mode with no cheap
+# remedy — "history must be rewritten before this repository is published" — stays
+# unreachable. Name subjects in the data; never in the message that lands it.
+COMPARISON_SCOPE=(
+    ':!docs/comparison'
+    ':!docs/comparison.md'
+    ':!website/docs/reference/comparison.md'
+)
+
 # ------------------------------------------------------------------------- scanning ----
 # Build one alternation pattern so each corpus is scanned in a single pass.
 pattern="$(printf '%s\n' "${terms[@]}" | paste -sd '|' -)"
@@ -75,15 +100,21 @@ status=0
 # Tracked files only: untracked scratch is ignored by design, and .gitignore already
 # excludes the local research directories.
 if git rev-parse --git-dir >/dev/null 2>&1 && [[ -n "$(git ls-files)" ]]; then
-    files_hit="$(git grep -I -n -i -E "$pattern" -- . ':!scripts/check-provenance.sh' || true)"
+    files_hit="$(git grep -I -n -i -E "$pattern" -- . ':!scripts/check-provenance.sh' \
+        "${COMPARISON_SCOPE[@]}" || true)"
     if [[ -n "$files_hit" ]]; then
         echo "provenance: FAIL — prior-art reference in tracked files:" >&2
         printf '%s\n' "$files_hit" >&2
         status=1
     fi
 else
+    # No git: a coarser approximation of COMPARISON_SCOPE, since plain grep excludes by
+    # basename rather than by path. It over-excludes a directory called `comparison`
+    # anywhere in the tree. Acceptable only because this branch runs outside a checkout;
+    # every gate and CI run takes the git path above.
     files_hit="$(grep -rInE "$pattern" . \
         --exclude-dir=.git --exclude-dir=target --exclude-dir=notes \
+        --exclude-dir=comparison --exclude='comparison.md' \
         --exclude='check-provenance.sh' || true)"
     if [[ -n "$files_hit" ]]; then
         echo "provenance: FAIL — prior-art reference found:" >&2
