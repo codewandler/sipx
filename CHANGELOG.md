@@ -7,6 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-beta.3] — 2026-08-04
+
+This prerelease ships the latest `main` after beta.2 without moving or overwriting the existing
+tag. The library and CLI behavior remains the beta.2 surface; beta.3 adds the checked public stack
+comparison, a demand-led capability roadmap, and safer recovery for interrupted registry
+publication.
+
 ### Added
 
 - **A generated, checked stack comparison, published as a public reference page** (`X-72`, `X-73`,
@@ -2741,7 +2748,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.2...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.3...HEAD
+[1.0.0-beta.3]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.2...v1.0.0-beta.3
 [1.0.0-beta.2]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.1...v1.0.0-beta.2
 [1.0.0-beta.1]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.5...v1.0.0-beta.1
 [1.0.0-alpha.5]: https://github.com/codewandler/sipx/compare/v1.0.0-alpha.4...v1.0.0-alpha.5

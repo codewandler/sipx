@@ -1,25 +1,26 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-beta.2 public beta.
+description: Release highlights and adoption notes for the sipx 1.0.0-beta.3 prerelease.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-beta.2 — 2026-08-04
+## 1.0.0-beta.3 — 2026-08-04
 <!-- END generated:release-heading -->
 
-The first public beta is published as exact crates.io packages from one immutable release tag. Its
-release threshold is all-or-nothing: the complete shell phone, independent transport peers,
-exact registry packages, installed CLI, public documentation, and the retained integrity gate agree
-on the same candidate. See [How sipx is built](reference/development-process.md) for the measured
-process and [Diagnostic-phone proof](reference/diagnostic-phone-proof.md) for the executable product
-matrix.
+The first public beta is published and remains immutable. Beta.3 is
+published as exact crates.io packages from a new immutable tag without moving or overwriting
+beta.2. Its runtime library and CLI
+surface is unchanged from beta.2; the release adds the checked public stack comparison, a
+demand-led capability roadmap, and checksum-bound recovery for interrupted registry publication.
+See [How sipx is built](reference/development-process.md) for the measured process and
+[Diagnostic-phone proof](reference/diagnostic-phone-proof.md) for the executable product matrix.
 
 Install the exact CLI release with:
 
 ```bash
-cargo install --locked --version =1.0.0-beta.2 sipx-cli
+cargo install --locked --version =1.0.0-beta.3 sipx-cli
 ```
 
 The adoption surface leads with the modular Rust crates: applications select the protocol, transport,
@@ -40,6 +41,18 @@ browser-media stack, automatic live-state presence, or SIP instant-message behav
 not ship an embedded application runtime, subprocess binding, or packaged TypeScript SDK. The
 two-dialog coupling primitive is public, but the truly off-media relay role is not complete. The
 [fit guide](guides/does-this-fit.md) is the maintained deployment boundary.
+
+## 1.0.0-beta.2 — 2026-08-04
+
+Beta.2 was the first published public beta. It established the same endpoint, library, transport,
+media and application-host surface described above, backed by exact registry packages, the
+installed diagnostic CLI, independent transport peers and release-commit documentation.
+
+```bash
+cargo install --locked --version =1.0.0-beta.2 sipx-cli
+```
+
+Use beta.3 for new installations; beta.2 remains immutable for reproducible existing consumers.
 
 ## 1.0.0-alpha.5 — 2026-08-03
 
@@ -130,5 +143,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 beta. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-beta.2` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-beta.3` merely because it appears on this
 site.

@@ -14,7 +14,7 @@ ahead of it.
 Install the exact release with Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```bash
-cargo install --locked --version =1.0.0-beta.2 sipx-cli
+cargo install --locked --version =1.0.0-beta.3 sipx-cli
 ```
 
 The exact `--version` requirement makes the installation reproducible. This site follows the
@@ -27,11 +27,11 @@ cargo install --git https://github.com/codewandler/sipx \
 ```
 
 Confirm which version was installed. This documentation build covers
-<!-- BEGIN generated:workspace-version -->1.0.0-beta.2<!-- END generated:workspace-version -->:
+<!-- BEGIN generated:workspace-version -->1.0.0-beta.3<!-- END generated:workspace-version -->:
 
 ```console
 $ sipx version
-sipx 1.0.0-beta.2
+sipx 1.0.0-beta.3
 ```
 
 ## Prepare audio

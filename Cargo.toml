@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 edition = "2024"
 # Raised from 1.85 by the DNS client needed to clear RUSTSEC-2026-0119. The alternative was
 # shipping a known denial of service in a parser that eats untrusted network data.
@@ -18,17 +18,17 @@ categories = ["network-programming", "multimedia"]
 
 [workspace.dependencies]
 # Internal crates
-sipx-sip = { path = "crates/sipx-sip", version = "1.0.0-beta.2" }
-sipx-sdp = { path = "crates/sipx-sdp", version = "1.0.0-beta.2" }
-sipx-rtp = { path = "crates/sipx-rtp", version = "1.0.0-beta.2" }
-sipx-audio = { path = "crates/sipx-audio", version = "1.0.0-beta.2" }
-sipx-media = { path = "crates/sipx-media", version = "1.0.0-beta.2" }
-sipx-transport = { path = "crates/sipx-transport", version = "1.0.0-beta.2" }
-sipx-ua = { path = "crates/sipx-ua", version = "1.0.0-beta.2", default-features = false }
-sipx-call = { path = "crates/sipx-call", version = "1.0.0-beta.2" }
-sipx-app = { path = "crates/sipx-app", version = "1.0.0-beta.2" }
-sipx-app-protocol = { path = "crates/sipx-app-protocol", version = "1.0.0-beta.2" }
-sipx-testkit = { path = "crates/sipx-testkit", version = "1.0.0-beta.2" }
+sipx-sip = { path = "crates/sipx-sip", version = "1.0.0-beta.3" }
+sipx-sdp = { path = "crates/sipx-sdp", version = "1.0.0-beta.3" }
+sipx-rtp = { path = "crates/sipx-rtp", version = "1.0.0-beta.3" }
+sipx-audio = { path = "crates/sipx-audio", version = "1.0.0-beta.3" }
+sipx-media = { path = "crates/sipx-media", version = "1.0.0-beta.3" }
+sipx-transport = { path = "crates/sipx-transport", version = "1.0.0-beta.3" }
+sipx-ua = { path = "crates/sipx-ua", version = "1.0.0-beta.3", default-features = false }
+sipx-call = { path = "crates/sipx-call", version = "1.0.0-beta.3" }
+sipx-app = { path = "crates/sipx-app", version = "1.0.0-beta.3" }
+sipx-app-protocol = { path = "crates/sipx-app-protocol", version = "1.0.0-beta.3" }
+sipx-testkit = { path = "crates/sipx-testkit", version = "1.0.0-beta.3" }
 
 # Core
 bytes = "1"

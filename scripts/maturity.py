@@ -158,7 +158,7 @@ ALPHA = (
     Predicate(7, "The distance to v1 is generated, not asserted", "computed"),
 )
 
-#: The all-or-nothing hypothetical announcement threshold for `1.0.0-beta.2`. No feature or RFC percentage appears
+#: The all-or-nothing hypothetical announcement threshold for `1.0.0-beta.3`. No feature or RFC percentage appears
 #: here: a truthful smaller surface is ready and an overstated larger one is not. Predicate 1 is
 #: derived from every alpha predicate and therefore deliberately has no declaring story of its own.
 BETA = (
@@ -988,7 +988,7 @@ def render(reseed=False):
 
     # ---- hypothetical prerelease publicity, deliberately separate from the stable v1 gate
     beta_met = 0
-    lines.append("## Hypothetical announcement readiness for `1.0.0-beta.2`")
+    lines.append("## Hypothetical announcement readiness for `1.0.0-beta.3`")
     lines.append("")
     lines.append("| # | Predicate | State | Waiting on |")
     lines.append("|---|---|---|---|")

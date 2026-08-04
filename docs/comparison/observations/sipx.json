@@ -18,7 +18,7 @@
           "note": "non-negotiable 3, which also forbids panics on network input"
         }
       ],
-      "version_evaluated": "1.0.0-beta.2",
+      "version_evaluated": "1.0.0-beta.3",
       "evaluated_at": "2026-08-04"
     },
     {
@@ -42,7 +42,7 @@
           "note": "the per-feature build matrix"
         }
       ],
-      "version_evaluated": "1.0.0-beta.2",
+      "version_evaluated": "1.0.0-beta.3",
       "evaluated_at": "2026-08-04"
     },
     {
@@ -66,7 +66,7 @@
           "note": "the generated RFC table, including the media and security layers"
         }
       ],
-      "version_evaluated": "1.0.0-beta.2",
+      "version_evaluated": "1.0.0-beta.3",
       "evaluated_at": "2026-08-04"
     },
     {
@@ -87,7 +87,7 @@
           "note": "the generated maturity report, including what is still open"
         }
       ],
-      "version_evaluated": "1.0.0-beta.2",
+      "version_evaluated": "1.0.0-beta.3",
       "evaluated_at": "2026-08-04"
     },
     {
@@ -112,7 +112,7 @@
           "note": "every way the conformance check fails"
         }
       ],
-      "version_evaluated": "1.0.0-beta.2",
+      "version_evaluated": "1.0.0-beta.3",
       "evaluated_at": "2026-08-04"
     },
     {
@@ -133,7 +133,7 @@
           "note": "the two independent peers the suite runs against"
         }
       ],
-      "version_evaluated": "1.0.0-beta.2",
+      "version_evaluated": "1.0.0-beta.3",
       "evaluated_at": "2026-08-04"
     }
   ]

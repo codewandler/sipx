@@ -163,7 +163,7 @@ Application-host phase 1 is delivered by `A-2`; the remaining in-progress work i
 are not milestones because they are not RFC gaps.
 
 **Next release cut.** `C-1`, `A-2` and `S-34` are closed, so the alpha boundary this paragraph used to
-describe has been reached. The next public boundary is now `1.0.0-beta.2`: one deliberate prerelease
+describe has been reached. The next public boundary is now `1.0.0-beta.3`: one deliberate prerelease
 cut after the phone's DPH-1…DPH-12 matrix, registry-only consumer proof and public claims all
 agree. The cut includes its repository-native GitHub prerelease, but no broader publicity. The five
 generated predicates below measure hypothetical announcement readiness. Later host phases and optional
@@ -404,7 +404,7 @@ honest about what it does not do.**
 A stack can be short of features and still be worth depending on. It cannot be *wrong about itself*
 and be worth depending on, because every consumer's design decision rests on what the table says.
 
-### `1.0.0-beta.2` — the hypothetical public-announcement predicates
+### `1.0.0-beta.3` — the hypothetical public-announcement predicates
 
 This is the threshold at which the prerelease could responsibly receive broader publicity: outside
 Rust users can install exact registry
