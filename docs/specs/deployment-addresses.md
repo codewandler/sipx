@@ -92,9 +92,11 @@ target whose address differs from the Request-URI and inspects both fields indep
 
 ## 5. Non-ICE media destination
 
-Before a valid RTP packet arrives, the session sends to the peer's SDP destination. After a valid
-packet arrives, the session sends RTP and its paired RTCP flow to that packet's observed source as
-specified by RFC 4961. A malformed, unauthenticated or wrong-SSRC packet cannot move the latch.
+Before a valid RTP packet is accepted by the session, it sends to the peer's SDP destination. After
+that packet has been parsed and accepted into the receive path, the session sends RTP and its paired
+RTCP flow to that packet's observed source as specified by RFC 4961. A peer-side socket send is not
+evidence of that acceptance. A malformed, unauthenticated or wrong-SSRC packet cannot move the
+latch.
 
 The black-hole vector offers a bound but unread SDP destination, then sends valid RTP from a
 different reachable source. Audio returned after that packet must reach the observed source, while

@@ -40,6 +40,7 @@ PCM/G.722/jitter lane remain separate decisions rather than silent beta.4 scope 
 
 ## Now (in progress)
 - [A-15 — Publish and verify 1.0.0-beta.4](A-15-publish-beta4.md) · Application · beta.4 capstone · immutable tag, exact registry consumer, installed Opus CLI, Pages and GitHub prerelease
+- [X-95 — Order the symmetric-RTP proof by receipt, not kernel enqueue](X-95-order-the-symmetric-rtp-proof-by-receipt.md) · Build · exact-main beta.4 CI exposed a send-to-versus-receive race in the non-ICE proof
 
 ## Next (ready — take the top one unless the user named a story)
 _None._
