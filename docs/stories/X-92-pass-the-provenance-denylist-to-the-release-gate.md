@@ -2,7 +2,7 @@
 id: X-92
 title: Pass the provenance denylist to the release gate
 pillar: Build
-status: in-progress
+status: done
 priority: 1
 design: docs/specs/release-workflow.md
 epic: conformance
@@ -29,7 +29,7 @@ registry write, using the externally configured denylist without broadening the 
 - [x] The release-workflow structural suite fails if that step loses or renames the secret mapping.
 - [x] An empty denylist is refused before the keep-going gate starts, so the same configuration
       failure cannot spend another full cold-gate run collecting unrelated results.
-- [ ] The complete local gate and exact-sha GitHub CI pass before a new immutable prerelease tag is
+- [x] The complete local gate and exact-sha GitHub CI pass before a new immutable prerelease tag is
       cut; `v1.0.0-beta.1` is not moved.
 
 ## Progress
@@ -44,6 +44,9 @@ registry write, using the externally configured denylist without broadening the 
 - The failed run reported the missing input after 33 seconds but the keep-going gate returned only
   after another 12 minutes and 4 seconds. The release step now preflights that one required value;
   the gate itself retains its diagnostic keep-going behavior for ordinary verification failures.
+- The complete 32-step local gate passed on the corrected `1.0.0-beta.2` candidate. Exact-SHA CI
+  run `30910251565` then completed green at `9a0f42ec6eb42f4831ae1a98388f85b9f063d0ac`, including
+  provenance, workflow guards, cargo-deny, feature matrix, package-path proofs and Pages deployment.
 
 ## Notes
 
