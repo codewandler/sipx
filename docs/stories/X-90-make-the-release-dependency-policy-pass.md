@@ -21,12 +21,12 @@ rules or making unpublished test support part of a public package.
 
 ## Acceptance
 
-- [ ] The failed `cargo-deny` job from exact commit `2794bee` is recorded as the failing-first
+- [x] The failed `cargo-deny` job from exact commit `2794bee` is recorded as the failing-first
       observation: `webpki-roots 1.0.9` needs a reviewed data-license exception, and the five
       path-only `sipx-testkit` dev dependencies are the only wildcard findings.
-- [ ] `CDLA-Permissive-2.0` is allowed only for the exact `webpki-roots` package reviewed here, with
+- [x] `CDLA-Permissive-2.0` is allowed only for the exact `webpki-roots` package reviewed here, with
       the redistribution boundary recorded beside the exception; it is not admitted globally.
-- [ ] Path-only dependencies are exempt from the wildcard-version rule while registry and Git
+- [x] Path-only dependencies are exempt from the wildcard-version rule while registry and Git
       dependencies remain denied, preserving the release helper's unpublished-testkit boundary.
 - [ ] The same cargo-deny version used by CI passes locally, the complete local gate passes, and a
       new exact-sha GitHub CI run—including `cargo-deny` and the Pages deployment—finishes green.
@@ -36,6 +36,9 @@ rules or making unpublished test support part of a public package.
 - GitHub Actions run `30903661581`, job `91973610369`, failed before any tag or registry write.
   Its six errors were one rejected `CDLA-Permissive-2.0` license and five wildcard findings, each
   naming a path-only `sipx-testkit` dev dependency. Advisories and sources passed.
+- `cargo-deny 0.20.2`, the version pinned by the CI action, passes all four policy classes locally.
+  Exact-sha run `30904773713` proves job `91977186078` green. That run remains red overall because
+  the feature-matrix runner lacked the Linux device-audio build prerequisite tracked by `X-91`.
 
 ## Notes
 

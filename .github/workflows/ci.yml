@@ -82,6 +82,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The matrix deliberately enables the optional live-device path. On Linux that path links
+      # against ALSA, so the feature job needs the same build prerequisite as the all-feature and
+      # documentation jobs; otherwise it tests runner provisioning rather than the feature graph.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Every other job builds `--all-features`, which cannot see a crate that fails to compile
