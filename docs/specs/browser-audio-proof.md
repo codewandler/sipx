@@ -128,7 +128,10 @@ declared endpoint/event and the overall deadline bounds failure.
 
 Each terminal object, WebDriver response and process output is capped at 1 MiB. Candidate and pair
 identifiers are capped at 256 characters and retained browser errors at 4,096 characters. Cleanup runs on success and every
-failure, including malformed evidence and an interrupted shell.
+failure, including malformed evidence and an interrupted shell. The cancellation self-test waits
+for a two-PID readiness record before interrupting the outer owner, then proves both the admitted
+leader and its child disappear. A separate complete-proof timeout test asserts the bound and its
+diagnostic without assuming that a role was admitted before that outer deadline.
 
 ## 7. CI and harness self-test
 
@@ -138,7 +141,8 @@ harness self-test and does not publish a compatibility result.
 
 The self-test reverses the harness's own trust boundaries with fixture processes:
 
-- a timed-out helper that forks a grandchild proves process-group cleanup and reaping;
+- an interrupted helper that has reported its leader and grandchild proves process-group cleanup
+  and reaping, while a separate outer-timeout case proves the complete bound;
 - malformed, partial and oversized JSON prove structured-fact assertions fail closed;
 - a one-role result proves both-role completeness is required;
 - each negative without its paired positive proves non-vacuity is enforced; and

@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import signal
 import stat
 import subprocess
 import sys
@@ -228,25 +229,48 @@ class BrowserAudioProofTest(unittest.TestCase):
         self.assertNotEqual(0, completed.returncode)
         self.assertFalse(marker.exists(), "identity failure admitted a role process")
 
-    def test_timeout_kills_the_entire_process_group(self) -> None:
+    def test_interrupt_after_admission_kills_the_entire_process_group(self) -> None:
         pid_file = self.directory / "pids"
         probe = executable(
             self.directory / "fork.sh",
             'sleep 300 &\nchild=$!\nprintf "%s\\n%s\\n" "$$" "$child" >"$1"\nwait "$child"\n',
         )
-        completed = subprocess.run(
+        process = subprocess.Popen(
             [str(RUNNER), "--lifecycle-probe", str(probe), str(pid_file), str(self.directory / "out")],
+            env={**os.environ, "SIPX_BROWSER_AUDIO_TOTAL_TIMEOUT": "10", "SIPX_BROWSER_AUDIO_ROLE_TIMEOUT": "30"},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if pid_file.exists() and len(pid_file.read_text(encoding="utf-8").splitlines()) == 2:
+                break
+            self.assertIsNone(process.poll(), "the lifecycle probe exited before readiness")
+            time.sleep(0.02)  # poll interval: the two-PID readiness file is the condition
+        self.assertTrue(pid_file.exists(), "the lifecycle probe never reported readiness")
+        pids = [int(value) for value in pid_file.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(2, len(pids), "the leader and its child reported readiness")
+
+        process.send_signal(signal.SIGTERM)
+        _, stderr = process.communicate(timeout=15)
+        self.assertEqual(124, process.returncode, stderr)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and any(pathlib.Path(f"/proc/{pid}").exists() for pid in pids):
+            time.sleep(0.02)  # poll interval: /proc disappearance is the cleanup condition
+        self.assertFalse([pid for pid in pids if pathlib.Path(f"/proc/{pid}").exists()])
+
+    def test_complete_timeout_is_bounded_before_role_admission(self) -> None:
+        probe = executable(self.directory / "timeout.sh", "sleep 300\n")
+        completed = subprocess.run(
+            [str(RUNNER), "--lifecycle-probe", str(probe), str(self.directory / "pids"), str(self.directory / "out")],
             env={**os.environ, "SIPX_BROWSER_AUDIO_TOTAL_TIMEOUT": "1", "SIPX_BROWSER_AUDIO_ROLE_TIMEOUT": "30"},
             capture_output=True,
             text=True,
             timeout=15,
         )
-        self.assertNotEqual(0, completed.returncode)
-        pids = [int(value) for value in pid_file.read_text(encoding="utf-8").splitlines()]
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline and any(pathlib.Path(f"/proc/{pid}").exists() for pid in pids):
-            time.sleep(0.02)  # poll interval: /proc disappearance is the cleanup condition
-        self.assertFalse([pid for pid in pids if pathlib.Path(f"/proc/{pid}").exists()])
+        self.assertEqual(124, completed.returncode, completed.stderr)
+        self.assertIn("complete proof exceeded 1s", completed.stderr)
 
     def test_normal_exit_cleanup_kills_an_orphaned_group(self) -> None:
         pid_file = self.directory / "pids"
