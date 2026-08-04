@@ -182,6 +182,15 @@ The language-neutral application wire contract and SIP over QUIC remain Experime
 
 ### Fixed
 
+- **Release CI now distinguishes reviewed package data and path-only test support (`X-90`).** The
+  dependency policy admits `CDLA-Permissive-2.0` only for the exact reviewed trust-anchor dataset,
+  while intentional path-only development dependencies no longer look like unbounded registry
+  requirements; registry and Git wildcard policy remains strict.
+
+- **The feature matrix provisions its optional Linux device-audio build (`X-91`).** The job now
+  installs the ALSA development metadata before enabling `device-audio`, so it checks the feature
+  graph instead of failing on a missing runner prerequisite.
+
 - **The independent-peer runner no longer prints success after a role test failed (`X-62`).** Each
   Cargo role result is checked explicitly because shell error propagation is disabled inside the
   condition that owns a peer run; a copied-runner fixture now proves failure reaches the top-level

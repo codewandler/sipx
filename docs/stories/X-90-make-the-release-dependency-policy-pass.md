@@ -2,7 +2,7 @@
 id: X-90
 title: Make the release dependency policy pass
 pillar: Build
-status: in-progress
+status: done
 priority: 1
 design: docs/specs/release-rehearsal.md
 epic: conformance
@@ -28,7 +28,7 @@ rules or making unpublished test support part of a public package.
       the redistribution boundary recorded beside the exception; it is not admitted globally.
 - [x] Path-only dependencies are exempt from the wildcard-version rule while registry and Git
       dependencies remain denied, preserving the release helper's unpublished-testkit boundary.
-- [ ] The same cargo-deny version used by CI passes locally, the complete local gate passes, and a
+- [x] The same cargo-deny version used by CI passes locally, the complete local gate passes, and a
       new exact-sha GitHub CI run—including `cargo-deny` and the Pages deployment—finishes green.
 
 ## Progress
@@ -39,6 +39,8 @@ rules or making unpublished test support part of a public package.
 - `cargo-deny 0.20.2`, the version pinned by the CI action, passes all four policy classes locally.
   Exact-sha run `30904773713` proves job `91977186078` green. That run remains red overall because
   the feature-matrix runner lacked the Linux device-audio build prerequisite tracked by `X-91`.
+- The complete 32-step gate passed at `f30ffd2`. Exact-sha GitHub run `30905359518` then completed
+  green, including cargo-deny job `91979064185` and Pages deployment job `91979625126`.
 
 ## Notes
 
