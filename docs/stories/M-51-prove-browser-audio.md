@@ -50,6 +50,13 @@ independently implemented browser SIP endpoint, and publish exactly the boundary
   gate also passed every substantive implementation, feature, MSRV, packaging and documentation
   step; its only pre-closure finding was the expected generated maturity-page drift resolved while
   closing this wave.
+- Exact release-candidate workflow run `30950648054`, job `92131573628`, exposed a startup race:
+  under hosted-runner contention the sipx role stopped waiting for its first browser method at ten
+  seconds even though the command still owned a 90-second operation budget. The browser then
+  reported `open exceeded 10000 ms` because its WSS peer had already exited. A paused-time
+  regression failed first with an eleven-second browser start, then passed after the separate timer
+  was removed. The complete local gate passed 36 of 36 steps, and hosted workflow run
+  `30951724369`, job `92135156289`, completed the native-browser proof on the repaired code.
 
 ## Notes
 
