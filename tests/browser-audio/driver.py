@@ -401,10 +401,15 @@ class WebDriver:
         value = json.loads(encoded.decode("utf-8"))
         return unwrap_webdriver_value(value)
 
-    def start(self, capabilities: dict[str, Any], expected_pin: str) -> None:
+    def start(self, capabilities: dict[str, Any], expected_pin: str, timeout: int) -> None:
         require(capabilities.get("acceptInsecureCerts") is not True, "acceptInsecureCerts would bypass WSS identity")
         require(expected_pin in json.dumps(capabilities, sort_keys=True), "browser capabilities do not enforce the WSS SPKI pin")
-        value = self.request("POST", "/session", {"capabilities": {"alwaysMatch": capabilities}})
+        value = self.request(
+            "POST",
+            "/session",
+            {"capabilities": {"alwaysMatch": capabilities}},
+            timeout=timeout,
+        )
         require(isinstance(value, dict), "WebDriver session response is not an object")
         self.session = value.get("sessionId")
         require(bool(self.session), "WebDriver did not return a session id")
@@ -418,8 +423,18 @@ class WebDriver:
 
     def run(self, page: pathlib.Path, config: dict[str, Any], timeout: int) -> Any:
         require(self.session is not None, "WebDriver session has not started")
-        self.request("POST", f"/session/{self.session}/url", {"url": page.resolve().as_uri()})
-        self.request("POST", f"/session/{self.session}/timeouts", {"script": timeout * 1000})
+        self.request(
+            "POST",
+            f"/session/{self.session}/url",
+            {"url": page.resolve().as_uri()},
+            timeout=timeout,
+        )
+        self.request(
+            "POST",
+            f"/session/{self.session}/timeouts",
+            {"script": timeout * 1000},
+            timeout=timeout,
+        )
         script = """
             const config = arguments[0];
             const done = arguments[arguments.length - 1];
@@ -611,7 +626,7 @@ def main() -> int:
         config["wssSpkiSha256"] = args.pin
         driver = WebDriver(args.url)
         try:
-            driver.start(load_json(args.capabilities), args.pin)
+            driver.start(load_json(args.capabilities), args.pin, args.timeout)
             result = driver.run(args.page, config, args.timeout)
             write_json_evidence(args.output, result)
             validate_browser_result(result, args.role, args.pin)
@@ -624,7 +639,7 @@ def main() -> int:
         config["mutation"] = args.mutation
         driver = WebDriver(args.url)
         try:
-            driver.start(load_json(args.capabilities), args.pin)
+            driver.start(load_json(args.capabilities), args.pin, args.timeout)
             result = driver.run(args.page, config, args.timeout)
             write_json_evidence(args.output, result)
             require(result.get("contract") == CONTRACT, "negative browser result contract is wrong")
