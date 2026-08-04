@@ -37,11 +37,22 @@ allow = [
     "Unicode-3.0",
     "Zlib",
 ]
+# `webpki-roots` contains the public trust-anchor dataset consumed by the verified TLS client;
+# it is data rather than executable code. CDLA-Permissive-2.0 permits use, modification and
+# redistribution while requiring its license text and disclaimers to accompany shared data. Keep
+# this exception crate- and version-specific so another dependency cannot introduce that license
+# without a fresh review.
+exceptions = [
+    { crate = "webpki-roots@=1.0.9", allow = ["CDLA-Permissive-2.0"] },
+]
 confidence-threshold = 0.9
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The unpublished test kit is deliberately a path-only dev dependency: Cargo omits that edge from
+# published manifests. Registry dependencies remain subject to the wildcard denial above.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
