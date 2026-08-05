@@ -11,7 +11,7 @@
 
 // A binary's `main` is the one place a program may print and exit rather than return a value, and
 // the argument reader has nowhere to hand an error to but the operator.
-#![allow(clippy::print_stderr)]
+#![allow(clippy::print_stderr, clippy::print_stdout)]
 
 use std::process::ExitCode;
 
@@ -56,6 +56,15 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let reports = host.take_realtime_reports();
+    let reporter = tokio::spawn(async move {
+        let Some(mut reports) = reports else {
+            return;
+        };
+        while let Some(report) = reports.recv().await {
+            println!("{}", report.to_json());
+        }
+    });
 
     let listener = match host.call_listener() {
         Ok(listener) => listener,
@@ -77,7 +86,10 @@ async fn main() -> ExitCode {
         listener.name
     );
 
-    match host.serve(handle, incoming).await {
+    let served = host.serve(handle, incoming).await;
+    drop(host);
+    let _ = reporter.await;
+    match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("sipx-host: {error}");

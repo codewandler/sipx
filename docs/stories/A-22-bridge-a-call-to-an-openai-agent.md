@@ -2,7 +2,7 @@
 id: A-22
 title: Bridge a call to an OpenAI agent
 pillar: Application
-status: backlog
+status: done
 priority: 3
 design: docs/designs/openai.md
 epic: openai
@@ -23,35 +23,48 @@ stand-in peer.
 
 ## Acceptance
 
-- [ ] The bridge owns one `Call` and one realtime session: caller audio leaves
+- [x] The bridge owns one `Call` and one realtime session: caller audio leaves
       `recv_encoded` (relay mode) and arrives at the peer as the spec's append events;
       agent deltas queue in a bounded local buffer and leave through `send_encoded`; both
       queues carry the spec's named sizes and counted drops. G.711 passthrough — no
       transcode on the path, asserted by byte identity in a test.
-- [ ] Barge-in holds to the spec: on speech-started the bridge cancels the response and
+- [x] Barge-in holds to the spec: on speech-started the bridge cancels the response and
       drops its queued agent audio; the test asserts the spec's queue-depth bound as a
       number, against the stand-in's cancel-honouring mode.
-- [ ] Configuration follows host-config discipline: endpoint URL, model, instructions and
+- [x] Configuration follows host-config discipline: endpoint URL, model, instructions and
       the credential's secret *name* under `[app.<name>]`, unknown keys refused (N2),
       deny-by-default grants (N5), secret values never in config, logs or errors (N7) —
       with config vectors in the existing `HC-*` style for the new table.
-- [ ] A CLI path answers (or originates) a call and hands it to the bridge, so one command
+- [x] A CLI path answers (or originates) a call and hands it to the bridge, so one command
       against the stand-in peer demonstrates the loop; its JSON output names the negotiated
       facts (codec, packet duration, session outcome).
-- [ ] End-to-end against the stand-in, M-39 evidence pattern: a distinct tone up-path
+- [x] End-to-end against the stand-in, M-39 evidence pattern: a distinct tone up-path
       arrives in the peer's appends; the peer's distinct tone down-path arrives in the
       call's RTP; correlation asserted both directions; non-vacuity negatives that must
       fail — wrong bearer never bridges, a stalled peer ends the bridge within its bound
       with the typed outcome, a malformed event follows the spec's disposition.
-- [ ] A dropped socket ends the bridge with its typed outcome and the call is released the
+- [x] A dropped socket ends the bridge with its typed outcome and the call is released the
       way the spec says — no silent reconnect, no orphaned media tasks
       (cancellation-safety asserted).
-- [ ] Gate green, including `check-app-surface.py` (deliberate surface growth named in
+- [x] Gate green, including `check-app-surface.py` (deliberate surface growth named in
       Progress) and `check-fixed-sleep.py`.
 
 ## Progress
 
-- (running log / checklist — a resuming agent reads this to know exactly where things stand)
+- The bridge engine is held to all A-22-owned ORB vectors plus queue-overflow, non-G.711,
+  mid-call-stall and task-ownership cases. The tests use event acknowledgements rather than sleeps
+  for queue and barge-in causality.
+- HC-31…HC-37 add the `realtime` binding under the host schema's existing N2/N5/N7/N8 discipline:
+  endpoint, model, instructions and `api_key_secret`; unknown keys refused, grants denied, and only
+  the secret name retained.
+- `sipx-host <document>` is the one-command answer path. Its direct binary test proves distinct
+  tones across real SIP/RTP in both directions and reads a JSON terminal record naming `codec`,
+  `packet_duration_ms` and `session_outcome`. The wrong-bearer arm carries zero audio and leaks no
+  credential value.
+- Surface review is deliberate: the host now calls the non-SIP WSS and realtime modules, so both
+  graduate to Supported with a CHANGELOG migration boundary. `check-app-surface.py --check`
+  reports 10 of 11 published crates reached, seven modules experimental, and none selected from a
+  call.
 
 ## Notes
 

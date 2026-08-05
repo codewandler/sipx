@@ -203,6 +203,17 @@ pub enum BindingExpect {
         /// The handler file.
         handler: &'static str,
     },
+    /// Realtime bridge mode.
+    Realtime {
+        /// The WebSocket endpoint before the model query.
+        endpoint: &'static str,
+        /// The model query value.
+        model: &'static str,
+        /// The configured session instructions.
+        instructions: &'static str,
+        /// The API key's name.
+        api_key_secret: &'static str,
+    },
 }
 
 impl BindingExpect {
@@ -230,6 +241,25 @@ impl BindingExpect {
                 got.as_str() == *bearer_secret
             }
             (Self::Embedded { handler }, AppBinding::Embedded { handler: got }) => got == handler,
+            (
+                Self::Realtime {
+                    endpoint,
+                    model,
+                    instructions,
+                    api_key_secret,
+                },
+                AppBinding::Realtime {
+                    endpoint: got_endpoint,
+                    model: got_model,
+                    instructions: got_instructions,
+                    api_key_secret: got_secret,
+                },
+            ) => {
+                got_endpoint == endpoint
+                    && got_model == model
+                    && got_instructions == instructions
+                    && got_secret.as_str() == *api_key_secret
+            }
             _ => false,
         }
     }
@@ -727,7 +757,89 @@ pub fn all() -> Vec<Vector> {
     vectors.extend(binding_vectors());
     vectors.extend(reload_vectors());
     vectors.extend(open_stance_vectors());
+    vectors.extend(realtime_vectors());
     vectors
+}
+
+/// HC-31 … HC-37 — the realtime binding under the same N2/N5/N7/N8 discipline.
+fn realtime_vectors() -> Vec<Vector> {
+    const REALTIME: &str = "[app.agent]\nbinding = \"realtime\"\nendpoint = \"wss://api.example.net/v1/realtime\"\nmodel = \"voice-1\"\ninstructions = \"answer briefly\"\napi_key_secret = \"agent-api-key\"\n";
+    vec![
+        Vector {
+            name: "HC-31",
+            about: "a realtime binding carries session values and only a secret name",
+            points: &["N5", "N7", "N8"],
+            case: Case::Accepts {
+                doc: REALTIME,
+                expect: Expect::new()
+                    .binding(
+                        "agent",
+                        BindingExpect::Realtime {
+                            endpoint: "wss://api.example.net/v1/realtime",
+                            model: "voice-1",
+                            instructions: "answer briefly",
+                            api_key_secret: "agent-api-key",
+                        },
+                    )
+                    .grants("agent", Grants::denied())
+                    .secrets(vec!["agent-api-key"]),
+            },
+        },
+        Vector {
+            name: "HC-32",
+            about: "an undeclared realtime tuning key is refused",
+            points: &["N2"],
+            case: Case::Rejects {
+                doc: "[app.agent]\nbinding = \"realtime\"\nendpoint = \"wss://api.example.net/v1/realtime\"\nmodel = \"voice-1\"\ninstructions = \"answer briefly\"\napi_key_secret = \"agent-api-key\"\ntemperature = 1\n",
+                code: "unknown-key",
+            },
+        },
+        Vector {
+            name: "HC-33",
+            about: "a realtime binding must name its endpoint",
+            points: &["N8"],
+            case: Case::Rejects {
+                doc: "[app.agent]\nbinding = \"realtime\"\nmodel = \"voice-1\"\ninstructions = \"answer briefly\"\napi_key_secret = \"agent-api-key\"\n",
+                code: "missing-key",
+            },
+        },
+        Vector {
+            name: "HC-34",
+            about: "a realtime binding must name its model",
+            points: &["N8"],
+            case: Case::Rejects {
+                doc: "[app.agent]\nbinding = \"realtime\"\nendpoint = \"wss://api.example.net/v1/realtime\"\ninstructions = \"answer briefly\"\napi_key_secret = \"agent-api-key\"\n",
+                code: "missing-key",
+            },
+        },
+        Vector {
+            name: "HC-35",
+            about: "a realtime binding must carry its instructions",
+            points: &["N8"],
+            case: Case::Rejects {
+                doc: "[app.agent]\nbinding = \"realtime\"\nendpoint = \"wss://api.example.net/v1/realtime\"\nmodel = \"voice-1\"\napi_key_secret = \"agent-api-key\"\n",
+                code: "missing-key",
+            },
+        },
+        Vector {
+            name: "HC-36",
+            about: "a realtime binding must name its API key",
+            points: &["N8"],
+            case: Case::Rejects {
+                doc: "[app.agent]\nbinding = \"realtime\"\nendpoint = \"wss://api.example.net/v1/realtime\"\nmodel = \"voice-1\"\ninstructions = \"answer briefly\"\n",
+                code: "missing-key",
+            },
+        },
+        Vector {
+            name: "HC-37",
+            about: "realtime credential material cannot occupy the secret-name field",
+            points: &["N7"],
+            case: Case::Rejects {
+                doc: "[app.agent]\nbinding = \"realtime\"\nendpoint = \"wss://api.example.net/v1/realtime\"\nmodel = \"voice-1\"\ninstructions = \"answer briefly\"\napi_key_secret = \"sk-LIVE_KEY_MATERIAL\"\n",
+                code: "not-a-secret-name",
+            },
+        },
+    ]
 }
 
 /// HC-1 — the reference document, read whole.

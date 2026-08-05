@@ -1,6 +1,6 @@
 [package]
 name = "sipx-app"
-description = "SIP application host with webhook and full-duplex session bindings"
+description = "SIP application host with webhook, session, and realtime audio bindings"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -35,6 +35,22 @@ sha2.workspace = true
 bytes.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
+# RFC 4648 §4, which is how `docs/specs/openai-realtime.md` §4.1 carries a call's G.711 frames
+# inside JSON events. The workspace's own encoder rather than a second one written here: audio
+# that decoded differently on two hosts would be a silent corruption, and this is the alphabet
+# every other consumer in the tree already reads.
+base64.workspace = true
+
+[dev-dependencies]
+# The stand-in realtime peer of `A-21` is the counterparty every bridge vector runs against.
+# Path-only so Cargo omits unpublished test support from the normalized registry manifest.
+sipx-testkit = { path = "../sipx-testkit" }
+# Only the tests read the peer's recorded events back; the bridge itself writes and reads JSON
+# through `sipx_app_protocol::json`, which is the workspace's own codec.
+serde_json.workspace = true
+# The product-path vector starts the shipped `sipx-host` binary and reaps it after its bounded
+# loopback call. Production does not spawn processes; this feature belongs to the test only.
+tokio = { workspace = true, features = ["process"] }
 
 [lints]
 workspace = true

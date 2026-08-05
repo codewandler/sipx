@@ -9,6 +9,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A routed SIP call can now terminate on a realtime audio agent** (`A-22`). `sipx-app` adds a
+  supported one-call/one-session bridge whose PCMU or PCMA RTP payloads remain encoded and
+  byte-identical across base64 event framing. Both directions have bounded non-blocking queues with
+  counted loss; partial downlink frames receive the negotiated G.711 silence byte; barge-in sends
+  one cancel, atomically flushes queued and accumulated audio, and bounds locally committed residue
+  to one 20 ms frame. Every socket, setup, protocol, liveness and call ending is a typed outcome,
+  and all media tasks are joined before it is reported.
+  Host configuration gains `binding = "realtime"` with endpoint, model, instructions and only the
+  API key's secret name; unknown keys are refused and grants remain denied by default. The shipped
+  `sipx-host <document>` command answers routed calls through that binding and writes one JSON line
+  naming the codec, 20 ms packet duration, terminal session outcome and drop counters. A loopback
+  suite holds all A-22-owned `ORB-*` vectors independently, while a real SIP/RTP product test
+  correlates distinct encoded tones in both directions, proves wrong credentials bridge no audio,
+  and runs the binary path itself. This use graduates the general non-SIP WSS client and realtime
+  bridge modules to Supported under the pre-1.0 policy.
 - **A deterministic stand-in for the realtime peer** (`A-21`). `sipx-testkit` gains a loopback
   WebSocket server that speaks `docs/specs/openai-realtime.md` from the vendor's side, so the
   whole bridge loop is provable in the default `cargo test` matrix with no account, no

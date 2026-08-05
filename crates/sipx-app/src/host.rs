@@ -47,6 +47,7 @@ use sipx_call::{
 };
 use sipx_media::{Interrupt, Playback, PlaybackId};
 use sipx_sip::{HeaderName, StatusCode, Uri, build::ResponseBuilder, uri::Host as UriHost};
+use sipx_transport::tls::{ClientTls, TlsError, TrustAnchors};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use sipx_ua::{Config as AgentConfig, UserAgent};
 use tokio::net::{TcpListener, TcpStream};
@@ -59,6 +60,9 @@ use crate::config::{
     Protocol, Running,
 };
 use crate::harness::policy::OnFailure;
+use crate::realtime::{
+    BridgeOutcome, BridgeReport, RealtimeBridge, SessionSetup, UnusableCredential,
+};
 use crate::session::{
     CallInput, DeliverError, MAX_CONNECTION_TASKS, OriginateRequest, SessionApp, SessionCall,
     SessionEndpoint, SessionHub, accept_websocket,
@@ -92,9 +96,81 @@ pub enum HostError {
     SessionIo(std::io::Error),
     /// A named signing secret was absent when the host started.
     MissingSecret(String),
+    /// The process could not construct the one TLS verification policy realtime sessions share.
+    RealtimeTls(TlsError),
+    /// A resolved realtime credential cannot be carried in an HTTP Authorization field.
+    RealtimeCredential(UnusableCredential),
     /// The document declares no `sip` listener, so there is nothing for a call to arrive on. A
     /// document can be valid and still describe a host that cannot answer anything.
     NoCallListener,
+}
+
+/// The machine-readable terminal record emitted for one realtime-bound call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeCallReport {
+    /// The SIP Call-ID whose ownership ended with this record.
+    pub call_id: String,
+    /// The negotiated G.711 codec name.
+    pub codec: &'static str,
+    /// The packet duration fixed by the realtime bridge contract.
+    pub packet_duration_ms: u16,
+    /// The realtime session's typed terminal report.
+    pub bridge: BridgeReport,
+}
+
+impl RealtimeCallReport {
+    /// A stable JSON line for `sipx-host` and shell automation.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let counters = self.bridge.counters;
+        sipx_app_protocol::json::Json::object([
+            (
+                "contract",
+                Some(sipx_app_protocol::json::Json::Str(
+                    "sipx.realtime.v1".to_owned(),
+                )),
+            ),
+            (
+                "call_id",
+                Some(sipx_app_protocol::json::Json::Str(self.call_id.clone())),
+            ),
+            (
+                "codec",
+                Some(sipx_app_protocol::json::Json::Str(self.codec.to_owned())),
+            ),
+            (
+                "packet_duration_ms",
+                Some(sipx_app_protocol::json::Json::Int(i64::from(
+                    self.packet_duration_ms,
+                ))),
+            ),
+            (
+                "session_outcome",
+                Some(sipx_app_protocol::json::Json::Str(
+                    self.bridge.outcome.name().to_owned(),
+                )),
+            ),
+            (
+                "uplink_dropped",
+                Some(sipx_app_protocol::json::Json::Int(
+                    i64::try_from(counters.uplink_dropped).unwrap_or(i64::MAX),
+                )),
+            ),
+            (
+                "downlink_dropped",
+                Some(sipx_app_protocol::json::Json::Int(
+                    i64::try_from(counters.downlink_dropped).unwrap_or(i64::MAX),
+                )),
+            ),
+        ])
+        .to_text()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RealtimeTarget {
+    client: crate::wss::WssClient,
+    setup: SessionSetup,
 }
 
 /// One admitted document call. It owns the call, its event receiver and its interpreter; no value
@@ -968,8 +1044,10 @@ impl fmt::Display for HostError {
             Self::SessionIo(error) => write!(formatter, "session listener: {error}"),
             Self::MissingSecret(name) => write!(
                 formatter,
-                "signing secret `{name}` is not available as `SIPX_SECRET_{name}`"
+                "secret `{name}` is not available as `SIPX_SECRET_{name}`"
             ),
+            Self::RealtimeTls(error) => write!(formatter, "realtime TLS policy: {error}"),
+            Self::RealtimeCredential(error) => write!(formatter, "realtime credential: {error}"),
             Self::NoCallListener => write!(
                 formatter,
                 "the document declares no `sip` listener, so no call can arrive"
@@ -985,6 +1063,8 @@ impl std::error::Error for HostError {
             Self::Transport(error) => Some(error),
             Self::Webhook(error) => Some(error),
             Self::SessionIo(error) => Some(error),
+            Self::RealtimeTls(error) => Some(error),
+            Self::RealtimeCredential(error) => Some(error),
             Self::MissingSecret(_) | Self::NoCallListener => None,
         }
     }
@@ -1171,6 +1251,57 @@ impl sipx_transport::resolve::Rng for FirstCandidate {
     }
 }
 
+/// Own one answered call and one realtime session until either ends, then release both.
+async fn run_realtime_call(
+    call: &mut Call,
+    inbox: &mut mpsc::Receiver<Incoming>,
+    target: RealtimeTarget,
+    shutdown: watch::Receiver<bool>,
+) -> (&'static str, BridgeReport) {
+    let codec = match call.negotiated_payload_type() {
+        0 => "PCMU",
+        8 => "PCMA",
+        _ => "unsupported",
+    };
+    call.media().set_relay(true);
+    let audio: Arc<dyn crate::realtime::CallAudio> = call.media_handle();
+    let bridge = RealtimeBridge::new(target.client, target.setup);
+    let (call_ended, ended) = tokio::sync::oneshot::channel::<()>();
+    let mut bridge_shutdown = shutdown.clone();
+    let running = bridge.run(audio, async move {
+        tokio::select! {
+            () = shutdown_signal(&mut bridge_shutdown) => {}
+            _ = ended => {}
+        }
+    });
+    tokio::pin!(running);
+
+    let report = {
+        let serving = sipx_call::serve(call, inbox);
+        tokio::pin!(serving);
+        tokio::select! {
+            report = &mut running => report,
+            _ = &mut serving => {
+                // The signalling owner observed the call end. Wake the bridge on that event rather
+                // than waiting for a scheduler turn in the media task to close its encoded queue.
+                let _ = call_ended.send(());
+                let mut report = running.await;
+                report.outcome = BridgeOutcome::CallEnded;
+                report
+            }
+        }
+    };
+
+    // A dead realtime session releases the SIP leg immediately; no reconnect can leave the caller
+    // speaking to a conversation that no longer exists. `hang_up` is transaction-bounded and is
+    // awaited before the actor reports completion.
+    if !call.is_ended() {
+        let _ = call.hang_up().await;
+    }
+    call.media().set_relay(false);
+    (codec, report)
+}
+
 /// A host with a configuration in force.
 ///
 /// Constructed from a document rather than from parts, because the document is the unit a reload
@@ -1181,6 +1312,9 @@ pub struct Host {
     media_address: IpAddr,
     webhooks: BTreeMap<String, Webhook>,
     sessions: SessionEndpoint,
+    realtime: BTreeMap<String, RealtimeTarget>,
+    realtime_reports: mpsc::Sender<RealtimeCallReport>,
+    realtime_report_rx: Option<mpsc::Receiver<RealtimeCallReport>>,
 }
 
 impl Host {
@@ -1212,11 +1346,22 @@ impl Host {
         let config = HostConfig::parse(document)?;
         let mut webhooks = BTreeMap::new();
         let mut session_apps = BTreeMap::new();
+        let mut realtime = BTreeMap::new();
         let has_webhooks = config
             .apps()
             .any(|app| matches!(&app.binding, AppBinding::Webhook { .. }));
         let http = if has_webhooks {
             Some(WebhookClient::new()?)
+        } else {
+            None
+        };
+        let has_realtime = config
+            .apps()
+            .any(|app| matches!(&app.binding, AppBinding::Realtime { .. }));
+        let realtime_client = if has_realtime {
+            Some(crate::wss::WssClient::new(
+                ClientTls::new(&TrustAnchors::system()).map_err(HostError::RealtimeTls)?,
+            ))
         } else {
             None
         };
@@ -1247,16 +1392,56 @@ impl Host {
                         SessionApp::new(secret, app.grants.originate),
                     );
                 }
+                AppBinding::Realtime {
+                    endpoint,
+                    model,
+                    instructions,
+                    api_key_secret,
+                } => {
+                    let Some(secret) = resolve(api_key_secret.as_str()) else {
+                        return Err(HostError::MissingSecret(api_key_secret.to_string()));
+                    };
+                    let setup = SessionSetup::new(
+                        endpoint,
+                        model,
+                        instructions,
+                        api_key_secret.as_str(),
+                        &secret,
+                    )
+                    .map_err(HostError::RealtimeCredential)?;
+                    let Some(client) = realtime_client.as_ref() else {
+                        continue;
+                    };
+                    realtime.insert(
+                        app.name.clone(),
+                        RealtimeTarget {
+                            client: client.clone(),
+                            setup,
+                        },
+                    );
+                }
                 AppBinding::Embedded { .. } => {}
             }
         }
         let sessions = SessionEndpoint::new(SessionHub::new(), session_apps);
+        let (realtime_reports, realtime_report_rx) = mpsc::channel(MAX_ACTORS);
         Ok(Self {
             running: Running::start(config),
             media_address,
             webhooks,
             sessions,
+            realtime,
+            realtime_reports,
+            realtime_report_rx: Some(realtime_report_rx),
         })
+    }
+
+    /// Take the one bounded stream of terminal realtime call records.
+    ///
+    /// `sipx-host` prints these as JSON lines. A library embedder may take it once; leaving it
+    /// untaken never blocks call teardown, because actors use non-blocking report admission.
+    pub fn take_realtime_reports(&mut self) -> Option<mpsc::Receiver<RealtimeCallReport>> {
+        self.realtime_report_rx.take()
     }
 
     /// The configuration new calls are admitted under.
@@ -1558,8 +1743,50 @@ impl Host {
                         return;
                     }
 
-                    // An absent session and the later embedded binding are unreachable in the
-                    // document's own vocabulary.
+                    if matches!(&policy.binding, AppBinding::Realtime { .. })
+                        && let Some(target) = self.realtime.get(&policy.app).cloned()
+                    {
+                        let Some(permit) = actors.reserve() else {
+                            let _ = invitation.refuse(handle, 503, "Service Unavailable").await;
+                            self.running.end(&call_id);
+                            return;
+                        };
+                        let Ok(mut call) = invitation.answer(handle, self.media_address).await
+                        else {
+                            self.running.end(&call_id);
+                            return;
+                        };
+                        let (_, mut inbox) = invitation.into_parts();
+                        let Some(lease) = self.running.completion_lease(call_id.clone()) else {
+                            let _ = call.hang_up().await;
+                            self.running.end(&call_id);
+                            return;
+                        };
+                        let reports = self.realtime_reports.clone();
+                        let shutdown = actors.receiver();
+                        actors
+                            .spawn(Box::pin(async move {
+                                let _permit = permit;
+                                let report =
+                                    run_realtime_call(&mut call, &mut inbox, target, shutdown)
+                                        .await;
+                                let _ = reports.try_send(RealtimeCallReport {
+                                    call_id,
+                                    codec: report.0,
+                                    packet_duration_ms: 20,
+                                    bridge: report.1,
+                                });
+                                let completion = lease.completion();
+                                drop(lease);
+                                completion
+                            }))
+                            .await;
+                        return;
+                    }
+
+                    // An absent session and the embedded binding are unreachable in the
+                    // document's own vocabulary. A realtime target is constructed at startup, so
+                    // its absence can only follow an internal inconsistency and belongs here too.
                     match policy.failure.on_unreachable {
                         OnFailure::Reject { status } => {
                             let _ = invitation.refuse(handle, status, "Unavailable").await;

@@ -342,6 +342,17 @@ pub enum AppBinding {
         /// The handler file. What it resolves against is `A-6`'s.
         handler: String,
     },
+    /// A call leg terminated by the host and bridged byte-for-byte to a realtime session.
+    Realtime {
+        /// The WebSocket endpoint before the model query is attached.
+        endpoint: String,
+        /// The model selected in the endpoint query.
+        model: String,
+        /// The instructions sent in the one session update.
+        instructions: String,
+        /// The API key, by name; its value never enters the document.
+        api_key_secret: SecretRef,
+    },
 }
 
 /// What an app is allowed to make the host do on its behalf. Deny-by-default (N5).
@@ -432,6 +443,7 @@ impl HostConfig {
                     signing_secrets, ..
                 } => signing_secrets.iter().map(SecretRef::as_str).collect(),
                 AppBinding::Session { bearer_secret } => vec![bearer_secret.as_str()],
+                AppBinding::Realtime { api_key_secret, .. } => vec![api_key_secret.as_str()],
                 AppBinding::Embedded { .. } => Vec::new(),
             })
             .collect();

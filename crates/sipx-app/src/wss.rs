@@ -1,7 +1,7 @@
 //! A general-purpose secure WebSocket client for non-SIP peers.
 //!
-//! **Experimental** (`A-8`): new with `A-20`, and nothing outside this crate constrains its
-//! shape yet — the realtime bridge (`A-22`) is its intended first caller.
+//! **Supported** (`A-22`): the shipped realtime host path constrains this client's authentication,
+//! liveness, size, close and certificate semantics end to end.
 //!
 //! An RFC 6455 client composed over the workspace's one TLS policy: the handshake is
 //! `tokio-tungstenite`'s, the certificate verification is [`ClientTls`]'s, and there is no
@@ -127,6 +127,15 @@ pub enum WssError {
     Handshake {
         /// Who we were talking to.
         peer: String,
+        /// The HTTP status the peer answered the upgrade with, when it answered with one.
+        ///
+        /// A peer that refuses the upgrade does so with a status before the 101 (RFC 6455 §4.1),
+        /// and that is a different fact from "the upgrade broke": a caller authenticating with a
+        /// bearer has to tell a rejected credential from an unreachable host, and reading the
+        /// status back out of [`detail`](Self::Handshake::detail) would be parsing a `Display`
+        /// string. `None` when the upgrade failed before any response — a malformed request, a
+        /// truncated stream — because there was no status to have.
+        status: Option<u16>,
         /// What went wrong.
         detail: String,
     },
@@ -197,9 +206,17 @@ impl fmt::Display for WssError {
             Self::Connect { peer, detail } => {
                 write!(formatter, "connecting to {peer}: {detail}")
             }
-            Self::Handshake { peer, detail } => {
-                write!(formatter, "websocket handshake with {peer}: {detail}")
-            }
+            Self::Handshake {
+                peer,
+                status,
+                detail,
+            } => match status {
+                Some(status) => write!(
+                    formatter,
+                    "websocket handshake with {peer} was refused {status}: {detail}"
+                ),
+                None => write!(formatter, "websocket handshake with {peer}: {detail}"),
+            },
             Self::Subprotocol { peer, offered } => write!(
                 formatter,
                 "{peer} did not agree to the {offered} subprotocol (RFC 6455 §4.1)"
@@ -406,8 +423,17 @@ impl WssClient {
                             offered: request.subprotocol.clone().unwrap_or_default(),
                         }
                     }
+                    // A response that is not a 101 is the peer's answer, not a broken pipe, and
+                    // the status is the only part of it a caller can act on — `A-22` reads a
+                    // 4xx here as a refused credential (`docs/specs/openai-realtime.md` §6).
+                    FrameError::Http(response) => WssError::Handshake {
+                        peer: target.authority.clone(),
+                        status: Some(response.status().as_u16()),
+                        detail: format!("the peer answered {}", response.status()),
+                    },
                     other => WssError::Handshake {
                         peer: target.authority.clone(),
+                        status: None,
                         detail: other.to_string(),
                     },
                 }
@@ -422,6 +448,7 @@ impl WssClient {
             ping_grace: self.config.ping_grace,
             held: VecDeque::new(),
             closed: false,
+            closed_with: None,
         })
     }
 }
@@ -450,11 +477,22 @@ pub struct WssConnection {
     awaiting_pong: bool,
     ping_interval: Duration,
     ping_grace: Duration,
-    /// Messages taken from the socket while looking for a Pong, owed to the caller in the order
+    /// Messages taken from the socket while looking for a Pong, handed to the caller in the order
     /// the peer sent them. Bounded by what one liveness pass found already buffered.
+    ///
+    /// **They survive every ending but one.** A close read ahead of them is reported after they
+    /// are drained, so a peer that says goodbye mid-burst costs nothing; a
+    /// [`Stalled`](WssError::Stalled) discards them, and that is deliberate rather than an
+    /// oversight the sentence above used to deny (`A-22`'s review of `A-20`). The grace expired
+    /// with no Pong, so this side has just declared the path unsteerable — handing over more of
+    /// what arrived on it would be reporting progress on a connection the caller has been told to
+    /// abandon. The queue also has no aggregate cap: it holds one liveness pass's worth of
+    /// already-buffered frames, which for a burst source is exactly the burst.
     held: VecDeque<WssMessage>,
     /// The peer closed while liveness was reading ahead; reported once `held` is empty.
     closed: bool,
+    /// The RFC 6455 §5.5.1 status code the peer's close frame carried, if it sent one.
+    closed_with: Option<u16>,
 }
 
 impl fmt::Debug for WssConnection {
@@ -471,6 +509,19 @@ impl WssConnection {
     #[must_use]
     pub fn peer(&self) -> &str {
         &self.peer
+    }
+
+    /// The status code the peer's close frame carried, once [`next`](Self::next) has reported the
+    /// close by returning `Ok(None)`.
+    ///
+    /// `None` before that, and `None` afterwards when the connection ended without a code — an
+    /// EOF, an abrupt reset, or a close frame with an empty body, none of which carry one
+    /// (RFC 6455 §5.5.1, §7.1.5). Kept here rather than returned from `next` because a close is
+    /// not a message: a caller reading messages should not have to destructure one to get the
+    /// next event, and the code is a fact about the *connection* that outlives the read.
+    #[must_use]
+    pub fn close_code(&self) -> Option<u16> {
+        self.closed_with
     }
 
     /// Send one text message.
@@ -562,7 +613,11 @@ impl WssConnection {
                     // Pings are answered by the protocol layer before this ever sees them
                     // (RFC 6455 §5.5.2); raw frames are the layer's own bookkeeping.
                     Some(Ok(Message::Ping(_) | Message::Frame(_))) => {}
-                    Some(Ok(Message::Close(_))) | None => return Ok(None),
+                    Some(Ok(Message::Close(frame))) => {
+                        self.closed_with = frame.map(|frame| u16::from(frame.code));
+                        return Ok(None);
+                    }
+                    None => return Ok(None),
                     Some(Err(error)) => return Err(self.fault(error)),
                 },
             }
@@ -613,8 +668,13 @@ impl WssConnection {
                     self.held.push_back(WssMessage::Binary(data));
                 }
                 Some(Ok(Message::Ping(_) | Message::Frame(_))) => {}
-                Some(Ok(Message::Close(_))) | None => {
+                Some(Ok(Message::Close(frame))) => {
                     // Reported after the caller has had what came before it.
+                    self.closed_with = frame.map(|frame| u16::from(frame.code));
+                    self.closed = true;
+                    return Ok(false);
+                }
+                None => {
                     self.closed = true;
                     return Ok(false);
                 }
@@ -804,6 +864,8 @@ fn upgrade_request(
     }
     builder.body(()).map_err(|error| WssError::Handshake {
         peer: target.authority.clone(),
+        // Nothing was sent, so no peer answered: there is no status to report.
+        status: None,
         detail: error.to_string(),
     })
 }

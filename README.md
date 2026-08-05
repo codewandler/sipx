@@ -124,7 +124,7 @@ workspace, parsers are fuzzed, and unknown headers survive a parse/serialize rou
 <!-- BEGIN generated:crate-map -->
 | Crate | What it does |
 |---|---|
-| `sipx-app` | SIP application host with webhook and full-duplex session bindings |
+| `sipx-app` | SIP application host with webhook, session, and realtime audio bindings |
 | `sipx-app-protocol` | The sipx.app.v1 application contract: its types, JSON wire format, and sans-IO instruction interpreter |
 | `sipx-audio` | Telephony audio: G.711 µ-law and A-law, PCM mixing, WAV I/O, and Opus behind the `opus` feature |
 | `sipx-call` | Call framework: dial, answer, couple dialogs, play, record, send DTMF, and transfer |

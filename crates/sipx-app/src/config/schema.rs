@@ -27,13 +27,17 @@ const LISTENER_KEYS: [&str; 6] = [
     "app",
     "no_app",
 ];
-/// Every key an `[app.<name>]` table may set, across all three bindings.
-const APP_KEYS: [&str; 5] = [
+/// Every key an `[app.<name>]` table may set, across all four bindings.
+const APP_KEYS: [&str; 9] = [
     "binding",
     "url",
     "signing_secrets",
     "bearer_secret",
     "handler",
+    "endpoint",
+    "model",
+    "instructions",
+    "api_key_secret",
 ];
 /// Every key a `[app.<name>.grants]` table may set.
 const GRANT_KEYS: [&str; 3] = ["play_roots", "dial_headers", "originate"];
@@ -123,17 +127,76 @@ fn binding_of(table: &Table) -> Result<AppBinding, ConfigError> {
         "embedded" => AppBinding::Embedded {
             handler: required_path(&mut reader, "handler")?,
         },
+        "realtime" => AppBinding::Realtime {
+            endpoint: realtime_endpoint(&mut reader)?,
+            model: required_realtime_text(&mut reader, "model")?,
+            instructions: required_realtime_text(&mut reader, "instructions")?,
+            api_key_secret: required_secret(&mut reader, "api_key_secret")?,
+        },
         other => {
             return Err(ConfigError::bad_value(
                 entry.line,
                 &reader.path_of("binding"),
-                &format!("`{other}` is not a binding; it is webhook, session or embedded"),
+                &format!(
+                    "`{other}` is not a binding; it is webhook, session, embedded or realtime"
+                ),
             ));
         }
     };
 
     reader.finish(&APP_KEYS, "is not a key this binding takes")?;
     Ok(binding)
+}
+
+/// The base URL of a realtime session: absolute WebSocket, with the model query owned elsewhere.
+fn realtime_endpoint(reader: &mut Reader<'_>) -> Result<String, ConfigError> {
+    let path = reader.path_of("endpoint");
+    let Some(entry) = reader.get("endpoint") else {
+        return Err(ConfigError::missing_key(
+            &path,
+            "a realtime app declares the WebSocket endpoint it connects to",
+        ));
+    };
+    let text = string(entry, &path)?;
+    let authority = text
+        .strip_prefix("wss://")
+        .or_else(|| text.strip_prefix("ws://"))
+        .map(|rest| rest.split('/').next().unwrap_or_default());
+    let valid = authority.is_some_and(|authority| !authority.is_empty())
+        && !text.contains('?')
+        && !text.contains('#');
+    if valid {
+        Ok(text.to_owned())
+    } else {
+        Err(ConfigError::bad_value(
+            entry.line,
+            &path,
+            "an absolute ws or wss URI without a query or fragment is required",
+        ))
+    }
+}
+
+/// One required, non-empty realtime session string.
+fn required_realtime_text(
+    reader: &mut Reader<'_>,
+    key: &'static str,
+) -> Result<String, ConfigError> {
+    let path = reader.path_of(key);
+    let Some(entry) = reader.get(key) else {
+        return Err(ConfigError::missing_key(
+            &path,
+            "a realtime app declares every session value before a call arrives",
+        ));
+    };
+    let text = string(entry, &path)?;
+    if text.is_empty() {
+        return Err(ConfigError::bad_value(
+            entry.line,
+            &path,
+            "must not be empty",
+        ));
+    }
+    Ok(text.to_owned())
 }
 
 /// The `url` of a webhook app.

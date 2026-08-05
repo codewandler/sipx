@@ -161,12 +161,12 @@ Those properties make the core deterministic to drive from another runtime or a 
 | Calls with playback, recording, DTMF, transfer | `sipx-call` |
 | A phone to run rather than embed — the `sipx` binary | `sipx-cli` |
 | The `sipx.app.v1` contract: its types, wire format and interpreter | `sipx-app-protocol` |
-| The application host, webhook/session bindings, and deterministic contract harness | `sipx-app` |
+| The application host, webhook/session/realtime bindings, and deterministic contract harness | `sipx-app` |
 
-`sipx-app` includes a `sipx-host` process that serves real calls to document-mode webhooks or
-authenticated full-duplex sessions. A granted session can originate calls. The Rust host surfaces
-are Supported under the policy above; the `sipx.app.v1` wire line remains Experimental, and no
-embedded runtime or TypeScript SDK is shipped.
+`sipx-app` includes a `sipx-host` process that serves real calls to document-mode webhooks,
+authenticated full-duplex sessions, or a configured realtime audio bridge. A granted session can
+originate calls. The Rust host surfaces are Supported under the policy above; the `sipx.app.v1`
+wire line remains Experimental, and no embedded runtime or TypeScript SDK is shipped.
 
 ## Runtime and feature boundaries
 

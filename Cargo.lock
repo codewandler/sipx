@@ -2320,16 +2320,19 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 name = "sipx-app"
 version = "1.0.0-beta.4"
 dependencies = [
+ "base64",
  "bytes",
  "futures-util",
  "hmac",
  "reqwest",
+ "serde_json",
  "sha2",
  "sipx-app-protocol",
  "sipx-audio",
  "sipx-call",
  "sipx-media",
  "sipx-sip",
+ "sipx-testkit",
  "sipx-transport",
  "sipx-ua",
  "tokio",

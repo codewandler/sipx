@@ -107,7 +107,6 @@ _sipx implements exactly one SRTP protection profile:_
 
 ### Bridge a call to an OpenAI realtime agent
 _Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) §3, SRTP held to_
-- [A-22 — Bridge a call to an OpenAI agent](A-22-bridge-a-call-to-an-openai-agent.md) · Application · integrates A-19–A-21 — the bridge component, its host configuration, and the one-command product path
 - [A-23 — Prove the bridge against the live endpoint](A-23-prove-the-bridge-against-the-live-endpoint.md) · Application · opt-in and credentialed — the first such proof in the repo; disclaim-don't-skip, evidence recorded once
 
 ### Quic
@@ -131,6 +130,7 @@ _Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) 
 - [A-19 — Specify the OpenAI realtime bridge](A-19-specify-the-openai-realtime-bridge.md) · Application · spec before code — every later story in the epic derives its tests from this document's vectors
 - [A-20 — A WSS client for non-SIP peers](A-20-a-wss-client-for-non-sip-peers.md) · Application · independent of A-19 — a general RFC 6455 client over the existing TLS policy, no vendor knowledge
 - [A-21 — Build a deterministic realtime peer](A-21-build-a-deterministic-realtime-peer.md) · Application · starts when A-19's spec lands — the peer implements the spec's other side, vector by vector
+- [A-22 — Bridge a call to an OpenAI agent](A-22-bridge-a-call-to-an-openai-agent.md) · Application · integrates A-19–A-21 — the bridge component, its host configuration, and the one-command product path
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 gateway model · one live session crosses early and confirmed dialog state
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
