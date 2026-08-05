@@ -131,9 +131,10 @@ Any one of these is enough to revisit — this is a decision about present cost,
 
 ## X-30: reachability, and why the rule was scoped to media
 
-*(`X-33` widened the scope to `{media, security}` and to `status` as well as `roles`. This section is
-kept as `X-30` wrote it — including the measurement the widening was tested against — and the
-`X-33` section that follows says what changed and why. The check is now `unreachable_claims`.)*
+*(`X-33` widened the scope to `{media, security}` and to `status` as well as `roles`; M13 later
+added `services` after the live endpoint began selecting those optional drivers. This section is
+kept as `X-30` wrote it — including the measurement the widening was tested against — and the later
+sections say what changed and why. The check is now `unreachable_claims`.)*
 
 `X-30` asked whether the registry can distinguish *implemented in a crate* from *reachable from a
 call* — after the same over-claim landed five times in two days. The answer is yes, and it needs
@@ -329,7 +330,13 @@ table says — from "✅ implemented" to "🟡 partial" — and the table's own 
 without naming the gap, which is prose and unenforceable — but it is conspicuous, because the status
 column changes in a generated document.
 
-### The four package rows, resolved one at a time
+### The four package rows, resolved one at a time (historical; superseded by M13)
+
+**M13 fired the trigger this section defined.** `sipx-call` now has live notifier, subscriber and
+publication drivers which select the subscription, package, presence and publication services.
+The services layer therefore joined `ROLE_REACHABILITY_LAYERS`, and its role-claiming rows now cite
+Rust source at or above `sipx-call`. The paragraphs below retain X-33's reasoning about the earlier
+tree; they are not a description of the current dispatcher.
 
 `X-30` gave RFCs 3680, 3856, 3903 and 4235 one collective argument, which the story filing `X-33`
 called out as the "rule fitted to the data it was tested on" risk. Taken row by row the argument
@@ -449,7 +456,10 @@ path check would accept).
 **Wiring Opus to a call has no story either.** `M-13` is `done` and it built the codec, not the
 selection. The demotion says so.
 
-### Why the four `sipx-ua` service rows keep their roles
+### Why the four `sipx-ua` service rows kept their roles before M13
+
+This is the earlier-tree rationale. M13 added the dispatchers it names as absent, so the current
+answer is mechanical call-layer reachability and the services layer is inside the path check.
 
 RFCs 3680, 3856, 3903 and 4235 implement a `uas` surface in `sipx-ua` that **nothing in
 `sipx-cli` calls** — `sipx-cli` offers `register`, `dial`, `answer` and `peers`, and mentions

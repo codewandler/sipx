@@ -1744,6 +1744,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 
 [[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2392,6 +2401,7 @@ dependencies = [
  "cpal",
  "rand 0.9.5",
  "serde_json",
+ "sha2",
  "sipx-app-protocol",
  "sipx-audio",
  "sipx-call",
@@ -2403,6 +2413,7 @@ dependencies = [
  "sipx-transport",
  "sipx-ua",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2480,12 +2491,14 @@ version = "1.0.0-beta.4"
 dependencies = [
  "bytes",
  "rcgen",
+ "sipx-audio",
+ "sipx-call",
+ "sipx-rtp",
  "sipx-sip",
  "sipx-transport",
+ "thiserror 2.0.19",
  "tokio",
- "tokio-util",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2501,6 +2514,7 @@ dependencies = [
  "rcgen",
  "rustls-native-certs",
  "rustls-pki-types",
+ "rustls-webpki",
  "sipx-sip",
  "sipx-testkit",
  "thiserror 2.0.19",
@@ -2519,6 +2533,7 @@ dependencies = [
  "hmac",
  "md-5",
  "pretty_assertions",
+ "quick-xml",
  "rand 0.9.5",
  "sha2",
  "sipx-sip",

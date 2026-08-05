@@ -593,6 +593,10 @@ pub struct MediaSession {
     keypresses: Arc<watch::Sender<u64>>,
     codec: Codec,
     wire_payload_type: u8,
+    /// Retained non-secret wire facts for validated runtime attachment after a host restart.
+    dtmf_payload_type: Option<u8>,
+    rtcp_mode: sipx_sdp::RtcpMode,
+    encrypted: bool,
     local_addr: SocketAddr,
     samples_per_packet: usize,
     packet_duration: Duration,
@@ -613,13 +617,12 @@ pub struct MediaSession {
     ice: Option<crate::ice::driver::Handle>,
     /// Browser-component security facts, when the one-owner path established this session.
     browser_ingress: Option<Arc<std::sync::Mutex<crate::browser::ComponentIngress>>>,
-    /// The sole browser-component receiver. Retained so drop can cancel rather than detach it.
-    #[cfg(feature = "dtls")]
-    browser_owner: Option<tokio::task::JoinHandle<()>>,
-    #[cfg(feature = "dtls")]
-    browser_ice_owner: Option<tokio::task::JoinHandle<()>>,
-    #[cfg(feature = "dtls")]
-    browser_media_owners: Vec<tokio::task::JoinHandle<()>>,
+    /// Every asynchronous worker this session started. A handle remains registered while
+    /// `shutdown` awaits it, which makes a cancelled shutdown retryable instead of detached.
+    owners: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Stopped generations replaced in place but not yet completely joined. The replacement owns
+    /// them before its first await, so cancellation cannot turn reconfiguration into detachment.
+    retired: Mutex<Vec<MediaSession>>,
     #[cfg(all(test, feature = "dtls"))]
     browser_profile_tasks: Option<Arc<crate::browser::ProfileTasks>>,
     #[cfg(all(test, feature = "dtls"))]
@@ -1295,8 +1298,10 @@ impl MediaSession {
         let clock_rate = config.clock_rate;
         let config_codec = config.codec;
         let wire_payload_type = config.wire_payload_type();
+        let dtmf_payload_type = config.dtmf_payload_type;
         let rtcp_interval = config.rtcp_interval;
         let rtcp_mode = config.rtcp_mode;
+        let encrypted = config.srtp.is_some();
         // A muxed session has exactly one running socket owner. The adjacent socket was reserved
         // before negotiation and is released now; no control worker may race the RTP reader.
         let rtcp = match rtcp_mode {
@@ -1321,8 +1326,8 @@ impl MediaSession {
         // See `ice::driver::Destinations::rtcp`: `None` here, and for every stream without ICE,
         // leaves the report loop on RFC 3550 §11's convention.
         let rtcp_remote: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
-        let ice = ice.map(|local| {
-            spawn_ice(
+        let (ice, ice_owner) = ice.map_or((None, None), |local| {
+            let (handle, owner) = spawn_ice(
                 local,
                 socket,
                 rtcp.as_ref(),
@@ -1332,10 +1337,11 @@ impl MediaSession {
                 },
                 &shared.stop,
                 &shared.discards,
-            )
+            );
+            (Some(handle), Some(owner))
         });
 
-        tokio::spawn(send_loop(
+        let send_owner = tokio::spawn(send_loop(
             Arc::clone(socket),
             outgoing_rx,
             Sending {
@@ -1351,8 +1357,8 @@ impl MediaSession {
                 discards: Arc::clone(&shared.discards),
             },
         ));
-        let clips_tx = spawn_playback_queue(&outgoing_tx, &shared.stop);
-        tokio::spawn(receive_loop(
+        let (clips_tx, playback_owner) = spawn_playback_queue(&outgoing_tx, &shared.stop);
+        let receive_owner = tokio::spawn(receive_loop(
             ReceiveInput::socket(Arc::clone(socket)),
             Inbound {
                 audio: incoming_tx,
@@ -1378,7 +1384,8 @@ impl MediaSession {
         ));
 
         let rtcp_socket = rtcp.clone();
-        let _control_owners = spawn_control(Control {
+        let mut owners = vec![send_owner, playback_owner, receive_owner];
+        owners.extend(spawn_control(Control {
             media: Arc::clone(socket),
             rtcp,
             remote: Arc::clone(&remote),
@@ -1396,7 +1403,10 @@ impl MediaSession {
             discards: Arc::clone(&shared.discards),
             #[cfg(feature = "dtls")]
             profile_tasks: None,
-        });
+        }));
+        if let Some(owner) = ice_owner {
+            owners.push(owner);
+        }
 
         Self {
             socket: Arc::clone(socket),
@@ -1415,6 +1425,9 @@ impl MediaSession {
             keypresses: shared.keypresses,
             codec: config_codec,
             wire_payload_type,
+            dtmf_payload_type,
+            rtcp_mode,
+            encrypted,
             local_addr,
             samples_per_packet,
             packet_duration,
@@ -1425,12 +1438,8 @@ impl MediaSession {
             stats: shared.stats,
             feedback: shared.feedback,
             browser_ingress: None,
-            #[cfg(feature = "dtls")]
-            browser_owner: None,
-            #[cfg(feature = "dtls")]
-            browser_ice_owner: None,
-            #[cfg(feature = "dtls")]
-            browser_media_owners: Vec::new(),
+            owners: Mutex::new(owners),
+            retired: Mutex::new(Vec::new()),
             #[cfg(all(test, feature = "dtls"))]
             browser_profile_tasks: None,
             #[cfg(all(test, feature = "dtls"))]
@@ -1463,6 +1472,9 @@ impl MediaSession {
         let clock_rate = config.clock_rate;
         let config_codec = config.codec;
         let wire_payload_type = config.wire_payload_type();
+        let dtmf_payload_type = config.dtmf_payload_type;
+        let rtcp_mode = config.rtcp_mode;
+        let encrypted = config.srtp.is_some();
         let rtcp_interval = config.rtcp_interval;
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(64);
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
@@ -1525,8 +1537,8 @@ impl MediaSession {
             ),
         ));
 
-        let mut browser_media_owners = vec![send_owner, playback_owner, receive_owner];
-        browser_media_owners.extend(spawn_control(Control {
+        let mut owners = vec![owner, ice_owner, send_owner, playback_owner, receive_owner];
+        owners.extend(spawn_control(Control {
             media: Arc::clone(&socket),
             rtcp: None,
             remote: Arc::clone(&remote),
@@ -1551,9 +1563,8 @@ impl MediaSession {
             rtcp_socket: None,
             ice,
             browser_ingress: Some(ingress),
-            browser_owner: Some(owner),
-            browser_ice_owner: Some(ice_owner),
-            browser_media_owners,
+            owners: Mutex::new(owners),
+            retired: Mutex::new(Vec::new()),
             #[cfg(all(test, feature = "dtls"))]
             browser_profile_tasks: Some(profile_tasks),
             #[cfg(all(test, feature = "dtls"))]
@@ -1571,6 +1582,9 @@ impl MediaSession {
             keypresses: shared.keypresses,
             codec: config_codec,
             wire_payload_type,
+            dtmf_payload_type,
+            rtcp_mode,
+            encrypted,
             local_addr,
             samples_per_packet,
             packet_duration,
@@ -1642,9 +1656,10 @@ impl MediaSession {
     ///
     /// Used when a later SDP exchange changes the remote address, codec, payload type, or keys.
     /// The local RTP/RTCP addresses do not change: they are already published to the peer, and a
-    /// replacement that rebound an ephemeral port would make the new description false. The old
-    /// workers are stopped before their replacements are installed, while mute and encoded-relay
-    /// policy survive the transition.
+    /// replacement that rebound an ephemeral port would make the new description false. Mute and
+    /// encoded-relay policy survive the transition. The stopped generation remains owned until
+    /// all of its workers have joined; if this future is cancelled during that join, the next
+    /// reconfiguration or shutdown resumes the cleanup.
     ///
     /// Returns `false` without changing the session when ICE owns the destinations. Rebuilding an
     /// ICE-backed session requires the agent and its selected pair to move with the workers; a
@@ -1654,11 +1669,12 @@ impl MediaSession {
     ///
     /// Returns [`SetupError`] before stopping the current workers if the new timing or codec
     /// cannot be constructed.
-    pub fn reconfigure(&mut self, config: Config) -> Result<bool, SetupError> {
+    pub async fn reconfigure(&mut self, config: Config) -> Result<bool, SetupError> {
         if self.ice.is_some() {
             return Ok(false);
         }
         let prepared = Prepared::new(&config)?;
+        self.reap_retired().await;
         let muted = self.is_muted();
         let relay = self.relay.load(Ordering::SeqCst);
         let socket = Arc::clone(&self.socket);
@@ -1678,7 +1694,8 @@ impl MediaSession {
         replacement.set_muted(muted);
         replacement.set_relay(relay);
         let previous = std::mem::replace(self, replacement);
-        previous.stop();
+        self.retired.get_mut().push(previous);
+        self.reap_retired().await;
         Ok(true)
     }
 
@@ -1867,6 +1884,26 @@ impl MediaSession {
     #[must_use]
     pub fn wire_payload_type(&self) -> u8 {
         self.wire_payload_type
+    }
+
+    /// The negotiated RTP payload type for telephone events, when enabled.
+    #[must_use]
+    pub fn dtmf_payload_type(&self) -> Option<u8> {
+        self.dtmf_payload_type
+    }
+
+    /// Whether RTP and RTCP share one socket for this session.
+    #[must_use]
+    pub fn rtcp_mode(&self) -> sipx_sdp::RtcpMode {
+        self.rtcp_mode
+    }
+
+    /// Whether this session was constructed with SRTP key material.
+    ///
+    /// The key bytes remain owned by the workers and are never exposed by this fact.
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        self.encrypted
     }
 
     /// The RTP timestamp clock negotiated for this stream.
@@ -2209,31 +2246,37 @@ impl MediaSession {
         self.stop.stop();
     }
 
-    /// Stop and join the browser component's sole receive owner.
+    /// Stop and join every worker owned by this session.
     ///
-    /// Ordinary sessions have no such owner and return immediately. Media workers observe the
-    /// same durable stop token, close their channels and drop their SRTP/SRTCP contexts.
-    #[cfg(feature = "dtls")]
-    pub async fn shutdown(mut self) {
+    /// Handles stay in the registry until their await completes. Cancelling this future therefore
+    /// leaves the current handle owned, and a later call resumes the same drain.
+    pub async fn shutdown(&self) {
         self.stop.stop();
         if let Some(ingress) = &self.browser_ingress {
             crate::browser::lock_ingress(ingress).close();
         }
-        if let Some(owner) = self.browser_owner.take() {
-            // discard: stop is the terminal outcome and this await is the proof of reaping; an
-            // already-cancelled JoinError cannot change the completed shutdown contract.
-            let _ = owner.await;
-        }
-        if let Some(owner) = self.browser_ice_owner.take() {
-            // discard: stop is the terminal outcome and this await is the proof of reaping; an
-            // already-cancelled JoinError cannot change the completed shutdown contract.
-            let _ = owner.await;
-        }
-        for owner in self.browser_media_owners.drain(..) {
+        let mut owners = self.owners.lock().await;
+        while let Some(owner) = owners.last_mut() {
             // discard: every worker shares the observed stop token; awaiting proves it is reaped,
             // while a cancellation JoinError adds no packet-level discard to count.
             let _ = owner.await;
+            owners.pop();
         }
+        drop(owners);
+        self.reap_retired().await;
+    }
+
+    async fn reap_retired(&self) {
+        let mut retired = self.retired.lock().await;
+        while let Some(previous) = retired.last() {
+            Box::pin(previous.shutdown()).await;
+            retired.pop();
+        }
+    }
+
+    #[cfg(test)]
+    async fn owned_task_count(&self) -> usize {
+        self.owners.lock().await.len() + self.retired.lock().await.len()
     }
 
     /// Whether the session has been stopped.
@@ -2251,16 +2294,7 @@ impl Drop for MediaSession {
         if let Some(ingress) = &self.browser_ingress {
             crate::browser::lock_ingress(ingress).close();
         }
-        #[cfg(feature = "dtls")]
-        if let Some(owner) = self.browser_owner.take() {
-            owner.abort();
-        }
-        #[cfg(feature = "dtls")]
-        if let Some(owner) = self.browser_ice_owner.take() {
-            owner.abort();
-        }
-        #[cfg(feature = "dtls")]
-        for owner in self.browser_media_owners.drain(..) {
+        for owner in self.owners.get_mut().drain(..) {
             owner.abort();
         }
     }
@@ -2722,10 +2756,13 @@ fn discarded(frame: &Frame) -> bool {
 }
 
 /// Start the playback queue and hand back the end a session keeps (`M-17`).
-fn spawn_playback_queue(outgoing: &mpsc::Sender<Frame>, stop: &Arc<Stop>) -> mpsc::Sender<Clip> {
+fn spawn_playback_queue(
+    outgoing: &mpsc::Sender<Frame>,
+    stop: &Arc<Stop>,
+) -> (mpsc::Sender<Clip>, tokio::task::JoinHandle<()>) {
     let (clips_tx, clips_rx) = mpsc::channel::<Clip>(Playback::QUEUE_DEPTH);
-    tokio::spawn(playback_loop(clips_rx, outgoing.clone(), Arc::clone(stop)));
-    clips_tx
+    let owner = tokio::spawn(playback_loop(clips_rx, outgoing.clone(), Arc::clone(stop)));
+    (clips_tx, owner)
 }
 
 #[cfg(feature = "dtls")]
@@ -3017,7 +3054,7 @@ fn spawn_ice(
     destinations: &ice::driver::Destinations,
     stop: &Arc<Stop>,
     discards: &Arc<DiscardMeters>,
-) -> ice::driver::Handle {
+) -> (ice::driver::Handle, tokio::task::JoinHandle<()>) {
     let (agent, pending) = local.into_driver_parts();
     let mut sockets = vec![Arc::clone(socket)];
     if let Some(control) = rtcp {
@@ -3838,6 +3875,126 @@ mod tests {
             .await
             .expect("binds");
         (left, right)
+    }
+
+    /// `MediaSession` is the ownership boundary for every socket worker it starts. Returning
+    /// from shutdown with an empty registry is the happens-before used by callers that report
+    /// zero post-drain work; no wall-clock grace period stands in for a join.
+    #[tokio::test]
+    async fn ordinary_shutdown_joins_every_owned_worker() {
+        let placeholder: SocketAddr = "127.0.0.1:1".parse().expect("valid");
+        let session = MediaSession::start(any(), Config::new(placeholder, Codec::Pcmu))
+            .await
+            .expect("session starts");
+
+        assert!(
+            session.owned_task_count().await >= 5,
+            "send, receive, playback and both separate-RTCP workers are owned"
+        );
+        session.shutdown().await;
+        assert_eq!(session.owned_task_count().await, 0);
+    }
+
+    /// A shutdown future can itself be cancelled by an outer lifecycle deadline. The handle it
+    /// was joining must remain in the session so the owner can retry and still prove reaping.
+    #[tokio::test]
+    async fn cancelled_shutdown_keeps_the_in_flight_worker_owned() {
+        let placeholder: SocketAddr = "127.0.0.1:1".parse().expect("valid");
+        let session = Arc::new(
+            MediaSession::start(any(), Config::new(placeholder, Codec::Pcmu))
+                .await
+                .expect("session starts"),
+        );
+        let (worker_started_tx, worker_started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        session.owners.lock().await.push(tokio::spawn(async move {
+            let _ = worker_started_tx.send(());
+            let _ = release_rx.await;
+        }));
+        worker_started_rx.await.expect("test worker starts");
+
+        let shutdown_session = Arc::clone(&session);
+        let shutdown = tokio::spawn(async move { shutdown_session.shutdown().await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if session.owners.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await // bound on failure: ownership-lock acquisition has no timing semantics.
+        .expect("shutdown begins joining");
+        shutdown.abort();
+        let _ = shutdown.await;
+
+        assert!(session.owned_task_count().await >= 1);
+        release_tx.send(()).expect("test worker remains owned");
+        session.shutdown().await;
+        assert_eq!(session.owned_task_count().await, 0);
+    }
+
+    /// Reconfiguration installs a new generation before joining the old one. Cancellation in
+    /// that join must leave the old generation attached to the replacement so retry can finish
+    /// the same drain and release the shared socket deterministically.
+    #[tokio::test]
+    async fn cancelled_reconfigure_retains_the_old_generation_for_retry() {
+        let placeholder: SocketAddr = "127.0.0.1:1".parse().expect("valid");
+        let config = Config::new(placeholder, Codec::Pcmu);
+        let session = Arc::new(Mutex::new(
+            MediaSession::start(any(), config.clone())
+                .await
+                .expect("session starts"),
+        ));
+        let (stop_seen_tx, stop_seen_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut session = session.lock().await;
+            let old_stop = Arc::clone(&session.stop);
+            session.owners.get_mut().push(tokio::spawn(async move {
+                old_stop.wait().await;
+                let _ = stop_seen_tx.send(());
+                let _ = release_rx.await;
+            }));
+        }
+
+        let reconfiguring_session = Arc::clone(&session);
+        let retry_config = config.clone();
+        let reconfiguring = tokio::spawn(async move {
+            reconfiguring_session
+                .lock()
+                .await
+                .reconfigure(retry_config)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), stop_seen_rx)
+            .await // bound on failure: the old generation's stop signal has no timing semantics.
+            .expect("old generation observes stop")
+            .expect("stop observer remains alive");
+        reconfiguring.abort();
+        let _ = reconfiguring.await;
+
+        let local_addr = {
+            let mut session = session.lock().await;
+            assert_eq!(
+                session.retired.get_mut().len(),
+                1,
+                "the cancelled join retained its old generation"
+            );
+            release_tx.send(()).expect("old generation remains owned");
+            assert!(session.reconfigure(config).await.expect("retry succeeds"));
+            assert_eq!(session.retired.get_mut().len(), 0);
+            session.shutdown().await;
+            session.local_addr()
+        };
+        let session = Arc::try_unwrap(session)
+            .expect("the test owns the replacement")
+            .into_inner();
+        drop(session);
+        let rebound = UdpSocket::bind(local_addr)
+            .await
+            .expect("retry joined every old socket worker");
+        drop(rebound);
     }
 
     /// The failing-first test for this story.

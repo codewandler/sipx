@@ -38,6 +38,7 @@ pub mod endpoint;
 pub mod error;
 pub mod nat;
 pub mod overload;
+pub mod policy;
 #[cfg(feature = "quic")]
 pub mod quic;
 pub mod resolve;
@@ -55,9 +56,17 @@ pub use counters::{
     CaptureCounts, Counters, DiscardCounts, ShedCounts, TimeoutCounts, TransportCounts,
     UnsentCounts,
 };
-pub use endpoint::{Config, Handle, Incoming, Responses, Unmatched, bind, new_branch};
+pub use endpoint::{
+    Config, Handle, InProcessEndpoint, InProcessPair, Incoming, Responses, Unmatched, bind,
+    in_process_pair, new_branch,
+};
 pub use error::{Error, Result};
 pub use overload::{OverloadConfig, OverloadFeedback, RequestCategory};
+pub use policy::{
+    ConnectionId, ConnectionObservation, ConnectionState, EndpointObservation, MessageDirection,
+    MessageObservation, RequestPolicy, RequestPolicyDecision, RequestPolicyRef, SourcePrefix,
+    TransactionClass,
+};
 pub use resolve::{Naptr, Resolver, Srv, resolve};
 pub use stun::Reply as StunReply;
 pub use target::{ConnectionKey, Target, TransportKind};

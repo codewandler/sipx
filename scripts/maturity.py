@@ -56,7 +56,7 @@ OPEN = {"ready", "backlog", "blocked", "in-progress"}
 #: whole lineage: it is satisfied by citing a file whose relevant branch is dead. `X-38` did not build
 #: a better version of it — it changed what the question means, which is why the basis below is a
 #: second column rather than more rows in this one.
-REACHABILITY_CHECKED = {"media", "security"}
+REACHABILITY_CHECKED = {"media", "security", "services"}
 
 #: What now decides reachability for every layer: the shipped application, and the gate step that
 #: holds the declared surface against it. `X-38`, and alpha predicate 1.
@@ -129,8 +129,10 @@ ALPHA = (
         "computed",
         "Computed, but the thing computed is a *definition* rather than a search. `X-38` ships an "
         f"application (`{SURFACE_APPLICATION}`) and defines the reachable-from-a-call surface as what "
-        f"it uses; `{SURFACE_CHECKER}` holds every crate's `Supported` claim against that "
-        "application's real dependency closure, and the gate is red when the two disagree. The three "
+        f"it uses; `{SURFACE_CHECKER}` holds production `Supported` claims against that "
+        "application's real dependency closure. A published test product may prove only its own "
+        "crate through a manifest-declared, independently compiled example target; that class never "
+        "widens the production closure. The gate is red when either proof disagrees. The three "
         "path checks before it could only find capabilities that were *mentioned* — a path is "
         "satisfied by citing a file whose relevant branch is dead — and none of them could say "
         "whether a capability was worth selecting. An application answers that by needing it or not. "
@@ -1045,7 +1047,8 @@ def render(reseed=False):
         f"changed the basis of the last column**: every layer now has a shipped application under it, "
         f"in place of the caveat this table carried for `core`, `services`, `transport` and `wire`, "
         f"which said no caller had been found. `{SURFACE_CHECKER}` fails the gate when a crate claims "
-        f"supported surface no application reaches. The two layers that also say *path check* carry "
+        f"supported surface no declared reachability class proves. The layers that also say *path "
+        f"check* carry "
         f"`rfc-report.py`'s per-row check on top; the others are entered per crate, so a single row of "
         f"them is not individually attested. The column is about reachability, not about which crate "
         f"holds the code: what a row must cite is `docs/rfc/README.md`'s business, and `X-43` is where "

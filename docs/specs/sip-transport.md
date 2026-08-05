@@ -1,6 +1,6 @@
 # Spec: Transport layer
 
-**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4, T-25 … T-27 · **Design:**
+**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4, T-25 … T-27, T-32 · **Design:**
 [sip-transport](../designs/sip-transport.md)
 
 ## 1. Normative references
@@ -133,7 +133,7 @@ Why each field is in the key — which is an argument, not a list, and so is not
 |---|---|
 | `peer` | The far end. |
 | `transport` | Which transport it speaks. |
-| `identity` | The name whose certificate was verified, for connections sipx opened over TLS. |
+| `identity` | Original URI host: verified for TLS/WSS and used as authority for WS/WSS. |
 | `path` | The resource the upgrade asked for, for WebSocket connections sipx opened. |
 <!-- END generated:pool-key -->
 
@@ -169,6 +169,12 @@ Order: if the URI names an IP address or a port, that is the answer and nothing 
 Otherwise NAPTR → SRV → A/AAAA, with RFC 2782 weighted selection among equal priorities.
 
 **[RFC]** A `sips:` URI restricts candidates to TLS-capable transports.
+**[sipx]** The pure `Uri::selected_transport` rule is the single mapping used both here and by
+dialog route-set consumers. It maps the URI scheme and transport parameter before resolution,
+supplies the transport's default port, rejects unknown transports and rejects `sips` over UDP.
+The pre-resolution URI host remains on every outbound WebSocket target: WSS verifies it and both WS
+and WSS use it as the HTTP `Host` authority. Connection pooling keys include that authority and the
+WebSocket resource, so virtual hosts and paths at one address never share an upgrade.
 **[sipx]** Resolution is behind a trait so tests use a fixture and never touch DNS. The
 weighted selection takes its randomness from an injectable source, so the distribution is
 testable with a fixed seed.
@@ -312,6 +318,50 @@ saturated. After expiry, every response reports explicit control-off state.
 | X33 | Unmatched response carrying valid-looking overload feedback | It reaches the unmatched path but changes no client control state |
 | X34 | More reporting peers than the configured overload-state bound | The map never exceeds the bound and evicts expired/control-off least-recently-used state first |
 | X35 | Queue saturation followed by an application response for an earlier request | The response still reports active feedback; a generated 100 Trying also carries a selected report |
+| X36 | Observation capacity one, followed by several parsed messages | The driver never waits; one event is retained and every overflow increments `observation_dropped` |
+| X37 | Observation receiver is closed while traffic continues | Traffic and timers continue; closure creates no driver failure |
+| X38 | Request policy returns a protected field directly, as mixed-case/compact `Other`, or appends a duplicate allowed standard field | Send is refused before transaction creation; only the application-field allowlist or a truly unknown extension may be appended |
+| X39 | Refused UDP source sends malformed bytes | `source_refusals` increments and `parse_failures` does not: admission ran before parsing |
+| X40 | Refused source reaches TCP, TLS, WebSocket, secure WebSocket or QUIC | The connection closes before framing or handshake work and that transport's `source_refusals` increments |
+| X41 | Source set changes from A to B while A has a pooled stream | New A connections are refused, B is admitted, and the existing A generation remains usable until close |
+| X42 | Replacement exceeds `source_admission_limit` | Typed capacity refusal; the previous complete generation and its number remain active |
+
+### 11.1 Live endpoint policy and observation
+
+**[sipx] Source admission precedes protocol work.** The active policy is either allow-all or one
+immutable set of exact IP addresses and CIDR prefixes. UDP reads the current generation before STUN
+classification or SIP parsing. TCP, TLS, WebSocket, secure WebSocket and QUIC read it immediately
+after the socket-level accept and before stream parsing, TLS authentication or HTTP upgrade. A
+refusal creates no task, future, per-source map entry or application event; it closes or drops, bumps
+the transport's `source_refusals`, and logs at debug level.
+
+Replacing or clearing the policy publishes one complete generation under one synchronization point.
+The configured `source_admission_limit` is non-zero and bounds both retained prefixes and the linear
+work of every admission decision. A replacement above it returns a typed capacity error before the
+publication point, leaving the old generation unchanged. The default maximum is 1024 prefixes.
+UDP has no connection and therefore reads the latest generation per datagram. A connection keeps the
+generation that admitted it; replacement governs later accepts and is deliberately not a revocation
+mechanism. That makes rotation atomic without letting policy work race every frame on an established
+call.
+
+**[sipx] Observation is data, never a callback.** One optional bounded receiver carries cloned,
+read-only endpoint events. Message events contain the parsed or finalized `Message`, local and peer
+addresses, transport, direction and transaction classification. Connection events contain a typed
+connection identity and accepted/opened, authenticated, pooled/reused, failed or closed state.
+Every producer uses `try_send`; a full receiver increments `observation_dropped`, and a closed
+receiver is detached. Capture and counter snapshots remain the no-custom-consumer path.
+
+**[sipx] Request policy is structurally narrow.** It receives an immutable request and target in the
+caller's task and returns allow, reject, or a list of headers to append. It cannot receive a mutable
+request. The standard-header allowlist is `Alert-Info`, `Call-Info`, `Organization`, `Priority`,
+`Subject` and `User-Agent`; an allowed standard field already present is refused rather than appended
+as a duplicate. A genuinely unknown extension field is also allowed. Before classification,
+`HeaderName::Other` is resolved case-insensitively and through SIP compact forms, so `Other("vIa")`
+and `Other("v")` are both protected `Via`. Every other standard field—including `Contact`, body
+metadata such as `Content-Type`, and dialog/event semantics such as `Event`—is refused before a
+command reaches the endpoint. The transport then adds its branch and `Via`, creates the transaction
+key, and serializes framing. The policy cannot replace target resolution and no policy runs after
+transaction creation.
 
 ## 12. Counters
 

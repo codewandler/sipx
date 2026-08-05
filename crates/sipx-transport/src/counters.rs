@@ -106,6 +106,7 @@ struct TransportMeter {
     responses_in: AtomicU64,
     responses_out: AtomicU64,
     parse_failures: AtomicU64,
+    source_refusals: AtomicU64,
 }
 
 /// What crossed one transport, in both directions.
@@ -129,6 +130,8 @@ pub struct TransportCounts {
     /// what could not be determined (§12.2). So `requests_in + responses_in` omits these, and the
     /// number of messages that arrived at all is that sum *plus* this.
     pub parse_failures: u64,
+    /// Packets or new connections rejected by live source admission before protocol work.
+    pub source_refusals: u64,
 }
 
 /// Transactions abandoned by the timer that gave up on them.
@@ -337,6 +340,8 @@ pub struct Counters {
     pub unsent: UnsentCounts,
     /// How the capture is faring, if one is running (§13).
     pub capture: CaptureCounts,
+    /// Observation events dropped because the optional bounded consumer was behind.
+    pub observation_dropped: u64,
     /// Per-transport message counts, read through [`Counters::transport`].
     per_transport: [TransportCounts; TRANSPORTS],
 }
@@ -394,6 +399,7 @@ impl Counters {
             || self.overload_rejections > 0
             || self.discards.total() > 0
             || self.capture.dropped > 0
+            || self.observation_dropped > 0
             || self.unsent.total() > 0
     }
 }
@@ -423,6 +429,7 @@ pub(crate) struct Meters {
     capture_records: AtomicU64,
     capture_dropped: AtomicU64,
     capture_errors: AtomicU64,
+    observation_dropped: AtomicU64,
     unsent: Unsent,
 }
 
@@ -473,6 +480,18 @@ impl Meters {
         if let Some(meter) = self.meter(transport) {
             bump(&meter.parse_failures);
         }
+    }
+
+    /// A source was refused before parsing or handshaking.
+    pub(crate) fn source_refusal(&self, transport: TransportKind) {
+        if let Some(meter) = self.meter(transport) {
+            bump(&meter.source_refusals);
+        }
+    }
+
+    /// A bounded observation receiver was full.
+    pub(crate) fn observation_drop(&self) {
+        bump(&self.observation_dropped);
     }
 
     /// A response matched no client transaction.
@@ -574,6 +593,7 @@ impl Meters {
                 responses_in: read(&meter.responses_in),
                 responses_out: read(&meter.responses_out),
                 parse_failures: read(&meter.parse_failures),
+                source_refusals: read(&meter.source_refusals),
             };
         }
         Counters {
@@ -602,6 +622,7 @@ impl Meters {
                 dropped: read(&self.capture_dropped),
                 errors: read(&self.capture_errors),
             },
+            observation_dropped: read(&self.observation_dropped),
             unsent: UnsentCounts {
                 invite: read(&self.unsent.invite),
                 ack: read(&self.unsent.ack),

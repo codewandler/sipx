@@ -14,8 +14,14 @@ into a fixture here would be caught by the provenance check — the same reason
 
 import datetime
 import importlib.util
+import json
+import os
 import pathlib
+import signal
 import sys
+import tempfile
+import threading
+import time
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -36,11 +42,191 @@ def load_report_module():
 
 report = load_report_module()
 
+
+def load_comparative_module():
+    """Import the neutral load contract kept beside the comparison checker."""
+    spec = importlib.util.spec_from_file_location(
+        "comparative_load", ROOT / "scripts" / "comparative-load.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+load_contract = load_comparative_module()
+
 #: The reserved fixture identity. Assertions filter on it so a fixture's problem can never be
 #: confused with a problem the real dataset has.
 FIXTURE_STACK = "zz-fixture-stack"
 FIXTURE_DIMENSION = "zz-fixture-dimension"
+FIXTURE_REVISION = "0123456789abcdef0123456789abcdef01234567"
 TODAY = datetime.date(2026, 8, 4)
+
+
+def process_group_exists(pgid):
+    """Observe whether a POSIX process group still owns at least one process."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def force_group_cleanup(pgid, timeout_seconds=2.0):
+    """Keep adversarial supervision fixtures from leaving work behind when an assertion fails."""
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + timeout_seconds
+    pause = threading.Event()
+    while process_group_exists(pgid) and time.monotonic() < deadline:
+        pause.wait(min(0.01, max(0.0, deadline - time.monotonic())))
+
+
+def a_load_manifest():
+    """One complete immutable v1 execution manifest."""
+    return {
+        "schema": load_contract.MANIFEST_SCHEMA,
+        "run_id": "0123456789abcdef0123456789abcdef",
+        "seed": 7,
+        "direction": {"index": 0, "driver": "endpoint-a", "responder": "endpoint-b"},
+        "builds": [
+            {
+                "endpoint_id": "endpoint-a",
+                "role": "driver",
+                "revision": "revision-a",
+                "artifact_sha256": "a" * 64,
+                "argv": ["/opt/endpoint-a", "drive"],
+                "cwd": "/opt",
+                "env_keys": ["PATH"],
+            },
+            {
+                "endpoint_id": "endpoint-b",
+                "role": "responder",
+                "revision": "revision-b",
+                "artifact_sha256": "b" * 64,
+                "argv": ["/opt/endpoint-b", "respond"],
+                "cwd": "/opt",
+                "env_keys": ["PATH"],
+            },
+        ],
+        "machine": {
+            "os": "fixture-os",
+            "architecture": "fixture-arch",
+            "logical_cpus": 8,
+            "memory_bytes": 8 * 1024 * 1024 * 1024,
+            "clock": "monotonic",
+        },
+        "ceiling": 1024,
+        "provisional_policy": "trying_100",
+        "limits": {
+            "active": 2048,
+            "events": load_contract.MAX_EVENTS,
+            "event_bytes": load_contract.MAX_EVENT_BYTES,
+            "stdout_bytes": load_contract.MAX_LOG_BYTES,
+            "stderr_bytes": load_contract.MAX_LOG_BYTES,
+        },
+        "phases": {
+            "readiness_ms": load_contract.READINESS_MS,
+            "correctness_rate": 1,
+            "correctness_dialogs": 20,
+            "headroom_multiplier": 2,
+            "warmup_ms": load_contract.WARMUP_MS,
+            "measurement_ms": load_contract.MEASUREMENT_MS,
+            "drain_ms": load_contract.MAX_DRAIN_MS,
+        },
+        "ladder": {
+            "divisors": list(load_contract.LADDER_DIVISORS),
+            "repetitions": load_contract.REPETITIONS,
+            "stop_after_failed_rates": load_contract.STOP_AFTER_FAILED_RATES,
+        },
+    }
+
+
+def a_load_result(manifest=None):
+    """A passed result with complete post-cleanup and resource evidence."""
+    manifest = manifest or a_load_manifest()
+    build = manifest["builds"][0]
+    offered = 1920
+    return {
+        "schema": load_contract.RESULT_SCHEMA,
+        "status": "passed",
+        "run": {
+            "run_id": manifest["run_id"],
+            "seed": manifest["seed"],
+            "direction": manifest["direction"],
+            "rate_index": 0,
+            "rate_per_second": 32,
+            "repetition": 0,
+            "started_utc": "2026-08-05T12:00:00Z",
+            "elapsed_ms": 70_100,
+            "warmup_ms": load_contract.WARMUP_MS,
+            "measurement_ms": load_contract.MEASUREMENT_MS,
+            "drain_ms": 100,
+        },
+        "build": {
+            "endpoint_id": build["endpoint_id"],
+            "role": build["role"],
+            "revision": build["revision"],
+            "artifact_sha256": build["artifact_sha256"],
+            "argv_sha256": load_contract.argv_hash(build["argv"]),
+        },
+        "machine": manifest["machine"],
+        "profile": {
+            "transport": "udp",
+            "t1_ms": 500,
+            "t2_ms": 4000,
+            "t4_ms": 5000,
+            "provisional_policy": manifest["provisional_policy"],
+            "maximum_active": manifest["limits"]["active"],
+            "events": manifest["limits"]["events"],
+            "event_bytes": manifest["limits"]["event_bytes"],
+            "stdout_bytes": manifest["limits"]["stdout_bytes"],
+            "stderr_bytes": manifest["limits"]["stderr_bytes"],
+            "contract_sha256": load_contract.contract_hash(),
+        },
+        "counts": {
+            "offered": offered,
+            "established": offered,
+            "completed": offered,
+            "active_high_water": 64,
+            "request_retransmissions": 0,
+            "response_retransmissions": 0,
+        },
+        "responses": {"provisional": {"100": offered}, "final": {"200": offered * 2}},
+        "errors": {name: 0 for name in load_contract.TERMINAL_ERRORS + load_contract.RUN_ERRORS},
+        "latency_ms": {
+            "setup": {"count": offered, "p50": 2, "p95": 4, "p99": 6, "max": 8},
+            "teardown": {"count": offered, "p50": 1, "p95": 2, "p99": 3, "max": 5},
+        },
+        "resources": {
+            "sample_interval_ms": 100,
+            "unsupported_resources": [],
+            "cpu_user_ms": 10_000,
+            "cpu_system_ms": 2_000,
+            "peak_rss_bytes": 64 * 1024 * 1024,
+            "descriptor_high_water": 32,
+            "task_thread_high_water": 16,
+            "endpoint_active_high_water": 64,
+        },
+        "post_drain": {
+            "active_dialogs": 0,
+            "transactions": 0,
+            "timers": 0,
+            "endpoint_tasks": 0,
+            "retained_events": 0,
+        },
+        "cleanup": {
+            "admission_stopped": True,
+            "zero_state_observed": True,
+            "process_group_exited": True,
+            "leader_status": 0,
+            "descendant_pipe_eof": True,
+            "escalation": "none",
+            "elapsed_ms": 100,
+        },
+    }
 
 
 def a_dimension(**overrides):
@@ -63,6 +249,7 @@ def a_stack(**overrides):
         "language": "Rust",
         "repository": "https://example.invalid/zz-fixture-stack",
         "license": "MIT",
+        "capability_inventory": True,
     }
     stack.update(overrides)
     return stack
@@ -93,6 +280,505 @@ def problems_for(observation, *, stacks=None, dimensions=None, today=TODAY):
         today,
     )
     return [p for p in found if FIXTURE_STACK in p or FIXTURE_DIMENSION in p]
+
+
+def a_capability(**overrides):
+    capability = {
+        "id": "zz-capability",
+        "category": "core",
+        "title": "A public capability",
+        "ownership": "sipx",
+        "status": "implemented",
+        "confidence": "measured",
+        "implementation": ["crates/sipx-sip/src/message.rs"],
+        "evidence": [
+            {
+                "url": f"https://example.invalid/source/blob/{FIXTURE_REVISION}/message.rs",
+                "note": "the exported API",
+            }
+        ],
+    }
+    capability.update(overrides)
+    return capability
+
+
+def a_capability_ledger(capabilities=None, **overrides):
+    capabilities = capabilities or [a_capability()]
+    ledger = {
+        "subject": FIXTURE_STACK,
+        "version_evaluated": "1.2.3",
+        "evaluated_at": "2026-08-01",
+        "source_revision": FIXTURE_REVISION,
+        "expected_capabilities": len(capabilities),
+        "capabilities": capabilities,
+        "_file": f"{FIXTURE_STACK}.json",
+    }
+    ledger.update(overrides)
+    return ledger
+
+
+def capability_problems_for(capability, **ledger_overrides):
+    ledger = a_capability_ledger([capability], **ledger_overrides)
+    return checked_capability_problems([ledger])
+
+
+def expectations_for(ledgers):
+    return {
+        ledger["subject"]: (
+            ledger["source_revision"],
+            {capability["id"] for capability in ledger["capabilities"]},
+        )
+        for ledger in ledgers
+    }
+
+
+def checked_capability_problems(ledgers, stacks=None):
+    return report.capability_problems(
+        ledgers,
+        stacks or [a_stack()],
+        TODAY,
+        expectations=expectations_for(ledgers),
+    )
+
+
+def a_complete_capability_ledger():
+    capabilities = []
+    for category in sorted(report.REQUIRED_CAPABILITY_CATEGORIES):
+        capabilities.append(a_capability(id=f"zz-{category}", category=category))
+    return a_capability_ledger(capabilities)
+
+
+class TheCapabilityLedger(unittest.TestCase):
+    """A complete leaf inventory has one evidence-backed owner and disposition per row."""
+
+    def test_an_open_sipx_row_without_a_story_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(status="open"))
+        self.assertTrue(any("open sipx row" in problem for problem in problems), problems)
+
+    def test_a_complete_fresh_ledger_is_accepted(self) -> None:
+        self.assertEqual(
+            [],
+            checked_capability_problems([a_complete_capability_ledger()]),
+        )
+
+    def test_an_unknown_owner_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(ownership="somebody"))
+        self.assertTrue(any("unknown ownership" in problem for problem in problems), problems)
+
+    def test_an_unknown_subject_is_rejected(self) -> None:
+        ledger = a_complete_capability_ledger()
+        problems = checked_capability_problems(
+            [ledger], [a_stack(id="another-stack")]
+        )
+        self.assertTrue(any("does not declare" in problem for problem in problems), problems)
+
+    def test_a_mismatched_filename_is_rejected(self) -> None:
+        ledger = a_complete_capability_ledger()
+        ledger["_file"] = "wrong.json"
+        problems = checked_capability_problems([ledger])
+        self.assertTrue(any("filename must match" in problem for problem in problems), problems)
+
+    def test_a_missing_revision_is_rejected(self) -> None:
+        ledger = a_complete_capability_ledger()
+        ledger["source_revision"] = ""
+        problems = checked_capability_problems([ledger])
+        self.assertTrue(any("no immutable version" in problem for problem in problems), problems)
+
+    def test_an_invalid_owner_status_pair_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(status="tracked"))
+        self.assertTrue(any("not valid for ownership" in problem for problem in problems), problems)
+
+    def test_a_duplicate_leaf_is_rejected(self) -> None:
+        capability = a_capability()
+        ledger = a_capability_ledger([capability, dict(capability)])
+        problems = checked_capability_problems([ledger])
+        self.assertTrue(any("declares capability" in problem for problem in problems), problems)
+
+    def test_a_duplicate_subject_ledger_is_rejected(self) -> None:
+        ledger = a_complete_capability_ledger()
+        problems = checked_capability_problems([ledger, dict(ledger)])
+        self.assertTrue(any("has 2 ledgers" in problem for problem in problems), problems)
+
+    def test_the_expected_count_ratchets_leaf_removal(self) -> None:
+        ledger = a_complete_capability_ledger()
+        ledger["capabilities"].pop()
+        problems = checked_capability_problems([ledger])
+        self.assertTrue(any("expected capabilities" in problem for problem in problems), problems)
+
+    def test_the_separate_exact_id_inventory_survives_a_coedited_count(self) -> None:
+        ledger = a_complete_capability_ledger()
+        expectations = expectations_for([ledger])
+        removed = ledger["capabilities"].pop()["id"]
+        ledger["expected_capabilities"] -= 1
+        problems = report.capability_problems(
+            [ledger], [a_stack()], TODAY, expectations=expectations
+        )
+        self.assertTrue(
+            any(removed in problem and "omits expected" in problem for problem in problems),
+            problems,
+        )
+
+    def test_an_exact_id_inventory_without_its_ledger_is_rejected(self) -> None:
+        problems = report.capability_problems(
+            [],
+            [a_stack()],
+            TODAY,
+            expectations={FIXTURE_STACK: (FIXTURE_REVISION, {"zz-capability"})},
+        )
+        self.assertTrue(any("no corresponding ledger" in problem for problem in problems), problems)
+
+    def test_deleting_both_inventory_files_is_rejected_by_the_stack_anchor(self) -> None:
+        problems = report.capability_problems([], [a_stack()], TODAY, expectations={})
+        for phrase in ("requires a capability ledger", "requires an exact-ID inventory"):
+            self.assertTrue(any(phrase in problem for problem in problems), problems)
+
+    def test_removing_every_stack_anchor_is_rejected(self) -> None:
+        stack = a_stack()
+        del stack["capability_inventory"]
+        problems = report.capability_problems([], [stack], TODAY, expectations={})
+        self.assertTrue(any("no comparison stack requires" in problem for problem in problems), problems)
+
+    def test_an_unevidenced_leaf_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(evidence=[]))
+        self.assertTrue(any("cites no evidence" in problem for problem in problems), problems)
+
+    def test_an_implemented_leaf_without_rust_source_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(implementation=[]))
+        self.assertTrue(any("Rust source evidence" in problem for problem in problems), problems)
+
+    def test_implementation_evidence_must_be_workspace_rust_source(self) -> None:
+        problems = capability_problems_for(a_capability(implementation=["README.md"]))
+        self.assertTrue(any("workspace crate" in problem for problem in problems), problems)
+
+    def test_implementation_evidence_cannot_escape_the_crates_directory(self) -> None:
+        problems = capability_problems_for(
+            a_capability(implementation=["crates/../fuzz/fuzz_targets/parse_stream.rs"])
+        )
+        self.assertTrue(any("workspace crate" in problem for problem in problems), problems)
+
+    def test_non_sipx_rows_cannot_carry_implementation_evidence(self) -> None:
+        problems = capability_problems_for(
+            a_capability(ownership="not-shipped", status="absent")
+        )
+        self.assertTrue(
+            any("without implemented sipx ownership" in problem for problem in problems),
+            problems,
+        )
+
+    def test_an_open_row_with_a_done_story_is_rejected(self) -> None:
+        problems = capability_problems_for(
+            a_capability(
+                status="open",
+                implementation=None,
+                story="docs/stories/M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md",
+            )
+        )
+        self.assertTrue(any("is done" in problem for problem in problems), problems)
+
+    def test_an_open_row_with_a_non_story_file_is_rejected(self) -> None:
+        problems = capability_problems_for(
+            a_capability(status="open", implementation=None, story="README.md")
+        )
+        self.assertTrue(any("has no status" in problem for problem in problems), problems)
+
+    def test_a_cluster_story_must_be_in_the_pinned_index(self) -> None:
+        problems = capability_problems_for(
+            a_capability(
+                ownership="sipx-clstr",
+                status="tracked",
+                implementation=None,
+                story="https://example.invalid/story.md",
+            )
+        )
+        self.assertTrue(any("pinned external index" in problem for problem in problems), problems)
+
+    def test_every_required_category_must_remain(self) -> None:
+        ledger = a_complete_capability_ledger()
+        ledger["capabilities"] = [
+            row for row in ledger["capabilities"] if row["category"] != "transports"
+        ]
+        ledger["expected_capabilities"] = len(ledger["capabilities"])
+        problems = checked_capability_problems([ledger])
+        self.assertTrue(any("omits required categories" in problem for problem in problems), problems)
+
+    def test_a_stale_ledger_is_rejected(self) -> None:
+        stale = TODAY - datetime.timedelta(days=report.MAX_OBSERVATION_AGE_DAYS + 1)
+        problems = capability_problems_for(
+            a_capability(), evaluated_at=stale.isoformat()
+        )
+        self.assertTrue(any("stale" in problem for problem in problems), problems)
+
+    def test_an_exclusion_without_a_rationale_is_rejected(self) -> None:
+        problems = capability_problems_for(
+            a_capability(ownership="not-applicable", status="excluded")
+        )
+        self.assertTrue(any("without a rationale" in problem for problem in problems), problems)
+
+    def test_an_unknown_confidence_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(confidence="certain"))
+        self.assertTrue(any("unknown confidence" in problem for problem in problems), problems)
+
+    def test_assessed_confidence_requires_a_rationale(self) -> None:
+        problems = capability_problems_for(a_capability(confidence="assessed"))
+        self.assertTrue(any("assessed without a rationale" in problem for problem in problems), problems)
+
+    def test_measured_confidence_requires_the_exact_source_revision(self) -> None:
+        problems = capability_problems_for(
+            a_capability(
+                evidence=[
+                    {
+                        "url": "https://example.invalid/source/v1.2.3",
+                        "note": "a mutable tag",
+                    }
+                ]
+            )
+        )
+        self.assertTrue(any("without pinning" in problem for problem in problems), problems)
+
+    def test_measured_confidence_rejects_a_revision_hidden_in_a_mutable_url(self) -> None:
+        problems = capability_problems_for(
+            a_capability(
+                evidence=[
+                    {
+                        "url": f"https://example.invalid/main?claimed_revision={FIXTURE_REVISION}",
+                        "note": "a mutable branch with a decorative revision",
+                    }
+                ]
+            )
+        )
+        self.assertTrue(any("without pinning" in problem for problem in problems), problems)
+
+    def test_documented_confidence_may_cite_versioned_prose(self) -> None:
+        capability = a_capability(
+            confidence="documented",
+            evidence=[
+                {
+                    "url": "https://example.invalid/docs/v1.2.3",
+                    "note": "the subject documentation",
+                }
+            ],
+        )
+        self.assertFalse(
+            any("without pinning" in problem for problem in capability_problems_for(capability))
+        )
+
+    def test_schema_rejects_non_string_evidence_paths(self) -> None:
+        capability = a_capability(evidence=[{"path": 123, "note": "not a path"}])
+        problems = report.capability_schema_problems(a_capability_ledger([capability]))
+        self.assertTrue(any("evidence path value" in problem for problem in problems), problems)
+
+    def test_schema_rejects_empty_optional_implementation_lists(self) -> None:
+        capability = a_capability(status="open", story="README.md", implementation=[])
+        problems = report.capability_schema_problems(a_capability_ledger([capability]))
+        self.assertTrue(any("implementation list" in problem for problem in problems), problems)
+
+    def test_scalar_schema_constraints_are_checked(self) -> None:
+        capability = a_capability(
+            id="",
+            title="",
+            evidence=[{"url": "not a uri", "note": ""}],
+        )
+        ledger = a_capability_ledger([capability], source_revision="x")
+        problems = report.capability_schema_problems(ledger)
+        problems.extend(report.capability_evidence_problems(ledger, capability))
+        for phrase in (
+            "source revision",
+            "stable capability key",
+            "empty title",
+            "empty note",
+            "invalid evidence URL",
+        ):
+            self.assertTrue(
+                any(phrase in problem for problem in problems), (phrase, problems)
+            )
+
+    def test_non_scalar_dispositions_are_refused_without_a_crash(self) -> None:
+        for field in ("confidence", "ownership", "status"):
+            for value in (["not", "scalar"], {"not": "scalar"}):
+                with self.subTest(field=field, value=value):
+                    capability = a_capability(**{field: value})
+                    ledger = a_capability_ledger([capability])
+                    schema = report.capability_schema_problems(ledger)
+                    self.assertTrue(any(f"invalid {field}" in p for p in schema), schema)
+                    substantive = report.capability_problems(
+                        [ledger],
+                        [a_stack()],
+                        TODAY,
+                        expectations=expectations_for([ledger]),
+                    )
+                    self.assertTrue(substantive)
+
+    def test_a_leaf_reaches_the_rendered_document(self) -> None:
+        rendered = report.render(
+            [a_dimension()],
+            [a_stack()],
+            [an_observation()],
+            report.GENERATED_VALUES_FOR_TESTS,
+            [a_capability_ledger()],
+        )
+        self.assertIn("A public capability", rendered)
+        self.assertIn("Endpoint capability ledger", rendered)
+
+
+class TheExternalStoryIndex(unittest.TestCase):
+    """Cluster ownership cites an exact commit, path and Git blob identity offline."""
+
+    def valid_index(self):
+        return {
+            "repository": "https://example.invalid/cluster",
+            "source_revision": "a" * 40,
+            "stories": [
+                {
+                    "path": "docs/stories/ZZ-1-a-story.md",
+                    "blob_sha": "b" * 40,
+                }
+            ],
+        }
+
+    def problems_for(self, value):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = pathlib.Path(raw)
+            (directory / "cluster.json").write_text(json.dumps(value), encoding="utf-8")
+            return report.external_story_index_problems(
+                directory,
+                lambda _repository, _revision, paths: {path: "b" * 40 for path in paths},
+            )
+
+    def test_a_complete_pinned_index_is_accepted_and_derives_the_url(self) -> None:
+        value = self.valid_index()
+        with tempfile.TemporaryDirectory() as raw:
+            directory = pathlib.Path(raw)
+            (directory / "cluster.json").write_text(json.dumps(value), encoding="utf-8")
+            self.assertEqual(
+                [],
+                report.external_story_index_problems(
+                    directory,
+                    lambda _repository, _revision, paths: {
+                        path: "b" * 40 for path in paths
+                    },
+                ),
+            )
+            self.assertEqual(
+                {
+                    "https://example.invalid/cluster/blob/"
+                    f"{'a' * 40}/docs/stories/ZZ-1-a-story.md"
+                },
+                report.external_story_urls(directory),
+            )
+
+    def test_a_well_formed_but_wrong_blob_identity_is_rejected(self) -> None:
+        value = self.valid_index()
+        value["stories"][0]["blob_sha"] = "0" * 40
+        problems = self.problems_for(value)
+        self.assertTrue(any("pinned commit carries" in problem for problem in problems), problems)
+
+    def test_each_external_index_refusal_has_a_mutated_fixture(self) -> None:
+        mutations = []
+        value = self.valid_index()
+        value["extra"] = True
+        mutations.append((value, "unknown key"))
+        value = self.valid_index()
+        value["repository"] = "git@example.invalid:cluster"
+        mutations.append((value, "repository URL"))
+        value = self.valid_index()
+        value["source_revision"] = "main"
+        mutations.append((value, "source revision"))
+        value = self.valid_index()
+        value["stories"] = []
+        mutations.append((value, "no story paths"))
+        value = self.valid_index()
+        value["stories"] = ["docs/stories/ZZ-1-a-story.md"]
+        mutations.append((value, "not an object"))
+        value = self.valid_index()
+        value["stories"][0]["extra"] = True
+        mutations.append((value, "require exactly"))
+        value = self.valid_index()
+        value["stories"][0]["path"] = "README.md"
+        mutations.append((value, "invalid story path"))
+        value = self.valid_index()
+        value["stories"][0]["blob_sha"] = "not-a-blob"
+        mutations.append((value, "blob identity"))
+        value = self.valid_index()
+        value["stories"].append(dict(value["stories"][0]))
+        mutations.append((value, "repeats story path"))
+
+        for value, phrase in mutations:
+            with self.subTest(phrase=phrase):
+                problems = self.problems_for(value)
+                self.assertTrue(any(phrase in problem for problem in problems), problems)
+
+
+class TheExactCapabilityInventory(unittest.TestCase):
+    """Expected IDs are reviewed separately from the disposition ledger they ratchet."""
+
+    def valid_inventory(self):
+        return {
+            "subject": FIXTURE_STACK,
+            "source_revision": FIXTURE_REVISION,
+            "expected_ids": ["zz-capability"],
+        }
+
+    def load(self, value, filename=f"{FIXTURE_STACK}.json"):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = pathlib.Path(raw)
+            (directory / filename).write_text(json.dumps(value), encoding="utf-8")
+            return report.capability_expectations(directory)
+
+    def test_a_complete_exact_id_inventory_is_accepted(self) -> None:
+        expectations, problems = self.load(self.valid_inventory())
+        self.assertEqual([], problems)
+        self.assertEqual(
+            (FIXTURE_REVISION, {"zz-capability"}), expectations[FIXTURE_STACK]
+        )
+
+    def test_each_exact_inventory_refusal_has_a_mutated_fixture(self) -> None:
+        mutations = []
+        value = self.valid_inventory()
+        value["extra"] = True
+        mutations.append((value, f"{FIXTURE_STACK}.json", "requires exactly"))
+        mutations.append((self.valid_inventory(), "wrong.json", "subject or filename"))
+        value = self.valid_inventory()
+        value["source_revision"] = "main"
+        mutations.append((value, f"{FIXTURE_STACK}.json", "source revision"))
+        value = self.valid_inventory()
+        value["expected_ids"] = []
+        mutations.append((value, f"{FIXTURE_STACK}.json", "no expected"))
+        value = self.valid_inventory()
+        value["expected_ids"] = ["NOT A KEY"]
+        mutations.append((value, f"{FIXTURE_STACK}.json", "invalid capability"))
+        value = self.valid_inventory()
+        value["expected_ids"] *= 2
+        mutations.append((value, f"{FIXTURE_STACK}.json", "repeats a capability"))
+
+        for value, filename, phrase in mutations:
+            with self.subTest(phrase=phrase):
+                _, problems = self.load(value, filename)
+                self.assertTrue(any(phrase in problem for problem in problems), problems)
+
+    def test_an_object_valued_capability_id_is_refused_without_a_crash(self) -> None:
+        value = self.valid_inventory()
+        value["expected_ids"] = [{"not": "hashable"}]
+        expectations, problems = self.load(value)
+        self.assertEqual({}, expectations)
+        self.assertTrue(any("invalid capability" in problem for problem in problems), problems)
+
+
+class MalformedCapabilityFiles(unittest.TestCase):
+    def test_an_array_ledger_is_loaded_for_a_typed_refusal_instead_of_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = pathlib.Path(raw)
+            (directory / "broken.json").write_text("[]", encoding="utf-8")
+            original = report.CAPABILITIES
+            try:
+                report.CAPABILITIES = directory
+                ledgers = report.capability_ledgers()
+            finally:
+                report.CAPABILITIES = original
+        self.assertEqual([[]], ledgers)
+        self.assertEqual(
+            ["capability ledger is not an object"],
+            report.capability_schema_problems(ledgers[0]),
+        )
 
 
 class TheClosedKeySet(unittest.TestCase):
@@ -131,6 +817,10 @@ class TheClosedKeySet(unittest.TestCase):
             any("weight" in p and "unknown key" in p for p in problems),
             f"a weighted dimension was accepted; problems={problems}",
         )
+
+    def test_a_capability_inventory_marker_must_be_boolean(self) -> None:
+        problems = report.schema_problems("stack", a_stack(capability_inventory="yes"))
+        self.assertTrue(any("non-boolean" in problem for problem in problems), problems)
 
 
 class TheConfidenceLadder(unittest.TestCase):
@@ -601,6 +1291,630 @@ class TheGenerationRules(unittest.TestCase):
             self.assertIn(f'"{token}"', source, f"{token} is not a spelling the enum emits")
 
 
+class TheComparativeLoadContract(unittest.TestCase):
+    """X-98's fixed profile, evidence schema and process-group cleanup are executable rules."""
+
+    def assert_manifest_refused(self, manifest) -> None:
+        with self.assertRaises(load_contract.ContractError):
+            load_contract.validate_manifest(manifest)
+
+    def assert_result_refused(self, result, manifest=None) -> None:
+        with self.assertRaises(load_contract.ContractError):
+            load_contract.validate_result(result, manifest or a_load_manifest())
+
+    @staticmethod
+    def changed(value):
+        return json.loads(json.dumps(value))
+
+    def test_the_exact_profile_and_complete_post_cleanup_result_are_accepted(self) -> None:
+        manifest = a_load_manifest()
+        self.assertIs(load_contract.validate_manifest(manifest), manifest)
+        result = a_load_result(manifest)
+        self.assertIs(load_contract.validate_result(result, manifest), result)
+
+    def test_every_dialog_identifier_including_ack_and_to_is_deterministic(self) -> None:
+        self.assertEqual(
+            {
+                "call_id": "cl-0123456789abcdef0123456789abcdef-3@driver.invalid",
+                "from_tag": "f-dbcde7aba829a6d2",
+                "to_tag": "t-f8d0e81e93174798",
+                "invite_branch": "z9hG4bK-i-2a0029d75e3b140c398b",
+                "ack_branch": "z9hG4bK-a-9cf65817dc9741e3da13",
+                "bye_branch": "z9hG4bK-b-d211c0e00a0ac3affb69",
+            },
+            load_contract.dialog_identifiers(
+                7, "0123456789abcdef0123456789abcdef", 3
+            ),
+        )
+
+    def test_the_spec_carries_exact_ack_bye_and_bye_response_templates(self) -> None:
+        text = (ROOT / "docs" / "specs" / "comparative-load.md").read_text(encoding="utf-8")
+        self.assertIn("ACK sip:load@<responder-uri> SIP/2.0\\r\\n", text)
+        self.assertIn("Via: SIP/2.0/UDP <driver-via>;rport;branch=<ack-branch>\\r\\n", text)
+        self.assertIn("BYE sip:load@<responder-uri> SIP/2.0\\r\\n", text)
+        self.assertIn("CSeq: 2 BYE\\r\\n", text)
+        self.assertIn("To tag: t-<first-16-hex", text)
+
+    def test_zero_missing_or_widened_phase_bounds_are_rejected(self) -> None:
+        original = a_load_manifest()
+        for name, value in (("drain_ms", 0), ("measurement_ms", 0), ("warmup_ms", 10_001)):
+            changed = self.changed(original)
+            changed["phases"][name] = value
+            self.assert_manifest_refused(changed)
+        changed = self.changed(original)
+        del changed["phases"]["readiness_ms"]
+        self.assert_manifest_refused(changed)
+
+    def test_the_manifest_fixes_one_closed_provisional_response_policy(self) -> None:
+        manifest = a_load_manifest()
+        for invalid in (None, True, "sometimes", "180_ringing"):
+            changed = self.changed(manifest)
+            changed["provisional_policy"] = invalid
+            self.assert_manifest_refused(changed)
+
+        changed = self.changed(manifest)
+        changed["provisional_policy"] = "none"
+        load_contract.validate_manifest(changed)
+
+        missing = self.changed(manifest)
+        del missing["provisional_policy"]
+        self.assert_manifest_refused(missing)
+
+    def test_incomplete_identity_machine_and_hash_metadata_are_rejected(self) -> None:
+        manifest = a_load_manifest()
+        changed = self.changed(manifest)
+        del changed["machine"]["architecture"]
+        self.assert_manifest_refused(changed)
+        result = a_load_result(manifest)
+        changed_result = self.changed(result)
+        changed_result["build"]["artifact_sha256"] = "0" * 64
+        self.assert_result_refused(changed_result, manifest)
+        changed_result = self.changed(result)
+        changed_result["build"]["argv_sha256"] = "0" * 64
+        self.assert_result_refused(changed_result, manifest)
+
+    def test_invalid_utc_phase_totals_and_response_totals_are_rejected(self) -> None:
+        manifest = a_load_manifest()
+        result = a_load_result(manifest)
+
+        changed = self.changed(result)
+        changed["run"]["started_utc"] = "not-a-time"
+        self.assert_result_refused(changed, manifest)
+        changed["run"]["started_utc"] = "2026-08-05T12Z"
+        self.assert_result_refused(changed, manifest)
+
+        changed = self.changed(result)
+        changed["run"]["elapsed_ms"] = (
+            changed["run"]["warmup_ms"]
+            + changed["run"]["measurement_ms"]
+            + changed["run"]["drain_ms"]
+            - 1
+        )
+        self.assert_result_refused(changed, manifest)
+
+        changed = self.changed(result)
+        changed["responses"] = {"provisional": {}, "final": {}}
+        self.assert_result_refused(changed, manifest)
+
+        changed = self.changed(result)
+        changed["responses"]["final"]["200"] += 1
+        self.assert_result_refused(changed, manifest)
+
+        changed = self.changed(result)
+        changed["responses"]["final"]["486"] = 1
+        self.assert_result_refused(changed, manifest)
+
+        changed = self.changed(result)
+        changed["responses"]["final"]["201"] = 1
+        changed["responses"]["final"]["200"] -= 1
+        self.assert_result_refused(changed, manifest)
+
+    def test_exact_rejection_and_provisional_response_accounting_is_accepted(self) -> None:
+        manifest = a_load_manifest()
+        result = a_load_result(manifest)
+        result["status"] = "failed"
+        result["counts"]["completed"] -= 2
+        result["errors"]["rejected"] = 1
+        result["errors"]["admission_refused"] = 1
+        result["latency_ms"]["teardown"]["count"] -= 2
+        result["responses"]["final"]["200"] -= 2
+        result["responses"]["final"].update({"486": 1, "503": 1})
+        load_contract.validate_result(result, manifest)
+
+        no_trying = self.changed(manifest)
+        no_trying["provisional_policy"] = "none"
+        no_trying_result = a_load_result(no_trying)
+        no_trying_result["responses"]["provisional"] = {}
+        load_contract.validate_result(no_trying_result, no_trying)
+
+        contradictory = a_load_result(manifest)
+        contradictory["responses"]["provisional"]["100"] -= 1
+        self.assert_result_refused(contradictory, manifest)
+
+    def test_missing_cleanup_or_live_post_drain_state_cannot_pass(self) -> None:
+        result = a_load_result()
+        changed = self.changed(result)
+        del changed["cleanup"]
+        self.assert_result_refused(changed)
+        changed = self.changed(result)
+        changed["post_drain"]["endpoint_tasks"] = 1
+        self.assert_result_refused(changed)
+        changed = self.changed(result)
+        changed["cleanup"]["descendant_pipe_eof"] = False
+        self.assert_result_refused(changed)
+
+    def test_passed_status_requires_clean_unforced_process_exit(self) -> None:
+        result = a_load_result()
+
+        changed = self.changed(result)
+        changed["cleanup"]["leader_status"] = 1
+        self.assert_result_refused(changed)
+
+        changed = self.changed(result)
+        changed["cleanup"]["leader_status"] = -signal.SIGKILL
+        self.assert_result_refused(changed)
+
+        changed = self.changed(result)
+        changed["cleanup"]["escalation"] = "kill"
+        self.assert_result_refused(changed)
+
+    def test_process_crash_count_and_leader_status_must_agree(self) -> None:
+        result = a_load_result()
+        result["status"] = "failed"
+
+        crashed_without_accounting = self.changed(result)
+        crashed_without_accounting["cleanup"]["leader_status"] = 2
+        self.assert_result_refused(crashed_without_accounting)
+
+        accounting_without_crash = self.changed(result)
+        accounting_without_crash["errors"]["process_crash"] = 1
+        self.assert_result_refused(accounting_without_crash)
+
+        result["cleanup"]["leader_status"] = 2
+        result["errors"]["process_crash"] = 1
+        load_contract.validate_result(result, a_load_manifest())
+
+    def test_unsupported_resources_are_absent_not_zero(self) -> None:
+        result = a_load_result()
+        changed = self.changed(result)
+        changed["resources"]["unsupported_resources"] = ["cpu_user_ms"]
+        changed["resources"]["cpu_user_ms"] = 0
+        self.assert_result_refused(changed)
+        del changed["resources"]["cpu_user_ms"]
+        load_contract.validate_result(changed, a_load_manifest())
+
+    def test_two_consecutive_failed_rates_omit_only_the_higher_rates(self) -> None:
+        self.assertEqual((), load_contract.omitted_after([True, False]))
+        self.assertEqual((3, 4, 5), load_contract.omitted_after([True, False, False]))
+        self.assertEqual((), load_contract.omitted_after([False, True, False]))
+        with self.assertRaises(load_contract.ContractError):
+            load_contract.omitted_after([True] * 7)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_cleanup_terminates_a_blocking_descendant_and_observes_pipe_eof(self) -> None:
+        helper = """
+import json, os, signal, subprocess, sys
+subprocess.Popen([sys.executable, '-c', 'import signal; signal.pause()'])
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        old_sigint = load_contract.signal.getsignal(load_contract.signal.SIGINT)
+        with load_contract.ProcessSupervisor(cleanup_wait_seconds=0.25) as owner:
+            supervised = owner.start(
+                [sys.executable, "-c", helper],
+                "responder",
+                stdout_limit=4096,
+                stderr_limit=4096,
+            )
+            ready = supervised.wait_ready(timeout_ms=2_000)
+            self.assertEqual(supervised.process.pid, ready["pid"])
+            self.assertNotEqual(
+                old_sigint, load_contract.signal.getsignal(load_contract.signal.SIGINT)
+            )
+        self.assertTrue(supervised.stdout.eof.is_set())
+        self.assertTrue(supervised.stderr.eof.is_set())
+        self.assertIsNotNone(supervised.process.returncode)
+        self.assertEqual(old_sigint, load_contract.signal.getsignal(load_contract.signal.SIGINT))
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_cleanup_observes_group_exit_when_descendant_closed_its_pipes(self) -> None:
+        child = "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); signal.pause()"
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = pathlib.Path(directory) / "child.pid"
+            helper = f"""
+import json, os, pathlib, subprocess, sys
+child = subprocess.Popen(
+    [sys.executable, '-c', {child!r}],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+pathlib.Path({str(pid_file)!r}).write_text(str(child.pid), encoding='ascii')
+print(json.dumps({{
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {{'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096}},
+}}), flush=True)
+"""
+            supervised = load_contract.SupervisedProcess(
+                [sys.executable, "-c", helper],
+                "responder",
+                stdout_limit=4096,
+                stderr_limit=4096,
+            )
+            pgid = supervised.pgid
+            try:
+                supervised.wait_ready(timeout_ms=2_000)
+                self.assertTrue(pid_file.read_text(encoding="ascii"))
+                self.assertEqual("kill", supervised.close(timeout_seconds=0.25))
+                self.assertFalse(process_group_exists(pgid))
+            finally:
+                force_group_cleanup(pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_a_failed_graceful_callback_still_forces_complete_cleanup(self) -> None:
+        helper = """
+import json, os, signal
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        def fail_to_stop_orderly():
+            raise RuntimeError("orderly stop failed")
+
+        supervised = load_contract.SupervisedProcess(
+            [sys.executable, "-c", helper],
+            "responder",
+            graceful=fail_to_stop_orderly,
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        pgid = supervised.pgid
+        worker_pid = supervised.orderly_stop_worker_pid
+        try:
+            supervised.wait_ready(timeout_ms=2_000)
+            with self.assertRaisesRegex(load_contract.ContractError, "orderly stop failed"):
+                supervised.close(timeout_seconds=0.25)
+            self.assertIsNotNone(supervised.process.returncode)
+            self.assertFalse(process_group_exists(pgid))
+            self.assertIsNotNone(worker_pid)
+            self.assertFalse(process_group_exists(worker_pid))
+            self.assertTrue(supervised.stdout.eof.is_set())
+            self.assertTrue(supervised.stderr.eof.is_set())
+        finally:
+            force_group_cleanup(pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_a_blocking_graceful_callback_is_bounded_before_group_escalation(self) -> None:
+        helper = """
+import json, os, signal
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        def block_orderly_stop():
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.pause()
+
+        supervised = load_contract.SupervisedProcess(
+            [sys.executable, "-c", helper],
+            "responder",
+            graceful=block_orderly_stop,
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        pgid = supervised.pgid
+        worker_pid = supervised.orderly_stop_worker_pid
+        try:
+            supervised.wait_ready(timeout_ms=2_000)
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                load_contract.ContractError, "orderly-stop callback exceeded"
+            ):
+                supervised.close(timeout_seconds=0.1)
+            self.assertLess(time.monotonic() - started, 0.7)
+            self.assertIsNotNone(supervised.process.returncode)
+            self.assertFalse(process_group_exists(pgid))
+            self.assertIsNotNone(worker_pid)
+            self.assertFalse(process_group_exists(worker_pid))
+            self.assertTrue(supervised.stdout.eof.is_set())
+            self.assertTrue(supervised.stderr.eof.is_set())
+        finally:
+            force_group_cleanup(pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_orderly_stop_worker_terminates_and_joins_its_descendant_group(self) -> None:
+        helper = """
+import json, os, signal
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = pathlib.Path(directory) / "orderly-descendant.pid"
+
+            def spawn_blocked_descendant():
+                ready_reader, ready_writer = os.pipe()
+                child_pid = os.fork()
+                if child_pid == 0:
+                    os.close(ready_reader)
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    pid_file.write_text(str(os.getpid()), encoding="ascii")
+                    os.write(ready_writer, b"ready")
+                    os.close(ready_writer)
+                    signal.pause()
+                    os._exit(0)
+                os.close(ready_writer)
+                ready = os.read(ready_reader, 5)
+                os.close(ready_reader)
+                if ready != b"ready":
+                    raise RuntimeError("orderly-stop descendant did not become ready")
+
+            supervised = load_contract.SupervisedProcess(
+                [sys.executable, "-c", helper],
+                "responder",
+                graceful=spawn_blocked_descendant,
+                stdout_limit=4096,
+                stderr_limit=4096,
+            )
+            endpoint_pgid = supervised.pgid
+            worker_pgid = supervised.orderly_stop_worker_pid
+            try:
+                supervised.wait_ready(timeout_ms=2_000)
+                supervised.close(timeout_seconds=0.1)
+                self.assertTrue(pid_file.read_text(encoding="ascii"))
+                self.assertIsNotNone(worker_pgid)
+                self.assertFalse(process_group_exists(worker_pgid))
+                self.assertFalse(process_group_exists(endpoint_pgid))
+            finally:
+                force_group_cleanup(endpoint_pgid)
+                if worker_pgid is not None:
+                    force_group_cleanup(worker_pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_term_handler_cleans_the_group_before_reporting_signal_exit(self) -> None:
+        helper = """
+import json, os, signal, subprocess, sys
+subprocess.Popen([sys.executable, '-c', 'import signal; signal.pause()'])
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        old_handler = signal.getsignal(signal.SIGTERM)
+        owner = load_contract.ProcessSupervisor(cleanup_wait_seconds=0.25)
+        owner.__enter__()
+        supervised = owner.start(
+            [sys.executable, "-c", helper],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        pgid = supervised.pgid
+        try:
+            supervised.wait_ready(timeout_ms=2_000)
+            with self.assertRaises(SystemExit) as stopped:
+                owner._on_signal(signal.SIGTERM, None)
+            self.assertEqual(128 + signal.SIGTERM, stopped.exception.code)
+            self.assertFalse(process_group_exists(pgid))
+            self.assertEqual(old_handler, signal.getsignal(signal.SIGTERM))
+        finally:
+            try:
+                owner.close()
+            except load_contract.ContractError:
+                pass
+            force_group_cleanup(pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_signal_arriving_during_cleanup_is_deferred_until_group_exit(self) -> None:
+        helper = """
+import json, os, signal
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        owner = load_contract.ProcessSupervisor(cleanup_wait_seconds=0.25)
+        owner.__enter__()
+        supervised = owner.start(
+            [sys.executable, "-c", helper],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        pgid = supervised.pgid
+        sender = threading.Timer(0.05, os.kill, args=(os.getpid(), signal.SIGTERM))
+        try:
+            supervised.wait_ready(timeout_ms=2_000)
+            sender.start()
+            with self.assertRaises(SystemExit) as stopped:
+                owner.close()
+            sender.join(timeout=1)
+            self.assertEqual(128 + signal.SIGTERM, stopped.exception.code)
+            self.assertFalse(process_group_exists(pgid))
+            self.assertIsNotNone(supervised.process.returncode)
+        finally:
+            sender.cancel()
+            sender.join(timeout=1)
+            force_group_cleanup(pgid)
+            if supervised.process.poll() is None:
+                supervised.process.wait(timeout=2)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_oversized_readiness_is_rejected_without_retaining_the_line(self) -> None:
+        helper = (
+            "import os,signal; "
+            f"os.write(1, b'x' * {load_contract.MAX_READY_BYTES + 65_536}); "
+            "signal.pause()"
+        )
+        supervised = load_contract.SupervisedProcess(
+            [sys.executable, "-c", helper],
+            "responder",
+            stdout_limit=load_contract.MAX_LOG_BYTES,
+            stderr_limit=4096,
+        )
+        pgid = supervised.pgid
+        try:
+            with self.assertRaises(load_contract.ContractError):
+                supervised.wait_ready(timeout_ms=2_000)
+            self.assertLessEqual(
+                supervised.stdout.readiness_retained_high_water,
+                load_contract.MAX_READY_BYTES,
+            )
+            self.assertIsNotNone(supervised.process.returncode)
+        finally:
+            force_group_cleanup(pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_an_escaped_descendant_retaining_a_pipe_is_reported_and_bounded(self) -> None:
+        child = (
+            "import signal; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "signal.pause()"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = pathlib.Path(directory) / "escaped.pid"
+            helper = f"""
+import json, os, pathlib, subprocess, sys
+child = subprocess.Popen(
+    [sys.executable, '-c', {child!r}],
+    stdin=subprocess.DEVNULL,
+    start_new_session=True,
+)
+pathlib.Path({str(pid_file)!r}).write_text(str(child.pid), encoding='ascii')
+print(json.dumps({{
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {{'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096}},
+}}), flush=True)
+"""
+            supervised = load_contract.SupervisedProcess(
+                [sys.executable, "-c", helper],
+                "responder",
+                stdout_limit=4096,
+                stderr_limit=4096,
+            )
+            escaped_pid = None
+            try:
+                supervised.wait_ready(timeout_ms=2_000)
+                escaped_pid = int(pid_file.read_text(encoding="ascii"))
+                with self.assertRaisesRegex(load_contract.ContractError, "retained.*pipe"):
+                    supervised.close(timeout_seconds=0.1)
+            finally:
+                force_group_cleanup(supervised.pgid)
+                if escaped_pid is not None:
+                    try:
+                        os.kill(escaped_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        supervised.close(timeout_seconds=0.5)
+                    except load_contract.ContractError:
+                        pass
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_malformed_and_duplicate_readiness_fail_closed(self) -> None:
+        malformed = load_contract.SupervisedProcess(
+            [sys.executable, "-c", "print('{', flush=True); import signal; signal.pause()"],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        with self.assertRaises(load_contract.ContractError):
+            malformed.wait_ready(timeout_ms=2_000)
+        self.assertIsNotNone(malformed.process.returncode)
+
+        record = {
+            "schema": load_contract.READY_SCHEMA,
+            "role": "responder",
+            "pid": 0,
+            "address": "127.0.0.1:5060",
+            "transport": "udp",
+            "limits": {"active": 1, "events": 1, "stdout_bytes": 4096, "stderr_bytes": 4096},
+        }
+        helper = (
+            "import json,os,signal; r="
+            + repr(record)
+            + "; r['pid']=os.getpid(); print(json.dumps(r),flush=True); "
+              "print(json.dumps(r),flush=True); signal.pause()"
+        )
+        duplicate = load_contract.SupervisedProcess(
+            [sys.executable, "-c", helper],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        duplicate.wait_ready(timeout_ms=2_000)
+        with self.assertRaises(load_contract.ContractError):
+            duplicate.close(timeout_seconds=0.25)
+
+        unterminated = load_contract.SupervisedProcess(
+            [
+                sys.executable,
+                "-c",
+                "import json,os; print(json.dumps({'schema':'sipx.comparative-load.ready.v1','role':'responder','pid':os.getpid(),'address':'127.0.0.1:5060','transport':'udp','limits':{'active':1,'events':1,'stdout_bytes':4096,'stderr_bytes':4096}}),end='',flush=True)",
+            ],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        with self.assertRaisesRegex(load_contract.ContractError, "line terminator"):
+            unterminated.wait_ready(timeout_ms=2_000)
+
+        invalid_driver = {
+            "schema": load_contract.READY_SCHEMA,
+            "role": "driver",
+            "pid": 1,
+            "address": None,
+            "transport": "udp",
+            "limits": {"active": 1, "events": 1, "stdout_bytes": 4096, "stderr_bytes": 4096},
+        }
+        with self.assertRaises(load_contract.ContractError):
+            load_contract.validate_readiness(invalid_driver, "driver")
+
+
 class TheRealDataset(unittest.TestCase):
     """The guard is only worth having if the dataset it guards already satisfies it."""
 
@@ -617,6 +1931,21 @@ class TheRealDataset(unittest.TestCase):
             ),
         )
 
+    def test_the_capability_ledgers_have_no_outstanding_problems(self) -> None:
+        _, stacks, _ = report.dataset()
+        expectations, expectation_problems = report.capability_expectations()
+        self.assertEqual([], expectation_problems)
+        self.assertEqual(
+            [],
+            report.capability_problems(
+                report.capability_ledgers(),
+                stacks,
+                datetime.date.today(),
+                report.external_story_urls(),
+                expectations,
+            ),
+        )
+
     def test_exactly_one_stack_is_this_repository(self) -> None:
         _, stacks, _ = report.dataset()
         selves = [s for s in stacks if s.get("is_self")]
@@ -624,7 +1953,13 @@ class TheRealDataset(unittest.TestCase):
 
     def test_the_report_is_current(self) -> None:
         dimensions, stacks, observations = report.dataset()
-        rendered = report.render(dimensions, stacks, observations, report.generated_values())
+        rendered = report.render(
+            dimensions,
+            stacks,
+            observations,
+            report.generated_values(),
+            report.capability_ledgers(),
+        )
         self.assertEqual(
             report.REPORT.read_text(encoding="utf-8"),
             rendered,

@@ -1,8 +1,8 @@
 //! `sipx peers` — who is there to call.
 //!
-//! This command consults nothing but a file. It is deliberately not async and opens no socket:
-//! the registrar source (`S-24`) and the local link (`T-24`) are separate stories, and the peer
-//! book has to be useful with neither.
+//! Without `--registrar` this command consults only a file. With it, the same generic event
+//! lifecycle used by library applications consumes bounded registration information from a live
+//! registrar; a book is merged only when the caller names one explicitly.
 //!
 //! **The book's format.** One peer per line, a name and a URI separated by whitespace, `#` for
 //! a comment, blank lines ignored:
@@ -26,6 +26,22 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use bytes::Bytes;
+use rand::Rng as _;
+use sipx_call::Dispatcher;
+use sipx_call::subscriber::{
+    EventNotification, EventSubscription, EventSubscriptionEvent, EventSubscriptions,
+};
+use sipx_sip::Uri;
+use sipx_transport::{Config as TransportConfig, Target, TransportKind, bind};
+use sipx_ua::Credentials;
+use sipx_ua::event_client::{
+    Config as EventConfig, Peer as EventPeer, SamePeer, Start as EventStart, StateChange,
+    Termination, Transport,
+};
+use sipx_ua::reginfo::{RegistrationConsumer, RegistrationSnapshot};
 
 use crate::output::{Exit, Format, Report, fail};
 
@@ -36,9 +52,21 @@ USAGE:
     sipx peers [OPTIONS]
 
 OPTIONS:
-    --book <FILE>   Read this peer book rather than the default one
-    --json          Report as JSON, one object per peer
-    --help          Show this message
+    --book <FILE>        Read this peer book; with --registrar, merge it explicitly
+    --registrar <AOR>    Subscribe to this registrar's current registrations
+    --password <P>       Registrar password. Prefer SIPX_PASSWORD; argv is world-readable
+    --target <ADDR>      Registrar address if not derived from the AOR (host:port)
+    --expires <S>        Subscription lifetime to ask for (default 3600)
+    --watch <S>          Observe updates this many seconds after the first snapshot (default 0)
+    --local <ADDR>       Local signalling address (default 0.0.0.0:0)
+    --transport <T>      Signalling: udp, tcp, tls, ws or wss (default udp)
+    --tcp                Legacy alias for --transport tcp
+    --tls-server-name <N> Certificate identity to verify (default AOR domain)
+    --tls-ca <FILE>      Add PEM trust roots to the platform store
+    --tls-cert <FILE>    Client certificate chain for mutual TLS (with --tls-key)
+    --tls-key <FILE>     Client private key for mutual TLS (with --tls-cert)
+    --json               Report as JSON, one object per peer
+    --help               Show this message
 
 THE PEER BOOK:
     One peer per line: a name, whitespace, and the URI to dial. Blank lines and lines
@@ -62,6 +90,8 @@ THE PEER BOOK:
 pub(crate) enum Source {
     /// Written down locally, by a person or a script.
     Book,
+    /// Current registration state delivered by a registrar subscription.
+    Registrar,
 }
 
 impl Source {
@@ -69,6 +99,7 @@ impl Source {
     fn as_str(self) -> &'static str {
         match self {
             Self::Book => "book",
+            Self::Registrar => "registrar",
         }
     }
 }
@@ -86,16 +117,22 @@ pub(crate) struct Peer {
     pub(crate) uri: String,
     /// Where it was learned from.
     pub(crate) source: Source,
+    /// Age of the live snapshot; absent for facts without an observation time.
+    pub(crate) age: Option<Duration>,
 }
 
 impl Peer {
     /// The entry as a result line, in the form `P-1` set for every other command.
     fn report(&self) -> Report {
-        Report::new()
+        let report = Report::new()
             .text("status", "peer")
             .text("name", self.name.as_str())
             .text("uri", self.uri.as_str())
-            .text("source", self.source.as_str())
+            .text("source", self.source.as_str());
+        match self.age {
+            Some(age) => report.seconds("age", age),
+            None => report,
+        }
     }
 }
 
@@ -166,7 +203,7 @@ impl std::error::Error for Error {
     }
 }
 
-pub(crate) fn run(raw: &[String], format: Format) -> Exit {
+pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // A `--book` with no path is refused rather than silently falling through to the environment
     // and reporting whichever book happens to be there (`S-30`).
     let args = match crate::arguments(raw, HELP, format) {
@@ -174,10 +211,20 @@ pub(crate) fn run(raw: &[String], format: Format) -> Exit {
         Err(exit) => return exit,
     };
 
-    let peers = match load(args.value("book")) {
-        Ok(peers) => peers,
-        Err(error) => return fail(format, error.exit(), &error.to_string()),
+    let registrar = args.value("registrar");
+    let mut peers = match (registrar, args.value("book")) {
+        (Some(_), None) => Vec::new(),
+        (_, explicit) => match load(explicit) {
+            Ok(peers) => peers,
+            Err(error) => return fail(format, error.exit(), &error.to_string()),
+        },
     };
+    if let Some(registrar) = registrar {
+        match discover(&args, registrar).await {
+            Ok(discovered) => peers.extend(discovered),
+            Err((exit, message)) => return fail(format, exit, &message),
+        }
+    }
 
     for (index, peer) in peers.iter().enumerate() {
         // One JSON object per line, which is what `P-1` set and what lets a reader split on
@@ -189,6 +236,193 @@ pub(crate) fn run(raw: &[String], format: Format) -> Exit {
     }
 
     Exit::Success
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "validation, endpoint ownership and terminal cleanup remain visible in protocol order"
+)]
+async fn discover(args: &crate::Args<'_>, registrar: &str) -> Result<Vec<Peer>, (Exit, String)> {
+    let parsed = Uri::parse(Bytes::copy_from_slice(registrar.as_bytes())).map_err(|_| {
+        (
+            Exit::Usage,
+            format!("not a SIP registrar address of record: {registrar}"),
+        )
+    })?;
+    let Some((user, domain)) = crate::register::parse_aor(registrar) else {
+        return Err((
+            Exit::Usage,
+            format!("not a SIP registrar address of record: {registrar}"),
+        ));
+    };
+    let selection = crate::signalling::Selection::from_args(args, parsed.scheme().is_secure())
+        .map_err(|message| (Exit::Usage, message))?;
+    let unresolved =
+        crate::register::resolve_target(args.value("target"), &domain, selection.kind())
+            .map_err(|message| (Exit::Usage, message))?;
+    let selected = selection
+        .target(args, unresolved.addr, &domain)
+        .map_err(|message| (Exit::Usage, message))?;
+    let expires = Duration::from_secs(args.number("expires").unwrap_or(3_600));
+    if expires.is_zero() {
+        return Err((
+            Exit::Usage,
+            "--expires must be positive for a registrar subscription".to_owned(),
+        ));
+    }
+    let local = args.value("local").unwrap_or("0.0.0.0:0");
+    let local = local
+        .parse()
+        .map_err(|_| (Exit::Usage, format!("not an address: {local}")))?;
+    let mut transport_config = TransportConfig::new(local);
+    transport_config.sent_by =
+        crate::advertise::reachable_ip(local, selected.addr.ip()).to_string();
+    selection
+        .configure_client(args, &mut transport_config)
+        .map_err(|message| (Exit::Usage, message))?;
+    let (endpoint, incoming) = bind(transport_config)
+        .await
+        .map_err(|error| (Exit::Failed, format!("bind: {error}")))?;
+    let runtime = EventSubscriptions::new(EventConfig::default())
+        .map_err(|error| (Exit::Failed, error.to_string()))?;
+    let subscriptions = runtime.handle();
+    let mut dispatcher =
+        Dispatcher::new(endpoint.clone(), incoming).with_event_subscriptions(runtime);
+    let dispatch = tokio::spawn(async move { while dispatcher.next().await.is_some() {} });
+
+    let nonce: u64 = rand::rng().random();
+    let credentials = args
+        .value("password")
+        .map(str::to_owned)
+        .or_else(|| std::env::var("SIPX_PASSWORD").ok())
+        .map(|password| Credentials::new(user.clone(), password));
+    let contact = format!("<sip:{user}@{}>", endpoint.advertised());
+    let consumer = RegistrationConsumer::new(registrar, 4_096).map_err(|_| {
+        (
+            Exit::Usage,
+            "invalid registrar resource for the registration package".to_owned(),
+        )
+    })?;
+    let start = EventStart {
+        resource: parsed,
+        local_identity: format!("<sip:{user}@{domain}>"),
+        contact,
+        target: event_peer(&selected),
+        expires,
+        body: Bytes::new(),
+        content_type: None,
+        credentials,
+        call_id: format!("peers-{nonce:016x}@sipx"),
+        from_tag: format!("{nonce:016x}"),
+        initial_cseq: 1,
+        consumer,
+        trust: std::sync::Arc::new(SamePeer),
+    };
+    let result = match subscriptions.subscribe(start) {
+        Ok(mut subscription) => {
+            let result = observe(
+                &mut subscription,
+                Duration::from_secs(args.number("watch").unwrap_or(0)),
+            )
+            .await;
+            let _ = subscription.unsubscribe().await;
+            result.map(registrar_peers)
+        }
+        Err(error) => Err((Exit::Failed, error.to_string())),
+    };
+    endpoint.shutdown().await;
+    let _ = dispatch.await;
+    result
+}
+
+async fn observe(
+    subscription: &mut EventSubscription<RegistrationSnapshot>,
+    watch: Duration,
+) -> Result<EventNotification<RegistrationSnapshot>, (Exit, String)> {
+    let first = next_snapshot(subscription).await?;
+    if watch.is_zero() {
+        return Ok(first);
+    }
+    let mut latest = first;
+    // The clock is the measurement: `--watch` asks for an observation window of exactly this size.
+    let deadline = tokio::time::sleep(watch);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            () = &mut deadline => return Ok(latest),
+            event = subscription.next_event() => match event {
+                Some(EventSubscriptionEvent::Notification(delivery)) => latest = delivery,
+                Some(EventSubscriptionEvent::State(StateChange::Terminated(reason))) => {
+                    return Err(termination(&reason));
+                }
+                Some(EventSubscriptionEvent::State(_)) => {}
+                None => return Err((Exit::Failed, "registrar subscription ended".to_owned())),
+            },
+        }
+    }
+}
+
+async fn next_snapshot(
+    subscription: &mut EventSubscription<RegistrationSnapshot>,
+) -> Result<EventNotification<RegistrationSnapshot>, (Exit, String)> {
+    loop {
+        match subscription.next_event().await {
+            Some(EventSubscriptionEvent::Notification(delivery)) => return Ok(delivery),
+            Some(EventSubscriptionEvent::State(StateChange::Terminated(reason))) => {
+                return Err(termination(&reason));
+            }
+            Some(EventSubscriptionEvent::State(_)) => {}
+            None => {
+                return Err((
+                    Exit::Failed,
+                    "registrar subscription ended before a snapshot".to_owned(),
+                ));
+            }
+        }
+    }
+}
+
+fn termination(reason: &Termination) -> (Exit, String) {
+    let exit = match reason {
+        Termination::Rejected(status) => Exit::for_status(*status),
+        Termination::AuthenticationExhausted => Exit::Unauthorized,
+        Termination::NoInitialNotify | Termination::LocalExpiry => Exit::Timeout,
+        _ => Exit::Failed,
+    };
+    (exit, format!("registrar subscription failed: {reason:?}"))
+}
+
+fn registrar_peers(delivery: EventNotification<RegistrationSnapshot>) -> Vec<Peer> {
+    let age = delivery.received_at.elapsed();
+    delivery
+        .value
+        .peers
+        .into_iter()
+        .map(|peer| Peer {
+            name: peer.name,
+            uri: peer.uri,
+            source: Source::Registrar,
+            age: Some(age),
+        })
+        .collect()
+}
+
+fn event_peer(target: &Target) -> EventPeer {
+    let transport = match target.transport {
+        TransportKind::Udp => Transport::Udp,
+        TransportKind::Tcp => Transport::Tcp,
+        TransportKind::Tls => Transport::Tls,
+        TransportKind::Ws => Transport::Ws,
+        TransportKind::Wss => Transport::Wss,
+        TransportKind::Quic => Transport::Quic,
+    };
+    EventPeer {
+        address: target.addr,
+        transport,
+        connection: None,
+        identity: target.verify_as.clone(),
+        path: target.path.clone(),
+    }
 }
 
 /// Read the book from wherever it lives.
@@ -273,6 +507,7 @@ fn parse(path: &Path, contents: &str) -> Result<Vec<Peer>, Error> {
             name: name.to_owned(),
             uri: uri.to_owned(),
             source: Source::Book,
+            age: None,
         });
     }
 
@@ -302,6 +537,7 @@ mod tests {
                 name: "alice".to_owned(),
                 uri: "sip:alice@192.0.2.17:5060".to_owned(),
                 source: Source::Book,
+                age: None,
             }]
         );
         assert_eq!(peers[0].source.as_str(), "book");
@@ -447,6 +683,7 @@ mod tests {
             name: "alice".to_owned(),
             uri: "sip:alice@192.0.2.17:5060".to_owned(),
             source: Source::Book,
+            age: None,
         };
         let json = peer.report().render(Format::Json);
         let text = peer.report().render(Format::Text);
@@ -456,5 +693,62 @@ mod tests {
             assert!(text.contains(fact), "{fact} missing from {text}");
         }
         assert!(!json.contains('\n'), "one line per peer: {json}");
+    }
+
+    #[test]
+    fn registrar_entries_report_source_and_snapshot_age() {
+        let delivery = EventNotification {
+            received_at: tokio::time::Instant::now(),
+            metadata: None,
+            value: RegistrationSnapshot {
+                version: 0,
+                peers: vec![sipx_ua::reginfo::RegistrationPeer {
+                    name: "alice".to_owned(),
+                    aor: "sip:alice@example.test".to_owned(),
+                    uri: "sip:alice@192.0.2.10".to_owned(),
+                    registration_id: "r1".to_owned(),
+                    contact_id: "c1".to_owned(),
+                    source: sipx_ua::reginfo::RegistrarSource {
+                        resource: "sip:all@example.test".to_owned(),
+                    },
+                }],
+            },
+        };
+        let peers = registrar_peers(delivery);
+        assert_eq!(peers[0].source, Source::Registrar);
+        let report = peers[0].report();
+        assert_eq!(
+            report.names(),
+            vec!["status", "name", "uri", "source", "age"]
+        );
+        assert!(
+            report
+                .render(Format::Json)
+                .contains("\"source\":\"registrar\"")
+        );
+    }
+
+    #[test]
+    fn live_target_keeps_secure_transport_selectors() {
+        let target = Target::new(
+            "192.0.2.10:7443".parse().expect("target"),
+            TransportKind::Wss,
+        )
+        .verifying("registrar.example.test")
+        .at_path("/events");
+        let peer = event_peer(&target);
+        assert_eq!(peer.transport, Transport::Wss);
+        assert_eq!(peer.identity.as_deref(), Some("registrar.example.test"));
+        assert_eq!(peer.path.as_deref(), Some("/events"));
+    }
+
+    #[test]
+    fn registrar_refusals_have_scriptable_exits() {
+        assert_eq!(
+            termination(&Termination::Rejected(403)).0,
+            Exit::Unauthorized
+        );
+        assert_eq!(termination(&Termination::Rejected(489)).0, Exit::Rejected);
+        assert_eq!(termination(&Termination::NoInitialNotify).0, Exit::Timeout);
     }
 }

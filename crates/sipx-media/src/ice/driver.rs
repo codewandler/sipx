@@ -330,9 +330,8 @@ pub(crate) fn spawn(
     destinations: Destinations,
     stop: Arc<crate::session::Stop>,
     discards: Arc<DiscardMeters>,
-) -> Handle {
-    let (handle, _task) = spawn_parts(agent, pending, sockets, destinations, stop, discards, None);
-    handle
+) -> (Handle, tokio::task::JoinHandle<()>) {
+    spawn_parts(agent, pending, sockets, destinations, stop, discards, None)
 }
 
 #[cfg(feature = "dtls")]

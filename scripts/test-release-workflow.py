@@ -182,6 +182,18 @@ class DistributionMutations(unittest.TestCase):
             "frontier loop does not require the all-visible observation",
         )
 
+    def test_locked_rehearsal_must_precede_publication(self) -> None:
+        rehearsal = (
+            "      - name: Rehearse the locked registry packages\n"
+            "        run: ./scripts/release.py --dry-run\n\n"
+        )
+        self.assertIn(rehearsal, WORKFLOW)
+        mutated = WORKFLOW.replace(rehearsal, "", 1) + "\n" + rehearsal
+        self.assertIn(
+            "locked rehearsal, publication, consumer, Pages and GitHub prerelease steps are out of order",
+            checker.workflow_problems(mutated),
+        )
+
     def test_direct_cargo_publication_is_refused(self) -> None:
         problems = checker.workflow_problems(WORKFLOW + "\n      cargo publish --workspace\n")
         self.assertIn(

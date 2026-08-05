@@ -30,10 +30,11 @@ PBX, browser media engine, or video stack.
 
 | Need | Today |
 |---|---|
-| Calls | Place and answer, hold and resume, blind and attended transfer, session timers |
+| Calls | Place and answer, hold and resume, blind and attended transfer, session timers, bounded confirmed-dialog snapshots |
 | Audio | G.711, DTMF, WAV playback and recording; optional Opus and explicitly selected live devices behind Cargo features |
 | Security | TLS and secure WebSocket; selectable plain RTP, SDES-keyed SRTP, optional DTLS-SRTP, and a fail-closed browser-audio composition profile |
 | Reachability | `rport`, symmetric RTP, Path, Service-Route, Outbound, GRUU and push refresh; host and STUN-derived ICE candidates, but no TURN relay |
+| SIP events | Bounded inbound notifier, package-generic authenticated subscriber, live registration discovery, and conditional presence publication in both roles |
 | Automation | Single-line JSON reports, distinct outcome exit codes, interactive scenarios, bounded load, quality statistics and signalling capture |
 | Two-leg calls | Public early and confirmed coupling of two dialogs, with optional media bridging; the off-media relay role remains unfinished |
 
@@ -133,12 +134,17 @@ workspace, parsers are fuzzed, and unknown headers survive a parse/serialize rou
 | `sipx-rtp` | RTP and RTCP packet handling, sequencing, jitter buffering, quality statistics and SRTP (RFC 3550) |
 | `sipx-sdp` | SDP session descriptions (RFC 8866) and offer/answer negotiation (RFC 3264) |
 | `sipx-sip` | Sans-IO SIP core: messages, parser and transactions (RFC 3261) |
+| `sipx-testkit` | Deterministic SIP and RTP tests with bounded peers, virtual time, and RFC corpora |
 | `sipx-transport` | Async SIP transports: UDP, TCP, TLS, WebSocket, experimental QUIC, and RFC 3263 resolution |
-| `sipx-ua` | SIP user agent: registration, digest authentication, and experimental subscriptions and presence |
+| `sipx-ua` | SIP user agent: registration, digest authentication, event subscriptions, and presence |
 <!-- END generated:crate-map -->
 
 Each crate states its supported and experimental surface in its crate-level API documentation.
 See the [API reference](https://codewandler.github.io/sipx/api/) for the exact contract.
+Production reachability is measured from `sipx-app`. The Supported `sipx-testkit` harness is a
+separate test-product surface: a manifest-declared Cargo example is compiled as its caller and the
+release rehearsal rebuilds that archived example in a clean consumer; it does not promote the
+testkit's dependencies into the production surface.
 
 ## Documentation
 

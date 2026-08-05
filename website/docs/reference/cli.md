@@ -5,7 +5,7 @@ description: Every sipx command, flag, exit code and JSON field — the surface 
 
 # CLI reference
 
-One binary, `sipx`. Seven commands do work — `dial`, `answer`, `load`, `register`, `peers`, `devices`
+One binary, `sipx`. Eight commands do work — `dial`, `answer`, `load`, `load-responder`, `register`, `peers`, `devices`
 and `scenario`, documented below — alongside `help` and `version`. Global: `--json` switches the report to a single-line JSON
 object on stdout; `-v`/`-vv` raise log verbosity on stderr (never stdout, so JSON stays
 parseable); `-h`/`--help` on any command.
@@ -24,10 +24,11 @@ say nothing. Both ways a value goes missing are refused:
 
 Every `<S>` value is a whole number of seconds from `0` through `4294967295`. Negative values,
 fractions, units such as `3s`, and values above that range are usage errors naming the flag. Zero is
-deliberate per command: `--duration 0` ends an established call immediately (and is refused as an
-admission bound by `load`), `--timeout 0` uses the
+deliberate where the command gives it a meaning: `--duration 0` ends an established call immediately
+(and is refused as an admission bound by `load` and `load-responder`), `--timeout 0` uses the
 transaction layer's expiry, `--wait 0` returns immediately when no call is queued, and `--expires 0`
-asks the registrar to remove the binding.
+asks the registrar to remove the binding. `load-responder` refuses zero for `--cleanup` and
+`--dialog-duration`, because neither a cleanup budget nor an accepted-dialog lifetime can be empty.
 
 `--help` is answered before any of this, so it still prints when the rest of the line is wrong.
 
@@ -187,6 +188,56 @@ p50/p95/p99 setup time; and aggregate media loss, jitter and MOS snapshots. Miss
 are `null`, not zero. A run that reaches a configured bound is `completed`; a cleanly drained Ctrl-C
 is `interrupted`.
 
+## `sipx load-responder`
+
+Answer a finite, machine-driven signalling load:
+
+```sh
+sipx load-responder --max-active 32 --calls 100 --cleanup 40 --seed 41 --json
+```
+
+| Flag | Meaning |
+|---|---|
+| `--max-active <N>` | Positive ceiling on simultaneously owned dialogs; required |
+| `--calls <N>` | Close admission after this many surfaced INVITEs |
+| `--duration <S>` | Close admission after this many seconds |
+| `--cleanup <S>` | Positive deadline for dialog, task and transaction drain; required |
+| `--seed <N>` | Reproduce policy choices and generated media (default 0) |
+| `--provisional-percent <P>` | Percentage of admitted INVITEs receiving one `100 Trying` (default 0) |
+| `--answer-percent <P>` | Percentage answered with `200`; the remainder use `--reject-status` (default 100) |
+| `--reject-status <CODE>` | Policy rejection from 400 through 699 (default 486) |
+| `--dialog-duration <S>` | Positive maximum lifetime of an accepted dialog (default 40) |
+| `--mode <M>` | `signalling` (default) or the separately explicit `generated-media` workload |
+| `--local <ADDR>` | UDP address to bind (default `127.0.0.1:0`) |
+| `--transport <T>` | Must be `udp`; other transports are separate measurement profiles |
+
+At least one of `--calls` and `--duration` is required; the first reached closes admission. Before
+traffic is admitted, stdout receives one flushed `sipx.comparative-load.ready.v1` JSON record with
+the exact bound address, process identity, effective limits and policy. This readiness record is
+always JSON so a supervisor never has to scrape prose. In `--json` mode the only later stdout line
+is the terminal `sipx.load-responder.v1` summary.
+
+The default creates no SDP or media session. `--mode generated-media` is an explicit, separate
+workload that drives deterministic PCMU media rather than silently changing the signalling
+baseline. The responder validates ACK, CANCEL and BYE as dialog actions; arbitrary packets do not
+become successful outcomes. Admission stop, interruption and internal error cancel and join every
+owned dialog before reporting. A successful summary therefore has zero `active_dialogs`,
+`dispatcher_routes`, `endpoint_transactions` and `owned_tasks` under `post_drain`.
+
+The terminal summary records invitations and response statuses; admitted, established, completed,
+cancelled, rejected and failed outcomes; active high-water; p50/p95/p99 setup and teardown latency;
+invalid messages; and the exact effective bounds. A response status is counted once when the
+responder successfully sends it, or when a valid final response returns for a BYE the responder
+originated. Protocol retransmissions do not inflate the map, and invalid responses are counted as
+invalid messages instead. UDP is the v1 baseline so connection setup and reuse costs cannot
+contaminate the SIP transaction measurement.
+
+Generated-media mode deliberately keeps the same small dialog vocabulary as signalling mode:
+after the initial ACK it accepts ACK and BYE, and refuses other in-dialog methods with a measured
+405. That keeps the load result about bounded call setup and teardown rather than application
+features such as transfer or renegotiation. Duplicate Call-ID, From, To or CSeq fields are rejected
+as malformed before they can match or mutate a dialog.
+
 ## `sipx register <AOR>`
 
 Register with a registrar: `sipx register sip:alice@example.com`
@@ -233,7 +284,19 @@ List what can be called: `sipx peers --json`
 
 | Flag | Meaning |
 |---|---|
-| `--book <FILE>` | Read this peer book rather than the default one |
+| `--book <FILE>` | Read this peer book; with `--registrar`, merge it explicitly |
+| `--registrar <AOR>` | Subscribe to this registrar's current registrations |
+| `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is visible |
+| `--target <ADDR>` | Registrar socket when it cannot be derived from the AOR |
+| `--expires <S>` | Positive requested subscription lifetime (default 3600) |
+| `--watch <S>` | Keep applying updates for this many seconds after the first snapshot |
+| `--local <ADDR>` | Local signalling bind address |
+| `--transport <T>` | `udp`, `tcp`, `tls`, `ws`, or `wss`, with the shared TLS options |
+| `--tcp` | Legacy alias for `--transport tcp` |
+| `--tls-server-name <N>` | Certificate identity to verify (default AOR domain) |
+| `--tls-ca <FILE>` | Add PEM trust roots to the platform store |
+| `--tls-cert <FILE>` | Client certificate chain for mutual TLS; requires `--tls-key` |
+| `--tls-key <FILE>` | Client private key for mutual TLS; requires `--tls-cert` |
 
 The book is looked for in `--book`, then `$SIPX_PEERS`, then `$XDG_CONFIG_HOME/sipx/peers`, then
 `$HOME/.config/sipx/peers`. It is a text file a shell can write — one peer per line, a name and a
@@ -250,16 +313,29 @@ echo "carol sip:carol@192.0.2.30:5060" >> ~/.config/sipx/peers
 sipx peers --json | jq -r 'select(.source == "book") | .uri'
 ```
 
-Reports one line per peer with `status` (always `peer`), `name`, `uri` and `source`. `source` says
-where the entry was learned from — `book` is the only one today, and it is what keeps the list
-extensible when other sources are merged into it.
+Reports one line per peer with `status` (always `peer`), `name`, `uri` and `source`. Book entries
+carry `source=book` and no invented age. Live contacts carry `source=registrar` and `age`, in whole
+seconds since the last complete snapshot was accepted.
+
+```sh
+SIPX_PASSWORD="$secret" sipx peers \
+  --registrar sip:alice@example.com \
+  --target 192.0.2.20:5060 \
+  --watch 30 --json
+```
+
+The command waits for a full registration snapshot, applies later partial NOTIFY documents, and
+prints only the final current set. Pass `--book` in that form to merge a local book; environment and
+default book locations are deliberately not implicit in a registrar query. A 403 exits
+`unauthorized`, a 489 exits `rejected`, and a missing initial NOTIFY exits `timeout`. None falls back
+to a book-only success, because that would present an incomplete answer as complete.
 
 A book that cannot be read — missing, unreadable, or holding a line that is not a name and a URI —
 exits non-zero and names the file and the line. It never prints an empty list: on a fresh machine
 that would read as "there is nobody to call" when the truth is "you have not been told about
 anyone". A book that exists and holds no peers prints nothing and exits 0.
 
-The command consults no network. It opens no socket and needs no registrar.
+Without `--registrar`, the command remains file-only and opens no socket.
 
 ## `sipx devices`
 
@@ -340,7 +416,7 @@ each; failures emit
 `{"status": …, "error": …}` on **stderr**. The text and JSON forms carry the same field set —
 that equality is asserted by a test, so a field you see in one is in the other.
 
-Three outputs have versioned schemas or envelopes. The checked table below is held against the Rust
+Five outputs have versioned schemas or envelopes. The checked table below is held against the Rust
 producers by `./scripts/check-cli-reference.py --check`; the same checker executes root and
 subcommand help and compares their commands and long options with the sections above. Event-specific
 scenario details extend the `event` object and do not define a second envelope.
@@ -350,5 +426,7 @@ scenario details extend the `event` object and do not define a second envelope.
 |---|---|---|
 | `sipx.devices.v1` | `device` | `schema`, `devices`, `id`, `name`, `input`, `output` |
 | `sipx.load.v1` | `load` | `schema`, `status`, `seed`, `target`, `limits`, `rate`, `concurrency`, `calls`, `duration_ms`, `call_duration_ms`, `setup_timeout_ms`, `cleanup_ms`, `outcomes`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency`, `response_codes`, `setup_ms`, `p50`, `p95`, `p99`, `media`, `snapshots`, `packets_lost`, `mean_loss`, `mean_jitter_ms`, `mean_mos` |
+| `sipx.comparative-load.ready.v1` | `load_responder_readiness` | `active`, `address`, `events`, `limits`, `pid`, `role`, `schema`, `stderr_bytes`, `stdout_bytes`, `transport` |
+| `sipx.load-responder.v1` | `load_responder` | `active_dialogs`, `active_high_water`, `admitted`, `calls`, `cancelled`, `cleanup_ms`, `completed`, `count`, `counts`, `dialog_duration_ms`, `dispatcher_routes`, `duration_ms`, `endpoint_transactions`, `established`, `failed`, `invalid_messages`, `invitations`, `latency_ms`, `limits`, `max_active`, `maximum`, `mode`, `owned_tasks`, `p50`, `p95`, `p99`, `post_drain`, `reason`, `rejected`, `responses`, `schema`, `seed`, `setup`, `status`, `teardown` |
 | `sipx.app.v1` | `scenario` | `contract`, `seq`, `at`, `call`, `event`, `id`, `leg`, `direction`, `state`, `from`, `to`, `headers`, `media`, `encrypted`, `on_hold`, `muted`, `legs`, `bridged`, `tags`, `type`, `command` |
 <!-- END cli-json-contracts -->

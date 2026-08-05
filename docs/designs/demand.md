@@ -1,7 +1,7 @@
 # Design: demand-led capability work
 
 **Status:** accepted · **Pillar:** Media · **Epic:** `demand` · **Stories:** S-36, M-42, M-43,
-M-44, M-45, M-46, T-28, T-29, T-30, P-14, X-75
+M-44, M-45, M-46, T-28, T-29, T-30, P-14
 
 ## Why
 

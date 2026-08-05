@@ -48,7 +48,8 @@
       "name": "rsipstack",
       "language": "Rust",
       "repository": "https://github.com/restsend/rsipstack",
-      "license": "MIT"
+      "license": "MIT",
+      "capability_inventory": true
     },
     {
       "id": "jain-sip",

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Adversarial tests for the registry release rehearsal (A-11).
 
-The suite uses fabricated Cargo metadata and checkout state. No test has registry credentials and no
-test runs `cargo publish`; command execution is separately asserted through a recording runner.
+Authority tests use fabricated Cargo metadata and checkout state. The local package-set case alone
+executes bounded `cargo package` and clean-consumer commands against the workspace. No test has
+registry credentials and no test runs `cargo publish`; write-capable dispatch stays behind a
+recording runner.
 """
 
 from __future__ import annotations
@@ -195,7 +197,7 @@ class ThePublicPackageGraph(unittest.TestCase):
 
 
 class TheManifestBoundary(unittest.TestCase):
-    def test_real_public_manifests_keep_unpublished_testkit_path_only(self) -> None:
+    def test_real_public_manifests_keep_workspace_testkit_path_only(self) -> None:
         for manifest_path in sorted((ROOT / "crates").glob("*/Cargo.toml")):
             manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
             if manifest["package"].get("publish", True) is False:
@@ -384,6 +386,146 @@ readme = "README.md"
         )
 
 
+class TheLocalPackageSetProof(unittest.TestCase):
+    def test_packaged_consumer_example_is_derived_from_surface_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory)
+            (source / "examples").mkdir()
+            (source / "Cargo.toml").write_text(
+                """[package]
+name = "sipx-testkit"
+[package.metadata.sipx-supported-test-surface]
+example = "public_harness"
+""",
+                encoding="utf-8",
+            )
+            example = source / "examples" / "public_harness.rs"
+            example.write_text("use sipx_testkit::call::CallHarness;\n", encoding="utf-8")
+            self.assertEqual(example, release.supported_test_surface_example(source))
+            example.unlink()
+            with self.assertRaisesRegex(release.ReleaseError, "omits examples/public_harness.rs"):
+                release.supported_test_surface_example(source)
+
+    def test_package_set_is_the_dependency_ordered_testkit_closure(self) -> None:
+        packages = release.package_records(
+            [
+                package("sipx-testkit", dependencies=(dependency("sipx-transport"),)),
+                package("sipx-transport", dependencies=(dependency("sipx-sip"),)),
+                package("sipx-sip"),
+                package("sipx-unrelated"),
+            ],
+            "1.0.0-beta.4",
+            pathlib.Path("/work"),
+        )
+        self.assertEqual(
+            ("sipx-sip", "sipx-transport", "sipx-testkit"),
+            release.local_package_set_members(packages),
+        )
+
+    def test_consumer_uses_every_exact_staged_package_source(self) -> None:
+        manifest = tomllib.loads(
+            release.local_package_consumer_manifest(
+                "1.0.0-beta.4",
+                {
+                    "sipx-sip": pathlib.Path("/staged/sipx-sip-1.0.0-beta.4"),
+                    "sipx-testkit": pathlib.Path("/staged/sipx-testkit-1.0.0-beta.4"),
+                    "sipx-transport": pathlib.Path("/staged/sipx-transport-1.0.0-beta.4"),
+                },
+            )
+        )
+        self.assertEqual(
+            {
+                "version": "=1.0.0-beta.4",
+                "path": "/staged/sipx-testkit-1.0.0-beta.4",
+            },
+            manifest["dependencies"]["sipx-testkit"],
+        )
+        self.assertEqual(
+            {
+                "version": "=1.0.0-beta.4",
+                "path": "/staged/sipx-transport-1.0.0-beta.4",
+            },
+            manifest["patch"]["crates-io"]["sipx-transport"],
+        )
+        self.assertEqual(
+            {
+                "version": "=1.0.0-beta.4",
+                "path": "/staged/sipx-sip-1.0.0-beta.4",
+            },
+            manifest["patch"]["crates-io"]["sipx-sip"],
+        )
+
+    def test_lock_must_resolve_every_package_set_member_from_staged_paths(self) -> None:
+        good = {
+            "package": [
+                {"name": "sipx-sip", "version": "1.0.0-beta.4"},
+                {"name": "sipx-testkit", "version": "1.0.0-beta.4"},
+                {"name": "sipx-transport", "version": "1.0.0-beta.4"},
+            ]
+        }
+        members = ("sipx-sip", "sipx-transport", "sipx-testkit")
+        self.assertEqual([], release.local_package_lock_problems(good, "1.0.0-beta.4", members))
+        registry = {
+            "package": [
+                {
+                    "name": "sipx-sip",
+                    "version": "1.0.0-beta.4",
+                    "source": release.CRATES_IO_LOCK_SOURCE,
+                },
+                {
+                    "name": "sipx-testkit",
+                    "version": "1.0.0-beta.4",
+                    "source": release.CRATES_IO_LOCK_SOURCE,
+                },
+                {"name": "sipx-transport", "version": "1.0.0-beta.4"},
+            ]
+        }
+        self.assertTrue(
+            any(
+                "registry instead of staged bytes" in problem
+                for problem in release.local_package_lock_problems(
+                    registry, "1.0.0-beta.4", members
+                )
+            )
+        )
+
+    def test_staged_archive_extraction_refuses_escape_and_links(self) -> None:
+        for name, member in (
+            ("escape", tarfile.TarInfo("sipx-testkit-1.0.0-beta.4/../secret")),
+            ("link", tarfile.TarInfo("sipx-testkit-1.0.0-beta.4/link")),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                archive = root / "sipx-testkit-1.0.0-beta.4.crate"
+                payload = b"secret"
+                if name == "link":
+                    member.type = tarfile.SYMTYPE
+                    member.linkname = "/outside"
+                else:
+                    member.size = len(payload)
+                with tarfile.open(archive, mode="w:gz") as bundle:
+                    bundle.addfile(member, None if name == "link" else io.BytesIO(payload))
+                with self.assertRaisesRegex(release.ReleaseError, "escapes|regular file"):
+                    release._extract_package_source(archive, root / "staged")
+
+    def test_real_archives_compile_the_example_in_an_isolated_consumer(self) -> None:
+        """Execute the complete dependency-closure proof under its owned finite command bounds."""
+
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
+        version = str(workspace["package"]["version"])
+        metadata = release._metadata(ROOT)
+        records = metadata.get("packages")
+        self.assertIsInstance(records, list)
+        packages = release.package_records(records, version, ROOT)
+        release.verify_local_rtp_echo_package_set(
+            packages,
+            version,
+            package_timeout=300.0,
+            consumer_timeout=900.0,
+            workspace_root=ROOT,
+        )
+
+
 class ThePackagedVcsEvidence(unittest.TestCase):
     def package(self) -> release.Package:
         return release.Package(
@@ -482,8 +624,13 @@ class ThePublicationBoundary(unittest.TestCase):
             mock.patch.object(release, "_metadata", return_value=self.main_metadata()),
             mock.patch.object(release, "_checkout", return_value=(False, (), ())),
             mock.patch.object(release, "_bounded_run", side_effect=bounded),
+            mock.patch.object(release, "verify_local_rtp_echo_package_set") as package_set,
         ):
             self.assertEqual(0, release.main(("--dry-run", "--command-timeout-seconds", "7")))
+        package_set.assert_called_once()
+        self.assertEqual(7.0, package_set.call_args.kwargs["package_timeout"])
+        self.assertEqual(900.0, package_set.call_args.kwargs["consumer_timeout"])
+        self.assertEqual(ROOT, package_set.call_args.kwargs["workspace_root"])
         self.assertEqual(1, len(calls))
         command, timeout = calls[0]
         self.assertEqual(7.0, timeout)

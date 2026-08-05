@@ -20,11 +20,36 @@ pub enum Error {
     /// The endpoint loop has stopped.
     #[error("the endpoint has shut down")]
     EndpointClosed,
+    /// An in-process endpoint was constructed without an entered Tokio runtime.
+    #[error("an entered Tokio runtime is required for the in-process endpoint")]
+    RuntimeUnavailable,
     /// The next hop asked this endpoint to reduce traffic and this request was not admitted.
     #[error("request rejected by overload control for {peer}")]
     Overloaded {
         /// The downstream server whose active report caused the rejection.
         peer: std::net::SocketAddr,
+    },
+    /// A configured pre-transaction policy refused the request.
+    #[error("request rejected by endpoint policy: {reason}")]
+    PolicyRejected {
+        /// Host-supplied, non-secret reason.
+        reason: String,
+    },
+    /// A policy attempted to add a stack-owned identity, routing, authentication or framing field.
+    #[error("endpoint policy may not add protected header {name}")]
+    ProtectedPolicyHeader {
+        /// Canonical field name.
+        name: String,
+    },
+    /// A live source-admission replacement exceeded the configured scan bound.
+    #[error(
+        "source-admission replacement carries {attempted} prefixes; configured maximum is {max}"
+    )]
+    SourceAdmissionCapacity {
+        /// Configured maximum number of prefixes in one generation.
+        max: usize,
+        /// Number of prefixes in the refused replacement.
+        attempted: usize,
     },
     /// A request could not be sent because it has no usable `Via`, so no transaction could be
     /// keyed on it and no response could ever be matched.

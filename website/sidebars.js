@@ -28,8 +28,11 @@ const sidebars = {
       collapsed: false,
       items: [
         'guides/as-a-library',
+        'guides/test-a-call',
+        'guides/rtp-echo',
         'guides/place-a-call',
         'guides/answer-a-call',
+        'guides/persist-a-dialog',
         'guides/register',
       ],
     },
@@ -38,6 +41,7 @@ const sidebars = {
       label: 'Reference',
       items: [
         'reference/security',
+        'reference/logging',
         'reference/compliance',
         'reference/comparison',
         'reference/development-process',

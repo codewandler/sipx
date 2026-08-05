@@ -1,6 +1,7 @@
 # Design: event reachability
 
-**Status:** proposed · **Pillar:** Signalling · **Epic:** `event-reachability` · **Stories:** S-35
+**Status:** accepted · **Pillar:** Signalling · **Epic:** `event-reachability` · **Stories:** S-35,
+S-37, S-38, S-39
 
 ## Why
 
@@ -21,7 +22,9 @@ caller is indistinguishable, from a user's seat, from one that was never written
 absent, because the registry and the crate docs describe behaviour a user cannot invoke.
 
 `S-24` (learn who is registered, via RFC 3680) sits on top of this and cannot be completed without
-it: it needs both a subscriber that can issue SUBSCRIBE and a path that accepts one.
+it: it consumes the generic subscriber rather than hiding a second event client inside discovery.
+The same reachability defect exists for RFC 3903: publication state and entity tags work as library
+logic, but no endpoint can receive or originate PUBLISH.
 
 ## Approach
 
@@ -38,14 +41,23 @@ it: it needs both a subscriber that can issue SUBSCRIBE and a path that accepts 
 - Subscriptions are bounded like every other peer-driven resource in the workspace: a cap on
   concurrent subscriptions, and per-package state that cannot grow without one, matching the
   bounded-by-construction rule the transport layer already holds (`docs/designs/bounded-transports.md`).
-- The subscriber half (issuing SUBSCRIBE, tracking `Subscription-State`) is **out of scope here**
-  and belongs to `S-24`, which this story unblocks.
+- `S-37` specifies the reusable event-client contract before code. `S-38` then issues SUBSCRIBE,
+  tracks `Subscription-State`, authenticates, refreshes and terminates it without giving any event
+  package ownership of transport or timers. `S-24` is one consumer and remains responsible only for
+  translating the `reg` package into peers.
+- The contract is [`docs/specs/event-client.md`](../specs/event-client.md): NOTIFY establishes the
+  subscriber route set, initial NOTIFY may beat the SUBSCRIBE response, one `Start` accepts one
+  dialog rather than silently multiplying work through forks, and package parsing is a bounded
+  injected consumer behind the generic lifecycle.
+- `S-39` carries the existing RFC 3903 compositor and entity-tag lifecycle through live inbound and
+  outbound PUBLISH paths. It reuses the store from `S-18`; it does not create a second presence
+  service or durable publication database.
 
 ## Alternatives considered
 
 - **Build subscriber and notifier socket paths together.** Rejected: they are separable, the
   notifier half is the one with an implementation already waiting, and one story that lands both
-  is one story that lands neither for longer. `S-24` consumes this.
+  is one story that lands neither for longer. The generic client follows its own specification.
 - **Expose the subscription store as a public API and let applications route SUBSCRIBE themselves.**
   Rejected for the reason `docs/designs/edge.md` gives for `CouplingState`: making the protocol
   state machine the application's responsibility lets an application configure an invalid one. The
@@ -60,8 +72,21 @@ it: it needs both a subscriber that can issue SUBSCRIBE and a path that accepts 
   `sipx-ua` where a remote party causes sipx to originate traffic on a schedule. The bound and the
   shutdown path need the same treatment as the transport layer's, and the story must show the
   timers stop when the subscription is terminated, not merely that state is removed.
-- Whether a subscription's NOTIFY traffic should share the dialog's transport connection or resolve
-  independently is an open question the story answers with reference to `docs/specs/sip-transport.md`
-  §8 rather than by choosing convenience.
-- RFC 6665 §4.4.1 forking behaviour is out of scope in a UA that does not fork, but the refusal
-  needs to be stated rather than assumed.
+- NOTIFY establishes the dialog's route set and remote target. Subsequent in-dialog SUBSCRIBE uses
+  that route/target through the ordinary transport connection pool in `docs/specs/sip-transport.md`
+  §8; it does not resolve independently around the dialog.
+- RFC 6665 permits package-specific fork handling. The generic client deliberately accepts the
+  first dialog and refuses competing NOTIFY dialogs with 481, keeping one refresh/timer budget per
+  application request.
+
+## Delivered boundary
+
+`S-35` made the three existing notifier packages socket-reachable. `S-38` adds the other generic
+role: a public sans-I/O subscriber plus a dispatcher-owned runtime for authenticated SUBSCRIBE,
+NOTIFY validation, refresh, unsubscribe and observable cleanup. `S-39` carries the existing
+publication compositor through a bounded inbound PUBLISH service and adds the corresponding
+authenticated outbound publisher, including conditional refresh, modification, removal and
+observable cleanup. These runtimes deliberately supply no package-specific application model.
+`S-24` still owns turning `reginfo` into discovered peers, and projecting live compositor state into
+later presence NOTIFY documents remains application policy rather than a hidden lifecycle side
+effect.

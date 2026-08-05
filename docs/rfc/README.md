@@ -113,17 +113,22 @@ and evidence was cited. To drop a role, say in the `note` what is missing, as RF
 is carried only because something asked for it — `Capabilities::with_srtp`, `with_dtls_srtp`,
 `MediaSession::start_with_ice`, `Config::with_credentials`, a `Target` built with a secure
 `TransportKind` — and asking for nothing is both the default and silent: the call still connects,
-unencrypted and unauthenticated, and every test in the crate below still passes. Nothing is
-*selected* in the other layers: there is no `with_transactions` and no `with_dns`, so "can a call
-reach the transaction layer" is a question that cannot come out `no`.
+unencrypted and unauthenticated, and every test in the crate below still passes. Live event
+services have the same property: the endpoint carries SUBSCRIBE or PUBLISH only when its notifier,
+subscriber or publication driver is attached. Nothing is *selected* in the remaining unscoped
+layers: there is no `with_transactions` and no `with_dns`, so "can a call reach the transaction
+layer" is a question that cannot come out `no`.
 
 Unscoped, the rule rejects 22 of the 29 role-claiming rows (measured at `57857c6`); only 7 of those
 rejections point at anything true of the row, and only 3 rows were over-claiming at all — so on the
 question the check exists to answer, the unscoped rule is wrong 19 times out of 22. **The scope is
-therefore a deliberate choice, and it is `{media, security}`, not a limit of the workspace.**
+therefore a deliberate choice, and it is `{media, security, services}`, not a limit of the
+workspace.**
 `X-33` added `security` after measuring it: all four security rows claiming a role failed the rule,
 three needed one honest citation each (`sipx register --password` is the selection), and the fourth
-needed a call over a secure transport. `transport` was measured and declined — it mixes selected
+needed a call over a secure transport. M13 added `services` when live endpoint drivers made the
+selection directly observable; every role-claiming services row now cites that driver or its test.
+`transport` was measured and declined — it mixes selected
 capabilities (RFC 7118, 5626, 8599) with plumbing every call runs (3263, 3581), and an
 evidence-path check cannot tell them apart.
 

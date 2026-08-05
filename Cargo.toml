@@ -38,6 +38,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 rustls-native-certs = "0.8"
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
 rcgen = "0.14"
 hickory-resolver = { version = "0.26", default-features = false, features = ["system-config", "tokio"] }
 # WebSocket framing and the RFC 6455 handshake. No TLS features: sipx drives its own handshake
@@ -69,6 +70,7 @@ sha2 = "0.10"
 p256 = "0.13"
 base64 = "0.22"
 serde_json = "1"
+quick-xml = "0.41.0"
 tracing = "0.1"
 # The document-mode application host is the only HTTP client in the workspace. Redirects and
 # serialization policy are deliberately selected by `sipx-app`, not hidden in a kernel crate.

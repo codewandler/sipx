@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/codewandler/sipx/docs/comparison/schema/capabilities.schema.json",
+  "title": "One subject's public capability ownership ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["subject", "version_evaluated", "evaluated_at", "source_revision", "expected_capabilities", "capabilities"],
+  "properties": {
+    "subject": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+    "version_evaluated": {"type": "string", "minLength": 1},
+    "evaluated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "expected_capabilities": {"type": "integer", "minimum": 1},
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "category", "title", "confidence", "ownership", "status", "evidence"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+          "category": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
+          "confidence": {"enum": ["measured", "documented", "assessed"]},
+          "ownership": {"enum": ["sipx", "sipx-clstr", "not-shipped", "not-applicable"]},
+          "status": {"enum": ["implemented", "open", "tracked", "absent", "excluded"]},
+          "story": {"type": "string", "minLength": 1},
+          "rationale": {"type": "string", "minLength": 1},
+          "implementation": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "pattern": "^crates/.+\\.rs$"}
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["note"],
+              "properties": {
+                "url": {"type": "string", "format": "uri"},
+                "path": {"type": "string", "minLength": 1},
+                "note": {"type": "string", "minLength": 1}
+              },
+              "oneOf": [{"required": ["url"]}, {"required": ["path"]}]
+            }
+          }
+        }
+      }
+    }
+  }
+}

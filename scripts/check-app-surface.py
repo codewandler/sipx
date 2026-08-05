@@ -15,7 +15,10 @@ only find capabilities that are mentioned. An application can, by needing them o
 So the reachable-from-a-call surface is **defined** as what the shipped application uses, and this
 script reads that definition off the workspace. It is not a better grep — it takes a different input.
 Its root is a program (`crates/sipx-app`, story `X-38`) that either compiles and carries a call or
-does not exist, and a program has no dead branch it can cite in its own defence.
+does not exist, and a program has no dead branch it can cite in its own defence. A published test
+product is a separate reachability class: it may back only its own crate-level test API, through a
+manifest-declared example target that imports that crate. It never joins the production closure and
+therefore cannot graduate one of its dependencies or an experimental module.
 
 ## What is compared, and where each side comes from
 
@@ -28,6 +31,14 @@ is the whole reason the tests could not settle this predicate themselves.
 put in all eleven published crates and the per-module `**Experimental** (`A-8`)` markers under them.
 Neither side is a list kept in this file. Adding a name here would make this the hand-maintained
 register the project has already paid for twice (`X-22`'s gate list, `X-24`'s pool-key prose).
+
+**A supported test surface proves itself from its package manifest.**
+`[package.metadata.sipx-supported-test-surface]` names one Cargo example target. The checker derives
+the crate from the manifest carrying the declaration, verifies the target exists, and requires its
+non-comment Rust source to import that crate. `cargo check --all-targets` compiles the independent
+example target. This is not an exception list and it does not admit ordinary tests or examples:
+without the explicit surface class an example changes nothing, and with a broken proof the gate is
+red.
 
 ## The three things it asserts
 
@@ -77,6 +88,9 @@ register the project has already paid for twice (`X-22`'s gate list, `X-24`'s po
   crate reached only that way would read as unreached.
 - **One application is one opinion.** `APPLICATIONS` is a tuple for that reason: a second
   implementation disagreeing widens the surface by joining it.
+- **A test surface is not application reachability.** Its proof admits only the crate containing the
+  example and never its dependencies. This preserves the rule that `[dev-dependencies]`, tests and
+  ordinary examples cannot widen the production surface.
 """
 
 import pathlib
@@ -102,10 +116,16 @@ CRATES = ROOT / "crates"
 #: were quietly swapped back for either.
 APPLICATIONS = ("sipx-app",)
 
+TEST_SURFACE_METADATA = "sipx-supported-test-surface"
+
 #: A module marked experimental at the item, in the form `A-8` settled on. The story reference is part
 #: of the pattern on purpose: the crate-root prose carries `**Experimental**` too, and matching that
 #: would read every crate's own summary of itself as a per-module marker.
 _MARKER = re.compile(r"^//! \*\*Experimental\*\* \(`A-8`\)", re.M)
+_RAW_LITERAL = re.compile(r'(?:br|cr|r)(?P<hashes>#{0,255})"')
+_CHARACTER_LITERAL = re.compile(
+    r"(?:b)?'(?:\\(?:u\{[0-9A-Fa-f_]+\}|x[0-9A-Fa-f]{2}|.)|[^'\\\n])'"
+)
 
 
 def _glossary(word: str) -> str:
@@ -178,6 +198,58 @@ def manifest(crate: str) -> dict:
 
 def workspace_manifest() -> dict:
     return tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+
+
+def supported_test_surfaces() -> tuple[set[str], list[str]]:
+    """Published test products with a compiled, manifest-declared example caller.
+
+    The declaration lives on the crate whose surface it proves, so adding another test product does
+    not require editing this checker. The example is a separate Cargo target and imports the library
+    as a downstream would; it backs only that crate, never the dependency graph below it.
+    """
+    reached = set()
+    problems = []
+    for crate in published():
+        package = manifest(crate)["package"]
+        declaration = package.get("metadata", {}).get(TEST_SURFACE_METADATA)
+        if declaration is None:
+            continue
+        where_manifest = where(CRATES / crate / "Cargo.toml")
+        if not isinstance(declaration, dict) or set(declaration) != {"example"}:
+            problems.append(
+                f"{where_manifest} has malformed [{TEST_SURFACE_METADATA}] metadata; it must "
+                "contain exactly one string key, `example`"
+            )
+            continue
+        example = declaration.get("example")
+        if not isinstance(example, str) or re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", example) is None:
+            problems.append(
+                f"{where_manifest} names an invalid supported test-surface example {example!r}"
+            )
+            continue
+        path = CRATES / crate / "examples" / f"{example}.rs"
+        explicit = {
+            target.get("name")
+            for target in manifest(crate).get("example", [])
+            if isinstance(target, dict)
+        }
+        auto = package.get("autoexamples", True) is not False
+        if not path.is_file() or not (auto or example in explicit):
+            problems.append(
+                f"{where_manifest} declares supported test-surface example {example!r}, but "
+                f"{where(path)} is not a Cargo example target"
+            )
+            continue
+        source = rust_code_only(path.read_text(encoding="utf-8"))
+        if f"{crate_path(crate)}::" not in source:
+            problems.append(
+                f"{where(path)} is the supported test-surface proof for {crate}, but its code "
+                f"never imports `{crate_path(crate)}::`; an example that does not call the public "
+                "crate cannot back its stability claim"
+            )
+            continue
+        reached.add(crate)
+    return reached, problems
 
 
 def workspace_dependency_table() -> dict:
@@ -370,7 +442,7 @@ def code(text: str) -> str:
 
 
 def rust_code_only(text: str) -> str:
-    """`text` with its comments removed, so a *mention* cannot satisfy a caller check.
+    """`text` with comments and literals blanked, so a mention cannot satisfy a caller check.
 
     `M-30` closed this same hole in `rfc-report.py`; this is the same fix, because it is the same
     mistake. A substring search over raw source cannot tell `use sipx_app_protocol::Envelope;` from
@@ -379,11 +451,91 @@ def rust_code_only(text: str) -> str:
     one. It fires both ways: a comment mentioning `sipx_ua::subscribe` would otherwise raise a spurious
     demand that an experimental module graduate.
 
-    Crude on purpose, exactly as `M-30`'s is: it does not understand a `//` inside a string literal and
-    does not need to, because a symbol in a string literal calls nothing either.
+    Strings matter for the same reason comments do. A compiled example containing only
+    `"sipx_fixture::Harness"` calls no crate, and accepting it would turn the test-product metadata
+    into an allowlist. This small lexer blanks nested block comments, line comments, ordinary and
+    raw strings, byte strings and valid character literals while preserving newlines. It is not a
+    Rust parser; it only separates tokens the compiler can resolve from bytes it cannot.
     """
-    without_blocks = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-    return "\n".join(line.split("//")[0] for line in without_blocks.splitlines())
+    output: list[str] = []
+    index = 0
+
+    def blank(start: int, end: int) -> None:
+        output.extend("\n" if character == "\n" else " " for character in text[start:end])
+
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            end = len(text) if end < 0 else end
+            blank(index, end)
+            index = end
+            continue
+
+        if text.startswith("/*", index):
+            end = index + 2
+            depth = 1
+            while end < len(text) and depth:
+                if text.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif text.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+            blank(index, end)
+            index = end
+            continue
+
+        could_start_raw = text[index] == "r" or (
+            text[index] in ("b", "c")
+            and index + 1 < len(text)
+            and text[index + 1] == "r"
+        )
+        raw = _RAW_LITERAL.match(text, index) if could_start_raw else None
+        if raw is not None:
+            delimiter = '"' + raw.group("hashes")
+            end = text.find(delimiter, raw.end())
+            end = len(text) if end < 0 else end + len(delimiter)
+            blank(index, end)
+            index = end
+            continue
+
+        quote = index
+        if text[index] in ("b", "c") and index + 1 < len(text) and text[index + 1] == '"':
+            quote += 1
+        if text[quote] == '"':
+            end = quote + 1
+            while end < len(text):
+                if text[end] == "\\":
+                    end = min(end + 2, len(text))
+                elif text[end] == '"':
+                    end += 1
+                    break
+                else:
+                    end += 1
+            blank(index, end)
+            index = end
+            continue
+
+        could_start_character = text[index] == "'" or (
+            text[index] == "b"
+            and index + 1 < len(text)
+            and text[index + 1] == "'"
+        )
+        character = (
+            _CHARACTER_LITERAL.match(text, index) if could_start_character else None
+        )
+        if character is not None:
+            end = character.end()
+            blank(index, end)
+            index = end
+            continue
+
+        output.append(text[index])
+        index += 1
+
+    return "".join(output)
 
 
 def sources(crate: str) -> dict[pathlib.Path, str]:
@@ -843,9 +995,12 @@ def report() -> tuple[list[str], set[str], dict[tuple[str, str], pathlib.Path]]:
     """Every disagreement between the declared surface and the application's use of it."""
     enabled = resolve(APPLICATIONS)
     reached = set(enabled)
+    test_surfaces, test_surface_problems = supported_test_surfaces()
+    declared_reachability = reached | test_surfaces
     experimental = experimental_modules()
     problems = (
-        unreached_supported(reached)
+        test_surface_problems
+        + unreached_supported(declared_reachability)
         + unused_edges(reached)
         + cli_cited_but_uncalled()
         + reached_experimental(enabled)
@@ -853,7 +1008,7 @@ def report() -> tuple[list[str], set[str], dict[tuple[str, str], pathlib.Path]]:
         + unselectable_and_unmarked(enabled)
     )
 
-    unreached_crates = unreached(reached)
+    unreached_crates = unreached(declared_reachability)
     if not experimental and not unreached_crates:
         problems.append(
             "nothing in the workspace is marked experimental and the application reaches every "
@@ -878,14 +1033,16 @@ def main() -> int:
             print(f"  {problem}", file=sys.stderr)
         return 1
 
-    unreached_crates = unreached(reached)
+    test_surfaces, _ = supported_test_surfaces()
+    unreached_crates = unreached(reached | test_surfaces)
     crates = "crate" if len(unreached_crates) == 1 else "crates"
     modules = "module" if len(experimental) == 1 else "modules"
     print(
         f"app surface: {' + '.join(APPLICATIONS)} reaches {len(reached)} of "
         f"{len(published())} published crates; {len(experimental)} {modules} and "
         f"{len(unreached_crates)} {crates} experimental "
-        f"({', '.join(unreached_crates) or 'none'}), none of them selected from a call"
+        f"({', '.join(unreached_crates) or 'none'}), {len(test_surfaces)} supported test surface, "
+        "none of them selected from a call"
     )
     return 0
 

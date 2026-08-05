@@ -476,6 +476,21 @@ Ownership is enforced by `Drop`. A dropped bridge aborts both directions, becaus
 tasks go on forwarding audio between calls nobody holds a handle to — and the tasks keep the
 sessions alive through their `Arc`s, so the sockets never close.
 
+## A bounded RTP test peer
+
+`M-53` publishes one shell-sized RTP/PCMU peer in `sipx-testkit`. It deliberately does not construct
+a `MediaSession`: that would add pacing, jitter, RTCP and detached session workers to a diagnostic
+whose only question is whether decoded audio crosses a caller's RTP boundary and comes back. The
+fixture instead composes the public `sipx-rtp` packet model and `sipx-audio` G.711 codec over one
+owned UDP socket, as specified in [`specs/rtp-echo-fixture.md`](../specs/rtp-echo-fixture.md).
+
+The lifecycle follows from its shape. `run` consumes the socket owner and starts no background task;
+a packet count and whole-run deadline are mandatory. Completion, malformed input, deadline and a
+dropped future therefore all release the same socket without a supervisor or settling sleep. The
+outbound sequence and timestamp start are deterministic because this is assertion machinery, not a
+production RTP identity. The public guide says so beside the example rather than letting a test
+fixture be mistaken for a reflector service or a media server.
+
 ## Control surface: playback, mute, hold
 
 `M-17` (playback control) and `M-18` (mute) are media stories delivered under the `app-sdk` epic,

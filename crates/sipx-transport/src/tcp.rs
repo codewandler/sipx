@@ -20,6 +20,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
+use crate::policy::{ConnectionState, ObservationHub, connection_event};
 use crate::target::{ConnectionKey, TransportKind};
 
 /// Something that happened on a connection.
@@ -147,6 +148,8 @@ struct Pooled {
     origin: Origin,
     last_used: Instant,
     active: bool,
+    admission_generation: Option<u64>,
+    has_sent: bool,
 }
 
 type ConnectionTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
@@ -156,6 +159,7 @@ struct Pending {
     id: u64,
     cancel: CancellationToken,
     task: ConnectionTask,
+    admission_generation: Option<u64>,
 }
 
 struct Registration {
@@ -163,6 +167,56 @@ struct Registration {
     cancel: CancellationToken,
     id: u64,
     start_now: bool,
+    admission_generation: Option<u64>,
+}
+
+pub(crate) fn observe_state(
+    observations: Option<&std::sync::Arc<ObservationHub>>,
+    key: &ConnectionKey,
+    id: u64,
+    admission_generation: Option<u64>,
+    state: ConnectionState,
+) {
+    if let Some(observations) = observations {
+        observations.emit(connection_event(
+            key.clone(),
+            id,
+            admission_generation,
+            state,
+        ));
+    }
+}
+
+pub(crate) fn observe_ready(
+    observations: Option<&std::sync::Arc<ObservationHub>>,
+    key: &ConnectionKey,
+    id: u64,
+    admission_generation: Option<u64>,
+    authenticated: bool,
+) {
+    if authenticated {
+        observe_state(
+            observations,
+            key,
+            id,
+            admission_generation,
+            ConnectionState::Authenticated,
+        );
+    }
+    observe_state(
+        observations,
+        key,
+        id,
+        admission_generation,
+        ConnectionState::Opened,
+    );
+    observe_state(
+        observations,
+        key,
+        id,
+        admission_generation,
+        ConnectionState::Pooled,
+    );
 }
 
 /// A pool of stream connections.
@@ -178,6 +232,7 @@ pub struct Pool {
     retiring: HashSet<(ConnectionKey, u64)>,
     /// Replacement work that owns a logical pool slot but cannot start until its victim exits.
     pending: VecDeque<Pending>,
+    observations: Option<std::sync::Arc<ObservationHub>>,
 }
 
 impl std::fmt::Debug for Pool {
@@ -207,7 +262,19 @@ impl Pool {
             shutdown: CancellationToken::new(),
             retiring: HashSet::new(),
             pending: VecDeque::new(),
+            observations: None,
         }
+    }
+
+    pub(crate) fn new_observed(
+        config: PoolConfig,
+        limits: Limits,
+        events: mpsc::Sender<Event>,
+        observations: std::sync::Arc<ObservationHub>,
+    ) -> Self {
+        let mut pool = Self::new(config, limits, events);
+        pool.observations = Some(observations);
+        pool
     }
 
     /// How many connections are held.
@@ -224,8 +291,26 @@ impl Pool {
 
     /// Adopt a connection a peer opened.
     pub fn accept(&mut self, stream: TcpStream, peer: SocketAddr) {
+        self.accept_admitted(stream, peer, 0);
+    }
+
+    pub(crate) fn accept_admitted(
+        &mut self,
+        stream: TcpStream,
+        peer: SocketAddr,
+        admission_generation: u64,
+    ) {
         let key = ConnectionKey::new(peer, TransportKind::Tcp);
-        if self.insert_stream(stream, key, Origin::Inbound).is_err() {
+        if self
+            .insert_stream_admitted(
+                stream,
+                key,
+                Origin::Inbound,
+                Some(admission_generation),
+                false,
+            )
+            .is_err()
+        {
             // discard: a retiring task still owns the last live slot, so admitting this socket
             // would exceed the configured bound. The peer may retry after termination.
             tracing::debug!(%peer, "refused inbound TCP connection at capacity");
@@ -265,9 +350,25 @@ impl Pool {
         stream: tokio_rustls::server::TlsStream<TcpStream>,
         peer: SocketAddr,
     ) {
+        self.accept_tls_admitted(stream, peer, 0);
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) fn accept_tls_admitted(
+        &mut self,
+        stream: tokio_rustls::server::TlsStream<TcpStream>,
+        peer: SocketAddr,
+        admission_generation: u64,
+    ) {
         let key = ConnectionKey::new(peer, TransportKind::Tls);
         if self
-            .insert_stream(stream, key.clone(), Origin::Inbound)
+            .insert_stream_admitted(
+                stream,
+                key.clone(),
+                Origin::Inbound,
+                Some(admission_generation),
+                true,
+            )
             .is_err()
         {
             // discard: a retiring task still owns the last live slot, so admitting this socket
@@ -279,9 +380,24 @@ impl Pool {
     /// Adopt an authenticated QUIC connection opened by a peer.
     #[cfg(feature = "quic")]
     pub fn accept_quic(&mut self, connection: quinn::Connection, peer: SocketAddr) {
+        self.accept_quic_admitted(connection, peer, 0);
+    }
+
+    #[cfg(feature = "quic")]
+    pub(crate) fn accept_quic_admitted(
+        &mut self,
+        connection: quinn::Connection,
+        peer: SocketAddr,
+        admission_generation: u64,
+    ) {
         let key = ConnectionKey::new(peer, TransportKind::Quic);
         if self
-            .insert_quic(connection, key.clone(), Origin::Inbound)
+            .insert_quic(
+                connection,
+                key.clone(),
+                Origin::Inbound,
+                Some(admission_generation),
+            )
             .is_err()
         {
             // discard: pool admission refused this peer before any SIP message or transaction existed.
@@ -351,8 +467,32 @@ impl Pool {
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        self.accept_ws_admitted(ws, key, keepalive, 0);
+    }
+
+    #[cfg(feature = "ws")]
+    pub(crate) fn accept_ws_admitted<S>(
+        &mut self,
+        ws: crate::ws::Socket<S>,
+        key: ConnectionKey,
+        keepalive: Duration,
+        admission_generation: u64,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let peer = key.peer;
-        if self.spawn_ws(ws, key, Origin::Inbound, keepalive).is_err() {
+        let authenticated = key.transport == TransportKind::Wss;
+        if self
+            .spawn_ws(
+                ws,
+                key,
+                Origin::Inbound,
+                keepalive,
+                Some(admission_generation),
+                authenticated,
+            )
+            .is_err()
+        {
             // discard: a retiring task still owns the last live slot, so admitting this socket
             // would exceed the configured bound. The peer may retry after termination.
             tracing::debug!(%peer, "refused inbound WebSocket connection at capacity");
@@ -430,6 +570,13 @@ impl Pool {
         self.connections.get(key).map(|pooled| pooled.id)
     }
 
+    /// Observation identity for the current incarnation, including its admission generation.
+    pub(crate) fn observation_generation(&self, key: &ConnectionKey) -> Option<(u64, Option<u64>)> {
+        self.connections
+            .get(key)
+            .map(|pooled| (pooled.id, pooled.admission_generation))
+    }
+
     /// Whether this connection is held.
     #[must_use]
     pub fn holds(&self, key: &ConnectionKey) -> bool {
@@ -490,7 +637,19 @@ impl Pool {
             return Err(crate::error::Error::EndpointClosed);
         };
         pooled.last_used = Instant::now();
+        let reused = pooled.has_sent;
+        pooled.has_sent = true;
+        let id = pooled.id;
+        let admission_generation = pooled.admission_generation;
         let writer = pooled.writer.clone();
+        if reused && let Some(observations) = &self.observations {
+            observations.emit(connection_event(
+                key.clone(),
+                id,
+                admission_generation,
+                ConnectionState::Reused,
+            ));
+        }
         writer
             .send(bytes)
             .await
@@ -501,14 +660,19 @@ impl Pool {
     ///
     /// The writer exists before the socket does, so bytes queue in the channel rather than in
     /// the caller while a connection is still being established.
-    fn register(&mut self, key: ConnectionKey, origin: Origin) -> Result<Registration> {
+    fn register(
+        &mut self,
+        key: &ConnectionKey,
+        origin: Origin,
+        admission_generation: Option<u64>,
+    ) -> Result<Registration> {
         self.reap_finished();
         self.activate_pending();
         // One admission may retire one connection. Replacing this exact key retires that
         // generation; a new key at capacity retires the LRU. Doing both would evict unrelated
         // connection B merely because replacement A still occupies its slot while cancelling.
-        if self.connections.contains_key(&key) {
-            self.retire(&key);
+        if self.connections.contains_key(key) {
+            self.retire(key);
         } else if self.connections.len() >= self.config.max_connections {
             self.evict_least_recently_used();
         }
@@ -524,7 +688,7 @@ impl Pool {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
         self.connections.insert(
-            key,
+            key.clone(),
             Pooled {
                 writer: writer_tx,
                 cancel: cancel.clone(),
@@ -532,13 +696,26 @@ impl Pool {
                 origin,
                 last_used: Instant::now(),
                 active: self.tasks.len() < self.config.max_connections,
+                admission_generation,
+                has_sent: false,
             },
         );
+        if let Some(observations) = &self.observations
+            && origin == Origin::Inbound
+        {
+            observations.emit(connection_event(
+                key.clone(),
+                id,
+                admission_generation,
+                ConnectionState::Accepted,
+            ));
+        }
         Ok(Registration {
             writer: writer_rx,
             cancel,
             id,
             start_now: self.tasks.len() < self.config.max_connections,
+            admission_generation,
         })
     }
 
@@ -549,17 +726,19 @@ impl Pool {
         cancel: CancellationToken,
         start_now: bool,
         task: F,
+        admission_generation: Option<u64>,
     ) where
         F: Future<Output = ()> + Send + 'static,
     {
         if start_now {
-            self.track(key, id, cancel, task);
+            self.track(key, id, cancel, task, admission_generation);
         } else {
             self.pending.push_back(Pending {
                 key,
                 id,
                 cancel,
                 task: Box::pin(task),
+                admission_generation,
             });
         }
     }
@@ -577,15 +756,28 @@ impl Pool {
                 continue;
             };
             pooled.active = true;
-            self.track(pending.key, pending.id, pending.cancel, pending.task);
+            self.track(
+                pending.key,
+                pending.id,
+                pending.cancel,
+                pending.task,
+                pending.admission_generation,
+            );
         }
     }
 
-    fn track<F>(&mut self, key: ConnectionKey, id: u64, cancel: CancellationToken, task: F)
-    where
+    fn track<F>(
+        &mut self,
+        key: ConnectionKey,
+        id: u64,
+        cancel: CancellationToken,
+        task: F,
+        admission_generation: Option<u64>,
+    ) where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
         let events = self.events.clone();
+        let observations = self.observations.clone();
         let shutdown = self.shutdown.clone();
         self.tasks.spawn(async move {
             let report = tokio::select! {
@@ -595,6 +787,14 @@ impl Pool {
                 () = task => true,
             };
             if report {
+                if let Some(observations) = observations {
+                    observations.emit(connection_event(
+                        key.clone(),
+                        id,
+                        admission_generation,
+                        ConnectionState::Closed,
+                    ));
+                }
                 // discard: the endpoint driver may already be gone. The tracked task still ends
                 // and releases its live slot, which is the resource guarantee this path owns.
                 tokio::select! {
@@ -614,18 +814,43 @@ impl Pool {
             cancel,
             id,
             start_now,
-        } = self.register(key.clone(), Origin::Outbound)?;
+            admission_generation,
+        } = self.register(&key, Origin::Outbound, None)?;
         let events = self.events.clone();
+        let observations = self.observations.clone();
         let limits = self.limits;
         let task_key = key.clone();
-        self.launch(key, id, cancel, start_now, async move {
-            match TcpStream::connect(task_key.peer).await {
-                Ok(stream) => pump(stream, task_key, id, writer_rx, events, limits).await,
-                Err(error) => {
-                    tracing::debug!(%error, peer = %task_key.peer, "connect failed");
+        self.launch(
+            key,
+            id,
+            cancel,
+            start_now,
+            async move {
+                match TcpStream::connect(task_key.peer).await {
+                    Ok(stream) => {
+                        observe_ready(
+                            observations.as_ref(),
+                            &task_key,
+                            id,
+                            admission_generation,
+                            false,
+                        );
+                        pump(stream, task_key, id, writer_rx, events, limits).await;
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, peer = %task_key.peer, "connect failed");
+                        observe_state(
+                            observations.as_ref(),
+                            &task_key,
+                            id,
+                            admission_generation,
+                            ConnectionState::Failed,
+                        );
+                    }
                 }
-            }
-        });
+            },
+            admission_generation,
+        );
         Ok(())
     }
 
@@ -643,38 +868,56 @@ impl Pool {
             cancel,
             id,
             start_now,
-        } = self.register(key.clone(), Origin::Outbound)?;
+            admission_generation,
+        } = self.register(&key, Origin::Outbound, None)?;
         let events = self.events.clone();
+        let observations = self.observations.clone();
         let limits = self.limits;
         let task_key = key.clone();
 
-        self.launch(key, id, cancel, start_now, async move {
-            let stream = match TcpStream::connect(task_key.peer).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    tracing::debug!(%error, peer = %task_key.peer, "connect failed");
-                    return;
-                }
-            };
-            match connector.connect(name, stream).await {
-                Ok(tls) => pump(tls, task_key, id, writer_rx, events, limits).await,
-                Err(error) => {
-                    // Every verification failure arrives here, with the reason attached. It is
-                    // logged rather than swallowed, and the connection simply does not exist —
-                    // there is no fallback to cleartext.
-                    tracing::warn!(%error, peer = %task_key.peer, "TLS handshake failed");
-                    // discard: the endpoint may have shut down before this bounded task reports;
-                    // no caller remains to receive the typed failure in that case.
-                    let _ = events
-                        .send(Event::HandshakeFailed {
-                            key: task_key,
+        self.launch(
+            key,
+            id,
+            cancel,
+            start_now,
+            async move {
+                let stream = match TcpStream::connect(task_key.peer).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        tracing::debug!(%error, peer = %task_key.peer, "connect failed");
+                        return;
+                    }
+                };
+                match connector.connect(name, stream).await {
+                    Ok(tls) => {
+                        observe_ready(
+                            observations.as_ref(),
+                            &task_key,
                             id,
-                            detail: error.to_string(),
-                        })
-                        .await;
+                            admission_generation,
+                            true,
+                        );
+                        pump(tls, task_key, id, writer_rx, events, limits).await;
+                    }
+                    Err(error) => {
+                        // Every verification failure arrives here, with the reason attached. It is
+                        // logged rather than swallowed, and the connection simply does not exist —
+                        // there is no fallback to cleartext.
+                        tracing::warn!(%error, peer = %task_key.peer, "TLS handshake failed");
+                        // discard: the endpoint may have shut down before this bounded task reports;
+                        // no caller remains to receive the typed failure in that case.
+                        let _ = events
+                            .send(Event::HandshakeFailed {
+                                key: task_key,
+                                id,
+                                detail: error.to_string(),
+                            })
+                            .await;
+                    }
                 }
-            }
-        });
+            },
+            admission_generation,
+        );
         Ok(())
     }
 
@@ -700,28 +943,45 @@ impl Pool {
             cancel,
             id,
             start_now,
-        } = self.register(key.clone(), Origin::Outbound)?;
+            admission_generation,
+        } = self.register(&key, Origin::Outbound, None)?;
         let events = self.events.clone();
+        let observations = self.observations.clone();
         let limits = self.limits;
         let task_key = key.clone();
-        self.launch(key, id, cancel, start_now, async move {
-            match connecting.await {
-                Ok(connection) => {
-                    crate::quic::pump(connection, task_key, id, writer_rx, events, limits).await;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, peer = %task_key.peer, "QUIC handshake failed");
-                    // discard: a stopped driver has no caller left to receive the handshake cause.
-                    let _ = events
-                        .send(Event::HandshakeFailed {
-                            key: task_key,
+        self.launch(
+            key,
+            id,
+            cancel,
+            start_now,
+            async move {
+                match connecting.await {
+                    Ok(connection) => {
+                        observe_ready(
+                            observations.as_ref(),
+                            &task_key,
                             id,
-                            detail: error.to_string(),
-                        })
-                        .await;
+                            admission_generation,
+                            true,
+                        );
+                        crate::quic::pump(connection, task_key, id, writer_rx, events, limits)
+                            .await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, peer = %task_key.peer, "QUIC handshake failed");
+                        // discard: a stopped driver has no caller left to receive the handshake cause.
+                        let _ = events
+                            .send(Event::HandshakeFailed {
+                                key: task_key,
+                                id,
+                                detail: error.to_string(),
+                            })
+                            .await;
+                    }
                 }
-            }
-        });
+            },
+            admission_generation,
+        );
         Ok(())
     }
 
@@ -758,54 +1018,98 @@ impl Pool {
             cancel,
             id,
             start_now,
-        } = self.register(key.clone(), Origin::Outbound)?;
+            admission_generation,
+        } = self.register(&key, Origin::Outbound, None)?;
         let events = self.events.clone();
+        let observations = self.observations.clone();
         let limits = self.limits;
         let task_key = key.clone();
 
-        self.launch(key, id, cancel, start_now, async move {
-            let stream = match TcpStream::connect(task_key.peer).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    tracing::debug!(%error, peer = %task_key.peer, "connect failed");
+        self.launch(
+            key,
+            id,
+            cancel,
+            start_now,
+            async move {
+                let stream = match TcpStream::connect(task_key.peer).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        tracing::debug!(%error, peer = %task_key.peer, "connect failed");
+                        return;
+                    }
+                };
+
+                #[cfg(feature = "wss")]
+                if let Some((connector, name)) = secure {
+                    match connector.connect(name, stream).await {
+                        Ok(tls) => {
+                            crate::ws::dial(
+                                tls,
+                                &authority,
+                                task_key,
+                                id,
+                                writer_rx,
+                                events,
+                                limits,
+                                keepalive,
+                                observations,
+                                admission_generation,
+                                true,
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, peer = %task_key.peer, "TLS handshake failed");
+                            // discard: the endpoint may have shut down before this bounded task
+                            // reports; no caller remains to receive the typed failure in that case.
+                            let _ = events
+                                .send(Event::HandshakeFailed {
+                                    key: task_key,
+                                    id,
+                                    detail: error.to_string(),
+                                })
+                                .await;
+                        }
+                    }
                     return;
                 }
-            };
 
-            #[cfg(feature = "wss")]
-            if let Some((connector, name)) = secure {
-                match connector.connect(name, stream).await {
-                    Ok(tls) => {
-                        crate::ws::dial(
-                            tls, &authority, task_key, id, writer_rx, events, limits, keepalive,
-                        )
-                        .await;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, peer = %task_key.peer, "TLS handshake failed");
-                        // discard: the endpoint may have shut down before this bounded task
-                        // reports; no caller remains to receive the typed failure in that case.
-                        let _ = events
-                            .send(Event::HandshakeFailed {
-                                key: task_key,
-                                id,
-                                detail: error.to_string(),
-                            })
-                            .await;
-                    }
-                }
-                return;
-            }
-
-            crate::ws::dial(
-                stream, &authority, task_key, id, writer_rx, events, limits, keepalive,
-            )
-            .await;
-        });
+                crate::ws::dial(
+                    stream,
+                    &authority,
+                    task_key,
+                    id,
+                    writer_rx,
+                    events,
+                    limits,
+                    keepalive,
+                    observations,
+                    admission_generation,
+                    false,
+                )
+                .await;
+            },
+            admission_generation,
+        );
         Ok(())
     }
 
+    #[cfg(test)]
     fn insert_stream<S>(&mut self, stream: S, key: ConnectionKey, origin: Origin) -> Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+    {
+        self.insert_stream_admitted(stream, key, origin, None, false)
+    }
+
+    fn insert_stream_admitted<S>(
+        &mut self,
+        stream: S,
+        key: ConnectionKey,
+        origin: Origin,
+        admission_generation: Option<u64>,
+        authenticated: bool,
+    ) -> Result<()>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
@@ -814,7 +1118,15 @@ impl Pool {
             cancel,
             id,
             start_now,
-        } = self.register(key.clone(), origin)?;
+            admission_generation,
+        } = self.register(&key, origin, admission_generation)?;
+        observe_ready(
+            self.observations.as_ref(),
+            &key,
+            id,
+            admission_generation,
+            authenticated,
+        );
         let events = self.events.clone();
         let limits = self.limits;
         let task_key = key.clone();
@@ -824,6 +1136,7 @@ impl Pool {
             cancel,
             start_now,
             pump(stream, task_key, id, writer_rx, events, limits),
+            admission_generation,
         );
         Ok(())
     }
@@ -834,13 +1147,22 @@ impl Pool {
         connection: quinn::Connection,
         key: ConnectionKey,
         origin: Origin,
+        admission_generation: Option<u64>,
     ) -> Result<()> {
         let Registration {
             writer: writer_rx,
             cancel,
             id,
             start_now,
-        } = self.register(key.clone(), origin)?;
+            admission_generation,
+        } = self.register(&key, origin, admission_generation)?;
+        observe_ready(
+            self.observations.as_ref(),
+            &key,
+            id,
+            admission_generation,
+            true,
+        );
         let events = self.events.clone();
         let limits = self.limits;
         let task_key = key.clone();
@@ -850,6 +1172,7 @@ impl Pool {
             cancel,
             start_now,
             crate::quic::pump(connection, task_key, id, writer_rx, events, limits),
+            admission_generation,
         );
         Ok(())
     }
@@ -861,6 +1184,8 @@ impl Pool {
         key: ConnectionKey,
         origin: Origin,
         keepalive: Duration,
+        admission_generation: Option<u64>,
+        authenticated: bool,
     ) -> Result<()>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -870,7 +1195,15 @@ impl Pool {
             cancel,
             id,
             start_now,
-        } = self.register(key.clone(), origin)?;
+            admission_generation,
+        } = self.register(&key, origin, admission_generation)?;
+        observe_ready(
+            self.observations.as_ref(),
+            &key,
+            id,
+            admission_generation,
+            authenticated,
+        );
         let events = self.events.clone();
         let limits = self.limits;
         let task_key = key.clone();
@@ -880,6 +1213,7 @@ impl Pool {
             cancel,
             start_now,
             crate::ws::pump(ws, task_key, id, writer_rx, events, limits, keepalive),
+            admission_generation,
         );
         Ok(())
     }
@@ -1037,38 +1371,6 @@ pub async fn accept_loop(listener: TcpListener, incoming: mpsc::Sender<(TcpStrea
             Ok((stream, peer)) => {
                 if incoming.send((stream, peer)).await.is_err() {
                     return;
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "accept failed");
-                return;
-            }
-        }
-    }
-}
-
-/// Accept connections until endpoint cancellation or listener failure.
-pub(crate) async fn accept_loop_until(
-    listener: TcpListener,
-    incoming: mpsc::Sender<(TcpStream, SocketAddr)>,
-    cancel: CancellationToken,
-) {
-    loop {
-        let accepted = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return,
-            accepted = listener.accept() => accepted,
-        };
-        match accepted {
-            Ok((stream, peer)) => {
-                tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => return,
-                    result = incoming.send((stream, peer)) => {
-                        if result.is_err() {
-                            return;
-                        }
-                    }
                 }
             }
             Err(error) => {

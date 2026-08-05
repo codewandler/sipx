@@ -10,8 +10,8 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-08-04:_ **`1.0.0-beta.2` and `1.0.0-beta.3` are published prereleases, and
-`1.0.0-beta.4` is the current release candidate.** Beta.4 is the measured feature-and-security wave
+_As of 2026-08-05:_ **`1.0.0-beta.2`, `1.0.0-beta.3` and `1.0.0-beta.4` are published prereleases,
+and beta.4 is current.** Beta.4 is the measured feature-and-security wave
 around secure browser audio and real-network connectivity recorded below. It deliberately excludes
 TURN-required networks, video, data channels and a general browser API; stable `1.0.0` remains a
 separate promotion and compatibility decision.
@@ -42,8 +42,11 @@ terminal. It is reachable behind NAT through a flow it opened, it can be the par
 challenge rather than only the one that answers, and it serves subscriptions to what its dialogs
 and registrations are doing.
 
-Next is not a milestone but an epic: the **application SDK** and the **host** that runs it — the
-question of what can be built on this stack without writing Rust. **M9** waits behind it.
+The delivered implementation wave after beta.4 is **M13 — Endpoint-complete**: it closes the
+measured sipx-owned endpoint gaps before the selected M14 load comparison. The application SDK and
+host remain independent backlog, and M15 separately tracks the requested browser-embeddable audio
+package without turning sipx into a WebRTC engine. M9's remaining off-media bridge work is not
+pulled into that wave.
 
 ## Delivered
 
@@ -150,7 +153,7 @@ question of what can be built on this stack without writing Rust. **M9** waits b
   measurement that would have been trusted to rule a cause out. See
   [where M12 stands](#m12--provable).
 
-## Next
+## Milestone sequence
 
 Four milestones, each independently demonstrable, each ordered by the same rule the
 [RFC roadmap](rfc-roadmap.md) uses: **a gap that changes what sipx can be deployed as beats a gap
@@ -168,8 +171,76 @@ Application-host phase 1 is delivered by `A-2`; the remaining in-progress work i
 [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host) phases below, which
 are not milestones because they are not RFC gaps.
 
-**Next release cut.** Beta.3 is published and beta.4 is the current candidate. Its boundary is a
-deliberately coherent feature-and-security wave rather than a bag of the ten shortest stories. The
+### M13 — Endpoint-complete (delivered)
+
+*Closed every known capability owned by a sipx endpoint before measuring it under load.*
+
+The `parity-wave-1` area tag is the machine-queryable delivered set: **fifteen stories across nine
+epics**. Its implementation is integrated and all 36 full-gate steps are green. M13 is not a release
+name or stable-1.0 promise. M14 is now the next selected measurement wave.
+
+| Order | Delivery lane | Stories | Outcome | Dependency order |
+|---:|---|---|---|---|
+| 1 | [Stack comparison](designs/stack-comparison.md) | **X-97** | Leaf-level, generated capability ownership; newly found sipx gaps joined M13 | first |
+| 2 | [Event reachability](designs/event-reachability.md) | **S-24, S-35, S-37, S-38, S-39** | Inbound notifier, reusable subscriber, registration-event consumer and live publication paths | S-35/S-37 before S-24/S-38/S-39 |
+| 3 | [Dialog extensions](designs/dialog-extensions.md) | **S-40** | Authenticated application-owned INFO, MESSAGE and extension requests | independent first batch |
+| 4 | [Live endpoint policy](designs/live-endpoint-policy.md) | **T-31, T-32** | Atomic TLS identity rotation, then bounded typed observation and policy | T-31 before T-32 |
+| 5 | [Supported test surfaces](designs/test-surfaces.md) | **X-75, M-53** | A quiet library, real call harness and runnable RTP echo proof | X-75 before M-53 |
+| 6 | Registration observation | **S-42** | Typed public address learned from a registration response | second batch |
+| 7 | [Dialog persistence](designs/dialog-persistence.md) | **S-43** | Versioned, bounded dialog snapshot and safe restoration | after dialog extensions |
+| 8 | [Comparative load](designs/comparative-load.md) | **X-98, P-15** | Freeze the bounded workload and ship its finite answering endpoint | X-98/X-75 before P-15 |
+
+**Delivery threshold:** the pinned capability ledger has no unclassified row and no open sipx-owned
+row; all fifteen selected stories plus any sipx story discovered by X-97 are done; every
+cluster-owned row links to a revision-pinned story in that repository; every new live path is
+bounded, cancellation-safe and represented in the RFC registry; and the full gate is green.
+Proxying, registrar/location service, routing, trunks,
+allowlists, deployment and cluster failover do not become sipx work merely because the comparison
+subject packages them beside its endpoint.
+
+The dependency-closed implementation order put X-97 and S-37 first; S-35, S-40, T-31 and X-75 ran
+beside them; S-38 and S-39 followed the event-client contract; T-32 followed the live-update review;
+S-42 and M-53 followed the first batch; S-43 followed the dialog-extension review; and X-98 froze
+the load contract before P-15 implemented its responder. X-97 served as a discovery gate, expanding
+the wave when it found another real sipx-owned leaf instead of declaring parity against a fixed
+initial list.
+
+### M14 — Pressure-proved
+
+*Run a fair, bounded endpoint comparison only after the comparable surface exists.*
+
+| Order | Story | Outcome | Starts when |
+|---:|---|---|---|
+| 1 | [**X-99 — Run and publish the comparative load result**](stories/X-99-run-and-publish-the-comparative-load-result.md) | Both directions, immutable builds, raw evidence and a generated, non-ranking summary | X-98, P-15 and M13 |
+
+**Done when** low-rate correctness qualifies each supported direction, the neutral driver proves
+headroom, five bounded repetitions identify sustainable UDP dialog-signalling capacity under the
+predeclared threshold, every process and dialog drains, and exact inputs plus raw results generate a
+refreshable public summary. Media, secure transports and connection churn are not inferred from the
+first signalling-only result.
+
+### M15 — Browser-embeddable audio
+
+*Ship sipx as a browser-consumable audio endpoint without implementing a WebRTC engine.*
+
+| Order | Story | Outcome | Starts when |
+|---:|---|---|---|
+| 1 | [**A-16 — Specify the browser SDK contract**](stories/A-16-specify-the-browser-sdk-contract.md) | ABI, lifecycle, security, package and browser-support contract | unscheduled admission gate |
+| 2 | [**S-41 — Export the sans-I/O session kernel to WebAssembly**](stories/S-41-export-the-sans-io-session-kernel-to-wasm.md) | Deterministic SIP/SDP/dialog kernel with host bytes, timers and entropy | A-16 |
+| 3 | [**T-33 — Bind browser WebSocket signalling**](stories/T-33-bind-browser-websocket-signalling.md) | Bounded WSS adapter using browser-owned I/O | A-16 and S-41 |
+| 4 | [**M-52 — Adapt browser-native WebRTC audio**](stories/M-52-adapt-browser-native-webrtc-audio.md) | Audio-only `RTCPeerConnection` adapter reusing the beta.4 profile | A-16 |
+| 5 | [**A-17 — Generate and package the browser SDK**](stories/A-17-generate-and-package-the-browser-sdk.md) | Installable JavaScript, checked TypeScript and WASM package | S-41, T-33 and M-52 |
+| 6 | [**A-18 — Publish a runnable browser-audio demo**](stories/A-18-publish-a-runnable-browser-audio-demo.md) | Public static demo for register, dial, answer and non-silent audio | A-17 |
+| 7 | [**X-100 — Prove the packaged browser SDK**](stories/X-100-prove-the-packaged-browser-sdk.md) | Clean consumer and supported-browser matrix in both SIP roles | A-18 |
+
+**Done when** a clean JavaScript consumer installs the exact package, the public demo registers over
+WSS and completes non-silent audio in both SIP roles across the supported browser matrix, and all
+socket, timer and media resources are observed closed after cancellation. The browser owns
+`RTCPeerConnection`, ICE, DTLS-SRTP, capture and render; video, data channels and a Rust WebRTC engine
+remain out of scope. M15 is tracked but is **not** part of the selected M13 wave.
+
+**Most recent release cut.** Beta.4 is published. Its boundary is a deliberately coherent
+feature-and-security wave rather than a bag of the ten shortest stories. The
 product claim is narrow: audio connects securely through real networks, including one independently
 proven browser-compatible path. Publication still requires the complete clean release gate,
 exact-SHA main CI and Pages, the protected registry workflow and one immutable annotated tag. The
@@ -548,6 +619,56 @@ has not yet been used by anyone outside this repository.
 An **epic** is a themed group of stories with a shared design doc. Stories join an epic via the
 `epic: <slug>` frontmatter field, where `<slug>` matches a design doc at `docs/designs/<slug>.md`.
 
+### Capability ownership — `stack-comparison`
+
+Generated comparison data records evidence and confidence for chooser-facing claims. `X-97` extends
+it to a leaf-level inventory with one owner and disposition per public capability, turning comparison
+into M13's discovery gate rather than a one-time prose audit. Subject-specific material remains in the
+comparison data directory. Done when no row is stale, unowned, unevidenced or linked to an already
+closed gap. See [design](designs/stack-comparison.md).
+
+### Event reachability — `event-reachability`
+
+Make the existing event machinery usable from a live endpoint: inbound SUBSCRIBE and mandatory
+initial NOTIFY (`S-35`), a specified reusable subscriber (`S-37`, `S-38`), and inbound/outbound
+PUBLISH using the existing compositor (`S-39`). Event-package policy stays with its consumer; `S-24`
+uses the generic subscriber for `reg`. See [design](designs/event-reachability.md).
+
+### Application-owned dialog extensions — `dialog-extensions`
+
+One constrained path for INFO, MESSAGE and admitted extension methods in both directions. Dialog
+routing, sequencing, authentication and transaction lifetime remain owned by the stack; re-INVITE,
+UPDATE, REFER, NOTIFY, BYE and OPTIONS keep their specialized semantics. See
+[design](designs/dialog-extensions.md).
+
+### Live endpoint policy — `live-endpoint-policy`
+
+Security-sensitive changes to a running endpoint: validate and atomically replace the server TLS
+identity for new handshakes (`T-31`), then expose bounded typed observation and a narrow pre-transaction
+policy seam (`T-32`). No arbitrary post-key message mutator, file watcher or competing resolver is
+introduced. See [design](designs/live-endpoint-policy.md).
+
+### Supported test surfaces — `test-surfaces`
+
+Turn the internal deterministic call tools into a public downstream test contract while keeping every
+library crate quiet unless its host installs tracing. The in-process surface is deliberately separate
+from wall-clock benchmark orchestration. See [design](designs/test-surfaces.md).
+
+### Comparative signalling load — `comparative-load`
+
+A subject-neutral, signalling-only dialog workload with bounded process supervision, a machine-ready
+answerer and immutable raw evidence. It reuses the existing scheduler and soak measurements rather
+than reopening them. M14 reports correctness-qualified capacity and uncertainty, not a winner. See
+[design](designs/comparative-load.md).
+
+### Browser audio SDK — `browser-sdk`
+
+An installable JavaScript/TypeScript package generated around a sans-I/O WebAssembly SIP/session
+kernel, browser WebSocket signalling, browser-native WebRTC audio and a runnable public demo. This is
+not the server-side application SDK and not a WebRTC implementation: the browser owns network and
+media engines. M15 is audio-only and unscheduled behind its specification gate. See
+[design](designs/browser-sdk.md).
+
 ### SIP core — `sip-core`
 
 The sans-IO heart of the stack: URIs, headers, messages, an incremental parser, and the four
@@ -692,8 +813,8 @@ RFC 8834 supplies the RTP/SAVPF and RTP/RTCP multiplex requirements rather than 
 **Current status:** the beta.4 tree now has the named fail-closed profile, `RTP/SAVPF`, RTCP
 multiplexing, one ICE-nominated component carrying DTLS-SRTP/SRTP/SRTCP, and the bounded native-browser
 CI proof in both SIP roles. That proof requires non-silent Opus in both directions and reverses the
-fingerprint, nomination and downgrade conditions independently. `M-38` remains the tracker until the
-hosted native-browser job and the complete release gate pass. See
+fingerprint, nomination and downgrade conditions independently. `M-38` is done: the hosted
+native-browser job and complete release gate passed before beta.4 was published. See
 [design](designs/webrtc-audio.md).
 
 ### Video admission — `video`

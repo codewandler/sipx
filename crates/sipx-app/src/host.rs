@@ -2190,7 +2190,7 @@ originate = true
         let policy = host.running.app_policy("session").unwrap();
         let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
         let (_stop, shutdown) = watch::channel(false);
-        let outcome = prepare_originated(
+        let outcome = Box::pin(prepare_originated(
             OriginateContext {
                 handle: origin.clone(),
                 calls,
@@ -2201,7 +2201,7 @@ originate = true
             },
             request,
             shutdown,
-        )
+        ))
         .await;
         let OriginateOutcome::Ready(mut prepared) = outcome else {
             panic!("the real outbound call is established");

@@ -51,13 +51,14 @@
 //! # }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bytes::Bytes;
 use sipx_sip::build::ResponseBuilder;
+use sipx_sip::headers::CSeq;
 use sipx_sip::transaction::TransactionKey;
 use sipx_sip::{HeaderName, Method, Request, StatusCode};
 use sipx_transport::{Handle, Incoming};
@@ -69,6 +70,9 @@ use crate::error::{Error, Result};
 use crate::event::{CallEvents, EndCause, EventSink};
 use crate::identity::InboundIdentityPolicy;
 use crate::media_policy::{Codecs, MediaPolicy};
+use crate::notifier::Notifier;
+use crate::publication::Publications;
+use crate::subscriber::EventSubscriptions;
 
 /// How many requests one call's inbox holds before the dispatcher sheds for it.
 ///
@@ -230,6 +234,7 @@ impl Invitation {
         media_address: crate::MediaAddress,
         policy: MediaPolicy,
     ) -> Result<Call> {
+        let tag = self.pending.tag();
         // Handed down rather than taken here, so that the invitation is taken immediately before
         // the `200` leaves rather than before the work that builds it — every step of which can
         // fail with nothing sent, and an invitation taken by one of those is one no CANCEL can
@@ -238,12 +243,72 @@ impl Invitation {
             endpoint,
             &self.incoming,
             media_address,
-            self.pending.tag(),
+            &tag,
             Some(&|| self.pending.claim()),
             policy,
             &[],
         )
         .await
+    }
+
+    /// Send the optional `100 Trying` used by a signalling workload.
+    ///
+    /// A `100` creates neither an early dialog nor a final-response claim, so a matching CANCEL
+    /// may still end this invitation afterwards. It deliberately carries no `To` tag (RFC 3261
+    /// §8.2.6.2).
+    pub async fn trying(&self, endpoint: &Handle) -> Result<()> {
+        let status = StatusCode::new(100).ok_or_else(|| Error::Rejected {
+            status: 100,
+            reason: "invalid Trying status".to_owned(),
+        })?;
+        let response =
+            ResponseBuilder::to_request(&self.incoming.request, status, "Trying")?.build();
+        endpoint.respond(&self.incoming.key, response).await?;
+        Ok(())
+    }
+
+    /// Accept an SDP-free INVITE as a signalling-only confirmed dialog.
+    ///
+    /// No media socket or task is created. The returned [`SignallingCall`](crate::SignallingCall)
+    /// owns the reserved per-dialog inbox, retransmits this 2xx until a valid ACK, validates BYE,
+    /// and can originate a bounded BYE of its own. `contact` is the local dialog target advertised
+    /// in the final response.
+    pub async fn answer_signalling(
+        self,
+        endpoint: &Handle,
+        contact: impl Into<Bytes>,
+    ) -> Result<crate::SignallingCall> {
+        let tag = self.pending.tag();
+        self.answer_signalling_inner(endpoint, contact.into(), tag)
+            .await
+    }
+
+    /// [`Self::answer_signalling`] with an application-selected, validated dialog tag.
+    ///
+    /// This exists for deterministic protocol fixtures. The tag is claimed atomically with the
+    /// invitation, so a crossing CANCEL either wins with the old pending tag or loses and uses this
+    /// same tag in its own response; the two transactions cannot disagree.
+    pub async fn answer_signalling_with_tag(
+        self,
+        endpoint: &Handle,
+        contact: impl Into<Bytes>,
+        tag: impl Into<String>,
+    ) -> Result<crate::SignallingCall> {
+        self.answer_signalling_inner(endpoint, contact.into(), tag.into())
+            .await
+    }
+
+    async fn answer_signalling_inner(
+        self,
+        endpoint: &Handle,
+        contact: Bytes,
+        tag: String,
+    ) -> Result<crate::SignallingCall> {
+        // Every fallible shape check happens before the transaction is claimed. A malformed
+        // Contact or dialog cannot consume an invitation that a later CANCEL could still end.
+        let prepared = crate::signalling::prepare(endpoint, &self.incoming, &tag, contact)?;
+        self.pending.claim_with_tag(&tag)?;
+        crate::signalling::establish(endpoint.clone(), self.incoming, self.requests, prepared).await
     }
 
     /// Refuse this pending invitation with a final response.
@@ -257,7 +322,8 @@ impl Invitation {
         reason: impl Into<Bytes>,
     ) -> Result<()> {
         self.pending.claim()?;
-        final_response(endpoint, &self.incoming, self.pending.tag(), status, reason).await
+        let tag = self.pending.tag();
+        final_response(endpoint, &self.incoming, &tag, status, reason).await
     }
 
     /// Split into the INVITE and the inbox, ready for
@@ -306,7 +372,8 @@ impl CouplingInvitation {
         reason: impl Into<Bytes>,
     ) -> Result<()> {
         self.pending.claim()?;
-        final_response(endpoint, &self.incoming, self.pending.tag(), status, reason).await
+        let tag = self.pending.tag();
+        final_response(endpoint, &self.incoming, &tag, status, reason).await
     }
 }
 
@@ -357,8 +424,6 @@ struct Pending {
     transaction: TransactionKey,
     /// The INVITE, which the `487` is built from.
     request: Request,
-    /// The `To` tag every response this side sends about this invitation carries (§9.2).
-    tag: String,
     /// The route this invitation reserved, kept only so a finished one can be swept.
     ///
     /// A transaction whose call has dropped its inbox is gone as far as anything here is
@@ -377,6 +442,12 @@ struct Pending {
 struct State {
     phase: Phase,
     events: EventSink,
+    /// The `To` tag every response this side sends about this invitation carries (§9.2).
+    ///
+    /// Kept under the phase lock so a deterministic signalling answer can replace it atomically
+    /// with claiming the invitation, while CANCEL observes either the complete before or after
+    /// state.
+    tag: String,
 }
 
 /// The three states RFC 3261 §9.2 distinguishes, and the only three it needs.
@@ -392,8 +463,8 @@ enum Phase {
 }
 
 impl Pending {
-    fn tag(&self) -> &str {
-        &self.tag
+    fn tag(&self) -> String {
+        self.lock().tag.clone()
     }
 
     /// The state, whether or not a previous holder panicked.
@@ -425,21 +496,33 @@ impl Pending {
         Ok(())
     }
 
+    /// Claim the invitation and select its final dialog tag as one atomic state transition.
+    fn claim_with_tag(&self, tag: &str) -> Result<()> {
+        let mut state = self.lock();
+        if state.phase == Phase::Cancelled {
+            return Err(Error::InvitationCancelled);
+        }
+        state.tag.clear();
+        state.tag.push_str(tag);
+        state.phase = Phase::Answered;
+        Ok(())
+    }
+
     /// End the invitation, if it has not already answered.
     ///
     /// Returns whether the `487` is owed — that is, whether this call was the transition. §9.2
     /// asks for it only "if the transaction for the original request still exists", and both
     /// things that make it not exist come through here: an answer, and an earlier CANCEL whose
     /// retransmission this is.
-    fn cancel(&self) -> bool {
+    fn cancel(&self) -> (bool, String) {
         let mut state = self.lock();
         if state.phase != Phase::Ringing {
-            return false;
+            return (false, state.tag.clone());
         }
         state.phase = Phase::Cancelled;
         state.events.end(EndCause::RemoteCancel);
         self.cancelled.notify_waiters();
-        true
+        (true, state.tag.clone())
     }
 }
 
@@ -546,6 +629,7 @@ struct Route {
 struct Table {
     routes: Mutex<Routing>,
     counts: Counters,
+    responses: Mutex<BTreeMap<u16, u64>>,
     queue: usize,
 }
 
@@ -625,7 +709,12 @@ impl Calls {
     /// How many calls are currently routed.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.lock().by_dialog.len()
+        let mut routing = self.lock();
+        routing.by_dialog.retain(|_, route| !route.tx.is_closed());
+        routing
+            .invites
+            .retain(|_, pending| !pending.route.is_closed());
+        routing.by_dialog.len()
     }
 
     /// Whether no call is routed at all.
@@ -647,6 +736,28 @@ impl Calls {
             merged: counts.merged.load(Ordering::Relaxed),
             identity: counts.identity.load(Ordering::Relaxed),
         }
+    }
+
+    /// Responses the dispatcher successfully handed to the endpoint, keyed by status code.
+    ///
+    /// Unlike [`Self::counts`], this is wire evidence rather than decision evidence: a response
+    /// that could not be built or handed off is absent.
+    #[must_use]
+    pub fn responses(&self) -> BTreeMap<u16, u64> {
+        self.0
+            .responses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn counted_response(&self, status: u16) {
+        let mut responses = self
+            .0
+            .responses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *responses.entry(status).or_default() += 1;
     }
 
     /// Record one request the dispatcher did not deliver.
@@ -710,11 +821,11 @@ impl Calls {
         let pending = Arc::new(Pending {
             transaction: incoming.key.clone(),
             request: incoming.request.clone(),
-            tag: token(),
             route: tx,
             state: Mutex::new(State {
                 phase: Phase::Ringing,
                 events,
+                tag: token(),
             }),
             cancelled: Notify::new(),
         });
@@ -790,6 +901,9 @@ pub struct Dispatcher {
     incoming: mpsc::Receiver<Incoming>,
     calls: Calls,
     identity: Option<InboundIdentityPolicy>,
+    notifier: Option<Notifier>,
+    event_subscriptions: Option<EventSubscriptions>,
+    publications: Option<Publications>,
 }
 
 impl Dispatcher {
@@ -811,9 +925,13 @@ impl Dispatcher {
             calls: Calls(Arc::new(Table {
                 routes: Mutex::new(Routing::default()),
                 counts: Counters::default(),
+                responses: Mutex::new(BTreeMap::new()),
                 queue: queue.max(1),
             })),
             identity: None,
+            notifier: None,
+            event_subscriptions: None,
+            publications: None,
         }
     }
 
@@ -825,6 +943,30 @@ impl Dispatcher {
     #[must_use]
     pub fn with_identity(mut self, identity: InboundIdentityPolicy) -> Self {
         self.identity = Some(identity);
+        self
+    }
+
+    /// Serve inbound RFC 6665 SUBSCRIBE requests through this bounded notifier.
+    #[must_use]
+    pub fn with_notifier(mut self, mut notifier: Notifier) -> Self {
+        notifier.attach(self.endpoint.clone());
+        self.notifier = Some(notifier);
+        self
+    }
+
+    /// Route inbound NOTIFY requests to a bounded outbound event-subscription client.
+    #[must_use]
+    pub fn with_event_subscriptions(mut self, subscriptions: EventSubscriptions) -> Self {
+        subscriptions.attach(self.endpoint.clone());
+        self.event_subscriptions = Some(subscriptions);
+        self
+    }
+
+    /// Serve inbound PUBLISH and attach outbound publication transactions to this endpoint.
+    #[must_use]
+    pub fn with_publications(mut self, mut publications: Publications) -> Self {
+        publications.attach(self.endpoint.clone());
+        self.publications = Some(publications);
         self
     }
 
@@ -853,7 +995,15 @@ impl Dispatcher {
     /// while it is being polled. `None` once the endpoint has shut down.
     pub async fn next(&mut self) -> Option<Dispatched> {
         loop {
-            let incoming = self.incoming.recv().await?;
+            let Some(incoming) = self.incoming.recv().await else {
+                if let Some(subscriptions) = self.event_subscriptions.as_mut() {
+                    subscriptions.shutdown().await;
+                }
+                if let Some(publications) = self.publications.as_mut() {
+                    publications.shutdown().await;
+                }
+                return None;
+            };
             if let Some(surfaced) = self.route(incoming).await {
                 return Some(surfaced);
             }
@@ -876,38 +1026,7 @@ impl Dispatcher {
         // `Dialog::matches` would then reject it and leave nothing to answer it.
         if incoming.request.method == Method::Invite && to_tag(&incoming.request.headers).is_none()
         {
-            let cseq = cseq_number(&incoming.request.headers);
-            if self.calls.is_merged(&key, cseq) {
-                // RFC 3261 §8.2.2.2, all three of its terms: the same `Call-ID`, `From` tag *and*
-                // `CSeq` as a request already accepted here, which means this copy reached us by
-                // a second path. A retransmission never gets this far — the server transaction
-                // absorbs those — so a match here is always a different branch.
-                self.calls.counted(Kind::Merged);
-                self.refuse(&incoming, 482, "Loop Detected", None).await;
-                return None;
-            }
-            let verification = self
-                .identity
-                .as_mut()
-                .map(|identity| identity.verify(&incoming.request));
-            if let Some(Err(failure)) = verification {
-                self.calls.counted(Kind::Identity);
-                self.refuse(&incoming, failure.status(), failure.reason(), None)
-                    .await;
-                return None;
-            }
-            // Anything else is a fresh call attempt, and that includes the §8.1.3.5 retry that
-            // follows a 401, 407, 413, 415, 420, 484 or RFC 4028 §7.3's 422 — same `Call-ID` and
-            // `From` tag, one higher `CSeq`. It reserves the key afresh, replacing a route whose
-            // invitation has been answered and abandoned; anything still holding that inbox stops
-            // receiving, which is what it already was.
-            let (requests, pending, events) = self.calls.reserve(key, &incoming);
-            return Some(Dispatched::Invitation(Invitation {
-                incoming,
-                requests,
-                pending,
-                events: Some(events),
-            }));
+            return self.route_new_invite(key, incoming).await;
         }
 
         // Before the route lookup, because a CANCEL does not belong to a *dialog* — it belongs to
@@ -916,6 +1035,33 @@ impl Dispatcher {
         // would put it in an inbox where the two responses §9.2 owes could not be sent from.
         if incoming.request.method == Method::Cancel {
             self.cancel(&incoming).await;
+            return None;
+        }
+
+        // SUBSCRIBE owns a dialog of its own and therefore cannot be routed by the call table.
+        // A tagged refresh is matched inside the notifier against its subscription dialog.
+        if incoming.request.method == Method::Subscribe
+            && let Some(notifier) = self.notifier.as_mut()
+        {
+            notifier.receive(&incoming).await;
+            return None;
+        }
+
+        // PUBLISH creates no dialog. The publication service serializes and authorizes its own
+        // resource state before anything can be mistaken for an INVITE-dialog request.
+        if incoming.request.method == Method::Publish
+            && let Some(publications) = self.publications.as_mut()
+        {
+            publications.receive(&incoming).await;
+            return None;
+        }
+
+        // NOTIFY owns the subscription dialog established by an outbound SUBSCRIBE, not an INVITE
+        // dialog in the call table. The event client validates its exact tags, Event and CSeq.
+        if incoming.request.method == Method::Notify
+            && let Some(subscriptions) = &self.event_subscriptions
+            && subscriptions.receive(&incoming).await
+        {
             return None;
         }
 
@@ -967,6 +1113,64 @@ impl Dispatcher {
         }
     }
 
+    async fn route_new_invite(&mut self, key: RouteKey, incoming: Incoming) -> Option<Dispatched> {
+        let invite_cseq = incoming
+            .request
+            .headers
+            .typed::<CSeq>()
+            .and_then(std::result::Result::ok)
+            .filter(|value| value.method == Method::Invite);
+        let unique_required = [
+            HeaderName::CallId,
+            HeaderName::From,
+            HeaderName::To,
+            HeaderName::CSeq,
+            HeaderName::Contact,
+        ]
+        .iter()
+        .all(|name| incoming.request.headers.count(name) == 1);
+        if invite_cseq.is_none()
+            || !unique_required
+            || Dialog::from_request(&incoming.request, "validation").is_none()
+        {
+            self.calls.counted(Kind::Malformed);
+            self.refuse(&incoming, 400, "Bad Request", None).await;
+            return None;
+        }
+        let cseq = cseq_number(&incoming.request.headers);
+        if self.calls.is_merged(&key, cseq) {
+            // RFC 3261 §8.2.2.2, all three of its terms: the same `Call-ID`, `From` tag *and*
+            // `CSeq` as a request already accepted here, which means this copy reached us by a
+            // second path. A retransmission never gets this far — the server transaction absorbs
+            // those — so a match here is always a different branch.
+            self.calls.counted(Kind::Merged);
+            self.refuse(&incoming, 482, "Loop Detected", None).await;
+            return None;
+        }
+        let verification = self
+            .identity
+            .as_mut()
+            .map(|identity| identity.verify(&incoming.request));
+        if let Some(Err(failure)) = verification {
+            self.calls.counted(Kind::Identity);
+            self.refuse(&incoming, failure.status(), failure.reason(), None)
+                .await;
+            return None;
+        }
+        // Anything else is a fresh call attempt, and that includes the §8.1.3.5 retry that follows
+        // a 401, 407, 413, 415, 420, 484 or RFC 4028 §7.3's 422 — same `Call-ID` and `From` tag, one
+        // higher `CSeq`. It reserves the key afresh, replacing a route whose invitation has been
+        // answered and abandoned; anything still holding that inbox stops receiving, which is what
+        // it already was.
+        let (requests, pending, events) = self.calls.reserve(key, &incoming);
+        Some(Dispatched::Invitation(Invitation {
+            incoming,
+            requests,
+            pending,
+            events: Some(events),
+        }))
+    }
+
     /// Answer a CANCEL — both halves of RFC 3261 §9.2, or the 481 that says there was nothing to
     /// cancel.
     ///
@@ -1013,24 +1217,25 @@ impl Dispatcher {
             return;
         };
 
+        let (cancelled, tag) = pending.cancel();
         self.answer_request(
             &incoming.key,
             &incoming.request,
             200,
             "OK",
             None,
-            Some(pending.tag()),
+            Some(&tag),
         )
         .await;
 
-        if pending.cancel() {
+        if cancelled {
             self.answer_request(
                 &pending.transaction,
                 &pending.request,
                 487,
                 "Request Terminated",
                 None,
-                Some(pending.tag()),
+                Some(&tag),
             )
             .await;
         }
@@ -1148,8 +1353,11 @@ impl Dispatcher {
         // discard: the same loss one step later and with the same gap — see above. Closing it
         // needs a counter for responses the endpoint could not send, which belongs with
         // `sipx_transport::Handle::respond` rather than here.
-        if let Err(error) = self.endpoint.respond(key, response).await {
-            tracing::warn!(%error, status, "could not send the response for a request");
+        match self.endpoint.respond(key, response).await {
+            Ok(()) => self.calls.counted_response(status),
+            Err(error) => {
+                tracing::warn!(%error, status, "could not send the response for a request");
+            }
         }
     }
 }
@@ -1164,7 +1372,7 @@ impl Dispatcher {
 /// a CANCEL and the `487` for the INVITE it withdraws are two responses about one invitation, and
 /// the section asks that they carry the same tag. Everything else is a one-off refusal with no
 /// second response to agree with, and takes a fresh token.
-fn with_to_tag(
+pub(crate) fn with_to_tag(
     builder: sipx_sip::build::ResponseBuilder,
     request: &Request,
     tag: Option<&str>,

@@ -57,6 +57,12 @@ until a second application disagrees.
       application reaches; after the host exists it names none.
 
 ## Progress
+- **M13 integration resolved the public-test-product boundary without weakening this story's
+  application rule.** `sipx-testkit` deliberately ships a Supported downstream harness, whose
+  caller cannot sensibly be the production host. Its manifest now declares a separate example
+  reachability class: the checker derives and validates the independent Cargo target and self
+  import, admits only the testkit crate, and never follows its dependencies. Tests, dev-dependencies
+  and undeclared examples remain unable to widen the production surface.
 - **Implemented; gate state is recorded below and nowhere else.** The host exists
   (`crates/sipx-app/src/host.rs`, `sipx-host` binary), the surface is derived from its dependency
   closure (`scripts/check-app-surface.py`), the maturity report reports predicate 1 against that

@@ -13,11 +13,12 @@
 //!   contacts at the registrar.
 //! - A 401 or 407 is expected on the first attempt, not an error.
 
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_sip::build::RequestBuilder;
-use sipx_sip::headers::ContactValue;
+use sipx_sip::headers::{ContactValue, Via, first_hop_end};
 use sipx_sip::{Address, HeaderName, Method, Request, Response, Uri};
 
 use crate::auth::{Challenge, Credentials, new_cnonce, respond, strongest};
@@ -57,6 +58,131 @@ impl Lease {
     }
 }
 
+/// What the registrar's top response `Via` says it observed as this registration's source.
+///
+/// This is an observation only. It is never copied into `Contact`, routing, GRUU, Outbound, push,
+/// SDP or media policy. [`Self::Absent`] and [`Self::Invalid`] do not make an otherwise successful
+/// registration fail, while [`Self::NotRegistered`] says there has not been a successful response
+/// to inspect yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RegistrationObservation {
+    /// No REGISTER has completed successfully, so there is no response `Via` to report.
+    #[default]
+    NotRegistered,
+    /// The top `Via` was valid and carried neither `received` nor `rport`.
+    Absent,
+    /// The registrar reported one unambiguous IP address and port.
+    Observed(SocketAddr),
+    /// Observation fields were present but invalid, or the required top `Via` was unusable.
+    Invalid(RegistrationObservationError),
+}
+
+impl RegistrationObservation {
+    /// The observed address, only when the registrar stated one unambiguously.
+    #[must_use]
+    pub const fn address(self) -> Option<SocketAddr> {
+        match self {
+            Self::Observed(address) => Some(address),
+            Self::NotRegistered | Self::Absent | Self::Invalid(_) => None,
+        }
+    }
+
+    /// Interpret the top `Via` of one successful REGISTER response.
+    #[must_use]
+    pub fn from_response(response: &Response) -> Self {
+        let Some(header) = response.headers.get(&HeaderName::Via) else {
+            return Self::Invalid(RegistrationObservationError::MissingVia);
+        };
+        let value = header.value();
+        let Some(top_hop) = value.get(..first_hop_end(&value)) else {
+            return Self::Invalid(RegistrationObservationError::MalformedVia);
+        };
+        let Ok(via) = Via::parse_one(top_hop) else {
+            return Self::Invalid(RegistrationObservationError::MalformedVia);
+        };
+
+        let received: Vec<_> = via
+            .params
+            .iter()
+            .filter(|parameter| parameter.is("received"))
+            .collect();
+        if received.len() > 1 {
+            return Self::Invalid(RegistrationObservationError::ContradictoryReceived);
+        }
+        let rport: Vec<_> = via
+            .params
+            .iter()
+            .filter(|parameter| parameter.is("rport"))
+            .collect();
+        if rport.len() > 1 {
+            return Self::Invalid(RegistrationObservationError::ContradictoryRport);
+        }
+
+        let received = received.first().map(|parameter| parameter.value.as_deref());
+        let rport = rport.first().map(|parameter| parameter.value.as_deref());
+        match (received, rport) {
+            (None, None) => return Self::Absent,
+            (None, Some(_)) => {
+                return Self::Invalid(RegistrationObservationError::MissingReceived);
+            }
+            (Some(_), None | Some(None)) => {
+                return Self::Invalid(RegistrationObservationError::MissingRport);
+            }
+            (Some(_), Some(Some(_))) => {}
+        }
+
+        let Some(received) = received.flatten().and_then(parse_observed_ip) else {
+            return Self::Invalid(RegistrationObservationError::NonIpReceived);
+        };
+        let Some(rport) = rport
+            .flatten()
+            .filter(|value| value.iter().all(u8::is_ascii_digit))
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|port| *port != 0)
+        else {
+            return Self::Invalid(RegistrationObservationError::InvalidRport);
+        };
+        Self::Observed(SocketAddr::new(received, rport))
+    }
+}
+
+/// Why a successful REGISTER response did not contain one usable path observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RegistrationObservationError {
+    /// The successful response carried no `Via` header.
+    MissingVia,
+    /// The first `Via` header could not be parsed into a top hop.
+    MalformedVia,
+    /// The top hop asserted `received` more than once.
+    ContradictoryReceived,
+    /// The top hop asserted `rport` more than once.
+    ContradictoryRport,
+    /// `rport` was present but `received` was absent.
+    MissingReceived,
+    /// `received` was present but `rport` was absent or valueless.
+    MissingRport,
+    /// `received` was valueless or was not an IPv4 or IPv6 literal.
+    NonIpReceived,
+    /// `rport` was not a decimal port in `1..=65535`.
+    InvalidRport,
+}
+
+fn parse_observed_ip(raw: &[u8]) -> Option<IpAddr> {
+    let text = std::str::from_utf8(raw).ok()?;
+    let unbracketed = match text
+        .strip_prefix('[')
+        .and_then(|without_open| without_open.strip_suffix(']'))
+    {
+        Some(address) => address,
+        None if text.starts_with('[') || text.ends_with(']') => return None,
+        None => text,
+    };
+    unbracketed.parse().ok()
+}
+
 /// A successful registration: the lease, and the two route vectors that came back with it.
 ///
 /// A struct rather than three positional fields on the enum variant, because `PathSet` and
@@ -67,6 +193,11 @@ impl Lease {
 pub struct Registered {
     /// What the registrar granted, and when to refresh it.
     pub lease: Lease,
+    /// The source address the registrar reported in the top response `Via`.
+    ///
+    /// Informational only: it never rewrites a `Contact`, route or media address. Invalid or absent
+    /// observations do not change the lease or any other registration result.
+    pub observation: RegistrationObservation,
     /// The proxies the registrar recorded on the path back to this contact (RFC 3327).
     pub path: PathSet,
     /// The proxies this UA's own outbound requests must traverse (RFC 3608).
@@ -475,6 +606,7 @@ pub fn interpret(response: &Response, registration: &Registration) -> Outcome {
         // whole security value §5.1 claims for the header is that the UA can look at it.
         return Outcome::Registered(Box::new(Registered {
             lease: Lease::from_granted(granted),
+            observation: RegistrationObservation::from_response(response),
             path: PathSet::from_response(response),
             service_route: ServiceRoute::from_response(response),
             flow_accepted: crate::outbound::accepted(response),
@@ -655,6 +787,207 @@ mod tests {
              {extra}\
              Content-Length: 0\r\n\r\n"
         ))
+    }
+
+    fn observation_from(via: Option<&str>) -> RegistrationObservation {
+        let via = via.map_or_else(String::new, |value| format!("Via: {value}\r\n"));
+        let outcome = interpret(
+            &response(&format!(
+                "SIP/2.0 200 OK\r\n\
+                 {via}\
+                 To: <sip:alice@example.com>;tag=r\r\n\
+                 From: <sip:alice@example.com>;tag=1\r\n\
+                 Call-ID: reg-1@192.0.2.5\r\n\
+                 CSeq: 1 REGISTER\r\n\
+                 Content-Length: 0\r\n\r\n"
+            )),
+            &registration(),
+        );
+        let Outcome::Registered(registered) = outcome else {
+            panic!("expected successful registration, got {outcome:?}");
+        };
+        registered.observation
+    }
+
+    #[test]
+    fn registration_observation_vectors_are_typed_and_non_authoritative() {
+        assert_eq!(
+            observation_from(Some("SIP/2.0/UDP private.example:5060;branch=z9hG4bKx")),
+            RegistrationObservation::Absent
+        );
+        assert_eq!(
+            observation_from(Some(
+                "SIP/2.0/UDP private.example:5060;received=203.0.113.9;rport=41234;branch=z9hG4bKx"
+            )),
+            RegistrationObservation::Observed("203.0.113.9:41234".parse().expect("address"))
+        );
+        assert_eq!(
+            observation_from(Some(
+                "SIP/2.0/TCP private.example:5060;received=[2001:db8::9];rport=5060;branch=z9hG4bKx"
+            )),
+            RegistrationObservation::Observed("[2001:db8::9]:5060".parse().expect("address"))
+        );
+        for (via, error) in [
+            (None, RegistrationObservationError::MissingVia),
+            (
+                Some("not-a-via"),
+                RegistrationObservationError::MalformedVia,
+            ),
+            (
+                Some("SIP/2.0/UDP h;rport=41234;branch=z9hG4bKx"),
+                RegistrationObservationError::MissingReceived,
+            ),
+            (
+                Some("SIP/2.0/UDP h;received=203.0.113.9;branch=z9hG4bKx"),
+                RegistrationObservationError::MissingRport,
+            ),
+            (
+                Some("SIP/2.0/UDP h;received=203.0.113.9;rport;branch=z9hG4bKx"),
+                RegistrationObservationError::MissingRport,
+            ),
+            (
+                Some("SIP/2.0/UDP h;received=registrar.example;rport=5060;branch=z9hG4bKx"),
+                RegistrationObservationError::NonIpReceived,
+            ),
+            (
+                Some("SIP/2.0/UDP h;received;rport=5060;branch=z9hG4bKx"),
+                RegistrationObservationError::NonIpReceived,
+            ),
+            (
+                Some("SIP/2.0/UDP h;received=203.0.113.9;rport=nope;branch=z9hG4bKx"),
+                RegistrationObservationError::InvalidRport,
+            ),
+            (
+                Some("SIP/2.0/UDP h;received=203.0.113.9;rport=+5060;branch=z9hG4bKx"),
+                RegistrationObservationError::InvalidRport,
+            ),
+            (
+                Some("SIP/2.0/UDP h;received=203.0.113.9;rport=0;branch=z9hG4bKx"),
+                RegistrationObservationError::InvalidRport,
+            ),
+            (
+                Some(
+                    "SIP/2.0/UDP h;received=203.0.113.9;Received=203.0.113.10;rport=5060;branch=z9hG4bKx",
+                ),
+                RegistrationObservationError::ContradictoryReceived,
+            ),
+            (
+                Some("SIP/2.0/UDP h;received=203.0.113.9;rport=5060;RPORT=5061;branch=z9hG4bKx"),
+                RegistrationObservationError::ContradictoryRport,
+            ),
+        ] {
+            assert_eq!(
+                observation_from(via),
+                RegistrationObservation::Invalid(error)
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_top_via_hop_contributes_the_observation() {
+        assert_eq!(
+            observation_from(Some(
+                "SIP/2.0/UDP top.example:5060;received=203.0.113.9;rport=41234;branch=z9hG4bKtop, \
+                 SIP/2.0/UDP lower.example:5060;received=not-an-ip;rport=0;branch=z9hG4bKlower"
+            )),
+            RegistrationObservation::Observed("203.0.113.9:41234".parse().expect("address")),
+            "a malformed lower hop cannot contaminate the top-hop observation"
+        );
+        assert_eq!(
+            observation_from(Some(
+                "SIP/2.0/UDP top.example:5060;received=203.0.113.9;rport=41234;branch=z9hG4bKtop, \
+                 SIP/2.0/UDP lower.example:5060;opaque=\"unterminated"
+            )),
+            RegistrationObservation::Observed("203.0.113.9:41234".parse().expect("address")),
+            "even invalid quoted syntax in a lower hop is outside this observation"
+        );
+
+        let outcome = interpret(
+            &ok_with(
+                "Via: SIP/2.0/UDP lower.example:5060;received=198.51.100.7;rport=50999;branch=z9hG4bKlower\r\n",
+            ),
+            &registration(),
+        );
+        let Outcome::Registered(registered) = outcome else {
+            panic!("expected successful registration, got {outcome:?}");
+        };
+        assert_eq!(
+            registered.observation,
+            RegistrationObservation::Absent,
+            "a lower Via row cannot supply parameters missing from the top row"
+        );
+    }
+
+    #[test]
+    fn invalid_observation_does_not_replace_registration_results() {
+        let instance = instance();
+        let urn = instance.urn().to_owned();
+        let registration = Registration {
+            instance: Some(instance),
+            reg_id: RegId::new(1),
+            gruu: Some(gruu::Kind::Public),
+            push: Some(
+                sipx_sip::push::Device::new("webpush", "c1a5b3e7d9f2").expect("valid push device"),
+            ),
+            ..registration()
+        };
+        let returned_contact = format!(
+            "{};pub-gruu=\"sip:alice@example.com;gr={urn}\"\
+             ;temp-gruu=\"sip:t7k2xq9f4m@example.com;gr\";expires=600",
+            registration.contact()
+        );
+        let outcome = interpret(
+            &response(&format!(
+                "SIP/2.0 200 OK\r\n\
+                 Via: SIP/2.0/UDP private.example:5060;received=not-an-ip;rport=41234;branch=z9hG4bKx\r\n\
+                 To: <sip:alice@example.com>;tag=r\r\n\
+                 From: <sip:alice@example.com>;tag=1\r\n\
+                 Call-ID: reg-1@192.0.2.5\r\n\
+                 CSeq: 1 REGISTER\r\n\
+                 Contact: {returned_contact}\r\n\
+                 Path: <sip:path.example;lr>\r\n\
+                 Service-Route: <sip:route.example;lr>\r\n\
+                 Require: outbound\r\n\
+                 Flow-Timer: 25\r\n\
+                 Feature-Caps: *;+sip.pns=\"webpush\";+sip.pnsreg=\"120\"\
+                 ;+sip.pnspurr=\"opaque-purr-1\"\r\n\
+                 Content-Length: 0\r\n\r\n"
+            )),
+            &registration,
+        );
+        let Outcome::Registered(registered) = outcome else {
+            panic!("an invalid observation must not reject the registration");
+        };
+        assert_eq!(
+            registered.observation,
+            RegistrationObservation::Invalid(RegistrationObservationError::NonIpReceived)
+        );
+        assert_eq!(registered.lease.granted, Duration::from_secs(600));
+        assert_eq!(
+            registered.path.rendered(),
+            vec!["<sip:path.example;lr>".to_owned()]
+        );
+        assert_eq!(
+            registered.service_route.rendered(),
+            vec!["<sip:route.example;lr>".to_owned()]
+        );
+        assert!(registered.flow_accepted);
+        assert_eq!(registered.flow_timer, Some(Duration::from_secs(25)));
+        assert_eq!(
+            registered.gruus.public().map(sipx_sip::Uri::to_string),
+            Some(format!("sip:alice@example.com;gr={urn}"))
+        );
+        assert_eq!(
+            registered.gruus.temporary().map(sipx_sip::Uri::to_string),
+            Some("sip:t7k2xq9f4m@example.com;gr".to_owned())
+        );
+        assert!(registered.push.supports("webpush"));
+        assert!(registered.push.refreshes_required());
+        assert_eq!(
+            registered.push.refresh_interval(),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(registered.push.purr(), Some("opaque-purr-1"));
     }
 
     /// The story's failing-first test.

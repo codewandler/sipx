@@ -35,6 +35,10 @@
           "is_self": {
             "type": "boolean",
             "description": "True for this repository, and for no other stack. Gates the generated confidence tier."
+          },
+          "capability_inventory": {
+            "type": "boolean",
+            "description": "True when this independent subject registry requires a leaf capability ledger and exact-ID inventory."
           }
         }
       }

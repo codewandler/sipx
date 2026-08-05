@@ -4,6 +4,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bytes::Bytes;
+use thiserror::Error;
 
 use crate::error::{BuildError, UriError};
 use crate::escape;
@@ -23,6 +24,51 @@ pub enum Scheme {
     Tel,
     /// Any other scheme, retained verbatim.
     Other(Bytes),
+}
+
+/// Effective wire transport selected by a SIP/SIPS URI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UriTransport {
+    /// UDP datagrams.
+    Udp,
+    /// TCP stream.
+    Tcp,
+    /// TLS over TCP.
+    Tls,
+    /// SIP over WebSocket.
+    Ws,
+    /// SIP over secure WebSocket.
+    Wss,
+    /// SIP over QUIC.
+    Quic,
+}
+
+impl UriTransport {
+    /// Default port for this transport when the URI omits one.
+    #[must_use]
+    pub fn default_port(self) -> u16 {
+        match self {
+            Self::Udp | Self::Tcp => 5060,
+            Self::Tls | Self::Quic => 5061,
+            Self::Ws => 80,
+            Self::Wss => 443,
+        }
+    }
+}
+
+/// Why a URI cannot select a safe wire transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum UriTransportError {
+    /// The scheme is neither SIP nor SIPS.
+    #[error("the URI is not a SIP or SIPS URI")]
+    NotSip,
+    /// The transport parameter is not implemented.
+    #[error("the URI names an unsupported transport")]
+    Unsupported,
+    /// SIPS cannot be carried over UDP.
+    #[error("a SIPS URI cannot select UDP")]
+    SecureDatagram,
 }
 
 impl Scheme {
@@ -348,6 +394,34 @@ impl Uri {
     #[must_use]
     pub fn transport(&self) -> Option<&[u8]> {
         self.params().and_then(|p| p.value("transport"))
+    }
+
+    /// Select the effective transport without resolving the URI's host.
+    pub fn selected_transport(&self) -> Result<UriTransport, UriTransportError> {
+        if !self.scheme.is_sip() {
+            return Err(UriTransportError::NotSip);
+        }
+        let explicit = match self.transport().map(<[u8]>::to_ascii_lowercase) {
+            None => None,
+            Some(value) => Some(match value.as_slice() {
+                b"udp" => UriTransport::Udp,
+                b"tcp" => UriTransport::Tcp,
+                b"tls" => UriTransport::Tls,
+                b"ws" => UriTransport::Ws,
+                b"wss" => UriTransport::Wss,
+                b"quic" => UriTransport::Quic,
+                _ => return Err(UriTransportError::Unsupported),
+            }),
+        };
+        if !self.scheme.is_secure() {
+            return Ok(explicit.unwrap_or(UriTransport::Udp));
+        }
+        match explicit {
+            None | Some(UriTransport::Tcp | UriTransport::Tls) => Ok(UriTransport::Tls),
+            Some(UriTransport::Ws | UriTransport::Wss) => Ok(UriTransport::Wss),
+            Some(UriTransport::Quic) => Ok(UriTransport::Quic),
+            Some(UriTransport::Udp) => Err(UriTransportError::SecureDatagram),
+        }
     }
 
     /// Add a URI parameter.
@@ -1225,6 +1299,27 @@ mod tests {
     fn parses_ipv4_literal_as_an_address() {
         let u = uri("sip:bob@192.0.2.4");
         assert!(matches!(u.host(), Some(Host::Ip(IpAddr::V4(_)))));
+    }
+
+    #[test]
+    fn scheme_and_parameter_select_one_fail_closed_transport_and_default_port() {
+        let cases = [
+            ("sip:h;transport=tcp", UriTransport::Tcp, 5060),
+            ("sip:h;transport=ws", UriTransport::Ws, 80),
+            ("sips:h;transport=tcp", UriTransport::Tls, 5061),
+            ("sips:h;transport=tls", UriTransport::Tls, 5061),
+            ("sips:h;transport=ws", UriTransport::Wss, 443),
+            ("sips:h;transport=wss", UriTransport::Wss, 443),
+        ];
+        for (input, expected, port) in cases {
+            let selected = uri(input).selected_transport().expect("supported mapping");
+            assert_eq!(selected, expected, "{input}");
+            assert_eq!(selected.default_port(), port, "{input}");
+        }
+        assert_eq!(
+            uri("sips:h;transport=udp").selected_transport(),
+            Err(UriTransportError::SecureDatagram)
+        );
     }
 
     #[test]

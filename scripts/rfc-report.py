@@ -15,10 +15,10 @@ heard of, which is the failure mode a table like this actually has.
 The second failure mode, and the one that recurred: a capability implemented and tested inside
 one crate that nothing above it can select, reported as shipped because every check above passes
 for it. `unreachable_claims` is the check for that. It is scoped to the layers where a capability
-must be *selected* before a call can use it — media and security — by choice and not by necessity,
-and it asks the question of both kinds of claim a row makes there: the roles it lists, and, at the
-media layer, the status it states. The argument, the measurement each scope rests on and the ways
-they can still be walked around are in docs/designs/rfc-registry-grain.md.
+must be *selected* before a call can use it — media, security and services — by choice and not by
+necessity, and it asks the question of both kinds of claim a row makes there: the roles it lists,
+and, at the media layer, the status it states. The argument, the measurement each scope rests on
+and the ways they can still be walked around are in docs/designs/rfc-registry-grain.md.
 """
 
 import argparse
@@ -102,11 +102,11 @@ CRATES = ROOT / "crates"
 # below still passes. That is how ICE and DTLS-SRTP came to be built, tested and claimed for both
 # roles with no call able to select either.
 #
-# The other layers have no such gap because their capabilities are not selected at all: there is no
-# `with_transactions` and no `with_dns`, so "can a call reach the transaction layer" is a question
-# that cannot come out `no`. And a services row like RFC 3856 claims `uas` for a surface `sipx-ua`
-# *itself* serves — `sipx-call` does not depend on `sipx-ua` and no crate above it must select
-# anything.
+# The other unscoped layers have no such gap because their capabilities are not selected at all:
+# there is no `with_transactions` and no `with_dns`, so "can a call reach the transaction layer"
+# is a question that cannot come out `no`. Services joined this set when the live endpoint grew
+# explicit SUBSCRIBE and PUBLISH drivers: those optional services now have exactly the same shape
+# as optional media, and every role-claiming services row has honest call-layer evidence.
 #
 # `security` was added by X-33. It has both halves of the property: `Config::with_credentials` is
 # the opt-in for digest and its only caller above the call layer sits inside an
@@ -132,7 +132,7 @@ CRATES = ROOT / "crates"
 # at all, so on the question this check exists to answer the unscoped rule is wrong 19 times out of
 # 22. docs/designs/rfc-registry-grain.md carries the full count, the argument, the false
 # justifications this scope has been given, and what would widen it.
-ROLE_REACHABILITY_LAYERS = {"media", "security"}
+ROLE_REACHABILITY_LAYERS = {"media", "security", "services"}
 
 # The same rule applied to `status = "implemented"` rather than to `roles`, and scoped tighter.
 #
@@ -181,7 +181,10 @@ def call_layer_crates() -> set[str]:
     dependencies = {}
     for manifest in sorted(CRATES.glob("*/Cargo.toml")):
         parsed = tomllib.loads(manifest.read_text())
-        named = set(parsed.get("dependencies", {})) | set(parsed.get("dev-dependencies", {}))
+        # A dev dependency is a test caller, not a shipped path above the call layer. Including it
+        # admits cycles such as `sipx-call -> sipx-testkit -> sipx-call`, after which any leaf crate
+        # using the testkit appears to sit above the call layer and can launder a leaf-only claim.
+        named = set(parsed.get("dependencies", {}))
         dependencies[manifest.parent.name] = {n for n in named if n.startswith("sipx-")}
 
     reachable = {CALL_CRATE}

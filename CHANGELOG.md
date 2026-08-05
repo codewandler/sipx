@@ -7,6 +7,85 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The live endpoint graduates the UA service primitives it now constrains.** The subscription
+  store and built-in dialog, registration and presence package documents are now Supported because
+  `sipx-call::Notifier` selects them from the application-reachable dispatcher. Pre-1.0 breaking
+  changes to these modules now receive migration guidance; the higher-level event runtimes remain
+  Experimental.
+
+- **A packaged RTP/PCMU echo fixture now makes a media boundary executable from a shell.**
+  `sipx-testkit::rtp_echo` owns one UDP socket and no background task, requires exact peer, packet
+  and runtime bounds, rejects malformed or foreign traffic with typed errors, and returns decoded
+  audio on a deterministic RTP sequence/timestamp timeline. Its compiled example and public guide
+  keep the scope explicit: a finite test peer, not call signalling, acoustic-echo cancellation, a
+  production reflector or a load service. The pre-publication dry-run also derives and stages
+  testkit's complete public workspace dependency closure, then compiles this exact example in an
+  isolated consumer before any release may proceed. Pinning every member to its staged archive
+  prevents an older same-version registry crate from satisfying a newly added internal API by
+  accident.
+
+- **Downstream applications can place and answer SIP signalling under deterministic virtual time.**
+  The newly published `sipx-testkit` exposes a supported socket-free `CallHarness` over its seeded
+  in-process link, with a compiled public example and guide. Library crates remain silent unless
+  the embedding host installs a tracing subscriber, and the public logging reference fixes the
+  level policy so per-message signalling detail never enters ordinary `info` output.
+- **Registration now reports the address a registrar observed without turning it into policy**
+  (`S-42`). Before the first success, `UserAgent` reports `NotRegistered`; the final successful
+  response's top `Via` then becomes a typed `Observed`, `Absent` or `Invalid` outcome on
+  `registrar::Registered` and `UserAgent`; UDP, connection-oriented and
+  authenticated retry paths preserve it. Missing, malformed, duplicate and non-IP observations
+  remain diagnostic state and cannot change the granted lease, routes, GRUU, Outbound, push,
+  Contact or media configuration.
+- **Confirmed dialogs now have a bounded, versioned persistence boundary** (`S-43`).
+  `Call::dialog_snapshot` captures dialog identifiers, parties, routes, remote target, independent
+  sequence numbers, negotiated non-secret media facts and remaining session duration only when the
+  call is quiescent. `DialogSnapshot::decode` rejects hostile lengths, unknown versions,
+  contradictions and non-canonical bytes before partial restoration. `Call::restore_dialog`
+  requires an explicit fresh endpoint, resolved target, matching already-created media session,
+  media policy and current time; it cannot downgrade signalling or media security, silently renew
+  an elapsed session, serialize keys, or attach one context twice. Storage, encryption,
+  distribution and failover ownership remain host responsibilities.
+- **A registrar can now be a live source for `sipx peers`** (`S-24`). The built-in RFC 3680
+  consumer uses the generic authenticated subscription runtime, applies bounded full/partial
+  `reginfo` documents atomically, removes expired contacts, and reports each current contact with
+  registrar source and observation age. `--watch` retains subsequent updates for a finite
+  user-selected window; 403, 489 and a missing initial NOTIFY are explicit non-zero outcomes, never
+  partial success. Review also closed a secure-target gap: event subscriptions and publications now
+  preserve TLS certificate identity and WebSocket resource through the live driver.
+
+- **Applications can now receive and originate conditional presence publications** (`S-39`). The
+  dispatcher routes authenticated PUBLISH requests through an injected, bounded compositor and
+  returns fresh entity tags for create, refresh, modify and remove. A public publisher retains the
+  exact granted expiry and latest tag across authenticated live transactions, schedules bounded
+  refresh and local-expiry work, stops on stale authority, and exposes zero-residue cleanup counts.
+  The protocol core remains sans-I/O; authorization, durable storage and projection into NOTIFY
+  documents remain explicit application policy.
+
+- **Applications can now place and maintain generic SIP event subscriptions** (`S-38`). A bounded
+  sans-I/O state machine and live endpoint driver cover authenticated SUBSCRIBE, mandatory NOTIFY,
+  refresh, unsubscribe and shutdown while keeping package parsing behind an application-supplied
+  consumer. Dialog targets and route sets, remote and local CSeq, exact expiry rules, peer trust,
+  transport-selected stream identity, byte-exact tags, terminal retry eligibility, delivery
+  backpressure and joined timer/transaction cleanup are enforced and tested from the public API.
+  Record-Route hops now select their exact transport, default or explicit port, secure verification
+  authority and connection generation without permitting a SIPS-to-UDP downgrade. Subscription and
+  publication admission also share an atomic shutdown barrier, so no task can spawn after its owner
+  has drained the registry. Named clear-WebSocket routes retain their HTTP Host authority and path
+  in the connection key without implying TLS authentication.
+- **A finite, machine-ready signalling responder now completes the local comparative-load
+  surface** (`P-15`). `sipx load-responder` publishes its bound UDP address before admission,
+  requires finite admission, concurrency, dialog-lifetime and cleanup limits, applies reproducible
+  seeded answer policy, validates ACK/CANCEL/BYE dialog actions, and reports versioned latency,
+  outcome, high-water and post-drain zero-state evidence. Signalling-only remains the default;
+  deterministic generated media is an explicit separate mode.
+
+- **A neutral, bounded signalling-load contract** (`X-98`) now fixes the exact SDP-free dialog flow,
+  six-rate/five-repetition protocol, result schema and process-group cleanup required before a
+  comparative run. Its checker rejects unbounded phases, incomplete metadata, false zero resource
+  measurements, live post-drain state, malformed or duplicate readiness and leaked descendants.
+
 ## [1.0.0-beta.4] — 2026-08-04
 
 This prerelease ships the beta.4 feature-and-security wave: explicit non-ICE deployment

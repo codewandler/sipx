@@ -22,8 +22,8 @@ serde_json.workspace = true
 
 [dev-dependencies]
 # A dev-dependency cycle: sipx-testkit depends on this crate. Cargo permits it, and the
-# alternative — a second copy of the corpus — is worse. It is path-only so Cargo omits unpublished
-# test support from the normalized registry manifest.
+# alternative — a second copy of the corpus — is worse. It is path-only so Cargo omits
+# workspace-only fixture support from the normalized registry manifest.
 sipx-testkit = { path = "../sipx-testkit" }
 pretty_assertions.workspace = true
 proptest.workspace = true

@@ -18,8 +18,6 @@ use std::collections::BinaryHeap;
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::time::Instant;
-
 /// Which end of the link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Side {
@@ -95,8 +93,8 @@ pub struct Delivery {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Scheduled {
-    at: Instant,
+struct Scheduled<I> {
+    at: I,
     /// Breaks ties in arrival order so two datagrams scheduled for the same instant deliver in the
     /// order they were sent. Without it the heap's tie-break is arbitrary and the same seed
     /// produces different traces.
@@ -105,7 +103,7 @@ struct Scheduled {
     bytes: Bytes,
 }
 
-impl Ord for Scheduled {
+impl<I: Ord> Ord for Scheduled<I> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.at
             .cmp(&other.at)
@@ -113,7 +111,7 @@ impl Ord for Scheduled {
     }
 }
 
-impl PartialOrd for Scheduled {
+impl<I: Ord> PartialOrd for Scheduled<I> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -121,16 +119,19 @@ impl PartialOrd for Scheduled {
 
 /// An in-process link between two stacks.
 #[derive(Debug)]
-pub struct Link {
+pub struct Link<I = tokio::time::Instant> {
     faults: Faults,
     state: u64,
     sequence: u64,
-    in_flight: BinaryHeap<Reverse<Scheduled>>,
+    in_flight: BinaryHeap<Reverse<Scheduled<I>>>,
     /// Datagrams the link dropped, for a test that wants to assert it dropped one.
     dropped: u64,
 }
 
-impl Link {
+impl<I> Link<I>
+where
+    I: Copy + Ord + std::ops::Add<Duration, Output = I>,
+{
     /// A link with these faults, replaying the same trace for the same seed.
     #[must_use]
     pub fn new(seed: u64, faults: Faults) -> Self {
@@ -163,7 +164,7 @@ impl Link {
     }
 
     /// Hand a datagram to the link, to arrive at some point at or after `now`.
-    pub fn send(&mut self, from: Side, bytes: Bytes, now: Instant) {
+    pub fn send(&mut self, from: Side, bytes: Bytes, now: I) {
         if self.chance() < self.faults.loss {
             self.dropped = self.dropped.saturating_add(1);
             return;
@@ -176,7 +177,7 @@ impl Link {
         }
     }
 
-    fn schedule(&mut self, to: Side, bytes: Bytes, now: Instant) {
+    fn schedule(&mut self, to: Side, bytes: Bytes, now: I) {
         let delay = self.delay();
         self.sequence = self.sequence.wrapping_add(1);
         self.in_flight.push(Reverse(Scheduled {
@@ -188,7 +189,7 @@ impl Link {
     }
 
     /// Everything that has arrived at or before `now`, in arrival order.
-    pub fn take_due(&mut self, now: Instant) -> Vec<Delivery> {
+    pub fn take_due(&mut self, now: I) -> Vec<Delivery> {
         let mut arrived = Vec::new();
         while let Some(Reverse(next)) = self.in_flight.peek() {
             if next.at > now {
@@ -207,7 +208,7 @@ impl Link {
 
     /// When the next datagram arrives, if any is in flight.
     #[must_use]
-    pub fn next_arrival(&self) -> Option<Instant> {
+    pub fn next_arrival(&self) -> Option<I> {
         self.in_flight.peek().map(|Reverse(next)| next.at)
     }
 
@@ -261,6 +262,7 @@ impl Link {
 )]
 mod tests {
     use super::*;
+    use tokio::time::Instant;
 
     fn datagram(text: &'static str) -> Bytes {
         Bytes::from_static(text.as_bytes())

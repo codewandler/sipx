@@ -1,6 +1,6 @@
 [package]
 name = "sipx-ua"
-description = "SIP user agent: registration, digest authentication, and experimental subscriptions and presence"
+description = "SIP user agent: registration, digest authentication, event subscriptions, and presence"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,6 +22,7 @@ sipx-sip.workspace = true
 sipx-transport = { workspace = true, optional = true }
 bytes.workspace = true
 thiserror.workspace = true
+quick-xml.workspace = true
 tracing.workspace = true
 rand.workspace = true
 md-5.workspace = true
@@ -33,7 +34,7 @@ subtle.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"], optional = true }
 
 [dev-dependencies]
-# Path-only so Cargo omits unpublished test support from the normalized registry manifest.
+# Path-only so Cargo omits workspace-only fixture support from the normalized registry manifest.
 sipx-testkit = { path = "../sipx-testkit" }
 sipx-transport.workspace = true
 tokio = { workspace = true, features = ["full"] }
