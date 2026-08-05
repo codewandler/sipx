@@ -157,6 +157,16 @@ impl Negotiation {
         }
     }
 
+    /// Whether no offer, answer, or accepted UPDATE remains outstanding.
+    ///
+    /// This is stricter than [`Self::may_offer`]: an offerless UPDATE in progress creates no
+    /// offer debt, but it is still a live transaction and therefore cannot cross a durable
+    /// dialog boundary.
+    #[must_use]
+    pub const fn is_idle(self) -> bool {
+        !self.offered && !self.owed && self.in_progress.is_none()
+    }
+
     /// The state of a UAC that has just sent an INVITE carrying an offer.
     #[must_use]
     pub const fn offering() -> Self {
@@ -359,6 +369,21 @@ mod tests {
         let mut state = Negotiation::offering();
         assert_eq!(state.receive(false), Reception::Accept);
         assert_eq!(state.receive(true), Reception::Refuse(Refusal::InProgress));
+    }
+
+    #[test]
+    fn durable_idle_is_stricter_than_permission_to_offer() {
+        assert!(Negotiation::idle().is_idle());
+        assert!(!Negotiation::offering().is_idle());
+        assert!(!Negotiation::owing().is_idle());
+
+        let mut busy = Negotiation::idle();
+        assert_eq!(busy.receive(false), Reception::Accept);
+        assert!(busy.may_offer());
+        assert!(!busy.is_idle());
+
+        busy.answered();
+        assert!(busy.is_idle());
     }
 
     #[test]

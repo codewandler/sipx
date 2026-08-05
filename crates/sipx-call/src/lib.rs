@@ -38,6 +38,9 @@
 //! [`Invitation::answer_with`], [`Invitation::answer_with_policy`], [`ring_early_with`],
 //! [`ring_early_with_policy`], [`ring_offer_early`], [`ring_offer_early_with_policy`] and
 //! [`dial_early_without_offer`]). These choices are pre-1.0 and their shape may still move.
+//! Confirmed-dialog persistence is Experimental too: [`Call::dialog_snapshot`],
+//! [`Call::restore_dialog`], [`DialogSnapshot`] and [`DialogRestoreContext`] expose a versioned
+//! boundary whose schema remains deliberately narrower than a serialized `Call`.
 //!
 //! The set is the G.711 pair unless a call says otherwise. An application may provide an exact
 //! non-empty order with [`Codecs::ordered`]; selecting Opus is a typed error unless this crate is
@@ -66,6 +69,7 @@ pub mod identity;
 pub mod load;
 mod media_policy;
 pub mod rel;
+mod snapshot;
 pub mod transfer;
 // Crate-private: every item in it is `pub(crate)`, and a `pub mod` whose contents are all
 // private renders as an empty page in the API reference — a promise of surface that is not there.
@@ -96,5 +100,10 @@ pub use media_policy::{
 pub use rel::{
     Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_early_with_policy_at,
     ring_offer_early, ring_offer_early_with_policy, ring_offer_early_with_policy_at,
+};
+pub use snapshot::{
+    DialogNotQuiescent, DialogPersistenceError, DialogRestoreContext, DialogSessionAction,
+    DialogSnapshot, MAX_FIELD_BYTES, MAX_ID_BYTES, MAX_ROUTES, MAX_SNAPSHOT_BYTES,
+    MAX_VARIABLE_BYTES,
 };
 pub use transfer::{Referral, Replaces, Transfer, TransferState};

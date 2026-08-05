@@ -593,6 +593,10 @@ pub struct MediaSession {
     keypresses: Arc<watch::Sender<u64>>,
     codec: Codec,
     wire_payload_type: u8,
+    /// Retained non-secret wire facts for validated runtime attachment after a host restart.
+    dtmf_payload_type: Option<u8>,
+    rtcp_mode: sipx_sdp::RtcpMode,
+    encrypted: bool,
     local_addr: SocketAddr,
     samples_per_packet: usize,
     packet_duration: Duration,
@@ -1295,8 +1299,10 @@ impl MediaSession {
         let clock_rate = config.clock_rate;
         let config_codec = config.codec;
         let wire_payload_type = config.wire_payload_type();
+        let dtmf_payload_type = config.dtmf_payload_type;
         let rtcp_interval = config.rtcp_interval;
         let rtcp_mode = config.rtcp_mode;
+        let encrypted = config.srtp.is_some();
         // A muxed session has exactly one running socket owner. The adjacent socket was reserved
         // before negotiation and is released now; no control worker may race the RTP reader.
         let rtcp = match rtcp_mode {
@@ -1415,6 +1421,9 @@ impl MediaSession {
             keypresses: shared.keypresses,
             codec: config_codec,
             wire_payload_type,
+            dtmf_payload_type,
+            rtcp_mode,
+            encrypted,
             local_addr,
             samples_per_packet,
             packet_duration,
@@ -1463,6 +1472,9 @@ impl MediaSession {
         let clock_rate = config.clock_rate;
         let config_codec = config.codec;
         let wire_payload_type = config.wire_payload_type();
+        let dtmf_payload_type = config.dtmf_payload_type;
+        let rtcp_mode = config.rtcp_mode;
+        let encrypted = config.srtp.is_some();
         let rtcp_interval = config.rtcp_interval;
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(64);
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
@@ -1571,6 +1583,9 @@ impl MediaSession {
             keypresses: shared.keypresses,
             codec: config_codec,
             wire_payload_type,
+            dtmf_payload_type,
+            rtcp_mode,
+            encrypted,
             local_addr,
             samples_per_packet,
             packet_duration,
@@ -1867,6 +1882,26 @@ impl MediaSession {
     #[must_use]
     pub fn wire_payload_type(&self) -> u8 {
         self.wire_payload_type
+    }
+
+    /// The negotiated RTP payload type for telephone events, when enabled.
+    #[must_use]
+    pub fn dtmf_payload_type(&self) -> Option<u8> {
+        self.dtmf_payload_type
+    }
+
+    /// Whether RTP and RTCP share one socket for this session.
+    #[must_use]
+    pub fn rtcp_mode(&self) -> sipx_sdp::RtcpMode {
+        self.rtcp_mode
+    }
+
+    /// Whether this session was constructed with SRTP key material.
+    ///
+    /// The key bytes remain owned by the workers and are never exposed by this fact.
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        self.encrypted
     }
 
     /// The RTP timestamp clock negotiated for this stream.

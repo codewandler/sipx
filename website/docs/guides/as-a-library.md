@@ -158,7 +158,7 @@ Those properties make the core deterministic to drive from another runtime or a 
 | RTP, RTCP, jitter buffer, quality statistics, SRTP | `sipx-rtp` |
 | G.711 (µ-law and A-law), mixing, WAV, and Opus behind the `opus` feature | `sipx-audio` |
 | RTP/RTCP sockets bound to negotiated SDP with NAT handling, bridging, conferencing | `sipx-media` |
-| Calls with playback, recording, DTMF, transfer | `sipx-call` |
+| Calls with playback, recording, DTMF, transfer, and confirmed-dialog snapshots | `sipx-call` |
 | Socket-free call signalling tests with seeded faults and virtual time | `sipx-testkit` |
 | A phone to run rather than embed — the `sipx` binary | `sipx-cli` |
 | The `sipx.app.v1` contract: its types, wire format and interpreter | `sipx-app-protocol` |
@@ -185,6 +185,10 @@ embedded runtime or TypeScript SDK is shipped.
   optional handshake backend. Its DTLS components can key a media session through explicit policy.
 - `sipx-call` exposes optional `opus` and `dtls` features. The default call codec set is G.711, and
   selecting DTLS-SRTP is always explicit.
+
+The call crate can persist a confirmed, quiescent dialog without serializing its runtime. See
+[Persist and restore a confirmed dialog](persist-a-dialog.md) for the format, fresh-driver
+attachment contract, and the host responsibilities that deliberately remain outside the library.
 
 ## The API reference
 

@@ -2,9 +2,9 @@
 id: S-43
 title: Serialize and restore dialog state
 pillar: Signalling
-status: backlog
+status: in-progress
 priority: 10
-design: docs/designs/dialog-extensions.md
+design: docs/designs/dialog-persistence.md
 epic: dialog-persistence
 areas: [sipx-call, sipx-sip, security, m13, parity-wave-1]
 predicate:
@@ -41,5 +41,14 @@ data.
 
 ## Progress
 
-- Discovered when independent review rejected assigning this endpoint capability to an unrelated
-  platform story. Not started.
+- 2026-08-05: normative snapshot and restore contract is being written before the codec or runtime
+  attachment API. The integration branch owns the deferred full gate.
+- 2026-08-05: the `SXD1` codec, atomic fresh-driver attachment, security/timer guards, hostile-byte
+  matrix and a live post-restore re-INVITE proof are implemented. Focused verification is green;
+  status remains in progress until the integration branch runs the deferred full gate.
+- 2026-08-05: review hardening rejects RTP payload values outside the seven-bit wire range and makes
+  the fresh media direction an explicit, pre-claim restore invariant. Adversarial tests prove both
+  refusals are typed and leave the context reusable.
+- 2026-08-05: final persistence review makes downtime an injected restore fact and subtracts it from
+  session lifetime before attachment; due timers remain typed and do not consume the context. Context
+  diagnostics now omit the complete signalling target so WSS paths and queries cannot leak.

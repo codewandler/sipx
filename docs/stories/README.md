@@ -47,6 +47,10 @@ public demo.
 ## Now (in progress)
 - [X-97 — Track capability parity as generated data](X-97-track-capability-parity-as-generated-data.md) · Build · M13 discovery gate · every public capability gets evidence, ownership and a disposition
 
+### dialog persistence
+_A host can preserve the protocol facts of a confirmed call without treating its live runtime as durable state._
+- [S-43 — Serialize and restore dialog state](S-43-serialize-and-restore-dialog-state.md) · Signalling · discovered by X-97 · versioned sans-I/O snapshot without serializing sockets, tasks or secrets
+
 ### live endpoint policy
 _A long-running endpoint has two operational seams that currently require replacement or a fork:_
 - [T-31 — Reload the TLS server identity without restarting](T-31-reload-the-tls-server-identity-without-restarting.md) · Transport · validate then atomically swap new-handshake identity · established connections survive

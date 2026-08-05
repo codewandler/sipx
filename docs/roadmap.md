@@ -185,7 +185,7 @@ This is the next implementation wave, not a release name and not a stable-1.0 pr
 | 4 | [Live endpoint policy](designs/live-endpoint-policy.md) | **T-31, T-32** | Atomic TLS identity rotation, then bounded typed observation and policy | T-31 now; T-32 after it |
 | 5 | [Supported test surfaces](designs/test-surfaces.md) | **X-75, M-53** | A quiet library, real call harness and runnable RTP echo proof | X-75 now; M-53 after its harness review |
 | 6 | Registration observation | **S-42** | Typed public address learned from a registration response | after the first implementation batch |
-| 7 | Dialog persistence | **S-43** | Versioned, bounded dialog snapshot and safe restoration | after the dialog-extension branch settles |
+| 7 | [Dialog persistence](designs/dialog-persistence.md) | **S-43** | Versioned, bounded dialog snapshot and safe restoration | after the dialog-extension branch settles |
 | 8 | [Comparative load](designs/comparative-load.md) | **X-98, P-15** | Freeze the bounded workload and ship its finite answering endpoint | after endpoint feature branches; P-15 after X-98/X-75 |
 
 **Done when** the pinned capability ledger has no unclassified row and no open sipx-owned row; all

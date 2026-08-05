@@ -29,6 +29,10 @@ use crate::event::{CallEvent, CallEvents, EndCause, EventSink};
 use crate::extension::{self, ApplicationRequest};
 use crate::identity::OutboundIdentityPolicy;
 use crate::media_policy::{Codecs, IcePolicy, Keying, MediaPolicy, MediaProfile, NegotiatedKeying};
+use crate::snapshot::{
+    DialogNotQuiescent, DialogPersistenceError, DialogRestoreContext, DialogSnapshot,
+    SessionSnapshot, SnapshotParts,
+};
 use crate::transfer::{
     Referral, Replaces, Transfer, TransferState, is_terminated, parse_sipfrag, sipfrag,
 };
@@ -276,6 +280,139 @@ impl SessionState {
 }
 
 impl Call {
+    /// Capture the bounded protocol state needed to continue this confirmed dialog.
+    ///
+    /// `now` is explicit and only the session timer's remaining duration is retained. Sockets,
+    /// endpoint handles, media sessions, tasks, transactions, credentials, keys, entropy and
+    /// process-local clock instants never enter [`DialogSnapshot`]. Capture refuses any call with
+    /// active work whose safe continuation would require one of those runtime values.
+    pub fn dialog_snapshot(
+        &self,
+        now: Instant,
+    ) -> std::result::Result<DialogSnapshot, DialogPersistenceError> {
+        if self.ended {
+            return Err(DialogPersistenceError::NotQuiescent(
+                DialogNotQuiescent::Ended,
+            ));
+        }
+        if self.awaiting_ack.is_some() {
+            return Err(DialogPersistenceError::NotQuiescent(
+                DialogNotQuiescent::AwaitingAck,
+            ));
+        }
+        if !self.negotiation.is_idle() {
+            return Err(DialogPersistenceError::NotQuiescent(
+                DialogNotQuiescent::OfferAnswer,
+            ));
+        }
+        if self.referral.is_some() || self.transfer.is_some() {
+            return Err(DialogPersistenceError::NotQuiescent(
+                DialogNotQuiescent::Transfer,
+            ));
+        }
+        if self.media.runs_ice() {
+            return Err(DialogPersistenceError::NotQuiescent(
+                DialogNotQuiescent::Ice,
+            ));
+        }
+        let session = self
+            .session
+            .map(|state| {
+                let remaining = state
+                    .act_at
+                    .checked_duration_since(now)
+                    .filter(|remaining| !remaining.is_zero())
+                    .ok_or({
+                        DialogPersistenceError::SessionActionDue(if state.terms.we_refresh {
+                            crate::DialogSessionAction::Refresh
+                        } else {
+                            crate::DialogSessionAction::Expire
+                        })
+                    })?;
+                Ok(SessionSnapshot {
+                    interval: state.terms.interval,
+                    we_refresh: state.terms.we_refresh,
+                    remaining,
+                })
+            })
+            .transpose()?;
+
+        DialogSnapshot::from_parts(SnapshotParts {
+            role: self.dialog.role,
+            id: self.dialog.id.clone(),
+            local_party: strip_header_params(&self.dialog.local_uri),
+            remote_party: strip_header_params(&self.dialog.remote_uri),
+            remote_target: self.dialog.remote_target.clone(),
+            route_set: self.dialog.route_set.clone(),
+            local_cseq: self.dialog.local_cseq,
+            remote_cseq: self.dialog.remote_cseq,
+            protected_signalling: self.target.transport.is_secure(),
+            media_keying: self.negotiated_keying(),
+            media_profile: self.profile,
+            codecs: self.codecs,
+            codec: self.current.codec,
+            payload_type: self.current.wire_payload_type(),
+            dtmf_payload_type: self.current.dtmf,
+            rtcp_mode: self.current.rtcp_mode,
+            hold: self.hold,
+            peer_allows_update: self.peer_allows_update,
+            session,
+        })
+    }
+
+    /// Attach validated durable dialog state to fresh endpoint and media drivers.
+    ///
+    /// Restoration is synchronous and performs no I/O. Every snapshot and context invariant is
+    /// checked before handles are cloned or events are published, so a refusal creates no task or
+    /// transaction and leaves the borrowed context running exactly as supplied. Snapshot storage,
+    /// authorization, encryption at rest, distribution and single-owner election belong to the
+    /// host; a successful decode proves format validity, not permission to resume a call.
+    pub fn restore_dialog(
+        snapshot: &DialogSnapshot,
+        context: &DialogRestoreContext,
+    ) -> std::result::Result<Self, DialogPersistenceError> {
+        let session = snapshot.validate_restore(context)?;
+        // The only mutation in restoration, after every fallible snapshot/context check. It is
+        // an atomic one-owner claim rather than runtime work: no task, transaction, socket or
+        // media worker starts here, and a concurrent duplicate restore gets a typed refusal.
+        context.claim()?;
+        let (events, events_rx) = EventSink::new();
+        Ok(Self {
+            dialog: snapshot.dialog(),
+            initial_status: OK,
+            media: Arc::clone(&context.media),
+            endpoint: context.endpoint.clone(),
+            target: context.target.clone(),
+            awaiting_ack: None,
+            ended: false,
+            media_address: context.media_address.advertised(),
+            media_bind_address: context.media_address.bind(),
+            codecs: snapshot.codecs_value(),
+            profile: snapshot.media_profile_value(),
+            current: snapshot.negotiated(context.remote_media),
+            peer_ice: None,
+            // Validation proved the freshly built media driver carries the durable direction.
+            // Install the injected runtime fact so restoration never trusts snapshot state alone.
+            hold: context.direction,
+            encrypted: context.media.is_encrypted(),
+            keying: context.policy.keying,
+            referral: None,
+            transfer: None,
+            session: session.map(|(interval, we_refresh, act_at)| SessionState {
+                terms: session::Session {
+                    interval,
+                    we_refresh,
+                },
+                act_at,
+            }),
+            negotiation: update::Negotiation::idle(),
+            peer_allows_update: snapshot.peer_allows_update_value(),
+            events,
+            events_rx: Some(events_rx),
+            history: None,
+        })
+    }
+
     /// The successful final response that established this call.
     #[must_use]
     pub fn initial_status(&self) -> u16 {
@@ -6433,22 +6570,22 @@ pub(crate) fn offer_from(capabilities: &Capabilities) -> SessionDescription {
 /// What negotiation settled on.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Negotiated {
-    remote: SocketAddr,
-    codec: Codec,
+    pub(crate) remote: SocketAddr,
+    pub(crate) codec: Codec,
     /// The payload type to send `codec` with, when the description gave it a number.
     ///
     /// `None` only for a bare static type matched by number. Anything an rtpmap touched —
     /// Opus always, a remapped static possibly — has no number of its own that means anything:
     /// 111 is convention, and what the far end listens for is the number *it* assigned.
-    payload_type: Option<u8>,
+    pub(crate) payload_type: Option<u8>,
     /// The payload type the far end uses for `telephone-event`, if it offered one.
     ///
     /// Taken from the description rather than assumed, because it is a *dynamic* type: 101 is
     /// what sipx offers, not what everyone uses, and assuming it would send keypresses on
     /// whatever the far end put that number to.
-    dtmf: Option<u8>,
+    pub(crate) dtmf: Option<u8>,
     /// Whether RTCP shares the RTP port or uses its adjacent control port.
-    rtcp_mode: sipx_sdp::RtcpMode,
+    pub(crate) rtcp_mode: sipx_sdp::RtcpMode,
 }
 
 /// What negotiation settled on, plus the keys — which are not `Copy` and do not belong in a

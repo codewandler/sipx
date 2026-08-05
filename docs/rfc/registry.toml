@@ -45,11 +45,13 @@ evidence = [
   "crates/sipx-sip/src/parser.rs",
   "crates/sipx-sip/src/transaction/mod.rs",
   "crates/sipx-call/src/dispatch.rs",
+  "crates/sipx-call/src/snapshot.rs",
   "crates/sipx-call/tests/dispatch.rs",
   "crates/sipx-ua/src/registrar.rs",
   "crates/sipx-ua/tests/registration_observation.rs",
+  "crates/sipx-call/tests/dialog_persistence.rs",
 ]
-note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2). A registering UA retains the top response Via's received/rport pair as a typed, non-authoritative observation; missing or invalid observation data does not alter the successful binding."
+note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2). A registering UA retains the top response Via's received/rport pair as a typed, non-authoritative observation; missing or invalid observation data does not alter the successful binding. A confirmed quiescent dialog's §§12.1–12.2 state can be captured in a bounded versioned snapshot and attached to explicit fresh drivers: identifier orientation, route order, refreshed target and independent sequence numbers survive, while transactions, sockets, tasks, clocks, credentials and media keys do not."
 
 [[rfc]]
 number = 4475
@@ -366,9 +368,11 @@ headers = ["SessionExpires", "MinSe"]
 evidence = [
   "crates/sipx-sip/src/session.rs",
   "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/snapshot.rs",
+  "crates/sipx-call/tests/dialog_persistence.rs",
   "crates/sipx-call/tests/session_timer.rs",
 ]
-note = "Negotiated on the INVITE and its 2xx, Table 2 election, 422 with Min-SE below the floor, and a local BYE when no refresh arrives. The refresh is an UPDATE with no body when the peer's Allow lists the method and a re-INVITE otherwise (§7.4)."
+note = "Negotiated on the INVITE and its 2xx, Table 2 election, 422 with Min-SE below the floor, and a local BYE when no refresh arrives. The refresh is an UPDATE with no body when the peer's Allow lists the method and a re-INVITE otherwise (§7.4). A durable confirmed-dialog snapshot retains only the remaining duration; restore rebases a positive remainder on explicit fresh time, surfaces a due refresh or expiry when it is zero, and rejects contradictory or overflowing values rather than silently renewing the interval."
 
 [[rfc]]
 number = 6665

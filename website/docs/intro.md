@@ -47,7 +47,7 @@ supports UDP, TCP, TLS, WebSocket, and secure WebSocket.
 
 | Area | Available |
 |---|---|
-| Calls | Place and answer, hold and resume, blind and attended transfer, session timers |
+| Calls | Place and answer, hold and resume, blind and attended transfer, session timers, bounded confirmed-dialog snapshots |
 | Registration | Digest authentication, lease refresh, Outbound flows, `Path`, `Service-Route`, GRUU, push-assisted refresh |
 | Audio | G.711, DTMF, WAV playback and recording; selectable Opus behind a Cargo feature |
 | Media | RTP/RTCP, jitter buffering, quality statistics, ICE, SDES-keyed SRTP, optional DTLS-SRTP |
