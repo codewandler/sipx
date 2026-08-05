@@ -561,7 +561,10 @@ async fn an_unavailable_tcp_fallback_is_typed_and_never_uses_udp() {
         } => {
             assert!(size > limit);
             assert_eq!(limit, 1_300);
-            assert!(matches!(*source, Error::ConnectionClosed));
+            assert!(matches!(
+                *source,
+                Error::Io(ref error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+            ));
         }
         other => panic!("expected typed TCP fallback failure, got {other}"),
     }

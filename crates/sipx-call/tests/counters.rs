@@ -17,7 +17,7 @@
     clippy::indexing_slicing
 )]
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -196,15 +196,18 @@ async fn a_discard_in_the_dialog_layer_is_counted_next_to_the_capture_of_the_req
 /// is up, because the request that would have ended it never left.
 ///
 /// **The stimulus is a real transmit failure, and that is the whole point of this test.** An
-/// over-MTU datagram is refused by name in `transmit` (RFC 3261 §18.1.1), which is *after*
-/// `Handle::send` has already returned `Ok` with the transaction key. The first version of this
-/// counter was incremented at that hand-off and could therefore never see this case — nor a refused
-/// connection, nor an unreachable peer — while its documentation claimed it did. So the assertion
-/// below is deliberately made on a send that **succeeds** at the call site and fails on the wire.
+/// over-MTU UDP request falls back to TCP under RFC 3261 §18.1.1. The closed loopback port below
+/// makes that connection fail after `Handle::send` has already returned `Ok` with the transaction
+/// key. The first version of this counter was incremented at that hand-off and could therefore
+/// never see this case — nor any refused connection or unreachable peer — while its documentation
+/// claimed it did. So the assertion below is deliberately made on a send that **succeeds** at the
+/// call site and fails on the wire.
 #[tokio::test]
 async fn a_bye_the_endpoint_cannot_put_on_the_wire_is_counted_as_a_bye() {
     let (endpoint, _incoming) = plain().await;
-    let peer = "127.0.0.1:9".parse::<SocketAddr>().expect("valid");
+    let closed = TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let peer = closed.local_addr().expect("the reserved address");
+    drop(closed);
 
     assert_eq!(
         endpoint.counters().unsent.total(),
@@ -212,7 +215,7 @@ async fn a_bye_the_endpoint_cannot_put_on_the_wire_is_counted_as_a_bye() {
         "nothing has failed to send yet"
     );
 
-    // Comfortably past the 1300-byte default MTU, so §18.1.1's refusal is certain.
+    // Comfortably past the 1300-byte default MTU, so §18.1.1's TCP fallback is certain.
     let bulky = "x".repeat(4096);
     let bye = raw_with_body(&endpoint, &Method::Bye, "linger@sipx", Some(&bulky));
     endpoint
@@ -222,7 +225,7 @@ async fn a_bye_the_endpoint_cannot_put_on_the_wire_is_counted_as_a_bye() {
 
     until(
         WRITING_BOUND,
-        "an over-MTU BYE was not counted as an unsent BYE",
+        "a BYE whose TCP fallback was refused was not counted as unsent",
         async || endpoint.counters().unsent.bye > 0,
     )
     .await;

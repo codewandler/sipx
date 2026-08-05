@@ -204,6 +204,15 @@ impl TransactionLayer {
         self.server.get(key).map(ServerTransaction::request)
     }
 
+    /// The request that created a client transaction.
+    ///
+    /// A transport driver needs this after an asynchronous connection attempt fails so it can
+    /// account for the exact method whose queued bytes never reached a socket.
+    #[must_use]
+    pub fn client_request(&self, key: &TransactionKey) -> Option<&Request> {
+        self.client.get(key).map(ClientTransaction::request)
+    }
+
     /// The state of a client transaction, if it exists.
     #[must_use]
     pub fn client_state(&self, key: &TransactionKey) -> Option<ClientState> {

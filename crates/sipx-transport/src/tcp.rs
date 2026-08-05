@@ -67,6 +67,21 @@ pub enum Event {
         /// Which incarnation received it, so an old queued pong cannot answer a new flow.
         id: u64,
     },
+    /// An outbound socket could not be opened.
+    ///
+    /// `Closed` follows, but cannot distinguish a failed dial from a connection that became
+    /// usable and later disappeared. The driver needs that distinction to count a queued request
+    /// as unsent without overstating loss for bytes that may already have reached the peer.
+    ConnectFailed {
+        /// Which connection was attempted.
+        key: ConnectionKey,
+        /// Which incarnation failed.
+        id: u64,
+        /// Stable operating-system error category.
+        kind: std::io::ErrorKind,
+        /// Human-readable operating-system detail.
+        detail: String,
+    },
     /// TLS authentication failed before the connection became usable.
     ///
     /// Separate from `Closed` so a caller can distinguish a rejected certificate from an
@@ -846,6 +861,16 @@ impl Pool {
                             admission_generation,
                             ConnectionState::Failed,
                         );
+                        // discard: the endpoint may have stopped while the bounded connection
+                        // task was reporting its failure. No transaction remains to notify then.
+                        let _ = events
+                            .send(Event::ConnectFailed {
+                                key: task_key,
+                                id,
+                                kind: error.kind(),
+                                detail: error.to_string(),
+                            })
+                            .await;
                     }
                 }
             },
@@ -885,6 +910,16 @@ impl Pool {
                     Ok(stream) => stream,
                     Err(error) => {
                         tracing::debug!(%error, peer = %task_key.peer, "connect failed");
+                        // discard: the endpoint may have stopped while the bounded connection
+                        // task was reporting its failure. No transaction remains to notify then.
+                        let _ = events
+                            .send(Event::ConnectFailed {
+                                key: task_key,
+                                id,
+                                kind: error.kind(),
+                                detail: error.to_string(),
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -1035,6 +1070,16 @@ impl Pool {
                     Ok(stream) => stream,
                     Err(error) => {
                         tracing::debug!(%error, peer = %task_key.peer, "connect failed");
+                        // discard: the endpoint may have stopped while the bounded connection
+                        // task was reporting its failure. No transaction remains to notify then.
+                        let _ = events
+                            .send(Event::ConnectFailed {
+                                key: task_key,
+                                id,
+                                kind: error.kind(),
+                                detail: error.to_string(),
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -1455,6 +1500,7 @@ mod tests {
                 assert_eq!(message.to_bytes().as_ref(), MESSAGE.as_bytes());
             }
             Event::Pong { .. }
+            | Event::ConnectFailed { .. }
             | Event::Closed { .. }
             | Event::FramingFailed { .. }
             | Event::HandshakeFailed { .. } => {

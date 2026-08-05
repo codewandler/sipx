@@ -54,6 +54,12 @@ requires.
   MiB free; that retry is an infrastructure non-result, and only this worktree's recoverable build
   artifacts were cleaned. Per wave instruction, the full repository gate was not run, so the story
   remains in progress and its gate acceptance item remains open.
+- 2026-08-05: the first integrated main CI run exposed that an asynchronous refused TCP connection
+  delivered the typed fallback error but did not increment `unsent`. The connection pool now reports
+  a failed outbound dial separately from an established connection closing, preserving the concrete
+  I/O cause and counting only bytes that provably never reached a socket. The focused call counter
+  regression and all three oversized-request/response transport tests pass. Per wave instruction,
+  the local full gate remains deliberately unrun.
 
 ## Notes
 - Two independent, still-open requests against a comparable stack, and a straightforward conformance

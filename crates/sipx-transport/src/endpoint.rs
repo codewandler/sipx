@@ -2960,6 +2960,21 @@ impl Driver {
                     let _ = waiter.send(Ok(None));
                 }
             }
+            tcp::Event::ConnectFailed {
+                key,
+                id,
+                kind,
+                detail,
+            } => {
+                // Remove this generation now. The task wrapper's following `Closed` is then
+                // stale and cannot count or fail the same transactions twice.
+                if !self.pool.remove(&key, id) {
+                    return;
+                }
+                let generation = ConnectionGeneration { key, id };
+                self.fail_transactions_on(&generation, None, Some((kind, detail)))
+                    .await;
+            }
             #[cfg(feature = "tls")]
             tcp::Event::HandshakeFailed { key, id, detail } => {
                 let admission_generation = self
@@ -2983,7 +2998,8 @@ impl Driver {
                     key: key.clone(),
                     id,
                 };
-                self.fail_transactions_on(&generation, Some(detail)).await;
+                self.fail_transactions_on(&generation, Some(detail), None)
+                    .await;
             }
             #[cfg(feature = "quic")]
             tcp::Event::QuicClosed { key, id, detail } => {
@@ -3005,7 +3021,7 @@ impl Driver {
                         let _ = client.failures.try_send(failure);
                     }
                 }
-                self.fail_transactions_on(&generation, None).await;
+                self.fail_transactions_on(&generation, None, None).await;
             }
             tcp::Event::Closed { key, id } => {
                 // A retiring generation can report after a replacement with the same key has
@@ -3027,7 +3043,7 @@ impl Driver {
                         let _ = waiter.send(Err(Error::ConnectionClosed));
                     }
                 }
-                self.fail_transactions_on(&generation, None).await;
+                self.fail_transactions_on(&generation, None, None).await;
             }
         }
     }
@@ -3040,6 +3056,7 @@ impl Driver {
         &mut self,
         closed: &ConnectionGeneration,
         tls_detail: Option<String>,
+        connect_failure: Option<(std::io::ErrorKind, String)>,
     ) {
         let affected: Vec<TransactionKey> = self
             .transaction_generations
@@ -3052,6 +3069,12 @@ impl Driver {
             .map(|(key, _)| key.clone())
             .collect();
         for key in affected {
+            if connect_failure.is_some() || tls_detail.is_some() {
+                self.meters.discard_send_failure();
+                if let Some(request) = self.layer.client_request(&key) {
+                    self.meters.unsent(&request.method);
+                }
+            }
             if let Some(fallback) = self.tcp_fallbacks.get(&key).copied()
                 && let Some(client) = self.clients.get(&key)
             {
@@ -3059,7 +3082,12 @@ impl Driver {
                 // then `Closed` reports that the selected TCP path could not become usable.
                 // Preserve that this connection existed only because the UDP request was too
                 // large, rather than exposing an unqualified close to the transaction user.
-                let failure = fallback.unavailable(Error::ConnectionClosed);
+                let source = connect_failure
+                    .as_ref()
+                    .map_or(Error::ConnectionClosed, |failure| {
+                        Error::Io(std::io::Error::new(failure.0, failure.1.clone()))
+                    });
+                let failure = fallback.unavailable(source);
                 let _ = client.failures.try_send(failure);
             }
             #[cfg(feature = "tls")]
