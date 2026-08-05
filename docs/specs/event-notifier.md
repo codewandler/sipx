@@ -30,10 +30,17 @@ It does not route requests or mutate notifier dialog bookkeeping.
 
 ## 2. Identity and dialog matching
 
-RFC 6665 §4.4.1 identifies a subscription by dialog and Event. The existing `Id` contains the
-Call-ID, subscriber (`From`) tag and complete Event value. The socket driver adds the notifier's
-local (`To`) tag, remote target, route set and local CSeq; these are wire state and do not form a
-second protocol store.
+RFC 6665 §4.4.1 identifies a subscription by dialog and Event. `Id` contains the Call-ID,
+subscriber (`From`) tag and a normalized Event identity: the event-type token followed only by its
+optional `id` parameter. RFC 6665 §8.2.1 compares the event-type and `id` values byte-for-byte,
+treats the `id` parameter name case-insensitively, and ignores every other parameter. Consequently
+parameter order and irrelevant parameter changes do not create a new subscription, while changing
+the case of the event-type or opaque `id` value does. A duplicate `id` parameter is malformed
+rather than a first-value-wins identity.
+
+The socket driver adds the notifier's local (`To`) tag, remote target, route set and local CSeq;
+these are wire state and do not form a second protocol store. Dialog tags are opaque RFC 3261
+tokens and compare byte-for-byte: changing tag case does not select the recorded dialog.
 
 An initial SUBSCRIBE has no `To` tag. Acceptance mints one local tag and records it with the
 subscription. A refresh or unsubscribe has a `To` tag and MUST match the recorded local tag for the
@@ -44,10 +51,15 @@ An untagged request whose `Id` is already owned by a live subscription is also a
 not treated as a refresh and MUST NOT replace the existing task, tag, target, package document or
 store row.
 
-The initial remote target is the request's Contact URI. Missing or malformed Contact, mandatory
-dialog headers, CSeq or Event is `400 Bad Request`. The route set is the request's Record-Route
-values in received order. NOTIFY uses that target and route set rather than resolving the resource
-URI again.
+Each store row records the CSeq of the last accepted remote SUBSCRIBE. A tagged refresh or
+unsubscribe MUST have a strictly greater sequence number. An equal or lower sequence is answered
+`500 Server Internal Error` per RFC 3261 §12.2.2 and MUST NOT change expiry, state, task deadline,
+target or counters. The sequence advances only after all request validation has succeeded.
+
+The initial remote target is the request's Contact URI. Missing, malformed, duplicate or
+conflicting Call-ID, From, To, Event, Contact, CSeq or Expires is `400 Bad Request` before any
+first-value parsing or store lookup. The route set is the request's Record-Route values in received
+order. NOTIFY uses that target and route set rather than resolving the resource URI again.
 
 ## 3. Request decision table
 
@@ -63,8 +75,10 @@ is elapsed whole seconds from that origin.
 | Unserved or template-derived Event | no mutation | `489 Bad Event`, `Allow-Events` | none |
 | In-dialog request with unknown identity/tag | no mutation | `481` | none |
 | Untagged request colliding with a live identity | no mutation | `481` | none |
+| Tagged refresh/unsubscribe with equal or lower CSeq | no mutation | `500` | retain the existing deadline/task |
 | Missing, malformed or duplicate CSeq; CSeq method other than SUBSCRIBE | `Malformed` | `400` | none |
 | Malformed or duplicate Expires | `Malformed` | `400` | none |
+| Missing, malformed, duplicate or conflicting Call-ID, From, To, Event or Contact | `Malformed` | `400` | none |
 | Expiry task fires | `terminate(id, timeout)` | none | send one terminating NOTIFY; remove wire state after the send attempt |
 
 RFC 6665 §4.2.1.1 permits a notifier to shorten an expiry and forbids lengthening it. Every 200
@@ -157,3 +171,10 @@ bounded residue is included in `Handle::outstanding()` rather than hidden by the
    and full-document marker. Refuse a template-derived package with 489.
 7. Send malformed Expires and CSeq values over a socket and observe 400 without store mutation;
    reject an untagged live-identity collision with 481 without replacing its task.
+8. Establish a tagged subscription, then send equal and lower CSeq refreshes and an unsubscribe;
+   each receives 500 and leaves the accepted expiry/state/task unchanged. A greater CSeq still
+   refreshes or terminates it.
+9. Prove Event matching ignores irrelevant parameter order and spelling, treats the `id` parameter
+   name case-insensitively, and compares the event-type and opaque `id` values byte-for-byte.
+10. Send duplicate Call-ID, From, To, Event and Contact fields and observe 400 before any store or
+    task mutation; prove that a case-changed local dialog tag receives 481.

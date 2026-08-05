@@ -13,7 +13,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
 use sipx_sip::event::{Packages, Reason, Subscription};
-use sipx_sip::headers::{CSeq, Expires};
+use sipx_sip::headers::{CSeq, Contact, Expires, From as FromHeader, To};
 use sipx_sip::{HeaderName, Method, Request, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
 use sipx_ua::packages::{DIALOG_INFO_TYPE, DialogWatch, REGINFO_TYPE, RegistrationWatch};
@@ -170,11 +170,10 @@ impl Notifier {
         }
 
         if let Some(tag) = to_tag(&incoming.request.headers) {
-            let known = self.tasks.get(&id).is_some_and(|task| {
-                task.local_tag
-                    .as_bytes()
-                    .eq_ignore_ascii_case(tag.as_slice())
-            });
+            let known = self
+                .tasks
+                .get(&id)
+                .is_some_and(|task| dialog_tag_matches(&task.local_tag, &tag));
             if !known {
                 answer(
                     &endpoint,
@@ -224,6 +223,18 @@ impl Notifier {
         match outcome {
             Answer::Malformed => {
                 answer(&endpoint, incoming, 400, "Bad Request", None, None, None).await;
+            }
+            Answer::OutOfOrder { .. } => {
+                answer(
+                    &endpoint,
+                    incoming,
+                    500,
+                    "Server Internal Error",
+                    None,
+                    None,
+                    None,
+                )
+                .await;
             }
             Answer::Unserved { status } => {
                 let allow = lock(&self.store).packages().allow_events();
@@ -561,8 +572,20 @@ fn lock(store: &Arc<Mutex<Subscriptions>>) -> MutexGuard<'_, Subscriptions> {
 }
 
 fn valid_subscribe_headers(request: &Request) -> bool {
-    request.method == Method::Subscribe
-        && request.headers.count(&HeaderName::CSeq) == 1
+    if request.method != Method::Subscribe
+        || request.headers.count(&HeaderName::CallId) != 1
+        || request.headers.count(&HeaderName::From) != 1
+        || request.headers.count(&HeaderName::To) != 1
+        || request.headers.count(&HeaderName::Event) != 1
+        || request.headers.count(&HeaderName::Contact) != 1
+        || request.headers.count(&HeaderName::CSeq) != 1
+        || request.headers.count(&HeaderName::Expires) > 1
+    {
+        return false;
+    }
+
+    let contacts: Vec<_> = request.headers.typed_all::<Contact>().collect();
+    matches!(contacts.as_slice(), [Ok(_)])
         && matches!(
             request.headers.typed::<CSeq>(),
             Some(Ok(CSeq {
@@ -570,8 +593,14 @@ fn valid_subscribe_headers(request: &Request) -> bool {
                 ..
             }))
         )
-        && request.headers.count(&HeaderName::Expires) <= 1
         && !matches!(request.headers.typed::<Expires>(), Some(Err(_)))
+        && matches!(request.headers.typed::<FromHeader>(), Some(Ok(_)))
+        && matches!(request.headers.typed::<To>(), Some(Ok(_)))
+        && Id::from_request(request).is_some()
+}
+
+fn dialog_tag_matches(recorded: &str, received: &[u8]) -> bool {
+    recorded.as_bytes() == received
 }
 
 async fn answer(
@@ -618,5 +647,16 @@ async fn answer(
     };
     if let Err(error) = endpoint.respond(&incoming.key, response).await {
         tracing::warn!(%error, "could not send SUBSCRIBE response");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dialog_tag_matches;
+
+    #[test]
+    fn opaque_dialog_tags_are_case_sensitive() {
+        assert!(dialog_tag_matches("LocalTag", b"LocalTag"));
+        assert!(!dialog_tag_matches("LocalTag", b"localtag"));
     }
 }

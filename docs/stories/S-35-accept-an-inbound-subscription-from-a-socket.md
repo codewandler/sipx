@@ -50,6 +50,10 @@ library-only.
 - 2026-08-05: independent review made header parsing fail closed, narrowed runtime package
   admission to the three rendered tokens, rejected untagged identity collisions, bounded each
   NOTIFY transaction, and added paused-time expiry plus all-package wire proofs.
+- 2026-08-05: second independent review specified replay-safe remote SUBSCRIBE sequencing,
+  RFC-defined Event/type identity, case-sensitive opaque dialog tags and duplicate-header refusal;
+  focused implementation and regression evidence are in progress while the full gate remains
+  deferred to integration.
 
 ## Notes
 - The sharpest instance of the pattern the 2026-08-04 capability review named as sipx's real feature

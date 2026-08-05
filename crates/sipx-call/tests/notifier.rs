@@ -126,6 +126,13 @@ fn replace_header(mut request: Request, name: HeaderName, value: &'static [u8]) 
     request
 }
 
+fn append_header(mut request: Request, name: &HeaderName, value: Bytes) -> Request {
+    request
+        .headers
+        .push(Header::build(name.clone(), value).expect("syntactic duplicate"));
+    request
+}
+
 async fn raw_final_response(
     socket: &UdpSocket,
     destination: SocketAddr,
@@ -525,5 +532,222 @@ async fn malformed_colliding_and_template_subscriptions_never_mutate_the_store()
     assert_eq!(collision.status.code(), 481);
     assert_eq!(shared_store(&handle).lock().expect("store").active(), 1);
     assert_eq!(handle.counts().started_tasks, 1);
+    pump.abort();
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn event_identity_and_remote_cseq_guard_refresh_and_unsubscribe() {
+    let (watcher, mut watcher_incoming) = endpoint().await;
+    let (notifier_endpoint, notifier_incoming) = endpoint().await;
+    let notifier = Notifier::new(Duration::from_secs(120), 2);
+    let handle = notifier.handle();
+    let pump = pump(&notifier_endpoint, notifier_incoming, notifier);
+
+    let accepted = final_response(
+        &watcher,
+        notifier_endpoint.local_addr(),
+        subscribe(
+            &watcher,
+            "event-identity",
+            "RemoteTag",
+            None,
+            "dialog;vendor=one;ID=Opaque-A;mode=full",
+            60,
+            20,
+        ),
+    )
+    .await;
+    assert_eq!(accepted.status.code(), 200);
+    let local_tag = local_tag(&accepted);
+    let initial = next_notify(&mut watcher_incoming).await;
+    assert_eq!(
+        initial.request.headers.value(&HeaderName::Event).as_deref(),
+        Some(&b"dialog;id=Opaque-A"[..]),
+        "NOTIFY carries the normalized matching identity"
+    );
+    answer_notify(&watcher, &initial).await;
+
+    let refreshed = final_response(
+        &watcher,
+        notifier_endpoint.local_addr(),
+        subscribe(
+            &watcher,
+            "event-identity",
+            "RemoteTag",
+            Some(&local_tag),
+            "dialog;mode=partial;id=Opaque-A;vendor=two",
+            90,
+            21,
+        ),
+    )
+    .await;
+    assert_eq!(
+        refreshed.status.code(),
+        200,
+        "irrelevant parameters do not split the subscription identity"
+    );
+
+    let before = {
+        let store = shared_store(&handle);
+        let store = store.lock().expect("store");
+        let [served] = store.all() else {
+            panic!("one subscription");
+        };
+        (served.expires_at, served.state, served.remote_cseq)
+    };
+    assert_eq!(before.2, 21);
+
+    for (event, expires, cseq) in [
+        ("dialog;id=Opaque-A", 120, 21),
+        ("dialog;vendor=three;ID=Opaque-A", 0, 20),
+    ] {
+        let stale = final_response(
+            &watcher,
+            notifier_endpoint.local_addr(),
+            subscribe(
+                &watcher,
+                "event-identity",
+                "RemoteTag",
+                Some(&local_tag),
+                event,
+                expires,
+                cseq,
+            ),
+        )
+        .await;
+        assert_eq!(stale.status.code(), 500);
+        let after = {
+            let store = shared_store(&handle);
+            let store = store.lock().expect("store");
+            let [served] = store.all() else {
+                panic!("one subscription");
+            };
+            (served.expires_at, served.state, served.remote_cseq)
+        };
+        assert_eq!(after, before, "a stale request cannot mutate the lease");
+        assert_eq!(handle.counts().active_tasks, 1);
+    }
+
+    for event in ["Dialog;id=Opaque-A", "dialog;id=opaque-a"] {
+        let not_same_identity = final_response(
+            &watcher,
+            notifier_endpoint.local_addr(),
+            subscribe(
+                &watcher,
+                "event-identity",
+                "RemoteTag",
+                Some(&local_tag),
+                event,
+                90,
+                22,
+            ),
+        )
+        .await;
+        assert_eq!(
+            not_same_identity.status.code(),
+            481,
+            "event type and opaque id values are byte-matched"
+        );
+    }
+
+    let changed_remote_tag = final_response(
+        &watcher,
+        notifier_endpoint.local_addr(),
+        subscribe(
+            &watcher,
+            "event-identity",
+            "remotetag",
+            Some(&local_tag),
+            "dialog;id=Opaque-A",
+            90,
+            22,
+        ),
+    )
+    .await;
+    assert_eq!(
+        changed_remote_tag.status.code(),
+        481,
+        "opaque dialog tags are byte-matched, including case"
+    );
+
+    let ended = final_response(
+        &watcher,
+        notifier_endpoint.local_addr(),
+        subscribe(
+            &watcher,
+            "event-identity",
+            "RemoteTag",
+            Some(&local_tag),
+            "dialog;id=Opaque-A",
+            0,
+            22,
+        ),
+    )
+    .await;
+    assert_eq!(ended.status.code(), 200);
+    let terminal = next_notify(&mut watcher_incoming).await;
+    answer_notify(&watcher, &terminal).await;
+    pump.abort();
+}
+
+#[tokio::test]
+async fn duplicate_dialog_and_event_headers_fail_before_store_mutation() {
+    let (watcher, _watcher_incoming) = endpoint().await;
+    let (notifier_endpoint, notifier_incoming) = endpoint().await;
+    let notifier = Notifier::new(Duration::from_secs(30), 2);
+    let handle = notifier.handle();
+    let pump = pump(&notifier_endpoint, notifier_incoming, notifier);
+    let raw = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("raw peer binds");
+
+    for (name, conflicting) in [
+        (HeaderName::CallId, &b"another-call"[..]),
+        (
+            HeaderName::From,
+            &b"<sip:another@sipx.test>;tag=another"[..],
+        ),
+        (HeaderName::To, &b"<sip:bob@sipx.test>"[..]),
+        (HeaderName::Event, &b"presence"[..]),
+        (HeaderName::Contact, &b"<sip:another@127.0.0.1:5060>"[..]),
+        (HeaderName::CSeq, &b"2 SUBSCRIBE"[..]),
+        (HeaderName::Expires, &b"10"[..]),
+    ] {
+        let template = subscribe(
+            &watcher,
+            "duplicate-header",
+            "remote",
+            None,
+            "dialog",
+            20,
+            1,
+        );
+        let original = template
+            .headers
+            .value(&name)
+            .expect("header exists")
+            .into_owned();
+        for value in [original, conflicting.to_vec()] {
+            let malformed = append_header(
+                subscribe(
+                    &watcher,
+                    "duplicate-header",
+                    "remote",
+                    None,
+                    "dialog",
+                    20,
+                    1,
+                ),
+                &name,
+                Bytes::from(value),
+            );
+            let response =
+                raw_final_response(&raw, notifier_endpoint.local_addr(), malformed).await;
+            assert_eq!(response.status.code(), 400, "duplicate {name:?}");
+            assert_eq!(shared_store(&handle).lock().expect("store").active(), 0);
+            assert_eq!(handle.counts().started_tasks, 0);
+        }
+    }
     pump.abort();
 }
