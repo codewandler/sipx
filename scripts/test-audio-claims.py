@@ -233,16 +233,20 @@ class TheModuleReader(unittest.TestCase):
         self.modules = guard.modules(guard.CODEC_CRATE, entry)
 
     def test_it_reads_the_modules_the_crate_declares(self):
-        self.assertEqual(["g711", "mix", "opus", "wav"], sorted(m.name for m in self.modules))
+        self.assertEqual(
+            ["g711", "l16", "mix", "opus", "pcm", "wav"],
+            sorted(m.name for m in self.modules),
+        )
 
     def test_an_optional_codec_carries_the_feature_that_gates_it(self):
         by_name = {m.name: m for m in self.modules}
         self.assertEqual("opus", by_name["opus"].feature)
         self.assertEqual("", by_name["g711"].feature)
+        self.assertEqual("", by_name["l16"].feature)
 
     def test_the_codec_modules_go_both_ways(self):
         by_name = {m.name: m for m in self.modules}
-        for name in ("g711", "opus"):
+        for name in ("g711", "l16", "opus"):
             with self.subTest(module=name):
                 self.assertTrue(by_name[name].provides("encode"))
                 self.assertTrue(by_name[name].provides("decode"))

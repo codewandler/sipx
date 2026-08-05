@@ -28,8 +28,10 @@ publicity as separate decisions.
 - [ ] The changelog and reviewed notes describe the complete post-beta.7 boundary, including
       migration guidance, fixed defects, measurement limits, experimental surfaces and intentional
       omissions.
-- [ ] The complete local gate passes once on the frozen candidate; focused checks may diagnose and
-      verify documentation edits, but the gate and retained load measurement are not repeated.
+- [ ] The complete release gate passes on the frozen candidate. At most one local invocation is
+      made; if infrastructure prevents a result, exact-SHA `main` CI and the protected tagged gate
+      must supply the passing evidence. The local gate and retained load measurement are not
+      repeated.
 - [ ] Exact-SHA `main` CI, including Pages, passes before one annotated `v1.0.0-rc.1` tag is pushed.
 - [ ] The protected workflow publishes or verifies every public crate, a registry-only consumer,
       the installed optional-feature CLI, all five native CLI archives, SPDX documents, checksums,
@@ -48,6 +50,14 @@ publicity as separate decisions.
   successful remote `main`, no existing RC.1 tag or package, an authenticated release account and
   the protected tag workflow that owns registry, Pages, five-target artifact and GitHub-release
   publication.
+- 2026-08-05: the one local gate invocation on candidate `8a8206f` found a stale audio-claim test
+  fixture: the module inventory still expected the pre-L16/pre-PCM four-module crate. The rest of
+  that step's checker already proved L16 and PCM correctly, and the complete all-feature Clippy,
+  workspace test, example and MSRV steps passed. The run later exhausted local disk in the feature
+  matrix and correctly ended as an infrastructure non-result rather than a tree verdict. The
+  fixture now includes `l16` and `pcm`, asserts L16 is ungated, and requires L16 encode/decode
+  reachability; all 59 focused tests and the live audio-claim check pass. Per the no-repeat
+  acceptance above, fresh exact-SHA CI and the tagged protected gate supply the complete result.
 
 ## Notes
 
