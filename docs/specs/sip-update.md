@@ -1,12 +1,14 @@
 # Spec: the UPDATE method
 
-**Status:** normative · **Crates:** `sipx-sip`, `sipx-call` · **Stories:** S-19, S-22 · **Design:**
+**Status:** normative · **Crates:** `sipx-sip`, `sipx-call` · **Stories:** S-19, S-22, S-36 · **Design:**
 [sip-ua](../designs/sip-ua.md)
 
 ## 1. Normative references
 
 - **RFC 3311** — the UPDATE method. §4 (determining support), §5.1 (sending), §5.2 (receiving).
 - RFC 3261 §12.2 (in-dialog requests), §13.2 (offer/answer in an INVITE), §20.5 (`Allow`).
+- RFC 3261 §14.2 — a re-INVITE without an offer receives one in its 2xx and answers it in
+  the ACK.
 - RFC 3262 §5 — an SDP answer may only be carried in a **reliable** provisional response.
 - RFC 3264 — the offer/answer model: one offer at a time, per direction.
 - RFC 4028 §7.4 — a session refresh SHOULD use UPDATE when the peer is known to support it.
@@ -284,3 +286,36 @@ Derived from §§4–7 and implemented in `crates/sipx-sip/src/update.rs` (pure)
 | `invite,update` | true — tokens are case-insensitive (RFC 3261 §7.3.1) |
 | `UPDATEX` | false — a token, not a substring |
 | *(absent)* | false — §4 makes silence mean "do not" |
+
+## 9. Delayed offer in a confirmed re-INVITE (RFC 3261 §14.2)
+
+A confirmed-dialog INVITE is allowed to carry no session description. In that form the 2xx
+contains this side's offer and the ACK contains the peer's answer. Rejecting the empty request as
+an unreadable offer reverses the exchange and incorrectly answers **488**.
+
+The delayed exchange uses the same local media port, codec set, direction and RTCP shape as an
+ordinary re-offer. Its session version is advanced from the accepted request's `CSeq`, and ICE is
+offered by the same driver seam. The running media remains in place until the ACK supplies a valid
+answer; building or transmitting the offer changes no media state.
+
+An encrypted running session is refused in this delayed form. Its new offer would have to carry a
+fresh SDES key or DTLS role/fingerprint, while the confirmed call deliberately retains no reusable
+keying material for serialization or replay. Sending a plain offer instead would be a media
+downgrade, so secure renegotiation remains on the ordinary peer-offer path.
+
+| Event | Offer/answer state | Media effect |
+|---|---|---|
+| bodyless re-INVITE while idle | send offer in 200; mark our offer outstanding | none |
+| retransmitted bodyless re-INVITE | transaction layer repeats the existing response | none |
+| matching ACK with a valid answer | validate and settle the answer; clear outstanding offer | apply the negotiated path atomically |
+| ACK with a missing, malformed or unacceptable answer | clear the exchange and report a typed error | keep the previously working path |
+| another offer while the ACK answer is outstanding | refuse as glare | none |
+
+There is no response to an ACK. Consequently an invalid answer cannot be repaired with a SIP
+status; it is reported to the application while the pre-existing media session stays owned by the
+call. Clearing the offer state is still required, because a broken peer must not leave every later
+renegotiation refused forever.
+
+The on-wire vector is `a_bodyless_reinvite_is_offered_in_the_success_and_answered_in_the_ack` in
+`crates/sipx-call/tests/call.rs`: its INVITE has an empty body, its 200 carries an offer, its ACK
+carries the corresponding answer, and the established dialog remains usable.

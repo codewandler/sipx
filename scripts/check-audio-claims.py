@@ -54,8 +54,8 @@ gap.
 Three things this deliberately does not do.
 
 **It reads each crate documentation and package README's summary paragraph, not the whole file.**
-The prose below the summary is where a crate says what it does *not* do — `X-26`'s record of why
-G.722 and resampling are absent lives there — and a check that could not tell a claim from a
+The prose below the summary is where a crate qualifies scope — `X-26`'s record of why G.722 is
+absent and `M-43`'s explicit resampling boundary live there — and a check that could not tell a claim from a
 disclaimer would forbid writing the decision down, which is the opposite of the point. The summary
 is what a reader is shown before choosing to read further, so it is the string that has to be true
 on its own.

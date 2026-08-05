@@ -82,9 +82,9 @@ share of the surveyed demand — belong to the separate platform and are not fil
   correction is a judgment, not a measurement.
 - **`M-42` may find the capability already present.** That is a good outcome and the story must be
   allowed to close as "verified, documented, no code" rather than inventing work to justify itself.
-- Whether resampling belongs in `sipx-audio` or behind a feature flag with a dependency is left to
-  `M-43`; the crate currently documents the absence of resampling as deliberate, and that note has
-  to be revisited rather than contradicted.
+- `M-43` resolved the resampling boundary in `sipx-audio` as a bounded, dependency-free linear
+  converter over explicit rates and sample depths. The crate's earlier absence note and its five
+  published front doors change with that implementation.
 
 ## Later direct product requests
 

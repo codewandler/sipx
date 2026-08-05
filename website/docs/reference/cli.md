@@ -49,7 +49,7 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 
 | Flag | Meaning |
 |---|---|
-| `--play <FILE>` | Play mono 16-bit WAV at the negotiated codec clock: 8 kHz for G.711 or 48 kHz for Opus |
+| `--play <FILE>` | Play mono 16-bit WAV, linearly resampled from its header rate to the negotiated clock |
 | `--record <FILE>` | Record the far end to WAV with that negotiated clock in its header |
 | `--dtmf <DIGITS>` | Send these digits once the call is up |
 | `--early-media` | Receive a reliable provisional media session before the final answer; incompatible with `--profile browser-audio` |
@@ -66,7 +66,7 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 | `--tls-cert <FILE>` | Mutual-TLS client certificate chain; requires `--tls-key` |
 | `--tls-key <FILE>` | Mutual-TLS client private key; requires `--tls-cert` |
 | `--profile <P>` | Select `standard` (default) or fail-closed `browser-audio`. The latter requires WSS plus the Opus and DTLS build features; it fixes codecs/keying and defaults ICE to `host` |
-| `--codec <C>` | Select `pcmu`, `pcma`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`). Opus requires the optional build feature |
+| `--codec <C>` | Select `pcmu`, `pcma`, `l16`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`). Opus requires the optional build feature |
 | `--media-security <M>` | Select `auto`, `plain`, `sdes`, or `dtls-srtp` (default `auto`). Explicit SDES requires TLS/WSS signalling |
 | `--ice <P>` | Select `disabled`, `host`, or `stun` (default `disabled`) |
 | `--stun-server <ADDR>` | STUN server as `host:port`; required by `--ice stun` and refused otherwise |
@@ -96,10 +96,10 @@ rate/channel/format configuration. `device_input_dropped_samples`,
 `device_output_dropped_samples`, and `device_output_silence_samples` make callback pressure and
 conversion gaps visible. These fields are measurements from the run, not requested settings.
 
-WAV input is never silently reinterpreted or resampled. Its sample rate must equal the codec that
-the call actually negotiates; a mismatch fails by naming both rates. Packet sizing likewise comes
-from the running session (160 samples for a 20 ms G.711 packet, 960 for Opus), and recordings use
-that rate in their WAV headers.
+WAV input is never silently reinterpreted. Its mono signed-16 format and header rate are explicit,
+and supported rates are linearly resampled to the negotiated clock. Packet sizing likewise comes
+from the running session (160 samples for a 20 ms G.711 or dynamic 8 kHz L16 packet, 882 for static
+44.1 kHz L16, and 960 for Opus), and recordings use that rate in their WAV headers.
 
 ## `sipx answer`
 
@@ -107,7 +107,7 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 
 | Flag | Meaning |
 |---|---|
-| `--play <FILE>` | Play mono 16-bit WAV at the negotiated codec clock: 8 kHz for G.711 or 48 kHz for Opus |
+| `--play <FILE>` | Play mono 16-bit WAV, linearly resampled from its header rate to the negotiated clock |
 | `--record <FILE>` | Record the caller to WAV with that negotiated clock in its header |
 | `--duration <S>` | Hang up after this many seconds (default 30) |
 | `--wait <S>` | Give up if no call arrives within this many seconds (default 60) |
@@ -118,7 +118,7 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 | `--tls-cert <FILE>` | TLS/WSS server certificate chain; requires `--tls-key` |
 | `--tls-key <FILE>` | TLS/WSS server private key; requires `--tls-cert` |
 | `--profile <P>` | Select `standard` (default) or fail-closed `browser-audio`; the latter requires a WSS listener, Opus, DTLS, and ICE |
-| `--codec <C>` | Select `pcmu`, `pcma`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`) |
+| `--codec <C>` | Select `pcmu`, `pcma`, `l16`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`) |
 | `--media-security <M>` | Select `auto`, `plain`, `sdes`, or `dtls-srtp` (default `auto`) |
 | `--ice <P>` | Select `disabled`, `host`, or `stun` (default `disabled`) |
 | `--stun-server <ADDR>` | STUN server as `host:port`; required by `--ice stun` and refused otherwise |
@@ -371,7 +371,7 @@ string `id` in its completion or refusal event.
 | `--tls-ca <FILE>` | Add PEM trust roots to the platform store |
 | `--tls-cert <FILE>` | Certificate chain for TLS/WSS; pair with `--tls-key` |
 | `--tls-key <FILE>` | Private key paired with `--tls-cert` |
-| `--codec <C>` | Select `pcmu`, `pcma`, or `opus`; repeat in preference order |
+| `--codec <C>` | Select `pcmu`, `pcma`, `l16`, or `opus`; repeat in preference order |
 | `--media-security <M>` | Select `auto`, `plain`, `sdes`, or `dtls-srtp` |
 | `--ice <P>` | Select `disabled`, `host`, or `stun` |
 | `--stun-server <ADDR>` | STUN server as `host:port` for `--ice stun` |

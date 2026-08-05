@@ -1,11 +1,12 @@
 # sipx-audio
 
-Telephony audio: G.711 µ-law and A-law, PCM mixing, WAV I/O, and Opus behind the `opus` feature.
+Telephony audio: G.711 µ-law and A-law, L16, linear PCM conversion and resampling, WAV I/O, and Opus behind the `opus` feature.
 
 ## What this is
 
-Sample-domain audio machinery for the rest of sipx: G.711 conversion, saturating PCM mixing, WAV
-reading and writing, and the optional stateful Opus encoder and decoder.
+Sample-domain audio machinery for the rest of sipx: G.711 and network-order L16 conversion,
+explicit unsigned-8 and signed-16 PCM conversion with linear resampling, WAV reading and writing,
+and the optional stateful Opus encoder and decoder.
 
 Opus is off by default and crosses a native-library boundary. The deployment and advisory policy is
 documented in the public
@@ -17,10 +18,11 @@ The supported and experimental surfaces are maintained in the
 [crate-level Stability section](https://codewandler.github.io/sipx/api/sipx_audio/#stability).
 That is the contract; it is linked rather than copied here so the two cannot drift.
 
-## Deliberately absent
+## Format boundary
 
-This crate does not resample, implement G.722, or carry telephone events. Telephone events are RTP
-payloads and live in `sipx-rtp`; a caller must supply audio at the negotiated sample rate.
+`PcmFormat` makes mono sample depth and rate explicit, and `LinearResampler` converts between rates
+from 1 through 384,000 Hz. G.722 remains deliberately absent. Telephone events are RTP payloads and
+live in `sipx-rtp` rather than being linear samples.
 
 ## See also
 

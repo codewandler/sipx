@@ -50,6 +50,9 @@ public demo.
 - [T-28 — Fall back to TCP when a request exceeds the path MTU](T-28-fall-back-to-tcp-when-a-request-exceeds-the-path-mtu.md) · Transport · RFC 3261 §18.1.1 · sipx currently refuses where the RFC says switch transport
 - [T-29 — Drain in-flight work on a graceful shutdown](T-29-drain-in-flight-work-on-a-graceful-shutdown.md) · Transport · restart without dropping calls · labelled critical and never delivered by the surveyed stack
 - [T-30 — Export signalling capture and media quality to a collector](T-30-export-signalling-capture-and-media-quality-to-a-collector.md) · Transport · the two observability asks people maintained private forks for · hooks, not a bundled exporter
+- [X-68 — Explain the layering on the public site](X-68-explain-the-layering-on-the-public-site.md) · Build · sans-IO is the central design property and the site never states it · one page, one diagram · beta-1
+- [S-36 — Verify the reported call-control and registration traps](S-36-verify-the-reported-call-control-and-registration-traps.md) · Signalling · six field-reported failure modes · each becomes a passing test or a defect · cheap, high information
+- [M-43 — Carry linear PCM in and out without format assumptions](M-43-carry-linear-pcm-in-and-out-without-format-assumptions.md) · Media · four reported use cases resolve to one unopinionated PCM boundary · not an AI feature
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-102 — Publish the peer endpoint load comparison](X-102-publish-the-peer-endpoint-load-comparison.md) · Build · compare endpoint responder capacity under the neutral profile; leave proxy workloads to sipx.clstr
@@ -108,11 +111,9 @@ _Applications need to shape live call audio without forking the media runtime: o
 
 ### demand-led capability work
 _sipx's backlog has been derived from RFCs, from our own review findings, and from what the design_
-- [M-43 — Carry linear PCM in and out without format assumptions](M-43-carry-linear-pcm-in-and-out-without-format-assumptions.md) · Media · four reported use cases resolve to one unopinionated PCM boundary · not an AI feature
 - [M-44 — Negotiate and carry G.722](M-44-negotiate-and-carry-g722.md) · Media · the only codec with real demand that sipx lacks · static PT 9 with the RFC 3551 clock-rate trap
 - [M-45 — Hold incoming audio in a jitter buffer](M-45-hold-incoming-audio-in-a-jitter-buffer.md) · Media · two independent field reports of seconds of added delay · characterise the current buffer before changing it
 - [P-14 — Ship portable CLI artifacts](P-14-ship-portable-cli-artifacts.md) · Phone · the surveyed stack's most-engaged issue is a glibc failure · Rust makes this a build-matrix problem
-- [S-36 — Verify the reported call-control and registration traps](S-36-verify-the-reported-call-control-and-registration-traps.md) · Signalling · six field-reported failure modes · each becomes a passing test or a defect · cheap, high information
 
 ### Depth
 - [X-67 — Split the call module along its seams](X-67-split-the-call-module-along-its-seams.md) · Build · call.rs is 6560 lines, ~6100 of them production · hold, transfer, session timers, re-INVITE and ICE restart in one file · follow-up
@@ -123,7 +124,6 @@ _sipx can call any endpoint you can already name, and cannot help you name one. 
 
 ### documentation depth
 _The published site (`website/`, `X-11`–`X-13`) is strong where it is machine-checked: a CLI_
-- [X-68 — Explain the layering on the public site](X-68-explain-the-layering-on-the-public-site.md) · Build · sans-IO is the central design property and the site never states it · one page, one diagram · beta-1
 - [X-69 — Guide every shipped call verb](X-69-guide-every-shipped-call-verb.md) · Build · hold, transfer, DTMF, playback, recording and coupling all ship and appear only as bullets · follow-up
 
 ### Edge / B2BUA

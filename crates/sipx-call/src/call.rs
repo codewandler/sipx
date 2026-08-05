@@ -161,6 +161,8 @@ pub struct Call {
     /// Completion of the successful-final-response retransmitter. Retained separately from its
     /// stop signal so an ACK or terminal call path proves that the worker has actually exited.
     ack_retransmission: Option<OwnedTask>,
+    /// Capabilities behind an offer sent in a re-INVITE's 2xx, awaiting its answer in the ACK.
+    delayed_offer: Option<Capabilities>,
     ended: bool,
     /// Where this side receives media, so a re-offer can name the same address.
     media_address: IpAddr,
@@ -417,7 +419,9 @@ impl Call {
             media_profile: self.profile,
             codecs: self.codecs,
             codec: self.current.codec,
+            clock_rate: self.current.clock_rate,
             payload_type: self.current.wire_payload_type(),
+            receive_payload_type: self.current.receive_wire_payload_type(),
             dtmf_payload_type: self.current.dtmf,
             rtcp_mode: self.current.rtcp_mode,
             hold: self.hold,
@@ -452,6 +456,7 @@ impl Call {
             target: context.target.clone(),
             ack_stop: None,
             ack_retransmission: None,
+            delayed_offer: None,
             ended: false,
             media_address: context.media_address.advertised(),
             media_bind_address: context.media_address.bind(),
@@ -609,6 +614,24 @@ impl Call {
         end.completed()
     }
 
+    /// Convert and play explicit linear PCM, reporting completion on the call event stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`sipx_audio::PcmError`] before queuing audio when the format cannot be converted.
+    pub async fn play_pcm(
+        &self,
+        pcm: &sipx_audio::Pcm,
+    ) -> std::result::Result<bool, sipx_audio::PcmError> {
+        let playback = self.media.start_pcm_playback(pcm, Interrupt::Never)?;
+        let end = playback.play_out().await;
+        self.events.emit(CallEvent::PlaybackFinished {
+            playback: playback.id(),
+            completed: end.completed(),
+        });
+        Ok(end.completed())
+    }
+
     /// Start a clip and hand back a handle to it, without waiting (`M-17`).
     ///
     /// The primitive under "play a prompt and collect digits": the caller goes on to read digits
@@ -638,6 +661,29 @@ impl Call {
             });
         });
         playback
+    }
+
+    /// Convert explicit linear PCM and start a controllable playback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`sipx_audio::PcmError`] before creating a playback when conversion is refused.
+    pub fn start_pcm_playback(
+        &self,
+        pcm: &sipx_audio::Pcm,
+        interrupt: Interrupt,
+    ) -> std::result::Result<Playback, sipx_audio::PcmError> {
+        let playback = self.media.start_pcm_playback(pcm, interrupt)?;
+        let watcher = playback.clone();
+        let emitter = self.events.emitter();
+        tokio::spawn(async move {
+            let end = watcher.finished().await;
+            emitter.emit(CallEvent::PlaybackFinished {
+                playback: watcher.id(),
+                completed: end.completed(),
+            });
+        });
+        Ok(playback)
     }
 
     /// Record until the far end goes quiet for `idle`, and report the result on the event stream.
@@ -670,7 +716,7 @@ impl Call {
     /// Shared by both recording verbs so the duration on the event cannot come to mean one thing
     /// for one of them and something else for the other.
     fn finished_recording(&self, samples: Vec<i16>) -> Vec<i16> {
-        let rate = u64::from(self.media.codec().clock_rate()).max(1);
+        let rate = u64::from(self.media.clock_rate()).max(1);
         let duration = Duration::from_micros(samples.len() as u64 * 1_000_000 / rate);
         self.events.emit(CallEvent::RecordingFinished { duration });
         samples
@@ -769,10 +815,19 @@ impl Call {
         self.media.browser_component()
     }
 
-    /// RTP payload type selected for the established audio codec.
+    /// RTP payload type selected for sending the established audio codec.
     #[must_use]
     pub fn negotiated_payload_type(&self) -> u8 {
         self.current.wire_payload_type()
+    }
+
+    /// RTP payload type accepted when receiving the established audio codec.
+    ///
+    /// Usually equal to [`Self::negotiated_payload_type`], but each SDP description may assign a
+    /// different dynamic number to the same format (RFC 3264 §6.1).
+    #[must_use]
+    pub fn negotiated_receive_payload_type(&self) -> u8 {
+        self.current.receive_wire_payload_type()
     }
 
     /// RTP clock rate selected for the established audio codec.
@@ -900,6 +955,8 @@ impl Call {
             Method::Ack => {
                 // The 2xx got through; stop retransmitting it.
                 self.stop_ack_retransmission().await;
+                self.accept_delayed_offer_answer(incoming.request.body())
+                    .await?;
                 Ok(true)
             }
             // An INVITE inside an existing dialog is a re-INVITE: a renegotiation of the call
@@ -1108,6 +1165,10 @@ impl Call {
         }
         self.record_remote_cseq(&incoming.request);
 
+        if incoming.request.body().is_empty() {
+            return self.offer_in_reinvite_success(incoming).await;
+        }
+
         // §5.2 rule 2's other source, and the reason the spec names INVITE alongside UPDATE: a
         // re-INVITE's offer is one this side owes an answer to until it produces one.
         if crate::update::carries_offer(&incoming.request) {
@@ -1170,6 +1231,91 @@ impl Call {
         self.ack_stop = Some(ack_stop);
         self.ack_retransmission = Some(OwnedTask::new(ack_retransmission));
         Ok(())
+    }
+
+    /// Put our offer in the 2xx to a bodyless re-INVITE (RFC 3261 §14.2).
+    async fn offer_in_reinvite_success(&mut self, incoming: &Incoming) -> Result<()> {
+        if self.profile == MediaProfile::BrowserAudio
+            || self.encrypted
+            || !self.negotiation.may_offer()
+        {
+            return self.refuse_unacceptable(incoming).await;
+        }
+
+        let mut capabilities = self
+            .codecs
+            .capabilities(self.media_address, self.media.local_addr().port());
+        if self.current.rtcp_mode == sipx_sdp::RtcpMode::Mux {
+            capabilities = capabilities.with_rtcp_mux();
+        }
+        capabilities.direction = self.hold;
+        capabilities.session_version = self
+            .dialog
+            .remote_cseq
+            .map_or(u64::from(self.dialog.local_cseq), u64::from);
+        let mut offer = offer_from(&capabilities);
+        self.offer_ice(&mut offer, IceOffer::Continue).await;
+
+        // The request itself is a target refresh even though its offer was delayed.
+        self.rearm();
+        self.dialog.refresh_target(&incoming.request.headers);
+        self.target = in_dialog_target(
+            &self.dialog,
+            Target::new(incoming.source, incoming.transport),
+        );
+
+        let response = ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?
+            .header(
+                HeaderName::Contact,
+                Bytes::from(contact_for(&self.endpoint, self.target.transport)),
+            )?
+            .header(
+                HeaderName::Allow,
+                Bytes::from_static(update::ALLOW.as_bytes()),
+            )?
+            .header(
+                HeaderName::ContentType,
+                Bytes::from_static(b"application/sdp"),
+            )?
+            .body(Bytes::from(offer.to_string_sdp()))
+            .build();
+
+        self.negotiation.sent_offer();
+        self.delayed_offer = Some(capabilities);
+        if let Err(error) = self.endpoint.respond(&incoming.key, response.clone()).await {
+            self.delayed_offer = None;
+            self.negotiation.received_answer();
+            return Err(error.into());
+        }
+
+        self.stop_ack_retransmission().await;
+        let ack_stop = CancellationToken::new();
+        let ack_retransmission = tokio::spawn(retransmit_until_acked(
+            self.endpoint.clone(),
+            incoming.key.clone(),
+            response,
+            ack_stop.clone(),
+        ));
+        self.ack_stop = Some(ack_stop);
+        self.ack_retransmission = Some(OwnedTask::new(ack_retransmission));
+        Ok(())
+    }
+
+    /// Settle the answer carried by the ACK of a delayed-offer re-INVITE.
+    async fn accept_delayed_offer_answer(&mut self, body: &[u8]) -> Result<()> {
+        let Some(offered) = self.delayed_offer.take() else {
+            return Ok(());
+        };
+        // Clear the exchange on every path: ACK has no response with which to repair a malformed
+        // answer, and retaining this flag would turn one peer error into permanent glare.
+        self.negotiation.received_answer();
+
+        let answer = sipx_sdp::parse(&String::from_utf8_lossy(body))
+            .map_err(|error| Error::Sdp(error.to_string()))?;
+        let settled = settle_answer(&offered, &answer, self.codecs)?;
+        preserve_rtcp_mode(self.current.rtcp_mode, settled.negotiated.rtcp_mode)?;
+        self.accept_answer_ice(&answer).await;
+        self.move_media_if_changed(settled.negotiated).await
     }
 
     /// Apply an offer that arrived in-dialog, and produce the answer to send back.
@@ -1725,7 +1871,9 @@ impl Call {
         // session, and dropping audio, on a re-INVITE that only reworded the SDP.
         if to.remote != self.current.remote
             || to.codec != self.current.codec
+            || to.clock_rate != self.current.clock_rate
             || to.wire_payload_type() != self.current.wire_payload_type()
+            || to.receive_wire_payload_type() != self.current.receive_wire_payload_type()
             || to.rtcp_mode != self.current.rtcp_mode
         {
             let port = MediaPort::bind(SocketAddr::new(self.media_bind_address, 0))
@@ -1909,10 +2057,10 @@ impl Call {
             // checks a path nobody is answering on. On an ordinary re-offer it is the same half
             // again, which the agent merges (RFC 8839 §4.2) rather than replaces — so a
             // re-answer cannot silence ICE on a call that is working.
-            if let Ok(renegotiated) = negotiated(&answer, self.codecs) {
-                preserve_rtcp_mode(self.current.rtcp_mode, renegotiated.rtcp_mode)?;
+            if let Ok(settled) = settle_answer(&capabilities, &answer, self.codecs) {
+                preserve_rtcp_mode(self.current.rtcp_mode, settled.negotiated.rtcp_mode)?;
                 self.accept_answer_ice(&answer).await;
-                self.move_media_if_changed(renegotiated).await?;
+                self.move_media_if_changed(settled.negotiated).await?;
             }
         }
         self.hold = direction;
@@ -3787,6 +3935,7 @@ async fn dial_with(
                 target: in_dialog,
                 ack_stop: None,
                 ack_retransmission: None,
+                delayed_offer: None,
                 ended: false,
                 media_address,
                 media_bind_address: options.media_bind_address,
@@ -3914,6 +4063,21 @@ fn settle_answer(
     // worth having, so both come back as `Error::Sdp` rather than as a quietly plain call.
     let answered = answered_crypto(answer);
     let mut negotiated = negotiated(answer, codecs)?;
+    let local_offer = offer_from(offered);
+    let local_audio = local_offer
+        .media
+        .iter()
+        .find(|media| media.media == "audio" && !media.is_rejected())
+        .ok_or(Error::NoCommonCodec)?;
+    negotiated.receive_payload_type = local_audio
+        .formats
+        .iter()
+        .find_map(|format| {
+            let (codec, payload_type, clock_rate) = codec_of(local_audio, format)?;
+            (codec == negotiated.codec && clock_rate == negotiated.clock_rate)
+                .then_some(payload_type)
+        })
+        .ok_or(Error::NoCommonCodec)?;
     let answered_mux = answer
         .media
         .iter()
@@ -5298,6 +5462,7 @@ impl Dialing {
                     target: self.in_dialog.clone(),
                     ack_stop: None,
                     ack_retransmission: None,
+                    delayed_offer: None,
                     ended: false,
                     media_address: self.options.media_address,
                     media_bind_address: self.options.media_bind_address,
@@ -6025,6 +6190,7 @@ pub async fn answer_early(
         target,
         ack_stop: Some(ack_stop),
         ack_retransmission: Some(ack_retransmission),
+        delayed_offer: None,
         ended: false,
         media_address: early.media_address,
         media_bind_address: early.media_bind_address,
@@ -6319,6 +6485,7 @@ async fn answer_negotiated(
         target,
         ack_stop: Some(ack_stop),
         ack_retransmission: Some(ack_retransmission),
+        delayed_offer: None,
         ended: false,
         media_address: media_address.advertised(),
         media_bind_address: media_address.bind(),
@@ -6690,12 +6857,22 @@ pub(crate) fn offer_from(capabilities: &Capabilities) -> SessionDescription {
 pub(crate) struct Negotiated {
     pub(crate) remote: SocketAddr,
     pub(crate) codec: Codec,
+    /// RTP clock rate of this exact format.
+    ///
+    /// Usually fixed by the codec. L16 can be negotiated at more than one rate, so retaining the
+    /// format's rate is what keeps packet sizing, resampling, and RTP timestamps in agreement.
+    pub(crate) clock_rate: u32,
     /// The payload type to send `codec` with, when the description gave it a number.
     ///
     /// `None` only for a bare static type matched by number. Anything an rtpmap touched —
     /// Opus always, a remapped static possibly — has no number of its own that means anything:
     /// 111 is convention, and what the far end listens for is the number *it* assigned.
     pub(crate) payload_type: Option<u8>,
+    /// The payload type our description assigned to packets arriving for this codec.
+    ///
+    /// Separate from [`Self::payload_type`], which belongs to the peer's description and is the
+    /// number used for sending. They are usually equal but dynamic assignments are directional.
+    pub(crate) receive_payload_type: Option<u8>,
     /// The payload type the far end uses for `telephone-event`, if it offered one.
     ///
     /// Taken from the description rather than assumed, because it is a *dynamic* type: 101 is
@@ -6726,9 +6903,16 @@ impl Negotiated {
             .unwrap_or_else(|| self.codec.payload_type())
     }
 
+    fn receive_wire_payload_type(&self) -> u8 {
+        self.receive_payload_type
+            .unwrap_or_else(|| self.codec.payload_type())
+    }
+
     fn media_config(self) -> sipx_media::Config {
         let mut config = sipx_media::Config::new(self.remote, self.codec);
+        config.clock_rate = self.clock_rate;
         config.payload_type = self.payload_type;
+        config.receive_payload_type = self.receive_payload_type;
         config.dtmf_payload_type = self.dtmf;
         config.rtcp_mode = self.rtcp_mode;
         config
@@ -6869,16 +7053,21 @@ pub(crate) fn negotiated(sdp: &SessionDescription, codecs: Codecs) -> Result<Neg
     // format is outside our set — so an Opus-first offer reaching a G.711 call would come back
     // `NoCommonCodec` while the answer this side builds happily names the PCMU further down the
     // same list.
-    let (codec, payload_type) = audio
+    let (codec, payload_type, clock_rate) = audio
         .formats
         .iter()
-        .find_map(|format| codec_of(audio, format).filter(|(codec, _)| codecs.carries(*codec)))
+        .find_map(|format| {
+            codec_of(audio, format)
+                .filter(|(codec, _, clock_rate)| codecs.carries_format(*codec, *clock_rate))
+        })
         .ok_or(Error::NoCommonCodec)?;
 
     Ok(Negotiated {
         remote: SocketAddr::new(address, audio.port),
         codec,
+        clock_rate,
         payload_type,
+        receive_payload_type: payload_type,
         dtmf: telephone_event_payload_type(audio),
         // On the answering side this is the offer's request, which sipx accepts. On the offering
         // side `settle_answer` additionally requires that this side actually offered the flag.
@@ -6897,12 +7086,25 @@ pub(crate) fn negotiated(sdp: &SessionDescription, codecs: Codecs) -> Result<Neg
 /// number is then *dynamic in meaning* — the map could have hung any name on it — so it goes
 /// home with the codec rather than being reassumed from [`Codec::payload_type`]. Only a bare
 /// static type, with no map at all, is matched by number.
-fn codec_of(audio: &sipx_sdp::MediaDescription, format: &str) -> Option<(Codec, Option<u8>)> {
+fn codec_of(audio: &sipx_sdp::MediaDescription, format: &str) -> Option<(Codec, Option<u8>, u32)> {
     let payload = format.parse::<u8>().ok()?;
     if let Some(rtpmap) = audio.rtpmap(format) {
-        return codec_named(rtpmap).map(|codec| (codec, Some(payload)));
+        return codec_format(rtpmap).map(|(codec, clock_rate)| (codec, Some(payload), clock_rate));
     }
-    Codec::from_payload_type(payload).map(|codec| (codec, None))
+    Codec::from_payload_type(payload).map(|codec| (codec, None, codec.clock_rate()))
+}
+
+/// The codec and RTP clock an rtpmap names.
+///
+/// L16 is special only in having more than one supported rate. Its name and mono channel count
+/// are still parsed by SDP's shared format reader; policy decides below whether the exact rate
+/// was offered locally.
+fn codec_format(rtpmap: &str) -> Option<(Codec, u32)> {
+    let parsed = sipx_sdp::rtpmap::Rtpmap::parse(rtpmap).ok()?;
+    if parsed.encoding().eq_ignore_ascii_case("L16") && parsed.channels() == 1 {
+        return Some((Codec::L16, parsed.clock_rate()));
+    }
+    codec_named(rtpmap).map(|codec| (codec, codec.clock_rate()))
 }
 
 /// The codec an rtpmap value names, if it is one we carry.
@@ -6939,6 +7141,7 @@ fn carried() -> &'static [Codec] {
     &[
         Codec::Pcmu,
         Codec::Pcma,
+        Codec::L16,
         #[cfg(feature = "opus")]
         Codec::Opus,
     ]
@@ -6958,6 +7161,7 @@ const fn offered_rtpmap(codec: Codec) -> &'static str {
     match codec {
         Codec::Pcmu => "PCMU/8000",
         Codec::Pcma => "PCMA/8000",
+        Codec::L16 => "L16/44100/1",
         #[cfg(feature = "opus")]
         Codec::Opus => "opus/48000/2",
     }
@@ -7504,6 +7708,62 @@ mod tests {
         );
     }
 
+    /// M-43: RFC 3551 assigns mono L16 at 44.1 kHz to static payload 11. The adjacent payload
+    /// 10 is stereo, which sipx's mono media surface deliberately does not claim.
+    #[test]
+    fn l16_static_payload_is_mono_at_forty_four_point_one_kilohertz() {
+        let l16 = Codecs::ordered(&[crate::CodecPreference::L16]).expect("L16 selection");
+        let settled = negotiated(&offered("11", &[]), l16).expect("static mono L16");
+        assert_eq!(settled.codec, Codec::L16);
+        assert_eq!(settled.payload_type, None);
+        assert_eq!(settled.clock_rate, 44_100);
+        assert!(matches!(
+            negotiated(&offered("10", &[]), l16),
+            Err(Error::NoCommonCodec)
+        ));
+    }
+
+    /// M-43: an L16 rate outside the static assignment is identified by rtpmap and its dynamic
+    /// payload number travels with the session. Only rates this policy actually offers settle.
+    #[test]
+    fn l16_dynamic_payload_retains_its_explicit_clock_rate() {
+        let l16 = Codecs::ordered(&[crate::CodecPreference::L16]).expect("L16 selection");
+        let settled =
+            negotiated(&offered("110", &["110 L16/8000/1"]), l16).expect("dynamic mono L16");
+        assert_eq!(settled.codec, Codec::L16);
+        assert_eq!(settled.payload_type, Some(110));
+        assert_eq!(settled.clock_rate, 8_000);
+
+        assert!(
+            matches!(
+                negotiated(&offered("96", &["96 L16/16000/1"]), l16),
+                Err(Error::NoCommonCodec)
+            ),
+            "an unoffered rate is not silently accepted"
+        );
+        assert!(
+            matches!(
+                negotiated(&offered("96", &["96 L16/8000/2"]), l16),
+                Err(Error::NoCommonCodec)
+            ),
+            "the PCM API is mono"
+        );
+    }
+
+    /// Each SDP description owns its dynamic assignment. An 8 kHz L16 answer may send on 110
+    /// while receiving on the 96 this side offered, with one shared negotiated clock.
+    #[test]
+    fn l16_answer_keeps_directional_dynamic_payload_assignments() {
+        let l16 = Codecs::L16;
+        let capabilities = l16.capabilities("192.0.2.9".parse().expect("address"), 40_000);
+        let answer = offered("110", &["110 L16/8000/1"]);
+        let settled = settle_answer(&capabilities, &answer, l16).expect("dynamic L16 answer");
+        assert_eq!(settled.negotiated.codec, Codec::L16);
+        assert_eq!(settled.negotiated.clock_rate, 8_000);
+        assert_eq!(settled.negotiated.wire_payload_type(), 110);
+        assert_eq!(settled.negotiated.receive_wire_payload_type(), 96);
+    }
+
     /// The clock rate and channel count are part of a format's identity (RFC 8866 §6.6), so a
     /// name sipx knows at a rate it does not is not a match.
     #[test]
@@ -7570,6 +7830,32 @@ mod tests {
             mapped.wire_payload_type(),
             bare.wire_payload_type(),
             "the same byte goes on the wire either way, so the session must not move",
+        );
+    }
+
+    /// S-36 / RFC 3264 §6.1: the offer and answer may assign different dynamic numbers to the
+    /// same format. The answer's number is what we send; the offer's remains what we receive.
+    #[test]
+    fn an_asymmetric_answer_keeps_each_directions_payload_number() {
+        let address = "192.0.2.9".parse().expect("address");
+        let mut capabilities = Capabilities::g711(address, 40_000);
+        capabilities.audio_formats = vec!["111".to_owned()];
+        capabilities.rtpmaps = vec![("111".to_owned(), "PCMU/8000".to_owned())];
+        let answer = offered("96", &["96 PCMU/8000"]);
+
+        let settled = settle_answer(&capabilities, &answer, Codecs::G711).expect("same format");
+        assert_eq!(settled.negotiated.wire_payload_type(), 96);
+        assert_eq!(settled.negotiated.receive_wire_payload_type(), 111);
+        let config = settled.media_config();
+        assert_eq!(
+            config.wire_payload_type(),
+            96,
+            "send with the peer's number"
+        );
+        assert_eq!(
+            config.receive_wire_payload_type(),
+            111,
+            "receive with our number"
         );
     }
 
@@ -7735,7 +8021,9 @@ mod tests {
             negotiated: Negotiated {
                 remote: server_address,
                 codec: Codec::Pcmu,
+                clock_rate: 8_000,
                 payload_type: Some(0),
+                receive_payload_type: Some(0),
                 dtmf: None,
                 rtcp_mode: sipx_sdp::RtcpMode::Separate,
             },

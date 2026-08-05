@@ -502,6 +502,8 @@ async fn outbound_requests_use_the_live_remote_target_and_route_set() {
     );
 }
 
+/// S-36 / RFC 3261 §§22.2 and 22.4: an in-dialog application request challenged with 401 or
+/// 407 is retried with credentials and a fresh `CSeq` in either dialog direction.
 #[tokio::test]
 async fn digest_challenges_retry_info_and_message_in_both_directions() {
     let options = DialOptions::new("<sip:caller@example.test>", loopback())

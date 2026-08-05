@@ -294,8 +294,8 @@ async fn registration_works_over_sha256() {
     assert_eq!(challenges.load(Ordering::SeqCst), 1);
 }
 
-/// The registrar's number wins. A client that refreshed on the interval it asked for would
-/// de-register itself every cycle.
+/// S-36 / RFC 3261 §10.2.4: the registrar's granted expiry wins. A client that refreshed on the
+/// interval it asked for would de-register itself every cycle.
 #[tokio::test]
 async fn the_granted_lease_is_shorter_than_the_one_requested() {
     let (target, _) = registrar(60, false).await;
@@ -307,6 +307,92 @@ async fn the_granted_lease_is_shorter_than_the_one_requested() {
         lease.refresh_after < lease.granted,
         "the refresh must leave margin: {lease:?}"
     );
+}
+
+/// S-36 / RFC 3261 §10.2.4: provisional responses do not decide a registration attempt. A
+/// registrar is allowed to acknowledge the work with `100 Trying`; the binding is established by
+/// the later final response.
+#[tokio::test]
+async fn a_hundred_trying_does_not_fail_registration() {
+    let (registrar, mut incoming) =
+        bind(TransportConfig::new("127.0.0.1:0".parse().expect("valid")))
+            .await
+            .expect("binds");
+    let target = Target::udp(registrar.local_addr());
+    let mut ua = agent(target, None).await;
+
+    let registering = tokio::spawn(async move { ua.register().await });
+    let request = incoming.recv().await.expect("REGISTER arrives");
+    let trying = ResponseBuilder::to_request(
+        &request.request,
+        StatusCode::new(100).expect("valid"),
+        "Trying",
+    )
+    .expect("builds")
+    .build();
+    registrar
+        .respond(&request.key, trying)
+        .await
+        .expect("sends provisional response");
+    registrar
+        .respond(&request.key, granted_ok(&request.request, 60))
+        .await
+        .expect("sends final response");
+
+    assert_eq!(
+        registering
+            .await
+            .expect("registration task joins")
+            .expect("the provisional response is ignored")
+            .granted,
+        Duration::from_secs(60)
+    );
+}
+
+/// S-36 / RFC 3261 §10.2.4: one transient refresh failure must consume the safety margin the
+/// granted lease reserved for retry, rather than immediately abandoning a binding that is still
+/// valid at the registrar.
+#[tokio::test(start_paused = true)]
+async fn one_failed_refresh_is_retried_before_the_granted_lease_expires() {
+    let (registrar, mut incoming) =
+        bind(TransportConfig::new("127.0.0.1:0".parse().expect("valid")))
+            .await
+            .expect("binds");
+    let target = Target::udp(registrar.local_addr());
+    let mut ua = agent(target, None).await;
+    let keeping = tokio::spawn(async move { ua.keep_registered().await });
+
+    let initial = incoming.recv().await.expect("initial REGISTER arrives");
+    registrar
+        .respond(&initial.key, granted_ok(&initial.request, 100))
+        .await
+        .expect("grants initial lease");
+
+    tokio::time::advance(Duration::from_secs(90)).await; // the clock is the measurement: assert the granted refresh deadline itself
+    let refresh = incoming.recv().await.expect("refresh REGISTER arrives");
+    let unavailable = ResponseBuilder::to_request(
+        &refresh.request,
+        StatusCode::new(503).expect("valid"),
+        "Service Unavailable",
+    )
+    .expect("builds")
+    .build();
+    registrar
+        .respond(&refresh.key, unavailable)
+        .await
+        .expect("refuses one refresh");
+
+    let retry = tokio::time::timeout(Duration::from_secs(6), incoming.recv())
+        .await
+        .expect("a retry uses the remaining ten-second lease margin")
+        .expect("the endpoint stays open");
+    registrar
+        .respond(&retry.key, granted_ok(&retry.request, 100))
+        .await
+        .expect("accepts retry");
+
+    keeping.abort();
+    let _ = keeping.await;
 }
 
 /// A wrong password must fail once and stop, not loop. Looping is how a client locks out the
@@ -343,7 +429,7 @@ async fn a_challenge_without_credentials_says_so() {
     assert!(matches!(result, Err(sipx_ua::Error::CredentialsRequired)));
 }
 
-/// RFC 7616 §3.4.3: `nc` is "the count of the number of requests (including the current
+/// S-36 / RFC 3261 §22.4 and RFC 7616 §3.4.3: `nc` is "the count of the number of requests (including the current
 /// request) that the client has sent with the nonce value in this request" — so the first
 /// request under a given nonce carries `nc=00000001`. A stale challenge by definition
 /// carries a fresh nonce, and a registrar tracking counts rejects a fresh nonce answered

@@ -37,7 +37,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "macros"], optiona
 # Path-only so Cargo omits workspace-only fixture support from the normalized registry manifest.
 sipx-testkit = { path = "../sipx-testkit" }
 sipx-transport.workspace = true
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 pretty_assertions.workspace = true
 
 [lints]

@@ -28,6 +28,8 @@ pub enum CodecPreference {
     Pcma,
     /// Opus (RFC 6716, carried per RFC 7587).
     Opus,
+    /// Mono signed linear PCM (RFC 3551 §4.5.11).
+    L16,
 }
 
 impl CodecPreference {
@@ -38,6 +40,7 @@ impl CodecPreference {
             Self::Pcmu => "pcmu",
             Self::Pcma => "pcma",
             Self::Opus => "opus",
+            Self::L16 => "l16",
         }
     }
 }
@@ -64,7 +67,7 @@ pub enum CodecSelectionError {
 /// alongside every non-empty audio set and are not themselves an audio codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Codecs {
-    ordered: [Option<CodecPreference>; 3],
+    ordered: [Option<CodecPreference>; 4],
 }
 
 impl Default for Codecs {
@@ -80,6 +83,7 @@ impl Codecs {
             Some(CodecPreference::Pcmu),
             Some(CodecPreference::Pcma),
             None,
+            None,
         ],
     };
 
@@ -94,7 +98,13 @@ impl Codecs {
             Some(CodecPreference::Opus),
             Some(CodecPreference::Pcmu),
             Some(CodecPreference::Pcma),
+            None,
         ],
+    };
+
+    /// Mono L16, in its static 44.1 kHz and dynamic 8 kHz forms.
+    pub const L16: Self = Self {
+        ordered: [Some(CodecPreference::L16), None, None, None],
     };
 
     /// Validate an application's exact ordered preference list.
@@ -109,7 +119,7 @@ impl Codecs {
         if preferences.is_empty() {
             return Err(CodecSelectionError::Empty);
         }
-        let mut ordered = [None; 3];
+        let mut ordered = [None; 4];
         for (slot, preference) in ordered.iter_mut().zip(preferences.iter().copied()) {
             if preferences
                 .iter()
@@ -124,7 +134,7 @@ impl Codecs {
             }
             *slot = Some(preference);
         }
-        // There are exactly three closed values, so a longer duplicate-free list cannot exist.
+        // There are exactly four closed values, so a longer duplicate-free list cannot exist.
         Ok(Self { ordered })
     }
 
@@ -159,6 +169,18 @@ impl Codecs {
                         .rtpmaps
                         .push(("111".to_owned(), "opus/48000/2".to_owned()));
                 }
+                CodecPreference::L16 => {
+                    // RFC 3551 §6 assigns mono 44.1 kHz L16 statically to 11. The 8 kHz form is
+                    // a different format and therefore receives a dynamic number.
+                    capabilities.audio_formats.push("11".to_owned());
+                    capabilities
+                        .rtpmaps
+                        .push(("11".to_owned(), "L16/44100/1".to_owned()));
+                    capabilities.audio_formats.push("96".to_owned());
+                    capabilities
+                        .rtpmaps
+                        .push(("96".to_owned(), "L16/8000/1".to_owned()));
+                }
             }
         }
         capabilities.audio_formats.push("101".to_owned());
@@ -177,6 +199,20 @@ impl Codecs {
             CodecPreference::Opus => codec == Codec::Opus,
             #[cfg(not(feature = "opus"))]
             CodecPreference::Opus => false,
+            CodecPreference::L16 => codec == Codec::L16,
+        })
+    }
+
+    /// Whether this selection carries the exact codec format, including its RTP clock.
+    pub(crate) fn carries_format(self, codec: Codec, clock_rate: u32) -> bool {
+        self.preferences().any(|preference| match preference {
+            CodecPreference::Pcmu => codec == Codec::Pcmu && clock_rate == 8_000,
+            CodecPreference::Pcma => codec == Codec::Pcma && clock_rate == 8_000,
+            #[cfg(feature = "opus")]
+            CodecPreference::Opus => codec == Codec::Opus && clock_rate == 48_000,
+            #[cfg(not(feature = "opus"))]
+            CodecPreference::Opus => false,
+            CodecPreference::L16 => codec == Codec::L16 && matches!(clock_rate, 8_000 | 44_100),
         })
     }
 }
@@ -337,6 +373,26 @@ mod tests {
         assert_eq!(capabilities.audio_formats, ["8", "0", "101"]);
         assert!(codecs.carries(Codec::Pcma));
         assert!(codecs.carries(Codec::Pcmu));
+    }
+
+    /// M-43: one L16 preference names both mono formats sipx implements. Payload 11 is RFC
+    /// 3551's static 44.1 kHz assignment; the 8 kHz form needs an explicit dynamic mapping.
+    #[test]
+    fn l16_offers_the_static_and_dynamic_mono_formats() {
+        let codecs = Codecs::ordered(&[CodecPreference::L16]).unwrap();
+        let capabilities = codecs.capabilities("192.0.2.9".parse().unwrap(), 40_000);
+        assert_eq!(capabilities.audio_formats, ["11", "96", "101"]);
+        assert!(
+            capabilities
+                .rtpmaps
+                .contains(&("11".to_owned(), "L16/44100/1".to_owned()))
+        );
+        assert!(
+            capabilities
+                .rtpmaps
+                .contains(&("96".to_owned(), "L16/8000/1".to_owned()))
+        );
+        assert!(codecs.carries(Codec::L16));
     }
 
     #[test]

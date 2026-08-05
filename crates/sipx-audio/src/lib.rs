@@ -1,18 +1,19 @@
-//! Telephony audio primitives: G.711 (µ-law and A-law), linear PCM mixing, WAV reading and
-//! writing, and Opus behind the `opus` feature.
+//! Telephony audio primitives: G.711 (µ-law and A-law), L16, linear PCM conversion and
+//! resampling, WAV reading and writing, and Opus behind the `opus` feature.
 //!
 //! Codecs are pure Rust by default. Opus lives behind the `opus` feature because it binds
 //! to C.
 //!
-//! **G.722 and resampling are absent, and no story is coming for either** (`X-26`). Both were
-//! named in this crate's description and in the paragraph above from the commit that scaffolded
-//! the workspace, and neither was ever written: no story cut them, no spec asked for them, and
-//! nothing else in the stack expects them. The wideband slot G.722 would have filled is Opus's
-//! (`M-13`), and the rest of the stack has always agreed — `Codec::from_payload_type(9)` returns
-//! `None` and an offer of G.722 alone is refused. Resampling is *deliberately* absent rather
-//! than merely missing: `sipx-cli` rejects a clip that is not 8 kHz instead of resampling it
-//! quietly, because audio resampled by accident is recognisably wrong rather than obviously
-//! broken. Either one is welcome back as a story that argues for it, not as a word in a blurb.
+//! **G.722 remains absent** (`X-26`). G.722 and resampling were named in this crate's description
+//! from the commit that scaffolded the workspace, although neither existed when `X-26` removed
+//! those claims. `M-43` deliberately restores only the explicit resampling claim below. The
+//! wideband slot G.722 would have filled is Opus's (`M-13`), and the rest of the stack has always
+//! agreed — `Codec::from_payload_type(9)` returns `None` and an offer of G.722 alone is refused.
+//!
+//! **Resampling is now explicit and supported** (`M-43`). [`PcmFormat`] names unsigned 8-bit or
+//! signed 16-bit mono PCM and a rate from 1 through 384,000 Hz; [`LinearResampler`] converts that
+//! stream to another stated rate without guessing either fact from a buffer. The diagnostic CLI
+//! uses this same boundary for WAV and device audio rather than maintaining a private resampler.
 //!
 //! RFC 4733 DTMF is not here either, and never was: telephone-events are an RTP payload format
 //! rather than audio samples, and they live in `sipx-rtp`.
@@ -33,7 +34,7 @@
 //!   you are prepared to follow it.
 //!
 //!
-//! **Supported.** G.711 both ways, mixing and WAV. Opus is behind the off-by-default `opus` feature
+//! **Supported.** G.711 and L16 both ways, linear PCM conversion/resampling, mixing and WAV. Opus is behind the off-by-default `opus` feature
 //! and remains **Experimental** at this crate boundary. `sipx-call` and an Opus-enabled diagnostic
 //! CLI can select it, but no default shipped application enables its native dependency. Cargo's
 //! normalized package manifests are checked with the feature off and on, including a clean packaged
@@ -41,11 +42,14 @@
 //! evidence in both SIP roles. Optional RFC 7587 `fmtp` controls are not implemented.
 
 pub mod g711;
+pub mod l16;
 pub mod mix;
 #[cfg(feature = "opus")]
 pub mod opus;
+pub mod pcm;
 pub mod wav;
 
 pub use g711::{alaw_decode, alaw_encode, ulaw_decode, ulaw_encode};
 pub use mix::{mix_excluding, mix_into};
+pub use pcm::{LinearResampler, Pcm, PcmEncoding, PcmError, PcmFormat, PcmSamples, resample_i16};
 pub use wav::{Wav, read_wav, write_wav};

@@ -45,8 +45,8 @@
 //! boundary whose schema remains deliberately narrower than a serialized `Call`.
 //!
 //! The set is the G.711 pair unless a call says otherwise. An application may provide an exact
-//! non-empty order with [`Codecs::ordered`]; selecting Opus is a typed error unless this crate is
-//! built with its `opus` feature, which links libopus.
+//! non-empty order with [`Codecs::ordered`], including mono L16; selecting Opus is a typed error
+//! unless this crate is built with its `opus` feature, which links libopus.
 //! [`MediaProfile::BrowserAudio`] is the fail-closed composition of WSS, ICE, DTLS-SRTP,
 //! multiplexed RTCP, and that required audio vocabulary. It is one bounded audio endpoint profile,
 //! not a browser API or a general WebRTC compatibility claim.

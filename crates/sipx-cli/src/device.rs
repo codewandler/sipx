@@ -1,7 +1,7 @@
 //! Feature-gated live audio for the diagnostic phone.
 //!
 //! Device callbacks live here, at the command leaf. They exchange bounded PCM frames with a media
-//! session and never enter `sipx-audio` or `sipx-media`.
+//! session and use `sipx-audio`'s public converter for their rate boundary.
 
 use crate::Args;
 use crate::output::{Exit, Format, Report, fail};
@@ -364,7 +364,7 @@ mod enabled {
             media: &sipx_media::MediaSession,
             duration: Duration,
         ) -> Result<u64, String> {
-            let rate = media.codec().clock_rate();
+            let rate = media.clock_rate();
             let packet_samples = u32::try_from(media.samples_per_packet())
                 .map_err(|_| "media packet is too large for a device frame".to_owned())?;
             let starting = (|| {
@@ -783,9 +783,7 @@ mod enabled {
     struct LinearResampler {
         source_rate: u32,
         target_rate: u32,
-        previous: Option<f32>,
-        source_index: u64,
-        next_numerator: u64,
+        inner: Option<sipx_audio::LinearResampler>,
     }
 
     impl LinearResampler {
@@ -793,56 +791,23 @@ mod enabled {
             Self {
                 source_rate: 0,
                 target_rate: 0,
-                previous: None,
-                source_index: 0,
-                next_numerator: 0,
+                inner: None,
             }
         }
 
         fn push(&mut self, samples: &[f32], source_rate: u32, target_rate: u32) -> Vec<i16> {
-            if source_rate == 0 || target_rate == 0 {
-                return Vec::new();
-            }
             if self.source_rate != source_rate || self.target_rate != target_rate {
                 self.source_rate = source_rate;
                 self.target_rate = target_rate;
-                self.previous = None;
-                self.source_index = 0;
-                self.next_numerator = 0;
+                self.inner = sipx_audio::LinearResampler::new(source_rate, target_rate).ok();
             }
-            let estimate = samples
-                .len()
-                .saturating_mul(usize::try_from(target_rate).unwrap_or(usize::MAX))
-                / usize::try_from(source_rate).unwrap_or(1)
-                + 1;
-            let mut output = Vec::with_capacity(estimate);
-            for &current in samples {
-                let Some(previous) = self.previous else {
-                    output.push(to_i16(f64::from(current)));
-                    self.previous = Some(current);
-                    self.next_numerator = u64::from(source_rate);
-                    continue;
-                };
-                self.source_index = self.source_index.saturating_add(1);
-                let interval_start = self
-                    .source_index
-                    .saturating_sub(1)
-                    .saturating_mul(u64::from(target_rate));
-                let interval_end = self.source_index.saturating_mul(u64::from(target_rate));
-                while self.next_numerator <= interval_end {
-                    let fraction_numerator =
-                        u32::try_from(self.next_numerator.saturating_sub(interval_start))
-                            .unwrap_or(u32::MAX);
-                    let fraction = f64::from(fraction_numerator) / f64::from(target_rate);
-                    let value =
-                        f64::from(previous) + (f64::from(current) - f64::from(previous)) * fraction;
-                    output.push(to_i16(value));
-                    self.next_numerator =
-                        self.next_numerator.saturating_add(u64::from(source_rate));
-                }
-                self.previous = Some(current);
-            }
-            output
+            let converted = samples
+                .iter()
+                .map(|sample| to_i16(f64::from(*sample)))
+                .collect::<Vec<_>>();
+            self.inner
+                .as_mut()
+                .map_or_else(Vec::new, |resampler| resampler.push_i16(&converted))
         }
     }
 

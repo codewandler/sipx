@@ -96,7 +96,8 @@ async fn connect(
     (caller.expect("the call connects"), callee)
 }
 
-/// S-9's exit criterion: the transfer reaches the target, and the transferor is told.
+/// S-36 / RFC 3515 §2.4.6: the transfer reaches the target, but success belongs to the final
+/// NOTIFY rather than the 202 that merely accepted the REFER.
 #[tokio::test]
 async fn a_referred_call_reaches_the_target_and_notifies_the_transferor() {
     let (alice_endpoint, mut alice_incoming) = endpoint().await;
@@ -176,9 +177,8 @@ async fn a_referred_call_reaches_the_target_and_notifies_the_transferor() {
     );
 }
 
-/// A transfer to somewhere that refuses. The transferor must be told *that*, not left to infer
-/// it from silence — this is the case that separates a real implementation of RFC 3515 §2.4.4
-/// from one that reports the 202 and stops.
+/// S-36 / RFC 3515 §2.4.6: a transfer to somewhere that refuses must tell the transferor that
+/// outcome and terminate the implicit subscription, rather than reporting the 202 and stopping.
 #[tokio::test]
 async fn a_transfer_the_target_refuses_is_reported_as_a_failure() {
     let (alice_endpoint, mut alice_incoming) = endpoint().await;

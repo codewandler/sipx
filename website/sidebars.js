@@ -12,6 +12,7 @@ const sidebars = {
       items: [
         'intro',
         'getting-started',
+        'architecture',
         'guides/does-this-fit',
         'guides/integrate-existing-system',
       ],

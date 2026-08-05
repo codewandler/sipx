@@ -23,7 +23,8 @@ use crate::dialog::{DialogId, Role};
 use crate::{Codecs, Keying, MediaAddress, MediaPolicy, MediaProfile, NegotiatedKeying};
 
 const MAGIC: &[u8; 4] = b"SXD1";
-const VERSION: u16 = 1;
+const LEGACY_VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const FLAG_CALLEE: u16 = 1 << 0;
 const FLAG_PROTECTED: u16 = 1 << 1;
 const FLAG_SESSION: u16 = 1 << 2;
@@ -85,7 +86,7 @@ pub enum DialogPersistenceError {
     /// The schema version is not implemented by this build.
     #[error("dialog snapshot schema version {0} is unsupported")]
     UnsupportedVersion(u16),
-    /// An encoded flag that version one does not assign was set.
+    /// An encoded flag that the selected schema does not assign was set.
     #[error("dialog snapshot has reserved flags set: {0:#06x}")]
     ReservedFlags(u16),
     /// The input ended before one complete field was available.
@@ -142,7 +143,7 @@ pub enum DialogPersistenceError {
         /// The declared route count.
         count: usize,
     },
-    /// Bytes remained after the last version-one field.
+    /// Bytes remained after the last schema field.
     #[error("dialog snapshot has trailing bytes")]
     TrailingBytes,
     /// A local request cannot advance the retained sequence number.
@@ -183,7 +184,7 @@ pub enum DialogPersistenceError {
     /// This fresh runtime attachment was already consumed by a successful restore.
     #[error("dialog restore context is already attached to a call")]
     ContextAlreadyAttached,
-    /// Version one cannot run a codec represented by these bytes.
+    /// This build cannot run a codec represented by these bytes.
     #[error("dialog snapshot codec id {0} is unavailable in this build")]
     UnsupportedCodec(u8),
     /// The fresh media address would be unusable in SDP.
@@ -198,7 +199,7 @@ pub(crate) struct SessionSnapshot {
     pub(crate) remaining: Duration,
 }
 
-/// Immutable version-one facts needed to continue a confirmed dialog.
+/// Immutable version-two facts needed to continue a confirmed dialog.
 #[derive(Clone)]
 pub struct DialogSnapshot {
     role: Role,
@@ -214,7 +215,12 @@ pub struct DialogSnapshot {
     media_profile: MediaProfile,
     codecs: Codecs,
     codec: Codec,
+    /// RTP clock rate of the exact negotiated codec format.
+    clock_rate: u32,
+    /// Payload number from the peer's description, used to transmit.
     payload_type: u8,
+    /// Payload number from our description, used to receive.
+    receive_payload_type: u8,
     dtmf_payload_type: Option<u8>,
     rtcp_mode: RtcpMode,
     hold: Direction,
@@ -242,7 +248,9 @@ impl fmt::Debug for DialogSnapshot {
             .field("media_profile", &self.media_profile)
             .field("codecs", &self.codecs)
             .field("codec", &self.codec)
+            .field("clock_rate", &self.clock_rate)
             .field("payload_type", &self.payload_type)
+            .field("receive_payload_type", &self.receive_payload_type)
             .field("dtmf_payload_type", &self.dtmf_payload_type)
             .field("rtcp_mode", &self.rtcp_mode)
             .field("hold", &self.hold)
@@ -337,10 +345,22 @@ impl DialogSnapshot {
         self.codec
     }
 
-    /// The RTP payload type carrying the negotiated codec.
+    /// The RTP clock rate of the negotiated audio format.
+    #[must_use]
+    pub const fn clock_rate(&self) -> u32 {
+        self.clock_rate
+    }
+
+    /// The RTP payload type used to send the negotiated codec.
     #[must_use]
     pub const fn payload_type(&self) -> u8 {
         self.payload_type
+    }
+
+    /// The RTP payload type accepted for the negotiated codec.
+    #[must_use]
+    pub const fn receive_payload_type(&self) -> u8 {
+        self.receive_payload_type
     }
 
     /// The dynamic RTP payload type carrying telephone events, when enabled.
@@ -376,7 +396,7 @@ impl DialogSnapshot {
         }
     }
 
-    /// Encode this value in the deterministic version-one binary format.
+    /// Encode this value in the deterministic version-two binary format.
     ///
     /// Values can only be obtained from validated capture or decoding, so this operation is
     /// infallible and never writes a partial result to a caller-owned buffer.
@@ -422,11 +442,13 @@ impl DialogSnapshot {
             encoded.push(preference_id(preference));
         }
         encoded.push(codec_id(self.codec));
+        put_u32(&mut encoded, self.clock_rate);
         encoded.push(self.payload_type);
+        encoded.push(self.receive_payload_type);
         put_optional_u8(&mut encoded, self.dtmf_payload_type);
         encoded.push(rtcp_id(self.rtcp_mode));
         encoded.push(direction_id(self.hold));
-        // Version one only admits an idle offer state. Writing the state explicitly makes a
+        // Version two only admits an idle offer state. Writing the state explicitly makes a
         // future state additive without letting an old decoder mistake it for idle.
         encoded.push(0);
         if let Some(session) = self.session {
@@ -459,7 +481,7 @@ impl DialogSnapshot {
             return Err(DialogPersistenceError::InvalidMagic);
         }
         let version = reader.u16("version")?;
-        if version != VERSION {
+        if !matches!(version, LEGACY_VERSION | VERSION) {
             return Err(DialogPersistenceError::UnsupportedVersion(version));
         }
         let flags = reader.u16("flags")?;
@@ -495,7 +517,7 @@ impl DialogSnapshot {
         let media_keying = decode_keying(reader.u8("media keying")?)?;
         let media_profile = decode_profile(reader.u8("media profile")?)?;
         let preference_count = usize::from(reader.u8("codec preference count")?);
-        if preference_count == 0 || preference_count > 3 {
+        if preference_count == 0 || preference_count > 4 {
             return Err(DialogPersistenceError::InvalidValue {
                 field: "codec preference count",
             });
@@ -509,7 +531,17 @@ impl DialogSnapshot {
                 field: "codec preferences",
             })?;
         let codec = decode_codec(reader.u8("codec")?)?;
+        let clock_rate = if version == LEGACY_VERSION {
+            codec.clock_rate()
+        } else {
+            reader.u32("media clock rate")?
+        };
         let payload_type = reader.u8("payload type")?;
+        let receive_payload_type = if version == LEGACY_VERSION {
+            payload_type
+        } else {
+            reader.u8("receive payload type")?
+        };
         let dtmf_payload_type = reader.optional_u8("DTMF payload type")?;
         let rtcp_mode = decode_rtcp(reader.u8("RTCP mode")?)?;
         let hold = decode_direction(reader.u8("hold direction")?)?;
@@ -559,7 +591,9 @@ impl DialogSnapshot {
             media_profile,
             codecs,
             codec,
+            clock_rate,
             payload_type,
+            receive_payload_type,
             dtmf_payload_type,
             rtcp_mode,
             hold,
@@ -585,7 +619,9 @@ impl DialogSnapshot {
             media_profile: parts.media_profile,
             codecs: parts.codecs,
             codec: parts.codec,
+            clock_rate: parts.clock_rate,
             payload_type: parts.payload_type,
+            receive_payload_type: parts.receive_payload_type,
             dtmf_payload_type: parts.dtmf_payload_type,
             rtcp_mode: parts.rtcp_mode,
             hold: parts.hold,
@@ -655,7 +691,9 @@ impl DialogSnapshot {
         crate::call::Negotiated {
             remote,
             codec: self.codec,
+            clock_rate: self.clock_rate,
             payload_type: Some(self.payload_type),
+            receive_payload_type: Some(self.receive_payload_type),
             dtmf: self.dtmf_payload_type,
             rtcp_mode: self.rtcp_mode,
         }
@@ -731,20 +769,33 @@ impl DialogSnapshot {
                 field: "negotiated codec selection",
             });
         }
+        if self.clock_rate == 0 || self.clock_rate > sipx_audio::pcm::MAX_SAMPLE_RATE {
+            return Err(DialogPersistenceError::InvalidValue {
+                field: "media clock rate",
+            });
+        }
         validate_payload_type("payload type", self.payload_type)?;
+        validate_payload_type("receive payload type", self.receive_payload_type)?;
         if let Some(payload_type) = self.dtmf_payload_type {
             validate_payload_type("DTMF payload type", payload_type)?;
         }
-        if self.dtmf_payload_type == Some(self.payload_type) {
+        if [self.payload_type, self.receive_payload_type]
+            .into_iter()
+            .any(|payload_type| self.dtmf_payload_type == Some(payload_type))
+        {
             return Err(DialogPersistenceError::InvalidValue {
                 field: "DTMF payload type",
             });
         }
         if self.rtcp_mode == RtcpMode::Mux
-            && [Some(self.payload_type), self.dtmf_payload_type]
-                .into_iter()
-                .flatten()
-                .any(|payload| (64..=95).contains(&payload))
+            && [
+                Some(self.payload_type),
+                Some(self.receive_payload_type),
+                self.dtmf_payload_type,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|payload| (64..=95).contains(&payload))
         {
             return Err(DialogPersistenceError::InvalidValue {
                 field: "RTCP-mux payload type",
@@ -795,7 +846,9 @@ pub(crate) struct SnapshotParts {
     pub(crate) media_profile: MediaProfile,
     pub(crate) codecs: Codecs,
     pub(crate) codec: Codec,
+    pub(crate) clock_rate: u32,
     pub(crate) payload_type: u8,
+    pub(crate) receive_payload_type: u8,
     pub(crate) dtmf_payload_type: Option<u8>,
     pub(crate) rtcp_mode: RtcpMode,
     pub(crate) hold: Direction,
@@ -929,9 +982,19 @@ fn validate_media(
     if context.media.codec() != snapshot.codec {
         return Err(DialogPersistenceError::MediaContractMismatch { field: "codec" });
     }
+    if context.media.clock_rate() != snapshot.clock_rate {
+        return Err(DialogPersistenceError::MediaContractMismatch {
+            field: "media clock rate",
+        });
+    }
     if context.media.wire_payload_type() != snapshot.payload_type {
         return Err(DialogPersistenceError::MediaContractMismatch {
             field: "payload type",
+        });
+    }
+    if context.media.receive_payload_type() != snapshot.receive_payload_type {
+        return Err(DialogPersistenceError::MediaContractMismatch {
+            field: "receive payload type",
         });
     }
     if context.media.dtmf_payload_type() != snapshot.dtmf_payload_type {
@@ -1229,6 +1292,7 @@ const fn preference_id(value: crate::CodecPreference) -> u8 {
         crate::CodecPreference::Pcmu => 0,
         crate::CodecPreference::Pcma => 1,
         crate::CodecPreference::Opus => 2,
+        crate::CodecPreference::L16 => 3,
     }
 }
 
@@ -1237,6 +1301,7 @@ fn decode_preference(value: u8) -> Result<crate::CodecPreference, DialogPersiste
         0 => Ok(crate::CodecPreference::Pcmu),
         1 => Ok(crate::CodecPreference::Pcma),
         2 => Ok(crate::CodecPreference::Opus),
+        3 => Ok(crate::CodecPreference::L16),
         _ => Err(DialogPersistenceError::InvalidValue {
             field: "codec preference",
         }),
@@ -1249,6 +1314,7 @@ const fn codec_id(value: Codec) -> u8 {
         Codec::Pcma => 1,
         #[cfg(feature = "opus")]
         Codec::Opus => 2,
+        Codec::L16 => 3,
     }
 }
 
@@ -1260,6 +1326,7 @@ fn decode_codec(value: u8) -> Result<Codec, DialogPersistenceError> {
         2 => Ok(Codec::Opus),
         #[cfg(not(feature = "opus"))]
         2 => Err(DialogPersistenceError::UnsupportedCodec(2)),
+        3 => Ok(Codec::L16),
         other => Err(DialogPersistenceError::UnsupportedCodec(other)),
     }
 }
@@ -1336,7 +1403,9 @@ mod tests {
             media_profile: MediaProfile::Standard,
             codecs: Codecs::G711,
             codec: Codec::Pcmu,
+            clock_rate: 8_000,
             payload_type: 0,
+            receive_payload_type: 0,
             dtmf_payload_type: Some(101),
             rtcp_mode: RtcpMode::Mux,
             hold: Direction::SendRecv,
@@ -1375,7 +1444,7 @@ mod tests {
         at
     }
 
-    fn payload_offsets(bytes: &[u8]) -> (usize, usize) {
+    fn media_offsets(bytes: &[u8]) -> (usize, usize, usize, usize) {
         let mut at = after_routes(bytes) + 4;
         let remote_cseq_present = bytes[at];
         at += 1 + if remote_cseq_present == 1 { 4 } else { 0 };
@@ -1383,10 +1452,18 @@ mod tests {
         let preference_count = usize::from(bytes[at]);
         at += 1 + preference_count;
         at += 1;
+        let clock_rate = at;
+        at += 4;
         let payload_type = at;
-        let dtmf_marker = payload_type + 1;
+        let receive_payload_type = payload_type + 1;
+        let dtmf_marker = receive_payload_type + 1;
         assert_eq!(bytes[dtmf_marker], 1, "fixture carries a DTMF payload");
-        (payload_type, dtmf_marker + 1)
+        (
+            clock_rate,
+            payload_type,
+            receive_payload_type,
+            dtmf_marker + 1,
+        )
     }
 
     #[test]
@@ -1411,11 +1488,32 @@ mod tests {
     #[test]
     fn dp2_rejects_an_unknown_version_before_reading_variable_fields() {
         let mut bytes = fixture().encode();
-        bytes[4..6].copy_from_slice(&2u16.to_be_bytes());
+        bytes[4..6].copy_from_slice(&3u16.to_be_bytes());
         bytes.truncate(6);
         assert_eq!(
             DialogSnapshot::decode(&bytes).unwrap_err(),
-            DialogPersistenceError::UnsupportedVersion(2)
+            DialogPersistenceError::UnsupportedVersion(3)
+        );
+    }
+
+    /// S-36/M-43: version one stored one symmetric payload number and implied the codec's fixed
+    /// clock. Version two keeps accepting those bytes and expands both old facts explicitly.
+    #[test]
+    fn version_one_snapshots_decode_with_a_symmetric_payload_assignment() {
+        let mut legacy = fixture().encode();
+        legacy[4..6].copy_from_slice(&LEGACY_VERSION.to_be_bytes());
+        let (clock_rate, _, receive_payload_type, _) = media_offsets(&legacy);
+        legacy.remove(receive_payload_type);
+        legacy.drain(clock_rate..clock_rate + 4);
+
+        let decoded = DialogSnapshot::decode(&legacy).expect("version one remains readable");
+        assert_eq!(decoded.payload_type(), 0);
+        assert_eq!(decoded.receive_payload_type(), 0);
+        assert_eq!(decoded.clock_rate(), 8_000);
+        assert_eq!(
+            decoded.version(),
+            VERSION,
+            "re-encoding upgrades the schema"
         );
     }
 
@@ -1548,9 +1646,10 @@ mod tests {
     #[test]
     fn hostile_payload_types_outside_the_rtp_header_range_are_typed_refusals() {
         let canonical = fixture().encode();
-        let (payload_type, dtmf_payload_type) = payload_offsets(&canonical);
+        let (_, payload_type, receive_payload_type, dtmf_payload_type) = media_offsets(&canonical);
         for (offset, field) in [
             (payload_type, "payload type"),
+            (receive_payload_type, "receive payload type"),
             (dtmf_payload_type, "DTMF payload type"),
         ] {
             for value in [128, u8::MAX] {

@@ -9,6 +9,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Calls expose an explicit, rate-converting linear PCM boundary and selectable mono L16.**
+  Applications can play unsigned 8-bit or signed 16-bit mono PCM at a stated rate, capture at a
+  caller-selected rate, and use the same bounded streaming resampler as WAV and device audio.
+  L16 supports static 44.1 kHz payload 11 and dynamic 8 kHz negotiation; the diagnostic CLI can
+  select it and resamples supported WAV rates to the negotiated clock.
+
+- **The public site explains the core/driver architecture.** A Start-section page shows the
+  sans-I/O layering, explicit byte and timer inputs, crate responsibilities, and why the boundary
+  enables deterministic virtual-time tests and network-free core testing.
+
 - **Oversized UDP requests now follow RFC 3261's TCP fallback.** Requests above 1300 bytes when
   the path MTU is unknown, or within 200 bytes of a configured known MTU, switch to TCP at the
   same peer before transaction creation. The endpoint exposes a fallback counter and preserves a
@@ -32,6 +42,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Transport MTU configuration now names the path property rather than a precomputed cutoff.**
   Replace `Config::mtu = limit` with `Config::path_mtu = Some(path_mtu)`; sipx derives the RFC's
   200-byte headroom once, while `None` selects the 1300-byte unknown-path rule.
+
+### Fixed
+
+- **Confirmed calls handle delayed offers and directional dynamic payload assignments.** A
+  bodyless re-INVITE now carries the local offer in its successful response and settles the ACK's
+  answer without replacing working media on invalid input. Transmit and receive payload numbers
+  remain independent through negotiation, media configuration, and backward-compatible dialog
+  snapshots.
+
+- **Registration refresh survives one transient failure within the granted lease.** The retry is
+  bounded and scheduled from the actual time remaining after the failed attempt, while provisional
+  responses and fresh-nonce re-challenges retain their existing successful paths.
 
 ## [1.0.0-beta.7] — 2026-08-05
 

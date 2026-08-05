@@ -147,6 +147,33 @@ The message borrows its input bytes, preserves headers it does not interpret, an
 parse errors. Transaction time enters as a fired-timer input and leaves as a set-timer output.
 Those properties make the core deterministic to drive from another runtime or a unit test.
 
+## Use explicit linear PCM
+
+Application audio carries its own depth and rate. Playback converts that format to the negotiated
+codec clock; capture converts received audio to the rate the caller selected. Nothing infers a
+format from a byte count.
+
+```rust
+use sipx_audio::{Pcm, PcmEncoding, PcmFormat, PcmSamples};
+
+let prompt = Pcm::new(
+    PcmFormat::new(16_000, PcmEncoding::Unsigned8)?,
+    PcmSamples::Unsigned8(raw_prompt),
+)?;
+call.play_pcm(&prompt).await?;
+
+let wanted = PcmFormat::new(24_000, PcmEncoding::Signed16)?;
+let mut capture = call.media().capture(wanted)?;
+if let Some(chunk) = capture.recv().await {
+    send_to_audio_consumer(chunk);
+}
+```
+
+Supported application rates are 1 through 384,000 Hz. Unsigned 8-bit uses 128 as silence; signed
+16-bit uses native `i16` samples. Unsupported rates and a depth/buffer mismatch are typed
+`PcmError`s before audio is queued. The `sipx` command uses this same path for WAV input, so a WAV
+whose header rate differs from the call is resampled rather than played at the wrong speed.
+
 ## Which crate
 
 | You want | Take |
@@ -156,7 +183,7 @@ Those properties make the core deterministic to drive from another runtime or a 
 | Sockets, TLS, WebSocket, RFC 3263 resolution, identity rotation and bounded endpoint policy | `sipx-transport` |
 | Registration, digest authentication, event subscriptions and publication | `sipx-ua` |
 | RTP, RTCP, jitter buffer, quality statistics, SRTP | `sipx-rtp` |
-| G.711 (µ-law and A-law), mixing, WAV, and Opus behind the `opus` feature | `sipx-audio` |
+| G.711 (µ-law and A-law), L16, linear PCM conversion and resampling, WAV, and Opus behind the `opus` feature | `sipx-audio` |
 | RTP/RTCP sockets bound to negotiated SDP with NAT handling, bridging, conferencing | `sipx-media` |
 | Calls with playback, recording, DTMF, transfer, event services, application-owned dialog requests, and confirmed-dialog snapshots | `sipx-call` |
 | Socket-free call signalling tests with seeded faults and virtual time | `sipx-testkit` |

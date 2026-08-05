@@ -41,9 +41,9 @@ output through `--record` are the reproducible defaults. A build with the option
 feature can instead open an exact microphone or speaker identifier; it does not add a graphical
 device picker or mixer.
 
-Input WAV files must be **16-bit mono PCM at the negotiated codec clock**: 8 kHz for the default
-G.711 codecs or 48 kHz when both ends select Opus. sipx refuses a mismatched rate instead of
-silently changing the clip's speed. If you do not have one, omit `--play` on either command below.
+Input WAV files must be **16-bit mono PCM** and carry a supported sample rate in their header.
+sipx linearly resamples them to the negotiated clock: 8 kHz for the default G.711 codecs, 44.1 or
+8 kHz for L16, or 48 kHz when both ends select Opus. If you do not have one, omit `--play` on either command below.
 The call will still complete, but that side sends silence.
 
 ## Make a call

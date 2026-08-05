@@ -844,6 +844,104 @@ async fn a_reinvite_can_put_the_call_on_hold_and_take_it_off() {
         "sendrecv takes it off hold"
     );
 
+    // S-36 / RFC 3264 §6.1: resuming is a media result, not merely a direction flag. The
+    // subsequent bidirectional stream proves the mirrored answer was applied at both ends.
+    let played = clip(100);
+    let recorded = tokio::join!(
+        async {
+            callee.media().play(&played.samples, 160).await;
+        },
+        async {
+            caller
+                .lock()
+                .await
+                .media()
+                .record_at_least(played.samples.len(), DELIVERY_BOUND)
+                .await
+        }
+    )
+    .1;
+    assert_eq!(
+        recorded.len(),
+        played.samples.len(),
+        "audio resumes after sendonly is answered recvonly and then restored to sendrecv"
+    );
+
+    pump.abort();
+}
+
+/// S-36 / RFC 3261 §14.2 and RFC 3264 §6.1: a bodyless in-dialog re-INVITE asks this side to
+/// make the offer in its 2xx; the peer's ACK then carries the answer. Refusing the empty request as
+/// malformed rejects a standard session refresh and leaves interoperable peers unable to hold.
+#[tokio::test]
+async fn a_bodyless_reinvite_is_offered_in_the_success_and_answered_in_the_ack() {
+    let (caller, _callee, pump, caller_addr) = connected_with_routing().await;
+    let (to, from, call_id) = {
+        let guard = caller.lock().await;
+        let (local, remote) = guard.dialog.local_and_remote();
+        (local, remote, guard.dialog.id.call_id.clone())
+    };
+
+    let reinvite = sipx_sip::build::RequestBuilder::new(
+        Method::Invite,
+        Uri::sip(Host::Name(HostName::new("caller.example").expect("valid"))),
+    )
+    .header(HeaderName::To, Bytes::from(to.clone()))
+    .expect("valid")
+    .header(HeaderName::From, Bytes::from(from.clone()))
+    .expect("valid")
+    .header(HeaderName::CallId, Bytes::from(call_id.clone()))
+    .expect("valid")
+    .cseq(99, &Method::Invite)
+    .expect("valid")
+    .max_forwards(70)
+    .build();
+
+    let (peer, _incoming) = endpoint().await;
+    let mut responses = peer
+        .send(reinvite, Target::udp(caller_addr))
+        .await
+        .expect("sends bodyless re-INVITE");
+    let response = responses
+        .final_response()
+        .await
+        .expect("re-INVITE receives a final response");
+    assert_eq!(
+        response.status.code(),
+        200,
+        "an empty re-INVITE requests an offer; it is not an unacceptable empty offer"
+    );
+    let offer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
+        .expect("the 2xx carries this side's offer");
+    let answer = sipx_sdp::answer(&offer, &sipx_sdp::Capabilities::g711(loopback(), 46_000));
+    let ack = sipx_sip::build::RequestBuilder::new(
+        Method::Ack,
+        Uri::sip(Host::Name(HostName::new("caller.example").expect("valid"))),
+    )
+    .header(HeaderName::To, Bytes::from(to))
+    .expect("valid")
+    .header(HeaderName::From, Bytes::from(from))
+    .expect("valid")
+    .header(HeaderName::CallId, Bytes::from(call_id))
+    .expect("valid")
+    .cseq(99, &Method::Ack)
+    .expect("valid")
+    .header(
+        HeaderName::ContentType,
+        Bytes::from_static(b"application/sdp"),
+    )
+    .expect("valid")
+    .max_forwards(70)
+    .body(Bytes::from(answer.to_string_sdp()))
+    .build();
+    peer.send_directly(ack, Target::udp(caller_addr))
+        .await
+        .expect("ACK carries the delayed answer");
+
+    assert!(
+        !caller.lock().await.is_ended(),
+        "the delayed offer/answer exchange keeps the established call alive"
+    );
     pump.abort();
 }
 

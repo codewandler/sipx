@@ -52,6 +52,8 @@ pub use ice::IcePath;
 #[cfg(feature = "dtls")]
 pub use session::DtlsStartError;
 pub use session::{
-    Codec, CodecDirection, Config, Encoded, Interrupt, MediaPort, MediaSession, Playback,
-    PlaybackEnd, PlaybackId, RtcpQualityHook, RtcpQualitySample, SetupError, SrtpKeys, StartError,
+    Codec, CodecDirection, Config, Encoded, Interrupt, MediaPort, MediaSession, PcmCapture,
+    Playback, PlaybackEnd, PlaybackId, RtcpQualityHook, RtcpQualitySample, SetupError, SrtpKeys,
+    StartError,
 };
+pub use sipx_audio::{Pcm, PcmEncoding, PcmError, PcmFormat, PcmSamples};

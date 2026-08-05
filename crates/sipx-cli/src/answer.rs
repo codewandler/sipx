@@ -26,7 +26,7 @@ OPTIONS:
     --tls-cert <FILE> Server certificate chain for TLS/WSS (with --tls-key)
     --tls-key <FILE>  Server private key for TLS/WSS (with --tls-cert)
     --profile <P>     Media profile: standard or browser-audio (default standard)
-    --codec <C>       Ordered codec preference; repeat pcmu, pcma or opus (default pcmu, pcma)
+    --codec <C>       Ordered codec preference; repeat pcmu, pcma, l16 or opus (default pcmu, pcma)
     --media-security <M>  auto, plain, sdes or dtls-srtp (default auto)
     --ice <P>         disabled, host or stun (default disabled)
     --stun-server <ADDR>  STUN server for --ice stun, as host:port
@@ -196,13 +196,13 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     let duration = Duration::from_secs(args.number("duration").unwrap_or(30));
     let session = call.media();
-    if let (Some(path), Some(clip)) = (audio.wav_input(), clip.as_ref())
-        && let Err(message) = crate::dial::validate_clip(path, clip, session.codec().clock_rate())
-    {
-        let _ = call.hang_up().await;
-        return fail(format, Exit::Usage, &message);
-    }
-
+    let pcm = match clip.as_ref().map(crate::dial::pcm_clip).transpose() {
+        Ok(pcm) => pcm,
+        Err(message) => {
+            let _ = call.hang_up().await;
+            return fail(format, Exit::Usage, &message);
+        }
+    };
     // The recording bounds itself, and keeps whatever arrived (`X-40`). It used to be
     // `timeout(duration, media.record_until_idle(500ms))`, which spent one 500 ms window on both
     // "has the stream started" and "has it ended" — so a first frame delayed past it recorded
@@ -217,12 +217,8 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     let output_device = devices.has_output();
     let ((), recorded, digits, device_samples) = tokio::join!(
         async {
-            if let Some(clip) = &clip {
-                let _ = tokio::time::timeout(
-                    duration,
-                    session.play(&clip.samples, session.samples_per_packet()),
-                )
-                .await;
+            if let Some(pcm) = &pcm {
+                let _ = tokio::time::timeout(duration, session.play_pcm(pcm)).await;
             }
         },
         async {
@@ -272,7 +268,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     }
 
     if let Some(path) = audio.wav_output() {
-        match crate::dial::write_clip(path, &recorded, session.codec().clock_rate()) {
+        match crate::dial::write_clip(path, &recorded, session.clock_rate()) {
             Ok(()) => report = report.text("recording", path),
             Err(message) => return fail(format, Exit::Failed, &message),
         }

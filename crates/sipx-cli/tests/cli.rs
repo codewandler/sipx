@@ -80,7 +80,6 @@ fn tone_at(sample_rate: u32, milliseconds: usize, frequency: f64) -> Wav {
 }
 
 /// Squared projection on one frequency, used to distinguish the two ends of a real call.
-#[cfg(feature = "opus")]
 fn spectral_power(wav: &Wav, frequency: f64) -> f64 {
     let angular = 2.0 * std::f64::consts::PI * frequency / f64::from(wav.sample_rate);
     let (sine, cosine) =
@@ -662,6 +661,86 @@ async fn diagnostic_phone_opus_is_rate_and_direction_correct() {
             "{direction}: recording does not identify the far-end signal ({expected} versus {local})"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M-43's command boundary: an explicitly selected L16 call accepts a differently sampled WAV,
+/// resamples it to the negotiated static 44.1 kHz format, and reports that wire contract.
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostic_phone_selects_l16_and_resamples_wav_input() {
+    const SIGNAL_HZ: f64 = 733.0;
+
+    let _scenario = process_scenario().await;
+    let dir = scratch("l16");
+    let played = dir.join("played.wav");
+    let recorded = dir.join("recorded.wav");
+    write_wav(
+        std::fs::File::create(&played).expect("creates input"),
+        &tone_at(16_000, 1_000, SIGNAL_HZ),
+    )
+    .expect("writes input");
+
+    let (mut answerer, address, mut lines) = start_answerer(&[
+        "--codec",
+        "l16",
+        "--duration",
+        "3",
+        "--record",
+        recorded.to_str().expect("recording path"),
+    ])
+    .await;
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:answer@{address}"),
+                "--codec",
+                "l16",
+                "--duration",
+                "3",
+                "--timeout",
+                "8",
+                "--play",
+                played.to_str().expect("input path"),
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("L16 call is bounded")
+    .expect("dial runs");
+    let dial_report = String::from_utf8_lossy(&output.stdout);
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{dial_report} / {complaint}");
+    assert!(
+        dial_report.contains("\"requested_codecs\":\"l16\"")
+            && dial_report.contains("\"negotiated_codec\":\"l16\"")
+            && dial_report.contains("\"negotiated_clock_rate\":44100"),
+        "{dial_report}"
+    );
+
+    let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .expect("answer report is bounded")
+        .expect("reads answer report")
+        .expect("answer report exists");
+    assert!(
+        answer_report.contains("\"negotiated_codec\":\"l16\"")
+            && answer_report.contains("\"negotiated_clock_rate\":44100")
+            && answer_report.contains("\"heard_audio\":true"),
+        "{answer_report}"
+    );
+    answerer_exits_cleanly(&mut answerer).await;
+
+    let heard = read_wav(std::fs::File::open(&recorded).expect("opens recording"))
+        .expect("reads recording");
+    assert_eq!(heard.sample_rate, 44_100, "the negotiated L16 clock");
+    assert!(!heard.samples.is_empty(), "L16 carried no decoded samples");
+    assert!(
+        spectral_power(&heard, SIGNAL_HZ) > 1_000_000.0,
+        "the resampled signal remains recognisable"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

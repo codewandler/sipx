@@ -32,7 +32,7 @@ OPTIONS:
     --tls-ca <FILE>   Add PEM trust roots to the platform store
     --tls-cert <FILE> Certificate chain for TLS/WSS
     --tls-key <FILE>  Private key paired with --tls-cert
-    --codec <C>       Ordered codec preference; repeat pcmu, pcma or opus
+    --codec <C>       Ordered codec preference; repeat pcmu, pcma, l16 or opus
     --media-security <M>  auto, plain, sdes or dtls-srtp
     --ice <P>         disabled, host or stun
     --stun-server <ADDR>  STUN server for --ice stun
@@ -361,8 +361,11 @@ impl Actor<'_> {
             .call
             .as_ref()
             .ok_or_else(|| "there is no active call".to_owned())?;
-        crate::dial::validate_clip(path, &clip, call.media_handle().codec().clock_rate())?;
-        self.playback = Some(call.start_playback(clip.samples, sipx_media::Interrupt::Never));
+        let pcm = crate::dial::pcm_clip(&clip)?;
+        self.playback = Some(
+            call.start_pcm_playback(&pcm, sipx_media::Interrupt::Never)
+                .map_err(|error| error.to_string())?,
+        );
         Ok(())
     }
 
@@ -385,7 +388,7 @@ impl Actor<'_> {
             .as_ref()
             .ok_or_else(|| "there is no active call".to_owned())?;
         let media = call.media_handle();
-        let rate = media.codec().clock_rate();
+        let rate = media.clock_rate();
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(record(media, stopped));
         self.recording = Some(Recording {

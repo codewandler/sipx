@@ -72,6 +72,11 @@ pub enum Codec {
     Pcmu,
     /// A-law, payload type 8.
     Pcma,
+    /// Signed 16-bit network-order linear PCM (RFC 3551 §4.5.11).
+    ///
+    /// Static payload type 11 is mono at 44.1 kHz. Other negotiated rates use a dynamic payload
+    /// assignment and override [`Config::clock_rate`].
+    L16,
     /// Opus (RFC 6716), on whatever dynamic payload type was negotiated.
     ///
     /// Unlike the G.711 pair this carries *state*: an Opus encoder and decoder each hold a
@@ -163,6 +168,7 @@ impl Codec {
         match self {
             Self::Pcmu => 0,
             Self::Pcma => 8,
+            Self::L16 => 11,
             // Opus has no static type — RFC 7587 §7 assigns none — so 111 is convention and
             // nothing more. What goes on the wire is whatever SDP negotiated, which
             // [`Config::payload_type`] carries.
@@ -180,6 +186,7 @@ impl Codec {
     pub fn clock_rate(self) -> u32 {
         match self {
             Self::Pcmu | Self::Pcma => 8_000,
+            Self::L16 => 44_100,
             #[cfg(feature = "opus")]
             Self::Opus => sipx_audio::opus::CLOCK_RATE,
         }
@@ -191,6 +198,9 @@ impl Codec {
         match payload_type {
             0 => Some(Self::Pcmu),
             8 => Some(Self::Pcma),
+            // RFC 3551 §6: 11 is mono L16 at 44.1 kHz. Type 10 is stereo, which this mono
+            // application boundary deliberately does not claim.
+            11 => Some(Self::L16),
             // Deliberately never Opus. A dynamic payload type means whatever `a=rtpmap` said,
             // and the number alone means nothing: guessing Opus from 111 would decode somebody
             // else's G.729 as Opus. The negotiated number lives on the session's config.
@@ -202,6 +212,7 @@ impl Codec {
         match self {
             Self::Pcmu => g711::ulaw_encode_all(samples),
             Self::Pcma => g711::alaw_encode_all(samples),
+            Self::L16 => sipx_audio::l16::encode(samples),
             // Unreachable: an Opus session encodes through [`Encoding`], which holds the state
             // this signature has nowhere to put.
             #[cfg(feature = "opus")]
@@ -209,12 +220,13 @@ impl Codec {
         }
     }
 
-    fn decode(self, payload: &[u8]) -> Vec<i16> {
+    fn decode(self, payload: &[u8]) -> Option<Vec<i16>> {
         match self {
-            Self::Pcmu => g711::ulaw_decode_all(payload),
-            Self::Pcma => g711::alaw_decode_all(payload),
+            Self::Pcmu => Some(g711::ulaw_decode_all(payload)),
+            Self::Pcma => Some(g711::alaw_decode_all(payload)),
+            Self::L16 => sipx_audio::l16::decode(payload).ok(),
             #[cfg(feature = "opus")]
-            Self::Opus => Vec::new(),
+            Self::Opus => None,
         }
     }
 }
@@ -304,7 +316,7 @@ impl Decoding {
     #[cfg_attr(not(feature = "opus"), allow(clippy::unnecessary_wraps))]
     fn decode(&mut self, payload: &[u8]) -> Option<Vec<i16>> {
         match self {
-            Self::Direct(codec) => Some(codec.decode(payload)),
+            Self::Direct(codec) => codec.decode(payload),
             #[cfg(feature = "opus")]
             Self::Opus(decoder) => match decoder.decode(payload) {
                 Ok(samples) => Some(samples),
@@ -334,6 +346,13 @@ pub struct Config {
     /// agreed on, and it may differ from the one sipx would have proposed. Assuming otherwise
     /// sends audio on a number the far end has assigned to something else.
     pub payload_type: Option<u8>,
+    /// The payload type accepted for this codec when our description assigned a different
+    /// dynamic number from the peer's.
+    ///
+    /// `None` mirrors [`Self::wire_payload_type`], which preserves the ordinary symmetric case.
+    /// Offer/answer may nevertheless assign the same codec independently in each direction:
+    /// outgoing packets use the peer's number and incoming packets use ours (RFC 3264 §6.1).
+    pub receive_payload_type: Option<u8>,
     /// How many channels the codec carries. One, for telephony.
     pub channels: usize,
     /// SRTP keys, if the media is to be encrypted (RFC 3711).
@@ -345,7 +364,9 @@ pub struct Config {
     /// How much audio each packet carries. 20 ms is universal; values below 1 ms are rejected
     /// by [`Self::validate`] and every session-start API.
     pub packet_duration: Duration,
-    /// Samples per second. G.711 is always 8000.
+    /// RTP-clock samples per second for the exact negotiated format.
+    ///
+    /// G.711 is always 8000; L16 may use its static 44100 clock or a dynamically mapped rate.
     pub clock_rate: u32,
     /// How many packets the jitter buffer holds, and never fewer.
     pub jitter_depth: usize,
@@ -383,6 +404,13 @@ impl Config {
             .unwrap_or_else(|| self.codec.payload_type())
     }
 
+    /// The payload type this session accepts for its negotiated codec.
+    #[must_use]
+    pub fn receive_wire_payload_type(&self) -> u8 {
+        self.receive_payload_type
+            .unwrap_or_else(|| self.wire_payload_type())
+    }
+
     /// A session to a peer in this codec, with the settings everything uses.
     #[must_use]
     pub fn new(remote: SocketAddr, codec: Codec) -> Self {
@@ -390,6 +418,7 @@ impl Config {
             remote,
             codec,
             payload_type: None,
+            receive_payload_type: None,
             channels: 1,
             srtp: None,
             packet_duration: Duration::from_millis(20),
@@ -425,9 +454,13 @@ impl Config {
             return Err(SetupError::RtcpIntervalTooShort(interval));
         }
         if self.rtcp_mode == sipx_sdp::RtcpMode::Mux {
-            for payload in [Some(self.wire_payload_type()), self.dtmf_payload_type]
-                .into_iter()
-                .flatten()
+            for payload in [
+                Some(self.wire_payload_type()),
+                Some(self.receive_wire_payload_type()),
+                self.dtmf_payload_type,
+            ]
+            .into_iter()
+            .flatten()
             {
                 if (64..=95).contains(&payload) {
                     return Err(SetupError::RtcpMuxPayloadCollision(payload));
@@ -651,6 +684,7 @@ pub struct MediaSession {
     keypresses: Arc<watch::Sender<u64>>,
     codec: Codec,
     wire_payload_type: u8,
+    receive_payload_type: u8,
     /// Retained non-secret wire facts for validated runtime attachment after a host restart.
     dtmf_payload_type: Option<u8>,
     rtcp_mode: sipx_sdp::RtcpMode,
@@ -690,6 +724,54 @@ pub struct MediaSession {
     #[cfg(all(test, feature = "dtls"))]
     browser_preparing_peak: Option<usize>,
     stop: Arc<Stop>,
+}
+
+/// A sole-consumer linear-PCM view of one session's received audio.
+///
+/// The handle owns its rate-conversion history, so consecutive RTP frames remain one continuous
+/// output stream. Creating one does not spawn work; it reads the same bounded receive queue as
+/// [`MediaSession::recv`].
+#[derive(Debug)]
+pub struct PcmCapture<'a> {
+    session: &'a MediaSession,
+    format: sipx_audio::PcmFormat,
+    resampler: sipx_audio::LinearResampler,
+}
+
+impl PcmCapture<'_> {
+    /// The application format this capture emits.
+    #[must_use]
+    pub const fn format(&self) -> sipx_audio::PcmFormat {
+        self.format
+    }
+
+    /// Take the next non-empty converted PCM chunk.
+    pub async fn recv(&mut self) -> Option<sipx_audio::Pcm> {
+        loop {
+            let frame = self.session.recv().await?;
+            let converted = self.resampler.push_i16(&frame);
+            if !converted.is_empty() {
+                return Some(sipx_audio::Pcm::from_i16(self.format, converted));
+            }
+        }
+    }
+
+    /// Record at least `samples` in the chosen output format, or until `within` elapses.
+    ///
+    /// `within` bounds failure rather than defining stream silence, matching
+    /// [`MediaSession::record_at_least`]. Whatever arrived before the bound is retained.
+    pub async fn record_at_least(&mut self, samples: usize, within: Duration) -> sipx_audio::Pcm {
+        let deadline = tokio::time::Instant::now() + within;
+        let mut recorded = Vec::with_capacity(samples);
+        while recorded.len() < samples {
+            match tokio::time::timeout_at(deadline, self.session.recv()).await {
+                Ok(Some(frame)) => recorded.extend(self.resampler.push_i16(&frame)),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        recorded.truncate(samples);
+        sipx_audio::Pcm::from_i16(self.format, recorded)
+    }
 }
 
 /// What this side has sent, as a sender report describes it (RFC 3550 §6.4.1).
@@ -1378,6 +1460,7 @@ impl MediaSession {
         let clock_rate = config.clock_rate;
         let config_codec = config.codec;
         let wire_payload_type = config.wire_payload_type();
+        let receive_payload_type = config.receive_wire_payload_type();
         let dtmf_payload_type = config.dtmf_payload_type;
         let rtcp_interval = config.rtcp_interval;
         let rtcp_mode = config.rtcp_mode;
@@ -1505,6 +1588,7 @@ impl MediaSession {
             keypresses: shared.keypresses,
             codec: config_codec,
             wire_payload_type,
+            receive_payload_type,
             dtmf_payload_type,
             rtcp_mode,
             encrypted,
@@ -1554,6 +1638,7 @@ impl MediaSession {
         let clock_rate = config.clock_rate;
         let config_codec = config.codec;
         let wire_payload_type = config.wire_payload_type();
+        let receive_payload_type = config.receive_wire_payload_type();
         let dtmf_payload_type = config.dtmf_payload_type;
         let rtcp_mode = config.rtcp_mode;
         let encrypted = config.srtp.is_some();
@@ -1664,6 +1749,7 @@ impl MediaSession {
             keypresses: shared.keypresses,
             codec: config_codec,
             wire_payload_type,
+            receive_payload_type,
             dtmf_payload_type,
             rtcp_mode,
             encrypted,
@@ -1992,6 +2078,12 @@ impl MediaSession {
         self.wire_payload_type
     }
 
+    /// The payload type this negotiated stream accepts from the wire.
+    #[must_use]
+    pub fn receive_payload_type(&self) -> u8 {
+        self.receive_payload_type
+    }
+
     /// The negotiated RTP payload type for telephone events, when enabled.
     #[must_use]
     pub fn dtmf_payload_type(&self) -> Option<u8> {
@@ -2075,6 +2167,23 @@ impl MediaSession {
     /// Take the next packet's worth of received samples.
     pub async fn recv(&self) -> Option<Vec<i16>> {
         self.incoming.lock().await.recv().await
+    }
+
+    /// Receive this session as linear PCM at an application-chosen rate and depth.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`sipx_audio::PcmError::UnsupportedSampleRate`] when the requested format's rate
+    /// cannot be converted safely.
+    pub fn capture(
+        &self,
+        format: sipx_audio::PcmFormat,
+    ) -> Result<PcmCapture<'_>, sipx_audio::PcmError> {
+        Ok(PcmCapture {
+            session: self,
+            format,
+            resampler: sipx_audio::LinearResampler::new(self.clock_rate, format.sample_rate())?,
+        })
     }
 
     /// Take received samples until the session goes quiet for `idle`.
@@ -2161,6 +2270,34 @@ impl MediaSession {
             .play_out()
             .await
             .completed()
+    }
+
+    /// Convert and play an explicit linear-PCM buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`sipx_audio::PcmError`] before queuing anything when its rate or representation
+    /// cannot be converted.
+    pub async fn play_pcm(&self, pcm: &sipx_audio::Pcm) -> Result<bool, sipx_audio::PcmError> {
+        Ok(self
+            .start_pcm_playback(pcm, Interrupt::Never)?
+            .play_out()
+            .await
+            .completed())
+    }
+
+    /// Convert an explicit PCM buffer and start it as a controllable playback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`sipx_audio::PcmError`] before creating a playback when conversion is refused.
+    pub fn start_pcm_playback(
+        &self,
+        pcm: &sipx_audio::Pcm,
+        interrupt: Interrupt,
+    ) -> Result<Playback, sipx_audio::PcmError> {
+        let samples = pcm.to_i16(self.clock_rate)?;
+        Ok(self.start_playback(samples, interrupt))
     }
 
     /// Start a clip and hand back a handle to it, without waiting (`M-17`).
@@ -3916,7 +4053,7 @@ async fn deliver(
     // other number is looked up among the static types, and one that is neither is dropped
     // rather than decoded as the negotiated codec — decoding somebody else's format produces a
     // burst of noise, which is worse than a gap.
-    if packet.payload_type != config.wire_payload_type()
+    if packet.payload_type != config.receive_wire_payload_type()
         && Codec::from_payload_type(packet.payload_type).is_none()
     {
         to.discards
@@ -4175,6 +4312,53 @@ mod tests {
             g711::ulaw_encode_all(&recorded),
             "the audio that arrived is the audio that was sent"
         );
+    }
+
+    /// M-43 / `linear-pcm.md` §3: playback converts both depth and rate before codec encoding.
+    /// The decoded output is asserted so an implementation that merely accepts the format cannot
+    /// pass while still putting byte-depth garbage on the wire.
+    #[tokio::test]
+    async fn pcm_playback_converts_unsigned_eight_and_signed_sixteen_bit_sources() {
+        let (left, right) = pair(Codec::Pcmu).await;
+        let eight = sipx_audio::Pcm::new(
+            sipx_audio::PcmFormat::new(8_000, sipx_audio::PcmEncoding::Unsigned8).expect("format"),
+            sipx_audio::PcmSamples::Unsigned8(vec![128; 160]),
+        )
+        .expect("samples");
+        assert!(right.play_pcm(&eight).await.expect("converts"));
+        let silent = left.record_at_least(160, DELIVERY_BOUND).await;
+        assert_eq!(silent.len(), 160);
+        assert!(silent.iter().all(|sample| sample.abs() <= 4));
+
+        let source = tone(320);
+        let sixteen = sipx_audio::Pcm::new(
+            sipx_audio::PcmFormat::new(16_000, sipx_audio::PcmEncoding::Signed16).expect("format"),
+            sipx_audio::PcmSamples::Signed16(source),
+        )
+        .expect("samples");
+        assert!(right.play_pcm(&sixteen).await.expect("resamples"));
+        let downsampled = left.record_at_least(160, DELIVERY_BOUND).await;
+        assert_eq!(
+            downsampled.len(),
+            160,
+            "16 kHz becomes the same duration at 8 kHz"
+        );
+        assert!(downsampled.iter().any(|sample| sample.abs() > 1_000));
+    }
+
+    /// M-43 / `linear-pcm.md` §3: capture owns a continuous resampler and emits the caller's
+    /// chosen rate instead of exposing the negotiated codec clock as an application assumption.
+    #[tokio::test]
+    async fn pcm_capture_resamples_received_audio_to_the_callers_rate() {
+        let (left, right) = pair(Codec::Pcmu).await;
+        let source = tone(320);
+        let format =
+            sipx_audio::PcmFormat::new(16_000, sipx_audio::PcmEncoding::Signed16).expect("format");
+        let mut capture = left.capture(format).expect("capture format");
+        right.play(&source, 160).await;
+        let pcm = capture.record_at_least(639, DELIVERY_BOUND).await;
+        assert_eq!(pcm.format(), format);
+        assert_eq!(pcm.samples().len(), 639);
     }
 
     /// Mute, from the receiving side (`M-18`): the far end gets every packet it would have got,
@@ -4436,6 +4620,35 @@ mod tests {
             g711::alaw_encode_all(&source),
             g711::alaw_encode_all(&recorded)
         );
+    }
+
+    /// M-43: dynamic L16 uses the negotiated clock and payload assignment, while the encoded
+    /// samples remain signed network-order PCM and therefore arrive bit-for-bit unchanged.
+    #[tokio::test]
+    async fn a_dynamic_eight_kilohertz_l16_session_carries_linear_pcm() {
+        let placeholder: SocketAddr = "127.0.0.1:1".parse().expect("valid");
+        let mut left_config = Config::new(placeholder, Codec::L16);
+        left_config.clock_rate = 8_000;
+        left_config.payload_type = Some(96);
+        left_config.receive_payload_type = Some(96);
+        let left = MediaSession::start(any(), left_config)
+            .await
+            .expect("binds");
+
+        let mut right_config = Config::new(left.local_addr(), Codec::L16);
+        right_config.clock_rate = 8_000;
+        right_config.payload_type = Some(96);
+        right_config.receive_payload_type = Some(96);
+        let right = MediaSession::start(any(), right_config)
+            .await
+            .expect("binds");
+
+        let source = tone(480);
+        right.play(&source, 160).await;
+        let recorded = left.record_at_least(source.len(), DELIVERY_BOUND).await;
+        assert_eq!(recorded, source);
+        assert_eq!(left.clock_rate(), 8_000);
+        assert_eq!(left.wire_payload_type(), 96);
     }
 
     /// Media ports attract stray traffic — STUN probes, port scans. None of it should end a
@@ -4995,6 +5208,37 @@ mod tests {
         assert_eq!(session.discard_counts().unknown_payload_type, 1);
     }
 
+    /// S-36 / RFC 3264 §6.1: each description assigns the dynamic number its author receives.
+    /// Therefore a session sends with the peer's answer number while accepting the different
+    /// number from its own offer; collapsing both directions into one number loses one stream.
+    #[tokio::test]
+    async fn asymmetric_dynamic_payload_types_are_honoured_in_both_directions() {
+        let raw = UdpSocket::bind(any()).await.expect("binds");
+        let mut config = Config::new(raw.local_addr().expect("address"), Codec::Pcmu);
+        config.payload_type = Some(96);
+        config.receive_payload_type = Some(111);
+        config.jitter_depth = 1;
+        config.jitter_max_depth = None;
+        config.dtmf_payload_type = None;
+        let session = MediaSession::start(any(), config).await.expect("starts");
+
+        session.send(vec![0; 160]).await;
+        let mut datagram = vec![0; 2048];
+        let (len, _) = tokio::time::timeout(DELIVERY_BOUND, raw.recv_from(&mut datagram))
+            .await
+            .expect("outbound packet arrives")
+            .expect("receives");
+        let outbound = Packet::decode(&Bytes::copy_from_slice(&datagram[..len])).expect("RTP");
+        assert_eq!(outbound.payload_type, 96, "send with the peer's number");
+
+        let inbound = Packet::new(111, 1, 160, 7, Bytes::from(vec![0xFF; 160]));
+        raw.send_to(&inbound.encode(), session.local_addr())
+            .await
+            .expect("sends inbound packet");
+        let heard = session.record_at_least(160, DELIVERY_BOUND).await;
+        assert_eq!(heard.len(), 160, "receive with our number");
+    }
+
     /// M-32's failing-first witness: unlike every other media discard in the original census,
     /// this loss had neither a trace nor a number. Fill the application queue, offer one more
     /// complete keypress, and assert the loss itself rather than a timeout in a consumer.
@@ -5441,8 +5685,11 @@ mod tests {
     fn codecs_map_to_their_static_payload_types() {
         assert_eq!(Codec::Pcmu.payload_type(), 0);
         assert_eq!(Codec::Pcma.payload_type(), 8);
+        assert_eq!(Codec::L16.payload_type(), 11);
         assert_eq!(Codec::from_payload_type(0), Some(Codec::Pcmu));
         assert_eq!(Codec::from_payload_type(8), Some(Codec::Pcma));
+        assert_eq!(Codec::from_payload_type(11), Some(Codec::L16));
+        assert_eq!(Codec::from_payload_type(10), None, "stereo L16 is not ours");
         assert_eq!(Codec::from_payload_type(9), None, "G.722 is not ours");
     }
 }

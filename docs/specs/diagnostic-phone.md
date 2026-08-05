@@ -23,7 +23,7 @@ SignallingTransport = udp | tcp | tls | ws | wss
 MediaSecurity       = auto | plain | sdes | dtls-srtp
 IcePolicy           = disabled | host | stun(server)
 AudioEndpoint       = wav(path) | device(id) | generator(kind) | null
-CodecPreference     = non-empty ordered list drawn from pcmu | pcma | opus
+CodecPreference     = non-empty ordered list drawn from pcmu | pcma | l16 | opus
 ```
 
 `auto` preserves the existing behavior: plain RTP on unprotected signalling and SDES-SRTP on a
@@ -42,7 +42,7 @@ public call policy is:
 
 | Command value | Call policy |
 |---|---|
-| ordered `pcmu`, `pcma`, `opus` | `Codecs::ordered` over the corresponding `CodecPreference` values |
+| ordered `pcmu`, `pcma`, `l16`, `opus` | `Codecs::ordered` over the corresponding `CodecPreference` values |
 | no `--codec` | `Codecs::default()` (`pcmu,pcma`) |
 | `auto` | `Keying::Auto` |
 | `plain` | `Keying::Plain` |
@@ -56,17 +56,17 @@ combination into a weaker policy.
 
 ### 2.1 WAV and media-clock contract
 
-WAV endpoints carry mono signed 16-bit linear samples at the clock rate of the codec selected by
-the running media session. The command MUST read and validate the file structure before signalling,
-but it cannot decide rate compatibility from a preference list: that decision is made immediately
-after negotiation and before the first sample is queued. A mismatched input is a typed command
-failure naming both rates and asking the operator to resample it; the command does not silently
-reinterpret or resample the samples.
+WAV endpoints carry mono signed 16-bit linear samples with the rate named in their header. The
+command MUST read and validate the file structure before signalling. After negotiation it passes
+that explicit format through the `M-43` PCM boundary, which linearly resamples to the session clock
+before the first sample is queued. A malformed or unsupported rate is a typed command failure; a
+different supported rate is converted rather than reinterpreted or distorted.
 
-RFC 3551 assigns PCMU and PCMA an 8 kHz RTP clock. RFC 7587 assigns Opus a 48 kHz RTP clock even
+RFC 3551 assigns PCMU and PCMA an 8 kHz RTP clock, and assigns mono L16 at 44.1 kHz to static
+payload 11; selected 8 kHz L16 uses a dynamic mapping. RFC 7587 assigns Opus a 48 kHz RTP clock even
 when the encoded signal bandwidth is narrower. At the session's 20 ms packet interval this means
-160 decoded samples per G.711 packet and 960 decoded samples per Opus packet. Both `dial` and
-`answer` MUST take the packet size from the negotiated session rather than retaining either literal.
+160 decoded samples for G.711 or 8 kHz L16, 882 for static L16, and 960 for Opus. Both `dial` and
+`answer` MUST take the packet size from the negotiated session rather than retaining any literal.
 A WAV recording MUST write the negotiated clock rate in its header. The number of recorded samples
 therefore has the same time meaning for both call roles: `samples / negotiated_clock_rate` seconds.
 
@@ -138,7 +138,8 @@ sample format in the order `i16`, `f32`, unsigned 16-bit. More than 32 channels 
 negotiation, input is downmixed by the arithmetic mean, linearly resampled to the media session's
 clock rate and cut into the session's packet-sized frames. Output is linearly resampled from that
 clock rate and copied to every device channel. Conversion clips at the `i16` range rather than
-wrapping. Thus G.711 uses 8 kHz/160-sample media frames while Opus uses its negotiated 48 kHz clock;
+wrapping. Thus G.711 and dynamic L16 use 8 kHz/160-sample media frames, static L16 uses 44.1 kHz/882,
+while Opus uses its negotiated 48 kHz clock;
 the device does not constrain codec selection.
 
 Device rates above 384 kHz and a single callback larger than 1,048,576 interleaved samples are

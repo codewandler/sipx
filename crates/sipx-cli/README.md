@@ -9,9 +9,10 @@ provides a finite, machine-ready `load-responder` with explicit admission, dialo
 cleanup bounds for reproducible signalling measurements. Its JSON output, exit statuses, and
 separation of logs from stdout make the call outcome assertable from a shell.
 
-WAV input is mono 16-bit PCM at the negotiated media clock: 8 kHz for G.711 or 48 kHz for Opus.
-The phone refuses a mismatched rate instead of silently changing playback speed, takes packet size
-from the running session in both call roles, and writes that same clock into recording headers.
+WAV input is mono 16-bit PCM with an explicit header rate. The phone linearly resamples supported
+rates to the negotiated media clock—8 kHz for G.711, 44.1 or 8 kHz for L16, and 48 kHz for Opus—
+takes packet size from the running session in both call roles, and writes that clock into recording
+headers.
 
 ## Stability
 

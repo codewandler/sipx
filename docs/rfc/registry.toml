@@ -664,8 +664,12 @@ number = 3551
 title = "RTP Profile for Audio and Video Conferences"
 layer = "media"
 status = "partial"
-evidence = ["crates/sipx-media/src/session.rs"]
-note = "The static payload types sipx carries: 0 and 8. The rest of the profile is not implemented."
+evidence = [
+  "crates/sipx-audio/src/l16.rs",
+  "crates/sipx-media/src/session.rs",
+  "crates/sipx-call/src/media_policy.rs",
+]
+note = "The static payload types sipx carries are PCMU 0, PCMA 8, and mono 44.1 kHz L16 11. Mono 8 kHz L16 is offered with an explicit dynamic mapping; stereo type 10 is refused because the public PCM boundary is mono. L16 encode/decode is signed 16-bit network byte order, selected through the call policy, and the negotiated clock is retained independently of the codec. The rest of the profile is not implemented."
 
 [[rfc]]
 number = 4733

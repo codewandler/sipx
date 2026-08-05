@@ -1,6 +1,6 @@
 # Confirmed-dialog snapshot and restoration
 
-**Status:** normative · **Story:** S-43 · **RFCs:** 3261, 3264, 3311, 4028
+**Status:** normative · **Stories:** S-36, S-43 · **RFCs:** 3261, 3264, 3311, 4028
 
 ## 1. Scope
 
@@ -35,7 +35,7 @@ event receiver begins empty: later transitions are emitted normally, while histo
 
 ## 3. Snapshot state
 
-The version-one snapshot contains exactly these non-secret facts:
+The version-two snapshot contains exactly these non-secret facts:
 
 | Field | Meaning and invariant |
 |---|---|
@@ -48,15 +48,15 @@ The version-one snapshot contains exactly these non-secret facts:
 | remote CSeq | optional greatest accepted remote value |
 | signalling security | clear or protected; a SIPS target is never marked clear |
 | media security | plain, SDES-SRTP or DTLS-SRTP; keys are excluded |
-| media contract | profile, negotiated codec/wire payload, optional DTMF payload and RTCP mode |
+| media contract | profile, negotiated codec and RTP clock rate, transmit and receive wire payloads, optional DTMF payload and RTCP mode |
 | hold direction | the most recently negotiated RFC 3264 direction |
 | peer UPDATE support | retained RFC 3311 capability used for later refresh selection |
 | session timer | absent, or interval/refresher role and remaining lifetime at capture |
-| offer state | version one admits only `idle`; any pending local or remote offer refuses capture |
+| offer state | version two admits only `idle`; any pending local or remote offer refuses capture |
 
 An ended call, pending REFER/NOTIFY transfer usage, unacknowledged dialog-forming response, retained
 media cleanup from an interrupted replacement, any live ICE generation, or non-idle offer exchange
-returns a named `NotQuiescent` reason. Version one
+returns a named `NotQuiescent` reason. Version two
 deliberately refuses those states because their missing transaction, credentials, nominated-pair
 state or timer cannot be recreated from dialog facts alone. It refuses all ICE rather than trying to
 infer whether a generation happens to be idle at the capture instant.
@@ -70,7 +70,7 @@ The encoding is network-byte-order binary, independent of Rust layout:
 
 ```text
 magic       4 octets   "SXD1"
-version     u16        1
+version     u16        2
 flags       u16        role/security/session bits; every unassigned bit is zero
 fields      ordered, length-prefixed values from §3
 checksum    none       integrity/authentication belongs to host storage policy
@@ -80,6 +80,14 @@ Unsigned integers are big-endian. Optional values have a one-octet presence mark
 Byte strings use a big-endian `u32` length followed by exactly that many octets. Route count is a
 big-endian `u16`, followed by that many strings. Encoders emit one spelling; decoders reject trailing
 bytes, non-zero reserved bits, unknown enum values and non-canonical presence markers.
+
+Version two adds the RTP clock (`u32`) immediately after the codec and the receive payload octet
+immediately after version one's payload octet. Encoders only produce version two. Decoders continue
+to accept version one, derive the codec's fixed clock, and interpret its single payload as the value
+for both directions, preserving every previously stored symmetric session. These are additive
+semantic corrections: RFC 3264 §6.1 permits two descriptions to assign different dynamic numbers
+to the same format, while L16 permits more than one clock rate, so version one's single payload and
+implicit codec clock cannot restore either session faithfully.
 
 The decoder refuses an input larger than 262,144 octets before reading a field. Call-ID and each tag
 are limited to 1,024 octets; each party, target and route value to 8,192; the route count to 64; and
@@ -104,10 +112,10 @@ The host supplies one `DialogRestoreContext` containing:
 The context is validated against the snapshot before attachment. A protected snapshot requires TLS,
 WSS or QUIC target protection. SDES/DTLS state requires a context declaring the same keying class and
 an encrypted media session; plain state refuses an implicitly encrypted/different policy rather than
-silently changing the negotiated contract. Codec, wire payload, DTMF payload, RTCP mode, profile and
+silently changing the negotiated contract. Codec, RTP clock rate, transmit and receive wire payloads, DTMF payload, RTCP mode, profile and
 direction must agree before the context's one-owner claim. A SIPS remote target or route can never
 be restored through clear signalling.
-The media session's own codec, wire payload, DTMF payload, RTCP mode, encryption fact, ICE fact and
+The media session's own codec, RTP clock rate, transmit and receive wire payloads, DTMF payload, RTCP mode, encryption fact, ICE fact and
 bound address are compared with the declarations; policy text alone is not treated as runtime proof.
 
 Security declarations are facts about resources the host already created; they do not contain or

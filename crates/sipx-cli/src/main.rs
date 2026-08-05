@@ -93,7 +93,7 @@ async fn main() -> ExitCode {
 
     let exit = match args.first().map(String::as_str) {
         Some("register") => register::run(&args, format).await,
-        Some("dial") => dial::run(&args, format).await,
+        Some("dial") => Box::pin(dial::run(&args, format)).await,
         Some("answer") => answer::run(&args, format).await,
         Some("devices") => device::list(&args, format),
         Some("load") => load::run(&args, format).await,

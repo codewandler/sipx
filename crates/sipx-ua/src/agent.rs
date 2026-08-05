@@ -574,17 +574,43 @@ impl UserAgent {
 
     /// Register and keep registering, refreshing before each lease expires.
     ///
-    /// Returns only if a refresh fails outright; a caller that wants to survive a transient
-    /// failure should restart it.
+    /// A failed refresh is retried once inside the margin left by the last granted lease. The
+    /// registrar's grant defines both deadlines: the first attempt starts at `refresh_after`, and
+    /// the retry divides what remains before `granted`. A second failure returns rather than
+    /// creating an unbounded retry loop.
     pub async fn keep_registered(&mut self) -> Result<std::convert::Infallible> {
+        let mut lease = self.register().await?;
         loop {
-            let lease = self.register().await?;
+            let granted_at = tokio::time::Instant::now();
             tracing::info!(
                 granted = lease.granted.as_secs(),
                 refresh_in = lease.refresh_after.as_secs(),
                 "registered"
             );
             tokio::time::sleep(lease.refresh_after).await;
+            match self.register().await {
+                Ok(refreshed) => lease = refreshed,
+                Err(first_error) => {
+                    // A failed transaction may itself consume most of the safety margin. Count
+                    // that time rather than subtracting only the scheduled refresh delay, or a
+                    // timeout could schedule its "within-lease" retry after the lease expired.
+                    let remaining = lease
+                        .granted
+                        .saturating_sub(tokio::time::Instant::now().duration_since(granted_at));
+                    if remaining.is_zero() {
+                        return Err(first_error);
+                    }
+                    let retry_after = remaining / 2;
+                    tracing::warn!(
+                        error = %first_error,
+                        retry_in = retry_after.as_secs_f64(),
+                        lease_remaining = remaining.as_secs_f64(),
+                        "registration refresh failed; retrying within the granted lease"
+                    );
+                    tokio::time::sleep(retry_after).await;
+                    lease = self.register().await?;
+                }
+            }
         }
     }
 

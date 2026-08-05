@@ -49,7 +49,7 @@ supports UDP, TCP, TLS, WebSocket, and secure WebSocket.
 |---|---|
 | Calls | Place and answer, hold and resume, blind and attended transfer, session timers, bounded confirmed-dialog snapshots |
 | Registration | Digest authentication, lease refresh, Outbound flows, `Path`, `Service-Route`, GRUU, push-assisted refresh |
-| Audio | G.711, DTMF, WAV playback and recording; selectable Opus behind a Cargo feature |
+| Audio | G.711, L16, DTMF, rate-converting PCM/WAV playback and recording; selectable Opus behind a Cargo feature |
 | Media | RTP/RTCP, jitter buffering, quality statistics, ICE, SDES-keyed SRTP, optional DTLS-SRTP |
 | Transports | UDP, TCP, TLS, WebSocket, secure WebSocket; live server-identity rotation and bounded endpoint policy/observation |
 | SIP events | Inbound and outbound subscriptions, registration discovery, conditional presence publication, application-owned in-dialog requests |

@@ -100,8 +100,8 @@ Five components, one story each.
   audio seam, which is the capability this epic exists to demonstrate.
 - **Transcoding to 24 kHz PCM for the realtime session.** Not chosen: the API accepts the
   call's own G.711 encodings, so passthrough via relay mode is exact, allocation-light, and
-  keeps the bridge out of the resampling business. PCM support is a non-goal until a story
-  needs it.
+  keeps the bridge out of the resampling business. PCM support was a non-goal for this bridge;
+  `M-43` later supplied the general application boundary without changing that choice.
 - **An HTTP client/framework addition for session setup.** Not needed: the WebSocket
   handshake carries the authentication header; no REST call is on the bridge's path.
 - **Automatic reconnection of a dropped realtime session.** Rejected: a reconnect invents a

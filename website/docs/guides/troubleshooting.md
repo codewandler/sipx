@@ -73,9 +73,10 @@ WebSocket signalling does not solve media reachability; RTP uses its own network
 
 ## WAV input is rejected or sounds wrong
 
-The default CLI uses files rather than a microphone or headset. `--play` accepts **16-bit mono PCM
-at the negotiated codec clock**: 8 kHz for G.711 or 48 kHz for Opus. Convert other sample rates,
-sample widths, channel counts, or compressed audio before the call. Builds with the optional
+The default CLI uses files rather than a microphone or headset. `--play` accepts **16-bit mono PCM**
+and linearly resamples the header's supported rate to the negotiated clock: 8 kHz for G.711, 44.1
+or 8 kHz for L16, or 48 kHz for Opus. Convert other sample widths, channel counts, compressed audio,
+or rates above 384 kHz before the call. Builds with the optional
 `device-audio` feature can open an explicitly selected device. Read an input error emitted before
 dialling as a local setup failure: sipx validates playback input before it lets the far end answer.
 

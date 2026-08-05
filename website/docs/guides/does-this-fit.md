@@ -15,8 +15,9 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
 - **A registered endpoint.** Digest authentication, automatic lease refresh, `Path`,
   `Service-Route`, GRUU, RFC 5626 Outbound on a client-opened flow, and push-assisted binding
   refresh are available.
-- **Telephony audio.** G.711 µ-law and A-law are the default. Opus is selectable through
-  `sipx-call`'s `opus` feature and links a C library.
+- **Telephony audio.** G.711 µ-law and A-law are the default. Mono L16 is selectable at its static
+  44.1 kHz assignment or dynamic 8 kHz mapping. Opus is selectable through `sipx-call`'s `opus`
+  feature and links a C library.
 - **SIP building blocks.** Use the parser, transaction and dialog machines, or SDP offer/answer
   without bringing in an async runtime, socket, or clock.
 - **Secure transports.** The transport layer and diagnostic CLI support TLS and secure WebSocket
@@ -62,8 +63,8 @@ claim and the places sipx loses stated plainly — see [How sipx compares](../re
   channels, multiple media sections, incremental candidate trickling, TURN, or the complete WebRTC
   protocol surface. The [native-browser proof](../reference/browser-audio-proof.md) covers that
   exact profile in both SIP roles; selecting the profile alone is not an interoperability claim.
-- **Video or additional codecs.** The media stack is for telephony audio. Calls support G.711
-  and optional Opus, not arbitrary application-supplied codecs.
+- **Video or additional codecs.** The media stack is for telephony audio. Calls support G.711,
+  mono L16 and optional Opus, not arbitrary application-supplied codecs.
 - **A ready-made routing product.** The two-dialog coupling primitive is available, but listener
   configuration, routing policy, a location service, and dial plans belong to the application.
 - **Automatic event documents from live stack state.** The socket notifier sends valid initial

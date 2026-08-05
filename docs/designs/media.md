@@ -55,7 +55,7 @@ Four crates, and the split between them is the design:
 | Crate | Holds | I/O |
 |---|---|---|
 | [`sipx-sdp`](../../crates/sipx-sdp/src/lib.rs) | SDP (RFC 8866), offer/answer (RFC 3264), the `a=crypto`, `a=fingerprint` and RFC 8839 ICE grammars | none — forbidden by [AGENTS.md](../../AGENTS.md) non-negotiable 2 |
-| [`sipx-audio`](../../crates/sipx-audio/src/lib.rs) | G.711 µ-law and A-law, PCM mixing, WAV, Opus behind a feature | none |
+| [`sipx-audio`](../../crates/sipx-audio/src/lib.rs) | G.711 µ-law and A-law, L16, explicit PCM conversion/resampling, WAV, Opus behind a feature | none |
 | [`sipx-rtp`](../../crates/sipx-rtp/src/lib.rs) | RTP and RTCP packets, the jitter buffer, DTMF events, SRTP, quality arithmetic | one clock read (below) |
 | [`sipx-media`](../../crates/sipx-media/src/lib.rs) | The session, the sockets, the pacing clock, the bridge, the conference, DTLS-SRTP, ICE | all of it |
 
@@ -324,9 +324,8 @@ accepting it would establish a session that can never carry speech.
 
 **G.722 is not implemented and is not planned** (`X-26`). The outline this record replaces listed
 it, and so did [`sipx-audio`](../../crates/sipx-audio/src/lib.rs)'s crate documentation, its
-package description and the website's crate table — along with "resampling", which also does not
-exist ([`sipx-cli`](../../crates/sipx-cli/src/dial.rs) tells the user to resample before
-dialling). When this record first went looking (`X-25`) it could find no story that cut G.722 and
+package description and the website's crate table — along with "resampling", which did not then
+exist. When this record first went looking (`X-25`) it could find no story that cut G.722 and
 no decision to drop it, only the claim being repeated; `X-26` is where the decision was finally
 taken, so it is written here rather than left in the gaps.
 
@@ -335,10 +334,13 @@ payload type, and that slot is Opus's here (`M-13`), which is wideband, better, 
 negotiated by name. Nothing in the stack was ever built expecting G.722:
 `Codec::from_payload_type(9)` returns `None`, `sipx-sdp` answers an offer of it with port 0, and
 `sipx-call` refuses a call that offers nothing else — three tests assert exactly that, so the
-codec's absence is a specified behaviour rather than an omission. Resampling is likewise
-deliberate: `sipx-cli` rejects a clip that is not 8 kHz rather than resampling it quietly,
-because audio resampled by accident is recognisably wrong rather than obviously broken. Either
-one is welcome back as a story that argues for it; neither is owed by a package blurb.
+codec's absence is a specified behaviour rather than an omission.
+
+**Resampling was reopened by `M-43` because its inputs are now explicit.** The rejected version
+would have guessed a format and quietly distorted it. The delivered boundary instead carries a
+`PcmFormat` naming depth and rate, accepts unsigned 8-bit and signed 16-bit mono samples, and linearly
+resamples only when the caller asks for a different stated rate. The CLI consumes the same public
+converter. G.722's decision is unchanged; the two former absences no longer travel together.
 
 The claim cannot come back by itself. `scripts/check-audio-claims.py` reads the three strings
 that advertise `sipx-audio` — the manifest description, the crate documentation's summary

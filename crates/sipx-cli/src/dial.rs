@@ -37,7 +37,7 @@ OPTIONS:
     --tls-cert <FILE> Client certificate chain for mutual TLS (with --tls-key)
     --tls-key <FILE>  Client private key for mutual TLS (with --tls-cert)
     --profile <P>     Media profile: standard or browser-audio (default standard)
-    --codec <C>       Ordered codec preference; repeat pcmu, pcma or opus (default pcmu, pcma)
+    --codec <C>       Ordered codec preference; repeat pcmu, pcma, l16 or opus (default pcmu, pcma)
     --media-security <M>  auto, plain, sdes or dtls-srtp (default auto)
     --ice <P>         disabled, host or stun (default disabled)
     --stun-server <ADDR>  STUN server for --ice stun, as host:port
@@ -242,13 +242,6 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     };
     tracing::info!(peer = uri, setup = ?started.elapsed(), "answered");
 
-    if let (Some(path), Some(clip)) = (audio.wav_input(), clip.as_ref())
-        && let Err(message) = validate_clip(path, clip, call.media().codec().clock_rate())
-    {
-        let _ = call.hang_up().await;
-        return fail(format, Exit::Usage, &message);
-    }
-
     let exchanged = match exchange(
         &mut call,
         clip.as_ref(),
@@ -299,7 +292,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     if let Some(path) = audio.wav_output() {
         let mut recorded = early_recorded;
         recorded.extend_from_slice(&exchanged.recorded);
-        match write_clip(path, &recorded, call.media().codec().clock_rate()) {
+        match write_clip(path, &recorded, call.media().clock_rate()) {
             Ok(()) => report = report.text("recording", path),
             Err(message) => return fail(format, Exit::Failed, &message),
         }
@@ -332,12 +325,16 @@ async fn exchange(
 
     let playing = async {
         if let Some(clip) = clip {
-            call.play(&clip.samples).await;
+            let pcm = pcm_clip(clip)?;
+            call.play_pcm(&pcm)
+                .await
+                .map_err(|error| error.to_string())?;
         }
         if let Some(digits) = dtmf {
             // After the audio, so a menu hears the prompt before the keypress.
             call.send_digits(digits, Duration::from_millis(100)).await;
         }
+        Ok::<(), String>(())
     };
 
     // Recording stops when the far end goes quiet, or when the call's time is up — whichever comes
@@ -356,11 +353,14 @@ async fn exchange(
     };
     let device_audio = devices.run(media, duration);
 
-    let (_, recorded, device_samples) = tokio::join!(
+    let (played, recorded, device_samples) = tokio::join!(
         tokio::time::timeout(duration, playing),
         recording,
         device_audio
     );
+    if let Ok(Err(error)) = played {
+        return Err(error);
+    }
     let device_samples = device_samples?;
     let samples_received = if output_device {
         usize::try_from(device_samples).unwrap_or(usize::MAX)
@@ -397,18 +397,21 @@ fn report_failure(format: Format, error: &sipx_call::Error) -> Exit {
 /// Read and structurally validate a clip before signalling starts.
 pub(crate) fn read_clip(path: &str) -> Result<Wav, String> {
     let file = std::fs::File::open(path).map_err(|error| format!("{path}: {error}"))?;
-    read_wav(file).map_err(|error| format!("{path}: {error}"))
+    let clip = read_wav(file).map_err(|error| format!("{path}: {error}"))?;
+    sipx_audio::PcmFormat::new(clip.sample_rate, sipx_audio::PcmEncoding::Signed16)
+        .map_err(|error| format!("{path}: {error}"))?;
+    Ok(clip)
 }
 
-/// Require the WAV's rate to be the clock the running session negotiated.
-pub(crate) fn validate_clip(path: &str, clip: &Wav, negotiated_rate: u32) -> Result<(), String> {
-    if clip.sample_rate != negotiated_rate {
-        return Err(format!(
-            "{path}: {} Hz; the negotiated media clock is {negotiated_rate} Hz — resample it first",
-            clip.sample_rate,
-        ));
-    }
-    Ok(())
+/// Attach a WAV's explicit signed-16 representation to its declared sample rate.
+pub(crate) fn pcm_clip(clip: &Wav) -> Result<sipx_audio::Pcm, String> {
+    let format = sipx_audio::PcmFormat::new(clip.sample_rate, sipx_audio::PcmEncoding::Signed16)
+        .map_err(|error| error.to_string())?;
+    sipx_audio::Pcm::new(
+        format,
+        sipx_audio::PcmSamples::Signed16(clip.samples.clone()),
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub(crate) fn write_clip(path: &str, samples: &[i16], sample_rate: u32) -> Result<(), String> {
@@ -575,10 +578,10 @@ mod tests {
     /// scheme is checked. That is how this test was first written, and it detected nothing.
     #[tokio::test]
     async fn the_dial_command_refuses_a_sips_uri_before_touching_the_network() {
-        let exit = run(
+        let exit = Box::pin(run(
             &["dial".to_owned(), "sips:bob@192.0.2.1".to_owned()],
             Format::Text,
-        )
+        ))
         .await;
         assert_eq!(
             exit.code(),
@@ -587,11 +590,9 @@ mod tests {
         );
     }
 
-    /// A clip at the wrong rate is refused by name. Playing 44.1 kHz samples at 8 kHz produces
-    /// audio that is recognisably wrong rather than obviously broken, which is harder to
-    /// diagnose than a refusal.
+    /// M-43: a WAV rate different from the codec clock is accepted for explicit resampling.
     #[test]
-    fn a_clip_at_the_wrong_sample_rate_is_refused() {
+    fn a_clip_at_a_different_sample_rate_is_accepted() {
         let dir = std::env::temp_dir().join(format!("sipx-dial-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a temp dir");
         let path = dir.join("wide.wav");
@@ -603,10 +604,7 @@ mod tests {
         write_wav(std::fs::File::create(&path).expect("creates"), &wide).expect("writes");
 
         let clip = read_clip(path.to_str().expect("a path")).expect("structurally valid");
-        let error =
-            validate_clip(path.to_str().expect("a path"), &clip, 8_000).expect_err("refused");
-        assert!(error.contains("44100"), "{error}");
-        assert!(error.contains("8000"), "{error}");
+        assert_eq!(clip.sample_rate, 44_100);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -621,7 +619,6 @@ mod tests {
         write_wav(std::fs::File::create(&path).expect("creates"), &clip).expect("writes");
 
         let read = read_clip(path.to_str().expect("a path")).expect("accepted");
-        validate_clip(path.to_str().expect("a path"), &read, 8_000).expect("rate accepted");
         assert_eq!(read.samples, clip.samples);
 
         let _ = std::fs::remove_dir_all(&dir);

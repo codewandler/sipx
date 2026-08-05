@@ -2,7 +2,7 @@
 id: X-68
 title: Explain the layering on the public site
 pillar: Build
-status: backlog
+status: in-progress
 priority: 13
 design: docs/designs/docs-depth.md
 epic: docs-depth
@@ -22,22 +22,28 @@ reading `AGENTS.md`.
 
 ## Acceptance
 
-- [ ] A concepts page exists in the site's Start section explaining the sans-I/O boundary: which
+- [x] A concepts page exists in the site's Start section explaining the sans-I/O boundary: which
       crates hold no socket, no runtime and no clock read; how time enters as a fired-timer input and
       bytes as data; where the seam to the driver crates falls; and which crate a reader reaches for
       to do a given job.
-- [ ] It states what the property buys rather than only asserting it — parser and transaction fuzzing,
+- [x] It states what the property buys rather than only asserting it — parser and transaction fuzzing,
       virtual-time determinism in the harness, and a core testable with no network.
-- [ ] It carries one Mermaid layer diagram that renders legibly in both the light and dark site
+- [x] It carries one Mermaid layer diagram that renders legibly in both the light and dark site
       themes. Mermaid is already enabled; no new asset pipeline is introduced.
-- [ ] The page's architectural claims are held at the level `AGENTS.md` non-negotiable 2 already pins,
+- [x] The page's architectural claims are held at the level `AGENTS.md` non-negotiable 2 already pins,
       so a violation fails review against the non-negotiable rather than only against this page.
-- [ ] It is reachable from the sidebar before the library guides, and `build-docs.sh` passes with no
+- [x] It is reachable from the sidebar before the library guides, and `build-docs.sh` passes with no
       new entry in `WARNING_EXCEPTIONS`.
 - [ ] `./scripts/gate.py` green.
 
 ## Progress
-- (not started)
+- 2026-08-05: selected for the post-beta.7 foundations and field-hardening wave. The first
+  failing-first docs build names the new Start-page route before the page exists; implementation
+  then has to supply the architecture contract rather than leaving an untested orphan document.
+- 2026-08-05: the Architecture page now names the core/driver seam, explicit byte and timer inputs,
+  crate selection, fuzzing and virtual-time consequences, with one Mermaid layer diagram. It is in
+  Start before the guides; the complete docs build and the final production-site build are green
+  with no warning exception.
 
 ## Notes
 - The 2026-08-04 capability review found the site has exactly one Mermaid diagram in ~21,500 words,

@@ -471,7 +471,7 @@ async fn a_recording_reports_the_duration_of_what_it_captured() {
     let mut events = callee.events().expect("the stream is taken once");
 
     let per_packet = caller.media().samples_per_packet();
-    let rate = u64::from(caller.media().codec().clock_rate());
+    let rate = u64::from(caller.media().clock_rate());
     // Ten packets the far end actually sends — a duration distinct from the idle timeout that
     // detects the end of it, which is the thing being asserted about.
     let packets = 10usize;

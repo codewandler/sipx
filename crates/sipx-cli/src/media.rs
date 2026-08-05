@@ -304,8 +304,9 @@ fn codec(value: &str) -> Result<CodecPreference, String> {
         "pcmu" => Ok(CodecPreference::Pcmu),
         "pcma" => Ok(CodecPreference::Pcma),
         "opus" => Ok(CodecPreference::Opus),
+        "l16" => Ok(CodecPreference::L16),
         _ => Err(format!(
-            "unsupported --codec {value:?}; expected pcmu, pcma or opus"
+            "unsupported --codec {value:?}; expected pcmu, pcma, l16 or opus"
         )),
     }
 }
@@ -322,6 +323,7 @@ const fn codec_name(codec: Codec) -> &'static str {
     match codec {
         Codec::Pcmu => "pcmu",
         Codec::Pcma => "pcma",
+        Codec::L16 => "l16",
         #[cfg(feature = "opus")]
         Codec::Opus => "opus",
     }
@@ -382,6 +384,13 @@ mod tests {
             selected.policy().codecs.preferences().collect::<Vec<_>>(),
             [CodecPreference::Pcma, CodecPreference::Pcmu]
         );
+    }
+
+    #[test]
+    fn l16_reaches_the_exact_call_policy() {
+        let raw = raw(&["dial", "sip:bob@192.0.2.1", "--codec", "l16"]);
+        let selected = selection(&raw, TransportKind::Udp).unwrap();
+        assert_eq!(selected.policy().codecs, Codecs::L16);
     }
 
     #[test]
