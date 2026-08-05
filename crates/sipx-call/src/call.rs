@@ -149,6 +149,9 @@ pub struct Call {
     target: Target,
     /// Set while a 2xx is still being retransmitted; cleared when the ACK arrives.
     awaiting_ack: Option<Arc<tokio::sync::Notify>>,
+    /// Completion of the successful-final-response retransmitter. Retained separately from its
+    /// stop signal so an ACK or terminal call path proves that the worker has actually exited.
+    ack_retransmission: Option<OwnedTask>,
     ended: bool,
     /// Where this side receives media, so a re-offer can name the same address.
     media_address: IpAddr,
@@ -201,6 +204,28 @@ pub struct Call {
     /// call. Retained because the application cannot recover it after the transaction stream is
     /// consumed by call setup.
     history: Option<HistoryInfo>,
+}
+
+/// A call-owned task that cannot detach if the call is abandoned without explicit shutdown.
+#[derive(Debug)]
+struct OwnedTask(tokio::task::JoinHandle<()>);
+
+impl OwnedTask {
+    fn new(owner: tokio::task::JoinHandle<()>) -> Self {
+        Self(owner)
+    }
+
+    async fn joined(&mut self) {
+        // discard: the caller has already selected the task's terminal protocol outcome; this
+        // await is only the ownership barrier and a cancellation JoinError cannot change it.
+        let _ = (&mut self.0).await;
+    }
+}
+
+impl Drop for OwnedTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// The pure half of accepting a peer's in-dialog offer.
@@ -271,6 +296,20 @@ impl SessionState {
 }
 
 impl Call {
+    /// Signal and join the successful-final-response retransmitter, if one is active.
+    ///
+    /// The handle stays in `self` while it is awaited. Cancelling the caller therefore leaves the
+    /// ownership intact for the next ACK or terminal path instead of detaching the retransmitter.
+    async fn stop_ack_retransmission(&mut self) {
+        if let Some(notify) = self.awaiting_ack.take() {
+            notify.notify_waiters();
+        }
+        if let Some(owner) = self.ack_retransmission.as_mut() {
+            owner.joined().await;
+        }
+        self.ack_retransmission = None;
+    }
+
     /// The successful final response that established this call.
     #[must_use]
     pub fn initial_status(&self) -> u16 {
@@ -559,9 +598,7 @@ impl Call {
         match incoming.request.method {
             Method::Ack => {
                 // The 2xx got through; stop retransmitting it.
-                if let Some(notify) = self.awaiting_ack.take() {
-                    notify.notify_waiters();
-                }
+                self.stop_ack_retransmission().await;
                 Ok(true)
             }
             // An INVITE inside an existing dialog is a re-INVITE: a renegotiation of the call
@@ -617,16 +654,20 @@ impl Call {
                 // `session_deadline` keep returning a time in the past, spinning any loop that
                 // selects on it.
                 self.session = None;
-                if let Some(notify) = self.awaiting_ack.take() {
-                    notify.notify_waiters();
-                }
+                self.stop_ack_retransmission().await;
                 // Emitted here, at the point `ended` actually flips, rather than after the 200
                 // OK below — the call is over the moment the far end's BYE is accepted, whether
                 // or not building or sending the response then succeeds.
                 self.events.end(EndCause::RemoteBye);
-                let response =
-                    ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?.build();
-                self.endpoint.respond(&incoming.key, response).await?;
+                let responded: Result<()> = async {
+                    let response =
+                        ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?.build();
+                    self.endpoint.respond(&incoming.key, response).await?;
+                    Ok(())
+                }
+                .await;
+                self.media.shutdown().await;
+                responded?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -785,17 +826,16 @@ impl Call {
         // retransmitted INVITEs without answering them again (RFC 6026), so if the TU does not
         // resend, one lost 200 deadlocks the renegotiation until the peer's Timer B — a single
         // dropped packet breaking hold and resume for half a minute.
-        if let Some(previous) = self.awaiting_ack.take() {
-            previous.notify_waiters();
-        }
+        self.stop_ack_retransmission().await;
         let acked = Arc::new(tokio::sync::Notify::new());
-        tokio::spawn(retransmit_until_acked(
+        let ack_retransmission = tokio::spawn(retransmit_until_acked(
             self.endpoint.clone(),
             incoming.key.clone(),
             response,
             Arc::clone(&acked),
         ));
         self.awaiting_ack = Some(acked);
+        self.ack_retransmission = Some(OwnedTask::new(ack_retransmission));
         Ok(())
     }
 
@@ -1364,7 +1404,7 @@ impl Call {
             // call behind the application's back.
             replacement.set_muted(self.media.is_muted());
             let previous = std::mem::replace(&mut self.media, Arc::new(replacement));
-            previous.stop();
+            previous.shutdown().await;
         }
         self.current = to;
         Ok(())
@@ -1969,30 +2009,35 @@ impl Call {
 
     async fn end_with_reason(&mut self, cause: EndCause, reason: &ReasonValue) -> Result<()> {
         if self.ended {
+            self.stop_ack_retransmission().await;
+            self.media.shutdown().await;
             return Ok(());
         }
         self.media.flush(Duration::from_secs(5)).await;
         self.media.stop();
         self.ended = true;
         self.session = None;
-        if let Some(notify) = self.awaiting_ack.take() {
-            notify.notify_waiters();
-        }
+        self.stop_ack_retransmission().await;
         self.events.end(cause);
 
-        let cseq = self.dialog.next_cseq();
-        let bye = bye_request(&self.dialog, cseq, reason)?;
-        let mut responses = self.endpoint.send(bye, self.target.clone()).await?;
-        // A BYE that is never answered still ends the call locally: the alternative is a call
-        // that cannot be hung up because the far end has already gone.
-        //
-        // discard: the BYE was handed over, and one the endpoint could not put on the wire is
-        // counted at the transmit as `sipx_transport::UnsentCounts::bye` — the number an operator
-        // asking "why did that call linger" needs. What is dropped here is only waiting for the
-        // 200, and this side has already ended the call either way. The bound bounds a failure
-        // (`X-29`).
-        let _ = tokio::time::timeout(Duration::from_secs(2), responses.final_response()).await;
-        Ok(())
+        let sent: Result<()> = async {
+            let cseq = self.dialog.next_cseq();
+            let bye = bye_request(&self.dialog, cseq, reason)?;
+            let mut responses = self.endpoint.send(bye, self.target.clone()).await?;
+            // A BYE that is never answered still ends the call locally: the alternative is a call
+            // that cannot be hung up because the far end has already gone.
+            //
+            // discard: the BYE was handed over, and one the endpoint could not put on the wire is
+            // counted at the transmit as `sipx_transport::UnsentCounts::bye` — the number an operator
+            // asking "why did that call linger" needs. What is dropped here is only waiting for the
+            // 200, and this side has already ended the call either way. The bound bounds a failure
+            // (`X-29`).
+            let _ = tokio::time::timeout(Duration::from_secs(2), responses.final_response()).await;
+            Ok(())
+        }
+        .await;
+        self.media.shutdown().await;
+        sent
     }
 
     /// End the call because this side decided to.
@@ -3335,6 +3380,7 @@ async fn dial_with(
                 endpoint: endpoint.clone(),
                 target: in_dialog,
                 awaiting_ack: None,
+                ack_retransmission: None,
                 ended: false,
                 media_address,
                 media_bind_address: options.media_bind_address,
@@ -4854,6 +4900,7 @@ impl Dialing {
                     endpoint: self.endpoint.clone(),
                     target: self.in_dialog.clone(),
                     awaiting_ack: None,
+                    ack_retransmission: None,
                     ended: false,
                     media_address: self.options.media_address,
                     media_bind_address: self.options.media_bind_address,
@@ -5559,12 +5606,12 @@ pub async fn answer_early(
     endpoint.respond(&incoming.key, response.clone()).await?;
 
     let acked = Arc::new(tokio::sync::Notify::new());
-    tokio::spawn(retransmit_until_acked(
+    let ack_retransmission = OwnedTask::new(tokio::spawn(retransmit_until_acked(
         endpoint.clone(),
         incoming.key.clone(),
         response,
         Arc::clone(&acked),
-    ));
+    )));
 
     let (events, events_rx) = EventSink::new();
     emit_construction_events(&events, Some(ringing.is_reliable()));
@@ -5576,6 +5623,7 @@ pub async fn answer_early(
         endpoint: endpoint.clone(),
         target,
         awaiting_ack: Some(acked),
+        ack_retransmission: Some(ack_retransmission),
         ended: false,
         media_address: early.media_address,
         media_bind_address: early.media_bind_address,
@@ -5827,16 +5875,16 @@ async fn answer_negotiated(
     endpoint.respond(&incoming.key, response.clone()).await?;
 
     let acked = Arc::new(tokio::sync::Notify::new());
-    tokio::spawn(retransmit_until_acked(
+    let mut ack_retransmission = OwnedTask::new(tokio::spawn(retransmit_until_acked(
         endpoint.clone(),
         incoming.key.clone(),
         response,
         Arc::clone(&acked),
-    ));
+    )));
 
     // The answer must leave before an active answerer sends ClientHello. A caller is permitted to
     // wait for the final SDP (and then its ACK) before opening the media path.
-    let (media, settled) = key_and_start(
+    let started = Box::pin(key_and_start(
         port,
         local_ice,
         settled,
@@ -5844,8 +5892,16 @@ async fn answer_negotiated(
         &offer,
         true,
         policy.profile,
-    )
-    .await?;
+    ))
+    .await;
+    let (media, settled) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            acked.notify_waiters();
+            ack_retransmission.joined().await;
+            return Err(error);
+        }
+    };
 
     // As in `dial_with`: emitted at construction, from what was actually observed (ringing
     // first, if this path came through it) rather than recomputed afterwards.
@@ -5859,6 +5915,7 @@ async fn answer_negotiated(
         endpoint: endpoint.clone(),
         target,
         awaiting_ack: Some(acked),
+        ack_retransmission: Some(ack_retransmission),
         ended: false,
         media_address: media_address.advertised(),
         media_bind_address: media_address.bind(),

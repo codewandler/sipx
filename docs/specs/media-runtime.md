@@ -1,6 +1,6 @@
 # Media runtime construction and ownership
 
-**Status:** normative · **Stories:** M-32, M-35, M-36, M-37
+**Status:** normative · **Stories:** M-32, M-35, M-36, M-37, P-15
 
 ## 1. Scope
 
@@ -36,6 +36,29 @@ For a dynamic payload type, the codec named by negotiation and the bytes carried
 are one contract. In particular, a failed Opus construction MUST NOT install a G.711 codec under the
 negotiated Opus payload type. RFC 7587 §7 assigns Opus no static payload type, so substitution based
 only on the number is never valid.
+
+### 2.1 Media-session shutdown
+
+A running `MediaSession` owns the completion handle for every worker it starts: RTP sending, RTP
+receiving, queued playback, each enabled RTCP loop, and the ICE driver when ICE is active. A browser
+session adds its component and ICE supervisors to the same bounded owner set. No spawn in session
+construction may discard its handle.
+
+`stop()` is the synchronous cancellation signal. `shutdown()` sends that durable signal, closes a
+browser ingress when one exists, and joins every handle before it returns. A handle remains in the
+owner set while its join is pending, so cancellation of `shutdown()` cannot detach it: a later call
+resumes the same drain. `Drop` signals cancellation and aborts handles that were not explicitly
+joined; it makes no synchronous-join claim.
+
+An answering `Call` likewise owns the handle for its RFC 3261 §13.3.1.4 successful-final-response
+retransmitter. ACK, remote BYE and local teardown signal and join that handle. A terminal call path
+then joins its `MediaSession` before returning. Therefore a load responder's joined per-dialog task
+is a complete barrier for the generated-media call beneath it; zero outer tasks cannot be reported
+while an RTP, RTCP, ICE, playback or final-response retransmission worker remains live.
+
+Replacing a media session during renegotiation performs the same explicit shutdown on the old
+session. Merely swapping the `Arc` and relying on its destructor would make the renegotiation return
+before the old socket workers were reaped.
 
 ## 3. Conference construction and shutdown
 
@@ -129,6 +152,9 @@ is honest under load.
 | T3 | packet and RTCP intervals of 1 ms | session starts and remains able to send |
 | T4 | conference interval of 0 | typed conference error; no mixer starts |
 | T5 | conference interval of 1 ms | conference starts and can be closed repeatedly |
+| S1 | start an ordinary separate-RTCP session, then call `shutdown()` | every retained RTP, playback and RTCP handle is joined; the owner set is empty |
+| S2 | cancel one `shutdown()` while it is joining, then call it again | the in-flight handle remains owned and the second call drains it |
+| S3 | answer a call, ACK it, then end it | the successful-response retransmitter and every media worker are joined before the terminal call operation returns |
 | C1 | drop a conference whose collector is blocked in `recv()` | collector is cancelled and its session `Arc` is released within a bounded deadline |
 | C2 | leave, close twice, then drop | no retained participant and no panic |
 | C3 | race `join` against `close` while the participant is quiet | either join is refused or its registered collector is drained; no retained session |

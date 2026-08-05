@@ -613,13 +613,9 @@ pub struct MediaSession {
     ice: Option<crate::ice::driver::Handle>,
     /// Browser-component security facts, when the one-owner path established this session.
     browser_ingress: Option<Arc<std::sync::Mutex<crate::browser::ComponentIngress>>>,
-    /// The sole browser-component receiver. Retained so drop can cancel rather than detach it.
-    #[cfg(feature = "dtls")]
-    browser_owner: Option<tokio::task::JoinHandle<()>>,
-    #[cfg(feature = "dtls")]
-    browser_ice_owner: Option<tokio::task::JoinHandle<()>>,
-    #[cfg(feature = "dtls")]
-    browser_media_owners: Vec<tokio::task::JoinHandle<()>>,
+    /// Every asynchronous worker this session started. A handle remains registered while
+    /// `shutdown` awaits it, which makes a cancelled shutdown retryable instead of detached.
+    owners: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     #[cfg(all(test, feature = "dtls"))]
     browser_profile_tasks: Option<Arc<crate::browser::ProfileTasks>>,
     #[cfg(all(test, feature = "dtls"))]
@@ -1321,8 +1317,8 @@ impl MediaSession {
         // See `ice::driver::Destinations::rtcp`: `None` here, and for every stream without ICE,
         // leaves the report loop on RFC 3550 §11's convention.
         let rtcp_remote: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
-        let ice = ice.map(|local| {
-            spawn_ice(
+        let (ice, ice_owner) = ice.map_or((None, None), |local| {
+            let (handle, owner) = spawn_ice(
                 local,
                 socket,
                 rtcp.as_ref(),
@@ -1332,10 +1328,11 @@ impl MediaSession {
                 },
                 &shared.stop,
                 &shared.discards,
-            )
+            );
+            (Some(handle), Some(owner))
         });
 
-        tokio::spawn(send_loop(
+        let send_owner = tokio::spawn(send_loop(
             Arc::clone(socket),
             outgoing_rx,
             Sending {
@@ -1351,8 +1348,8 @@ impl MediaSession {
                 discards: Arc::clone(&shared.discards),
             },
         ));
-        let clips_tx = spawn_playback_queue(&outgoing_tx, &shared.stop);
-        tokio::spawn(receive_loop(
+        let (clips_tx, playback_owner) = spawn_playback_queue(&outgoing_tx, &shared.stop);
+        let receive_owner = tokio::spawn(receive_loop(
             ReceiveInput::socket(Arc::clone(socket)),
             Inbound {
                 audio: incoming_tx,
@@ -1378,7 +1375,8 @@ impl MediaSession {
         ));
 
         let rtcp_socket = rtcp.clone();
-        let _control_owners = spawn_control(Control {
+        let mut owners = vec![send_owner, playback_owner, receive_owner];
+        owners.extend(spawn_control(Control {
             media: Arc::clone(socket),
             rtcp,
             remote: Arc::clone(&remote),
@@ -1396,7 +1394,10 @@ impl MediaSession {
             discards: Arc::clone(&shared.discards),
             #[cfg(feature = "dtls")]
             profile_tasks: None,
-        });
+        }));
+        if let Some(owner) = ice_owner {
+            owners.push(owner);
+        }
 
         Self {
             socket: Arc::clone(socket),
@@ -1425,12 +1426,7 @@ impl MediaSession {
             stats: shared.stats,
             feedback: shared.feedback,
             browser_ingress: None,
-            #[cfg(feature = "dtls")]
-            browser_owner: None,
-            #[cfg(feature = "dtls")]
-            browser_ice_owner: None,
-            #[cfg(feature = "dtls")]
-            browser_media_owners: Vec::new(),
+            owners: Mutex::new(owners),
             #[cfg(all(test, feature = "dtls"))]
             browser_profile_tasks: None,
             #[cfg(all(test, feature = "dtls"))]
@@ -1525,8 +1521,8 @@ impl MediaSession {
             ),
         ));
 
-        let mut browser_media_owners = vec![send_owner, playback_owner, receive_owner];
-        browser_media_owners.extend(spawn_control(Control {
+        let mut owners = vec![owner, ice_owner, send_owner, playback_owner, receive_owner];
+        owners.extend(spawn_control(Control {
             media: Arc::clone(&socket),
             rtcp: None,
             remote: Arc::clone(&remote),
@@ -1551,9 +1547,7 @@ impl MediaSession {
             rtcp_socket: None,
             ice,
             browser_ingress: Some(ingress),
-            browser_owner: Some(owner),
-            browser_ice_owner: Some(ice_owner),
-            browser_media_owners,
+            owners: Mutex::new(owners),
             #[cfg(all(test, feature = "dtls"))]
             browser_profile_tasks: Some(profile_tasks),
             #[cfg(all(test, feature = "dtls"))]
@@ -2209,31 +2203,27 @@ impl MediaSession {
         self.stop.stop();
     }
 
-    /// Stop and join the browser component's sole receive owner.
+    /// Stop and join every worker owned by this session.
     ///
-    /// Ordinary sessions have no such owner and return immediately. Media workers observe the
-    /// same durable stop token, close their channels and drop their SRTP/SRTCP contexts.
-    #[cfg(feature = "dtls")]
-    pub async fn shutdown(mut self) {
+    /// Handles stay in the registry until their await completes. Cancelling this future therefore
+    /// leaves the current handle owned, and a later call resumes the same drain.
+    pub async fn shutdown(&self) {
         self.stop.stop();
         if let Some(ingress) = &self.browser_ingress {
             crate::browser::lock_ingress(ingress).close();
         }
-        if let Some(owner) = self.browser_owner.take() {
-            // discard: stop is the terminal outcome and this await is the proof of reaping; an
-            // already-cancelled JoinError cannot change the completed shutdown contract.
-            let _ = owner.await;
-        }
-        if let Some(owner) = self.browser_ice_owner.take() {
-            // discard: stop is the terminal outcome and this await is the proof of reaping; an
-            // already-cancelled JoinError cannot change the completed shutdown contract.
-            let _ = owner.await;
-        }
-        for owner in self.browser_media_owners.drain(..) {
+        let mut owners = self.owners.lock().await;
+        while let Some(owner) = owners.last_mut() {
             // discard: every worker shares the observed stop token; awaiting proves it is reaped,
             // while a cancellation JoinError adds no packet-level discard to count.
             let _ = owner.await;
+            owners.pop();
         }
+    }
+
+    #[cfg(test)]
+    async fn owned_task_count(&self) -> usize {
+        self.owners.lock().await.len()
     }
 
     /// Whether the session has been stopped.
@@ -2251,16 +2241,7 @@ impl Drop for MediaSession {
         if let Some(ingress) = &self.browser_ingress {
             crate::browser::lock_ingress(ingress).close();
         }
-        #[cfg(feature = "dtls")]
-        if let Some(owner) = self.browser_owner.take() {
-            owner.abort();
-        }
-        #[cfg(feature = "dtls")]
-        if let Some(owner) = self.browser_ice_owner.take() {
-            owner.abort();
-        }
-        #[cfg(feature = "dtls")]
-        for owner in self.browser_media_owners.drain(..) {
+        for owner in self.owners.get_mut().drain(..) {
             owner.abort();
         }
     }
@@ -2722,10 +2703,13 @@ fn discarded(frame: &Frame) -> bool {
 }
 
 /// Start the playback queue and hand back the end a session keeps (`M-17`).
-fn spawn_playback_queue(outgoing: &mpsc::Sender<Frame>, stop: &Arc<Stop>) -> mpsc::Sender<Clip> {
+fn spawn_playback_queue(
+    outgoing: &mpsc::Sender<Frame>,
+    stop: &Arc<Stop>,
+) -> (mpsc::Sender<Clip>, tokio::task::JoinHandle<()>) {
     let (clips_tx, clips_rx) = mpsc::channel::<Clip>(Playback::QUEUE_DEPTH);
-    tokio::spawn(playback_loop(clips_rx, outgoing.clone(), Arc::clone(stop)));
-    clips_tx
+    let owner = tokio::spawn(playback_loop(clips_rx, outgoing.clone(), Arc::clone(stop)));
+    (clips_tx, owner)
 }
 
 #[cfg(feature = "dtls")]
@@ -3017,7 +3001,7 @@ fn spawn_ice(
     destinations: &ice::driver::Destinations,
     stop: &Arc<Stop>,
     discards: &Arc<DiscardMeters>,
-) -> ice::driver::Handle {
+) -> (ice::driver::Handle, tokio::task::JoinHandle<()>) {
     let (agent, pending) = local.into_driver_parts();
     let mut sockets = vec![Arc::clone(socket)];
     if let Some(control) = rtcp {
@@ -3838,6 +3822,63 @@ mod tests {
             .await
             .expect("binds");
         (left, right)
+    }
+
+    /// `MediaSession` is the ownership boundary for every socket worker it starts. Returning
+    /// from shutdown with an empty registry is the happens-before used by callers that report
+    /// zero post-drain work; no wall-clock grace period stands in for a join.
+    #[tokio::test]
+    async fn ordinary_shutdown_joins_every_owned_worker() {
+        let placeholder: SocketAddr = "127.0.0.1:1".parse().expect("valid");
+        let session = MediaSession::start(any(), Config::new(placeholder, Codec::Pcmu))
+            .await
+            .expect("session starts");
+
+        assert!(
+            session.owned_task_count().await >= 5,
+            "send, receive, playback and both separate-RTCP workers are owned"
+        );
+        session.shutdown().await;
+        assert_eq!(session.owned_task_count().await, 0);
+    }
+
+    /// A shutdown future can itself be cancelled by an outer lifecycle deadline. The handle it
+    /// was joining must remain in the session so the owner can retry and still prove reaping.
+    #[tokio::test]
+    async fn cancelled_shutdown_keeps_the_in_flight_worker_owned() {
+        let placeholder: SocketAddr = "127.0.0.1:1".parse().expect("valid");
+        let session = Arc::new(
+            MediaSession::start(any(), Config::new(placeholder, Codec::Pcmu))
+                .await
+                .expect("session starts"),
+        );
+        let (worker_started_tx, worker_started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        session.owners.lock().await.push(tokio::spawn(async move {
+            let _ = worker_started_tx.send(());
+            let _ = release_rx.await;
+        }));
+        worker_started_rx.await.expect("test worker starts");
+
+        let shutdown_session = Arc::clone(&session);
+        let shutdown = tokio::spawn(async move { shutdown_session.shutdown().await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if session.owners.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await // bound on failure: ownership-lock acquisition has no timing semantics.
+        .expect("shutdown begins joining");
+        shutdown.abort();
+        let _ = shutdown.await;
+
+        assert!(session.owned_task_count().await >= 1);
+        release_tx.send(()).expect("test worker remains owned");
+        session.shutdown().await;
+        assert_eq!(session.owned_task_count().await, 0);
     }
 
     /// The failing-first test for this story.
