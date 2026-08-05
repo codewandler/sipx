@@ -69,6 +69,19 @@ def load_comparative_runner_module():
 
 load_runner = load_comparative_runner_module()
 
+
+def load_comparative_driver_module():
+    """Import the neutral traffic driver whose response accounting is contractual."""
+    spec = importlib.util.spec_from_file_location(
+        "comparative_load_driver", ROOT / "scripts" / "comparative-load-driver.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+load_driver = load_comparative_driver_module()
+
 #: The reserved fixture identity. Assertions filter on it so a fixture's problem can never be
 #: confused with a problem the real dataset has.
 FIXTURE_STACK = "zz-fixture-stack"
@@ -2080,6 +2093,48 @@ def a_load_run(manifest=None, results=None, omitted=None):
             "omitted": list(omitted or ()),
         },
     }
+
+
+class TheComparativeLoadDriver(unittest.TestCase):
+    """The measuring instrument distinguishes validated evidence from wire failures."""
+
+    def test_an_invalid_success_response_is_not_counted_as_validated_evidence(self) -> None:
+        args = argparse.Namespace(
+            seed=7,
+            run_id="0123456789abcdef0123456789abcdef",
+            rate=1,
+            max_active=1,
+            provisional="trying_100",
+            local="127.0.0.1:0",
+            target="127.0.0.1:9",
+        )
+        driver = load_driver.Driver(args)
+        try:
+            driver.counting = True
+            driver.offer(0)
+            dialog = driver.dialogs[0]
+            ids = dialog["ids"]
+            response = (
+                "SIP/2.0 200 OK\r\n"
+                f"Via: SIP/2.0/UDP {driver.local};rport;branch={ids['invite_branch']}\r\n"
+                f"From: <sip:driver@{driver.local}>;tag={ids['from_tag']}\r\n"
+                f"To: <sip:load@{driver.target_text}>;tag={ids['to_tag']}\r\n"
+                f"Call-ID: {ids['call_id']}\r\n"
+                "CSeq: 1 INVITE\r\n"
+                f"Contact: <sip:load@{driver.target_text}>\r\n"
+                "Content-Length: 0\r\n\r\n"
+            ).encode()
+
+            # The required provisional response was never observed. The successful-coded
+            # datagram is therefore failure evidence, not a validated transaction response.
+            driver.handle_datagram(response)
+
+            self.assertEqual({}, driver.responses["final"])
+            self.assertEqual(1, driver.errors["invalid_message"])
+            self.assertEqual(0, driver.counts["established"])
+            self.assertEqual(0, driver.counts["completed"])
+        finally:
+            driver.sock.close()
 
 
 class TheComparativeLoadRunner(unittest.TestCase):

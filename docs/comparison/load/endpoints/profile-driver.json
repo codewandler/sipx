@@ -1,6 +1,6 @@
 {
   "id": "profile-driver",
-  "revision": "source-sha256:3b7ddf25cadc45512e8684863a065858acb29c5110643a7b5ce5a49a75b11acf",
+  "revision": "source-sha256:b87006a8c623972300fd30ed620c913c092ccd4612162e7d3e33cf94e472b2f2",
   "artifact": "scripts/comparative-load-driver.py",
   "build_command": "none: an interpreted single-file instrument; the artifact hash pins its source bytes",
   "toolchain": "python3 (exact interpreter recorded per run in environment.json toolchains)",

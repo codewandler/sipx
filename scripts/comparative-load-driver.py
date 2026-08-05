@@ -361,12 +361,10 @@ class Driver:
 
         if state == "calling":
             if branch != ids["invite_branch"] or from_tag != ids["from_tag"] or cseq != ["1", "INVITE"]:
-                self.count_response(dialog, "final" if code >= 200 else "provisional", code_text)
                 self.finish(index, "invalid_message")
                 return
             if code < 200:
                 if code != 100 or self.provisional == "none":
-                    self.count_response(dialog, "provisional", code_text)
                     self.finish(index, "invalid_message")
                     return
                 if dialog["provisional_seen"]:
@@ -382,11 +380,9 @@ class Driver:
                     to_tag != ids["to_tag"]
                     or f"sip:load@{self.target_text}" not in contact
                 ):
-                    self.count_response(dialog, "final", code_text)
                     self.finish(index, "invalid_message")
                     return
                 if self.provisional == "trying_100" and not dialog["provisional_seen"]:
-                    self.count_response(dialog, "final", code_text)
                     self.finish(index, "invalid_message")
                     return
                 self.count_response(dialog, "final", code_text)
@@ -433,11 +429,9 @@ class Driver:
                 or to_tag != ids["to_tag"]
                 or cseq != ["2", "BYE"]
             ):
-                self.count_response(dialog, "final" if code >= 200 else "provisional", code_text)
                 self.finish(index, "invalid_message")
                 return
             if code < 200:
-                self.count_response(dialog, "provisional", code_text)
                 self.finish(index, "invalid_message")
                 return
             self.count_response(dialog, "final", code_text)

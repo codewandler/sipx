@@ -1,7 +1,7 @@
 {
   "id": "sipx",
-  "revision": "e311e82ad427920eeb8d475cdc11b95152303a35",
-  "version": "1.0.0-beta.4",
+  "revision": "82fe7c8f85cf39a949d272db786b28372478961a",
+  "version": "1.0.0-beta.5",
   "artifact": "target/release/sipx",
   "build_command": "cargo build --release -p sipx-cli",
   "toolchain": "rustc 1.97.0 (2d8144b78 2026-07-07)",
