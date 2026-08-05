@@ -1,15 +1,16 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-beta.4 prerelease.
+description: Release highlights and adoption notes for the sipx 1.0.0-beta.5 prerelease.
 ---
 
 # What's new
 
-## Unreleased on `main` — 2026-08-05
+<!-- BEGIN generated:release-heading -->
+## 1.0.0-beta.5 — 2026-08-05
+<!-- END generated:release-heading -->
 
-The website follows `main`, which currently contains a substantial endpoint and application wave
-newer than the immutable beta.4 packages. Use a Git dependency when intentionally testing these
-surfaces; installing `1.0.0-beta.4` does not provide them.
+Beta.5 publishes the endpoint and application wave delivered after beta.4. It is a new immutable
+prerelease: it does not move or overwrite beta.2, beta.3 or beta.4.
 
 - **Long-lived endpoints gained explicit operational seams.** A TLS or secure-WebSocket listener can
   atomically replace the certificate identity used by new handshakes without closing established
@@ -39,9 +40,18 @@ surfaces; installing `1.0.0-beta.4` does not provide them.
   [comparative signalling-load result](reference/comparison.md#comparative-signalling-load) with
   those limits intact.
 
-<!-- BEGIN generated:release-heading -->
+Install the exact CLI release with:
+
+```bash
+cargo install --locked --version =1.0.0-beta.5 sipx-cli
+```
+
+Public APIs are not frozen before 1.0. Supported APIs receive migration guidance when they break;
+Experimental APIs may change or disappear without that guide. The credentialed live-endpoint proof
+for the realtime binding remains pending, and the comparative-load result remains one bounded UDP
+responder-direction measurement rather than a general ranking.
+
 ## 1.0.0-beta.4 — 2026-08-04
-<!-- END generated:release-heading -->
 
 The first public beta is published and remains immutable.
 Beta.4 is published as exact crates.io packages. It comes from a new immutable tag without moving
@@ -107,8 +117,8 @@ installed diagnostic CLI, independent transport peers and release-commit documen
 cargo install --locked --version =1.0.0-beta.2 sipx-cli
 ```
 
-Use beta.4 for new installations; beta.2 and beta.3 remain immutable for reproducible existing
-consumers.
+Use beta.5 for new installations; beta.2, beta.3 and beta.4 remain immutable for reproducible
+existing consumers.
 
 ## 1.0.0-alpha.5 — 2026-08-03
 
@@ -199,5 +209,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 beta. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-beta.4` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-beta.5` merely because it appears on this
 site.

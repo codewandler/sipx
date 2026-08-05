@@ -14,7 +14,7 @@ ahead of it.
 Install the exact release with Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```bash
-cargo install --locked --version =1.0.0-beta.4 sipx-cli
+cargo install --locked --version =1.0.0-beta.5 sipx-cli
 ```
 
 The exact `--version` requirement makes the installation reproducible. This site follows the
@@ -27,11 +27,11 @@ cargo install --git https://github.com/codewandler/sipx \
 ```
 
 Confirm which version was installed. This documentation build covers
-<!-- BEGIN generated:workspace-version -->1.0.0-beta.4<!-- END generated:workspace-version -->:
+<!-- BEGIN generated:workspace-version -->1.0.0-beta.5<!-- END generated:workspace-version -->:
 
 ```console
 $ sipx version
-sipx 1.0.0-beta.4
+sipx 1.0.0-beta.5
 ```
 
 ## Prepare audio
@@ -81,7 +81,7 @@ For the narrower browser-compatible path, install the same exact release with th
 and `dtls` features:
 
 ```bash
-cargo install --locked --version =1.0.0-beta.4 --features opus,dtls sipx-cli
+cargo install --locked --version =1.0.0-beta.5 --features opus,dtls sipx-cli
 ```
 
 Then select the fail-closed `browser-audio` profile over WSS. It composes Opus, host or

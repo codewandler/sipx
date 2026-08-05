@@ -98,7 +98,10 @@ ADOPTION_REQUIREMENTS = {
         ("registry honesty", re.compile(r"published as exact crates\.io packages", re.I)),
         ("Rust-crates-first adoption", re.compile(r"adoption surface leads with the modular Rust crates", re.I)),
         ("intentional omissions", re.compile(r"release intentionally does not provide", re.I)),
-        ("current-main changes", re.compile(r"Unreleased on `main`", re.I)),
+        (
+            "post-beta endpoint changes",
+            re.compile(r"Long-lived endpoints gained explicit operational seams", re.I),
+        ),
     ),
     "website/docs/sdk/overview.md": (
         ("implemented webhook binding", re.compile(r"\| Webhook \|.*\| Implemented \|", re.I)),

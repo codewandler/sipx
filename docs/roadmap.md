@@ -10,11 +10,13 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-08-05:_ **`1.0.0-beta.2`, `1.0.0-beta.3` and `1.0.0-beta.4` are published prereleases,
-and beta.4 is current.** Beta.4 is the measured feature-and-security wave
-around secure browser audio and real-network connectivity recorded below. It deliberately excludes
-TURN-required networks, video, data channels and a general browser API; stable `1.0.0` remains a
-separate promotion and compatibility decision.
+_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.4` are published prereleases, and beta.5 is
+the authorized release candidate on `main`.** Beta.5 carries the endpoint-complete service wave,
+deterministic downstream test surfaces, the bounded comparative signalling result and the routed
+realtime-agent bridge. Its credentialed live-endpoint proof remains pending, and the result does
+not rank general performance. The beta.4 browser-audio limits remain: no TURN-required networks,
+video, data channels or general browser API. Stable `1.0.0` is a separate promotion and
+compatibility decision.
 
 _As of 2026-07-30:_ **all seven `1.0.0-alpha` predicates are met**, and `1.0.0-alpha` is cut.
 [`maturity.md`](maturity.md) reports them, and it reports them as *computed* rather than asserted —
@@ -42,11 +44,12 @@ terminal. It is reachable behind NAT through a flow it opened, it can be the par
 challenge rather than only the one that answers, and it serves subscriptions to what its dialogs
 and registrations are doing.
 
-The delivered implementation wave after beta.4 is **M13 — Endpoint-complete**: it closes the
-measured sipx-owned endpoint gaps before the selected M14 load comparison. The application SDK and
-host remain independent backlog, and M15 separately tracks the requested browser-embeddable audio
-package without turning sipx into a WebRTC engine. M9's remaining off-media bridge work is not
-pulled into that wave.
+Beta.5's delivered implementation wave is **M13 — Endpoint-complete**: it closes the measured
+sipx-owned endpoint gaps, and M14 records the selected bounded load comparison. The routed realtime
+binding is a separate application integration with deterministic default-suite evidence; A-23 keeps
+its credentialed live proof visible as backlog. M15 separately tracks the requested
+browser-embeddable audio package without turning sipx into a WebRTC engine. M9's remaining off-media
+bridge work is not pulled into that wave.
 
 ## Delivered
 
@@ -506,7 +509,7 @@ honest about what it does not do.**
 A stack can be short of features and still be worth depending on. It cannot be *wrong about itself*
 and be worth depending on, because every consumer's design decision rests on what the table says.
 
-### `1.0.0-beta.4` — the hypothetical public-announcement predicates
+### `1.0.0-beta.5` — the hypothetical public-announcement predicates
 
 This is the threshold at which the prerelease could responsibly receive broader publicity: outside
 Rust users can install exact registry

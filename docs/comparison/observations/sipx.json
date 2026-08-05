@@ -18,8 +18,8 @@
           "note": "non-negotiable 3, which also forbids panics on network input"
         }
       ],
-      "version_evaluated": "1.0.0-beta.4",
-      "evaluated_at": "2026-08-04"
+      "version_evaluated": "1.0.0-beta.5",
+      "evaluated_at": "2026-08-05"
     },
     {
       "dimension": "transports",
@@ -42,8 +42,8 @@
           "note": "the per-feature build matrix"
         }
       ],
-      "version_evaluated": "1.0.0-beta.4",
-      "evaluated_at": "2026-08-04"
+      "version_evaluated": "1.0.0-beta.5",
+      "evaluated_at": "2026-08-05"
     },
     {
       "dimension": "media",
@@ -74,8 +74,8 @@
           "note": "the native-browser compatibility job that runs the proof"
         }
       ],
-      "version_evaluated": "1.0.0-beta.4",
-      "evaluated_at": "2026-08-04"
+      "version_evaluated": "1.0.0-beta.5",
+      "evaluated_at": "2026-08-05"
     },
     {
       "dimension": "security-posture",
@@ -95,8 +95,8 @@
           "note": "the generated maturity report, including what is still open"
         }
       ],
-      "version_evaluated": "1.0.0-beta.4",
-      "evaluated_at": "2026-08-04"
+      "version_evaluated": "1.0.0-beta.5",
+      "evaluated_at": "2026-08-05"
     },
     {
       "dimension": "testing-ci",
@@ -120,8 +120,8 @@
           "note": "every way the conformance check fails"
         }
       ],
-      "version_evaluated": "1.0.0-beta.4",
-      "evaluated_at": "2026-08-04"
+      "version_evaluated": "1.0.0-beta.5",
+      "evaluated_at": "2026-08-05"
     },
     {
       "dimension": "maturity-adoption",
@@ -141,8 +141,8 @@
           "note": "the two independent peers the suite runs against"
         }
       ],
-      "version_evaluated": "1.0.0-beta.4",
-      "evaluated_at": "2026-08-04"
+      "version_evaluated": "1.0.0-beta.5",
+      "evaluated_at": "2026-08-05"
     }
   ]
 }

@@ -7,6 +7,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-beta.5] — 2026-08-05
+
+This prerelease carries the endpoint-complete service wave, deterministic downstream test surfaces,
+the bounded comparative signalling result and the routed realtime-agent bridge. It is a new
+immutable release after beta.4, not a replacement for an existing tag.
+
 ### Added
 
 - **Comparative signalling load is now a reproducible measurement rather than a benchmark claim**
@@ -3006,7 +3012,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.4...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.5...HEAD
+[1.0.0-beta.5]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.4...v1.0.0-beta.5
 [1.0.0-beta.4]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.3...v1.0.0-beta.4
 [1.0.0-beta.3]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.2...v1.0.0-beta.3
 [1.0.0-beta.2]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.1...v1.0.0-beta.2
