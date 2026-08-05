@@ -30,13 +30,17 @@ before the transport-facing client is implemented.
 - [x] Event-package payload interpretation is an injected consumer. The generic client never imports
       discovery, presence UI or call policy.
 - [x] Byte-level vectors cover authenticated establishment, refresh, expiry, unsubscribe, out-of-order
-      NOTIFY, an unsupported package and shutdown with a refresh due.
+      NOTIFY, an unsupported package, shutdown with a refresh due, provisional expiry, CSeq
+      exhaustion, invalid interval responses and NOTIFY trust/Contact rejection.
 - [ ] `S-38` acceptance and tests cite those vectors, and `./scripts/gate.py` is green.
 
 ## Progress
 
 - 2026-08-05: [`docs/specs/event-client.md`](../specs/event-client.md) fixes the sans-I/O boundary,
   bounded resources/timers, initial-NOTIFY/dialog race, single-dialog fork policy, auth and interval
-  retries, CSeq ordering, terminal-reason policy, shutdown drain and eight byte-level vectors. S-38
-  now names the failing-first test derived from each vector. The story remains in progress until the
-  integration gate runs.
+  retries, CSeq ordering, terminal-reason policy, shutdown drain and the initial eight byte-level
+  vectors. S-38 names the failing-first test derived from each vector. The story remains in progress
+  until the integration gate runs.
+- 2026-08-05: independent review added a finite pre-response expiry, exact invalid-response
+  transitions, non-wrapping CSeq exhaustion, mandatory Contact validation and a fail-closed injected
+  NOTIFY trust policy; S-38 now maps four additional negative vectors.

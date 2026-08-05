@@ -23,11 +23,16 @@ dialog, without embedding any event package's application policy in the transpor
 
 - [ ] The public API establishes, refreshes and terminates a subscription through the state machine
       and byte vectors in [`docs/specs/event-client.md`](../specs/event-client.md), specifically
-      `S37-V1` through `S37-V8`.
+      `S37-V1` through `S37-V12`.
 - [ ] 401 and 407 challenges reuse endpoint credentials; refreshes use the granted expiry; initial
       and subsequent NOTIFY requests are ordered and surfaced with typed subscription state.
 - [ ] The dialog remote target, route set and CSeq rules are honored for every request, and a
-      terminated or rejected subscription cannot be silently resurrected.
+      terminated or rejected subscription cannot be silently resurrected. Local CSeq exhaustion is
+      typed and never wraps or emits a repeated request.
+- [ ] Every initial and target-refresh NOTIFY passes the configured trust policy and carries exactly
+      one parseable Contact before it can select a dialog, change a remote target or deliver state.
+- [ ] Response Expires and 423 Min-Expires are fail-closed for initial, refresh and unsubscribe
+      operations; an expiry-less initial NOTIFY retains a finite provisional bound.
 - [ ] Live subscriptions, pending notification delivery and refresh timers are bounded. Cancellation
       waits for owned work and a test observes zero residual transactions and timers.
 - [ ] A synthetic package proves the generic API; `S-24` consumes it for `reg` without copying the
@@ -51,3 +56,7 @@ The tests below cite the normative vectors rather than restating them:
 - `stale_notify_is_refused_without_delivery` — `S37-V6`.
 - `unsupported_event_is_489` — `S37-V7`.
 - `shutdown_cancels_a_due_refresh_and_drains` — `S37-V8`.
+- `expiryless_notify_retains_a_finite_provisional_bound` — `S37-V9`.
+- `local_cseq_exhaustion_terminates_without_a_send` — `S37-V10`.
+- `response_intervals_fail_closed_for_every_operation` — `S37-V11`.
+- `notify_trust_and_contact_rejections_do_not_mutate` — `S37-V12`.

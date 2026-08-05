@@ -33,7 +33,7 @@ The core receives only these classes of input:
 
 | Input | Data |
 |---|---|
-| `Start` | resource URI, event token and optional `id`, requested expiry, Accept values, optional bounded SUBSCRIBE body, credentials, driver-supplied fresh Call-ID/From tag/initial CSeq and injected package consumer |
+| `Start` | resource URI, event token and optional `id`, requested expiry, Accept values, optional bounded SUBSCRIBE body, credentials, driver-supplied fresh Call-ID/From tag/initial CSeq, selected SUBSCRIBE target, injected NOTIFY trust policy and package consumer |
 | `Response` | transaction identity and one parsed SIP response or transaction failure |
 | `Notify` | server-transaction identity, parsed request, source target and transport facts |
 | `TimerFired` | subscription identity, timer kind and generation |
@@ -73,6 +73,20 @@ The callback MUST be finite, MUST NOT perform I/O, MUST NOT read time and MUST N
 message bytes. The generic client imports no registration, discovery, presence, call or UI type. It
 understands dialog and `Subscription-State` metadata, never package payload semantics.
 
+### 2.2 Injected NOTIFY trust policy
+
+Matching SIP dialog fields proves correlation, not authority: they are visible on the wire. `Start`
+therefore supplies a synchronous, sans-I/O trust policy. Before accepting a NOTIFY dialog, CSeq,
+Contact, state or body, the core calls it with the resource URI, selected SUBSCRIBE target, received
+source/transport/connection identity and parsed request. It returns `Accept` or `Reject`; rejection
+produces 403 and changes no state. The callback has the same finite/no-I/O/no-clock restrictions as
+the package consumer.
+
+The default is fail-closed `SamePeer`: the source socket address and transport MUST equal the target
+used for the current SUBSCRIBE transaction; on a connection-oriented transport the connection
+generation MUST also match. Deployments that receive NOTIFY through a trusted proxy must inject an
+explicit allow-list or authenticated-identity policy. There is no accept-any default.
+
 ## 3. Resource and timer bounds
 
 The public configuration exposes the limits below and refuses zero values. The defaults are part of
@@ -95,7 +109,7 @@ Shutdown timer:
 | Timer | Duration/source | Fired behavior |
 |---|---|---|
 | `N` | exactly `64*T1`, armed for every initial, refresh or unsubscribe SUBSCRIBE | if no matching NOTIFY completed, terminate the attempt/subscription |
-| `Expiry` | newest valid grant for the current SUBSCRIBE operation: an accepted active/pending NOTIFY dominates that operation's response even if it arrived first; until that NOTIFY, a successful SUBSCRIBE response updates the previous expiry | terminate locally and cancel refresh work |
+| `Expiry` | requested expiry is armed at `Start` as a provisional upper bound; a valid 2xx grant or active/pending NOTIFY `expires` replaces it according to §5; every replacement is measured from the input that supplied it | terminate locally and cancel refresh work |
 | `Refresh` | four fifths of the authoritative expiry, clamped to at least 1 second and at most 1 second before expiry when expiry is at least 2 seconds; a 1-second expiry becomes one immediate input, not a loop | issue one in-dialog refresh if no operation is in flight |
 | `Retry` | reason table in §7 | start an unrelated subscription only while application intent remains active |
 | `Shutdown` | driver-supplied global deadline | abandon remaining transactions, clear every timer/queue and emit `Stopped` |
@@ -116,13 +130,17 @@ Max-Forwards, Event, Accept, Expires, Content-Length and authentication headers.
 An initial SUBSCRIBE uses a fresh Call-ID, cryptographically fresh From tag, non-zero initial local
 CSeq and the resource URI. Every retry after 401, 407 or 423 increments local CSeq. Every refresh and
 unsubscribe is an in-dialog target-refresh request and increments local CSeq again. Numbers never
-decrease or repeat; gaps caused by authentication are valid.
+decrease or repeat; gaps caused by authentication are valid. Local CSeq is a `u32` and never wraps:
+before an operation would increment `u32::MAX`, it emits no request and follows the typed
+`LocalCSeqExhausted` transition in §7.
 
 The first accepted NOTIFY establishes the subscription dialog usage. The subscriber's route set is
 the Record-Route sequence from that NOTIFY in wire order, not the sequence in the SUBSCRIBE 2xx. Its
-remote target is the NOTIFY Contact. Later accepted NOTIFY requests and in-dialog SUBSCRIBE
-responses may refresh the remote target from Contact because both methods are target-refresh
-methods; neither replaces the route set.
+remote target is the NOTIFY Contact. Every dialog-creating or target-refresh NOTIFY MUST contain
+exactly one parseable Contact. Later accepted NOTIFY requests and in-dialog SUBSCRIBE responses may
+refresh the remote target from Contact because both methods are target-refresh methods; neither
+replaces the route set. A missing, malformed or duplicate Contact changes neither candidate nor
+established target.
 
 For an established dialog, a NOTIFY MUST match Call-ID, local/remote tags and Event token/`id`.
 Transaction-layer retransmissions receive the cached response without entering the client again.
@@ -137,21 +155,26 @@ NOTIFY. Timer N remains armed until a matching NOTIFY transaction completes, eve
 
 | State/input | Guard | State/output |
 |---|---|---|
-| `Idle` + `Start` | capacity and package policy valid | allocate; emit neutral state, initial `SendSubscribe`, `ArmTimer(N)`; enter `NotifyWait` |
-| `NotifyWait` + 401/407 | valid supported challenge and retry budget remains | increment CSeq; emit authenticated `SendSubscribe`; replace the transaction and N generation |
-| `NotifyWait` + 423 | valid Min-Expires within host/package maximum and interval retry unused | increment CSeq; emit a retry with Min-Expires; replace the transaction and N generation |
-| `NotifyWait` + 2xx | Expires present and no longer than requested | record granted expiry and response dialog candidate; stay `NotifyWait` |
+| `Idle` + `Start` | capacity/package/trust policy valid; requested expiry is positive and representable | allocate; emit neutral state, initial `SendSubscribe`, `ArmTimer(N)` and provisional `ArmTimer(Expiry, requested)`; enter `NotifyWait` |
+| `NotifyWait` + 401/407 | valid supported challenge, retry budget remains and CSeq can increment | increment CSeq; emit authenticated `SendSubscribe`; replace the transaction and N generation |
+| `NotifyWait` + 423 | exactly one valid Min-Expires is greater than the attempted interval, within host/package maximum, retry unused and CSeq can increment | increment CSeq; emit retry with Min-Expires; replace transaction, N and provisional Expiry generations |
+| `NotifyWait` + 2xx | exactly one valid Expires is positive and no longer than the attempted interval | record granted expiry and response dialog candidate; replace provisional Expiry; stay `NotifyWait` |
 | `NotifyWait` + non-2xx | no accepted NOTIFY exists | cancel N; terminate with typed response failure |
-| `NotifyWait` + matching active/pending NOTIFY | first dialog candidate | validate and consume; emit 200 before delivery; establish from NOTIFY; cancel N; enter `Active` or `Pending` |
+| `NotifyWait` + matching active/pending NOTIFY | first trusted dialog candidate | validate and consume; emit 200 before delivery; establish from NOTIFY; cancel N; replace Expiry when state carries `expires`, otherwise retain the finite provisional/response bound; enter `Active` or `Pending` |
 | `NotifyWait` + matching terminated NOTIFY | first dialog candidate | emit 200 and optional final delivery; cancel N; terminate using §7 |
 | any establishing state + N | current generation | cancel transaction/timers, discard queued neutral state and terminate `NoInitialNotify` |
 
 A NOTIFY may arrive before the SUBSCRIBE response. It is processed exactly as the table says; the
 later transaction response still completes its transaction. If that later 2xx names another remote
-tag, its dialog facts and expiry are ignored. If a non-2xx arrives after a NOTIFY established the
-subscription, the client emits a typed `ConflictingSubscribeResponse` fact and retains the
-NOTIFY-established usage until terminal NOTIFY, expiry or explicit unsubscribe. This deterministic
-rule prevents a response from another fork from rolling back accepted state.
+tag, its dialog facts and expiry are ignored. For the selected tag, a NOTIFY `expires` is
+authoritative; otherwise one valid response Expires replaces the provisional requested bound and,
+when the usage is already active/pending, arms Refresh from that response-derived interval. A
+missing, malformed, duplicate, zero or over-attempt Expires is an `InvalidExpiry` operation failure
+and cannot remove the finite bound. If a non-2xx, transaction failure or invalid 2xx arrives after a
+NOTIFY established the subscription, the client emits a typed `ConflictingSubscribeResponse` fact
+and retains the usage only until the NOTIFY expiry when supplied, otherwise the provisional
+requested bound. This deterministic rule prevents a response from another fork from rolling back
+accepted state or an incomplete response from creating an immortal usage.
 
 ### 5.1 Deliberate refusal of forking
 
@@ -176,34 +199,62 @@ response and no later step runs.
 | request matches an establishing attempt or live subscription | 481 |
 | Event token and `id` exactly match the selected consumer | 489 |
 | dialog is the selected non-forked dialog | 481 |
+| injected trust policy accepts the received peer/connection and request | 403 |
 | CSeq method is NOTIFY and sequence is newer | 400 for method mismatch; 500 for stale/replayed sequence |
+| exactly one parseable Contact exists | 400 |
 | exactly one parseable `Subscription-State` exists | 400 |
 | body is within the configured bound | 413 |
 | queue has capacity | 503 with `Retry-After: 1` |
 | content type/body satisfy the injected consumer | consumer's 400, 415 or package-defined final status |
 
-On success the client records remote CSeq, refreshes the remote target from Contact without changing
-the route set, applies `Subscription-State`, invokes the consumer, and emits `RespondNotify(200)`
-before `Deliver`. It does not wait for an application/user decision.
+No rejecting step records a candidate dialog, remote CSeq, Contact, state or body. On success the
+client records remote CSeq, refreshes the remote target from Contact without changing the route set,
+applies `Subscription-State`, invokes the consumer, and emits `RespondNotify(200)` before `Deliver`.
+It does not wait for an application/user decision.
 
 `active` and `pending` cancel the current N and replace expiry and Refresh from their `expires`
-parameter when present. Without that parameter, the most recent authoritative expiry remains;
-absence is never treated as zero. `reason` and `retry-after` on active/pending are ignored.
+parameter when present. Without that parameter, the most recent response-derived expiry remains;
+before a valid response, the requested provisional expiry remains. Absence is never treated as zero
+or infinity. `reason` and `retry-after` on active/pending are ignored.
 `terminated` cancels expiry, refresh and N, ignores any `expires` parameter, optionally delivers its
 body, and follows §7 after its 200 output.
 
 ## 7. Termination, retry and refresh
 
-The 401/407 and 423 retry transitions in §5 apply to every initial, refresh and unsubscribe
-SUBSCRIBE operation. Each retry preserves the logical operation, increments CSeq, uses a fresh Via
-branch and digest cnonce where required, and replaces both transaction and N generation. Exhausting
-a retry budget follows the failure transition for that logical operation; it never starts a second
-subscription or silently extends the current expiry.
+The 401/407 retry transitions in §5 apply to initial, refresh and unsubscribe SUBSCRIBE operations;
+423 retry applies only to positive initial/refresh intervals. Each retry preserves the logical
+operation, increments CSeq, uses a fresh Via branch and digest cnonce where required, and replaces
+both transaction and N generation. Exhausting a retry budget follows the failure transition for
+that logical operation; it never starts a second subscription or silently extends the current
+expiry.
+
+Response interval parsing is fail-closed and precedes every state or timer change:
+
+| Response | Valid interval | Invalid interval |
+|---|---|---|
+| initial/refresh 2xx | exactly one parseable Expires in `1..=attempted` | absent, malformed, duplicate, zero, numerically unrepresentable or greater than attempted is `InvalidExpiry` |
+| unsubscribe 2xx | exactly one parseable `Expires: 0` | every other value, absence, malformed, duplicate or unrepresentable is `InvalidExpiry` |
+| initial/refresh 423 | exactly one parseable Min-Expires, positive, greater than the attempted interval and no greater than both package and host maxima | absent, malformed, duplicate, unrepresentable, non-increasing or over-policy is `IntervalRejected`; no retry |
+| unsubscribe 423 | none; raising Expires would reverse the requested operation | always `IntervalRejected`, terminate locally unconfirmed, no retry |
+
+For an initial operation with no accepted NOTIFY, either typed interval failure terminates the
+intent. After a NOTIFY already established it, the failure is surfaced as
+`ConflictingSubscribeResponse` and the existing finite Expiry is retained. For refresh, failure
+retains the previous authoritative expiry and issues no replacement timer. For unsubscribe,
+failure terminates locally as `UnsubscribeUnconfirmed` and never restores Refresh. Authentication
+or interval retry exhaustion uses the same operation-specific failure transition.
+
+Before any retry, refresh or unsubscribe increments CSeq, the core checks the current value. At
+`u32::MAX` it MUST NOT wrap, repeat, emit `SendSubscribe`, arm N or consume a retry budget. An
+establishing intent terminates `LocalCSeqExhausted`; an active/pending usage cancels Refresh and
+Expiry and terminates `LocalCSeqExhausted`; an explicit unsubscribe or shutdown drain terminates
+locally as `UnsubscribeUnconfirmed(LocalCSeqExhausted)`. This transition releases the subscription
+on the same input.
 
 | Input/result | Transition |
 |---|---|
 | refresh due | increment CSeq; send in-dialog SUBSCRIBE with the current desired Expires; arm N; retain old expiry until success/NOTIFY |
-| refresh 2xx | validate Expires; update response-derived expiry only if this operation has not already accepted its NOTIFY; remain in current active/pending state until the required NOTIFY arrives |
+| refresh 2xx | validate Expires by the table above; update response-derived expiry only if this operation has not already accepted an `expires` in its NOTIFY; remain in current active/pending state until the required NOTIFY arrives |
 | refresh 404, 405, 410, 416, 480-485, 489, 501 or 604 | terminate; any future attempt is an unrelated initial SUBSCRIBE with fresh Call-ID/tag |
 | other refresh failure | keep the old subscription only until its last authoritative expiry; do not move the expiry later |
 | expiry timer | terminate `LocalExpiry`; no automatic resurrection |
@@ -331,6 +382,7 @@ From: <sip:resource@example.test>;tag=notifier-a
 To: <sip:client@example.test>;tag=sub-a
 Call-ID: sub-a@example.test
 CSeq: 41 NOTIFY
+Contact: <sip:notifier@192.0.2.20:5060>
 Event: test-state;id=alpha
 Subscription-State: active;expires=900
 Content-Length: 0
@@ -358,6 +410,7 @@ From: <sip:resource@example.test>;tag=notifier-a
 To: <sip:client@example.test>;tag=sub-a
 Call-ID: sub-a@example.test
 CSeq: 41 NOTIFY
+Contact: <sip:notifier@192.0.2.20:5060>
 Event: test-state;id=alpha
 Subscription-State: terminated;reason=timeout
 Content-Length: 0
@@ -385,6 +438,77 @@ arm N. Delivering the old Refresh generation produces no output. If no terminal 
 Shutdown timer clears N, expiry and the subscription, then emits `Stopped`; no refresh request is
 sent before or after it.
 
+### S37-V9 — an expiry-less initial NOTIFY cannot create an immortal usage
+
+Start a fresh subscription requesting 300 seconds. Before its SUBSCRIBE response, the trusted peer
+sends a V1-shaped NOTIFY whose relevant fields are:
+
+```text
+CSeq: 1 NOTIFY
+Contact: <sip:notifier@192.0.2.20:5060>
+Event: test-state;id=alpha
+Subscription-State: active
+Content-Length: 0
+
+```
+
+It receives 200, cancels N and becomes active, but retains the provisional Expiry at +300 seconds.
+A later SUBSCRIBE transaction failure emits `ConflictingSubscribeResponse` and neither cancels nor
+moves that timer. Firing the current Expiry generation terminates `LocalExpiry`, releases the
+subscription and leaves no Refresh timer. The same rule applies to `pending`.
+
+### S37-V10 — local CSeq exhaustion is terminal, never wrapping
+
+Given an active subscription whose last local request used:
+
+```text
+CSeq: 4294967295 SUBSCRIBE
+```
+
+fire its current Refresh timer. Expected outputs are Cancel Expiry, Cancel Refresh and
+`StateChanged(Terminated(LocalCSeqExhausted))`. There is no `SendSubscribe`, N timer or retry-budget
+change, and no request with CSeq 0 or repeated CSeq 4294967295. Applying `Unsubscribe` in the same
+starting state instead yields `UnsubscribeUnconfirmed(LocalCSeqExhausted)` and the same no-send
+property.
+
+### S37-V11 — response intervals fail closed
+
+For independent fresh attempts that requested `Expires: 300`, each of these response fragments is
+invalid:
+
+```text
+SIP/2.0 200 OK
+Content-Length: 0
+
+SIP/2.0 200 OK
+Expires: 4294967296
+Content-Length: 0
+
+SIP/2.0 200 OK
+Expires: 301
+Content-Length: 0
+
+SIP/2.0 423 Interval Too Brief
+Min-Expires: 301
+Content-Length: 0
+
+```
+
+The first three terminate `InvalidExpiry`; the over-policy 423 terminates `IntervalRejected` when
+the configured host maximum is 300. No fragment changes Expiry or emits a retry. Equivalent
+malformed or duplicate Expires/Min-Expires cases have the same result. For an unsubscribe, only one
+parseable `Expires: 0` in a 2xx is valid; an absent/non-zero value or any 423 terminates
+`UnsubscribeUnconfirmed` without restoring Refresh.
+
+### S37-V12 — trust and Contact rejection precede dialog mutation
+
+Send the V1 initial NOTIFY from `192.0.2.99:5060` while the default policy's selected SUBSCRIBE
+target is `192.0.2.20:5060`. It receives 403. Then send it from the expected peer first with Contact
+absent and then with two Contact fields; each receives 400. No case records a remote tag, CSeq,
+target, route set, state or delivery. Finally the unchanged V1 NOTIFY from the expected peer with
+its single parseable Contact receives 200 and establishes normally. For a live subscription, the
+same malformed/duplicate Contact cases preserve the previously accepted remote target.
+
 ## 10. S-38 conformance mapping
 
 `S-38` MUST derive failing-first tests from the vectors, without copying their expected behavior into
@@ -400,6 +524,10 @@ a second prose contract:
 | `stale_notify_is_refused_without_delivery` | V6 |
 | `unsupported_event_is_489` | V7 |
 | `shutdown_cancels_a_due_refresh_and_drains` | V8 |
+| `expiryless_notify_retains_a_finite_provisional_bound` | V9 |
+| `local_cseq_exhaustion_terminates_without_a_send` | V10 |
+| `response_intervals_fail_closed_for_every_operation` | V11 |
+| `notify_trust_and_contact_rejections_do_not_mutate` | V12 |
 
 The implementation is incomplete if any vector is asserted only against a helper rather than the
 public event-client surface and a real SIP transaction layer.
