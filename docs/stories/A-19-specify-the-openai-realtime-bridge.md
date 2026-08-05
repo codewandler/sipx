@@ -52,7 +52,18 @@ to one OpenAI realtime session over a WebSocket, precise enough that the stand-i
 
 ## Progress
 
-- (running log / checklist — a resuming agent reads this to know exactly where things stand)
+- 2026-08-05: wrote `docs/specs/openai-realtime.md` on `impl/A-19`. Vendor facts verified
+  against OpenAI's published documentation that day (platform guides + API reference at
+  `developers.openai.com/api/docs`, and the vendor's published event schemas in
+  `openai-python` `src/openai/types/realtime` @ `main`); observation date recorded in the
+  spec's §1. Confirmed GA surface: `wss://api.openai.com/v1/realtime?model=…`, bearer on the
+  upgrade, no `OpenAI-Beta` header, `audio/pcmu`/`audio/pcma` session formats,
+  `response.output_audio.delta`/`.done` (GA names, not the beta `response.audio.*`).
+  Vectors V-1…V-17 with owners A-20/A-21/A-22/A-23; byte-level base64 literals for two
+  160-byte G.711 frames. Two deliberate calls recorded in the spec: `interrupt_response:
+  false` so cancellation has one owner (the bridge), and `conversation.item.truncate` named
+  as a non-goal (vendor recommends it after interruption; the design's client subset omits
+  it — §4.3 records the consequence).
 
 ## Notes
 
