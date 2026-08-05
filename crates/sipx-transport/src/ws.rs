@@ -18,6 +18,7 @@
 //! weaker.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -34,6 +35,7 @@ use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config, client_as
 
 use crate::target::{ConnectionKey, TransportKind};
 use crate::tcp::Event;
+use crate::{ConnectionState, policy::ObservationHub};
 
 /// The subprotocol name RFC 7118 §4.2 registers.
 pub const SUBPROTOCOL: &str = "sip";
@@ -258,6 +260,9 @@ pub(crate) async fn dial<S>(
     events: mpsc::Sender<Event>,
     limits: Limits,
     keepalive: Duration,
+    observations: Option<Arc<ObservationHub>>,
+    admission_generation: Option<u64>,
+    authenticated: bool,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -265,9 +270,25 @@ pub(crate) async fn dial<S>(
     // The resource travels on the key rather than beside it, because it is part of what makes
     // this connection this connection — see [`ConnectionKey`].
     match connect_with_limits(stream, authority, key.ws_path(), secure, &limits).await {
-        Ok(socket) => pump(socket, key, id, outgoing, events, limits, keepalive).await,
+        Ok(socket) => {
+            crate::tcp::observe_ready(
+                observations.as_ref(),
+                &key,
+                id,
+                admission_generation,
+                authenticated,
+            );
+            pump(socket, key, id, outgoing, events, limits, keepalive).await;
+        }
         Err(error) => {
             tracing::warn!(%error, peer = %key.peer, "websocket handshake failed");
+            crate::tcp::observe_state(
+                observations.as_ref(),
+                &key,
+                id,
+                admission_generation,
+                ConnectionState::Failed,
+            );
         }
     }
 }

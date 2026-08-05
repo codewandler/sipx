@@ -1,7 +1,8 @@
 # Spec: TLS, WebSocket, and the certificate policy
 
-**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-6 … T-9 · **Design:**
-[sip-transport](../designs/sip-transport.md)
+**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-6 … T-9, T-31 · **Design:**
+[sip-transport](../designs/sip-transport.md),
+[live-endpoint-policy](../designs/live-endpoint-policy.md)
 
 ## 1. Normative references
 
@@ -125,6 +126,36 @@ to accommodate it.
 hand-written cipher list is a snapshot of one afternoon's opinion, and it ages badly: the lists
 people pin are the reason deployments are still negotiating things nobody meant to allow.
 
+### 3.6 Live server-identity rotation
+
+**[sipx] A replacement is validated before it is published.** The public endpoint operation takes
+an [`Identity`](../../crates/sipx-transport/src/tls.rs), not certificate and key paths. It builds the
+complete server configuration first; a chain and private key that do not belong together therefore
+return a typed TLS configuration error while the active identity is still untouched. When issuer
+certificates are supplied after the leaf, every one must parse and participate, in order, in the
+server-authentication path to the last supplied certificate. A malformed, unrelated or out-of-order
+issuer is a refusal rather than extra material handed to later handshakes. A leaf alone remains
+valid: servers ordinarily omit the trust root and the peer supplies trust during its handshake.
+Errors and debug output never contain the private-key bytes.
+
+**[sipx] Publication is one atomic replacement.** A TLS or WSS listener selects one immutable
+server configuration after accepting a socket and before starting its TLS handshake. A reload
+concurrent with that selection may leave the handshake on the old configuration or move it to the
+new one; it can never combine the certificate chain from one with the key from the other. Once the
+reload operation returns, every later selection observes the new configuration.
+
+**[sipx] Existing connections keep their established TLS session.** Rotation does not rebind a
+listener, replace its task, close a pooled stream or renegotiate a live connection. A dialog using
+an existing TLS or WSS connection continues over it; only a later handshake selects the replacement
+identity. Successful and refused rotations are reported through the endpoint's existing tracing
+diagnostics.
+
+The operation replaces the server identity for every configured TLS and WSS listener on that
+endpoint. File watching, process signals and secret-store access are host I/O and remain outside the
+transport. Client trust anchors, outbound mutual-TLS identities and QUIC server identities are
+unchanged: each has a different connection or transport lifetime, and sharing certificate syntax is
+not enough reason to imply shared rotation semantics.
+
 ## 4. WebSocket (RFC 7118)
 
 **[RFC 7118 §4]** The handshake negotiates the `sip` subprotocol. **[sipx]** A peer that does not
@@ -232,6 +263,9 @@ DNS deciding which certificate is acceptable.
 | L8 | `sips:` where only TCP is reachable | No candidate; the request fails, never downgrades |
 | L9 | TLS 1.1 offered | Refused |
 | L10 | Two hosts on one address | Two connections, not one reused |
+| L11 | Replace a server identity with a different key, a malformed issuer, or an unrelated issuer; then connect using the old trust | Typed refusal before publication; private bytes absent from the error; old identity remains active |
+| L12 | TLS handshakes race one valid identity replacement | Every peer observes the complete old or complete new identity |
+| L13 | Existing TLS connection sends again after rotation | Continues on the established connection; listener address unchanged |
 | W1 | WebSocket peer offering no `sip` subprotocol | Refused |
 | W2 | One message per frame | Delivered |
 | W3 | Message split across two frames | Rejected as malformed |
@@ -246,6 +280,7 @@ DNS deciding which certificate is acceptable.
 | W12 | WSS with a certificate for another host | Refused before the upgrade; nothing crosses |
 | W13 | Server serving SIP only at `/ws` | Reached when the target names it; `404` when it does not |
 | W14 | Frame or fragmented message above the configured SIP message limit | Refused by the WebSocket decoder before assembly |
+| W15 | Existing WSS connection sends again after rotation, then a new connection arrives | Existing connection continues; the new handshake presents the replacement identity |
 | I1 | Register over TLS against a third-party server | Accepted |
 | I2 | …presenting a certificate for another name | Refused, immediately |
 | I3 | …signed by an issuer we do not know | Refused, immediately |

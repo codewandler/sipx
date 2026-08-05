@@ -2,7 +2,7 @@
 id: T-32
 title: Expose bounded endpoint observation and policy hooks
 pillar: Transport
-status: backlog
+status: in-progress
 priority: 9
 design: docs/designs/live-endpoint-policy.md
 epic: live-endpoint-policy
@@ -29,12 +29,13 @@ letting callbacks stall the driver or corrupt transaction and authentication inv
       counted and observable, and observer closure or failure cannot stop network processing.
 - [ ] A separate pre-transaction policy may approve, reject or add application-owned headers before
       branch, transaction key, Digest, Via and Content-Length are finalized.
-- [ ] A source-admission policy runs before SIP parsing for UDP datagrams and before TLS/WebSocket
-      handshake or stream parsing for connection transports. The host can atomically replace or
-      clear a bounded IP/prefix allowlist without rebinding; existing admitted connections retain a
-      stated generation policy, and refused sources are counted without allocating per-source work.
 - [ ] No post-key mutator can rewrite Call-ID, CSeq, route set, branch or authenticated bytes. Target
       selection continues through the existing resolver and explicit target APIs.
+- [ ] A live IP/prefix source-admission set is checked before UDP parsing and before TLS/WebSocket
+      handshaking or stream parsing. Replace and clear publish atomically; an accepted connection
+      retains the generation that admitted it until close, and refusals are counted without
+      per-source tasks, futures or state. A validated non-zero configured maximum bounds scan work;
+      oversized replacement is typed and preserves the old generation.
 - [ ] Capture and counters remain the zero-custom-code observation path and are not reimplemented by
       the hook.
 - [ ] Saturation, closed-consumer, protected-field mutation, UDP source refusal, pre-handshake
@@ -43,6 +44,5 @@ letting callbacks stall the driver or corrupt transaction and authentication inv
 
 ## Progress
 
-- Not started. Follows T-31 so the epic has one reviewed live-update doctrine before adding policy.
-  X-97 review added the pre-parse source-admission contract; parsed-message hooks alone do not close
-  the transport-whitelist leaf.
+- In progress after T-31 review. The source-admission correction discovered by X-97 is part of this
+  story rather than hidden inside the broader message-policy row. Full-gate completion is deferred.
