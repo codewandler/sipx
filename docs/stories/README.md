@@ -42,7 +42,11 @@ decisions rather than silent beta.4 scope growth.
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
-_None._
+
+### Transport layer
+_The transport layer is the only place in the signalling stack that touches the network, which_
+- [T-31 — Cancel an outgoing INVITE transaction from a forwarding element](T-31-cancel-an-outgoing-invite-transaction.md) · Signalling · requested by sipx-clstr PX-12 — the UA has a private builder, while a proxy cannot cancel one branch through Handle. Re-filed — the first filing (as T-28, commit 09d5518) was never merged and its ID was recycled
+- [T-32 — Bind only the selected cleartext transports](T-32-bind-only-the-selected-cleartext-transports.md) · Signalling · requested by sipx-clstr FC-1 — Config can express UDP or UDP+TCP, never TCP without an undeclared UDP socket. Re-filed — the first filing (as T-29, commit 09d5518) was never merged and its ID was recycled
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -122,6 +126,7 @@ _sipx implements exactly one SRTP protection profile:_
 - [A-12 — Publish and verify 1.0.0-beta.2](A-12-publish-and-announce-beta.md) · Application · irreversible cut only after P-13, A-11 and explicit user authorization
 - [A-13 — Explain how sipx was built on the public documentation site](A-13-explain-how-sipx-was-built.md) · Application · before A-12; evidence-led development narrative, not an internal story dump
 - [A-14 — Publish 1.0.0-beta.3 from latest main](A-14-publish-beta3-from-latest-main.md) · Application · new immutable prerelease from latest main; beta.2 remains untouched
+- [A-15 — Publish and verify 1.0.0-beta.4](A-15-publish-beta4.md) · Application · beta.4 capstone · immutable tag, exact registry consumer, installed Opus CLI, Pages and GitHub prerelease
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 gateway model · one live session crosses early and confirmed dialog state
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
