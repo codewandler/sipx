@@ -51,7 +51,7 @@ request, in this order:
 | # | Condition | Outcome |
 |---|---|---|
 | 1 | No `Call-ID`, or no `From` tag | `400 Bad Request` (RFC 3261 §8.1.1 makes both mandatory) |
-| 2 | INVITE with no `To` tag, missing/malformed CSeq or CSeq method other than INVITE | `400 Bad Request` (§8.1.1.5) |
+| 2 | Initial INVITE has missing/duplicate required dialog fields, unusable Contact, malformed CSeq or a CSeq method other than INVITE | `400 Bad Request` (§8.1.1 and §8.1.1.5) |
 | 3 | INVITE with no `To` tag, **merged** (see below) | `482 Loop Detected` (§8.2.2.2) |
 | 4 | INVITE with no `To` tag, not merged | **surfaced** as `Dispatched::Invitation`, route and INVITE transaction reserved |
 | 5 | CANCEL | placed here, never routed and never surfaced — see §9 |
@@ -115,6 +115,10 @@ a `DispatchCounts` — the same shape and the same reasoning as `Handle::shed` (
 `DispatchCounts::total()` is every field, and **every refusal the table makes is on one of them**.
 The last two exist because the first version of this type had four and the `400` and `482` branches
 moved no counter: two refusals invisible to the counters this whole section exists to provide.
+
+`Calls::responses()` is the distinct wire-evidence view: a status enters that map only after the
+response was built and successfully handed to the endpoint. Decision counts deliberately remain
+useful when a response cannot leave; response counts deliberately do not pretend that it did.
 
 `acks` is counted apart for `T-19`'s reason, which is unchanged by moving one layer up: an ACK
 cannot be refused, nothing retransmits it once Timer H expires, and the dialog it would have

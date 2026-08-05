@@ -12,9 +12,7 @@ use sipx_sip::build::{RequestBuilder, ResponseBuilder};
 use sipx_sip::headers::{CSeq, From as FromHeader, To};
 use sipx_sip::{HeaderName, Method, Request, Response, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio::sync::mpsc;
 
 use crate::dialog::Dialog;
 use crate::error::{Error, Result};
@@ -110,15 +108,14 @@ pub(crate) async fn establish(
     endpoint
         .respond(&incoming.key, prepared.response.clone())
         .await?;
-    let cancellation = CancellationToken::new();
-    let (terminal_tx, terminal_rx) = oneshot::channel();
-    let retransmission = tokio::spawn(retransmit_final(
-        endpoint.clone(),
-        incoming.key,
-        prepared.response,
-        cancellation.clone(),
-        terminal_tx,
-    ));
+    let now = tokio::time::Instant::now();
+    let retransmission = Retransmission {
+        key: incoming.key,
+        response: prepared.response,
+        interval: T1,
+        next: now + T1,
+        deadline: now + TIMER_H,
+    };
     Ok(SignallingCall {
         endpoint,
         dialog: prepared.dialog,
@@ -127,11 +124,24 @@ pub(crate) async fn establish(
         invite_cseq: prepared.invite_cseq,
         acknowledged: false,
         ended: false,
-        cancellation,
         retransmission: Some(retransmission),
-        retransmission_event: Some(terminal_rx),
         last_request_elapsed: None,
+        last_response_status: None,
     })
+}
+
+#[derive(Debug)]
+struct Retransmission {
+    key: sipx_sip::transaction::TransactionKey,
+    response: Response,
+    interval: Duration,
+    next: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+}
+
+enum SignallingInput {
+    Request(Option<Box<Incoming>>),
+    Retransmit,
 }
 
 /// One confirmed INVITE dialog without SDP or media ownership.
@@ -144,15 +154,9 @@ pub struct SignallingCall {
     invite_cseq: u32,
     acknowledged: bool,
     ended: bool,
-    cancellation: CancellationToken,
-    retransmission: Option<JoinHandle<()>>,
-    retransmission_event: Option<oneshot::Receiver<SignallingEvent>>,
+    retransmission: Option<Retransmission>,
     last_request_elapsed: Option<Duration>,
-}
-
-enum SignallingInput {
-    Request(Option<Box<Incoming>>),
-    Retransmission(Option<SignallingEvent>),
+    last_response_status: Option<u16>,
 }
 
 impl SignallingCall {
@@ -183,40 +187,46 @@ impl SignallingCall {
         self.last_request_elapsed
     }
 
+    /// Take the status successfully sent while producing the most recent event.
+    pub fn take_response_status(&mut self) -> Option<u16> {
+        self.last_response_status.take()
+    }
+
     /// Drive one routed request or final-response timer outcome.
     ///
     /// Network-invalid input becomes a typed event and, when SIP defines one, a response. It never
     /// panics or escapes as an internal error.
     pub async fn next(&mut self) -> Option<SignallingEvent> {
-        if self.ended {
-            return None;
-        }
-        let input = tokio::select! {
-            incoming = self.requests.recv() => {
-                SignallingInput::Request(incoming.map(Box::new))
-            },
-            event = wait_retransmission(&mut self.retransmission_event), if !self.acknowledged => {
-                SignallingInput::Retransmission(event)
+        loop {
+            if self.ended {
+                return None;
             }
-        };
-        match input {
-            SignallingInput::Request(Some(incoming)) => {
-                let started = tokio::time::Instant::now();
-                let event = self.handle(*incoming).await;
-                self.last_request_elapsed = Some(started.elapsed());
-                Some(event)
+            let wake = self
+                .retransmission
+                .as_ref()
+                .map(|state| state.next.min(state.deadline));
+            let input = tokio::select! {
+                incoming = self.requests.recv() => SignallingInput::Request(incoming.map(Box::new)),
+                () = wait_until(wake), if wake.is_some() => SignallingInput::Retransmit,
+            };
+            match input {
+                SignallingInput::Request(Some(incoming)) => {
+                    let started = tokio::time::Instant::now();
+                    let event = self.handle(*incoming).await;
+                    self.last_request_elapsed = Some(started.elapsed());
+                    return Some(event);
+                }
+                SignallingInput::Request(None) => {
+                    self.stop();
+                    return None;
+                }
+                SignallingInput::Retransmit => {
+                    if let Some(event) = self.retransmit().await {
+                        self.ended = true;
+                        return Some(event);
+                    }
+                }
             }
-            SignallingInput::Request(None) => {
-                self.stop().await;
-                None
-            }
-            SignallingInput::Retransmission(Some(event)) => {
-                self.ended = true;
-                self.finish_retransmission().await;
-                Some(event)
-            }
-            // The sender closes without an event only when cancellation already owns completion.
-            SignallingInput::Retransmission(None) => None,
         }
     }
 
@@ -225,7 +235,7 @@ impl SignallingCall {
     /// The duration bounds a failure; success is the observed final response rather than elapsed
     /// wall time.
     pub async fn hang_up(&mut self, within: Duration) -> Result<u16> {
-        self.finish_retransmission().await;
+        self.finish_retransmission();
         let cseq = self.dialog.next_cseq();
         let (local, remote) = self.dialog.local_and_remote();
         let (uri, routes) = self.dialog.request_target();
@@ -263,12 +273,13 @@ impl SignallingCall {
     ///
     /// Used only when another protocol outcome already ended the dialog or shutdown can no longer
     /// reach the peer. A live established dialog should prefer [`Self::hang_up`].
-    pub async fn stop(&mut self) {
+    pub fn stop(&mut self) {
         self.ended = true;
-        self.finish_retransmission().await;
+        self.finish_retransmission();
     }
 
     async fn handle(&mut self, incoming: Incoming) -> SignallingEvent {
+        self.last_response_status = None;
         if !self.dialog.matches(&incoming.request) {
             if incoming.request.method != Method::Ack
                 && respond(&self.endpoint, &incoming, 481, "Call Does Not Exist", None)
@@ -276,6 +287,9 @@ impl SignallingCall {
                     .is_err()
             {
                 return SignallingEvent::TransportFailed;
+            }
+            if incoming.request.method != Method::Ack {
+                self.last_response_status = Some(481);
             }
             return SignallingEvent::InvalidDialog;
         }
@@ -289,7 +303,7 @@ impl SignallingCall {
                     return SignallingEvent::InvalidAck;
                 }
                 self.acknowledged = true;
-                self.finish_retransmission().await;
+                self.finish_retransmission();
                 SignallingEvent::Acknowledged
             }
             Method::Bye => {
@@ -303,6 +317,7 @@ impl SignallingCall {
                     {
                         return SignallingEvent::TransportFailed;
                     }
+                    self.last_response_status = Some(400);
                     return SignallingEvent::InvalidCSeq;
                 };
                 if self
@@ -322,10 +337,11 @@ impl SignallingCall {
                     {
                         return SignallingEvent::TransportFailed;
                     }
+                    self.last_response_status = Some(500);
                     return SignallingEvent::InvalidCSeq;
                 }
                 self.dialog.record_remote_cseq(&incoming.request);
-                self.finish_retransmission().await;
+                self.finish_retransmission();
                 self.ended = true;
                 if respond(&self.endpoint, &incoming, 200, "OK", None)
                     .await
@@ -333,6 +349,7 @@ impl SignallingCall {
                 {
                     SignallingEvent::TransportFailed
                 } else {
+                    self.last_response_status = Some(200);
                     SignallingEvent::RemoteBye
                 }
             }
@@ -349,20 +366,41 @@ impl SignallingCall {
                 {
                     SignallingEvent::TransportFailed
                 } else {
+                    self.last_response_status = Some(405);
                     SignallingEvent::Unsupported
                 }
             }
         }
     }
 
-    async fn finish_retransmission(&mut self) {
-        self.cancellation.cancel();
-        self.retransmission_event = None;
-        if let Some(task) = self.retransmission.take() {
-            // The cancellation token is the happens-before; awaiting the task proves no owned
-            // retransmission remains.
-            let _ = task.await;
+    fn finish_retransmission(&mut self) {
+        self.retransmission = None;
+    }
+
+    async fn retransmit(&mut self) -> Option<SignallingEvent> {
+        let now = tokio::time::Instant::now();
+        let state = self.retransmission.as_mut()?;
+        if now >= state.deadline {
+            self.retransmission = None;
+            return Some(SignallingEvent::AckTimedOut);
         }
+        if self
+            .endpoint
+            .respond(&state.key, state.response.clone())
+            .await
+            .is_err()
+        {
+            let event = if tokio::time::Instant::now() >= state.deadline {
+                SignallingEvent::AckTimedOut
+            } else {
+                SignallingEvent::TransportFailed
+            };
+            self.retransmission = None;
+            return Some(event);
+        }
+        state.interval = state.interval.saturating_mul(2).min(T2);
+        state.next = tokio::time::Instant::now() + state.interval;
+        None
     }
 }
 
@@ -391,56 +429,10 @@ fn response_matches_dialog(response: &Response, dialog: &Dialog, sequence: u32) 
     call_id_matches && from_matches && to_matches && cseq_matches
 }
 
-impl Drop for SignallingCall {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-        if let Some(task) = self.retransmission.take() {
-            task.abort();
-        }
-    }
-}
-
-async fn wait_retransmission(
-    receiver: &mut Option<oneshot::Receiver<SignallingEvent>>,
-) -> Option<SignallingEvent> {
-    match receiver {
-        Some(receiver) => receiver.await.ok(),
+async fn wait_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
-    }
-}
-
-async fn retransmit_final(
-    endpoint: Handle,
-    key: sipx_sip::transaction::TransactionKey,
-    response: Response,
-    cancellation: CancellationToken,
-    terminal: oneshot::Sender<SignallingEvent>,
-) {
-    let mut interval = T1;
-    let deadline = tokio::time::Instant::now() + TIMER_H;
-    loop {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return,
-            () = tokio::time::sleep_until(deadline) => {
-                let _ = terminal.send(SignallingEvent::AckTimedOut);
-                return;
-            }
-            () = tokio::time::sleep(interval) => {}
-        }
-        if endpoint.respond(&key, response.clone()).await.is_err() {
-            // The transport transaction's Timer L and this owner's Timer H have the same RFC
-            // deadline. If the transaction loop removes its Accepted state first at that exact
-            // instant, the missing transaction is still an ACK timeout, not a transport failure.
-            let event = if tokio::time::Instant::now() >= deadline {
-                SignallingEvent::AckTimedOut
-            } else {
-                SignallingEvent::TransportFailed
-            };
-            let _ = terminal.send(event);
-            return;
-        }
-        interval = interval.saturating_mul(2).min(T2);
     }
 }
 

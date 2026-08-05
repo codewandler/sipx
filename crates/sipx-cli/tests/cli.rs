@@ -2560,6 +2560,32 @@ async fn bounded_load_responder_drives_readiness_through_zero_state() {
         "{}",
         String::from_utf8_lossy(&malformed_response[..malformed_length])
     );
+    let missing_contact = format!(
+        "INVITE sip:load@{address} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP {malformed_address};branch=z9hG4bKmissingcontact;rport\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:driver@driver.invalid>;tag=f-missing-contact\r\n\
+         To: <sip:load@{address}>\r\n\
+         Call-ID: cl-0123456789abcdef0123456789abcdef-10@driver.invalid\r\n\
+         CSeq: 1 INVITE\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    malformed_peer
+        .send_to(missing_contact.as_bytes(), address)
+        .await
+        .expect("contact-less INVITE sends");
+    let (missing_length, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        malformed_peer.recv_from(&mut malformed_response),
+    )
+    .await
+    .expect("contact-less INVITE response is bounded")
+    .expect("contact-less INVITE response");
+    assert!(
+        malformed_response[..missing_length].starts_with(b"SIP/2.0 400 "),
+        "{}",
+        String::from_utf8_lossy(&malformed_response[..missing_length])
+    );
     let call_id = "cl-0123456789abcdef0123456789abcdef-0@driver.invalid";
     let request_uri = sipx_sip::Uri::parse(bytes::Bytes::from(format!("sip:load@{address}")))
         .expect("request URI");
@@ -2662,9 +2688,9 @@ async fn bounded_load_responder_drives_readiness_through_zero_state() {
     assert_eq!(summary["counts"]["established"], 1);
     assert_eq!(summary["counts"]["completed"], 1);
     assert_eq!(summary["counts"]["active_high_water"], 1);
-    assert_eq!(summary["counts"]["invalid_messages"], 2);
+    assert_eq!(summary["counts"]["invalid_messages"], 3);
     assert_eq!(summary["responses"]["481"], 1);
-    assert_eq!(summary["responses"]["400"], 1);
+    assert_eq!(summary["responses"]["400"], 2);
     assert_eq!(summary["post_drain"]["active_dialogs"], 0);
     assert_eq!(summary["post_drain"]["dispatcher_routes"], 0);
     assert_eq!(summary["post_drain"]["endpoint_transactions"], 0);
@@ -2873,6 +2899,15 @@ fn load_invite_with_cseq(
         .expect("request URI");
     sipx_sip::build::RequestBuilder::new(Method::Invite, request_uri)
         .header(
+            HeaderName::Via,
+            bytes::Bytes::from(format!(
+                "SIP/2.0/UDP {};rport;branch={}",
+                peer.sent_by_for(sipx_transport::TransportKind::Udp),
+                sipx_transport::new_branch()
+            )),
+        )
+        .expect("Via")
+        .header(
             HeaderName::To,
             bytes::Bytes::from(format!("<sip:load@{address}>")),
         )
@@ -2896,6 +2931,31 @@ fn load_invite_with_cseq(
             bytes::Bytes::from(format!("<sip:driver@{}>", peer.local_addr())),
         )
         .expect("Contact")
+        .max_forwards(70)
+        .build()
+}
+
+fn load_cancel(invite: &sipx_sip::Request) -> sipx_sip::Request {
+    let copy = |name: &HeaderName| {
+        bytes::Bytes::from(
+            invite
+                .headers
+                .value(name)
+                .expect("INVITE header")
+                .into_owned(),
+        )
+    };
+    sipx_sip::build::RequestBuilder::new(Method::Cancel, invite.uri.clone())
+        .header(HeaderName::Via, copy(&HeaderName::Via))
+        .expect("Via")
+        .header(HeaderName::To, copy(&HeaderName::To))
+        .expect("To")
+        .header(HeaderName::From, copy(&HeaderName::From))
+        .expect("From")
+        .header(HeaderName::CallId, copy(&HeaderName::CallId))
+        .expect("Call-ID")
+        .cseq(1, &Method::Cancel)
+        .expect("CSeq")
         .max_forwards(70)
         .build()
 }
@@ -2984,11 +3044,9 @@ async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
     .await
     .expect("peer binds");
 
+    let first_request = load_invite(&peer, address, 0);
     let mut first = peer
-        .send(
-            load_invite(&peer, address, 0),
-            sipx_transport::Target::udp(address),
-        )
+        .send(first_request.clone(), sipx_transport::Target::udp(address))
         .await
         .expect("first INVITE sends");
     let accepted = tokio::time::timeout(Duration::from_secs(5), first.final_response())
@@ -2998,6 +3056,23 @@ async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
     assert_eq!(accepted.status.code(), 200);
     let tagged_to =
         bytes::Bytes::copy_from_slice(&accepted.headers.value(&HeaderName::To).expect("tagged To"));
+
+    let mut late_cancel = peer
+        .send(
+            load_cancel(&first_request),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("late CANCEL sends");
+    assert_eq!(
+        late_cancel
+            .final_response()
+            .await
+            .expect("late CANCEL response")
+            .status
+            .code(),
+        200
+    );
 
     let mut second = peer
         .send(
@@ -3048,6 +3123,8 @@ async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
     assert_eq!(summary["counts"]["established"], 1);
     assert_eq!(summary["counts"]["completed"], 1);
     assert_eq!(summary["counts"]["active_high_water"], 1);
+    assert_eq!(summary["responses"]["200"], 3);
+    assert_eq!(summary["responses"]["503"], 1);
     assert_eq!(summary["post_drain"]["active_dialogs"], 0);
     assert_eq!(summary["post_drain"]["dispatcher_routes"], 0);
     assert_eq!(summary["post_drain"]["endpoint_transactions"], 0);

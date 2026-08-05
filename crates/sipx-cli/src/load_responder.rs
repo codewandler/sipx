@@ -251,10 +251,6 @@ impl WorkerResult {
 
     fn cancelled(&mut self) {
         self.terminal = Terminal::Cancelled;
-        // A matched pre-final CANCEL is completed by the dispatcher as two transactions: 200 on
-        // CANCEL and 487 on the pending INVITE. The invitation observes the same atomic state.
-        self.response(200);
-        self.response(487);
     }
 }
 
@@ -358,18 +354,10 @@ impl Totals {
         }
     }
 
-    fn apply_dispatch(&mut self, counts: DispatchCounts) {
+    fn apply_dispatch(&mut self, counts: DispatchCounts, responses: BTreeMap<u16, u64>) {
         self.invalid = self.invalid.saturating_add(counts.total());
-        for (status, count) in [
-            (503, counts.shed),
-            (481, counts.unmatched),
-            (405, counts.unsupported),
-            (400, counts.malformed),
-            (482, counts.merged),
-        ] {
-            if count != 0 {
-                *self.responses.entry(status).or_default() += count;
-            }
+        for (status, count) in responses {
+            *self.responses.entry(status).or_default() += count;
         }
         if counts.identity != 0 {
             self.failed = self.failed.saturating_add(counts.identity);
@@ -582,8 +570,6 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
                         }
                         Err(sipx_call::Error::InvitationCancelled) => {
                             totals.cancelled += 1;
-                            *totals.responses.entry(200).or_default() += 1;
-                            *totals.responses.entry(487).or_default() += 1;
                         }
                         Err(error) => {
                             totals.failed += 1;
@@ -648,7 +634,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             }
         }
     }
-    totals.apply_dispatch(dispatcher.counts());
+    totals.apply_dispatch(dispatcher.counts(), calls.responses());
     let routes = calls.len();
     let transactions_before_shutdown = match endpoint.outstanding().await {
         Ok(count) => count,
@@ -822,7 +808,7 @@ async fn run_signalling(
     result.response(200);
     drive_signalling(&mut call, limits, stop, setup_started, &mut result).await;
     calls.forget(call.dialog());
-    call.stop().await;
+    call.stop();
     result
 }
 
@@ -845,6 +831,11 @@ async fn drive_signalling(
             () = stop.cancelled() => Drive::Stop,
             () = sleep_until(deadline) => Drive::Deadline,
         };
+        if matches!(&action, Drive::Event(Some(_)))
+            && let Some(status) = call.take_response_status()
+        {
+            result.response(status);
+        }
         match action {
             Drive::Event(Some(SignallingEvent::Acknowledged)) => {
                 if !result.established {
@@ -854,7 +845,6 @@ async fn drive_signalling(
             }
             Drive::Event(Some(SignallingEvent::RemoteBye)) if result.established => {
                 result.terminal = Terminal::Completed;
-                result.response(200);
                 result.teardown = call.last_request_elapsed();
                 return;
             }
@@ -1426,7 +1416,7 @@ mod tests {
     }
 
     #[test]
-    fn matched_cancel_accounts_for_both_transactions_once() {
+    fn matched_cancel_is_terminal_while_dispatcher_owns_wire_counts() {
         let limits = Limits {
             calls: Some(1),
             duration: None,
@@ -1445,7 +1435,6 @@ mod tests {
         totals.apply(worker);
         assert_eq!(totals.cancelled, 1);
         assert_eq!(totals.failed, 0);
-        assert_eq!(totals.responses.get(&200), Some(&1));
-        assert_eq!(totals.responses.get(&487), Some(&1));
+        assert!(totals.responses.is_empty());
     }
 }

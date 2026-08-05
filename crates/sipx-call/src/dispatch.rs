@@ -51,7 +51,7 @@
 //! # }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -626,6 +626,7 @@ struct Route {
 struct Table {
     routes: Mutex<Routing>,
     counts: Counters,
+    responses: Mutex<BTreeMap<u16, u64>>,
     queue: usize,
 }
 
@@ -732,6 +733,28 @@ impl Calls {
             merged: counts.merged.load(Ordering::Relaxed),
             identity: counts.identity.load(Ordering::Relaxed),
         }
+    }
+
+    /// Responses the dispatcher successfully handed to the endpoint, keyed by status code.
+    ///
+    /// Unlike [`Self::counts`], this is wire evidence rather than decision evidence: a response
+    /// that could not be built or handed off is absent.
+    #[must_use]
+    pub fn responses(&self) -> BTreeMap<u16, u64> {
+        self.0
+            .responses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn counted_response(&self, status: u16) {
+        let mut responses = self
+            .0
+            .responses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *responses.entry(status).or_default() += 1;
     }
 
     /// Record one request the dispatcher did not deliver.
@@ -896,6 +919,7 @@ impl Dispatcher {
             calls: Calls(Arc::new(Table {
                 routes: Mutex::new(Routing::default()),
                 counts: Counters::default(),
+                responses: Mutex::new(BTreeMap::new()),
                 queue: queue.max(1),
             })),
             identity: None,
@@ -967,7 +991,19 @@ impl Dispatcher {
                 .typed::<CSeq>()
                 .and_then(std::result::Result::ok)
                 .filter(|value| value.method == Method::Invite);
-            if invite_cseq.is_none() {
+            let unique_required = [
+                HeaderName::CallId,
+                HeaderName::From,
+                HeaderName::To,
+                HeaderName::CSeq,
+                HeaderName::Contact,
+            ]
+            .iter()
+            .all(|name| incoming.request.headers.count(name) == 1);
+            if invite_cseq.is_none()
+                || !unique_required
+                || Dialog::from_request(&incoming.request, "validation").is_none()
+            {
                 self.calls.counted(Kind::Malformed);
                 self.refuse(&incoming, 400, "Bad Request", None).await;
                 return None;
@@ -1245,8 +1281,11 @@ impl Dispatcher {
         // discard: the same loss one step later and with the same gap — see above. Closing it
         // needs a counter for responses the endpoint could not send, which belongs with
         // `sipx_transport::Handle::respond` rather than here.
-        if let Err(error) = self.endpoint.respond(key, response).await {
-            tracing::warn!(%error, status, "could not send the response for a request");
+        match self.endpoint.respond(key, response).await {
+            Ok(()) => self.calls.counted_response(status),
+            Err(error) => {
+                tracing::warn!(%error, status, "could not send the response for a request");
+            }
         }
     }
 }
