@@ -2,7 +2,7 @@
 id: A-20
 title: A WSS client for non-SIP peers
 pillar: Application
-status: ready
+status: in-progress
 priority: 2
 design: docs/designs/openai.md
 epic: openai
@@ -23,24 +23,24 @@ by contract, and must stay that way.
 
 ## Acceptance
 
-- [ ] `sipx-app` exposes a client that connects to a `wss` URL by composing
+- [x] `sipx-app` exposes a client that connects to a `wss` URL by composing
       `tokio-tungstenite`'s handshake over `sipx-transport`'s `ClientTls` — the same trust
       anchors, verification and refusal behaviour as every other TLS client in the
       workspace, proven by a failing-first test that a wrong-name certificate and an
       unknown-issuer certificate are refused with the existing typed errors.
-- [ ] The caller supplies request headers (at least `Authorization`); no subprotocol is
+- [x] The caller supplies request headers (at least `Authorization`); no subprotocol is
       required or offered unless the caller names one.
-- [ ] Frame and message sizes are bounded via the handshake configuration; an oversize
+- [x] Frame and message sizes are bounded via the handshake configuration; an oversize
       message is a typed error, not an allocation.
-- [ ] Liveness follows the session-binding discipline: Ping answered, a peer silent past the
+- [x] Liveness follows the session-binding discipline: Ping answered, a peer silent past the
       bound surfaces as a typed close — and the bound is a failure bound, not a
       happens-before (`check-fixed-sleep.py` clean).
-- [ ] Cleartext `ws` to non-loopback hosts is refused; loopback is permitted so A-21's
+- [x] Cleartext `ws` to non-loopback hosts is refused; loopback is permitted so A-21's
       stand-in peer and this story's own tests can run without certificates where the spec
       allows it.
-- [ ] No new workspace dependency, and `tokio-tungstenite` keeps its no-TLS-features stance
+- [x] No new workspace dependency, and `tokio-tungstenite` keeps its no-TLS-features stance
       (one TLS policy, not two) — asserted the way the Cargo.toml comment states it.
-- [ ] `scripts/check-app-surface.py` output reviewed: whatever this adds to the supported
+- [x] `scripts/check-app-surface.py` output reviewed: whatever this adds to the supported
       surface is deliberate and named in the story's Progress.
 
 ## Progress
