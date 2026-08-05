@@ -185,6 +185,7 @@ impl Clone for ResponseCapability {
     fn clone(&self) -> Self {
         // Saturation keeps cloning panic-free. Reaching usize::MAX live application handles is
         // outside any addressable process, but the counter remains well-defined even there.
+        // discard: saturation is the defined clone result; no fallible state transition is lost.
         let _ = self
             .state
             .owners

@@ -89,6 +89,7 @@ pub(crate) fn prepare(
     // `endpoint` is intentionally part of the preparation signature: the response's Contact is
     // caller-selected, but all subsequent requests remain tied to this endpoint. Reading its
     // advertised address here would silently override that explicit Contact.
+    // discard: the endpoint is a capability witness; preparation deliberately performs no I/O.
     let _ = endpoint;
     Ok(Prepared {
         response,

@@ -54,8 +54,9 @@ The version-one snapshot contains exactly these non-secret facts:
 | session timer | absent, or interval/refresher role and remaining lifetime at capture |
 | offer state | version one admits only `idle`; any pending local or remote offer refuses capture |
 
-An ended call, pending REFER/NOTIFY transfer usage, unacknowledged dialog-forming response, any live
-ICE generation, or non-idle offer exchange returns a named `NotQuiescent` reason. Version one
+An ended call, pending REFER/NOTIFY transfer usage, unacknowledged dialog-forming response, retained
+media cleanup from an interrupted replacement, any live ICE generation, or non-idle offer exchange
+returns a named `NotQuiescent` reason. Version one
 deliberately refuses those states because their missing transaction, credentials, nominated-pair
 state or timer cannot be recreated from dialog facts alone. It refuses all ICE rather than trying to
 infer whether a generation happens to be idle at the capture instant.
@@ -142,7 +143,7 @@ and refused.
 | DP-5 | protected/SIPS snapshot with clear UDP context | `SecurityDowngrade`; endpoint counters and task/transaction counts unchanged |
 | DP-6 | SDES or DTLS snapshot with plain/mismatched injected media policy, or a mismatched injected direction | typed security/contract mismatch; no serialized key bytes, runtime mutation or consumed context claim |
 | DP-7 | elapsed time below, equal to and greater than the captured remainder; separately, a remainder greater than the interval | checked `now + (remaining - elapsed)`, reusable pre-claim `SessionActionDue`, and contradiction refusal |
-| DP-8 | snapshot/capture while offer, ACK, transfer or ICE work is pending | typed `NotQuiescent`; no bytes produced |
+| DP-8 | snapshot/capture while offer, ACK, transfer, retired-media cleanup or ICE work is pending | typed `NotQuiescent`; no bytes produced |
 | DP-9 | restored loopback dialog sends one re-INVITE, receives its response, then shuts down the fresh endpoint | dialog identifiers, route order, target and CSeq are preserved; the endpoint shutdown barrier completes without orphaned work |
 
 Adversarial tests enumerate every prefix of a canonical snapshot, mutate each byte position, and

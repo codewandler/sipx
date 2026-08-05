@@ -338,6 +338,10 @@ impl SessionState {
     }
 }
 
+fn retired_media_snapshot_refusal(count: usize) -> Option<DialogNotQuiescent> {
+    (count != 0).then_some(DialogNotQuiescent::MediaCleanup)
+}
+
 impl Call {
     /// Capture the bounded protocol state needed to continue this confirmed dialog.
     ///
@@ -363,6 +367,9 @@ impl Call {
             return Err(DialogPersistenceError::NotQuiescent(
                 DialogNotQuiescent::OfferAnswer,
             ));
+        }
+        if let Some(reason) = retired_media_snapshot_refusal(self.retired_media.len()) {
+            return Err(DialogPersistenceError::NotQuiescent(reason));
         }
         if self.referral.is_some() || self.transfer.is_some() {
             return Err(DialogPersistenceError::NotQuiescent(
@@ -7235,10 +7242,16 @@ mod tests {
         }
         drop(draining);
         assert_eq!(retired.len(), 1, "cancellation preserved the old owner");
+        assert_eq!(
+            retired_media_snapshot_refusal(retired.len()),
+            Some(DialogNotQuiescent::MediaCleanup),
+            "snapshot capture refuses while cleanup ownership is retained"
+        );
 
         release.cancel();
         drain_retired(&mut retired).await;
         assert!(retired.is_empty(), "retry joined and removed the old owner");
+        assert_eq!(retired_media_snapshot_refusal(retired.len()), None);
     }
 
     /// M-49's pre-I/O boundary is pure: failure cannot have bound or gathered a socket.

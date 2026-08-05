@@ -54,6 +54,9 @@ pub enum DialogNotQuiescent {
     /// An offer, answer, or UPDATE transaction remains outstanding.
     #[error("an offer, answer, or UPDATE remains outstanding")]
     OfferAnswer,
+    /// An interrupted media replacement still owns a previous session awaiting cleanup.
+    #[error("a replaced media session is still awaiting cleanup")]
+    MediaCleanup,
     /// A received or originated transfer usage remains attached.
     #[error("a transfer usage remains attached")]
     Transfer,
