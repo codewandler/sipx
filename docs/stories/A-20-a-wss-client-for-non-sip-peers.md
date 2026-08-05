@@ -46,6 +46,21 @@ by contract, and must stay that way.
 ## Progress
 
 - (running log / checklist — a resuming agent reads this to know exactly where things stand)
+- 2026-08-05 (`impl/A-20`): implemented as `crates/sipx-app/src/wss.rs` — `WssClient` /
+  `WssRequest` / `WssConnection` / `WssMessage` / `WssError`, `tokio-tungstenite`'s client
+  handshake composed over `sipx_transport::tls::ClientTls` on a `TcpStream`. TLS refusals pass
+  through as the existing `TlsError::Handshake`; cleartext `ws` is refused for any non-loopback
+  *name* (resolution is never consulted); frame and message bounds go into the handshake
+  configuration; liveness is Ping on a cadence with a grace, a silent peer surfacing as the
+  typed `WssError::Stalled`, and the peer's Pings answered by the protocol layer. Proven by
+  `crates/sipx-app/tests/wss_client.rs` (13 tests, failing-first on the wrong-name vector) plus
+  10 unit vectors in the module; fixture certificates come from
+  `cargo run -p sipx-testkit --example issue-certs` into the system temp dir per run.
+- `scripts/check-app-surface.py` reviewed: before, "10 of 11 published crates; 7 modules and 0
+  crates experimental"; after, the same closure with **8** modules experimental — the new `wss`
+  module itself, marked **Experimental** (`A-8`) deliberately. No crate joins the dependency
+  closure and nothing graduates, so the *supported* surface is unchanged; the module graduates
+  when `A-22`'s bridge (or an external caller) constrains its shape.
 
 ## Notes
 
