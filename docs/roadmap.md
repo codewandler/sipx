@@ -42,10 +42,11 @@ terminal. It is reachable behind NAT through a flow it opened, it can be the par
 challenge rather than only the one that answers, and it serves subscriptions to what its dialogs
 and registrations are doing.
 
-The selected implementation work after beta.4 is **M13 — Endpoint-complete**: close the measured
-sipx-owned endpoint gaps before M14 compares load. The application SDK and host remain independent
-backlog, and M15 separately tracks the requested browser-embeddable audio package without turning
-sipx into a WebRTC engine. M9's remaining off-media bridge work is not pulled into that wave.
+The delivered implementation wave after beta.4 is **M13 — Endpoint-complete**: it closes the
+measured sipx-owned endpoint gaps before the selected M14 load comparison. The application SDK and
+host remain independent backlog, and M15 separately tracks the requested browser-embeddable audio
+package without turning sipx into a WebRTC engine. M9's remaining off-media bridge work is not
+pulled into that wave.
 
 ## Delivered
 
@@ -152,7 +153,7 @@ sipx into a WebRTC engine. M9's remaining off-media bridge work is not pulled in
   measurement that would have been trusted to rule a cause out. See
   [where M12 stands](#m12--provable).
 
-## Next
+## Milestone sequence
 
 Four milestones, each independently demonstrable, each ordered by the same rule the
 [RFC roadmap](rfc-roadmap.md) uses: **a gap that changes what sipx can be deployed as beats a gap
@@ -170,37 +171,39 @@ Application-host phase 1 is delivered by `A-2`; the remaining in-progress work i
 [app-sdk](#application-sdk--app-sdk) and [app-host](#application-host--app-host) phases below, which
 are not milestones because they are not RFC gaps.
 
-### M13 — Endpoint-complete (selected wave)
+### M13 — Endpoint-complete (delivered)
 
-*Close every currently known capability owned by a sipx endpoint before measuring it under load.*
+*Closed every known capability owned by a sipx endpoint before measuring it under load.*
 
-The `parity-wave-1` area tag is the machine-queryable selection: **fourteen stories across eight epics**.
-This is the next implementation wave, not a release name and not a stable-1.0 promise.
+The `parity-wave-1` area tag is the machine-queryable delivered set: **fifteen stories across nine
+epics**. Its implementation is integrated and all 36 full-gate steps are green. M13 is not a release
+name or stable-1.0 promise. M14 is now the next selected measurement wave.
 
-| Order | Epic | Stories | Outcome | Starts when |
+| Order | Delivery lane | Stories | Outcome | Dependency order |
 |---:|---|---|---|---|
-| 1 | [Stack comparison](designs/stack-comparison.md) | **X-97** | Leaf-level, generated capability ownership; newly found sipx gaps join M13 | now |
-| 2 | [Event reachability](designs/event-reachability.md) | **S-35, S-37, S-38, S-39** | Inbound notifier, reusable subscriber and live publication paths | S-35/S-37 now; S-38/S-39 after S-37 |
-| 3 | [Dialog extensions](designs/dialog-extensions.md) | **S-40** | Authenticated application-owned INFO, MESSAGE and extension requests | now |
-| 4 | [Live endpoint policy](designs/live-endpoint-policy.md) | **T-31, T-32** | Atomic TLS identity rotation, then bounded typed observation and policy | T-31 now; T-32 after it |
-| 5 | [Supported test surfaces](designs/test-surfaces.md) | **X-75, M-53** | A quiet library, real call harness and runnable RTP echo proof | X-75 now; M-53 after its harness review |
-| 6 | Registration observation | **S-42** | Typed public address learned from a registration response | after the first implementation batch |
-| 7 | [Dialog persistence](designs/dialog-persistence.md) | **S-43** | Versioned, bounded dialog snapshot and safe restoration | after the dialog-extension branch settles |
-| 8 | [Comparative load](designs/comparative-load.md) | **X-98, P-15** | Freeze the bounded workload and ship its finite answering endpoint | after endpoint feature branches; P-15 after X-98/X-75 |
+| 1 | [Stack comparison](designs/stack-comparison.md) | **X-97** | Leaf-level, generated capability ownership; newly found sipx gaps joined M13 | first |
+| 2 | [Event reachability](designs/event-reachability.md) | **S-24, S-35, S-37, S-38, S-39** | Inbound notifier, reusable subscriber, registration-event consumer and live publication paths | S-35/S-37 before S-24/S-38/S-39 |
+| 3 | [Dialog extensions](designs/dialog-extensions.md) | **S-40** | Authenticated application-owned INFO, MESSAGE and extension requests | independent first batch |
+| 4 | [Live endpoint policy](designs/live-endpoint-policy.md) | **T-31, T-32** | Atomic TLS identity rotation, then bounded typed observation and policy | T-31 before T-32 |
+| 5 | [Supported test surfaces](designs/test-surfaces.md) | **X-75, M-53** | A quiet library, real call harness and runnable RTP echo proof | X-75 before M-53 |
+| 6 | Registration observation | **S-42** | Typed public address learned from a registration response | second batch |
+| 7 | [Dialog persistence](designs/dialog-persistence.md) | **S-43** | Versioned, bounded dialog snapshot and safe restoration | after dialog extensions |
+| 8 | [Comparative load](designs/comparative-load.md) | **X-98, P-15** | Freeze the bounded workload and ship its finite answering endpoint | X-98/X-75 before P-15 |
 
-**Done when** the pinned capability ledger has no unclassified row and no open sipx-owned row; all
-fourteen selected stories plus any sipx story discovered by X-97 are done; every cluster-owned row links
-to a revision-pinned story in that repository; every new live path is bounded, cancellation-safe and represented in
-the RFC registry; and the full gate is green. Proxying, registrar/location service, routing, trunks,
+**Delivery threshold:** the pinned capability ledger has no unclassified row and no open sipx-owned
+row; all fifteen selected stories plus any sipx story discovered by X-97 are done; every
+cluster-owned row links to a revision-pinned story in that repository; every new live path is
+bounded, cancellation-safe and represented in the RFC registry; and the full gate is green.
+Proxying, registrar/location service, routing, trunks,
 allowlists, deployment and cluster failover do not become sipx work merely because the comparison
 subject packages them beside its endpoint.
 
-The dependency-closed order is X-97 and S-37 first; S-35, S-40, T-31 and X-75 can run beside them;
-S-38 and S-39 follow the event-client contract; T-32 follows the live-update review; S-42 and M-53
-follow the first implementation batch; S-43 follows the dialog-extension review; X-98 freezes the load contract before P-15 implements its
-responder. X-97 is a
-discovery gate: the wave expands if it finds another real sipx-owned leaf, rather than declaring
-parity by keeping the original list fixed.
+The dependency-closed implementation order put X-97 and S-37 first; S-35, S-40, T-31 and X-75 ran
+beside them; S-38 and S-39 followed the event-client contract; T-32 followed the live-update review;
+S-42 and M-53 followed the first batch; S-43 followed the dialog-extension review; and X-98 froze
+the load contract before P-15 implemented its responder. X-97 served as a discovery gate, expanding
+the wave when it found another real sipx-owned leaf instead of declaring parity against a fixed
+initial list.
 
 ### M14 — Pressure-proved
 

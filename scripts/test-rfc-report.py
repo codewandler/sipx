@@ -272,6 +272,17 @@ class ClaimReachability(unittest.TestCase):
             f"a security role no call can select was accepted; problems={problems}",
         )
 
+    def test_a_service_role_claimed_from_a_leaf_crate_is_rejected(self):
+        """Once a live driver selects a service, leaf-only evidence no longer proves a role."""
+        entry = self.a_media_entry(
+            layer="services", evidence=["crates/sipx-ua/src/subscribe.rs"]
+        )
+        problems = report.check([entry])
+        self.assertTrue(
+            any("9999" in problem and "reach" in problem for problem in problems),
+            f"a services role with no live endpoint evidence was accepted; problems={problems}",
+        )
+
     def test_an_implemented_media_row_with_no_role_must_still_reach_a_call(self):
         """The `roles`-not-`status` hole `X-30` recorded, in fixture form: RFC 6716 and 7587.
 
@@ -338,123 +349,33 @@ class ClaimReachability(unittest.TestCase):
         )
 
     def test_the_services_rows_keep_their_roles_and_why(self):
-        """RFC 3680, 3856, 3903 and 4235 are *not* the media over-claims one layer over.
+        """Live endpoint selection puts services under the same reachability rule as media.
 
-        They implement a `uas` surface in `sipx-ua` that nothing in `sipx-cli` calls, which is the
-        ICE shape until you ask *which crate serves the claimed role*. For a media row that is
-        `sipx-call`, a different crate sitting above the one that implements the capability, and
-        something there has to select it. For a services row it is `sipx-ua` itself: the notifier
-        is `sipx_ua::subscribe::Subscriptions`, and no call or application dispatcher selects it.
-        `sipx-call` now depends on `sipx-ua` for authenticated identity, but dependency reachability
-        is not service selection: that path imports `identity`, not the subscription, publication,
-        or package modules.
-
-        The absence of dispatcher selection is the load-bearing fact and is asserted by the next
-        test. `packages.rs` is asserted here too, but only for what it shows — the surface being
-        driven from outside its crate rather than merely compiled. It is *not* what distinguishes
-        these rows from ICE:
-        `crates/sipx-media/tests/ice.rs` calls `start_with_ice` from outside `sipx-media` in
-        exactly the same way, and an earlier version of this docstring claimed otherwise.
-
-        `docs/designs/rfc-registry-grain.md` carries the argument and both corrections.
+        The call layer now drives both event roles: its notifier selects the package and
+        subscription stores, while its subscriber and publication drivers select the outbound
+        state machines. A services role is therefore no longer justified by a leaf-crate test;
+        every claimed role must retain Rust evidence at or above `sipx-call`.
         """
         by_number = {e["number"]: e for e in registry_entries()}
-        for number in (3680, 3856, 3903, 4235):
+        self.assertIn("services", report.ROLE_REACHABILITY_LAYERS)
+        expected = {
+            3680: ["uac", "uas"],
+            3856: ["uas"],
+            3903: ["uac", "uas"],
+            4235: ["uas"],
+        }
+        reachable = report.call_layer_crates()
+        for number, roles in expected.items():
             with self.subTest(rfc=number):
-                self.assertTrue(by_number[number].get("roles"))
-
-        reached = (ROOT / "crates" / "sipx-ua" / "tests" / "packages.rs").read_text()
-        self.assertIn("sipx_ua::presence", reached)
-        self.assertIn("sipx_ua::packages", reached)
-        self.assertIn("sipx_ua::subscribe::{Answer, Subscriptions}", reached)
-        # And driven, not just imported: a real SUBSCRIBE goes into the notifier.
-        self.assertIn("notifier.on_subscribe(", reached)
-
-    def test_the_services_rows_keep_their_roles_only_while_nothing_dispatches_to_them(self):
-        """`X-33` resolving the four rows individually, and pinning the reason so it can expire.
-
-        `X-30` gave these rows one collective argument. Taken row by row the argument is the same
-        one four times, and it holds — but only because of a fact nobody had checked: **no call or
-        application dispatcher selects the SUBSCRIBE, PUBLISH, or package services.**
-        `Subscriptions::on_subscribe` and `Compositor::apply` take a parsed `Request` and are fed one
-        by `sipx-ua`'s own tests; `sipx-call`'s dispatcher advertises neither method on `Allow` and
-        unit-tests that it does not, while the application surfaces select none of those modules.
-
-        That is what makes `sipx-ua` the crate that *serves* the role rather than a crate below one
-        that must select the capability. `sipx-call` depending on `sipx-ua` for identity does not
-        change that: the dependency is real, but it selects a different service.
-        The four resolutions, individually:
-
-        - **3903** (PUBLISH, `uas`): `Compositor::apply` decides what a publication means and what to
-          answer; an application supplies the request. Role kept, note says so.
-        - **3856** (presence package, `uas`): joined to the notifier and driven from outside the
-          crate — `packages.rs` publishes and asserts the NOTIFY body changes. Role kept.
-        - **3680** (`reg` package, `uas`): registered under the name a subscriber asks for, asserted
-          from outside the crate. Role kept; the missing registrar join was already in the note.
-        - **4235** (`dialog` package, `uas`): same, plus the missing dialog-store join. Role kept.
-
-        **And the trigger that takes the roles away is this assertion.** The moment something routes
-        an inbound SUBSCRIBE or PUBLISH — a dispatcher, a server mode, an application host — these
-        rows acquire the media shape exactly, because then there *is* a crate above `sipx-ua` that
-        must select the package, and a package nothing selects is unreachable. This test goes red
-        first, which is the point of writing it here instead of in prose.
-        """
-        dispatch = (ROOT / "crates" / "sipx-call" / "src" / "dispatch.rs").read_text()
-        served = re.findall(r"Method::(\w+)\s*(?:=>|\|)", dispatch)
-        # Non-vacuous: the dispatcher does route six methods, `Notify` among them — which is how
-        # RFC 6665's own `uas` claim reaches a call, through REFER's implicit subscription.
-        self.assertIn("Notify", served)
-        for method in ("Subscribe", "Publish"):
-            with self.subTest(method=method):
-                self.assertNotIn(
-                    method,
-                    served,
-                    f"something now dispatches on {method}. If an inbound one reaches a package,"
-                    " RFC 3680, 3856, 3903 and 4235 are the media over-claim shape one layer over"
-                    " and their `uas` claims need a caller above `sipx-ua` — re-read"
-                    " docs/designs/rfc-registry-grain.md before relaxing this",
+                entry = by_number[number]
+                self.assertEqual(roles, entry["roles"])
+                self.assertTrue(
+                    any(
+                        report.reaches_the_call_layer(path, reachable)
+                        for path in entry["evidence"]
+                    ),
+                    f"RFC {number} lost its live endpoint evidence",
                 )
-
-        # A dependency on `sipx-ua` is not selection of all of its services. The call layer uses
-        # identity, while neither application surface routes these methods or imports the service
-        # modules that would handle them.
-        service_module = re.compile(
-            r"\bsipx_ua\s*::\s*(?:packages|presence|subscribe|\{[^}]*\b(?:packages|presence|subscribe)\b)",
-            flags=re.DOTALL,
-        )
-        for crate in ("sipx-call", "sipx-app", "sipx-cli"):
-            for source in (ROOT / "crates" / crate / "src").rglob("*.rs"):
-                code = rust_code_only(source.read_text())
-                with self.subTest(crate=crate, source=source.name):
-                    self.assertIsNone(
-                        service_module.search(code),
-                        f"{source} now selects a subscription, publication, or package service;"
-                        " re-evaluate RFC 3680, 3856, 3903 and 4235",
-                    )
-                if crate in ("sipx-app", "sipx-cli"):
-                    for method in ("Method::Subscribe", "Method::Publish"):
-                        with self.subTest(crate=crate, source=source.name, method=method):
-                            self.assertNotIn(
-                                method,
-                                code,
-                                f"{source} now selects {method}; re-evaluate RFC 3680, 3856,"
-                                " 3903 and 4235",
-                            )
-
-        # And no request-routing anywhere in the crate that serves them either. `sipx-ua` is a
-        # library: it decides what a SUBSCRIBE means and never learns one arrived.
-        for source in (ROOT / "crates" / "sipx-ua" / "src").rglob("*.rs"):
-            text = source.read_text()
-            for method in ("Method::Subscribe", "Method::Publish"):
-                with self.subTest(source=source.name, method=method):
-                    self.assertNotIn(method, text)
-
-        # Each of the four resolutions is a role that is still claimed, so a silent removal is a
-        # change to the argument above and not just to a row.
-        by_number = {e["number"]: e for e in registry_entries()}
-        for number in (3680, 3856, 3903, 4235):
-            with self.subTest(rfc=number):
-                self.assertEqual(["uas"], by_number[number]["roles"])
 
     def test_the_scope_tracks_selection_not_the_layer_string(self):
         """The property behind `ROLE_REACHABILITY_LAYERS`, held against the code.
@@ -568,6 +489,7 @@ class ClaimReachability(unittest.TestCase):
         # Below sipx-call, so citing them proves nothing about what a call can select.
         self.assertNotIn("sipx-media", crates)
         self.assertNotIn("sipx-sdp", crates)
+        self.assertNotIn("sipx-ua", crates)
 
     def test_the_security_scope_tracks_selection_too(self):
         """The property behind adding `security`, held against the code rather than asserted.

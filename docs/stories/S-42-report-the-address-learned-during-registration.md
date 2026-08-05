@@ -2,7 +2,7 @@
 id: S-42
 title: Report the address learned during registration
 pillar: Signalling
-status: in-progress
+status: done
 priority: 10
 design: docs/designs/stack-comparison.md
 epic: registration-observation
@@ -29,13 +29,12 @@ wire response again or confusing that observation with a routable Contact policy
       and authentication retry does not lose the final response's observation.
 - [x] The API states that the learned value is an observation, not permission to rewrite future
       Contacts or media addresses automatically.
-- [ ] RFC registry evidence is updated and `./scripts/gate.py` is green.
+- [x] RFC registry evidence is updated and `./scripts/gate.py` is green.
 
 ## Progress
 
 - The independent `registration-observation` branch carries the spec, typed registrar and
   `UserAgent` surfaces, malformed-input vectors, UDP/TCP runtime coverage, final-auth-response
   coverage, public guide, RFC evidence and generated maturity/compliance changes.
-- Focused `sipx-ua` check, clippy and test suites are green. The full workspace gate is intentionally
-  left to the integration branch after the parallel M13 branches merge, so the story remains
-  in-progress and the final acceptance item remains open.
+- Focused `sipx-ua` check, clippy and test suites are green. The corrected full workspace gate passed
+  all 36 steps after the parallel M13 branches merged.

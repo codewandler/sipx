@@ -153,14 +153,22 @@ after inspection. This diagnostic does not waive the clean-checkout rule in any 
 not a substitute for `cargo publish --dry-run --locked` compiling the archive.
 
 The local package-set proof covers a dependency-ordered pre-publication case that a single-package
-verification cannot: `sipx-testkit` may consume an unreleased `sipx-transport` API at the same
-workspace version. Cargo packages and verifies both together through its temporary registry. A
-second clean consumer compiles the RTP echo example copied from the exact staged testkit archive and
-its lockfile must resolve both testkit and transport from the staged archive sources. Every
+verification cannot: `sipx-testkit` may consume unreleased APIs anywhere in its transitive public
+workspace dependency closure at the same version. The helper derives that complete closure from
+Cargo metadata and packages it in deterministic publication order through Cargo's temporary
+registry. A second clean consumer compiles the RTP echo example copied from the exact staged testkit
+archive; its manifest patches every other closure member to its extracted archive and its lockfile
+must resolve every member, including `sipx-sip` and `sipx-transport`, from those staged sources. Every
 `dry-run` MUST complete this proof before Cargo's workspace rehearsal, so the tag workflow cannot
 publish after exercising only the single-package path. `--verify-local-package-set` remains a
 focused way to run the same proof while developing a dirty candidate. Both paths are bounded and
 temporary and say nothing about registry visibility.
+
+The same example is the manifest-declared proof for the test-product reachability class enforced by
+`check-app-surface.py`. That class backs only `sipx-testkit`'s Supported test API: it does not add
+the testkit or its dependency closure to the shipped application's production surface. The surface
+check proves the example target and import exist; this rehearsal proves the archived bytes resolve
+and compile as a clean external consumer.
 
 ## 4. Partial registry availability
 
@@ -215,4 +223,4 @@ the unavailable dependencies. It never guesses that a successful upload is alrea
 | R17 | GitHub tag push or tag-selected manual dispatch, exact annotated tag/HEAD/workflow SHA, both confirmations and token | retain the ordinary frontier/checksum rules and permit at most one ready frontier |
 | R18 | protected recovery names a failed same-tag release whose gate/rehearsal passed and publication failed, with matching visible bytes | fixed controller may advance one missing frontier; wrong run/workflow/step/commit/controller or byte mismatch dispatches no upload |
 | R19 | Cargo VCS record omits `git.dirty`, sets a boolean, or gives a non-boolean value | omitted/false is clean; true is dirty; malformed is refused |
-| R20 | local package-set verification stages transport and testkit, then compiles the archived RTP echo example | both exact packages resolve from staged bytes; never substitute the older registry transport or claim publication |
+| R20 | local package-set verification derives and stages testkit's complete public workspace dependency closure, then compiles the archived RTP echo example | every exact closure member resolves from staged bytes; never substitute an older registry package or claim publication |

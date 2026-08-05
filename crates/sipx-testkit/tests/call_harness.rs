@@ -60,8 +60,7 @@ async fn the_public_harness_establishes_real_calls_and_delivers_the_ack() {
         .expect("real dial produced an invitation");
     assert_eq!(pending.invitation().request.method, Method::Invite);
 
-    let mut established = pending
-        .answer(loopback)
+    let mut established = Box::pin(pending.answer(loopback))
         .await
         .expect("real answer produced two calls and a matching ACK");
     let mut originating_events = established.caller.events().expect("caller event stream");
@@ -93,8 +92,7 @@ async fn each_pending_call_owns_only_its_own_invitation_and_response_stream() {
             pending.invitation().request.uri.to_bytes(),
             uri(callee).to_bytes()
         );
-        pending
-            .answer(loopback)
+        Box::pin(pending.answer(loopback))
             .await
             .expect("this call established independently");
     }

@@ -18,6 +18,11 @@
 //! over socket-free SIP signalling, bounded RTP media peer, seeded fault link and nanosecond virtual
 //! clock. **Experimental:** certificate, corpus, soak and transaction-sequence utilities; these
 //! primarily serve workspace verification and their shape follows those suites.
+//!
+//! This is a test-product surface, not production application reachability. Its package metadata
+//! names the independently compiled `rtp_echo` example as the executable caller; the app-surface
+//! gate validates that target and import without admitting this crate's dependencies into the
+//! production surface.
 
 pub mod call;
 pub mod certs;

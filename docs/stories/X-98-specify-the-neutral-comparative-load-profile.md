@@ -2,7 +2,7 @@
 id: X-98
 title: Specify the neutral comparative load profile
 pillar: Build
-status: in-progress
+status: done
 priority: 12
 design: docs/designs/comparative-load.md
 epic: comparative-load
@@ -35,7 +35,7 @@ comparison before implementing or running it.
       p99 setup at most 250 ms and complete drain. Uncertainty overlap is inconclusive, never ranked.
 - [x] Subject-specific identity, pins, commands and evidence are data under `docs/comparison/`; the
       spec, runner and story remain subject-neutral.
-- [ ] Fixture tests reject unbounded phases, missing cleanup, incomplete metadata and a simulated
+- [x] Fixture tests reject unbounded phases, missing cleanup, incomplete metadata and a simulated
       orphan descendant; `./scripts/gate.py` is green.
 
 ## Progress
@@ -55,5 +55,5 @@ comparison before implementing or running it.
   requires a clean, unforced leader exit, with every non-zero status tied to one crash count.
 - Descendant cleanup review observes callback process-group disappearance independently of leader
   exit and proves that a returned callback cannot strand a descendant that ignores `TERM`.
-- The full gate is intentionally deferred until the reviewed M13 branches reach integration, so the
-  final Acceptance item and story status remain open. The actual comparative measurement is M14.
+- The reviewed M13 branches are integrated and the corrected full gate passed all 36 steps. The
+  actual comparative measurement remains M14.

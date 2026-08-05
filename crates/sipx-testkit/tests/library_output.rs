@@ -148,8 +148,7 @@ async fn quiet_library_child() {
         .dial(to, DialOptions::new("sip:caller@example.net", loopback))
         .await
         .expect("real dial reaches the application");
-    let _established = pending
-        .answer(loopback)
+    let _established = Box::pin(pending.answer(loopback))
         .await
         .expect("real answer and ACK complete");
 }

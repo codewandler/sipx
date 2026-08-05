@@ -75,16 +75,17 @@ rebinds the released address while the runtime task count equals its baseline.
 
 The locked `python3 scripts/release.py --dry-run` rehearsal MUST run the pre-publication consumer
 proof for this example before checking the complete public workspace. The focused
-`--verify-local-package-set` mode runs that same proof by itself. One bounded Cargo invocation stages
-`sipx-transport` and `sipx-testkit` archives
-together, so Cargo verifies the unreleased dependency edge through its temporary registry rather
-than substituting the older registry release. The verifier then extracts those exact archives into a
-temporary directory, copies `examples/rtp_echo.rs` from the testkit archive into a clean consumer,
-and resolves both package-set members from the staged bytes before compiling every consumer target.
+`--verify-local-package-set` mode runs that same proof by itself. One bounded Cargo invocation derives
+and stages `sipx-testkit` plus its complete transitive public workspace dependency closure in
+deterministic publication order. Cargo therefore verifies every unreleased dependency edge through
+its temporary registry rather than substituting an older registry release. The verifier extracts
+those exact archives into a temporary directory, copies `examples/rtp_echo.rs` from the testkit
+archive into a clean consumer, patches every other closure member to its extracted source, and
+resolves every package-set member from staged bytes before compiling every consumer target.
 
 The package and consumer commands have separate finite deadlines and owned process groups. Archive
 paths and links are refused before extraction, temporary state is removed on every outcome, and the
-lockfile MUST show both package-set members as staged path sources. The release helper's test suite
+lockfile MUST show every package-set member as a staged path source. The release helper's test suite
 also executes this complete archive-to-consumer path under finite package and consumer deadlines.
 This is pre-publication evidence;
 it does not claim the same version is already visible on the registry and does not replace the

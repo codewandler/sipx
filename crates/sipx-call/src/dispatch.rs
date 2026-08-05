@@ -1026,61 +1026,7 @@ impl Dispatcher {
         // `Dialog::matches` would then reject it and leave nothing to answer it.
         if incoming.request.method == Method::Invite && to_tag(&incoming.request.headers).is_none()
         {
-            let invite_cseq = incoming
-                .request
-                .headers
-                .typed::<CSeq>()
-                .and_then(std::result::Result::ok)
-                .filter(|value| value.method == Method::Invite);
-            let unique_required = [
-                HeaderName::CallId,
-                HeaderName::From,
-                HeaderName::To,
-                HeaderName::CSeq,
-                HeaderName::Contact,
-            ]
-            .iter()
-            .all(|name| incoming.request.headers.count(name) == 1);
-            if invite_cseq.is_none()
-                || !unique_required
-                || Dialog::from_request(&incoming.request, "validation").is_none()
-            {
-                self.calls.counted(Kind::Malformed);
-                self.refuse(&incoming, 400, "Bad Request", None).await;
-                return None;
-            }
-            let cseq = cseq_number(&incoming.request.headers);
-            if self.calls.is_merged(&key, cseq) {
-                // RFC 3261 §8.2.2.2, all three of its terms: the same `Call-ID`, `From` tag *and*
-                // `CSeq` as a request already accepted here, which means this copy reached us by
-                // a second path. A retransmission never gets this far — the server transaction
-                // absorbs those — so a match here is always a different branch.
-                self.calls.counted(Kind::Merged);
-                self.refuse(&incoming, 482, "Loop Detected", None).await;
-                return None;
-            }
-            let verification = self
-                .identity
-                .as_mut()
-                .map(|identity| identity.verify(&incoming.request));
-            if let Some(Err(failure)) = verification {
-                self.calls.counted(Kind::Identity);
-                self.refuse(&incoming, failure.status(), failure.reason(), None)
-                    .await;
-                return None;
-            }
-            // Anything else is a fresh call attempt, and that includes the §8.1.3.5 retry that
-            // follows a 401, 407, 413, 415, 420, 484 or RFC 4028 §7.3's 422 — same `Call-ID` and
-            // `From` tag, one higher `CSeq`. It reserves the key afresh, replacing a route whose
-            // invitation has been answered and abandoned; anything still holding that inbox stops
-            // receiving, which is what it already was.
-            let (requests, pending, events) = self.calls.reserve(key, &incoming);
-            return Some(Dispatched::Invitation(Invitation {
-                incoming,
-                requests,
-                pending,
-                events: Some(events),
-            }));
+            return self.route_new_invite(key, incoming).await;
         }
 
         // Before the route lookup, because a CANCEL does not belong to a *dialog* — it belongs to
@@ -1165,6 +1111,64 @@ impl Dispatcher {
                 None
             }
         }
+    }
+
+    async fn route_new_invite(&mut self, key: RouteKey, incoming: Incoming) -> Option<Dispatched> {
+        let invite_cseq = incoming
+            .request
+            .headers
+            .typed::<CSeq>()
+            .and_then(std::result::Result::ok)
+            .filter(|value| value.method == Method::Invite);
+        let unique_required = [
+            HeaderName::CallId,
+            HeaderName::From,
+            HeaderName::To,
+            HeaderName::CSeq,
+            HeaderName::Contact,
+        ]
+        .iter()
+        .all(|name| incoming.request.headers.count(name) == 1);
+        if invite_cseq.is_none()
+            || !unique_required
+            || Dialog::from_request(&incoming.request, "validation").is_none()
+        {
+            self.calls.counted(Kind::Malformed);
+            self.refuse(&incoming, 400, "Bad Request", None).await;
+            return None;
+        }
+        let cseq = cseq_number(&incoming.request.headers);
+        if self.calls.is_merged(&key, cseq) {
+            // RFC 3261 §8.2.2.2, all three of its terms: the same `Call-ID`, `From` tag *and*
+            // `CSeq` as a request already accepted here, which means this copy reached us by a
+            // second path. A retransmission never gets this far — the server transaction absorbs
+            // those — so a match here is always a different branch.
+            self.calls.counted(Kind::Merged);
+            self.refuse(&incoming, 482, "Loop Detected", None).await;
+            return None;
+        }
+        let verification = self
+            .identity
+            .as_mut()
+            .map(|identity| identity.verify(&incoming.request));
+        if let Some(Err(failure)) = verification {
+            self.calls.counted(Kind::Identity);
+            self.refuse(&incoming, failure.status(), failure.reason(), None)
+                .await;
+            return None;
+        }
+        // Anything else is a fresh call attempt, and that includes the §8.1.3.5 retry that follows
+        // a 401, 407, 413, 415, 420, 484 or RFC 4028 §7.3's 422 — same `Call-ID` and `From` tag, one
+        // higher `CSeq`. It reserves the key afresh, replacing a route whose invitation has been
+        // answered and abandoned; anything still holding that inbox stops receiving, which is what
+        // it already was.
+        let (requests, pending, events) = self.calls.reserve(key, &incoming);
+        Some(Dispatched::Invitation(Invitation {
+            incoming,
+            requests,
+            pending,
+            events: Some(events),
+        }))
     }
 
     /// Answer a CANCEL — both halves of RFC 3261 §9.2, or the 481 that says there was nothing to

@@ -136,11 +136,15 @@ workspace, parsers are fuzzed, and unknown headers survive a parse/serialize rou
 | `sipx-sip` | Sans-IO SIP core: messages, parser and transactions (RFC 3261) |
 | `sipx-testkit` | Deterministic SIP and RTP tests with bounded peers, virtual time, and RFC corpora |
 | `sipx-transport` | Async SIP transports: UDP, TCP, TLS, WebSocket, experimental QUIC, and RFC 3263 resolution |
-| `sipx-ua` | SIP user agent: registration, digest authentication, and experimental subscriptions and presence |
+| `sipx-ua` | SIP user agent: registration, digest authentication, event subscriptions, and presence |
 <!-- END generated:crate-map -->
 
 Each crate states its supported and experimental surface in its crate-level API documentation.
 See the [API reference](https://codewandler.github.io/sipx/api/) for the exact contract.
+Production reachability is measured from `sipx-app`. The Supported `sipx-testkit` harness is a
+separate test-product surface: a manifest-declared Cargo example is compiled as its caller and the
+release rehearsal rebuilds that archived example in a clean consumer; it does not promote the
+testkit's dependencies into the production surface.
 
 ## Documentation
 

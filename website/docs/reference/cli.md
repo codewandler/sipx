@@ -292,6 +292,11 @@ List what can be called: `sipx peers --json`
 | `--watch <S>` | Keep applying updates for this many seconds after the first snapshot |
 | `--local <ADDR>` | Local signalling bind address |
 | `--transport <T>` | `udp`, `tcp`, `tls`, `ws`, or `wss`, with the shared TLS options |
+| `--tcp` | Legacy alias for `--transport tcp` |
+| `--tls-server-name <N>` | Certificate identity to verify (default AOR domain) |
+| `--tls-ca <FILE>` | Add PEM trust roots to the platform store |
+| `--tls-cert <FILE>` | Client certificate chain for mutual TLS; requires `--tls-key` |
+| `--tls-key <FILE>` | Client private key for mutual TLS; requires `--tls-cert` |
 
 The book is looked for in `--book`, then `$SIPX_PEERS`, then `$XDG_CONFIG_HOME/sipx/peers`, then
 `$HOME/.config/sipx/peers`. It is a text file a shell can write — one peer per line, a name and a

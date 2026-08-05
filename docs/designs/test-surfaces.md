@@ -53,6 +53,14 @@ surface unavailable to registry consumers and contradict the point of the story.
 workspace dependencies are already public; development dependencies do not enter its published
 graph. Release graph checks and `cargo package` remain the authority for the archive.
 
+This Supported claim uses a distinct **test-product reachability** class. The package manifest
+names one example target, `rtp_echo`; `check-app-surface.py` derives the crate from that declaration,
+requires the example's non-comment Rust source to import its public library, and relies on the
+gate's `cargo check --all-targets` to compile the separate target. The release rehearsal then copies
+that exact archived example into a clean package-set consumer. An ordinary test, dev-dependency or
+undeclared example still cannot widen production application reachability, and the test product
+backs only `sipx-testkit` itself rather than the dependency closure below it.
+
 ## Output audit
 
 The 2026-08-05 audit of library `src/` found all output at `tracing` call sites and no `println!`,

@@ -7,8 +7,9 @@
 //!
 //! Together they are what a busy-lamp field on a desk phone subscribes to: `dialog` says whether a
 //! line is ringing or in a call, `reg` says whether the phone is registered at all.
-//! **Experimental** (`A-8`): the event-package documents are public and tested; nothing above this
-//! crate subscribes to one, so their shape is still free.
+//! **Supported** (`S-35`): [`sipx_call::Notifier`](https://docs.rs/sipx-call/latest/sipx_call/struct.Notifier.html)
+//! selects these package documents through the live endpoint dispatcher. Breaking changes receive
+//! migration guidance while sipx remains pre-1.0.
 //!
 
 use std::fmt::Write as _;

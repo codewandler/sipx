@@ -10,6 +10,12 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[package.metadata.sipx-supported-test-surface]
+# This is a separate Cargo target that consumes the public library API. The app-surface checker
+# validates the target and import mechanically; it does not admit this crate's dependencies into
+# the production application surface.
+example = "rtp_echo"
+
 [dependencies]
 sipx-sip.workspace = true
 sipx-call.workspace = true

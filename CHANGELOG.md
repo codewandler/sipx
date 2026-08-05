@@ -9,14 +9,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The live endpoint graduates the UA service primitives it now constrains.** The subscription
+  store and built-in dialog, registration and presence package documents are now Supported because
+  `sipx-call::Notifier` selects them from the application-reachable dispatcher. Pre-1.0 breaking
+  changes to these modules now receive migration guidance; the higher-level event runtimes remain
+  Experimental.
+
 - **A packaged RTP/PCMU echo fixture now makes a media boundary executable from a shell.**
   `sipx-testkit::rtp_echo` owns one UDP socket and no background task, requires exact peer, packet
   and runtime bounds, rejects malformed or foreign traffic with typed errors, and returns decoded
   audio on a deterministic RTP sequence/timestamp timeline. Its compiled example and public guide
   keep the scope explicit: a finite test peer, not call signalling, acoustic-echo cancellation, a
-  production reflector or a load service. The pre-publication dry-run also stages the testkit and
-  transport archives together and compiles this exact example in an isolated consumer before any
-  release may proceed.
+  production reflector or a load service. The pre-publication dry-run also derives and stages
+  testkit's complete public workspace dependency closure, then compiles this exact example in an
+  isolated consumer before any release may proceed. Pinning every member to its staged archive
+  prevents an older same-version registry crate from satisfying a newly added internal API by
+  accident.
 
 - **Downstream applications can place and answer SIP signalling under deterministic virtual time.**
   The newly published `sipx-testkit` exposes a supported socket-free `CallHarness` over its seeded

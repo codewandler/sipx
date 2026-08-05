@@ -2,7 +2,7 @@
 id: T-32
 title: Expose bounded endpoint observation and policy hooks
 pillar: Transport
-status: in-progress
+status: done
 priority: 9
 design: docs/designs/live-endpoint-policy.md
 epic: live-endpoint-policy
@@ -21,28 +21,29 @@ letting callbacks stall the driver or corrupt transaction and authentication inv
 
 ## Acceptance
 
-- [ ] A read-only event surface observes parsed inbound and finalized outbound messages with source,
+- [x] A read-only event surface observes parsed inbound and finalized outbound messages with source,
       target, transport and transaction classification.
-- [ ] The same surface reports connection accepted/opened, authenticated, pooled/reused, failed and
+- [x] The same surface reports connection accepted/opened, authenticated, pooled/reused, failed and
       closed transitions with stable typed identifiers.
-- [ ] Delivery is bounded and never awaits application work from the endpoint driver; overflow is
+- [x] Delivery is bounded and never awaits application work from the endpoint driver; overflow is
       counted and observable, and observer closure or failure cannot stop network processing.
-- [ ] A separate pre-transaction policy may approve, reject or add application-owned headers before
+- [x] A separate pre-transaction policy may approve, reject or add application-owned headers before
       branch, transaction key, Digest, Via and Content-Length are finalized.
-- [ ] No post-key mutator can rewrite Call-ID, CSeq, route set, branch or authenticated bytes. Target
+- [x] No post-key mutator can rewrite Call-ID, CSeq, route set, branch or authenticated bytes. Target
       selection continues through the existing resolver and explicit target APIs.
-- [ ] A live IP/prefix source-admission set is checked before UDP parsing and before TLS/WebSocket
+- [x] A live IP/prefix source-admission set is checked before UDP parsing and before TLS/WebSocket
       handshaking or stream parsing. Replace and clear publish atomically; an accepted connection
       retains the generation that admitted it until close, and refusals are counted without
       per-source tasks, futures or state. A validated non-zero configured maximum bounds scan work;
       oversized replacement is typed and preserves the old generation.
-- [ ] Capture and counters remain the zero-custom-code observation path and are not reimplemented by
+- [x] Capture and counters remain the zero-custom-code observation path and are not reimplemented by
       the hook.
-- [ ] Saturation, closed-consumer, protected-field mutation, UDP source refusal, pre-handshake
+- [x] Saturation, closed-consumer, protected-field mutation, UDP source refusal, pre-handshake
       connection refusal and live allowlist replacement tests fail first, then pass; the full gate
       is green.
 
 ## Progress
 
-- In progress after T-31 review. The source-admission correction discovered by X-97 is part of this
-  story rather than hidden inside the broader message-policy row. Full-gate completion is deferred.
+- Completed after T-31 review. The source-admission correction discovered by X-97 is part of this
+  story rather than hidden inside the broader message-policy row. The corrected integration gate
+  passed all 36 steps.

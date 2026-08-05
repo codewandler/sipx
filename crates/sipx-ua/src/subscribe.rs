@@ -7,8 +7,8 @@
 //! Time is a parameter, not a call to a clock, for the same reason it is in the timer queue: a
 //! notifier driven by a scheduler somebody else owns has to be able to say what "now" is, and a
 //! test that wants to watch a subscription expire should not have to wait an hour.
-//! **Experimental** (`A-8`): public and tested. `sipx-call::Notifier` now drives this exact store
-//! from the dispatcher; the pre-1.0 observation and runtime API may still change shape.
+//! **Supported** (`S-35`): `sipx-call::Notifier` drives this exact store from the live endpoint
+//! dispatcher. Breaking changes receive migration guidance while sipx remains pre-1.0.
 //!
 
 use std::time::Duration;

@@ -1,6 +1,6 @@
 [package]
 name = "sipx-ua"
-description = "SIP user agent: registration, digest authentication, and experimental subscriptions and presence"
+description = "SIP user agent: registration, digest authentication, event subscriptions, and presence"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

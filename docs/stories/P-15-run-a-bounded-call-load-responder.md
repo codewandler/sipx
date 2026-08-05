@@ -2,7 +2,7 @@
 id: P-15
 title: Run a bounded call-load responder
 pillar: Phone
-status: in-progress
+status: done
 priority: 13
 design: docs/designs/comparative-load.md
 epic: comparative-load
@@ -33,7 +33,7 @@ overloading the interactive `sipx answer` contract.
       child, task, transaction or dialog behind.
 - [x] UDP is the required baseline. TCP, TLS, WS and WSS are separate future scenarios so connection
       reuse and handshake cost cannot contaminate the SIP transaction baseline.
-- [ ] A bounded failing-first integration test drives readiness through drain and the gate is green.
+- [x] A bounded failing-first integration test drives readiness through drain and the gate is green.
 
 ## Progress
 
@@ -42,5 +42,5 @@ overloading the interactive `sipx answer` contract.
   summary records, and post-drain zero-state accounting. Failing-first evidence began with the
   absent `SignallingEvent`/answering APIs. Focused all-feature tests cover the exact wire flow and a
   live concurrency-one refusal while an admitted dialog remains active. Strict Clippy, CLI-contract,
-  RFC-evidence, fixed-wait and provenance checks pass. The final acceptance item remains open until
-  the integration branch runs the full project gate once for the whole M13 wave.
+  RFC-evidence, fixed-wait and provenance checks pass. The corrected full project gate passed all
+  36 steps for the integrated M13 wave.

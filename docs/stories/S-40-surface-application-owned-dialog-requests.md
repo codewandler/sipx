@@ -2,7 +2,7 @@
 id: S-40
 title: Surface application-owned dialog requests
 pillar: Signalling
-status: in-progress
+status: done
 priority: 4
 design: docs/designs/dialog-extensions.md
 epic: dialog-extensions
@@ -33,11 +33,11 @@ the stack's specialized handling of session, transfer and teardown methods.
       generic API cannot intercept or forge them.
 - [x] Invalid dialog state, body over limit and unsupported body semantics return typed errors without
       panic or partial send.
-- [ ] Applicable RFC registry rows are updated and `./scripts/gate.py` is green.
+- [x] Applicable RFC registry rows are updated and `./scripts/gate.py` is green.
 
 ## Progress
 
-- In progress on the independent `dialog-extensions` epic branch.
+- Implemented and independently reviewed on the `dialog-extensions` epic branch before integration.
 - Review follow-up closed three ownership gaps: canonical known methods cannot be disguised as
   `Method::Other`, a committed final response survives cancellation of its application waiter, and
   `Contact` on INFO, MESSAGE or private-method responses cannot redirect the dialog's remote target.
@@ -48,4 +48,4 @@ the stack's specialized handling of session, transfer and teardown methods.
 - Independent review now exercises construction failure, response and last-owner drop through the
   public `ApplicationRequest` surface outside a runtime context; the forged-token matrix covers
   every canonical method, and live wire tests pin 413/415 plus typed no-send failures after teardown
-  and before invalid outbound bodies. The full integration gate remains deferred.
+  and before invalid outbound bodies. The corrected full integration gate passed all 36 steps.

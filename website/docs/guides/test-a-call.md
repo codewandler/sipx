@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut harness = CallHarness::new()?;
 
     let pending = harness.dial(to, options).await?;
-    let mut established = pending.answer(loopback).await?;
+    let mut established = Box::pin(pending.answer(loopback)).await?;
     let mut originating_events = established
         .caller
         .events()

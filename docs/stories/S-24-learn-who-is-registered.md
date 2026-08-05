@@ -2,12 +2,12 @@
 id: S-24
 title: Learn who is registered, with the registration event package
 pillar: Signalling
-status: in-progress
+status: done
 priority: 7
 design: docs/designs/discovery.md
 epic: discovery
-areas: [sipx-ua, sipx-sip]
-note: live bounded UAC landed on the epic branch; full integration gate remains
+areas: [sipx-ua, sipx-sip, parity-wave-1]
+note: live bounded UAC and registration-event discovery are integration-gate proven
 ---
 
 # Learn who is registered, with the registration event package
@@ -40,8 +40,8 @@ the case where real infrastructure exists.
   age, and maps 403, 489 and missing initial NOTIFY to scriptable non-zero outcomes. An explicit
   `--book` merges local facts; no implicit book can disguise a refused registrar result.
 - The live failing-first test observes a registration arrive and expire over real SIP transactions,
-  then verifies unsubscribe cleanup. Focused compilation and tests run on the epic branch; story
-  completion waits for the integration branch's final gate.
+  then verifies unsubscribe cleanup. Focused compilation and tests passed on the epic branch, then
+  the corrected integration gate passed all 36 steps.
 
 ## Notes
 - Third story of the `discovery` epic; see [the design](../designs/discovery.md).

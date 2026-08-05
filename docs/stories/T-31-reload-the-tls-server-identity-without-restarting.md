@@ -2,7 +2,7 @@
 id: T-31
 title: Reload the TLS server identity without restarting
 pillar: Transport
-status: in-progress
+status: done
 priority: 6
 design: docs/designs/live-endpoint-policy.md
 epic: live-endpoint-policy
@@ -21,23 +21,23 @@ endpoint, interrupting established dialogs or exposing a partially updated ident
 
 ## Acceptance
 
-- [ ] A public endpoint operation accepts a parsed server identity and validates the complete chain
+- [x] A public endpoint operation accepts a parsed server identity and validates the complete chain
       and matching private key before it can become active.
-- [ ] Publication is atomic: a concurrent-handshake test observes either the complete old pair or the
+- [x] Publication is atomic: a concurrent-handshake test observes either the complete old pair or the
       complete new pair, never a mixture.
-- [ ] Invalid replacement material returns a typed error, exposes no private bytes, and leaves the
+- [x] Invalid replacement material returns a typed error, exposes no private bytes, and leaves the
       previous identity active for subsequent handshakes.
-- [ ] Existing TLS and WSS connections and their dialogs continue on the identity with which they
+- [x] Existing TLS and WSS connections and their dialogs continue on the identity with which they
       were established; reload creates no replacement tasks or sockets.
-- [ ] Success and failure are observable through the endpoint's existing diagnostics. File watching,
+- [x] Success and failure are observable through the endpoint's existing diagnostics. File watching,
       signals and secret-store integration remain host concerns.
-- [ ] Client trust-anchor rotation, outbound mutual-TLS identity rotation and QUIC are explicitly
+- [x] Client trust-anchor rotation, outbound mutual-TLS identity rotation and QUIC are explicitly
       unchanged unless a shared atomic primitive proves them without widening the public contract.
-- [ ] Failing-first concurrent and invalid-input tests pass and `./scripts/gate.py` is green.
+- [x] Failing-first concurrent and invalid-input tests pass and `./scripts/gate.py` is green.
 
 ## Progress
 
-- In progress. The live-rotation contract is now normative in `docs/specs/sip-tls.md` §3.6 and
+- Complete. The live-rotation contract is now normative in `docs/specs/sip-tls.md` §3.6 and
   vectors L11–L13/W15. Implementation is confined to TLS/WSS new-handshake identity selection;
   outbound trust, mutual-TLS client identity, QUIC and host-side file watching remain unchanged.
 - `Handle::reload_server_identity` validates an `Identity` by constructing the complete immutable
@@ -50,5 +50,5 @@ endpoint, interrupting established dialogs or exposing a partially updated ident
   issuer each leaving the old identity active; a complete valid chain is accepted; 32 concurrent
   handshakes observe only the old or new leaf; and established TLS and WSS connections survive
   before later clients select the replacement. The focused TLS/WSS suites, all-feature Clippy,
-  TLS-only/WSS-only/no-feature checks and denied-warning API docs are green. The full gate remains
-  deliberately unrun for this independent frontier slice.
+  TLS-only/WSS-only/no-feature checks and denied-warning API docs are green. The corrected full
+  integration gate subsequently passed all 36 steps.

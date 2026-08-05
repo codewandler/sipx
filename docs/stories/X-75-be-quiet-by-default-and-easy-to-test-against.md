@@ -2,7 +2,7 @@
 id: X-75
 title: Be quiet by default and easy to test against
 pillar: Build
-status: in-progress
+status: done
 priority: 5
 design: docs/designs/test-surfaces.md
 epic: test-surfaces
@@ -36,9 +36,14 @@ call in their own tests.
       cannot rot, and the guide inlines it via `sync-website.py`.
 - [x] Whether `sipx-testkit` becomes a published crate is decided here and recorded — it is
       currently unpublished, and a harness nobody can depend on is not a harness.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
+- 2026-08-05: integration made the stability evidence explicit. `sipx-testkit` remains Supported,
+  but as a mechanically checked test-product surface rather than as part of `sipx-app`'s production
+  closure: its manifest names the independently compiled RTP echo example, and the release rehearsal
+  compiles that exact archived source in a clean package-set consumer. The class admits only the
+  testkit crate, never its dependencies.
 - 2026-08-05: implementation started. The existing loopback link and transaction timer queue are
   the call harness substrate; the public boundary, output audit, logging policy and executable
   documentation are being added without a socket or wall-clock wait.
@@ -54,8 +59,8 @@ call in their own tests.
 - 2026-08-05: focused verification passed: all 43 `sipx-testkit` unit/integration/example targets,
   clippy with warnings denied, the runnable example, package listing and registry-style package
   verification, release-helper tests, public-doc synchronisation/tests, capability-front-door
-  checks, maturity, provenance and formatting. The full gate is deliberately left for integration,
-  so the story remains `in-progress` and its final acceptance item remains open.
+  checks, maturity, provenance and formatting. The corrected integration gate subsequently passed
+  all 36 steps.
 - 2026-08-05: follow-up review replaced the raw-request public façade with the real `sipx-call`
   application path. `CallHarness` now drives `DialOptions`, `dial`, `answer`, two `Call` values,
   their events and the final ACK over an in-process signalling handle pair. Pending exchanges own

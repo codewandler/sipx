@@ -387,12 +387,50 @@ readme = "README.md"
 
 
 class TheLocalPackageSetProof(unittest.TestCase):
-    def test_consumer_uses_exact_staged_testkit_and_transport_sources(self) -> None:
+    def test_packaged_consumer_example_is_derived_from_surface_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory)
+            (source / "examples").mkdir()
+            (source / "Cargo.toml").write_text(
+                """[package]
+name = "sipx-testkit"
+[package.metadata.sipx-supported-test-surface]
+example = "public_harness"
+""",
+                encoding="utf-8",
+            )
+            example = source / "examples" / "public_harness.rs"
+            example.write_text("use sipx_testkit::call::CallHarness;\n", encoding="utf-8")
+            self.assertEqual(example, release.supported_test_surface_example(source))
+            example.unlink()
+            with self.assertRaisesRegex(release.ReleaseError, "omits examples/public_harness.rs"):
+                release.supported_test_surface_example(source)
+
+    def test_package_set_is_the_dependency_ordered_testkit_closure(self) -> None:
+        packages = release.package_records(
+            [
+                package("sipx-testkit", dependencies=(dependency("sipx-transport"),)),
+                package("sipx-transport", dependencies=(dependency("sipx-sip"),)),
+                package("sipx-sip"),
+                package("sipx-unrelated"),
+            ],
+            "1.0.0-beta.4",
+            pathlib.Path("/work"),
+        )
+        self.assertEqual(
+            ("sipx-sip", "sipx-transport", "sipx-testkit"),
+            release.local_package_set_members(packages),
+        )
+
+    def test_consumer_uses_every_exact_staged_package_source(self) -> None:
         manifest = tomllib.loads(
             release.local_package_consumer_manifest(
                 "1.0.0-beta.4",
-                pathlib.Path("/staged/sipx-testkit-1.0.0-beta.4"),
-                pathlib.Path("/staged/sipx-transport-1.0.0-beta.4"),
+                {
+                    "sipx-sip": pathlib.Path("/staged/sipx-sip-1.0.0-beta.4"),
+                    "sipx-testkit": pathlib.Path("/staged/sipx-testkit-1.0.0-beta.4"),
+                    "sipx-transport": pathlib.Path("/staged/sipx-transport-1.0.0-beta.4"),
+                },
             )
         )
         self.assertEqual(
@@ -409,17 +447,31 @@ class TheLocalPackageSetProof(unittest.TestCase):
             },
             manifest["patch"]["crates-io"]["sipx-transport"],
         )
+        self.assertEqual(
+            {
+                "version": "=1.0.0-beta.4",
+                "path": "/staged/sipx-sip-1.0.0-beta.4",
+            },
+            manifest["patch"]["crates-io"]["sipx-sip"],
+        )
 
-    def test_lock_must_resolve_both_package_set_members_from_staged_paths(self) -> None:
+    def test_lock_must_resolve_every_package_set_member_from_staged_paths(self) -> None:
         good = {
             "package": [
+                {"name": "sipx-sip", "version": "1.0.0-beta.4"},
                 {"name": "sipx-testkit", "version": "1.0.0-beta.4"},
                 {"name": "sipx-transport", "version": "1.0.0-beta.4"},
             ]
         }
-        self.assertEqual([], release.local_package_lock_problems(good, "1.0.0-beta.4"))
+        members = ("sipx-sip", "sipx-transport", "sipx-testkit")
+        self.assertEqual([], release.local_package_lock_problems(good, "1.0.0-beta.4", members))
         registry = {
             "package": [
+                {
+                    "name": "sipx-sip",
+                    "version": "1.0.0-beta.4",
+                    "source": release.CRATES_IO_LOCK_SOURCE,
+                },
                 {
                     "name": "sipx-testkit",
                     "version": "1.0.0-beta.4",
@@ -431,7 +483,9 @@ class TheLocalPackageSetProof(unittest.TestCase):
         self.assertTrue(
             any(
                 "registry instead of staged bytes" in problem
-                for problem in release.local_package_lock_problems(registry, "1.0.0-beta.4")
+                for problem in release.local_package_lock_problems(
+                    registry, "1.0.0-beta.4", members
+                )
             )
         )
 
@@ -455,7 +509,7 @@ class TheLocalPackageSetProof(unittest.TestCase):
                     release._extract_package_source(archive, root / "staged")
 
     def test_real_archives_compile_the_example_in_an_isolated_consumer(self) -> None:
-        """Execute the complete package-pair proof under its owned finite command bounds."""
+        """Execute the complete dependency-closure proof under its owned finite command bounds."""
 
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
         version = str(workspace["package"]["version"])

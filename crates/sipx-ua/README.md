@@ -1,11 +1,12 @@
 # sipx-ua
 
-SIP user agent: registration, digest authentication, and experimental subscriptions and presence.
+SIP user agent: registration, digest authentication, event subscriptions, and presence.
 
 ## What this is
 
 Stateful user-agent services over the transport layer: registration leases, digest challenges,
-reachability identifiers, and experimental subscriptions, event packages, and published presence.
+reachability identifiers, Supported subscription/package primitives selected by the live endpoint,
+and experimental higher-level event and publication runtimes.
 
 ## Stability
 

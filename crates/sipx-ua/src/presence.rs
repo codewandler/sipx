@@ -9,10 +9,10 @@
 //! publishers for one resource silently overwrite each other and neither can tell; with it, a
 //! publisher whose state has expired is told to start again rather than allowed to resurrect a
 //! document the server has already forgotten.
-//! **Experimental** (`A-8`): public and tested. `sipx-call::Publications` now carries this exact
-//! compositor through live inbound PUBLISH and exposes a bounded outbound publisher. No CLI
-//! command publishes, and projection from this store into later presence NOTIFY documents remains
-//! an application policy.
+//! **Supported** (`S-35`, `S-39`): `sipx-call` selects [`Pidf`] for its live notifier and carries
+//! this exact compositor through live inbound PUBLISH. Breaking changes receive migration guidance
+//! while sipx remains pre-1.0. No CLI command publishes, and projection from this store into later
+//! presence NOTIFY documents remains an application policy.
 //!
 
 use std::fmt::Write as _;

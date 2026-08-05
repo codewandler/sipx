@@ -111,6 +111,19 @@ class Workspace:
         self._write_root()
         return self
 
+    def test_surface(self, crate, example, source):
+        """Declare and write one independent Cargo example as a test-product proof."""
+        manifest = self.crates / crate / "Cargo.toml"
+        with manifest.open("a") as output:
+            output.write(
+                "\n[package.metadata.sipx-supported-test-surface]\n"
+                f'example = "{example}"\n'
+            )
+        examples = self.crates / crate / "examples"
+        examples.mkdir(exist_ok=True)
+        (examples / f"{example}.rs").write_text(source)
+        return self
+
     def __enter__(self):
         self._saved = (surface.CRATES, surface.ROOT)
         surface.CRATES = self.crates
@@ -324,6 +337,105 @@ class TheAssertions(unittest.TestCase):
             )
             self.assertFalse(surface.has_library("sipx-tool"))
             self.assertEqual(surface.unreached_supported(surface.closure(("sipx-app",))), [])
+
+
+class SupportedTestSurfaces(unittest.TestCase):
+    """A published test product has its own executable reachability class."""
+
+    def test_a_manifest_declared_example_backs_only_its_own_crate(self):
+        with Workspace() as workspace:
+            workspace.add("sipx-app", declares="//! **Experimental.**")
+            workspace.add(
+                "sipx-fixture",
+                declares="//! **Supported.** The bounded downstream harness.",
+                dependencies=["sipx-deep"],
+            )
+            workspace.add("sipx-deep", declares="//! # Experimental")
+            workspace.test_surface(
+                "sipx-fixture",
+                "public_harness",
+                "use sipx_fixture::Harness;\nfn main() { let _ = Harness; }\n",
+            )
+
+            reached, problems = surface.supported_test_surfaces()
+            self.assertEqual(problems, [])
+            self.assertEqual(reached, {"sipx-fixture"})
+            self.assertNotIn(
+                "sipx-deep",
+                reached,
+                "a test product must not widen production reachability through its dependencies",
+            )
+            self.assertEqual(surface.unreached_supported(reached | {"sipx-app"}), [])
+
+    def test_an_ordinary_example_does_not_back_a_supported_claim(self):
+        with Workspace() as workspace:
+            workspace.add("sipx-app", declares="//! **Experimental.**")
+            workspace.add("sipx-fixture", declares="//! **Supported.** A harness.")
+            examples = workspace.crates / "sipx-fixture" / "examples"
+            examples.mkdir()
+            (examples / "demo.rs").write_text("use sipx_fixture::Harness;\n")
+
+            reached, problems = surface.supported_test_surfaces()
+            self.assertEqual(problems, [])
+            self.assertEqual(reached, set())
+            self.assertTrue(
+                surface.unreached_supported(surface.closure(("sipx-app",))),
+                "an undeclared example must not launder a supported claim",
+            )
+
+    def test_a_declared_example_that_does_not_import_the_crate_fails(self):
+        with Workspace() as workspace:
+            workspace.add("sipx-app", declares="//! **Experimental.**")
+            workspace.add("sipx-fixture", declares="//! **Supported.** A harness.")
+            workspace.test_surface(
+                "sipx-fixture", "empty", "fn main() { println!(\"nothing\"); }\n"
+            )
+
+            reached, problems = surface.supported_test_surfaces()
+            self.assertEqual(reached, set())
+            self.assertTrue(any("never imports" in problem for problem in problems), problems)
+
+    def test_a_string_only_example_cannot_launder_the_proof(self):
+        """The reviewer mutation: quoted path text is not a Rust caller."""
+        for name, declaration in (
+            ("ordinary", 'const CLAIM: &str = "sipx_fixture::Harness";'),
+            ("byte", 'const CLAIM: &[u8] = b"sipx_fixture::Harness";'),
+            ("raw", 'const CLAIM: &str = r##"sipx_fixture::Harness"##;'),
+            ("raw-byte", 'const CLAIM: &[u8] = br#"sipx_fixture::Harness"#;'),
+        ):
+            with self.subTest(kind=name), Workspace() as workspace:
+                workspace.add("sipx-app", declares="//! **Experimental.**")
+                workspace.add("sipx-fixture", declares="//! **Supported.** A harness.")
+                workspace.test_surface(
+                    "sipx-fixture",
+                    "quoted",
+                    f"{declaration}\nfn main() {{ let _ = CLAIM; }}\n",
+                )
+
+                reached, problems = surface.supported_test_surfaces()
+                self.assertEqual(reached, set())
+                self.assertTrue(any("never imports" in problem for problem in problems), problems)
+
+    def test_literal_lexing_preserves_real_paths_and_blanks_characters(self):
+        source = "use sipx_fixture::Harness; let c = 'x'; let byte = b'x';"
+        code = surface.rust_code_only(source)
+        self.assertIn("sipx_fixture::Harness", code)
+        self.assertNotIn("'x'", code)
+        self.assertNotIn("b'x'", code)
+
+    def test_removing_the_declared_example_breaks_the_proof(self):
+        """Mutation proof: metadata cannot preserve support after its target disappears."""
+        with Workspace() as workspace:
+            workspace.add("sipx-app", declares="//! **Experimental.**")
+            workspace.add("sipx-fixture", declares="//! **Supported.** A harness.")
+            workspace.test_surface(
+                "sipx-fixture", "public_harness", "use sipx_fixture::Harness;\n"
+            )
+            (workspace.crates / "sipx-fixture" / "examples" / "public_harness.rs").unlink()
+
+            reached, problems = surface.supported_test_surfaces()
+            self.assertEqual(reached, set())
+            self.assertTrue(any("not a Cargo example target" in problem for problem in problems))
 
 
 class FeaturesArePartOfSelection(unittest.TestCase):
@@ -795,8 +907,10 @@ class TheRealWorkspace(unittest.TestCase):
     def test_the_experimental_list_is_not_empty(self):
         """The list `X-38` requires to be non-empty, on the real tree rather than a fixture."""
         _, reached, experimental = surface.report()
+        test_surfaces, problems = surface.supported_test_surfaces()
+        self.assertEqual(problems, [])
         self.assertTrue(
-            experimental or surface.unreached(reached),
+            experimental or surface.unreached(reached | test_surfaces),
             "no module or unreached published crate remains experimental",
         )
 

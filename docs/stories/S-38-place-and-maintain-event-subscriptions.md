@@ -2,7 +2,7 @@
 id: S-38
 title: Place and maintain event subscriptions
 pillar: Signalling
-status: in-progress
+status: done
 priority: 7
 design: docs/designs/event-reachability.md
 epic: event-reachability
@@ -37,7 +37,7 @@ dialog, without embedding any event package's application policy in the transpor
       waits for owned work and a test observes zero residual transactions and timers.
 - [x] A synthetic package proves the generic API; `S-24` consumes it for `reg` without copying the
       subscriber state machine.
-- [ ] RFC registry evidence is updated with reachable Rust paths and `./scripts/gate.py` is green.
+- [x] RFC registry evidence is updated with reachable Rust paths and `./scripts/gate.py` is green.
 
 ## Progress
 
@@ -53,8 +53,8 @@ dialog, without embedding any event package's application policy in the transpor
   retry eligibility, and an async shutdown barrier that joins every driver-owned task. Re-review
   then completed route-hop scheme/transport/port/authority derivation and made the driver registry
   the atomic admission/shutdown boundary. A final handshake-boundary proof pins clear-WS hostname
-  authority and resource into both the HTTP upgrade and connection key. The final full-gate item
-  intentionally remains open for the integration branch.
+  authority and resource into both the HTTP upgrade and connection key. The corrected integration
+  gate passed all 36 steps.
 
 ## Required failing-first tests
 

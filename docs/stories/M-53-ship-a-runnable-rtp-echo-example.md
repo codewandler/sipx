@@ -2,7 +2,7 @@
 id: M-53
 title: Ship a runnable RTP echo example
 pillar: Media
-status: in-progress
+status: done
 priority: 11
 design: docs/designs/media.md
 epic: test-surfaces
@@ -29,7 +29,7 @@ surface and sends the same decoded samples back, making the bidirectional seam v
       sequence/timestamp progression, then observes zero residual media work.
 - [x] The public testing guide explains the example's diagnostic scope and does not present echo as
       acoustic-echo cancellation, a production media server or a load test.
-- [ ] The website inlines the compiled source through `sync-website.py`, and compilation/tests pass
+- [x] The website inlines the compiled source through `sync-website.py`, and compilation/tests pass
       through `./scripts/gate.py`.
 
 ## Progress
@@ -47,10 +47,11 @@ surface and sends the same decoded samples back, making the bidirectional seam v
   socket reuse and zero owned work for foreign-source, oversized and non-PCMU input. The successful
   wire vector also pins marker-clear, padding-free, extension-free and CSRC-free output plus every
   byte of the first three fixed RTP headers. The bounded
-  local package-set verifier stages X-75's current `sipx-transport` and `sipx-testkit` archives in
-  dependency order, then compiles the archived RTP echo example in a clean consumer whose lockfile
-  proves both came from staged bytes. The locked pre-publication dry-run now invokes this proof
+  local package-set verifier derives and stages X-75's complete transitive public dependency closure
+  for `sipx-testkit` in dependency order, then compiles the archived RTP echo example in a clean
+  consumer whose lockfile proves every member, including `sipx-sip` and `sipx-transport`, came from
+  staged bytes. The locked pre-publication dry-run now invokes this proof
   unconditionally, and an end-to-end release test executes the real archive/consumer path under
   separate finite command bounds; neither makes a claim about the older registry beta.4 transport.
-  The full gate remains an integration responsibility, so the story and its final acceptance item
-  remain open.
+  The corrected full integration gate passed all 36 steps, including archive-consumer proof, the
+  public-site build and the complete workspace test suite.

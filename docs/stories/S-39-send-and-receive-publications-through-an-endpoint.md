@@ -2,7 +2,7 @@
 id: S-39
 title: Send and receive publications through an endpoint
 pillar: Signalling
-status: in-progress
+status: done
 priority: 8
 design: docs/designs/event-reachability.md
 epic: event-reachability
@@ -31,7 +31,7 @@ PUBLISH paths without introducing another presence store.
       owned work and a failing-first test observes no residual publication or transaction.
 - [x] Composition policy, authorization policy and durable or distributed storage remain injected
       application concerns.
-- [ ] RFC 3903 registry evidence moves to the reachable endpoint paths and `./scripts/gate.py` is
+- [x] RFC 3903 registry evidence moves to the reachable endpoint paths and `./scripts/gate.py` is
       green.
 
 ## Progress
@@ -47,4 +47,5 @@ PUBLISH paths without introducing another presence store.
   live silent transaction and every publication timer before its barrier returns. Re-review made
   the driver registry the admission linearization point and deterministically proves racing and
   post-shutdown publishes cannot spawn beyond the barrier.
-- Integration still owns the complete gate and generated board before marking this story done.
+- The corrected integration gate passed all 36 steps, and the generated board records the story as
+  done.

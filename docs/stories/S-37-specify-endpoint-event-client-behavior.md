@@ -2,7 +2,7 @@
 id: S-37
 title: Specify endpoint event-client behavior
 pillar: Signalling
-status: in-progress
+status: done
 priority: 3
 design: docs/designs/event-reachability.md
 epic: event-reachability
@@ -32,15 +32,15 @@ before the transport-facing client is implemented.
 - [x] Byte-level vectors cover authenticated establishment, refresh, expiry, unsubscribe, out-of-order
       NOTIFY, an unsupported package, shutdown with a refresh due, provisional expiry, CSeq
       exhaustion, invalid interval responses and NOTIFY trust/Contact rejection.
-- [ ] `S-38` acceptance and tests cite those vectors, and `./scripts/gate.py` is green.
+- [x] `S-38` acceptance and tests cite those vectors, and `./scripts/gate.py` is green.
 
 ## Progress
 
 - 2026-08-05: [`docs/specs/event-client.md`](../specs/event-client.md) fixes the sans-I/O boundary,
   bounded resources/timers, initial-NOTIFY/dialog race, single-dialog fork policy, auth and interval
   retries, CSeq ordering, terminal-reason policy, shutdown drain and the initial eight byte-level
-  vectors. S-38 names the failing-first test derived from each vector. The story remains in progress
-  until the integration gate runs.
+  vectors. S-38 names the failing-first test derived from each vector, and the corrected integration
+  gate passed all 36 steps.
 - 2026-08-05: independent review added a finite pre-response expiry, exact invalid-response
   transitions, non-wrapping CSeq exhaustion, mandatory Contact validation and a fail-closed injected
   NOTIFY trust policy; S-38 now maps four additional negative vectors.

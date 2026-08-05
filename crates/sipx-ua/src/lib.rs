@@ -31,7 +31,9 @@
 //!
 //!
 //! **Supported**: registration leases, digest authentication, authenticated caller identity, Path,
-//! Service-Route, registering as one Outbound flow, and push. `S-34` gives identity its caller:
+//! Service-Route, registering as one Outbound flow, push, and the subscription store plus built-in
+//! dialog, registration and presence package documents selected by `sipx-call::Notifier`.
+//! `S-34` gives identity its caller:
 //! outbound and inbound policies in `sipx-call` select the authentication and verification
 //! services. `S-29` is what gives Outbound and push their callers — `sipx register --outbound` and
 //! `--push-provider`/`--push-prid` — and it is why `X-37` had demoted their compliance rows in the
@@ -51,9 +53,8 @@
 //! §8.2's answer read back, and §4.1.3's refresh through `UserAgent::woken`. Outbound is earned
 //! only as far as the registration goes, which is what the wording above says and no further.
 //!
-//! **Experimental**: `presence`, `subscribe`, `event_client`, `publication_client` and `packages`.
-//! They are public and tested. `sipx-call::Notifier` serves inbound SUBSCRIBE through this crate's
-//! exact store, `event_client` is the bounded sans-I/O subscriber driven by
+//! **Experimental**: `event_client` and `publication_client`. They are public and tested.
+//! `event_client` is the bounded sans-I/O subscriber driven by
 //! `sipx-call::EventSubscriptions`, and `sipx-call::Publications` carries the publication core and
 //! exact compositor through live endpoints. The bounded `reginfo` consumer is reached by
 //! `sipx peers --registrar`; no CLI command publishes, and published presence is not automatically
