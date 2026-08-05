@@ -340,8 +340,20 @@ mod tests {
     #[test]
     fn canonical_known_tokens_cannot_be_admitted_as_other_methods() {
         for (token, known) in [
-            (Bytes::from_static(b"BYE"), Method::Bye),
             (Bytes::from_static(b"INVITE"), Method::Invite),
+            (Bytes::from_static(b"ACK"), Method::Ack),
+            (Bytes::from_static(b"BYE"), Method::Bye),
+            (Bytes::from_static(b"CANCEL"), Method::Cancel),
+            (Bytes::from_static(b"REGISTER"), Method::Register),
+            (Bytes::from_static(b"OPTIONS"), Method::Options),
+            (Bytes::from_static(b"INFO"), Method::Info),
+            (Bytes::from_static(b"PRACK"), Method::Prack),
+            (Bytes::from_static(b"UPDATE"), Method::Update),
+            (Bytes::from_static(b"SUBSCRIBE"), Method::Subscribe),
+            (Bytes::from_static(b"NOTIFY"), Method::Notify),
+            (Bytes::from_static(b"REFER"), Method::Refer),
+            (Bytes::from_static(b"MESSAGE"), Method::Message),
+            (Bytes::from_static(b"PUBLISH"), Method::Publish),
         ] {
             let alias = Method::Other(token.clone());
             assert!(matches!(

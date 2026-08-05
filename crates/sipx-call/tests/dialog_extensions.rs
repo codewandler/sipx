@@ -8,14 +8,18 @@
     clippy::similar_names
 )]
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_call::{
     ApplicationRequest, Call, CallEvent, CallEvents, Credentials, DialOptions, answer, dial,
 };
-use sipx_sip::{Header, HeaderName, Headers, Host, HostName, Method, Request, StatusCode, Uri};
+use sipx_sip::build::RequestBuilder;
+use sipx_sip::{
+    Header, HeaderName, Headers, Host, HostName, Method, Request, Response, StatusCode, Uri,
+};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use tokio::sync::mpsc::Receiver;
 
@@ -26,21 +30,25 @@ fn loopback() -> IpAddr {
 }
 
 async fn endpoint() -> (Handle, Receiver<Incoming>) {
-    bind(Config::new("127.0.0.1:0".parse().expect("valid")))
-        .await
-        .expect("binds")
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.limits = sipx_sip::Limits::stream();
+    bind(config).await.expect("binds")
 }
 
 async fn connected(options: DialOptions) -> (Call, Receiver<Incoming>, Call, Receiver<Incoming>) {
     let (caller, caller_incoming, callee, callee_incoming, _callee_endpoint) =
-        connected_with_server(options).await;
+        Box::pin(connected_with_server(options)).await;
     (caller, caller_incoming, callee, callee_incoming)
 }
 
 async fn connected_with_server(
     options: DialOptions,
 ) -> (Call, Receiver<Incoming>, Call, Receiver<Incoming>, Handle) {
-    connected_with_server_and_timers(options, sipx_sip::Timers::default()).await
+    Box::pin(connected_with_server_and_timers(
+        options,
+        sipx_sip::Timers::default(),
+    ))
+    .await
 }
 
 async fn connected_with_server_and_timers(
@@ -50,6 +58,7 @@ async fn connected_with_server_and_timers(
     let (callee_endpoint, mut callee_incoming) = endpoint().await;
     let mut caller_config = Config::new("127.0.0.1:0".parse().expect("valid"));
     caller_config.timers = caller_timers;
+    caller_config.limits = sipx_sip::Limits::stream();
     let (caller_endpoint, caller_incoming) = bind(caller_config).await.expect("caller binds");
     let target = Target::udp(callee_endpoint.local_addr());
     let uri = Uri::sip(Host::Name(
@@ -183,6 +192,103 @@ async fn ok(request: ApplicationRequest) {
         .expect("responds");
 }
 
+fn raw_dialog_request(
+    peer: &Handle,
+    dialog: &sipx_call::Dialog,
+    transport: sipx_transport::TransportKind,
+    method: &Method,
+    cseq: u32,
+    content_type: Option<&str>,
+    body: Bytes,
+) -> Request {
+    let (local, remote) = dialog.local_and_remote();
+    let mut builder = RequestBuilder::new(method.clone(), dialog.remote_target.clone())
+        .header(
+            HeaderName::Via,
+            Bytes::from(format!(
+                "SIP/2.0/{} {};rport;branch={}",
+                transport.as_str(),
+                peer.sent_by_for(transport),
+                sipx_transport::new_branch()
+            )),
+        )
+        .expect("Via")
+        .header(HeaderName::To, Bytes::from(local))
+        .expect("To")
+        .header(HeaderName::From, Bytes::from(remote))
+        .expect("From")
+        .header(HeaderName::CallId, Bytes::from(dialog.id.call_id.clone()))
+        .expect("Call-ID")
+        .cseq(cseq, method)
+        .expect("CSeq")
+        .max_forwards(70);
+    if let Some(content_type) = content_type {
+        builder = builder
+            .header(
+                HeaderName::ContentType,
+                Bytes::from(content_type.to_owned()),
+            )
+            .expect("Content-Type");
+    }
+    builder.body(body).build()
+}
+
+async fn invalid_inbound(
+    peer: &Handle,
+    destination: SocketAddr,
+    call: &mut Call,
+    incoming: &mut Receiver<Incoming>,
+    transport: sipx_transport::TransportKind,
+    request: Request,
+) -> (sipx_call::Result<bool>, Response) {
+    let expected_method = request.method.clone();
+    let expected_cseq = cseq(&request.headers);
+    let mut responses = peer
+        .send(request, Target::new(destination, transport))
+        .await
+        .expect("request starts");
+    let handled = loop {
+        let received = incoming.recv().await.expect("request arrives");
+        if received.request.method == expected_method
+            && cseq(&received.request.headers) == expected_cseq
+        {
+            break call.handle(&received).await;
+        }
+        assert!(
+            call.handle(&received)
+                .await
+                .expect("prior dialog traffic handled")
+        );
+    };
+    let response = responses
+        .final_response()
+        .await
+        .expect("the invalid request receives a final response");
+    (handled, response)
+}
+
+fn captured_application_request(
+    runtime: &tokio::runtime::Runtime,
+) -> (
+    ApplicationRequest,
+    tokio::task::JoinHandle<sipx_call::Result<Response>>,
+) {
+    runtime.block_on(async {
+        let options = DialOptions::new("<sip:caller@example.test>", loopback());
+        let (mut caller, _caller_incoming, mut callee, mut callee_incoming) =
+            Box::pin(connected(options)).await;
+        let mut events = callee.events().expect("callee event stream");
+        let sending = tokio::spawn(async move {
+            caller
+                .send_dialog_request(Method::Info, &[], Bytes::new())
+                .await
+        });
+        let request =
+            next_application_request(&mut callee, &mut callee_incoming, &mut events).await;
+        (request, sending)
+    })
+}
+
 #[tokio::test]
 async fn info_and_message_are_typed_events_in_both_directions() {
     let options = DialOptions::new("<sip:caller@example.test>", loopback());
@@ -297,10 +403,23 @@ async fn an_admitted_private_method_is_case_sensitive_and_uses_dialog_state() {
             .await,
         Err(sipx_call::Error::StackOwnedDialogMethod(Method::Bye))
     ));
-    for (alias, known) in [
-        (Method::Other(Bytes::from_static(b"BYE")), Method::Bye),
-        (Method::Other(Bytes::from_static(b"INVITE")), Method::Invite),
+    for (token, known) in [
+        (Bytes::from_static(b"INVITE"), Method::Invite),
+        (Bytes::from_static(b"ACK"), Method::Ack),
+        (Bytes::from_static(b"BYE"), Method::Bye),
+        (Bytes::from_static(b"CANCEL"), Method::Cancel),
+        (Bytes::from_static(b"REGISTER"), Method::Register),
+        (Bytes::from_static(b"OPTIONS"), Method::Options),
+        (Bytes::from_static(b"INFO"), Method::Info),
+        (Bytes::from_static(b"PRACK"), Method::Prack),
+        (Bytes::from_static(b"UPDATE"), Method::Update),
+        (Bytes::from_static(b"SUBSCRIBE"), Method::Subscribe),
+        (Bytes::from_static(b"NOTIFY"), Method::Notify),
+        (Bytes::from_static(b"REFER"), Method::Refer),
+        (Bytes::from_static(b"MESSAGE"), Method::Message),
+        (Bytes::from_static(b"PUBLISH"), Method::Publish),
     ] {
+        let alias = Method::Other(token);
         assert!(matches!(
             caller.admit_dialog_method(&alias),
             Err(sipx_call::Error::StackOwnedDialogMethod(method)) if method == known
@@ -523,6 +642,226 @@ async fn cloned_response_owners_still_share_exactly_one_answer() {
     assert!(response.expect("clone answers once").status.is_success());
 }
 
+#[tokio::test]
+async fn ended_and_invalid_outbound_requests_are_typed_and_send_nothing() {
+    let options = DialOptions::new("<sip:caller@example.test>", loopback());
+    let (mut caller, _caller_incoming, mut callee, mut callee_incoming) =
+        Box::pin(connected(options)).await;
+    while let Ok(pending) = callee_incoming.try_recv() {
+        assert!(
+            callee
+                .handle(&pending)
+                .await
+                .expect("initial traffic handled")
+        );
+    }
+
+    let content_type = Header::build(HeaderName::ContentType, "text/plain").expect("header");
+    let oversized = Bytes::from(vec![0; sipx_call::MAX_APPLICATION_BODY + 1]);
+    assert!(matches!(
+        caller
+            .send_dialog_request(
+                Method::Message,
+                std::slice::from_ref(&content_type),
+                oversized,
+            )
+            .await,
+        Err(sipx_call::Error::ApplicationBodyTooLarge { .. })
+    ));
+    assert!(
+        callee_incoming.try_recv().is_err(),
+        "oversize sent no bytes"
+    );
+
+    assert!(matches!(
+        caller
+            .send_dialog_request(Method::Info, &[], Bytes::from_static(b"body"))
+            .await,
+        Err(sipx_call::Error::ApplicationContentTypeRequired)
+    ));
+    assert!(
+        callee_incoming.try_recv().is_err(),
+        "missing Content-Type sent no bytes"
+    );
+
+    let ending = caller.hang_up();
+    let answer_bye = async {
+        let bye = callee_incoming.recv().await.expect("BYE arrives");
+        assert!(callee.handle(&bye).await.expect("BYE handled"));
+    };
+    let (ended, ()) = tokio::join!(ending, answer_bye);
+    ended.expect("hangup completes");
+    assert!(matches!(
+        caller
+            .send_dialog_request(Method::Info, &[], Bytes::new())
+            .await,
+        Err(sipx_call::Error::DialogEnded)
+    ));
+    while let Ok(residual) = callee_incoming.try_recv() {
+        assert_ne!(
+            residual.request.method,
+            Method::Info,
+            "ended call sent no INFO"
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_inbound_bodies_are_refused_without_an_application_event() {
+    let options = DialOptions::new("<sip:caller@example.test>", loopback());
+    let (_caller, _caller_incoming, mut callee, mut callee_incoming, server) =
+        Box::pin(connected_with_server(options)).await;
+    let mut events = callee.events().expect("callee event stream");
+    while events.try_recv().is_some() {}
+    let (peer, _peer_incoming) = endpoint().await;
+
+    let oversized = raw_dialog_request(
+        &peer,
+        &callee.dialog,
+        sipx_transport::TransportKind::Tcp,
+        &Method::Message,
+        99,
+        Some("text/plain"),
+        Bytes::from(vec![0; sipx_call::MAX_APPLICATION_BODY + 1]),
+    );
+    let (handled, response) = invalid_inbound(
+        &peer,
+        server.local_addr(),
+        &mut callee,
+        &mut callee_incoming,
+        sipx_transport::TransportKind::Tcp,
+        oversized,
+    )
+    .await;
+    assert!(matches!(
+        handled,
+        Err(sipx_call::Error::ApplicationBodyTooLarge { .. })
+    ));
+    assert_eq!(response.status.code(), 413);
+    assert!(events.try_recv().is_none());
+
+    let missing_type = raw_dialog_request(
+        &peer,
+        &callee.dialog,
+        sipx_transport::TransportKind::Tcp,
+        &Method::Info,
+        100,
+        None,
+        Bytes::from_static(b"body"),
+    );
+    let (handled, response) = invalid_inbound(
+        &peer,
+        server.local_addr(),
+        &mut callee,
+        &mut callee_incoming,
+        sipx_transport::TransportKind::Tcp,
+        missing_type,
+    )
+    .await;
+    assert!(matches!(
+        handled,
+        Err(sipx_call::Error::ApplicationContentTypeRequired)
+    ));
+    assert_eq!(response.status.code(), 415);
+    assert!(events.try_recv().is_none());
+}
+
+#[test]
+fn application_request_construction_fails_cleanly_without_a_runtime_context() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime builds");
+    let (mut callee, incoming, sending) = runtime.block_on(async {
+        let options = DialOptions::new("<sip:caller@example.test>", loopback());
+        let (mut caller, _caller_incoming, mut callee, mut callee_incoming) =
+            Box::pin(connected(options)).await;
+        let sending = tokio::spawn(async move {
+            caller
+                .send_dialog_request(Method::Info, &[], Bytes::new())
+                .await
+        });
+        loop {
+            let incoming = callee_incoming.recv().await.expect("INFO arrives");
+            if incoming.request.method == Method::Info {
+                break (callee, incoming, sending);
+            }
+            assert!(
+                callee
+                    .handle(&incoming)
+                    .await
+                    .expect("initial traffic handled")
+            );
+        }
+    });
+    assert!(tokio::runtime::Handle::try_current().is_err());
+
+    let mut handling = Box::pin(callee.handle(&incoming));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let polled = handling.as_mut().poll(&mut context);
+    assert!(
+        matches!(
+            polled,
+            Poll::Ready(Err(sipx_call::Error::ApplicationRuntimeUnavailable))
+        ),
+        "unexpected public construction result: {polled:?}"
+    );
+    sending.abort();
+}
+
+#[test]
+fn public_response_uses_its_captured_runtime_outside_runtime_context() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime builds");
+    let (request, sending) = captured_application_request(&runtime);
+    assert!(tokio::runtime::Handle::try_current().is_err());
+
+    let mut responding = Box::pin(request.respond(
+        StatusCode::new(200).expect("status"),
+        "OK",
+        &[],
+        Bytes::new(),
+    ));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let first = responding.as_mut().poll(&mut context);
+    let result = match first {
+        Poll::Ready(result) => result,
+        Poll::Pending => runtime.block_on(responding.as_mut()),
+    };
+    result.expect("public response completes on captured runtime");
+    let response = runtime
+        .block_on(sending)
+        .expect("sender task completes")
+        .expect("INFO succeeds");
+    assert_eq!(response.status.code(), 200);
+}
+
+#[test]
+fn last_public_response_owner_drops_outside_runtime_and_sends_fallback() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime builds");
+    let (request, sending) = captured_application_request(&runtime);
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    drop(request);
+
+    let result = runtime
+        .block_on(sending)
+        .expect("sender task completes after fallback");
+    assert!(matches!(
+        result,
+        Err(sipx_call::Error::Rejected { status: 500, .. })
+    ));
+}
+
 #[tokio::test(start_paused = true)]
 async fn response_timeout_sends_504_and_releases_the_server_transaction() {
     let options = DialOptions::new("<sip:caller@example.test>", loopback());
@@ -533,7 +872,7 @@ async fn response_timeout_sends_504_and_releases_the_server_transaction() {
         ..sipx_sip::Timers::default()
     };
     let (mut caller, _caller_incoming, mut callee, mut callee_incoming, server) =
-        connected_with_server_and_timers(options, caller_timers).await;
+        Box::pin(connected_with_server_and_timers(options, caller_timers)).await;
     let mut events = callee.events().expect("callee event stream");
 
     // Let the completed INVITE transaction reach its normal cleanup horizon before measuring the
