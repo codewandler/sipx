@@ -7,63 +7,16 @@ use sipx_sip::{Host, HostName, Uri};
 use sipx_transport::{Config as TransportConfig, Target, TransportKind, bind};
 use sipx_ua::{Config, Credentials, Flow, InstanceId, RegId, UserAgent};
 
-use crate::Args;
+use crate::cli::RegisterOptions;
 use crate::output::{Exit, Format, Report, fail};
-
-pub(crate) const HELP: &str = "\
-sipx register — register with a registrar
-
-USAGE:
-    sipx register <AOR> [OPTIONS]
-
-ARGS:
-    <AOR>    The address of record, e.g. sip:alice@example.com
-
-OPTIONS:
-    --password <P>       Password. Prefer SIPX_PASSWORD, since argv is world-readable.
-    --target <ADDR>      Where to send, if not derived from the AOR (host:port)
-    --expires <S>        Lease to ask for, in seconds (default 3600)
-    --local <ADDR>       Local address to bind (default 0.0.0.0:0)
-    --transport <T>      Signalling: udp, tcp, tls, ws or wss (default udp)
-    --tcp                Legacy alias for --transport tcp
-    --tls-server-name <N> Certificate identity to verify (default AOR domain)
-    --tls-ca <FILE>      Add PEM trust roots to the platform store
-    --tls-cert <FILE>    Client certificate chain for mutual TLS (with --tls-key)
-    --tls-key <FILE>     Client private key for mutual TLS (with --tls-cert)
-    --header <H>         Add an application-owned REGISTER field; repeat 'Name: value'
-    --keep-alive         Keep refreshing until interrupted
-    --outbound           Register as one Outbound flow (RFC 5626), and report whether the
-                         registrar accepted it
-    --instance <URN>     With --outbound: this device identity rather than a fresh one
-    --push-provider <P>  Push notification service this device can be woken through (RFC 8599)
-    --push-prid <T>      The identifier that service knows this device by
-    --push-param <X>     Service-specific extra, when the service needs one
-    --wake               Act as though a push arrived: refresh the binding and report the PURR
-    --capture <FILE>     Record signalling to this pcapng file. Credentials are redacted;
-                         TLS is recorded decrypted. Still identifies who called whom
-    --counters <FILE>    Write this run's signalling counters to this file, as JSON.
-                         Implied by --capture, as <capture>.counters.json
-    --json               Report as JSON
-";
 
 #[allow(
     clippy::too_many_lines,
     reason = "the command lifecycle is kept in execution order so validation-before-I/O remains auditable"
 )]
-pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    // Before the address of record, and before any socket: a valued flag that was given no value
-    // cannot be honoured, and reading it as absent is what let `--instance` register a device
-    // identity nobody chose (`S-30`).
-    let args = match crate::arguments(raw, HELP, format) {
-        Ok(args) => args,
-        Err(exit) => return exit,
-    };
-
-    let Some(aor) = args.positional() else {
-        eprint!("{HELP}");
-        return fail(format, Exit::Usage, "an address of record is required");
-    };
-    let headers = match crate::header::from_args(&args) {
+pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
+    let aor = options.aor.as_str();
+    let headers = match crate::header::from_options(&options.headers) {
         Ok(headers) => headers,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
@@ -84,49 +37,43 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         );
     };
 
-    // A password on the command line is visible to every process on the machine, so the
-    // environment is the documented route and the flag is the convenience.
-    let password = args
-        .value("password")
-        .map(str::to_owned)
-        .or_else(|| std::env::var("SIPX_PASSWORD").ok());
+    let password = options.password.clone();
 
     // Validated before any socket is opened, and every combination that cannot work is refused:
     // a flag that parses and is dropped is worse than one that errors (`P-7` was filed for
     // exactly that shape), so `--wake` without a push service, half a push pair, or an
     // `--instance` with no flow to name are usage errors here, never surprises later.
-    let reach = match reachability(&args) {
+    let reach = match reachability(&options) {
         Ok(reach) => reach,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
-    let transport =
-        match crate::signalling::Selection::from_args(&args, parsed_aor.scheme().is_secure()) {
-            Ok(transport) => transport,
-            Err(message) => return fail(format, Exit::Usage, &message),
-        };
+    let transport = match crate::signalling::Selection::from_options(
+        &options.signalling,
+        parsed_aor.scheme().is_secure(),
+    ) {
+        Ok(transport) => transport,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
 
-    let unresolved = match resolve_target(args.value("target"), &domain, transport.kind()) {
+    let unresolved = match resolve_target(options.target.as_deref(), &domain, transport.kind()) {
         Ok(target) => target,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let target = match transport.target(&args, unresolved.addr, &domain) {
+    let target = match transport.target(&options.signalling, unresolved.addr, &domain) {
         Ok(target) => target,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
     let negotiated_transport = target.transport;
 
-    let local = args.value("local").unwrap_or("0.0.0.0:0");
-    let Ok(local) = local.parse() else {
-        return fail(format, Exit::Usage, &format!("not an address: {local}"));
-    };
+    let local = options.local;
 
     let mut config = TransportConfig::new(local);
     // The `Via` sent-by names where *this* client expects responses (RFC 3261 §18.1.1); the
     // bound address may be 0.0.0.0, which names every interface and reaches none.
     config.sent_by = crate::advertise::reachable_ip(local, target.addr.ip()).to_string();
-    crate::apply_capture(&args, &mut config);
-    if let Err(message) = transport.configure_client(&args, &mut config) {
+    crate::apply_capture(&options.capture, &mut config);
+    if let Err(message) = transport.configure_client(&options.signalling, &mut config) {
         return fail(format, Exit::Usage, &message);
     }
     let (handle, _incoming) = match bind(config).await {
@@ -136,7 +83,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     // Armed here, not at the end: the run that most needs the numbers is the one that fails, and
     // every `return fail(…)` below now takes the counters file with it.
-    let export = crate::counters::Export::arm(&args, &handle);
+    let export = crate::counters::Export::arm(&options.capture, &handle);
     // The registrar stores this binding and routes every call to the address-of-record at it
     // (RFC 3261 §10.2.6), so it carries the advertised address — reachable host, real port —
     // not the bound one.
@@ -151,7 +98,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     for header in headers {
         ua_config = ua_config.with_header(header);
     }
-    ua_config.expires = Duration::from_secs(args.number("expires").unwrap_or(3600));
+    ua_config.expires = Duration::from_secs(options.expires);
     if let Some(password) = password {
         ua_config = ua_config.with_credentials(Credentials::new(user.clone(), password));
     }
@@ -210,7 +157,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
                 }
             }
 
-            if args.flag("keep-alive") {
+            if options.keep_alive {
                 // `keep_registered` refreshes forever; its success type is uninhabited, so the
                 // only way out is a failure. The single-arm match says so, where an `if let`
                 // would read as though the other case were possible.
@@ -242,10 +189,10 @@ struct Reachability {
 
 /// Read the reachability flags, refusing every combination that would otherwise parse and be
 /// dropped.
-fn reachability(args: &Args<'_>) -> Result<Reachability, String> {
-    let provider = args.value("push-provider");
-    let prid = args.value("push-prid");
-    let param = args.value("push-param");
+fn reachability(options: &RegisterOptions) -> Result<Reachability, String> {
+    let provider = options.push_provider.as_deref();
+    let prid = options.push_prid.as_deref();
+    let param = options.push_param.as_deref();
 
     // §4.1.2 has a UA insert `pn-provider` and `pn-prid` together: either alone names no service
     // that could be asked to wake anything, so half a pair is refused rather than registered.
@@ -280,7 +227,7 @@ fn reachability(args: &Args<'_>) -> Result<Reachability, String> {
         }
     };
 
-    let wake = args.flag("wake");
+    let wake = options.wake;
     if wake && device.is_none() {
         return Err(
             "--wake acts as though a push notification arrived, and no push service was named: \
@@ -289,8 +236,8 @@ fn reachability(args: &Args<'_>) -> Result<Reachability, String> {
         );
     }
 
-    let instance = args.value("instance");
-    let flow = if args.flag("outbound") {
+    let instance = options.instance.as_deref();
+    let flow = if options.outbound {
         let instance = match instance {
             // §4.1 wants the identity persistent across restarts. The CLI keeps no state, so the
             // default is a fresh one and the flag is how a caller supplies the one it persisted.
@@ -402,6 +349,18 @@ pub(crate) fn resolve_target(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
+
+    use crate::cli::{Cli, Command};
+
+    fn command(items: &[&str]) -> Result<RegisterOptions, String> {
+        let cli = Cli::try_parse_from(std::iter::once("sipx").chain(items.iter().copied()))
+            .map_err(|error| error.to_string())?;
+        let Some(Command::Register(options)) = cli.command else {
+            return Err("register command expected".to_owned());
+        };
+        Ok(options)
+    }
 
     #[test]
     fn an_address_of_record_splits_into_user_and_domain() {
@@ -423,7 +382,7 @@ mod tests {
     #[tokio::test]
     async fn a_sips_aor_is_refused_rather_than_registered_in_the_clear() {
         let exit = run(
-            &["register".to_owned(), "sips:bob@192.0.2.1".to_owned()],
+            command(&["register", "sips:bob@192.0.2.1"]).expect("valid syntax"),
             Format::Text,
         )
         .await;
@@ -490,9 +449,8 @@ mod tests {
     }
 
     fn parsed(items: &[&str]) -> Result<Reachability, String> {
-        let raw: Vec<String> = items.iter().map(|item| (*item).to_owned()).collect();
-        let args = Args::new(&raw).expect("a well formed argument list");
-        reachability(&args)
+        let options = command(items)?;
+        reachability(&options)
     }
 
     /// The flags build the config they select: the flow, the push parameters, and the wake.
@@ -612,11 +570,7 @@ mod tests {
     #[tokio::test]
     async fn a_wake_without_push_is_a_usage_error_from_the_command() {
         let exit = run(
-            &[
-                "register".to_owned(),
-                "sip:alice@example.com".to_owned(),
-                "--wake".to_owned(),
-            ],
+            command(&["register", "sip:alice@example.com", "--wake"]).expect("valid syntax"),
             Format::Text,
         )
         .await;

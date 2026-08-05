@@ -10,42 +10,8 @@ use sipx_call::{Credentials, DialOptions};
 use sipx_sip::{Address, Uri};
 use sipx_transport::{Config as TransportConfig, bind};
 
+use crate::cli::LoadOptions;
 use crate::output::{Exit, Format, fail};
-
-pub(crate) const HELP: &str = "\
-sipx load — place a finite, reproducible call load
-
-USAGE:
-    sipx load <URI> --rate <CALLS/S> --concurrency <N> (--calls <N> | --duration <S>) [OPTIONS]
-
-ARGS:
-    <URI>             Target called by every admitted call
-
-REQUIRED OPTIONS:
-    --rate <CALLS/S>  Positive finite arrival rate
-    --concurrency <N> Positive maximum active calls
-
-BOUNDS:
-    --calls <N>       Stop after admitting this many calls
-    --duration <S>    Stop admission after this many seconds
-    --call-duration <S> End each answered call after this many seconds (default 0)
-    --timeout <S>     Bound each call setup (default 20)
-
-REPRODUCIBILITY:
-    --seed <N>        Arrival-jitter and media seed (default 0)
-
-CALL OPTIONS:
-    --from <URI>      Our own address (default sip:sipx@<local>)
-    --password <P>    Password. Prefer SIPX_PASSWORD, since argv is world-readable
-    --local <ADDR>    Local address to bind (default 0.0.0.0:0)
-    --transport <T>   Signalling: udp, tcp, tls, ws or wss (default udp)
-    --tcp             Legacy alias for --transport tcp
-    --tls-server-name <N>  Certificate identity to verify (default URI host)
-    --tls-ca <FILE>   Add PEM trust roots to the platform store
-    --tls-cert <FILE> Client certificate chain for mutual TLS (with --tls-key)
-    --tls-key <FILE>  Client private key for mutual TLS (with --tls-cert)
-    --json            Emit the stable sipx.load.v1 summary as one JSON line
-";
 
 const CLEANUP: Duration = Duration::from_secs(40);
 
@@ -61,25 +27,25 @@ struct Limits {
 }
 
 impl Limits {
-    fn parse(args: &crate::Args<'_>) -> Result<Self, String> {
-        let rate = parse_positive_f64(args.value("rate"), "--rate")?;
+    fn parse(options: &LoadOptions) -> Result<Self, String> {
+        let rate = positive_f64(options.rate, "--rate")?;
         let interval = Duration::try_from_secs_f64(1.0 / rate)
             .map_err(|_| "--rate cannot be represented by the scheduler clock".to_owned())?;
         if interval.is_zero() {
             return Err("--rate is faster than the scheduler clock can represent".to_owned());
         }
-        let concurrency = parse_positive_usize(args.value("concurrency"), "--concurrency")?;
+        let concurrency = positive_usize(options.concurrency, "--concurrency")?;
         if concurrency > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(format!(
                 "--concurrency must not exceed {}",
                 tokio::sync::Semaphore::MAX_PERMITS
             ));
         }
-        let calls = args
-            .value("calls")
-            .map(|value| parse_positive_usize(Some(value), "--calls"))
+        let calls = options
+            .calls
+            .map(|value| positive_usize(value, "--calls"))
             .transpose()?;
-        let duration = args.number("duration").map(Duration::from_secs);
+        let duration = options.duration.map(Duration::from_secs);
         if duration.is_some_and(|value| value.is_zero()) {
             return Err("--duration must be greater than zero for load admission".to_owned());
         }
@@ -91,9 +57,9 @@ impl Limits {
                 "load requires at least one finite bound: --calls or --duration".to_owned(),
             );
         }
-        let seed = parse_u64(args.value("seed").unwrap_or("0"), "--seed")?;
-        let call_duration = Duration::from_secs(args.number("call-duration").unwrap_or(0));
-        let setup_timeout = Duration::from_secs(args.number("timeout").unwrap_or(20));
+        let seed = options.seed;
+        let call_duration = Duration::from_secs(options.call_duration);
+        let setup_timeout = Duration::from_secs(options.timeout);
 
         Ok(Self {
             rate,
@@ -107,41 +73,20 @@ impl Limits {
     }
 }
 
-fn parse_positive_f64(value: Option<&str>, flag: &str) -> Result<f64, String> {
-    let Some(value) = value else {
-        return Err(format!("{flag} is required"));
-    };
-    let parsed = value
-        .parse::<f64>()
-        .map_err(|_| format!("{flag} must be a positive finite number, not {value:?}"))?;
-    if !parsed.is_finite() || parsed <= 0.0 {
+fn positive_f64(value: f64, flag: &str) -> Result<f64, String> {
+    if !value.is_finite() || value <= 0.0 {
         return Err(format!(
             "{flag} must be a positive finite number, not {value:?}"
         ));
     }
-    Ok(parsed)
+    Ok(value)
 }
 
-fn parse_positive_usize(value: Option<&str>, flag: &str) -> Result<usize, String> {
-    let Some(value) = value else {
-        return Err(format!("{flag} is required"));
-    };
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| format!("{flag} must be a positive whole number, not {value:?}"))?;
-    if parsed == 0 {
+fn positive_usize(value: usize, flag: &str) -> Result<usize, String> {
+    if value == 0 {
         return Err(format!("{flag} must be greater than zero"));
     }
-    Ok(parsed)
-}
-
-fn parse_u64(value: &str, flag: &str) -> Result<u64, String> {
-    value.parse::<u64>().map_err(|_| {
-        format!(
-            "{flag} must be a whole number from 0 through {}, not {value:?}",
-            u64::MAX
-        )
-    })
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -155,23 +100,19 @@ struct Measurement {
     clippy::too_many_lines,
     reason = "validation, endpoint construction, owned execution and final reporting stay in lifecycle order"
 )]
-pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    let args = match crate::arguments(raw, HELP, format) {
-        Ok(args) => args,
-        Err(exit) => return exit,
-    };
-    let Some(uri_text) = args.positional() else {
-        eprint!("{HELP}");
-        return fail(format, Exit::Usage, "a target URI is required");
-    };
-    let limits = match Limits::parse(&args) {
+pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
+    let uri_text = command.uri.as_str();
+    let limits = match Limits::parse(&command) {
         Ok(limits) => limits,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
     let Ok(to) = Uri::parse(bytes::Bytes::from(uri_text.to_owned())) else {
         return fail(format, Exit::Usage, &format!("not a SIP URI: {uri_text}"));
     };
-    let transport = match crate::signalling::Selection::from_args(&args, to.scheme().is_secure()) {
+    let transport = match crate::signalling::Selection::from_options(
+        &command.signalling,
+        to.scheme().is_secure(),
+    ) {
         Ok(transport) => transport,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
@@ -182,25 +123,24 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             &format!("{uri_text} must name an address and port"),
         );
     };
-    let target = match transport.target(&args, target_addr, &server_name) {
+    let target = match transport.target(&command.signalling, target_addr, &server_name) {
         Ok(target) => target,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let Ok(local) = args.value("local").unwrap_or("0.0.0.0:0").parse() else {
-        return fail(format, Exit::Usage, "--local must be host:port");
-    };
+    let local = command.local;
     let media_address: IpAddr = crate::advertise::reachable_ip(local, target_addr.ip());
-    let from = args
-        .value("from")
+    let from = command
+        .from
+        .as_deref()
         .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
-    let credentials = match credentials(&args, &from) {
+    let credentials = match credentials(&command, &from) {
         Ok(credentials) => credentials,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
     let mut config = TransportConfig::new(local);
     config.sent_by = media_address.to_string();
-    if let Err(message) = transport.configure_client(&args, &mut config) {
+    if let Err(message) = transport.configure_client(&command.signalling, &mut config) {
         return fail(format, Exit::Usage, &message);
     }
     let (handle, _incoming) = match bind(config).await {
@@ -330,11 +270,8 @@ fn deterministic_frame(seed: u64, index: usize) -> [i16; 160] {
     frame
 }
 
-fn credentials(args: &crate::Args<'_>, from: &str) -> Result<Option<Credentials>, String> {
-    let password = args
-        .value("password")
-        .map(str::to_owned)
-        .or_else(|| std::env::var("SIPX_PASSWORD").ok());
+fn credentials(options: &LoadOptions, from: &str) -> Result<Option<Credentials>, String> {
+    let password = options.password.clone();
     let Some(password) = password else {
         return Ok(None);
     };
@@ -498,9 +435,22 @@ fn emit_summary(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
+
+    use crate::cli::{Cli, Command};
 
     fn raw(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    fn command(raw: &[String]) -> LoadOptions {
+        let cli =
+            Cli::try_parse_from(std::iter::once("sipx").chain(raw.iter().map(String::as_str)))
+                .expect("argument shape");
+        let Some(Command::Load(options)) = cli.command else {
+            panic!("load command expected");
+        };
+        options
     }
 
     #[test]
@@ -513,8 +463,7 @@ mod tests {
             "--concurrency",
             "3",
         ]);
-        let args = crate::Args::new(&unbounded).expect("argument shape");
-        assert!(Limits::parse(&args).is_err());
+        assert!(Limits::parse(&command(&unbounded)).is_err());
 
         let bounded = raw(&[
             "load",
@@ -526,8 +475,7 @@ mod tests {
             "--calls",
             "4",
         ]);
-        let args = crate::Args::new(&bounded).expect("argument shape");
-        let limits = Limits::parse(&args).expect("finite plan");
+        let limits = Limits::parse(&command(&bounded)).expect("finite plan");
         assert_eq!(limits.calls, Some(4));
         assert_eq!(CLEANUP, Duration::from_secs(40));
     }
@@ -606,8 +554,7 @@ mod tests {
                 "0",
             ]),
         ] {
-            let args = crate::Args::new(&values).expect("argument shape");
-            assert!(Limits::parse(&args).is_err(), "{values:?}");
+            assert!(Limits::parse(&command(&values)).is_err(), "{values:?}");
         }
 
         let excessive = raw(&[
@@ -622,8 +569,10 @@ mod tests {
             "--calls",
             "4",
         ]);
-        let args = crate::Args::new(&excessive).expect("argument shape");
-        assert!(Limits::parse(&args).is_err(), "{excessive:?}");
+        assert!(
+            Limits::parse(&command(&excessive)).is_err(),
+            "{excessive:?}"
+        );
     }
 
     #[test]

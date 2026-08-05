@@ -3695,6 +3695,10 @@ async fn custom_supported_header_is_sent_and_stack_owned_via_is_refused_before_b
     peer.await.expect("peer finishes");
     assert_eq!(sent.status.code(), Some(6));
 
+    let occupied = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("occupied address binds");
+    let occupied_address = occupied.local_addr().expect("occupied address is named");
     let refused = sipx()
         .args([
             "dial",
@@ -3702,7 +3706,7 @@ async fn custom_supported_header_is_sent_and_stack_owned_via_is_refused_before_b
             "--header",
             "Via: SIP/2.0/UDP injected.invalid",
             "--local",
-            "this-is-not-an-address",
+            &occupied_address.to_string(),
             "--json",
         ])
         .output()
@@ -3711,10 +3715,6 @@ async fn custom_supported_header_is_sent_and_stack_owned_via_is_refused_before_b
     assert_eq!(refused.status.code(), Some(2));
     let complaint = String::from_utf8_lossy(&refused.stderr);
     assert!(complaint.contains("stack-owned field Via"), "{complaint}");
-    assert!(
-        !complaint.contains("--local must"),
-        "header validation must win: {complaint}"
-    );
 }
 
 /// DPH-9: the real process reads a finite shell pipeline, waits for the answer event instead of a

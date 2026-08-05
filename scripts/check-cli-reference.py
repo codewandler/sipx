@@ -43,7 +43,11 @@ class JsonContract:
 def help_commands(text: str) -> set[str]:
     """Read the executable command names from the root help's COMMANDS block."""
 
-    match = re.search(r"^COMMANDS:\s*$\n(?P<body>.*?)(?=^\S|\Z)", text, re.MULTILINE | re.DOTALL)
+    match = re.search(
+        r"^COMMANDS:\s*$\n(?P<body>.*?)(?=^\S|\Z)",
+        text,
+        re.MULTILINE | re.DOTALL | re.IGNORECASE,
+    )
     if match is None:
         return set()
     return {

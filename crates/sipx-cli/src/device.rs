@@ -3,17 +3,8 @@
 //! Device callbacks live here, at the command leaf. They exchange bounded PCM frames with a media
 //! session and use `sipx-audio`'s public converter for their rate boundary.
 
-use crate::Args;
+use crate::cli::{AudioOptions, DevicesOptions};
 use crate::output::{Exit, Format, Report, fail};
-
-pub(crate) const HELP: &str = "\
-sipx devices — list stable audio device identifiers
-
-USAGE:
-    sipx devices [--json]
-
-The command opens no stream. Device support requires the `device-audio` build feature.
-";
 
 /// A command's two local audio endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,16 +22,16 @@ enum Endpoint {
 
 impl Selection {
     /// Resolve the new endpoint spelling and the two existing WAV aliases before any I/O.
-    pub(crate) fn from_args(args: &Args<'_>) -> Result<Self, String> {
+    pub(crate) fn from_options(options: &AudioOptions) -> Result<Self, String> {
         let input = endpoint(
-            args.value("audio-input"),
-            args.value("play"),
+            options.audio_input.as_deref(),
+            options.play.as_deref(),
             "input",
             "play",
         )?;
         let output = endpoint(
-            args.value("audio-output"),
-            args.value("record"),
+            options.audio_output.as_deref(),
+            options.record.as_deref(),
             "output",
             "record",
         )?;
@@ -113,11 +104,7 @@ fn endpoint(
 }
 
 /// List stable identifiers without opening a stream.
-pub(crate) fn list(raw: &[String], format: Format) -> Exit {
-    if crate::wants_help(raw) {
-        print!("{HELP}");
-        return Exit::Success;
-    }
+pub(crate) fn list(_options: DevicesOptions, format: Format) -> Exit {
     #[cfg(feature = "device-audio")]
     {
         match enabled::devices() {
@@ -1035,21 +1022,19 @@ mod enabled {
 
         #[test]
         fn endpoint_aliases_are_exact_and_conflicts_are_refused() {
-            let raw = ["dial", "sip:a@b", "--audio-input", "wav:a.wav"].map(str::to_owned);
-            let selected =
-                super::super::Selection::from_args(&crate::Args::new(&raw).unwrap()).unwrap();
+            let selected = super::super::Selection::from_options(&crate::cli::AudioOptions {
+                audio_input: Some("wav:a.wav".to_owned()),
+                ..crate::cli::AudioOptions::default()
+            })
+            .unwrap();
             assert_eq!(selected.wav_input(), Some("a.wav"));
 
-            let raw = [
-                "dial",
-                "sip:a@b",
-                "--audio-input",
-                "wav:a.wav",
-                "--play",
-                "b.wav",
-            ]
-            .map(str::to_owned);
-            assert!(super::super::Selection::from_args(&crate::Args::new(&raw).unwrap()).is_err());
+            let options = crate::cli::AudioOptions {
+                audio_input: Some("wav:a.wav".to_owned()),
+                play: Some("b.wav".to_owned()),
+                ..crate::cli::AudioOptions::default()
+            };
+            assert!(super::super::Selection::from_options(&options).is_err());
         }
     }
 }

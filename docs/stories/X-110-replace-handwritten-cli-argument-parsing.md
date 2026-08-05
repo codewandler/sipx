@@ -20,23 +20,31 @@ forget a global list.
 
 ## Acceptance
 
-- [ ] One declarative parser owns the root command, every shipped subcommand, global output and
+- [x] One declarative parser owns the root command, every shipped subcommand, global output and
       verbosity options, positional arguments, repeated options, defaults, conflicts and value
       validation. Command implementations receive typed command values rather than raw argv or a
       string lookup facade.
-- [ ] The custom `Args` type, `arguments`, `wants_help`, `VALUED_FLAGS`, `NUMERIC_FLAGS`, raw command
+- [x] The custom `Args` type, `arguments`, `wants_help`, `VALUED_FLAGS`, `NUMERIC_FLAGS`, raw command
       dispatch and every production `std::env::args`/`args_os` read are removed from `sipx-cli`.
       A focused repository check fails if any of those manual-parser shapes return.
-- [ ] The shipped command contract is preserved deliberately: command and option names, aliases,
+- [x] The shipped command contract is preserved deliberately: command and option names, aliases,
       repeatability and ordering, environment fallbacks, defaults, help/version success, unknown or
       malformed input refusal, JSON/text result separation, verbosity semantics and exit codes.
-- [ ] Values are parsed once into their semantic types where the parser can own the rule; remaining
+- [x] Values are parsed once into their semantic types where the parser can own the rule; remaining
       cross-field and protocol-policy validation is named in the command layer and does not rescan
       argv. Non-Unicode input is refused as a usage error rather than panicking before `main`.
-- [ ] Failing-first tests cover at least a missing value, a value that begins with `-`, a repeated
+- [x] Failing-first tests cover at least a missing value, a value that begins with `-`, a repeated
       ordered option, a conflicting option pair, clustered verbosity, help mixed with malformed
       input, a non-Unicode argument on Unix and one option shared across multiple commands.
-- [ ] The generated CLI reference and public examples are synchronized from the parser-owned help;
+- [x] The generated CLI reference and public examples are synchronized from the parser-owned help;
       no second hand-written command/flag inventory remains in docs or tests.
 - [ ] Focused CLI tests, no-default/all-feature builds, strict Clippy, docs synchronization and the
       complete repository gate are green.
+
+## Progress
+
+- 2026-08-06: replaced the raw argument scanner, registries and string lookup facade with one typed
+  declarative command model. The all-feature CLI suite (including 53 real-process scenarios),
+  no-default and all-feature checks, strict all-target Clippy, and CLI-reference synchronization are
+  green. The complete repository gate and generated repository reports are deferred to the shared
+  push boundary, so the final acceptance item and story status remain open until that wave check.

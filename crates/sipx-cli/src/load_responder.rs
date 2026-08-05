@@ -1,7 +1,6 @@
 //! `sipx load-responder` — a finite, machine-driven answering endpoint.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -15,35 +14,9 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::cli::LoadResponderOptions;
 use crate::output::{Exit, Format, fail};
 
-pub(crate) const HELP: &str = "\
-sipx load-responder — answer a finite, bounded signalling load
-
-USAGE:
-    sipx load-responder --max-active <N> --cleanup <S> (--calls <N> | --duration <S>) [OPTIONS]
-
-REQUIRED BOUNDS:
-    --max-active <N>       Positive maximum simultaneously owned dialogs
-    --calls <N>            Close admission after this many surfaced INVITEs
-    --duration <S>         Close admission after this many seconds
-    --cleanup <S>          Positive deadline for dialog, task and transaction drain
-
-POLICY:
-    --seed <N>                 Deterministic policy seed (default 0)
-    --provisional-percent <P>  Percent receiving one 100 Trying (default 0)
-    --answer-percent <P>       Percent receiving 200 rather than rejection (default 100)
-    --reject-status <CODE>     Final 4xx-6xx for policy rejection (default 486)
-    --dialog-duration <S>      Positive maximum accepted-dialog lifetime (default 40)
-    --mode <M>                 signalling or generated-media (default signalling)
-
-ENDPOINT:
-    --local <ADDR>         UDP address to bind (default 127.0.0.1:0)
-    --transport <T>        Must be udp; other profiles are separate (default udp)
-    --json                 Emit terminal sipx.load-responder.v1 JSON after JSON readiness
-";
-
-const DEFAULT_DIALOG_DURATION: Duration = Duration::from_secs(40);
 const PER_DIALOG_QUEUE: usize = 8;
 const MAX_LATENCY_SAMPLES: usize = 65_536;
 
@@ -60,8 +33,8 @@ enum Mode {
 }
 
 impl Mode {
-    fn parse(value: Option<&str>) -> Result<Self, String> {
-        match value.unwrap_or("signalling") {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
             "signalling" => Ok(Self::Signalling),
             "generated-media" => Ok(Self::GeneratedMedia),
             other => Err(format!(
@@ -93,11 +66,8 @@ struct Limits {
 }
 
 impl Limits {
-    fn parse(args: &crate::Args<'_>) -> Result<Self, String> {
-        if args.flag("tcp") || args.value("transport").is_some_and(|value| value != "udp") {
-            return Err("load-responder v1 supports only --transport udp".to_owned());
-        }
-        let max_active = positive_usize(args.value("max-active"), "--max-active")?;
+    fn parse(options: &LoadResponderOptions) -> Result<Self, String> {
+        let max_active = positive_usize(options.max_active, "--max-active")?;
         if max_active > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(format!(
                 "--max-active must not exceed {}",
@@ -111,39 +81,23 @@ impl Limits {
                 tokio::sync::Semaphore::MAX_PERMITS / PER_DIALOG_QUEUE
             ));
         }
-        let calls = args
-            .value("calls")
-            .map(|value| positive_usize(Some(value), "--calls"))
+        let calls = options
+            .calls
+            .map(|value| positive_usize(value, "--calls"))
             .transpose()?;
-        let duration = args.number("duration").map(Duration::from_secs);
+        let duration = options.duration.map(Duration::from_secs);
         if duration.is_some_and(|value| value.is_zero()) {
             return Err("--duration must be greater than zero".to_owned());
         }
         if calls.is_none() && duration.is_none() {
             return Err("load-responder requires --calls or --duration".to_owned());
         }
-        let cleanup = required_positive_duration(args, "cleanup")?;
-        let dialog_duration = match args.number("dialog-duration") {
-            Some(0) => return Err("--dialog-duration must be greater than zero".to_owned()),
-            Some(seconds) => Duration::from_secs(seconds),
-            None => DEFAULT_DIALOG_DURATION,
-        };
-        let seed = args
-            .value("seed")
-            .unwrap_or("0")
-            .parse::<u64>()
-            .map_err(|_| "--seed must be an unsigned 64-bit integer".to_owned())?;
-        let provisional_percent = percent(
-            args.value("provisional-percent"),
-            0,
-            "--provisional-percent",
-        )?;
-        let answer_percent = percent(args.value("answer-percent"), 100, "--answer-percent")?;
-        let reject_status = args
-            .value("reject-status")
-            .unwrap_or("486")
-            .parse::<u16>()
-            .map_err(|_| "--reject-status must be an integer from 400 through 699".to_owned())?;
+        let cleanup = positive_duration(options.cleanup, "--cleanup")?;
+        let dialog_duration = positive_duration(options.dialog_duration, "--dialog-duration")?;
+        let seed = options.seed;
+        let provisional_percent = percent(options.provisional_percent, "--provisional-percent")?;
+        let answer_percent = percent(options.answer_percent, "--answer-percent")?;
+        let reject_status = options.reject_status;
         if !(400..=699).contains(&reject_status) {
             return Err("--reject-status must be an integer from 400 through 699".to_owned());
         }
@@ -157,43 +111,30 @@ impl Limits {
             provisional_percent,
             answer_percent,
             reject_status,
-            mode: Mode::parse(args.value("mode"))?,
+            mode: Mode::parse(&options.mode)?,
         })
     }
 }
 
-fn positive_usize(value: Option<&str>, flag: &str) -> Result<usize, String> {
-    let Some(value) = value else {
-        return Err(format!("{flag} is required"));
-    };
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| format!("{flag} must be a positive whole number"))?;
-    if parsed == 0 {
+fn positive_usize(value: usize, flag: &str) -> Result<usize, String> {
+    if value == 0 {
         return Err(format!("{flag} must be greater than zero"));
     }
-    Ok(parsed)
+    Ok(value)
 }
 
-fn required_positive_duration(args: &crate::Args<'_>, name: &str) -> Result<Duration, String> {
-    let flag = format!("--{name}");
-    let Some(seconds) = args.number(name) else {
-        return Err(format!("{flag} is required"));
-    };
+fn positive_duration(seconds: u64, flag: &str) -> Result<Duration, String> {
     if seconds == 0 {
         return Err(format!("{flag} must be greater than zero"));
     }
     Ok(Duration::from_secs(seconds))
 }
 
-fn percent(value: Option<&str>, default: u8, flag: &str) -> Result<u8, String> {
-    let parsed = value
-        .map_or(Ok(default), str::parse::<u8>)
-        .map_err(|_| format!("{flag} must be an integer from 0 through 100"))?;
-    if parsed > 100 {
+fn percent(value: u8, flag: &str) -> Result<u8, String> {
+    if value > 100 {
         return Err(format!("{flag} must be an integer from 0 through 100"));
     }
-    Ok(parsed)
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -413,26 +354,12 @@ impl Completion {
     clippy::too_many_lines,
     reason = "the command's admission, routing, cleanup barriers and final evidence remain in lifecycle order"
 )]
-pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    let args = match crate::arguments(raw, HELP, format) {
-        Ok(args) => args,
-        Err(exit) => return exit,
-    };
-    if let Some(positional) = args.positional() {
-        return fail(
-            format,
-            Exit::Usage,
-            &format!("load-responder takes no positional argument, got {positional:?}"),
-        );
-    }
-    let limits = match Limits::parse(&args) {
+pub(crate) async fn run(options: LoadResponderOptions, format: Format) -> Exit {
+    let limits = match Limits::parse(&options) {
         Ok(limits) => limits,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let local: SocketAddr = match args.value("local").unwrap_or("127.0.0.1:0").parse() {
-        Ok(local) => local,
-        Err(_) => return fail(format, Exit::Usage, "--local must be an IP socket address"),
-    };
+    let local = options.local;
     let mut config = TransportConfig::new(local);
     config.sent_by = local.ip().to_string();
     let queued_events = endpoint_event_capacity(limits.max_active);
@@ -1534,6 +1461,9 @@ fn emit_summary(
 )]
 mod tests {
     use super::*;
+    use clap::Parser as _;
+
+    use crate::cli::{Cli, Command};
 
     #[test]
     fn endpoint_queue_covers_the_advertised_event_budget() {
@@ -1553,7 +1483,7 @@ mod tests {
             "--cleanup",
             "40",
         ]);
-        let parsed = crate::Args::new(&raw).expect("argument shape");
+        let parsed = command(&raw).expect("argument shape");
         assert!(Limits::parse(&parsed).is_err());
     }
 
@@ -1570,6 +1500,16 @@ mod tests {
         items.iter().map(|item| (*item).to_owned()).collect()
     }
 
+    fn command(raw: &[String]) -> Result<LoadResponderOptions, String> {
+        let cli =
+            Cli::try_parse_from(std::iter::once("sipx").chain(raw.iter().map(String::as_str)))
+                .map_err(|error| error.to_string())?;
+        let Some(Command::LoadResponder(options)) = cli.command else {
+            return Err("load-responder command expected".to_owned());
+        };
+        Ok(options)
+    }
+
     #[test]
     fn responder_requires_every_lifecycle_bound() {
         for raw in [
@@ -1577,8 +1517,10 @@ mod tests {
             args(&["load-responder", "--cleanup", "40", "--calls", "1"]),
             args(&["load-responder", "--max-active", "2", "--cleanup", "40"]),
         ] {
-            let parsed = crate::Args::new(&raw).expect("argument shape");
-            assert!(Limits::parse(&parsed).is_err(), "{raw:?}");
+            assert!(
+                command(&raw).map_or(true, |options| Limits::parse(&options).is_err()),
+                "{raw:?}"
+            );
         }
     }
 
@@ -1641,8 +1583,10 @@ mod tests {
                 "200",
             ]),
         ] {
-            let parsed = crate::Args::new(&raw).expect("argument shape");
-            assert!(Limits::parse(&parsed).is_err(), "{raw:?}");
+            assert!(
+                command(&raw).map_or(true, |options| Limits::parse(&options).is_err()),
+                "{raw:?}"
+            );
         }
     }
 

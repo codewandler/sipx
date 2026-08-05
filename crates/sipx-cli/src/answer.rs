@@ -1,73 +1,33 @@
 //! `sipx answer`.
 
-use std::net::IpAddr;
 use std::time::Duration;
 
 use sipx_sip::{HeaderName, StatusCode};
 use sipx_transport::{Config as TransportConfig, bind};
 
+use crate::cli::AnswerOptions;
 use crate::output::{Exit, Format, Report, fail};
-
-pub(crate) const HELP: &str = "\
-sipx answer — wait for a call and answer it
-
-USAGE:
-    sipx answer [OPTIONS]
-
-OPTIONS:
-    --play <FILE>     Play mono 16-bit WAV at the negotiated codec clock
-    --record <FILE>   Record the caller to WAV at the negotiated codec clock
-    --duration <S>    Hang up after this many seconds (default 30)
-    --wait <S>        Give up if no call arrives within this many seconds (default 60)
-    --local <ADDR>    Local address to bind (default 0.0.0.0:5060)
-    --advertise <IP>  Address to put in Via, Contact and SDP independently of --local
-    --transport <T>   Signalling: udp, tcp, tls, ws or wss (no flag keeps UDP/TCP)
-    --tcp             Legacy alias for --transport tcp
-    --tls-cert <FILE> Server certificate chain for TLS/WSS (with --tls-key)
-    --tls-key <FILE>  Server private key for TLS/WSS (with --tls-cert)
-    --profile <P>     Media profile: standard or browser-audio (default standard)
-    --codec <C>       Ordered codec preference; repeat pcmu, pcma, l16 or opus (default pcmu, pcma)
-    --media-security <M>  auto, plain, sdes or dtls-srtp (default auto)
-    --ice <P>         disabled, host or stun (default disabled)
-    --stun-server <ADDR>  STUN server for --ice stun, as host:port
-    --audio-input <E>  Local source: wav:<path>, device:<id> or null
-    --audio-output <E> Local sink: wav:<path>, device:<id> or null
-    --header <H>      Add an application-owned final-response field; repeat 'Name: value'
-    --reject          Answer 603 Decline instead
-    --busy            Answer 486 Busy Here instead
-    --once            Exit after one call (default; kept for clarity in scripts)
-    --capture <FILE>  Record signalling to this pcapng file. Credentials are redacted;
-                      TLS is recorded decrypted. Still identifies who called whom
-    --counters <FILE> Write this run's signalling counters to this file, as JSON.
-                      Implied by --capture, as <capture>.counters.json
-    --json            Report as JSON
-";
 
 #[allow(
     clippy::too_many_lines,
     reason = "the command lifecycle is kept in execution order so validation-before-I/O remains auditable"
 )]
-pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    // Refused before the socket is bound, so a dropped flag cannot become an answerer that
-    // reports `listening` and then records nothing (`S-30`).
-    let args = match crate::arguments(raw, HELP, format) {
-        Ok(args) => args,
-        Err(exit) => return exit,
-    };
-
-    let transport = match crate::signalling::Selection::from_args(&args, false) {
+pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
+    let signalling = options.signalling.complete();
+    let transport = match crate::signalling::Selection::from_options(&signalling, false) {
         Ok(transport) => transport,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let media = match crate::media::Selection::from_args(&args, transport.kind()) {
+    let media = match crate::media::Selection::from_options(&options.media, transport.kind(), false)
+    {
         Ok(media) => media,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let audio = match crate::device::Selection::from_args(&args) {
+    let audio = match crate::device::Selection::from_options(&options.audio) {
         Ok(audio) => audio,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let headers = match crate::header::from_args(&args) {
+    let headers = match crate::header::from_options(&options.headers) {
         Ok(headers) => headers,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
@@ -82,21 +42,16 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Err(message) => return fail(format, Exit::Failed, &message),
     };
 
-    let local: std::net::SocketAddr = match args.value("local").unwrap_or("0.0.0.0:5060").parse() {
-        Ok(local) => local,
-        Err(_) => return fail(format, Exit::Usage, "--local must be host:port"),
-    };
-    let advertised = match args.value("advertise") {
-        Some(value) => match value.parse::<IpAddr>() {
-            Ok(address) if !address.is_unspecified() => Some(address),
-            _ => {
-                return fail(
-                    format,
-                    Exit::Usage,
-                    "--advertise must be a non-unspecified IP",
-                );
-            }
-        },
+    let local = options.local;
+    let advertised = match options.advertise {
+        Some(address) if !address.is_unspecified() => Some(address),
+        Some(_) => {
+            return fail(
+                format,
+                Exit::Usage,
+                "--advertise must be a non-unspecified IP",
+            );
+        }
         None => None,
     };
 
@@ -106,8 +61,8 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     } else if local.ip().is_unspecified() {
         "127.0.0.1".clone_into(&mut config.sent_by);
     }
-    crate::apply_capture(&args, &mut config);
-    if let Err(message) = transport.configure_listener(&args, &mut config) {
+    crate::apply_capture(&options.capture, &mut config);
+    if let Err(message) = transport.configure_listener(&signalling, &mut config) {
         return fail(format, Exit::Usage, &message);
     }
     let (handle, mut incoming) = match bind(config).await {
@@ -117,7 +72,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     // Armed here, not at the end: the run that most needs the numbers is the one that fails, and
     // every `return fail(…)` below now takes the counters file with it.
-    let export = crate::counters::Export::arm(&args, &handle);
+    let export = crate::counters::Export::arm(&options.capture, &handle);
 
     // Announce the port before waiting, so a script that started this in the background knows
     // where to call without guessing or racing.
@@ -138,7 +93,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         )
         .emit(format);
 
-    let wait = Duration::from_secs(args.number("wait").unwrap_or(60));
+    let wait = Duration::from_secs(options.wait);
     // The call's progress at INFO, which is what `-v` documents and what it produced nothing of
     // before `X-57`: the two INFO records in the workspace are a registration refresh and a
     // transcoding bridge, and a call goes near neither.
@@ -164,12 +119,12 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         .map(|value| String::from_utf8_lossy(&value).into_owned())
         .unwrap_or_default();
 
-    if args.flag("reject") || args.flag("busy") {
+    if options.reject || options.busy {
         return refuse(
             &handle,
             &request,
             &caller,
-            args.flag("busy"),
+            options.busy,
             transport,
             format,
             &headers,
@@ -194,7 +149,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Err(error) => return fail(format, Exit::Failed, &error.to_string()),
     };
 
-    let duration = Duration::from_secs(args.number("duration").unwrap_or(30));
+    let duration = Duration::from_secs(options.duration);
     let session = call.media();
     let pcm = match clip.as_ref().map(crate::dial::pcm_clip).transpose() {
         Ok(pcm) => pcm,

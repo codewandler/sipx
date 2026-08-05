@@ -1,6 +1,5 @@
 //! `sipx dial`.
 
-use std::net::IpAddr;
 use std::time::Duration;
 
 use sipx_audio::{Wav, read_wav, write_wav};
@@ -8,94 +7,44 @@ use sipx_call::{Call, Credentials};
 use sipx_sip::{Address, Host, Uri};
 use sipx_transport::{Config as TransportConfig, TransportKind, bind};
 
+use crate::cli::DialOptions;
 use crate::output::{Exit, Format, Report, fail};
-
-pub(crate) const HELP: &str = "\
-sipx dial — place a call
-
-USAGE:
-    sipx dial <URI> [OPTIONS]
-
-ARGS:
-    <URI>    Who to call, e.g. sip:bob@192.0.2.1:5060
-
-OPTIONS:
-    --play <FILE>     Play mono 16-bit WAV at the negotiated codec clock
-    --record <FILE>   Record the far end to WAV at the negotiated codec clock
-    --dtmf <DIGITS>   Send these digits once the call is up
-    --duration <S>    Hang up after this many seconds once connected (default 30)
-    --timeout <S>     Give up if the call is not answered in this many seconds (default 20).
-                      0 waits as long as the transaction layer does, which is 32 seconds.
-    --from <URI>      Our own address (default sip:sipx@<local>)
-    --password <P>    Password. Prefer SIPX_PASSWORD, since argv is world-readable.
-    --local <ADDR>    Local address to bind (default 0.0.0.0:0)
-    --advertise <IP>  Address to put in Via, Contact and SDP independently of --local
-    --transport <T>   Signalling: udp, tcp, tls, ws or wss (default udp)
-    --tcp             Legacy alias for --transport tcp
-    --tls-server-name <N>  Certificate identity to verify (default URI host)
-    --tls-ca <FILE>   Add PEM trust roots to the platform store
-    --tls-cert <FILE> Client certificate chain for mutual TLS (with --tls-key)
-    --tls-key <FILE>  Client private key for mutual TLS (with --tls-cert)
-    --profile <P>     Media profile: standard or browser-audio (default standard)
-    --codec <C>       Ordered codec preference; repeat pcmu, pcma, l16 or opus (default pcmu, pcma)
-    --media-security <M>  auto, plain, sdes or dtls-srtp (default auto)
-    --ice <P>         disabled, host or stun (default disabled)
-    --stun-server <ADDR>  STUN server for --ice stun, as host:port
-    --audio-input <E>  Local source: wav:<path>, device:<id> or null
-    --audio-output <E> Local sink: wav:<path>, device:<id> or null
-    --early-media     Receive a reliable provisional media session before the final answer
-    --header <H>      Add an application-owned INVITE field; repeat 'Name: value'
-    --stats           Report call quality on exit: loss, jitter, round trip, MOS estimate
-    --capture <FILE>  Record signalling to this pcapng file. Credentials are redacted;
-                      TLS is recorded decrypted. Still identifies who called whom
-    --counters <FILE> Write this run's signalling counters to this file, as JSON.
-                      Implied by --capture, as <capture>.counters.json
-    --json            Report as JSON
-";
 
 #[allow(
     clippy::too_many_lines,
     reason = "the command lifecycle is kept in execution order so validation-before-I/O remains auditable"
 )]
-pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    // Help, then any flag given no value — refused before the URI is even looked at, so a dropped
-    // `--play` or `--record` cannot turn into a call that carries no audio (`S-30`).
-    let args = match crate::arguments(raw, HELP, format) {
-        Ok(args) => args,
-        Err(exit) => return exit,
-    };
-
-    let Some(uri) = args.positional() else {
-        eprint!("{HELP}");
-        return fail(format, Exit::Usage, "a URI to call is required");
-    };
+pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
+    let uri = options.uri.as_str();
 
     let Ok(to) = Uri::parse(bytes::Bytes::from(uri.to_owned())) else {
         return fail(format, Exit::Usage, &format!("not a SIP URI: {uri}"));
     };
-    let transport = match crate::signalling::Selection::from_args(&args, to.scheme().is_secure()) {
+    let transport = match crate::signalling::Selection::from_options(
+        &options.signalling,
+        to.scheme().is_secure(),
+    ) {
         Ok(transport) => transport,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let media = match crate::media::Selection::from_args(&args, transport.kind()) {
+    let media = match crate::media::Selection::from_options(
+        &options.media,
+        transport.kind(),
+        options.early_media,
+    ) {
         Ok(media) => media,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let audio = match crate::device::Selection::from_args(&args) {
+    let audio = match crate::device::Selection::from_options(&options.audio) {
         Ok(audio) => audio,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let headers = match crate::header::from_args(&args) {
+    let headers = match crate::header::from_options(&options.headers) {
         Ok(headers) => headers,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
-    // A password on the command line is visible to every process on the machine, so the
-    // environment is the documented route and the flag is the convenience.
-    let password = args
-        .value("password")
-        .map(str::to_owned)
-        .or_else(|| std::env::var("SIPX_PASSWORD").ok());
+    let password = options.password.clone();
 
     let Some((target_addr, server_name)) = target_of(&to, transport.kind()) else {
         return fail(
@@ -104,7 +53,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             &format!("{uri} must name an address and port, e.g. sip:bob@192.0.2.1:5060"),
         );
     };
-    let target = match transport.target(&args, target_addr, &server_name) {
+    let target = match transport.target(&options.signalling, target_addr, &server_name) {
         Ok(target) => target,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
@@ -122,28 +71,24 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Err(message) => return fail(format, Exit::Failed, &message),
     };
 
-    let local: std::net::SocketAddr = match args.value("local").unwrap_or("0.0.0.0:0").parse() {
-        Ok(local) => local,
-        Err(_) => return fail(format, Exit::Usage, "--local must be host:port"),
-    };
+    let local = options.local;
     // Media has to advertise something reachable, and an unspecified address is not.
-    let advertised = match args.value("advertise") {
-        Some(value) => match value.parse::<IpAddr>() {
-            Ok(address) if !address.is_unspecified() => Some(address),
-            _ => {
-                return fail(
-                    format,
-                    Exit::Usage,
-                    "--advertise must be a non-unspecified IP",
-                );
-            }
-        },
+    let advertised = match options.advertise {
+        Some(address) if !address.is_unspecified() => Some(address),
+        Some(_) => {
+            return fail(
+                format,
+                Exit::Usage,
+                "--advertise must be a non-unspecified IP",
+            );
+        }
         None => None,
     };
     let media_addresses = crate::advertise::media_addresses(local, target_addr.ip(), advertised);
     let media_address = media_addresses.advertised;
-    let from = args
-        .value("from")
+    let from = options
+        .from
+        .as_deref()
         .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
     let credentials = match password {
         Some(password) => {
@@ -165,8 +110,8 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     let mut config = TransportConfig::new(local);
     config.sent_by = media_address.to_string();
-    crate::apply_capture(&args, &mut config);
-    if let Err(message) = transport.configure_client(&args, &mut config) {
+    crate::apply_capture(&options.capture, &mut config);
+    if let Err(message) = transport.configure_client(&options.signalling, &mut config) {
         return fail(format, Exit::Usage, &message);
     }
     let (handle, _incoming) = match bind(config).await {
@@ -176,24 +121,24 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     // Armed here, not at the end: the run that most needs the numbers is the one that fails, and
     // every `return fail(…)` below now takes the counters file with it.
-    let export = crate::counters::Export::arm(&args, &handle);
+    let export = crate::counters::Export::arm(&options.capture, &handle);
 
     // The bound is handed to the library rather than wrapped around it. Dropping the call
     // future partway through would leave the far end believing it is in a call, and only code
     // inside the exchange can send the CANCEL that stops it ringing.
-    let attempt = Duration::from_secs(args.number("timeout").unwrap_or(DEFAULT_TIMEOUT_SECS));
+    let attempt = Duration::from_secs(options.timeout);
 
-    let mut options = sipx_call::DialOptions::new(from, media_address)
+    let mut call_options = sipx_call::DialOptions::new(from, media_address)
         .with_media_bind_address(media_addresses.bind)
         .with_media_policy(media.policy());
     for header in headers {
-        options = options.with_header(header);
+        call_options = call_options.with_header(header);
     }
     if !attempt.is_zero() {
-        options = options.with_timeout(attempt);
+        call_options = call_options.with_timeout(attempt);
     }
     if let Some(credentials) = credentials {
-        options = options.with_credentials(credentials);
+        call_options = call_options.with_credentials(credentials);
     }
 
     // What `-v` is *for*, and what it used to be worth nothing on: a call's own progress. The
@@ -204,11 +149,11 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // allowed to narrate it.
     tracing::info!(peer = uri, transport = ?negotiated_transport, "calling");
 
-    let duration = Duration::from_secs(args.number("duration").unwrap_or(30));
-    let early_requested = args.flag("early-media");
+    let duration = Duration::from_secs(options.duration);
+    let early_requested = options.early_media;
     let started = std::time::Instant::now();
     let (mut call, early_recorded, early_media) = if early_requested {
-        let mut dialing = match sipx_call::dial_early(&handle, target, &to, &options).await {
+        let mut dialing = match sipx_call::dial_early(&handle, target, &to, &call_options).await {
             Ok(dialing) => dialing,
             Err(error) => return report_failure(format, &error),
         };
@@ -234,7 +179,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         };
         (call, early_recorded, early_media)
     } else {
-        let call = match sipx_call::dial(&handle, target, &to, &options).await {
+        let call = match sipx_call::dial(&handle, target, &to, &call_options).await {
             Ok(call) => call,
             Err(error) => return report_failure(format, &error),
         };
@@ -245,7 +190,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     let exchanged = match exchange(
         &mut call,
         clip.as_ref(),
-        args.value("dtmf"),
+        options.dtmf.as_deref(),
         duration,
         &mut devices,
     )
@@ -285,7 +230,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         );
     }
 
-    if args.flag("stats") {
+    if options.stats {
         report = with_quality(report, &call.media().quality().await);
     }
 
@@ -378,13 +323,6 @@ struct Exchange {
     samples_received: usize,
 }
 
-/// How long to wait for an answer.
-///
-/// Deliberately *under* 64·T1 — the transaction layer's own 32-second expiry — so that when a
-/// call goes unanswered it is always this bound that fires. Setting them equal makes which one
-/// wins a matter of scheduling, and the error a script reads changes between runs.
-const DEFAULT_TIMEOUT_SECS: u64 = 20;
-
 fn report_failure(format: Format, error: &sipx_call::Error) -> Exit {
     let exit = match error {
         sipx_call::Error::Rejected { status, .. } => Exit::for_status(*status),
@@ -463,6 +401,9 @@ fn with_quality(report: Report, quality: &sipx_rtp::Quality) -> Report {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use clap::Parser as _;
+
+    use crate::cli::{Cli, Command};
     /// Both formats must carry the same facts — that is the rule the whole output module is
     /// built on, and a statistics block added to one and not the other is the easiest way to
     /// break it.
@@ -572,17 +513,14 @@ mod tests {
     /// helper. It needs no network and no peer, which is the point — the refusal happens before a
     /// transport is chosen, so there is no window in which a cleartext datagram could leave.
     ///
-    /// **The first argument must be the subcommand.** `Args::positional` skips index 0 as the
-    /// subcommand name (`main.rs:137-139`), so a slice holding only the URI has *no* positional and
-    /// this returns `Usage` for "a URI to call is required" instead — which passes whether or not the
-    /// scheme is checked. That is how this test was first written, and it detected nothing.
     #[tokio::test]
     async fn the_dial_command_refuses_a_sips_uri_before_touching_the_network() {
-        let exit = Box::pin(run(
-            &["dial".to_owned(), "sips:bob@192.0.2.1".to_owned()],
-            Format::Text,
-        ))
-        .await;
+        let parsed =
+            Cli::try_parse_from(["sipx", "dial", "sips:bob@192.0.2.1"]).expect("valid syntax");
+        let Some(Command::Dial(options)) = parsed.command else {
+            panic!("dial command expected");
+        };
+        let exit = Box::pin(run(options, Format::Text)).await;
         assert_eq!(
             exit.code(),
             Exit::Usage.code(),

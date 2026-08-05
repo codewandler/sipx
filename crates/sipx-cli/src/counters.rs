@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 
 use sipx_call::SignallingCounts;
 
-use crate::Args;
+use crate::cli::CaptureOptions;
 use crate::output::{Format, Report};
 
 /// The suffix appended to a capture's path when `--capture` implies a counters file.
@@ -52,11 +52,13 @@ const BESIDE_CAPTURE: &str = ".counters.json";
 /// Where this run's counters go, if anywhere.
 ///
 /// `--counters` wins over the capture's sibling: an operator who named a path meant that path.
-pub(crate) fn destination(args: &Args<'_>) -> Option<PathBuf> {
-    if let Some(path) = args.value("counters") {
+pub(crate) fn destination(options: &CaptureOptions) -> Option<PathBuf> {
+    if let Some(path) = options.counters.as_deref() {
         return Some(PathBuf::from(path));
     }
-    args.value("capture")
+    options
+        .capture
+        .as_deref()
         .map(|capture| PathBuf::from(format!("{capture}{BESIDE_CAPTURE}")))
 }
 
@@ -146,9 +148,9 @@ pub(crate) struct Export {
 
 impl Export {
     /// Arm the export for this run. Cheap and inert when neither flag asked for one.
-    pub(crate) fn arm(args: &Args<'_>, endpoint: &sipx_transport::Handle) -> Self {
+    pub(crate) fn arm(options: &CaptureOptions, endpoint: &sipx_transport::Handle) -> Self {
         Self {
-            destination: destination(args),
+            destination: destination(options),
             endpoint: endpoint.clone(),
             written: false,
         }
@@ -215,17 +217,15 @@ pub(crate) fn write(path: &Path, counts: &SignallingCounts) -> Result<(), String
 mod tests {
     use super::*;
 
-    fn args(items: &[&str]) -> Vec<String> {
-        items.iter().map(|item| (*item).to_owned()).collect()
-    }
-
     /// `--capture` alone puts the numbers beside the traffic they explain — the clause's "next to".
     #[test]
     fn a_capture_implies_a_counters_file_beside_it() {
-        let raw = args(&["dial", "--capture", "/tmp/run/signalling.pcapng", "sip:a@b"]);
-        let parsed = Args::new(&raw).expect("well formed");
+        let options = CaptureOptions {
+            capture: Some("/tmp/run/signalling.pcapng".to_owned()),
+            ..CaptureOptions::default()
+        };
         assert_eq!(
-            destination(&parsed),
+            destination(&options),
             Some(PathBuf::from("/tmp/run/signalling.pcapng.counters.json")),
             "an operator assembling a bug report should not have to ask twice"
         );
@@ -234,10 +234,12 @@ mod tests {
     /// An operator who must not record call content can still have the numbers.
     #[test]
     fn counters_alone_needs_no_capture() {
-        let raw = args(&["dial", "--counters", "/tmp/run/counts.json", "sip:a@b"]);
-        let parsed = Args::new(&raw).expect("well formed");
+        let options = CaptureOptions {
+            counters: Some("/tmp/run/counts.json".to_owned()),
+            ..CaptureOptions::default()
+        };
         assert_eq!(
-            destination(&parsed),
+            destination(&options),
             Some(PathBuf::from("/tmp/run/counts.json"))
         );
     }
@@ -245,25 +247,18 @@ mod tests {
     /// A named path wins: it was named on purpose.
     #[test]
     fn an_explicit_path_beats_the_capture_sibling() {
-        let raw = args(&[
-            "dial",
-            "--capture",
-            "/tmp/run/signalling.pcapng",
-            "--counters",
-            "/tmp/elsewhere/counts.json",
-            "sip:a@b",
-        ]);
-        let parsed = Args::new(&raw).expect("well formed");
+        let options = CaptureOptions {
+            capture: Some("/tmp/run/signalling.pcapng".to_owned()),
+            counters: Some("/tmp/elsewhere/counts.json".to_owned()),
+        };
         assert_eq!(
-            destination(&parsed),
+            destination(&options),
             Some(PathBuf::from("/tmp/elsewhere/counts.json"))
         );
     }
 
     #[test]
     fn neither_flag_writes_nothing() {
-        let raw = args(&["dial", "sip:a@b"]);
-        let parsed = Args::new(&raw).expect("well formed");
-        assert_eq!(destination(&parsed), None);
+        assert_eq!(destination(&CaptureOptions::default()), None);
     }
 }

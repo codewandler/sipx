@@ -3,8 +3,6 @@
 //! This module validates closed command values before a socket is opened and maps them directly
 //! to `sipx-call`'s public policy. It does not inspect or construct SDP.
 
-use std::net::SocketAddr;
-
 use sipx_call::{
     CodecPreference, Codecs, IcePolicy, Keying, MediaPolicy, MediaProfile, NegotiatedKeying,
 };
@@ -12,7 +10,7 @@ use sipx_media::browser::ComponentState;
 use sipx_media::{Codec, IcePath};
 use sipx_transport::TransportKind;
 
-use crate::Args;
+use crate::cli::{CodecChoice, IceChoice, MediaOptions, MediaProfileChoice, MediaSecurityChoice};
 use crate::output::Report;
 
 /// A validated media selection and the result vocabulary associated with it.
@@ -44,39 +42,39 @@ impl Security {
 
 impl Selection {
     /// Parse and validate the media flags before transport binding.
-    pub(crate) fn from_args(args: &Args<'_>, transport: TransportKind) -> Result<Self, String> {
-        let profile = match args.value("profile").unwrap_or("standard") {
-            "standard" => MediaProfile::Standard,
-            "browser-audio" => MediaProfile::BrowserAudio,
-            value => {
-                return Err(format!(
-                    "unsupported --profile {value:?}; expected standard or browser-audio"
-                ));
-            }
+    pub(crate) fn from_options(
+        options: &MediaOptions,
+        transport: TransportKind,
+        early_media: bool,
+    ) -> Result<Self, String> {
+        let profile = match options.profile.unwrap_or(MediaProfileChoice::Standard) {
+            MediaProfileChoice::Standard => MediaProfile::Standard,
+            MediaProfileChoice::BrowserAudio => MediaProfile::BrowserAudio,
         };
         if profile == MediaProfile::BrowserAudio {
-            return Self::browser_audio(args, transport);
+            return Self::browser_audio(options, transport, early_media);
         }
-        let preferences = args
-            .values("codec")
+        let selection = &options.selection;
+        let preferences = selection
+            .codec
+            .iter()
+            .copied()
             .map(codec)
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Vec<_>>();
         let codecs = if preferences.is_empty() {
             Codecs::default()
         } else {
             Codecs::ordered(&preferences).map_err(|error| error.to_string())?
         };
 
-        let security = match args.value("media-security").unwrap_or("auto") {
-            "auto" => Security::Auto,
-            "plain" => Security::Plain,
-            "sdes" => Security::Sdes,
-            "dtls-srtp" => Security::DtlsSrtp,
-            value => {
-                return Err(format!(
-                    "unsupported --media-security {value:?}; expected auto, plain, sdes or dtls-srtp"
-                ));
-            }
+        let security = match selection
+            .media_security
+            .unwrap_or(MediaSecurityChoice::Auto)
+        {
+            MediaSecurityChoice::Auto => Security::Auto,
+            MediaSecurityChoice::Plain => Security::Plain,
+            MediaSecurityChoice::Sdes => Security::Sdes,
+            MediaSecurityChoice::DtlsSrtp => Security::DtlsSrtp,
         };
         if security == Security::Sdes && !transport.is_secure() {
             return Err(format!(
@@ -89,30 +87,26 @@ impl Selection {
             );
         }
 
-        let ice = match args.value("ice").unwrap_or("disabled") {
-            "disabled" => {
-                if args.value("stun-server").is_some() {
+        let ice = match selection.ice.unwrap_or(IceChoice::Disabled) {
+            IceChoice::Disabled => {
+                if selection.stun_server.is_some() {
                     return Err("--stun-server requires --ice stun".to_owned());
                 }
                 IcePolicy::Disabled
             }
-            "host" => {
-                if args.value("stun-server").is_some() {
+            IceChoice::Host => {
+                if selection.stun_server.is_some() {
                     return Err("--stun-server requires --ice stun".to_owned());
                 }
                 IcePolicy::Host
             }
-            "stun" => IcePolicy::Stun(
-                args.value("stun-server")
+            IceChoice::Stun => IcePolicy::Stun(
+                selection
+                    .stun_server
+                    .as_ref()
                     .ok_or_else(|| "--ice stun requires --stun-server host:port".to_owned())?
-                    .parse::<SocketAddr>()
-                    .map_err(|_| "--stun-server must be host:port".to_owned())?,
+                    .to_owned(),
             ),
-            value => {
-                return Err(format!(
-                    "unsupported --ice {value:?}; expected disabled, host or stun"
-                ));
-            }
         };
         if security == Security::DtlsSrtp && ice != IcePolicy::Disabled {
             return Err(
@@ -133,18 +127,22 @@ impl Selection {
                 .with_ice(ice)
                 .with_keying(keying),
             security,
-            report: args.value("codec").is_some()
-                || args.value("media-security").is_some()
-                || args.value("ice").is_some()
-                || args.value("stun-server").is_some(),
+            report: !selection.codec.is_empty()
+                || selection.media_security.is_some()
+                || selection.ice.is_some()
+                || selection.stun_server.is_some(),
         })
     }
 
-    fn browser_audio(args: &Args<'_>, transport: TransportKind) -> Result<Self, String> {
+    fn browser_audio(
+        options: &MediaOptions,
+        transport: TransportKind,
+        early_media: bool,
+    ) -> Result<Self, String> {
         if transport != TransportKind::Wss {
             return Err("--profile browser-audio requires --transport wss".to_owned());
         }
-        if args.flag("early-media") {
+        if early_media {
             return Err(
                 "--profile browser-audio does not support --early-media; wait for the final answer"
                     .to_owned(),
@@ -160,34 +158,31 @@ impl Selection {
                 "--profile browser-audio requires a build with the `dtls` feature".to_owned(),
             );
         }
-        if args.value("codec").is_some() || args.value("media-security").is_some() {
+        let selection = &options.selection;
+        if !selection.codec.is_empty() || selection.media_security.is_some() {
             return Err(
                 "--profile browser-audio fixes codecs and media security; do not combine it with --codec or --media-security"
                     .to_owned(),
             );
         }
-        let ice = match args.value("ice").unwrap_or("host") {
-            "host" => {
-                if args.value("stun-server").is_some() {
+        let ice = match selection.ice.unwrap_or(IceChoice::Host) {
+            IceChoice::Host => {
+                if selection.stun_server.is_some() {
                     return Err("--stun-server requires --ice stun".to_owned());
                 }
                 IcePolicy::Host
             }
-            "stun" => IcePolicy::Stun(
-                args.value("stun-server")
+            IceChoice::Stun => IcePolicy::Stun(
+                selection
+                    .stun_server
+                    .as_ref()
                     .ok_or_else(|| "--ice stun requires --stun-server host:port".to_owned())?
-                    .parse::<SocketAddr>()
-                    .map_err(|_| "--stun-server must be host:port".to_owned())?,
+                    .to_owned(),
             ),
-            "disabled" => {
+            IceChoice::Disabled => {
                 return Err(
                     "--profile browser-audio requires ICE; disabled is not allowed".to_owned(),
                 );
-            }
-            value => {
-                return Err(format!(
-                    "unsupported --ice {value:?}; browser-audio expects host or stun"
-                ));
             }
         };
         Ok(Self {
@@ -299,15 +294,12 @@ fn candidate_type(kind: sipx_sdp::ice::CandidateType) -> &'static str {
     kind.as_str()
 }
 
-fn codec(value: &str) -> Result<CodecPreference, String> {
+const fn codec(value: CodecChoice) -> CodecPreference {
     match value {
-        "pcmu" => Ok(CodecPreference::Pcmu),
-        "pcma" => Ok(CodecPreference::Pcma),
-        "opus" => Ok(CodecPreference::Opus),
-        "l16" => Ok(CodecPreference::L16),
-        _ => Err(format!(
-            "unsupported --codec {value:?}; expected pcmu, pcma, l16 or opus"
-        )),
+        CodecChoice::Pcmu => CodecPreference::Pcmu,
+        CodecChoice::Pcma => CodecPreference::Pcma,
+        CodecChoice::Opus => CodecPreference::Opus,
+        CodecChoice::L16 => CodecPreference::L16,
     }
 }
 
@@ -352,13 +344,25 @@ const fn path_name(path: IcePath) -> &'static str {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
+
+    use crate::cli::{Cli, Command};
 
     fn raw(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
     }
 
     fn selection(raw: &[String], transport: TransportKind) -> Result<Selection, String> {
-        Selection::from_args(&Args::new(raw)?, transport)
+        let parsed =
+            Cli::try_parse_from(std::iter::once("sipx").chain(raw.iter().map(String::as_str)))
+                .map_err(|error| error.to_string())?;
+        let (options, early_media) = match parsed.command {
+            Some(Command::Dial(options)) => (options.media, options.early_media),
+            Some(Command::Answer(options)) => (options.media, false),
+            Some(Command::Scenario(options)) => (options.media.complete(), false),
+            _ => return Err("media test requires dial, answer or scenario".to_owned()),
+        };
+        Selection::from_options(&options, transport, early_media)
     }
 
     #[test]

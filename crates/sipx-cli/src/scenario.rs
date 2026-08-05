@@ -16,65 +16,33 @@ use sipx_transport::{Config as TransportConfig, Incoming, bind};
 use tokio::io::AsyncBufReadExt as _;
 use tokio::sync::oneshot;
 
+use crate::cli::ScenarioOptions;
 use crate::output::{Exit, Format, fail};
 
-pub(crate) const HELP: &str = "\
-sipx scenario — drive one call through correlated NDJSON commands
-
-USAGE:
-    sipx scenario [OPTIONS]
-
-OPTIONS:
-    --local <ADDR>    Local signalling address (default 0.0.0.0:0)
-    --transport <T>   Signalling: udp, tcp, tls, ws or wss (default udp)
-    --tcp             Legacy alias for --transport tcp
-    --tls-server-name <N>  Certificate identity to verify (default URI host)
-    --tls-ca <FILE>   Add PEM trust roots to the platform store
-    --tls-cert <FILE> Certificate chain for TLS/WSS
-    --tls-key <FILE>  Private key paired with --tls-cert
-    --codec <C>       Ordered codec preference; repeat pcmu, pcma, l16 or opus
-    --media-security <M>  auto, plain, sdes or dtls-srtp
-    --ice <P>         disabled, host or stun
-    --stun-server <ADDR>  STUN server for --ice stun
-    --header <H>      Add an application-owned field to originated INVITEs; repeat
-    --timeout <S>     Default outbound answer timeout (default 20)
-    -h, --help        Show this help
-
-STDIN:
-    One JSON object per line. Every object has a string `id` and one of:
-    dial, accept, reject, play, stop_playback, start_recording, stop_recording,
-    send_dtmf, hold, resume, transfer, hangup, wait_for, shutdown.
-";
-
-const DEFAULT_TIMEOUT: u64 = 20;
 /// One minute of 48 kHz mono PCM. Reaching it finishes the recording rather than growing forever.
 const MAX_RECORDING_SAMPLES: usize = 48_000 * 60;
 
-pub(crate) async fn run(raw: &[String]) -> Exit {
-    let args = match crate::arguments(raw, HELP, Format::Json) {
-        Ok(args) => args,
-        Err(exit) => return exit,
-    };
-    let headers = match crate::header::from_args(&args) {
+pub(crate) async fn run(options: ScenarioOptions) -> Exit {
+    let headers = match crate::header::from_options(&options.headers) {
         Ok(headers) => headers,
         Err(message) => return fail(Format::Json, Exit::Usage, &message),
     };
-    let transport = match crate::signalling::Selection::from_args(&args, false) {
+    let transport = match crate::signalling::Selection::from_options(&options.signalling, false) {
         Ok(transport) => transport,
         Err(message) => return fail(Format::Json, Exit::Usage, &message),
     };
-    let media = match crate::media::Selection::from_args(&args, transport.kind()) {
+    let media_options = options.media.complete();
+    let media = match crate::media::Selection::from_options(&media_options, transport.kind(), false)
+    {
         Ok(media) => media,
         Err(message) => return fail(Format::Json, Exit::Usage, &message),
     };
-    let Ok(local) = args.value("local").unwrap_or("0.0.0.0:0").parse() else {
-        return fail(Format::Json, Exit::Usage, "--local must be host:port");
-    };
+    let local = options.local;
     let mut config = TransportConfig::new(local);
     if local.ip().is_unspecified() {
         "127.0.0.1".clone_into(&mut config.sent_by);
     }
-    if let Err(message) = transport.configure_client(&args, &mut config) {
+    if let Err(message) = transport.configure_client(&options.signalling, &mut config) {
         return fail(Format::Json, Exit::Usage, &message);
     }
     // The default endpoint already owns UDP and TCP listeners. Explicit WebSocket listeners need
@@ -82,7 +50,7 @@ pub(crate) async fn run(raw: &[String]) -> Exit {
     if matches!(
         transport.kind(),
         sipx_transport::TransportKind::Ws | sipx_transport::TransportKind::Wss
-    ) && let Err(message) = transport.configure_listener(&args, &mut config)
+    ) && let Err(message) = transport.configure_listener(&options.signalling, &mut config)
     {
         return fail(Format::Json, Exit::Usage, &message);
     }
@@ -92,7 +60,7 @@ pub(crate) async fn run(raw: &[String]) -> Exit {
     };
 
     let mut actor = Actor {
-        args: &args,
+        options,
         handle,
         incoming,
         transport,
@@ -121,8 +89,8 @@ pub(crate) async fn run(raw: &[String]) -> Exit {
     Exit::Success
 }
 
-struct Actor<'a> {
-    args: &'a crate::Args<'a>,
+struct Actor {
+    options: ScenarioOptions,
     handle: sipx_transport::Handle,
     incoming: tokio::sync::mpsc::Receiver<Incoming>,
     transport: crate::signalling::Selection,
@@ -139,7 +107,7 @@ struct Actor<'a> {
     next_call: u64,
 }
 
-impl Actor<'_> {
+impl Actor {
     async fn drive(&mut self) {
         let stdin = tokio::io::stdin();
         let mut lines = tokio::io::BufReader::new(stdin).lines();
@@ -242,7 +210,7 @@ impl Actor<'_> {
             .ok_or_else(|| format!("{target_text} must name an IP address and port"))?;
         let target = self
             .transport
-            .target(self.args, target_addr, &server_name)?;
+            .target(&self.options.signalling, target_addr, &server_name)?;
         let media_address: IpAddr =
             crate::advertise::reachable_ip(self.handle.local_addr(), target_addr.ip());
         let from = value
@@ -252,7 +220,7 @@ impl Actor<'_> {
         let mut options =
             sipx_call::DialOptions::new(from.clone(), media_address).with_media_policy(self.policy);
         let timeout = value.get("timeout_ms").and_then(Value::as_u64).map_or_else(
-            || Duration::from_secs(self.args.number("timeout").unwrap_or(DEFAULT_TIMEOUT)),
+            || Duration::from_secs(self.options.timeout),
             Duration::from_millis,
         );
         if !timeout.is_zero() {
