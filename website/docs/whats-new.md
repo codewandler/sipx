@@ -1,13 +1,42 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-beta.5 prerelease.
+description: Release highlights and adoption notes for the sipx 1.0.0-beta.6 prerelease.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-beta.5 — 2026-08-05
+## 1.0.0-beta.6 — 2026-08-05
 <!-- END generated:release-heading -->
+
+Beta.6 publishes the integrated correctness and specification wave after beta.5. It is a new
+immutable prerelease and does not move or overwrite any existing tag or package.
+
+- **The bounded endpoint responder has less hot-path contention.** Route sweeping is amortized,
+  timer generations remain exact, UDP intake uses a bounded batch and queue, completions are
+  dispatched fairly, invalid capacity is a typed refusal, and BYE-before-ACK ordering drains without
+  leaking dialog state.
+- **Protocol validation now owns successful-response accounting.** Malformed responses cannot
+  inflate qualification or headroom totals. The retained load dataset covers the current endpoint
+  direction only; the peer direction remains unmeasured, and beta.6 adds no general ranking.
+- **The browser SDK boundary is normative before implementation.** Browser-owned signalling,
+  timers, entropy, certificate handling and WebRTC resources now have a bounded host/core contract
+  with state tables and refusal vectors. The package, adapters and runnable demo remain backlog.
+- **Later media and application work is explicitly planning-only.** Local speech, call-audio
+  analysis, custom DSP and realtime phone actions are decomposed into constrained designs and
+  stories. They are not beta.6 runtime capabilities.
+
+Install the exact CLI release with:
+
+```bash
+cargo install --locked --version =1.0.0-beta.6 sipx-cli
+```
+
+Public APIs are not frozen before 1.0. Supported APIs receive migration guidance when they break;
+Experimental APIs may change or disappear without that guide. Beta.6 preserves beta.5's runtime
+surface while hardening the measurement responder and its evidence accounting.
+
+## 1.0.0-beta.5 — 2026-08-05
 
 Beta.5 publishes the endpoint and application wave delivered after beta.4. It is a new immutable
 prerelease: it does not move or overwrite beta.2, beta.3 or beta.4.
@@ -117,7 +146,7 @@ installed diagnostic CLI, independent transport peers and release-commit documen
 cargo install --locked --version =1.0.0-beta.2 sipx-cli
 ```
 
-Use beta.5 for new installations; beta.2, beta.3 and beta.4 remain immutable for reproducible
+Use beta.6 for new installations; beta.2 through beta.5 remain immutable for reproducible
 existing consumers.
 
 ## 1.0.0-alpha.5 — 2026-08-03

@@ -10,13 +10,12 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.5` are published prereleases, and beta.5 is
-the current prerelease.** Beta.5 carries the endpoint-complete service wave,
-deterministic downstream test surfaces, the bounded comparative signalling result and the routed
-realtime-agent bridge. Its credentialed live-endpoint proof remains pending, and the result does
-not rank general performance. The beta.4 browser-audio limits remain: no TURN-required networks,
-video, data channels or general browser API. Stable `1.0.0` is a separate promotion and
-compatibility decision.
+_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.5` are published prereleases, and beta.6 is
+the authorized release candidate on `main`.** Beta.6 hardens the bounded endpoint responder,
+corrects validated-response accounting, and records the browser SDK plus later media/application
+work as explicit specifications and backlog rather than runtime claims. The retained load evidence
+covers the current endpoint direction only; no peer result or general ranking is claimed. Stable
+`1.0.0` remains a separate promotion and compatibility decision.
 
 _As of 2026-07-30:_ **all seven `1.0.0-alpha` predicates are met**, and `1.0.0-alpha` is cut.
 [`maturity.md`](maturity.md) reports them, and it reports them as *computed* rather than asserted —
@@ -51,7 +50,8 @@ its credentialed live proof visible as backlog. M15 separately tracks the reques
 browser-embeddable audio package without turning sipx into a WebRTC engine. M16 tracks local speech
 and deterministic call-audio analysis, M17 extends the delivered realtime bridge with understanding
 and policy-governed phone actions, and M18 tracks custom call DSP. M9's remaining off-media bridge
-work is not pulled into that wave.
+work is not pulled into that wave. Beta.6 ships the responder hardening behind the retained M14
+evidence and the completed M15 specification gate; the remaining M15 through M18 stories are plans.
 
 ## Delivered
 
@@ -589,7 +589,7 @@ honest about what it does not do.**
 A stack can be short of features and still be worth depending on. It cannot be *wrong about itself*
 and be worth depending on, because every consumer's design decision rests on what the table says.
 
-### `1.0.0-beta.5` — the hypothetical public-announcement predicates
+### `1.0.0-beta.6` — the hypothetical public-announcement predicates
 
 This is the threshold at which the prerelease could responsibly receive broader publicity: outside
 Rust users can install exact registry

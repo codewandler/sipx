@@ -9,7 +9,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 <!-- BEGIN generated:badges -->
 <a href="https://codewandler.github.io/sipx/"><img alt="docs: codewandler.github.io/sipx" src="https://img.shields.io/static/v1?label=docs&message=codewandler.github.io%2Fsipx&color=blue"></a>
-<a href="CHANGELOG.md"><img alt="release: 1.0.0-beta.5" src="https://img.shields.io/static/v1?label=release&message=1.0.0-beta.5&color=blue"></a>
+<a href="CHANGELOG.md"><img alt="release: 1.0.0-beta.6" src="https://img.shields.io/static/v1?label=release&message=1.0.0-beta.6&color=blue"></a>
 <a href="#try-the-cli"><img alt="MSRV: rustc 1.88" src="https://img.shields.io/static/v1?label=MSRV&message=rustc%201.88&color=blue"></a>
 <a href="docs/compliance.md"><img alt="RFCs: 36 implemented of 78" src="https://img.shields.io/static/v1?label=RFCs&message=36%20implemented%20of%2078&color=blue"></a>
 <a href="docs/compliance.md"><img alt="codecs: G.711 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20Opus&color=blue"></a>
@@ -18,7 +18,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 </div>
 
-> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-beta.5<!-- END generated:workspace-version -->.** This is the current public-beta release. `main` can move ahead of
+> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-beta.6<!-- END generated:workspace-version -->.** This is the current public-beta release. `main` can move ahead of
 > the release tag. Public APIs are not frozen;
 > Supported APIs receive migration notes when they break, while Experimental APIs may change or be
 > removed without one. Start with the exact registry install below when reproducibility matters.
@@ -66,11 +66,11 @@ deployment shape.
 
 ## Try the CLI
 
-The <!-- BEGIN generated:release-tag -->v1.0.0-beta.5<!-- END generated:release-tag --> beta release needs
+The <!-- BEGIN generated:release-tag -->v1.0.0-beta.6<!-- END generated:release-tag --> beta release needs
 Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```sh
-cargo install --locked --version =1.0.0-beta.5 sipx-cli
+cargo install --locked --version =1.0.0-beta.6 sipx-cli
 sipx version
 ```
 
@@ -78,7 +78,7 @@ To use the bounded browser-audio profile, install that same exact release with i
 media features:
 
 ```sh
-cargo install --locked --version =1.0.0-beta.5 --features opus,dtls sipx-cli
+cargo install --locked --version =1.0.0-beta.6 --features opus,dtls sipx-cli
 ```
 
 Then make a bounded loopback call. Terminal one listens for at most 15 seconds:
@@ -106,8 +106,8 @@ dependency to the same exact beta while the API remains pre-1.0:
 
 ```toml
 [dependencies]
-sipx-call = "=1.0.0-beta.5"
-sipx-transport = "=1.0.0-beta.5"
+sipx-call = "=1.0.0-beta.6"
+sipx-transport = "=1.0.0-beta.6"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

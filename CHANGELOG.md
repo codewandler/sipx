@@ -7,6 +7,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-beta.6] — 2026-08-05
+
+This prerelease hardens the bounded signalling responder used for endpoint measurements, corrects
+its validation accounting, and records the browser SDK and subsequent media/application work as
+explicit specifications and backlog rather than implying those planned surfaces are implemented.
+It is a new immutable release after beta.5, not a replacement for an existing tag.
+
+### Added
+
+- **The browser SDK now has a normative host/core contract.** The specification fixes the
+  browser-owned WebSocket, timer, entropy, certificate and WebRTC boundaries; bounded ABI types and
+  lifecycle; registration and call state machines; and byte-level refusal vectors before any
+  package implementation begins. The browser SDK itself remains planned work.
+- **Future call-audio and application work is now split into reviewable contracts and stories.**
+  Local speech providers, call-audio analysis, application-controlled DSP and realtime phone
+  actions have explicit ownership, resource, privacy and evidence boundaries. These documents are
+  roadmap commitments, not shipped runtime capabilities.
+
+### Changed
+
+- **The finite endpoint responder removes measured hot-path congestion without weakening bounds.**
+  Dead-route cleanup is amortized, timer generations remain exact, UDP intake is batched into a
+  bounded queue, worker completions are dispatched fairly, invalid capacity is a typed refusal,
+  and a valid BYE arriving before ACK is handled without leaking dialog state.
+- **Current endpoint load evidence is retained with its limits intact.** The checked dataset records
+  the current responder direction only; the peer direction remains explicitly unmeasured, and no
+  secure-transport, media or overall-ranking claim is made.
+
+### Fixed
+
+- **Validated-response accounting no longer includes malformed responses.** Qualification and
+  headroom evidence now count only responses that pass the protocol validator, preventing invalid
+  traffic from inflating a successful-result total.
+- **Project guidance distinguishes repository work, generated planning records and release
+  evidence more clearly.** The contributor and adoption paths now point to the authoritative
+  contracts without changing the shipped API.
+
 ## [1.0.0-beta.5] — 2026-08-05
 
 This prerelease carries the endpoint-complete service wave, deterministic downstream test surfaces,
@@ -3012,7 +3049,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.5...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.6...HEAD
+[1.0.0-beta.6]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.5...v1.0.0-beta.6
 [1.0.0-beta.5]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.4...v1.0.0-beta.5
 [1.0.0-beta.4]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.3...v1.0.0-beta.4
 [1.0.0-beta.3]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.2...v1.0.0-beta.3
