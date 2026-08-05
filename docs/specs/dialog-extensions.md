@@ -52,13 +52,16 @@ refused at admission and at dispatch.
 | capability is dropped unclaimed | claim capability | `500 Server Internal Error` |
 | capability remains unclaimed for 32 seconds | claim capability | `504 Server Time-out` |
 | any second claimant | none | typed `ResponseAlreadySent` error or no-op fallback |
+| no runtime can be captured when the event is formed | no capability is created | typed `ApplicationRuntimeUnavailable` error |
 
 The 32-second interval is a bound on failure, aligned with SIP's 64*T1 transaction horizon. It is
-not a delay used to establish ordering. Drop responds immediately when a runtime is available; the
-timer remains the bounded fallback for abandoned tasks. Once `respond` claims the capability, the
-chosen final response remains the only possible final response. Its transport send continues if the
-application future is cancelled, while an ambiguous transport error keeps the capability spent so a
-contradictory final response cannot follow bytes that may already have left.
+not a delay used to establish ordering. Forming the event captures the runtime that owns transport
+work; drop and `respond` use that captured handle even when the application polls or drops the
+request from a thread with no entered Tokio runtime. The timer remains the bounded fallback for
+abandoned tasks. Once `respond` claims the capability, the chosen final response remains the only
+possible final response. Its transport send continues if the application future is cancelled, while
+an ambiguous transport error keeps the capability spent so a contradictory final response cannot
+follow bytes that may already have left.
 
 ## Outbound state table
 

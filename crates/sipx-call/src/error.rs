@@ -162,6 +162,9 @@ pub enum Error {
     /// The request's exactly-once response capability was already claimed.
     #[error("the application-owned request has already been answered")]
     ApplicationResponseAlreadySent,
+    /// A response capability could not capture the runtime that owns its transport work.
+    #[error("an application response requires an active Tokio runtime")]
+    ApplicationRuntimeUnavailable,
     /// An operation requiring a live dialog was attempted after call teardown.
     #[error("the dialog has ended")]
     DialogEnded,

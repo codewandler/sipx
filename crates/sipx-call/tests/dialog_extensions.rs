@@ -15,7 +15,7 @@ use bytes::Bytes;
 use sipx_call::{
     ApplicationRequest, Call, CallEvent, CallEvents, Credentials, DialOptions, answer, dial,
 };
-use sipx_sip::{Header, HeaderName, Host, HostName, Method, StatusCode, Uri};
+use sipx_sip::{Header, HeaderName, Headers, Host, HostName, Method, Request, StatusCode, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use tokio::sync::mpsc::Receiver;
 
@@ -97,6 +97,80 @@ async fn next_application_request(
     .expect("a bound on failure waiting for the application request")
 }
 
+async fn next_application_request_with_wire(
+    call: &mut Call,
+    incoming: &mut Receiver<Incoming>,
+    events: &mut CallEvents,
+) -> (ApplicationRequest, Request) {
+    tokio::time::timeout(SIGNALLING_BOUND, async {
+        let mut wire = None;
+        loop {
+            tokio::select! {
+                message = incoming.recv() => {
+                    let message = message.expect("endpoint remains open");
+                    let application_owned = matches!(
+                        message.request.method,
+                        Method::Info | Method::Message | Method::Other(_)
+                    );
+                    assert!(call.handle(&message).await.expect("handles request"));
+                    if application_owned {
+                        wire = Some(message.request);
+                    }
+                }
+                event = events.recv() => {
+                    if let Some(CallEvent::ApplicationRequest(request)) = event {
+                        return (request, wire.take().expect("wire request precedes its event"));
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("a bound on failure waiting for the application request and wire image")
+}
+
+fn cseq(headers: &Headers) -> u32 {
+    let value = headers
+        .value(&HeaderName::CSeq)
+        .expect("application request carries CSeq");
+    std::str::from_utf8(&value)
+        .expect("CSeq is ASCII")
+        .split_ascii_whitespace()
+        .next()
+        .expect("CSeq has a number")
+        .parse()
+        .expect("CSeq number parses")
+}
+
+async fn exchange_application_request(
+    sender: &mut Call,
+    receiver: &mut Call,
+    incoming: &mut Receiver<Incoming>,
+    events: &mut CallEvents,
+    method: Method,
+    headers: &[Header],
+    body: Bytes,
+) -> Request {
+    let expected_method = method.clone();
+    let expected_body = body.clone();
+    let send = sender.send_dialog_request(method, headers, body);
+    let answer = async {
+        let (request, wire) = next_application_request_with_wire(receiver, incoming, events).await;
+        assert_eq!(request.method(), &expected_method);
+        assert_eq!(request.body(), expected_body.as_ref());
+        ok(request).await;
+        wire
+    };
+    let (response, wire) = tokio::join!(send, answer);
+    assert!(
+        response
+            .expect("application-owned request succeeds")
+            .status
+            .is_success()
+    );
+    wire
+}
+
 async fn ok(request: ApplicationRequest) {
     request
         .respond(
@@ -118,41 +192,62 @@ async fn info_and_message_are_typed_events_in_both_directions() {
     let mut callee_events = callee.events().expect("callee event stream");
     let content_type = Header::build(HeaderName::ContentType, "text/plain").expect("valid header");
 
-    let send_info = caller.send_dialog_request(
+    let caller_info = exchange_application_request(
+        &mut caller,
+        &mut callee,
+        &mut callee_incoming,
+        &mut callee_events,
         Method::Info,
         std::slice::from_ref(&content_type),
         Bytes::from_static(b"caller-info"),
-    );
-    let answer_info = async {
-        let request =
-            next_application_request(&mut callee, &mut callee_incoming, &mut callee_events).await;
-        assert_eq!(request.method(), &Method::Info);
-        assert_eq!(request.body(), b"caller-info");
-        ok(request).await;
-    };
-    let (sent, ()) = tokio::join!(send_info, answer_info);
-    assert!(sent.expect("INFO succeeds").status.is_success());
-
-    let send_message = callee.send_dialog_request(
+    )
+    .await;
+    let callee_info = exchange_application_request(
+        &mut callee,
+        &mut caller,
+        &mut caller_incoming,
+        &mut caller_events,
+        Method::Info,
+        std::slice::from_ref(&content_type),
+        Bytes::from_static(b"callee-info"),
+    )
+    .await;
+    let caller_message = exchange_application_request(
+        &mut caller,
+        &mut callee,
+        &mut callee_incoming,
+        &mut callee_events,
+        Method::Message,
+        std::slice::from_ref(&content_type),
+        Bytes::from_static(b"caller-message"),
+    )
+    .await;
+    let callee_message = exchange_application_request(
+        &mut callee,
+        &mut caller,
+        &mut caller_incoming,
+        &mut caller_events,
         Method::Message,
         std::slice::from_ref(&content_type),
         Bytes::from_static(b"callee-message"),
+    )
+    .await;
+
+    assert_eq!(
+        cseq(&caller_message.headers),
+        cseq(&caller_info.headers) + 1
     );
-    let answer_message = async {
-        let request =
-            next_application_request(&mut caller, &mut caller_incoming, &mut caller_events).await;
-        assert_eq!(request.method(), &Method::Message);
-        assert_eq!(request.body(), b"callee-message");
-        ok(request).await;
-    };
-    let (sent, ()) = tokio::join!(send_message, answer_message);
-    assert!(sent.expect("MESSAGE succeeds").status.is_success());
+    assert_eq!(
+        cseq(&callee_message.headers),
+        cseq(&callee_info.headers) + 1
+    );
 }
 
 #[tokio::test]
 async fn an_admitted_private_method_is_case_sensitive_and_uses_dialog_state() {
     let options = DialOptions::new("<sip:caller@example.test>", loopback());
-    let (mut caller, _caller_incoming, mut callee, mut callee_incoming) = connected(options).await;
+    let (mut caller, mut caller_incoming, mut callee, mut callee_incoming) =
+        connected(options).await;
     let private = Method::Other(Bytes::from_static(b"PRIVATE"));
     caller
         .admit_dialog_method(&private)
@@ -160,23 +255,31 @@ async fn an_admitted_private_method_is_case_sensitive_and_uses_dialog_state() {
     callee
         .admit_dialog_method(&private)
         .expect("admits private token");
-    let mut events = callee.events().expect("callee event stream");
+    let mut callee_events = callee.events().expect("callee event stream");
+    let mut caller_events = caller.events().expect("caller event stream");
 
-    let send = caller.send_dialog_request(private.clone(), &[], Bytes::new());
-    let answer = async {
-        let request =
-            next_application_request(&mut callee, &mut callee_incoming, &mut events).await;
-        assert_eq!(request.method(), &private);
-        assert!(request.headers().get(&HeaderName::CallId).is_some());
-        ok(request).await;
-    };
-    let (response, ()) = tokio::join!(send, answer);
-    assert!(
-        response
-            .expect("private request succeeds")
-            .status
-            .is_success()
-    );
+    let caller_private = exchange_application_request(
+        &mut caller,
+        &mut callee,
+        &mut callee_incoming,
+        &mut callee_events,
+        private.clone(),
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    let callee_private = exchange_application_request(
+        &mut callee,
+        &mut caller,
+        &mut caller_incoming,
+        &mut caller_events,
+        private.clone(),
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert!(caller_private.headers.get(&HeaderName::CallId).is_some());
+    assert!(callee_private.headers.get(&HeaderName::CallId).is_some());
 
     assert!(matches!(
         caller
@@ -243,6 +346,44 @@ async fn application_owned_responses_cannot_refresh_the_remote_target() {
 }
 
 #[tokio::test]
+async fn outbound_requests_use_the_live_remote_target_and_route_set() {
+    let options = DialOptions::new("<sip:caller@example.test>", loopback());
+    let (mut caller, _caller_incoming, mut callee, mut callee_incoming, server) =
+        connected_with_server(options).await;
+    let mut events = callee.events().expect("callee event stream");
+    let server_addr = server.local_addr();
+    let remote_target = Uri::parse(Bytes::from(format!(
+        "sip:application@{}:{}",
+        server_addr.ip(),
+        server_addr.port()
+    )))
+    .expect("live remote target");
+    let route = format!("<sip:{}:{};lr>", server_addr.ip(), server_addr.port());
+    caller.dialog.remote_target = remote_target.clone();
+    caller.dialog.route_set = vec![route.clone()];
+
+    let wire = exchange_application_request(
+        &mut caller,
+        &mut callee,
+        &mut callee_incoming,
+        &mut events,
+        Method::Info,
+        &[],
+        Bytes::new(),
+    )
+    .await;
+
+    assert_eq!(wire.uri.to_bytes(), remote_target.to_bytes());
+    assert_eq!(
+        wire.headers
+            .value(&HeaderName::Route)
+            .expect("route set is rendered")
+            .as_ref(),
+        route.as_bytes()
+    );
+}
+
+#[tokio::test]
 async fn digest_challenges_retry_info_and_message_in_both_directions() {
     let options = DialOptions::new("<sip:caller@example.test>", loopback())
         .with_credentials(Credentials::new("caller", "secret"));
@@ -256,6 +397,7 @@ async fn digest_challenges_retry_info_and_message_in_both_directions() {
     let challenge_then_answer = async {
         let first =
             next_application_request(&mut callee, &mut callee_incoming, &mut callee_events).await;
+        let first_cseq = cseq(first.headers());
         assert!(first.headers().get(&HeaderName::Authorization).is_none());
         let challenge = Header::build(
             HeaderName::WwwAuthenticate,
@@ -274,6 +416,7 @@ async fn digest_challenges_retry_info_and_message_in_both_directions() {
 
         let retry =
             next_application_request(&mut callee, &mut callee_incoming, &mut callee_events).await;
+        assert_eq!(cseq(retry.headers()), first_cseq + 1);
         assert!(retry.headers().get(&HeaderName::Authorization).is_some());
         ok(retry).await;
     };
@@ -289,6 +432,7 @@ async fn digest_challenges_retry_info_and_message_in_both_directions() {
     let challenge_then_answer = async {
         let first =
             next_application_request(&mut caller, &mut caller_incoming, &mut caller_events).await;
+        let first_cseq = cseq(first.headers());
         assert!(
             first
                 .headers()
@@ -312,6 +456,7 @@ async fn digest_challenges_retry_info_and_message_in_both_directions() {
 
         let retry =
             next_application_request(&mut caller, &mut caller_incoming, &mut caller_events).await;
+        assert_eq!(cseq(retry.headers()), first_cseq + 1);
         assert!(
             retry
                 .headers()

@@ -752,7 +752,7 @@ impl Call {
                         self.endpoint.clone(),
                         incoming.key.clone(),
                         &incoming.request,
-                    )));
+                    )?));
                 Ok(true)
             }
             _ => Ok(false),

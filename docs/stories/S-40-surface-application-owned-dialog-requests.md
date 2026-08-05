@@ -41,3 +41,7 @@ the stack's specialized handling of session, transfer and teardown methods.
 - Review follow-up closed three ownership gaps: canonical known methods cannot be disguised as
   `Method::Other`, a committed final response survives cancellation of its application waiter, and
   `Contact` on INFO, MESSAGE or private-method responses cannot redirect the dialog's remote target.
+- The reviewed public-surface matrix now sends INFO, MESSAGE and a private method from both dialog
+  roles, checks live Request-URI/Route derivation and strictly increasing CSeq (including digest
+  retries). Response capabilities capture their transport runtime, so polling `respond` from a
+  thread without an entered Tokio runtime is tested and cannot panic.

@@ -37,14 +37,14 @@ pub struct ApplicationRequest {
 }
 
 impl ApplicationRequest {
-    pub(crate) fn new(endpoint: Handle, key: TransactionKey, request: &Request) -> Self {
-        let response = ResponseCapability::new(endpoint, key, request.clone());
-        Self {
+    pub(crate) fn new(endpoint: Handle, key: TransactionKey, request: &Request) -> Result<Self> {
+        let response = ResponseCapability::new(endpoint, key, request.clone())?;
+        Ok(Self {
             method: request.method.clone(),
             headers: request.headers.clone(),
             body: Bytes::copy_from_slice(request.body()),
             response,
-        }
+        })
     }
 
     /// The admitted request method.
@@ -91,6 +91,7 @@ struct ResponseState {
     endpoint: Handle,
     key: TransactionKey,
     request: Request,
+    runtime: tokio::runtime::Handle,
 }
 
 impl ResponseState {
@@ -107,7 +108,9 @@ struct ResponseCapability {
 }
 
 impl ResponseCapability {
-    fn new(endpoint: Handle, key: TransactionKey, request: Request) -> Self {
+    fn new(endpoint: Handle, key: TransactionKey, request: Request) -> Result<Self> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| Error::ApplicationRuntimeUnavailable)?;
         let state = Arc::new(ResponseState {
             claimed: AtomicBool::new(false),
             owners: AtomicUsize::new(1),
@@ -115,9 +118,10 @@ impl ResponseCapability {
             endpoint,
             key,
             request,
+            runtime: runtime.clone(),
         });
         let deadline = Arc::clone(&state);
-        tokio::spawn(async move {
+        runtime.spawn(async move {
             // A bound on failure: an abandoned application must not retain a server transaction.
             if tokio::time::timeout(RESPONSE_DEADLINE, deadline.completed.notified())
                 .await
@@ -127,7 +131,7 @@ impl ResponseCapability {
                 send_fallback(&deadline, 504, "Server Time-out").await;
             }
         });
-        Self { state }
+        Ok(Self { state })
     }
 
     async fn respond(
@@ -155,18 +159,23 @@ impl ResponseCapability {
         self.state.completed.notify_one();
         let endpoint = self.state.endpoint.clone();
         let key = self.state.key.clone();
-        await_committed_send(async move { endpoint.respond(&key, response).await }).await
+        await_committed_send(self.state.runtime.clone(), async move {
+            endpoint.respond(&key, response).await
+        })
+        .await
     }
 }
 
-async fn await_committed_send<F>(send: F) -> Result<()>
+async fn await_committed_send<F>(runtime: tokio::runtime::Handle, send: F) -> Result<()>
 where
     F: Future<Output = sipx_transport::Result<()>> + Send + 'static,
 {
-    // There is no await between claiming the capability and spawning this task. Once spawned, the
-    // transport operation owns the selected response and survives cancellation of the application
-    // future that is only waiting for its result.
-    tokio::spawn(send)
+    // There is no await between claiming the capability and spawning this task. The runtime was
+    // captured when the request became an event, so an application may poll `respond` from a thread
+    // without an entered Tokio context. Once spawned, the transport operation owns the selected
+    // response and survives cancellation of the application future that only waits for its result.
+    runtime
+        .spawn(send)
         .await
         .map_err(|_| sipx_transport::Error::EndpointClosed)??;
     Ok(())
@@ -200,15 +209,12 @@ impl Drop for ResponseCapability {
         if !was_last {
             return;
         }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
         if !self.state.claim() {
             return;
         }
         self.state.completed.notify_one();
         let state = Arc::clone(&self.state);
-        runtime.spawn(async move {
+        self.state.runtime.spawn(async move {
             send_fallback(&state, 500, "Server Internal Error").await;
         });
     }
@@ -301,7 +307,8 @@ fn protected_header(name: &HeaderName) -> bool {
     clippy::indexing_slicing
 )]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
+    use std::task::{Context, Poll, Waker};
 
     use tokio::sync::{Notify, oneshot};
 
@@ -353,12 +360,15 @@ mod tests {
         let send_started = Arc::clone(&started);
         let send_release = Arc::clone(&release);
 
-        let waiter = tokio::spawn(await_committed_send(async move {
-            send_started.notify_one();
-            send_release.notified().await;
-            let _ = completed.send(());
-            Ok(())
-        }));
+        let waiter = tokio::spawn(await_committed_send(
+            tokio::runtime::Handle::current(),
+            async move {
+                send_started.notify_one();
+                send_release.notified().await;
+                let _ = completed.send(());
+                Ok(())
+            },
+        ));
         started.notified().await;
         waiter.abort();
         let cancelled = waiter
@@ -371,6 +381,38 @@ mod tests {
             .await
             .expect("a bound on failure waiting for the owned send")
             .expect("the owned send completes after waiter cancellation");
+    }
+
+    #[test]
+    fn a_committed_send_uses_its_captured_runtime_outside_runtime_context() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime builds");
+        let handle = runtime.handle().clone();
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "the regression requires no entered Tokio runtime"
+        );
+        let (completed, completion) = mpsc::channel();
+        let mut send = Box::pin(await_committed_send(handle, async move {
+            completed.send(()).expect("observer remains live");
+            Ok(())
+        }));
+
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let first = send.as_mut().poll(&mut context);
+        completion
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a bound on failure waiting for the captured runtime");
+        match first {
+            Poll::Ready(result) => result.expect("send succeeds"),
+            Poll::Pending => runtime
+                .block_on(send.as_mut())
+                .expect("join completes on the captured runtime"),
+        }
     }
 
     #[test]
