@@ -65,6 +65,7 @@ pub mod identity;
 pub mod load;
 mod media_policy;
 pub mod rel;
+mod signalling;
 pub mod transfer;
 // Crate-private: every item in it is `pub(crate)`, and a `pub mod` whose contents are all
 // private renders as an empty page in the API reference — a promise of surface that is not there.
@@ -95,4 +96,5 @@ pub use rel::{
     Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_early_with_policy_at,
     ring_offer_early, ring_offer_early_with_policy, ring_offer_early_with_policy_at,
 };
+pub use signalling::{SignallingCall, SignallingEvent};
 pub use transfer::{Referral, Replaces, Transfer, TransferState};

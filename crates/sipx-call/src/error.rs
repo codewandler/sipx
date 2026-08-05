@@ -97,6 +97,16 @@ pub enum Error {
     /// not have.
     #[error("the invitation was cancelled by the caller")]
     InvitationCancelled,
+    /// A caller-selected signalling-dialog tag was empty, overlong or not a SIP token.
+    ///
+    /// The rejected value is deliberately absent: reflecting arbitrary application or fixture
+    /// bytes in an error is unnecessary and makes it too easy to copy them into a log.
+    #[error("the signalling dialog tag must be a non-empty SIP token of at most 128 bytes")]
+    InvalidDialogTag,
+    /// An originated signalling-only BYE did not receive a final response inside its caller-owned
+    /// failure bound.
+    #[error("no final response to the signalling dialog BYE within {0:?}")]
+    SignallingTeardownTimeout(std::time::Duration),
     /// An INVITE asked to replace a dialog it did not name, or named one this is not.
     ///
     /// Deliberately one error for both. Telling a caller "the Call-ID matched but the tags did

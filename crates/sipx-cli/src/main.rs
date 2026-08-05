@@ -15,9 +15,9 @@
 //! variables and exit codes documented in `website/docs/reference/cli.md` and asserted in
 //! `tests/cli.rs`.
 //!
-//! **Supported**: `register`, `dial`, `answer`, `load`, `peers`, optional device-audio selection,
-//! their flags, `SIPX_PASSWORD`, the `--book` lookup order, signalling transport selection and the
-//! exit codes.
+//! **Supported**: `register`, `dial`, `answer`, `load`, `load-responder`, `peers`, optional
+//! device-audio selection, their flags, `SIPX_PASSWORD`, the `--book` lookup order, signalling
+//! transport selection and the exit codes.
 //!
 //! Refused rather than silently unsupported, because a flag that is accepted and dropped is worse
 //! than one that errors: for example, a cleartext transport for a `sips:` URI.
@@ -30,6 +30,7 @@ mod device;
 mod dial;
 mod header;
 mod load;
+mod load_responder;
 mod media;
 mod output;
 mod peers;
@@ -53,6 +54,7 @@ COMMANDS:
     answer      Wait for and answer a call
     devices     List stable audio device identifiers
     load        Place a finite, reproducible call load
+    load-responder  Answer a finite, bounded signalling load
     peers       List what can be called
     scenario    Drive a call through correlated NDJSON commands
     help        Show this message
@@ -94,6 +96,7 @@ async fn main() -> ExitCode {
         Some("answer") => answer::run(&args, format).await,
         Some("devices") => device::list(&args, format),
         Some("load") => load::run(&args, format).await,
+        Some("load-responder") => load_responder::run(&args, format).await,
         // Not async, and deliberately so: listing what can be called reads a file and opens no
         // socket. The registrar and local-link sources are separate stories.
         Some("peers") => peers::run(&args, format),
@@ -494,18 +497,29 @@ const VALUED_FLAGS: &[&str] = &[
     "--calls",
     "--seed",
     "--call-duration",
+    "--max-active",
+    "--cleanup",
+    "--dialog-duration",
+    "--provisional-percent",
+    "--answer-percent",
+    "--reject-status",
+    "--mode",
 ];
 
 /// Flags whose values are whole seconds in the inclusive range `0..=u32::MAX`.
 ///
 /// The upper bound is a command contract rather than an incidental integer width: every supported
 /// platform and every deadline calculation can represent it, while a larger input is almost
-/// certainly a shell/configuration mistake. Zero is meaningful for each current flag:
+/// certainly a shell/configuration mistake. Zero is meaningful only where a command gives it a
+/// defined behavior:
 ///
 /// - `--duration 0` ends an established call immediately;
 /// - `--timeout 0` delegates to the transaction layer's own expiry;
 /// - `--wait 0` checks once and returns immediately when no call is already queued;
 /// - `--expires 0` asks the registrar to remove the binding.
+///
+/// `load-responder` refuses zero for `--cleanup`, `--dialog-duration`, and its admission-duration
+/// use of `--duration`; sharing lexical validation does not make their semantic constraints equal.
 ///
 /// `every_seconds_flag_is_registered_as_numeric` derives the documented `<S>` flags from the help
 /// text and holds it against this list, so a future numeric flag cannot silently bypass validation.
@@ -515,6 +529,8 @@ const NUMERIC_FLAGS: &[&str] = &[
     "--wait",
     "--expires",
     "--call-duration",
+    "--cleanup",
+    "--dialog-duration",
 ];
 
 #[cfg(test)]
@@ -605,13 +621,14 @@ mod tests {
     #[test]
     fn every_valued_flag_in_the_help_text_is_registered() {
         let help = format!(
-            "{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}",
             USAGE,
             crate::register::HELP,
             crate::dial::HELP,
             crate::answer::HELP,
             crate::peers::HELP,
             crate::load::HELP,
+            crate::load_responder::HELP,
             crate::scenario::HELP
         );
 
@@ -734,13 +751,14 @@ mod tests {
     #[test]
     fn every_seconds_flag_is_registered_as_numeric() {
         let help = format!(
-            "{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}",
             USAGE,
             crate::register::HELP,
             crate::dial::HELP,
             crate::answer::HELP,
             crate::peers::HELP,
             crate::load::HELP,
+            crate::load_responder::HELP,
             crate::scenario::HELP
         );
         let documented: Vec<String> = help

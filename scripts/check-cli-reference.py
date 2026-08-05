@@ -113,7 +113,7 @@ def _document_json_contracts(document: str) -> dict[str, JsonContract]:
         if len(cells) != 3:
             continue
         contract_match = re.fullmatch(r"`(sipx\.[a-z0-9.-]+\.v[0-9]+)`", cells[0])
-        producer_match = re.fullmatch(r"`([a-z][a-z0-9-]*)`", cells[1])
+        producer_match = re.fullmatch(r"`([a-z][a-z0-9_-]*)`", cells[1])
         if contract_match is None or producer_match is None:
             continue
         contracts[contract_match.group(1)] = JsonContract(

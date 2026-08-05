@@ -2392,6 +2392,7 @@ dependencies = [
  "cpal",
  "rand 0.9.5",
  "serde_json",
+ "sha2",
  "sipx-app-protocol",
  "sipx-audio",
  "sipx-call",
@@ -2403,6 +2404,7 @@ dependencies = [
  "sipx-transport",
  "sipx-ua",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

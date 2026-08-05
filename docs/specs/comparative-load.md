@@ -273,3 +273,92 @@ The checker/supervisor fixture suite must contain at least:
 
 The actual cross-endpoint run belongs to M14. X-98 freezes and tests this contract; P-15 implements
 the responder side without changing it.
+
+## 9. Bounded responder command
+
+### 9.1 Command and admission
+
+`sipx load-responder` is the public P-15 answering surface. It binds exactly one UDP endpoint and
+MUST reject any explicit non-UDP transport before opening a socket. It requires positive
+`--max-active <N>` and `--cleanup <S>` values plus at least one positive admission bound,
+`--calls <N>` or `--duration <S>`. If both admission bounds are present, the first reached closes
+admission. `--dialog-duration <S>` is a positive bound on every accepted dialog and defaults to
+40 seconds. Zero is not an unbounded spelling for any of these fields.
+
+The command binds, obtains the OS-selected address, writes and flushes one
+`sipx.comparative-load.ready.v1` record, and only then begins polling the endpoint receiver. It
+never infers readiness from a delay. After admission closes it refuses fresh INVITEs with
+`503 Service Unavailable` while continuing to route ACK, CANCEL and BYE for owned dialogs through
+the earlier of zero state or the cleanup deadline.
+
+No more than `max_active` dialog workers exist. An INVITE beyond that bound receives `503`; it does
+not wait on a semaphore or enter an unbounded queue. The dispatcher inbox, per-dialog inbox,
+terminal-event storage and joined-worker set all have finite capacities derived from
+`max_active`. Arithmetic that would overflow or exceed the runtime's task bound is a usage error.
+
+### 9.2 Seeded policy
+
+`--seed <U64>` defaults to zero. For zero-based surfaced INVITE index `n`, two SplitMix64 outputs
+derived from `seed XOR n` decide provisional and final policy. `--provisional-percent <0..100>`
+controls whether exactly one `100 Trying` precedes the final response. `--answer-percent <0..100>`
+controls acceptance; the remainder receives the final status selected by `--reject-status`, which
+MUST be in 400 through 699 and defaults to 486. Given the same seed, indices and flags, decisions
+MUST be identical across executions.
+
+Successful signalling-only answers have no body and use the response shape in §3.2. Their To tag is
+`t-<first-16-hex(H(seed || run_id || n || "to"))>` when the Call-ID has the profile form. A
+non-profile Call-ID receives a deterministic tag derived from the same seed, its complete bounded
+Call-ID and `n`; the command never reflects unbounded or invalid bytes into a header.
+
+`--mode signalling` is the default and creates no SDP, RTP socket or media task. The distinct
+`--mode generated-media` accepts only an INVITE carrying a negotiable SDP offer, uses the ordinary
+call/media stack, and emits a finite deterministic audio fixture. A missing or unusable offer in
+that mode receives a typed final refusal. Media behavior and measurements never enter the v1
+signalling-load result.
+
+### 9.3 Per-dialog state machine
+
+The signalling-only state machine is:
+
+| State | Input | Action | Next |
+|---|---|---|---|
+| pending | selected provisional | send one `100`; do not create a dialog | pending |
+| pending | policy rejects | claim INVITE; send configured final response | terminal |
+| pending | matching CANCEL wins | dispatcher sends `200` to CANCEL and `487` to INVITE | terminal cancelled |
+| pending | policy accepts | claim INVITE; send bodyless `200`; arm RFC 3261 G/H retransmission | awaiting ACK |
+| awaiting ACK | matching ACK with INVITE CSeq | stop 2xx retransmission | established |
+| awaiting ACK | final-response timer H | classify failure; release dialog | terminal failed |
+| established | valid increasing BYE | send `200`; release dialog | terminal completed |
+| established | dialog-duration deadline | originate BYE; require final 2xx within cleanup bound | terminal completed/failed |
+| any live | malformed/wrong-dialog/out-of-order request | send the RFC response where one exists; classify invalid | unchanged or failed by policy |
+
+The 2xx retransmission owner is joined or cancelled on every terminal path. An ACK is validated
+against the dialog identifiers and the INVITE sequence; an arbitrary packet cannot establish a
+dialog. A BYE is validated against both tags, Call-ID, method-consistent CSeq and monotonically
+increasing remote sequence before its `200` is counted. CANCEL remains transaction-matched by the
+dispatcher and never becomes an in-dialog BYE substitute.
+
+### 9.4 Shutdown and result
+
+Ctrl-C, duration/count completion and the first internal error atomically close admission. Shutdown
+then requests BYE for each established owned dialog, stops pending invitations with a final response,
+joins every worker, drops every dialog inbox, observes the dispatcher route set empty, and waits for
+the endpoint's transaction/timer count to become zero. A monotonic cleanup deadline bounds failure;
+no fixed sleep stands in for any of those barriers. Expiry reports failure and the exact non-zero
+leftovers.
+
+After cleanup the command writes exactly one `sipx.load-responder.v1` object. Its closed top-level
+keys are:
+
+```text
+schema, status, seed, mode, limits, counts, responses, latency_ms, post_drain, reason
+```
+
+`status` is `completed`, `interrupted` or `failed`. `limits` records calls/duration, maximum active,
+dialog duration and cleanup seconds. `counts` records surfaced INVITEs, admitted, established,
+completed, cancelled, rejected, failed, active high-water and invalid messages. `responses` maps
+decimal provisional and final status codes to counts. `latency_ms.setup` and `.teardown` each carry
+count, p50, p95, p99 and maximum, or are `null` with no samples. `post_drain` records active dialogs,
+dispatcher routes, endpoint transactions and owned tasks. Every terminal INVITE belongs to exactly
+one completed/cancelled/rejected/failed class, and a completed/interrupted result has zero post-drain
+state. `reason` is null except for interruption/failure and never contains packet bodies or secrets.

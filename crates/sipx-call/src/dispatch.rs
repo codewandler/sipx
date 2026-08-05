@@ -230,6 +230,7 @@ impl Invitation {
         media_address: crate::MediaAddress,
         policy: MediaPolicy,
     ) -> Result<Call> {
+        let tag = self.pending.tag();
         // Handed down rather than taken here, so that the invitation is taken immediately before
         // the `200` leaves rather than before the work that builds it — every step of which can
         // fail with nothing sent, and an invitation taken by one of those is one no CANCEL can
@@ -238,12 +239,72 @@ impl Invitation {
             endpoint,
             &self.incoming,
             media_address,
-            self.pending.tag(),
+            &tag,
             Some(&|| self.pending.claim()),
             policy,
             &[],
         )
         .await
+    }
+
+    /// Send the optional `100 Trying` used by a signalling workload.
+    ///
+    /// A `100` creates neither an early dialog nor a final-response claim, so a matching CANCEL
+    /// may still end this invitation afterwards. It deliberately carries no `To` tag (RFC 3261
+    /// §8.2.6.2).
+    pub async fn trying(&self, endpoint: &Handle) -> Result<()> {
+        let status = StatusCode::new(100).ok_or_else(|| Error::Rejected {
+            status: 100,
+            reason: "invalid Trying status".to_owned(),
+        })?;
+        let response =
+            ResponseBuilder::to_request(&self.incoming.request, status, "Trying")?.build();
+        endpoint.respond(&self.incoming.key, response).await?;
+        Ok(())
+    }
+
+    /// Accept an SDP-free INVITE as a signalling-only confirmed dialog.
+    ///
+    /// No media socket or task is created. The returned [`SignallingCall`](crate::SignallingCall)
+    /// owns the reserved per-dialog inbox, retransmits this 2xx until a valid ACK, validates BYE,
+    /// and can originate a bounded BYE of its own. `contact` is the local dialog target advertised
+    /// in the final response.
+    pub async fn answer_signalling(
+        self,
+        endpoint: &Handle,
+        contact: impl Into<Bytes>,
+    ) -> Result<crate::SignallingCall> {
+        let tag = self.pending.tag();
+        self.answer_signalling_inner(endpoint, contact.into(), tag)
+            .await
+    }
+
+    /// [`Self::answer_signalling`] with an application-selected, validated dialog tag.
+    ///
+    /// This exists for deterministic protocol fixtures. The tag is claimed atomically with the
+    /// invitation, so a crossing CANCEL either wins with the old pending tag or loses and uses this
+    /// same tag in its own response; the two transactions cannot disagree.
+    pub async fn answer_signalling_with_tag(
+        self,
+        endpoint: &Handle,
+        contact: impl Into<Bytes>,
+        tag: impl Into<String>,
+    ) -> Result<crate::SignallingCall> {
+        self.answer_signalling_inner(endpoint, contact.into(), tag.into())
+            .await
+    }
+
+    async fn answer_signalling_inner(
+        self,
+        endpoint: &Handle,
+        contact: Bytes,
+        tag: String,
+    ) -> Result<crate::SignallingCall> {
+        // Every fallible shape check happens before the transaction is claimed. A malformed
+        // Contact or dialog cannot consume an invitation that a later CANCEL could still end.
+        let prepared = crate::signalling::prepare(endpoint, &self.incoming, &tag, contact)?;
+        self.pending.claim_with_tag(&tag)?;
+        crate::signalling::establish(endpoint.clone(), self.incoming, self.requests, prepared).await
     }
 
     /// Refuse this pending invitation with a final response.
@@ -257,7 +318,8 @@ impl Invitation {
         reason: impl Into<Bytes>,
     ) -> Result<()> {
         self.pending.claim()?;
-        final_response(endpoint, &self.incoming, self.pending.tag(), status, reason).await
+        let tag = self.pending.tag();
+        final_response(endpoint, &self.incoming, &tag, status, reason).await
     }
 
     /// Split into the INVITE and the inbox, ready for
@@ -306,7 +368,8 @@ impl CouplingInvitation {
         reason: impl Into<Bytes>,
     ) -> Result<()> {
         self.pending.claim()?;
-        final_response(endpoint, &self.incoming, self.pending.tag(), status, reason).await
+        let tag = self.pending.tag();
+        final_response(endpoint, &self.incoming, &tag, status, reason).await
     }
 }
 
@@ -357,8 +420,6 @@ struct Pending {
     transaction: TransactionKey,
     /// The INVITE, which the `487` is built from.
     request: Request,
-    /// The `To` tag every response this side sends about this invitation carries (§9.2).
-    tag: String,
     /// The route this invitation reserved, kept only so a finished one can be swept.
     ///
     /// A transaction whose call has dropped its inbox is gone as far as anything here is
@@ -377,6 +438,12 @@ struct Pending {
 struct State {
     phase: Phase,
     events: EventSink,
+    /// The `To` tag every response this side sends about this invitation carries (§9.2).
+    ///
+    /// Kept under the phase lock so a deterministic signalling answer can replace it atomically
+    /// with claiming the invitation, while CANCEL observes either the complete before or after
+    /// state.
+    tag: String,
 }
 
 /// The three states RFC 3261 §9.2 distinguishes, and the only three it needs.
@@ -392,8 +459,8 @@ enum Phase {
 }
 
 impl Pending {
-    fn tag(&self) -> &str {
-        &self.tag
+    fn tag(&self) -> String {
+        self.lock().tag.clone()
     }
 
     /// The state, whether or not a previous holder panicked.
@@ -425,21 +492,33 @@ impl Pending {
         Ok(())
     }
 
+    /// Claim the invitation and select its final dialog tag as one atomic state transition.
+    fn claim_with_tag(&self, tag: &str) -> Result<()> {
+        let mut state = self.lock();
+        if state.phase == Phase::Cancelled {
+            return Err(Error::InvitationCancelled);
+        }
+        state.tag.clear();
+        state.tag.push_str(tag);
+        state.phase = Phase::Answered;
+        Ok(())
+    }
+
     /// End the invitation, if it has not already answered.
     ///
     /// Returns whether the `487` is owed — that is, whether this call was the transition. §9.2
     /// asks for it only "if the transaction for the original request still exists", and both
     /// things that make it not exist come through here: an answer, and an earlier CANCEL whose
     /// retransmission this is.
-    fn cancel(&self) -> bool {
+    fn cancel(&self) -> (bool, String) {
         let mut state = self.lock();
         if state.phase != Phase::Ringing {
-            return false;
+            return (false, state.tag.clone());
         }
         state.phase = Phase::Cancelled;
         state.events.end(EndCause::RemoteCancel);
         self.cancelled.notify_waiters();
-        true
+        (true, state.tag.clone())
     }
 }
 
@@ -625,7 +704,12 @@ impl Calls {
     /// How many calls are currently routed.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.lock().by_dialog.len()
+        let mut routing = self.lock();
+        routing.by_dialog.retain(|_, route| !route.tx.is_closed());
+        routing
+            .invites
+            .retain(|_, pending| !pending.route.is_closed());
+        routing.by_dialog.len()
     }
 
     /// Whether no call is routed at all.
@@ -710,11 +794,11 @@ impl Calls {
         let pending = Arc::new(Pending {
             transaction: incoming.key.clone(),
             request: incoming.request.clone(),
-            tag: token(),
             route: tx,
             state: Mutex::new(State {
                 phase: Phase::Ringing,
                 events,
+                tag: token(),
             }),
             cancelled: Notify::new(),
         });
@@ -1013,24 +1097,25 @@ impl Dispatcher {
             return;
         };
 
+        let (cancelled, tag) = pending.cancel();
         self.answer_request(
             &incoming.key,
             &incoming.request,
             200,
             "OK",
             None,
-            Some(pending.tag()),
+            Some(&tag),
         )
         .await;
 
-        if pending.cancel() {
+        if cancelled {
             self.answer_request(
                 &pending.transaction,
                 &pending.request,
                 487,
                 "Request Terminated",
                 None,
-                Some(pending.tag()),
+                Some(&tag),
             )
             .await;
         }

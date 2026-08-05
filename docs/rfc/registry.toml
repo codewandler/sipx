@@ -45,9 +45,11 @@ evidence = [
   "crates/sipx-sip/src/parser.rs",
   "crates/sipx-sip/src/transaction/mod.rs",
   "crates/sipx-call/src/dispatch.rs",
+  "crates/sipx-call/src/signalling.rs",
   "crates/sipx-call/tests/dispatch.rs",
+  "crates/sipx-call/tests/signalling.rs",
 ]
-note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2)."
+note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2). The bounded signalling responder sends final INVITE responses, validates ACK and remote sequence ordering, accepts or originates BYE, retransmits its final response through Timer H, and joins owned timer work before release."
 
 [[rfc]]
 number = 4475
