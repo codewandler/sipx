@@ -66,6 +66,16 @@ by contract, and must stay that way.
   the buffered-Pong drain closes a false-`Stalled` window a caller-driven `next` has and a
   server's parked loop does not; and the strict-Pong consequence (a data-streaming, Pong-dropping
   peer is `Stalled` mid-burst) is stated in the module docs so `A-22` inherits it knowingly.
+- 2026-08-05 (`impl/A-20`, review rework 2): the redaction only covered URLs containing `://`,
+  and `user:sekret@host` / `//user:sekret@host` both parse as a `Uri` without a scheme — so a
+  pasted URL that lost its `wss://` reached the scheme refusal with the credential intact. The
+  scheme is now optional in `redacted`. Second, the previous round's drain had made the
+  strict-Pong rule unreachable: any ready data frame short-circuited the search, so a peer
+  streaming while withholding Pongs deferred the verdict frame by frame. The drain now takes
+  the whole buffered backlog looking for a Pong (data set aside in `held`, delivered in order,
+  never dropped) and the `select!` is `biased` with the clock first, so an expired deadline is
+  settled before another frame is handed over. Both liveness properties now hold at once and
+  each has its own vector; module docs, code comments and this note say the same thing.
 - `scripts/check-app-surface.py` reviewed: before, "10 of 11 published crates; 7 modules and 0
   crates experimental"; after, the same closure with **8** modules experimental — the new `wss`
   module itself, marked **Experimental** (`A-8`) deliberately. No crate joins the dependency

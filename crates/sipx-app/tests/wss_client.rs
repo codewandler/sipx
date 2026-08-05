@@ -741,6 +741,80 @@ async fn a_pong_that_arrived_while_the_caller_was_away_is_not_a_stall() {
     peer.abort();
 }
 
+/// The other side of the same rule, and the one a burst can hide: only a Pong stands a probe
+/// down. A peer that streams at full rate while never answering is dead by the session-binding
+/// discipline, and must be declared so at the grace — not held open for as long as it keeps
+/// talking. A client that let any ready data defer the verdict would never produce it here.
+#[tokio::test]
+async fn a_peer_that_streams_without_answering_probes_is_still_declared_gone() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("an address");
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("a connection");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("upgrades");
+        // Never reads, so it never sees a Ping and never answers one — the protocol layer's
+        // automatic Pong needs a read to be queued at all. It only talks.
+        loop {
+            if socket
+                .send(Message::Text("filling the socket".into()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let config = WssClientConfig {
+        ping_interval: Duration::from_millis(50),
+        ping_grace: Duration::from_millis(100),
+        ..WssClientConfig::default()
+    };
+    let mut connection = WssClient::with_config(
+        ClientTls::new(&TrustAnchors::system()).expect("a client policy"),
+        config,
+    )
+    .connect(WssRequest::new(format!("ws://{addr}/")))
+    .await
+    .expect("the handshake");
+
+    // Drive `next` long enough for the probe to go out at ~50 ms. The peer's frames are always
+    // ready, so this also proves the burst does not stop the probe being sent.
+    let mut delivered = 0_usize;
+    let _ = tokio::time::timeout(Duration::from_millis(70), async {
+        while connection.next().await.is_ok() {
+            delivered += 1;
+        }
+    })
+    .await;
+    assert!(
+        delivered > 0,
+        "the peer must really have been streaming for this to prove anything"
+    );
+
+    // Ordering two stimuli: the grace's expiry at ~150 ms and the caller's return. The wait
+    // puts the return after the expiry with the peer still talking — the state under test —
+    // and a longer wait preserves that order rather than breaking it.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // The verdict is owed *now*, and a backlog of data is not an answer: the very next thing
+    // this caller is handed must be the typed close. A client that let ready data defer it
+    // would hand back another message here, and would go on doing so for as long as the peer
+    // kept the socket readable — which is the bound `session-binding.md` does not allow.
+    // The bound on failure only decides when one that never answers at all is declared broken.
+    match tokio::time::timeout(Duration::from_secs(5), connection.next())
+        .await
+        .expect("the liveness bound must fire long before this")
+    {
+        Err(WssError::Stalled { bound, .. }) => assert_eq!(bound, Duration::from_millis(100)),
+        other => panic!("a burst must not defer the verdict, got: {other:?}"),
+    }
+    peer.abort();
+}
+
 /// One TLS policy, not two: the workspace's WebSocket dependency is built without TLS features,
 /// asserted the way the workspace `Cargo.toml` comment states it.
 #[test]

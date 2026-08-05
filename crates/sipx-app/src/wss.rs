@@ -28,12 +28,17 @@
 //! (`docs/specs/session-binding.md`), client side.
 //!
 //! That liveness rule is **strict about Pongs, deliberately**, and a caller should know what it
-//! buys: only a Pong stands a probe down, so a peer streaming data at full rate while dropping
-//! Pongs is declared [`Stalled`](WssError::Stalled) mid-burst. That is the same reading
-//! `docs/specs/session-binding.md` §"Liveness" states and `sipx-transport`'s server side already
-//! applies — a path that has stopped carrying control frames has stopped being a path this side
-//! can steer, whatever is still arriving on it — and it is inherited knowingly rather than by
-//! accident.
+//! buys. Only a Pong stands a probe down; data never does. A peer streaming at full rate while
+//! withholding Pongs is therefore declared [`Stalled`](WssError::Stalled) mid-burst, at the
+//! grace, once this side has taken delivery of what had already arrived — the same reading
+//! `docs/specs/session-binding.md` states and `sipx-transport`'s server side already applies. A
+//! path that has stopped carrying control frames has stopped being a path this side can steer,
+//! whatever is still arriving on it, and `A-22` inherits that knowingly rather than by accident.
+//!
+//! The one thing that *does* survive the grace is an answer that beat it: a Pong which arrived
+//! while the caller was away from [`next`](WssConnection::next) counts, because the peer sent it
+//! in time and only this side was late to look. Nothing the peer sends after the grace expired
+//! can extend it.
 //!
 //! **Credentials never travel in the URL.** A `wss://user:secret@host/` URL is refused
 //! ([`WssError::Url`]): RFC 3986 §3.2.1 deprecates userinfo for exactly this reason, no `Host`
@@ -42,6 +47,7 @@
 //! `Debug` on purpose.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::fmt;
 use std::net::IpAddr;
 
@@ -51,7 +57,7 @@ use sipx_transport::tls::{ClientTls, TlsError};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, Instant};
-use tokio_tungstenite::tungstenite::error::{CapacityError, ProtocolError, SubProtocolError};
+use tokio_tungstenite::tungstenite::error::{CapacityError, ProtocolError};
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue, Uri};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{Error as FrameError, Message};
@@ -68,6 +74,11 @@ pub const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a Ping may remain unanswered before the peer is declared gone.
 pub const DEFAULT_PING_GRACE: Duration = Duration::from_secs(10);
+
+/// How many already-buffered frames the liveness search takes before offering the executor a
+/// turn. Nothing here waits on a clock; this only keeps a talkative peer from monopolising the
+/// task while its backlog is read.
+const YIELD_EVERY: usize = 64;
 
 /// What can go wrong dialing or speaking to a non-SIP WebSocket peer.
 ///
@@ -129,7 +140,8 @@ pub enum WssError {
     Subprotocol {
         /// Who we were talking to.
         peer: String,
-        /// What the caller asked for.
+        /// What the caller asked for — empty when the caller named none and the peer answered
+        /// with one anyway, which RFC 6455 §4.1 fails the connection for just the same.
         offered: String,
     },
     /// The peer sent a message larger than the configured bound.
@@ -385,12 +397,15 @@ impl WssClient {
                 // only ever disagree with the one that already ran — and a disagreement in
                 // favour of *accepting* would be this module deciding what frames mean.
                 match error {
-                    FrameError::Protocol(ProtocolError::SecWebSocketSubProtocolError(
-                        SubProtocolError::NoSubProtocol | SubProtocolError::InvalidSubProtocol,
-                    )) => WssError::Subprotocol {
-                        peer: target.authority.clone(),
-                        offered: request.subprotocol.clone().unwrap_or_default(),
-                    },
+                    // All three of the dependency's subprotocol refusals, including the peer
+                    // that names one nobody offered — RFC 6455 §4.1 step 6 fails the connection
+                    // for that too, and it is the same disagreement seen from the other side.
+                    FrameError::Protocol(ProtocolError::SecWebSocketSubProtocolError(_)) => {
+                        WssError::Subprotocol {
+                            peer: target.authority.clone(),
+                            offered: request.subprotocol.clone().unwrap_or_default(),
+                        }
+                    }
                     other => WssError::Handshake {
                         peer: target.authority.clone(),
                         detail: other.to_string(),
@@ -405,6 +420,8 @@ impl WssClient {
             awaiting_pong: false,
             ping_interval: self.config.ping_interval,
             ping_grace: self.config.ping_grace,
+            held: VecDeque::new(),
+            closed: false,
         })
     }
 }
@@ -433,6 +450,11 @@ pub struct WssConnection {
     awaiting_pong: bool,
     ping_interval: Duration,
     ping_grace: Duration,
+    /// Messages taken from the socket while looking for a Pong, owed to the caller in the order
+    /// the peer sent them. Bounded by what one liveness pass found already buffered.
+    held: VecDeque<WssMessage>,
+    /// The peer closed while liveness was reading ahead; reported once `held` is empty.
+    closed: bool,
 }
 
 impl fmt::Debug for WssConnection {
@@ -473,9 +495,58 @@ impl WssConnection {
     /// This is also where liveness runs. The clock only ever bounds a failure: the peer's own
     /// frames complete the wait whenever there are any, and the timer's sole verdicts are
     /// "probe now" and "the probe went unanswered".
+    ///
+    /// **Cancel-safe.** Every piece of liveness state lives on the connection rather than in
+    /// the future, so a caller that drops this — a `select!` arm that lost, a `timeout` that
+    /// fired — loses no message and no probe. One cancellation is visible, and only as extra
+    /// work: dropped inside the probe's own send, the Ping may reach the peer with this side's
+    /// bookkeeping unwritten, which costs one redundant Ping at the next cadence and can never
+    /// produce a [`Stalled`](WssError::Stalled) that was not owed.
     pub async fn next(&mut self) -> Result<Option<WssMessage>, WssError> {
         loop {
+            // Anything liveness set aside while looking for a Pong is the caller's, and it is
+            // older than whatever the socket holds now.
+            if let Some(message) = self.held.pop_front() {
+                return Ok(Some(message));
+            }
+            if self.closed {
+                return Ok(None);
+            }
             tokio::select! {
+                // `biased`, with the clock read first, and it changes only one thing: when the
+                // deadline has *already* passed, the work it owes happens before another of the
+                // peer's frames is handed over. An unbiased choice here would let a peer that
+                // keeps the socket readable defer the verdict frame by frame for as long as it
+                // kept talking — the burst outrunning the bound `session-binding.md` sets.
+                // Until the deadline passes this arm is simply pending, so it never delays a
+                // frame and never stands in for one: the clock still only bounds a failure.
+                biased;
+
+                () = tokio::time::sleep_until(self.probe) => {
+                    if self.awaiting_pong {
+                        if self.answered_while_away().await? {
+                            self.awaiting_pong = false;
+                            self.probe = Instant::now() + self.ping_interval;
+                            continue;
+                        }
+                        if self.closed {
+                            // A peer that closed is not a peer that went silent; the loop head
+                            // hands over what arrived before the close, then reports it.
+                            continue;
+                        }
+                        return Err(WssError::Stalled {
+                            peer: self.peer.clone(),
+                            bound: self.ping_grace,
+                        });
+                    }
+                    self.socket
+                        .send(Message::Ping(Bytes::new()))
+                        .await
+                        .map_err(|error| self.fault(error))?;
+                    self.awaiting_pong = true;
+                    self.probe = Instant::now() + self.ping_grace;
+                }
+
                 frame = self.socket.next() => match frame {
                     Some(Ok(Message::Text(text))) => {
                         return Ok(Some(WssMessage::Text(text.as_str().to_owned())));
@@ -494,33 +565,6 @@ impl WssConnection {
                     Some(Ok(Message::Close(_))) | None => return Ok(None),
                     Some(Err(error)) => return Err(self.fault(error)),
                 },
-                // The liveness clock. In this race the clock is always the loser's branch — a
-                // bound on failure, never a stand-in for the peer's next frame.
-                () = tokio::time::sleep_until(self.probe) => {
-                    if self.awaiting_pong {
-                        match self.answered_while_away()? {
-                            Buffered::Pong => {
-                                self.awaiting_pong = false;
-                                self.probe = Instant::now() + self.ping_interval;
-                                continue;
-                            }
-                            Buffered::Message(message) => return Ok(Some(message)),
-                            Buffered::Closed => return Ok(None),
-                            Buffered::Nothing => {
-                                return Err(WssError::Stalled {
-                                    peer: self.peer.clone(),
-                                    bound: self.ping_grace,
-                                });
-                            }
-                        }
-                    }
-                    self.socket
-                        .send(Message::Ping(Bytes::new()))
-                        .await
-                        .map_err(|error| self.fault(error))?;
-                    self.awaiting_pong = true;
-                    self.probe = Instant::now() + self.ping_grace;
-                }
             }
         }
     }
@@ -533,39 +577,55 @@ impl WssConnection {
         }
     }
 
-    /// What the socket already holds, without waiting for anything to arrive.
+    /// Whether a Pong was **already** in hand when the grace expired.
     ///
     /// A grace that expires means only that this side has not *read* a Pong, and between calls
     /// to [`next`](Self::next) nobody is reading: a Pong that arrived while the caller was away
     /// is sitting in the socket, and on re-entry both `select!` branches are ready at once — an
     /// unbiased choice would announce [`Stalled`](WssError::Stalled) with the answer in hand.
-    /// So the verdict consults what is buffered first. `sipx-transport`'s server side needs no
-    /// equivalent because its loop is always parked on the socket; a caller-driven `next` is
-    /// away exactly as often as its caller is busy.
-    fn answered_while_away(&mut self) -> Result<Buffered, WssError> {
+    /// `sipx-transport`'s server side needs no equivalent because its loop is always parked on
+    /// the socket; a caller-driven `next` is away exactly as often as its caller is busy.
+    ///
+    /// So this takes delivery of everything the socket holds *right now*, looking for a Pong.
+    /// Data frames are set aside for the caller rather than returned from here, because a data
+    /// frame is not an answer: were the search to stop at one, a peer streaming at full rate
+    /// while withholding Pongs would defer the verdict for as long as it kept talking, and the
+    /// discipline `docs/specs/session-binding.md` states — no Pong within the grace and the
+    /// session is dead — would be unreachable while the connection was busiest.
+    ///
+    /// The work is bounded by what has already arrived: the search ends the moment the socket
+    /// has nothing ready, so nothing the peer sends *after* the grace expired can extend it.
+    async fn answered_while_away(&mut self) -> Result<bool, WssError> {
+        let mut taken: usize = 0;
         loop {
             // Polls once and takes only what is ready. Nothing here waits, so a peer that has
             // genuinely stopped still reaches its verdict on this pass rather than the next.
             let Some(frame) = self.socket.next().now_or_never() else {
-                return Ok(Buffered::Nothing);
+                return Ok(false);
             };
             match frame {
-                Some(Ok(Message::Pong(_))) => return Ok(Buffered::Pong),
-                // A data message is not liveness — only a Pong stands a probe down — so this
-                // hands the caller its message with the probe still outstanding and the clock
-                // still expired. The verdict is deferred by the frames actually buffered, never
-                // cancelled by them, and nothing the peer sent is dropped to reach it.
+                Some(Ok(Message::Pong(_))) => return Ok(true),
                 Some(Ok(Message::Text(text))) => {
-                    return Ok(Buffered::Message(WssMessage::Text(
-                        text.as_str().to_owned(),
-                    )));
+                    self.held
+                        .push_back(WssMessage::Text(text.as_str().to_owned()));
                 }
                 Some(Ok(Message::Binary(data))) => {
-                    return Ok(Buffered::Message(WssMessage::Binary(data)));
+                    self.held.push_back(WssMessage::Binary(data));
                 }
                 Some(Ok(Message::Ping(_) | Message::Frame(_))) => {}
-                Some(Ok(Message::Close(_))) | None => return Ok(Buffered::Closed),
+                Some(Ok(Message::Close(_))) | None => {
+                    // Reported after the caller has had what came before it.
+                    self.closed = true;
+                    return Ok(false);
+                }
                 Some(Err(error)) => return Err(self.fault(error)),
+            }
+            taken += 1;
+            if taken.is_multiple_of(YIELD_EVERY) {
+                // A peer can keep this socket readable — a flood of control frames adds nothing
+                // to `held` and would otherwise spin here without ever reaching the executor.
+                // Yielding is not a wait: it costs this task its turn, never a wall-clock hold.
+                tokio::task::yield_now().await;
             }
         }
     }
@@ -588,18 +648,6 @@ impl WssConnection {
     }
 }
 
-/// What a socket already held when a liveness grace expired.
-enum Buffered {
-    /// Nothing had arrived: the peer really has gone quiet.
-    Nothing,
-    /// The peer answered the probe while nobody was reading.
-    Pong,
-    /// A message for the caller, taken from the buffer rather than dropped.
-    Message(WssMessage),
-    /// The peer closed.
-    Closed,
-}
-
 /// The stream under the WebSocket: loopback cleartext or the TLS policy's verified stream.
 ///
 /// A trait object rather than an enum, deliberately: naming the TLS stream's concrete type
@@ -613,11 +661,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Io for S {}
 /// Read off the raw string rather than a parsed URL on purpose: a URL too malformed to parse
 /// still carries whatever secret was written into it, and that is exactly the URL an error
 /// message wants to quote back.
+///
+/// The scheme is optional here, and that is the point. `user:secret@host` and `//user:secret@host`
+/// both parse as a [`Uri`] — without a scheme, so both are refused a few lines below and both
+/// reach an error with the credential still in them. A pasted URL that lost its `wss://` is the
+/// ordinary way to write one.
+///
+/// What this does **not** cover is a credential in the query string, which is left as written:
+/// `docs/specs/openai-realtime.md` §2 puts authentication in a header, so a token in a query
+/// would be a caller doing something this client does not ask for, and blanket-redacting query
+/// values would hide the `?model=` an operator needs to read.
 fn redacted(url: &str) -> Cow<'_, str> {
-    let Some(mark) = url.find("://") else {
-        return Cow::Borrowed(url);
+    let start = match url.find("://") {
+        Some(mark) => mark + "://".len(),
+        // No scheme: an authority may still open the string, with or without `//`.
+        None if url.starts_with("//") => "//".len(),
+        None => 0,
     };
-    let start = mark + "://".len();
     // The authority ends where the path, query or fragment begins (RFC 3986 §3.2); anything
     // after that is not credentials however many `@` it contains.
     let end = url[start..]
@@ -917,7 +977,35 @@ mod tests {
             redacted("wss://example.com/mail/user@example.com"),
             "wss://example.com/mail/user@example.com"
         );
+        // No scheme at all. Both of these parse as a `Uri`, so both reach the scheme refusal
+        // with the credential still in the string — a pasted URL that lost its `wss://` is the
+        // ordinary way to write one, and it must not travel into the error verbatim.
+        assert_eq!(redacted("user:sekret@example.com"), "***@example.com");
+        assert_eq!(
+            redacted("//user:sekret@example.com/v1"),
+            "//***@example.com/v1"
+        );
+        assert_eq!(redacted("sekret@example.com:8443"), "***@example.com:8443");
+        // A relative path whose `@` is past the first separator is not an authority.
+        assert_eq!(redacted("mail/user@example.com"), "mail/user@example.com");
         assert_eq!(redacted("wss://example.com/v1"), "wss://example.com/v1");
         assert_eq!(redacted("not a url"), "not a url");
+    }
+
+    /// The scheme-less forms reach the scheme refusal, so the refusal is where the credential
+    /// would surface — `Display` included, which is what a caller logs.
+    #[test]
+    fn a_scheme_less_url_is_refused_without_repeating_its_credential() {
+        for url in [
+            "user:sekret@example.com",
+            "//user:sekret@example.com/v1",
+            "sekret@example.com:8443",
+        ] {
+            let error = Target::of(url).expect_err("refused");
+            assert!(
+                !format!("{error}").contains("sekret") && !format!("{error:?}").contains("sekret"),
+                "{url} leaked: {error} / {error:?}"
+            );
+        }
     }
 }
