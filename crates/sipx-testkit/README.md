@@ -7,8 +7,11 @@ ports; it is the signalling path that opens no socket.
 
 The crate also carries the protocol torture corpora and certificate fixtures used by the sipx
 workspace. `TransactionHarness`, `Link` and nanosecond `Virtual` provide the lower-level seeded
-fault and chronological-time surface. Neither harness claims network interoperability.
+fault and chronological-time surface. `RtpEcho` is a bounded PCMU test peer for checking a media
+boundary from a shell; it is not a SIP user agent or production media service. None of these
+harnesses claims network interoperability.
 
-See the [public test guide](https://codewandler.github.io/sipx/docs/guides/test-a-call).
+See the [call test guide](https://codewandler.github.io/sipx/docs/guides/test-a-call) and the
+[RTP echo guide](https://codewandler.github.io/sipx/docs/guides/rtp-echo).
 
 Licensed under either of Apache-2.0 or MIT, at your option.

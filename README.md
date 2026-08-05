@@ -133,7 +133,7 @@ workspace, parsers are fuzzed, and unknown headers survive a parse/serialize rou
 | `sipx-rtp` | RTP and RTCP packet handling, sequencing, jitter buffering, quality statistics and SRTP (RFC 3550) |
 | `sipx-sdp` | SDP session descriptions (RFC 8866) and offer/answer negotiation (RFC 3264) |
 | `sipx-sip` | Sans-IO SIP core: messages, parser and transactions (RFC 3261) |
-| `sipx-testkit` | Deterministic SIP call tests with virtual time, seeded in-process links, and RFC corpora |
+| `sipx-testkit` | Deterministic SIP and RTP tests with bounded peers, virtual time, and RFC corpora |
 | `sipx-transport` | Async SIP transports: UDP, TCP, TLS, WebSocket, experimental QUIC, and RFC 3263 resolution |
 | `sipx-ua` | SIP user agent: registration, digest authentication, and experimental subscriptions and presence |
 <!-- END generated:crate-map -->

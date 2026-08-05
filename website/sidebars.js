@@ -29,6 +29,7 @@ const sidebars = {
       items: [
         'guides/as-a-library',
         'guides/test-a-call',
+        'guides/rtp-echo',
         'guides/place-a-call',
         'guides/answer-a-call',
         'guides/register',

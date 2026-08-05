@@ -1,6 +1,6 @@
 [package]
 name = "sipx-testkit"
-description = "Deterministic SIP call tests with virtual time, seeded in-process links, and RFC corpora"
+description = "Deterministic SIP and RTP tests with bounded peers, virtual time, and RFC corpora"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,13 +13,15 @@ categories.workspace = true
 [dependencies]
 sipx-sip.workspace = true
 sipx-call.workspace = true
+sipx-audio.workspace = true
+sipx-rtp.workspace = true
 # The loopback link's tests drive the transaction machines against the shared timer queue, which
 # lives in the transport crate — the point of `X-14` being that both take `now` as an argument.
 sipx-transport.workspace = true
 # Not a dev-dependency: the fixtures this crate *is* are what other crates' tests depend on.
 rcgen.workspace = true
 bytes.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
 thiserror.workspace = true
 
 [dev-dependencies]

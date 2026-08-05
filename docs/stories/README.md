@@ -50,6 +50,7 @@ WASM kernel, browser-native WebRTC adapter and public demo. Neither is silently 
 ### supported test surfaces
 _The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
 - [X-75 — Be quiet by default and easy to test against](X-75-be-quiet-by-default-and-easy-to-test-against.md) · Build · recurring complaint against the surveyed stack · a library that spams logs and cannot be tested against
+- [M-53 — Ship a runnable RTP echo example](M-53-ship-a-runnable-rtp-echo-example.md) · Media · discovered by X-97 · exercise the public RTP receive/send seam without inventing a second media stack
 
 ## Next (ready — take the top one unless the user named a story)
 
