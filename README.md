@@ -23,6 +23,20 @@ transfer, and carry real audio from a Rust library or a shell command.
 > Supported APIs receive migration notes when they break, while Experimental APIs may change or be
 > removed without one. Start with the exact registry install below when reproducibility matters.
 
+## Start here
+
+| If you want to… | Go to… |
+|---|---|
+| Check whether sipx supports your deployment | [Does it fit?](#does-it-fit) and the [fit guide](https://codewandler.github.io/sipx/docs/guides/does-this-fit) |
+| Make a local call from the shell | [Try the CLI](#try-the-cli) |
+| Build an endpoint in Rust | [Use the Rust libraries](#use-the-rust-libraries) |
+| Understand crate boundaries | [Why the core is different](#why-the-core-is-different) and [Crates](#crates) |
+| Contribute to the repository | [Contributing](#contributing) and [`AGENTS.md`](AGENTS.md) |
+
+For reproducible results, use the exact beta versions shown below. For current development APIs,
+follow the `main`-branch instructions in the getting-started guide and expect Experimental surfaces
+to change.
+
 ## Does it fit?
 
 sipx is a **user agent**: the endpoint that places or receives a call. It is not a proxy, registrar,
