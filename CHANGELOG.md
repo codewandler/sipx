@@ -7,6 +7,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-beta.7] — 2026-08-05
+
+This prerelease gives routing and forwarding consumers exact transaction, listener, identity and
+URI operations without making them reconstruct SIP wire state. It is a new immutable release after
+beta.6, not a replacement for an existing tag.
+
 ### Added
 
 - **Forwarding code can cancel one exact outgoing INVITE transaction.** The transport handle owns

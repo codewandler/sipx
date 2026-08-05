@@ -1,13 +1,41 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-beta.6 prerelease.
+description: Release highlights and adoption notes for the sipx 1.0.0-beta.7 prerelease.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-beta.6 — 2026-08-05
+## 1.0.0-beta.7 — 2026-08-05
 <!-- END generated:release-heading -->
+
+Beta.7 publishes the routing-integration wave after beta.6. It is a new immutable prerelease and
+does not move or overwrite any existing tag or package.
+
+- **One public operation cancels one exact outgoing INVITE transaction.** It is anchored to the
+  original response stream, owns CANCEL construction and the provisional/final-response race, and
+  returns distinct typed outcomes. The call layer now uses the same operation.
+- **Cleartext listener selection is exact.** Endpoints select UDP only, TCP only, both, or no
+  cleartext listener when another signalling listener is configured. TCP-only no longer opens an
+  undeclared UDP socket.
+- **Privacy and identity fields are typed.** Checked Privacy values and strict-send/tolerant-receive
+  asserted identity lists keep syntax validation and indexed diagnostics inside the SIP layer.
+- **URI editing is parser-owned and lossless.** SIP/SIPS users, TEL subscribers, Request-URIs and
+  nested address-field URIs can change without byte searching or rebuilding unchanged wire syntax.
+  Generic percent escapes, TEL subscribers and ambiguous bare-address boundaries are validated.
+
+Install the exact CLI release with:
+
+```bash
+cargo install --locked --version =1.0.0-beta.7 sipx-cli
+```
+
+Public APIs are not frozen before 1.0. Supported APIs receive migration guidance when they break;
+Experimental APIs may change or disappear without that guide. Code that configured cleartext
+listeners must replace the former TCP boolean with `CleartextTransports`; the default remains UDP
+and TCP together.
+
+## 1.0.0-beta.6 — 2026-08-05
 
 Beta.6 publishes the integrated correctness and specification wave after beta.5. It is a new
 immutable prerelease and does not move or overwrite any existing tag or package.
@@ -146,7 +174,7 @@ installed diagnostic CLI, independent transport peers and release-commit documen
 cargo install --locked --version =1.0.0-beta.2 sipx-cli
 ```
 
-Use beta.6 for new installations; beta.2 through beta.5 remain immutable for reproducible
+Use beta.7 for new installations; beta.2 through beta.6 remain immutable for reproducible
 existing consumers.
 
 ## 1.0.0-alpha.5 — 2026-08-03

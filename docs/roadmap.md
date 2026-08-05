@@ -10,12 +10,12 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.6` are published prereleases, and beta.6 is
-current.** Beta.6 hardens the bounded endpoint responder,
-corrects validated-response accounting, and records the browser SDK plus later media/application
-work as explicit specifications and backlog rather than runtime claims. The retained load evidence
-covers the current endpoint direction only; no peer result or general ranking is claimed. Stable
-`1.0.0` remains a separate promotion and compatibility decision.
+_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.6` are published prereleases, and beta.7 is
+the authorized release candidate on `main`.** Beta.7 gives routing and forwarding consumers exact
+outgoing-INVITE cancellation, cleartext listener selection, typed privacy and identity fields, and
+lossless parser-owned URI editing. The retained load evidence covers the current endpoint direction
+only; no peer result or general ranking is claimed. Stable `1.0.0` remains a separate promotion and
+compatibility decision.
 
 _As of 2026-07-30:_ **all seven `1.0.0-alpha` predicates are met**, and `1.0.0-alpha` is cut.
 [`maturity.md`](maturity.md) reports them, and it reports them as *computed* rather than asserted —
@@ -589,7 +589,7 @@ honest about what it does not do.**
 A stack can be short of features and still be worth depending on. It cannot be *wrong about itself*
 and be worth depending on, because every consumer's design decision rests on what the table says.
 
-### `1.0.0-beta.6` — the hypothetical public-announcement predicates
+### `1.0.0-beta.7` — the hypothetical public-announcement predicates
 
 This is the threshold at which the prerelease could responsibly receive broader publicity: outside
 Rust users can install exact registry
