@@ -14,7 +14,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and runtime bounds, rejects malformed or foreign traffic with typed errors, and returns decoded
   audio on a deterministic RTP sequence/timestamp timeline. Its compiled example and public guide
   keep the scope explicit: a finite test peer, not call signalling, acoustic-echo cancellation, a
-  production reflector or a load service.
+  production reflector or a load service. The pre-publication dry-run also stages the testkit and
+  transport archives together and compiles this exact example in an isolated consumer before any
+  release may proceed.
 
 - **Downstream applications can place and answer SIP signalling under deterministic virtual time.**
   The newly published `sipx-testkit` exposes a supported socket-free `CallHarness` over its seeded

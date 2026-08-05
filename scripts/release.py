@@ -1523,7 +1523,11 @@ def verify_registry_consumer(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--dry-run", action="store_true", help="run Cargo's locked publication rehearsal")
+    modes.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="verify the staged package pair, then run Cargo's locked publication rehearsal",
+    )
     modes.add_argument("--publish", action="store_true", help="publish one dependency-ready frontier")
     modes.add_argument(
         "--inspect-dirty-contents",
@@ -1694,6 +1698,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         order = publication_order(packages)
         print(f"workspace {version}: {len(order)} public packages")
         print("dependency order: " + ", ".join(order))
+        if mode == "dry-run":
+            verify_local_rtp_echo_package_set(
+                packages,
+                version,
+                package_timeout=args.command_timeout_seconds,
+                consumer_timeout=args.consumer_timeout_seconds,
+                workspace_root=release_root,
+            )
+            print(
+                "exact staged sipx-transport/sipx-testkit packages and RTP echo example "
+                "passed the clean-consumer proof"
+            )
         if mode == "verify-consumer":
             visibility = poll_registry_visibility(
                 order,

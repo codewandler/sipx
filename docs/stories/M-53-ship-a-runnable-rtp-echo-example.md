@@ -44,9 +44,13 @@ surface and sends the same decoded samples back, making the bidirectional seam v
 - 2026-08-05: the public guide inlines the compiled source and fixes the diagnostic scope. Focused
   all-target/all-feature tests, strict clippy, a live three-packet shell run, public-doc sync,
   provenance, fixed-sleep and maturity passed. Adversarial wire tests now prove typed terminal errors,
-  socket reuse and zero owned work for foreign-source, oversized and non-PCMU input. The bounded
+  socket reuse and zero owned work for foreign-source, oversized and non-PCMU input. The successful
+  wire vector also pins marker-clear, padding-free, extension-free and CSRC-free output plus every
+  byte of the first three fixed RTP headers. The bounded
   local package-set verifier stages X-75's current `sipx-transport` and `sipx-testkit` archives in
   dependency order, then compiles the archived RTP echo example in a clean consumer whose lockfile
-  proves both came from staged bytes; it makes no claim about the older registry beta.4 transport.
+  proves both came from staged bytes. The locked pre-publication dry-run now invokes this proof
+  unconditionally, and an end-to-end release test executes the real archive/consumer path under
+  separate finite command bounds; neither makes a claim about the older registry beta.4 transport.
   The full gate remains an integration responsibility, so the story and its final acceptance item
   remain open.

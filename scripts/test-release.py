@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Adversarial tests for the registry release rehearsal (A-11).
 
-The suite uses fabricated Cargo metadata and checkout state. No test has registry credentials and no
-test runs `cargo publish`; command execution is separately asserted through a recording runner.
+Authority tests use fabricated Cargo metadata and checkout state. The local package-set case alone
+executes bounded `cargo package` and clean-consumer commands against the workspace. No test has
+registry credentials and no test runs `cargo publish`; write-capable dispatch stays behind a
+recording runner.
 """
 
 from __future__ import annotations
@@ -452,6 +454,23 @@ class TheLocalPackageSetProof(unittest.TestCase):
                 with self.assertRaisesRegex(release.ReleaseError, "escapes|regular file"):
                     release._extract_package_source(archive, root / "staged")
 
+    def test_real_archives_compile_the_example_in_an_isolated_consumer(self) -> None:
+        """Execute the complete package-pair proof under its owned finite command bounds."""
+
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
+        version = str(workspace["package"]["version"])
+        metadata = release._metadata(ROOT)
+        records = metadata.get("packages")
+        self.assertIsInstance(records, list)
+        packages = release.package_records(records, version, ROOT)
+        release.verify_local_rtp_echo_package_set(
+            packages,
+            version,
+            package_timeout=300.0,
+            consumer_timeout=900.0,
+            workspace_root=ROOT,
+        )
+
 
 class ThePackagedVcsEvidence(unittest.TestCase):
     def package(self) -> release.Package:
@@ -551,8 +570,13 @@ class ThePublicationBoundary(unittest.TestCase):
             mock.patch.object(release, "_metadata", return_value=self.main_metadata()),
             mock.patch.object(release, "_checkout", return_value=(False, (), ())),
             mock.patch.object(release, "_bounded_run", side_effect=bounded),
+            mock.patch.object(release, "verify_local_rtp_echo_package_set") as package_set,
         ):
             self.assertEqual(0, release.main(("--dry-run", "--command-timeout-seconds", "7")))
+        package_set.assert_called_once()
+        self.assertEqual(7.0, package_set.call_args.kwargs["package_timeout"])
+        self.assertEqual(900.0, package_set.call_args.kwargs["consumer_timeout"])
+        self.assertEqual(ROOT, package_set.call_args.kwargs["workspace_root"])
         self.assertEqual(1, len(calls))
         command, timeout = calls[0]
         self.assertEqual(7.0, timeout)

@@ -17,7 +17,7 @@ diagnostic:
 | Mode | Registry writes | Required checkout | Action |
 |---|---:|---|---|
 | `check` (default) | no | clean | validate the release graph and print dependency order |
-| `dry-run` | no | clean | run one locked Cargo workspace dry-run covering every public package |
+| `dry-run` | no | clean | stage and compile the RTP echo package pair in a clean consumer, then run one locked Cargo workspace dry-run covering every public package |
 | `publish` | yes | clean, at the exact annotated `v<workspace-version>` tag | publish one dependency-ready frontier to crates.io after exact typed confirmation; CI additionally needs the GitHub tag/commit authorization below |
 | `verify-consumer` | no | clean, at the exact annotated release tag | build exact crates.io crates, install the exact CLI, and run one bounded loopback call |
 | `inspect-dirty-contents` | no | may be dirty | diagnose listings and normalized archives without declaring a release candidate |
@@ -152,12 +152,15 @@ not turn an unpublished workspace package into a registry dependency. Local arch
 after inspection. This diagnostic does not waive the clean-checkout rule in any release mode and is
 not a substitute for `cargo publish --dry-run --locked` compiling the archive.
 
-`--verify-local-package-set` covers a dependency-ordered pre-publication case that a single-package
+The local package-set proof covers a dependency-ordered pre-publication case that a single-package
 verification cannot: `sipx-testkit` may consume an unreleased `sipx-transport` API at the same
 workspace version. Cargo packages and verifies both together through its temporary registry. A
 second clean consumer compiles the RTP echo example copied from the exact staged testkit archive and
-its lockfile must resolve both testkit and transport from the staged archive sources. This mode is
-bounded, temporary and explicitly diagnostic; it says nothing about registry visibility.
+its lockfile must resolve both testkit and transport from the staged archive sources. Every
+`dry-run` MUST complete this proof before Cargo's workspace rehearsal, so the tag workflow cannot
+publish after exercising only the single-package path. `--verify-local-package-set` remains a
+focused way to run the same proof while developing a dirty candidate. Both paths are bounded and
+temporary and say nothing about registry visibility.
 
 ## 4. Partial registry availability
 

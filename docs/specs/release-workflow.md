@@ -68,7 +68,7 @@ push or Pages deployment, so ancestry is necessary but not sufficient for a veri
 |---|---|---|---|
 | approved | tag push or tag-selected manual resume with matching confirmation | one approved `release` job | one serialized job per tag |
 | validated | clean full-history checkout | immutable tag facts from §3 | job timeout |
-| gated | validated tag | full local gate and locked publication dry-run pass | job timeout plus helper command bounds |
+| gated | validated tag | full local gate and locked publication dry-run pass, including its staged transport/testkit clean-consumer proof | job timeout plus helper command bounds |
 | publishing | gated tag and non-empty Cargo secret | one dependency-ready frontier becomes visible | helper visibility and command bounds |
 | publishing | visible frontier | rerun helper on unchanged tag | public-package count plus one invocations total |
 | recovering | failed ordinary run for this tag whose gate and rehearsal passed and publication step failed | fixed controller reproduces every visible checksum, then advances at most one unchanged frontier per bounded invocation | protected job timeout and public-package count plus one invocations total |

@@ -115,6 +115,7 @@ def workflow_problems(text: str) -> list[str]:
         problems.append("provenance denylist secret is not confined to the gate step")
 
     ordered = (
+        ("Rehearse the locked registry packages", "locked rehearsal"),
         ("Publish dependency-ready frontiers", "publication"),
         ("Verify the exact registry consumer", "consumer proof"),
         ("Verify Pages deployment", "Pages proof"),
@@ -125,7 +126,10 @@ def workflow_problems(text: str) -> list[str]:
         if [position for position, _label in positions] != sorted(
             position for position, _label in positions
         ):
-            problems.append("publication, consumer, Pages and GitHub prerelease steps are out of order")
+            problems.append(
+                "locked rehearsal, publication, consumer, Pages and GitHub prerelease steps "
+                "are out of order"
+            )
 
     return problems
 

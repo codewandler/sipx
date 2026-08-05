@@ -64,6 +64,7 @@ async fn a_finite_stream_returns_recognizable_audio_on_one_progressing_timeline(
 
     let exchange = async {
         let mut replies = Vec::new();
+        let mut headers = Vec::new();
         for frame in 0..3 {
             let source = recognizable(frame);
             let encoded = Bytes::from(g711::ulaw_encode_all(&source));
@@ -86,24 +87,55 @@ async fn a_finite_stream_returns_recognizable_audio_on_one_progressing_timeline(
             .expect("reply stayed inside the run bound")
             .expect("peer receives reply");
             assert_eq!(source_addr, echo_addr);
+            let header: [u8; 12] = datagram[..12]
+                .try_into()
+                .expect("every decoded RTP reply has its fixed header");
             let packet =
                 Packet::decode(&Bytes::copy_from_slice(&datagram[..length])).expect("reply is RTP");
+            assert!(!packet.marker, "reply {frame} keeps the marker bit clear");
+            assert!(
+                packet.csrc.is_empty(),
+                "reply {frame} has no contributing sources"
+            );
+            assert_eq!(header[0] & 0b0010_0000, 0, "reply {frame} has no padding");
+            assert_eq!(header[0] & 0b0001_0000, 0, "reply {frame} has no extension");
+            assert_eq!(
+                header[0] & 0b0000_1111,
+                0,
+                "reply {frame} has no CSRC words"
+            );
             assert_eq!(packet.payload_type, 0);
             assert_eq!(
                 g711::ulaw_decode_all(&packet.payload),
                 g711::ulaw_decode_all(&encoded),
                 "reply {frame} carries the recognizable decoded samples"
             );
+            headers.push(header);
             replies.push(packet);
         }
-        replies
+        (replies, headers)
     };
 
-    let (report, replies) = tokio::join!(echo.run(), exchange);
+    let (report, (replies, headers)) = tokio::join!(echo.run(), exchange);
     let report = report.expect("all configured packets were echoed");
     assert_eq!(report.packets, 3);
     assert_eq!(report.samples, 3 * FRAME_SAMPLES);
     assert_eq!(replies.len(), 3);
+    assert_eq!(
+        headers,
+        [
+            [
+                0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x53, 0x50, 0x58, 0x54
+            ],
+            [
+                0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xa0, 0x53, 0x50, 0x58, 0x54
+            ],
+            [
+                0x80, 0x00, 0x00, 0x02, 0x00, 0x00, 0x01, 0x40, 0x53, 0x50, 0x58, 0x54
+            ],
+        ],
+        "the first twelve reply bytes are the specification vectors"
+    );
     for (index, reply) in replies.iter().enumerate() {
         assert_eq!(reply.sequence, u16::try_from(index).unwrap_or(0));
         assert_eq!(
