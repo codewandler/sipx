@@ -85,3 +85,14 @@ share of the surveyed demand — belong to the separate platform and are not fil
 - Whether resampling belongs in `sipx-audio` or behind a feature flag with a dependency is left to
   `M-43`; the crate currently documents the absence of resampling as deliberate, and that note has
   to be revisited rather than contradicted.
+
+## Later direct product requests
+
+On 2026-08-05, direct product requests added three separate future epics: interchangeable
+local/offline speech providers; deterministic call-audio analysis, including voice activity; and
+custom call DSP for filters, effects, distortion/glitching and noise reduction. Those requests are
+new planning inputs; they do not retroactively change what the 2026-08-04 external-demand survey did
+or did not observe. All three consume the neutral PCM/resampling boundary from `M-43`/`M-54`, whose
+scope remains provider- and algorithm-independent. See [`local-speech.md`](local-speech.md),
+[`call-audio-analysis.md`](call-audio-analysis.md) and
+[`custom-call-dsp.md`](custom-call-dsp.md).

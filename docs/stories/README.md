@@ -49,7 +49,8 @@ public demo.
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
-_None._
+- [T-34 — Cancel an outgoing INVITE transaction from a forwarding element](T-34-cancel-an-outgoing-invite-transaction.md) · Signalling · requested by sipx-clstr PX-12 — one public operation must cancel the exact outgoing INVITE branch
+- [T-35 — Bind only the selected cleartext transports](T-35-bind-only-the-selected-cleartext-transports.md) · Signalling · requested by sipx-clstr FC-1 — a TCP-only endpoint must not open an undeclared UDP socket
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -77,6 +78,27 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 - [S-41 — Export the sans-I/O session kernel to WebAssembly](S-41-export-the-sans-io-session-kernel-to-wasm.md) · Signalling · after A-16 · deterministic Rust state machine with host bytes, timers and entropy
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-100 — Prove the packaged browser SDK](X-100-prove-the-packaged-browser-sdk.md) · Build · M15 exit · clean consumer, supported browser matrix, both SIP roles and fail-closed negatives
+
+### call audio analysis
+_Small deterministic facts about live audio without a speech model: voice activity, signal level,_
+- [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
+- [M-58 — Detect voice activity with typed call events](M-58-detect-voice-activity.md) · Media · after M-57 and M-54 · start, end and hangover through CallEvent and SDK
+- [M-59 — Report call signal level clipping and silence metrics](M-59-report-call-signal-metrics.md) · Media · after M-57 and M-54 · signal content only, distinct from M-10 network quality
+- [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
+- [M-61 — Harden call-audio analysis against adversarial input](M-61-harden-call-audio-analysis.md) · Media · after M-57 · hostile audio, bounded resources, cross-call isolation and no retention
+- [X-106 — Measure call-audio analysis accuracy and resource cost](X-106-measure-call-audio-analysis.md) · Build · after M-58 through M-61 · versioned corpus, error rates, event latency, CPU and memory
+- [A-29 — Publish a runnable live call-audio analysis example](A-29-publish-call-audio-analysis-example.md) · Application · M16 analysis exit after X-106 · no model or special hardware required
+
+### custom call DSP
+_Applications need to shape live call audio without forking the media runtime: ordinary gain and_
+- [M-63 — Specify the custom call-DSP contract](M-63-specify-custom-call-dsp-contract.md) · Media · after M-54 · M18 admission · frame contract, execution profiles and minimum failure policy
+- [M-64 — Attach bounded DSP graphs to calls](M-64-attach-bounded-dsp-graphs-to-calls.md) · Media · after M-54 and M-63 · ordered per-direction graphs, atomic replacement and teardown barrier
+- [M-65 — Ship deterministic audio effects and filters](M-65-ship-deterministic-audio-effects-and-filters.md) · Media · after M-63 · gain/filter/distortion/bit-crush/stutter processors use the public contract
+- [M-66 — Ship interchangeable local noise reduction](M-66-ship-interchangeable-noise-reduction.md) · Media · after M-63 · optional M-58 VAD input · provider-neutral contract and local baseline
+- [M-67 — Control call DSP graphs through the application SDK](M-67-control-dsp-graphs-through-the-sdk.md) · Media · after M-64 · typed registry and sample-boundary parameters, never SDK callbacks on media work
+- [M-68 — Harden DSP real-time and failure isolation](M-68-harden-dsp-realtime-failure-isolation.md) · Media · after M-63/M-64 · measured budgets and explicit fail-open/fail-closed policy
+- [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
+- [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
 
 ### Conformance
 - [X-66 — Measure coverage and publish the number](X-66-measure-coverage-and-publish-the-number.md) · Build · 1756 test attributes and no measurement of what they reach · a number that is generated, never asserted · follow-up
@@ -112,6 +134,18 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 ### Ice
 - [M-24 — Gather a relayed candidate from a configured relay](M-24-ice-relayed-candidate.md) · Media · ice · RFC 8656 · after M-22 · the third RFC that made M-16 impossible as one story
 
+### local speech
+_Live-call recognition and synthesis through interchangeable providers, with practical local/offline_
+- [A-25 — Specify interchangeable local speech providers](A-25-specify-interchangeable-local-speech-providers.md) · Application · M16 spec gate · endpoint default and per-call override · local/offline by default
+- [M-54 — Expose bounded call PCM processing and resampling](M-54-expose-bounded-call-pcm-processing.md) · Media · after A-25 and M-43 · shared seam for local speech and deterministic analysis
+- [A-28 — Isolate speech data and resources with no default retention](A-28-isolate-speech-data-and-resources.md) · Application · after A-25 · gates provider delivery · explicit opt-in for retention or off-host processing
+- [M-55 — Ship a practical local offline speech-recognition provider](M-55-ship-local-offline-speech-recognition.md) · Media · after A-25, A-28 and M-54 · accelerator path plus defined CPU behavior
+- [M-56 — Ship a practical local offline speech-synthesis provider](M-56-ship-local-offline-speech-synthesis.md) · Media · after A-25, A-28 and M-54 · accelerator path plus defined CPU behavior
+- [A-26 — Emit speech-recognition events through the application SDK](A-26-emit-speech-recognition-sdk-events.md) · Application · after C-3, C-5, A-25, M-54 and M-55 · ordered utterance and provider lifecycle
+- [A-27 — Control synthesized call speech through the application SDK](A-27-control-synthesized-call-speech.md) · Application · after A-25, M-17, M-56 and M-58 · bounded playback, cancellation and activity-aware ducking
+- [X-105 — Prove speech-provider substitution with one conformance suite](X-105-prove-speech-provider-substitution.md) · Build · after M-55, M-56, A-26, A-27 and A-28 · same suite for bundled and downstream providers
+- [X-104 — Publish a runnable local live-call speech example and measurements](X-104-publish-local-call-speech-example.md) · Build · M16 exit after X-105 · accelerator when available and bounded CPU fixture everywhere
+
 ### media security profiles
 _sipx implements exactly one SRTP protection profile:_
 - [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
@@ -119,6 +153,15 @@ _sipx implements exactly one SRTP protection profile:_
 ### Bridge a call to an OpenAI realtime agent
 _Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) §3, SRTP held to_
 - [A-23 — Prove the bridge against the live endpoint](A-23-prove-the-bridge-against-the-live-endpoint.md) · Application · opt-in and credentialed — the first such proof in the repo; disclaim-don't-skip, evidence recorded once
+
+### OpenAI Realtime phone extension
+_Typed understanding and policy-governed phone actions extending A-22's one delivered audio bridge._
+- [A-30 — Adapt OpenAI Realtime session and lifecycle events](A-30-adapt-openai-realtime-session-events.md) · Application · after A-22 · extend the delivered bridge with correlated lifecycle and deliberate replacement
+- [A-31 — Emit typed Realtime understanding and transcript events](A-31-emit-realtime-understanding-events.md) · Application · after A-30 and C-3 · model output is untrusted application data, never caller authorization
+- [A-33 — Enforce schema idempotency and confirmation for model actions](A-33-enforce-realtime-action-policy.md) · Application · after A-22 · application owns policy, timeouts and consequential-action confirmation
+- [A-32 — Allowlist Realtime requests into phone actions](A-32-allowlist-realtime-phone-actions.md) · Application · after A-30 and A-33 · model never receives Handle · only capabilities this phone exposes
+- [X-107 — Prove the Realtime phone against mock and opt-in live services](X-107-prove-openai-realtime-test-service.md) · Build · after A-30 through A-33 · extend A-21 deterministic CI and A-23's bounded live proof
+- [X-108 — Publish the OpenAI Realtime testkit phone and measurements](X-108-publish-openai-realtime-testkit-phone.md) · Build · M17 exit after X-107 · runnable phone, policy UI and bounded cost/rate/latency evidence
 
 ### Quic
 - [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · track: quic · T-12 delivered the transport; independent-peer evidence remains

@@ -48,8 +48,10 @@ Beta.5's delivered implementation wave is **M13 — Endpoint-complete**: it clos
 sipx-owned endpoint gaps, and M14 records the selected bounded load comparison. The routed realtime
 binding is a separate application integration with deterministic default-suite evidence; A-23 keeps
 its credentialed live proof visible as backlog. M15 separately tracks the requested
-browser-embeddable audio package without turning sipx into a WebRTC engine. M9's remaining off-media
-bridge work is not pulled into that wave.
+browser-embeddable audio package without turning sipx into a WebRTC engine. M16 tracks local speech
+and deterministic call-audio analysis, M17 extends the delivered realtime bridge with understanding
+and policy-governed phone actions, and M18 tracks custom call DSP. M9's remaining off-media bridge
+work is not pulled into that wave.
 
 ## Delivered
 
@@ -241,6 +243,84 @@ WSS and completes non-silent audio in both SIP roles across the supported browse
 socket, timer and media resources are observed closed after cancellation. The browser owns
 `RTCPeerConnection`, ICE, DTLS-SRTP, capture and render; video, data channels and a Rust WebRTC engine
 remain out of scope. M15 is tracked but is **not** part of the selected M13 wave.
+
+### M16 — Local call intelligence
+
+*Make live-call speech and small real-time audio facts useful on a local machine without coupling
+the two capabilities or hiding provider choice.*
+
+M16 contains two separate epics. [Local speech](designs/local-speech.md) defines interchangeable
+recognition and synthesis providers, ships practical local/offline implementations with declared
+accelerator and CPU behavior, and carries their lifecycle through the application SDK.
+[Call-audio analysis](designs/call-audio-analysis.md) supplies deterministic voice activity and
+signal metrics without loading a speech model. They share M-54's bounded PCM attachment and no
+other implementation state.
+
+| Order | Epic | Stories | Outcome | Starts when |
+|---:|---|---|---|---|
+| 1 | Local speech | **A-25** | Recognition/synthesis provider contracts, discovery and selection | spec gate |
+| 1 | Call-audio analysis | **M-57** | Sans-I/O frame-processor contract and sample vectors | spec gate, parallel with A-25 |
+| 2 | Shared seam and policy | **M-54, A-28** | Bounded PCM/resampling attachment plus privacy and isolation | A-25 and M-43 |
+| 3 | Local speech | **M-55, M-56** | Local/offline recognition and synthesis on measured accelerator/CPU paths | A-25, A-28 and M-54 |
+| 3 | Call-audio analysis | **M-58, M-59** | Voice activity and signal metrics through typed events | M-57 and M-54 |
+| 4 | Call-audio analysis | **M-60, M-61** | Bounded adaptation and hostile-input hardening | analysis implementation |
+| 5 | Local speech | **A-26, A-27** | Ordered recognition and bounded synthesis/cancellation lifecycle | providers; A-27 also uses M-58 |
+| 6 | Local speech | **X-105, X-104** | Provider conformance plus runnable measured example | implementation and SDK stories |
+| 6 | Call-audio analysis | **X-106, A-29** | Accuracy/resource corpus plus runnable model-free example | analysis implementation |
+
+**Done when** endpoint and per-call provider selection use one public contract; bundled and external
+providers pass one conformance suite; accelerator and CPU limits are measured; deterministic voice
+activity and signal metrics meet declared accuracy and resource budgets; concurrent calls share no
+data or state; default runs retain no audio or text; and clean packaged examples prove both epics.
+
+### M17 — Realtime phone understanding and actions
+
+*Extend the delivered routed-agent bridge without giving the model authority over the phone.*
+
+The [Realtime phone extension](designs/openai-realtime-phone.md) reuses A-22's one audio bridge,
+configuration and credential boundary. A-21 remains the deterministic peer and A-23 remains the
+single guarded live-proof authority.
+
+| Order | Story | Outcome | Starts when |
+|---:|---|---|---|
+| 1 | [**A-30 — Adapt Realtime session events**](stories/A-30-adapt-openai-realtime-session-events.md) | Correlated finite lifecycle and deliberate session replacement | A-22 |
+| 2 | [**A-31 — Emit understanding events**](stories/A-31-emit-realtime-understanding-events.md) | Bounded typed transcripts and untrusted-model provenance | A-30 and C-3 |
+| 2 | [**A-33 — Enforce action policy**](stories/A-33-enforce-realtime-action-policy.md) | Closed schemas, idempotency, deadlines and confirmation | A-22 |
+| 3 | [**A-32 — Allowlist phone actions**](stories/A-32-allowlist-realtime-phone-actions.md) | Exhaustive deny-by-default action registry and correlated outcomes | A-30 and A-33 |
+| 4 | [**X-107 — Prove deterministic and live paths**](stories/X-107-prove-openai-realtime-test-service.md) | A-21 CI plus A-23's guarded live evidence for the extension | A-30…A-33 |
+| 5 | [**X-108 — Publish the measured phone**](stories/X-108-publish-openai-realtime-testkit-phone.md) | Runnable policy UI with bounded rate, cost and latency evidence | X-107 |
+
+**Done when** typed session, speech, transcript, response, rate and action state reaches the SDK;
+only schema-valid, idempotent, policy-accepted phone actions execute; consequential actions require
+independent confirmation; every request has a correlated terminal event; deterministic CI covers
+all failure paths; and the packaged example records redacted evidence with zero residual work.
+
+### M18 — Custom call-audio DSP
+
+*Let applications compose bounded filters, effects and noise reduction on live call audio through
+one deterministic processor contract.*
+
+The [custom call-DSP](designs/custom-call-dsp.md) epic consumes M-54's call-local PCM seam. Built-in
+effects and external processors use the same frame contract; supervised processors never block the
+media worker; noise reduction is interchangeable and measured; and SDK code controls registered
+graphs without running callbacks on the media worker.
+
+| Order | Story | Outcome | Starts when |
+|---:|---|---|---|
+| 1 | [**M-63 — Specify the DSP contract**](stories/M-63-specify-custom-call-dsp-contract.md) | Frames, execution profiles, bounds and minimum failure policy | M-54; spec gate |
+| 2 | [**M-64 — Attach bounded DSP graphs**](stories/M-64-attach-bounded-dsp-graphs-to-calls.md) | Ordered per-direction graphs, atomic replacement and teardown | M-54 and M-63 |
+| 3 | [**M-65 — Ship effects and filters**](stories/M-65-ship-deterministic-audio-effects-and-filters.md) | Deterministic gain, filters, distortion, bit-crush and stutter | M-63 |
+| 3 | [**M-66 — Ship local noise reduction**](stories/M-66-ship-interchangeable-noise-reduction.md) | Replaceable measured baseline with explicit latency | M-63 |
+| 4 | [**M-67 — Control graphs through the SDK**](stories/M-67-control-dsp-graphs-through-the-sdk.md) | Typed registry, parameters and lifecycle events | M-64 |
+| 4 | [**M-68 — Harden failure isolation**](stories/M-68-harden-dsp-realtime-failure-isolation.md) | Prove budgets, bypass/termination and worker containment | M-63 and M-64 |
+| 5 | [**X-109 — Measure DSP quality and cost**](stories/X-109-measure-custom-dsp-quality-and-cost.md) | Exact effects plus noise, latency, CPU and drop evidence | M-65, M-66 and M-68 |
+| 6 | [**A-34 — Publish the DSP example**](stories/A-34-publish-custom-call-dsp-example.md) | Runnable live graph with bypass and teardown | M-67 and X-109 |
+
+**Done when** built-in and external processors compose on either call direction; changes occur at
+deterministic sample boundaries; intentional effects remain distinct from overload defects; the
+noise reducer meets declared quality and real-time thresholds; proven execution profiles cannot
+stall RTP or cross call boundaries; every transition is observable; and a clean consumer runs the
+packaged example with zero residual work.
 
 **Most recent release cut.** Beta.4 is published. Its boundary is a deliberately coherent
 feature-and-security wave rather than a bag of the ten shortest stories. The
