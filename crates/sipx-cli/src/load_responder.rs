@@ -902,16 +902,33 @@ async fn terminate_signalling(
     result: &mut WorkerResult,
 ) {
     let started = Instant::now();
-    match call.hang_up(within).await {
+    let outcome = call.hang_up(within).await;
+    apply_signalling_teardown(result, outcome, started.elapsed());
+}
+
+fn apply_signalling_teardown(
+    result: &mut WorkerResult,
+    outcome: sipx_call::Result<u16>,
+    elapsed: Duration,
+) {
+    match outcome {
         Ok(status) => {
             result.response(status);
-            result.teardown = Some(started.elapsed());
+            result.teardown = Some(elapsed);
             if result.established
                 && result.error.is_none()
                 && result.terminal != Terminal::Cancelled
             {
                 result.terminal = Terminal::Completed;
             }
+        }
+        Err(error @ sipx_call::Error::Rejected { status, .. }) => {
+            // The dialog identifiers and exact BYE CSeq were validated before `hang_up` exposed
+            // this protocol refusal. It is response evidence even though it cannot complete the
+            // dialog successfully.
+            result.response(status);
+            result.teardown = Some(elapsed);
+            result.error = Some(format!("dialog teardown failed: {error}"));
         }
         Err(sipx_call::Error::InvalidDialogResponse) => {
             result.invalid = result.invalid.saturating_add(1);
@@ -1436,5 +1453,23 @@ mod tests {
         assert_eq!(totals.cancelled, 1);
         assert_eq!(totals.failed, 0);
         assert!(totals.responses.is_empty());
+    }
+
+    #[test]
+    fn a_valid_non_success_bye_final_is_response_evidence() {
+        let mut result = WorkerResult::new(Terminal::Failed);
+        apply_signalling_teardown(
+            &mut result,
+            Err(sipx_call::Error::Rejected {
+                status: 481,
+                reason: "Call Does Not Exist".to_owned(),
+            }),
+            Duration::from_millis(7),
+        );
+
+        assert_eq!(result.responses.get(&481), Some(&1));
+        assert_eq!(result.teardown, Some(Duration::from_millis(7)));
+        assert!(result.error.is_some());
+        assert_eq!(result.terminal, Terminal::Failed);
     }
 }

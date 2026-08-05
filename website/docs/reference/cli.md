@@ -226,8 +226,11 @@ owned dialog before reporting. A successful summary therefore has zero `active_d
 
 The terminal summary records invitations and response statuses; admitted, established, completed,
 cancelled, rejected and failed outcomes; active high-water; p50/p95/p99 setup and teardown latency;
-invalid messages; and the exact effective bounds. UDP is the v1 baseline so connection setup and
-reuse costs cannot contaminate the SIP transaction measurement.
+invalid messages; and the exact effective bounds. A response status is counted once when the
+responder successfully sends it, or when a valid final response returns for a BYE the responder
+originated. Protocol retransmissions do not inflate the map, and invalid responses are counted as
+invalid messages instead. UDP is the v1 baseline so connection setup and reuse costs cannot
+contaminate the SIP transaction measurement.
 
 ## `sipx register <AOR>`
 

@@ -365,8 +365,10 @@ schema, status, seed, mode, limits, counts, responses, latency_ms, post_drain, r
 `status` is `completed`, `interrupted` or `failed`. `limits` records calls/duration, maximum active,
 dialog duration and cleanup seconds. `counts` records surfaced INVITEs, admitted, established,
 completed, cancelled, rejected, failed, active high-water and invalid messages. `responses` maps
-decimal provisional and final status codes successfully handed to the endpoint; a response build or
-send failure cannot become wire evidence. `latency_ms.setup` and `.teardown` each carry
+one semantic observation per SIP transaction: provisional and final responses this command
+successfully sends, plus a valid final response received for a BYE this command originated. A
+response build/send failure and an invalid final response are not wire evidence; protocol-level
+retransmissions do not add another observation. `latency_ms.setup` and `.teardown` each carry
 the exact count and maximum plus p50, p95 and p99 from a seeded bounded reservoir, or are `null` with
 no samples. Its capacity is eight observations per active-dialog slot, capped at 65,536, so a
 duration-bounded run cannot turn latency evidence into unbounded memory use. `post_drain` records active dialogs,
