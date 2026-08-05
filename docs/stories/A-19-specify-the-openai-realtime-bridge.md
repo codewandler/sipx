@@ -59,11 +59,21 @@ to one OpenAI realtime session over a WebSocket, precise enough that the stand-i
   spec's §1. Confirmed GA surface: `wss://api.openai.com/v1/realtime?model=…`, bearer on the
   upgrade, no `OpenAI-Beta` header, `audio/pcmu`/`audio/pcma` session formats,
   `response.output_audio.delta`/`.done` (GA names, not the beta `response.audio.*`).
-  Vectors V-1…V-17 with owners A-20/A-21/A-22/A-23; byte-level base64 literals for two
+  Vectors ORB-1…ORB-17 with owners A-20/A-21/A-22/A-23; byte-level base64 literals for two
   160-byte G.711 frames. Two deliberate calls recorded in the spec: `interrupt_response:
   false` so cancellation has one owner (the bridge), and `conversation.item.truncate` named
   as a non-goal (vendor recommends it after interruption; the design's client subset omits
   it — §4.3 records the consequence).
+- 2026-08-05: review rework (new commit, same branch). Split the barge-in counters —
+  `bridge_barge_in_flushed` counts queue *frames* and is the ≤ 2048 bound A-22 asserts,
+  `bridge_cancelled_deltas` counts post-cancel *events* and carries no bound — resolving
+  the §4.3-vs-ORB-8 contradiction. Defined the read-set failure disposition for known
+  events (bad/missing `delta`, missing `response_id` → `MalformedEvent`) with new vector
+  ORB-18. Pinned both `SetupTimeout` start points (from the 101; from sending
+  `session.update`). Stated the uplink-audio fate before `session.updated` (buffered in
+  the 32-frame queue) and the accumulator residue's fate at a barge-in flush (discarded,
+  uncounted; padding is only for `response.output_audio.done`). §5.4's full-queue policy
+  is now stated as this spec's own rather than attributed to session-binding §3.
 
 ## Notes
 

@@ -108,8 +108,13 @@ Normative references for our own rules: RFC 6455 (WebSocket), RFC 4648 §4 (base
 - **[sipx-app]** Because turn detection is server-side, the bridge never commits or clears
   the input buffer: `input_audio_buffer.commit` and `input_audio_buffer.clear` are **not** in
   the client subset (§5.1). The server segments speech itself.
-- **[sipx-app]** The server acknowledges with `session.updated`. Until it arrives the bridge
-  sends no audio. If it does not arrive within the setup bound (§6), setup fails typed.
+- **[sipx-app]** The server acknowledges with `session.updated`. Until it arrives the
+  bridge writes no audio to the socket: uplink frames arriving in the window are admitted
+  to the uplink queue (§5.4) and drain in order once `session.updated` lands, so a slow
+  acknowledgement costs at most the queue's 640 ms of buffered audio plus counted overflow,
+  never a protocol violation. `session.created` must arrive within **10 s** of the
+  completed upgrade and `session.updated` within **10 s** of sending `session.update`;
+  either missed bound fails setup typed (`SetupTimeout`, §6).
 
 ## 4. Audio framing and barge-in
 
@@ -154,16 +159,23 @@ discipline).
 - **[sipx-app]** On `input_audio_buffer.speech_started` while agent audio is in flight, the
   bridge, in order and without waiting on anything:
   1. sends `response.cancel` (no `response_id`: the in-progress response is the target);
-  2. atomically empties the downlink queue, counting every dropped frame in
-     `bridge_barge_in_flushed`;
+  2. atomically empties the downlink queue **and** the re-framing accumulator (§4.1),
+     counting every dropped **frame** in `bridge_barge_in_flushed`; the accumulator's
+     sub-frame residue (< 160 bytes) is discarded with the flush and counts nothing — it
+     never became a frame, and the `response.output_audio.done` padding rule does not apply
+     to audio being thrown away;
   3. drops every further `response.output_audio.delta` until the next `response.done`,
-     counting them in the same counter.
+     counting each dropped **event** in `bridge_cancelled_deltas`.
+- **[sipx-app]** Two counters, because only one of them has a bound. `bridge_barge_in_flushed`
+  counts frames that were in the queue, so per barge-in it is **≤ 2048**, the queue bound
+  (§5.4) — that and the residual below are the numbers A-22's test asserts.
+  `bridge_cancelled_deltas` counts events the peer chose to send after the cancel; how many
+  arrive before `response.done` is the peer's, so this spec claims no bound on it — it is
+  observability, not a limit.
 - **[sipx-app]** The residual bound: after step 2, at most **one** frame of agent audio is
   still ahead of the flush locally — the frame already committed to the media path — so the
-  locally-sourced residual is **≤ 20 ms**. The downlink queue bound is **2048 frames** (§5.4),
-  so `bridge_barge_in_flushed` per barge-in is ≤ 2048 and A-22's test asserts these numbers,
-  not a feeling. (What the bound cannot cover, the design records as a risk: audio the far
-  end of the *call* has already been sent is beyond recall.)
+  locally-sourced residual is **≤ 20 ms**. (What the bound cannot cover, the design records
+  as a risk: audio the far end of the *call* has already been sent is beyond recall.)
 - **[sipx-app]** `speech_started` with no response in flight performs steps 2–3 vacuously
   and sends nothing: `response.cancel` is only sent when a response is in flight.
 - **[sipx-app]** The cancel/done race is normal, not a failure: the response may complete
@@ -219,7 +231,7 @@ no other client event; a code path that would emit one is a defect against ORB-5
 | `input_audio_buffer.speech_started` | `type` | barge-in (§4.3) |
 | `response.output_audio.delta` | `type`, `response_id`, `delta` | decode, slice, enqueue downlink |
 | `response.output_audio.done` | `type`, `response_id` | flush the partial-frame tail (§4.1) |
-| `response.done` | `type`, `response.status` | close the response; end any cancel-race window |
+| `response.done` | `type` | close the response; end any cancel-race window — whatever `response.status` says |
 | `error` | `type`, `error.type`, `error.code`, `error.message`, `error.param` | cancel-race → count; otherwise session-fatal (§6) |
 
 JSON vectors, one per event, members beyond the read set elided as `…` (the peer sends them;
@@ -246,14 +258,25 @@ the bridge must not require them):
 - **[sipx-app]** A text frame that does not parse as JSON, or parses without a string
   `type`, is **session-fatal**: `MalformedEvent` (§6). A binary frame is the same outcome —
   every event in this contract is a JSON text frame.
+- **[sipx-app]** Exhaustiveness covers the members too: a §5.2 event that arrives without a
+  read member, or with one the bridge cannot interpret, is the same `MalformedEvent`.
+  Concretely: a `response.output_audio.delta` whose `delta` is absent, not a string, or not
+  valid RFC 4648 §4 base64; a `response.output_audio.delta` or `response.output_audio.done`
+  without a string `response_id`. One stated exception: an `error` event is consumed
+  whatever its members — a missing or malformed `error` object changes nothing about its
+  disposition (§4.3's race rule or `SessionError`), it only leaves the outcome without a
+  code. The remaining §5.2 events read only `type`, so they have no invalid-member case.
 - **[sipx-app]** An inbound WebSocket message larger than **1 MiB** is session-fatal:
   `OversizeFrame` (§6). The bound is enforced by the WSS client (A-20) before any JSON
   parsing, so an oversize frame cannot cost an allocation proportional to the peer's claim.
 
 ### 5.4 Buffering and backpressure
 
-Both queues follow [session-binding.md](session-binding.md) §3: bounded, non-blocking
-admission, loss counted, never a blocking send.
+Both queues carry the bounded-work discipline of [session-binding.md](session-binding.md)
+§3 — bounded, non-blocking admission, never a blocking send. The full-queue policy is this
+spec's own, not that one's: a full control queue there goes dead or refuses (`1013`,
+`call_busy`) because control loss is corruption; a media stream tolerates loss, so here a
+full queue **drops the offered frame, counts it, and the session stays live**.
 
 | Queue | Direction | Bound | Full ⇒ | Counter |
 |---|---|---|---|---|
@@ -294,10 +317,10 @@ Every way the bridge ends, with its trigger and bound:
 | `CallEnded` | the call leg ended | — (normal) |
 | `NotBridgeable` | negotiated codec is neither PCMU nor PCMA | before connecting |
 | `AuthRefused` | the upgrade is refused (observed: HTTP 4xx before 101) | one attempt; reports the secret **name** only |
-| `SetupTimeout` | no `session.created`, or no `session.updated` after ours | 10 s each, from send |
+| `SetupTimeout` | no `session.created`, or no `session.updated` after ours | 10 s from the completed upgrade (the 101); 10 s from sending `session.update` |
 | `PeerClosed` | server close frame or EOF, carrying the close code if any | — |
 | `PeerStalled` | no Pong within grace | 30 s + 10 s |
-| `MalformedEvent` | §5.3: unparseable text, `type` missing, or binary frame | first occurrence |
+| `MalformedEvent` | §5.3: unparseable text, `type` missing, a binary frame, or a §5.2 event failing its read set | first occurrence |
 | `OversizeFrame` | §5.3: inbound message > 1 MiB | first occurrence |
 | `SessionError` | an `error` event outside the cancel-race window, carrying `error.code` | first occurrence |
 | `Cancelled` | host shutdown | join, no orphan tasks |
@@ -309,8 +332,9 @@ No outcome, log line or error string carries the bearer value or any fragment of
 
 Machine-consumable the way [webhook-binding.md](webhook-binding.md) WB-1…WB-9 are: the test
 names are the vector identifiers, and each vector names the story that owns its enforcement.
-A-21's peer supplies every scripted behaviour (including the negative modes) so all of
-ORB-1…ORB-16 run in the default CI matrix with no credentials; A-23 alone touches the network.
+A-21's peer supplies every scripted behaviour (including the negative modes) so every vector
+except ORB-17 runs in the default CI matrix with no credentials; A-23 alone (ORB-17) touches
+the network.
 
 | ID | Script | Required result | Owner |
 |---|---|---|---|
@@ -321,7 +345,7 @@ ORB-1…ORB-16 run in the default CI matrix with no credentials; A-23 alone touc
 | ORB-5 | a full scripted conversation | the peer observes **only** the three client events of §5.1 | A-21 |
 | ORB-6 | delta of 400 bytes, then `response.output_audio.done` | two 160-byte frames, then one frame of 80 audio bytes padded with 80 silence bytes (`0xFF` μ-law / `0xD5` A-law) | A-22 |
 | ORB-7 | A-law call | `session.update` says `audio/pcma` both directions; ORB-3/ORB-4/ORB-6 shapes unchanged | A-22 |
-| ORB-8 | 16 frames queued downlink, response in flight, peer sends `speech_started` | `response.cancel` sent; downlink queue empty; `bridge_barge_in_flushed` = 16 + later-dropped deltas; ≤ 1 further frame reaches the media path | A-22 |
+| ORB-8 | 16 frames queued downlink plus 80 bytes in the accumulator, response in flight; peer sends `speech_started`, then two more deltas, then `response.done` | `response.cancel` sent; queue and accumulator empty; `bridge_barge_in_flushed` = 16 (the residue counts nothing); `bridge_cancelled_deltas` = 2; ≤ 1 further frame reaches the media path | A-22 |
 | ORB-9 | `response.done` then a scripted `error` inside the race window after a cancel | `bridge_cancel_race` = 1, session lives; the same `error` outside the window ends the bridge `SessionError` | A-22 |
 | ORB-10 | peer refuses the upgrade (401) | `AuthRefused`; no session, no audio ever; the outcome names `openai-api-key` and provably not the value | A-22 |
 | ORB-11 | peer sends a 2 MiB text frame | `OversizeFrame` before JSON parsing | A-20 |
@@ -331,6 +355,9 @@ ORB-1…ORB-16 run in the default CI matrix with no credentials; A-23 alone touc
 | ORB-15 | peer never sends `session.created`; separately, never `session.updated` | `SetupTimeout` at 10 s in each case | A-22 |
 | ORB-16 | peer closes 1000 mid-call; separately, TCP reset | `PeerClosed` with the code / without; the peer observes **no second upgrade attempt** | A-22 |
 | ORB-17 | one real call against the live endpoint | the session establishes per ORB-1/ORB-2, the agent's reply is non-silent, and every fact this spec observes about the vendor (URL, headers, event names, formats) held; evidence recorded in A-23's Progress | A-23 |
+| ORB-18 | peer sends a delta whose `delta` is `not base64!!`; separately a delta with no `delta` member; separately a `response.output_audio.done` with no `response_id` | each is `MalformedEvent` on its first occurrence (§5.3's read-set rule) | A-22 |
 
-ORB-5's exhaustiveness and ORB-12's forward-compatibility are two halves of one claim: the client
-subset is closed, the server subset is open-with-a-counter.
+ORB-5's exhaustiveness and ORB-12's forward-compatibility are two halves of one claim: the
+client subset is closed, the server subset is open-with-a-counter. ORB-13 and ORB-18 are the
+closed half of the server side: what cannot be interpreted is fatal, whether the frame or a
+required member.
