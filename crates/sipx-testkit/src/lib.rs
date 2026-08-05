@@ -2,13 +2,14 @@
 //!
 //! Provides a loopback transport that lets two full stacks talk inside one process with no
 //! sockets, the RFC 4475 and RFC 5118 torture-message corpora and their harnesses, a private
-//! certificate authority for the TLS tests, and fixtures for interoperability runs against
-//! third-party servers.
+//! certificate authority for the TLS tests, a deterministic stand-in for the realtime agent
+//! endpoint, and fixtures for interoperability runs against third-party servers.
 //!
 //! Not published to crates.io.
 
 pub mod certs;
 pub mod link;
+pub mod realtime_peer;
 pub mod rfc4475;
 pub mod rfc5118;
 pub mod soak;
