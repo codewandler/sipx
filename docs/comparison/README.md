@@ -79,9 +79,10 @@ A leaf-level inventory for one pinned subject release. This is deliberately sepa
 chooser-facing dimensions: a dimension is a concise answer, while a capability ledger is the finite
 discovery gate that prevents a broad answer such as "SIP dialogs" from hiding one missing method.
 
-The ledger names `subject`, `version_evaluated`, ISO `evaluated_at`, immutable `source_revision` and
-`capabilities`. Every capability carries a stable kebab-case `id`, `category`, reader-facing `title`,
-`ownership`, `status`, and at least one subject-evidence entry of the same shape observations use.
+The ledger names `subject`, `version_evaluated`, ISO `evaluated_at`, immutable `source_revision`, an
+`expected_capabilities` count ratchet and `capabilities`. Every capability carries a stable
+kebab-case `id`, `category`, reader-facing `title`, `confidence`, `ownership`, `status`, and at least
+one subject-evidence entry of the same shape observations use.
 An implemented sipx row additionally carries `implementation`: one or more existing Rust source
 paths below a workspace crate. Subject evidence proves the compared capability exists; implementation
 evidence proves the parity disposition is not merely asserted.
@@ -91,16 +92,28 @@ Ownership and status are paired rather than freely combined:
 | Ownership | Allowed status | Meaning |
 |---|---|---|
 | `sipx` | `implemented`, `open` | Endpoint work belongs here; an open row must link an existing story |
-| `sipx-clstr` | `tracked` | Platform work belongs in the cluster repository and must link its external story or roadmap |
+| `sipx-clstr` | `tracked` | Platform work belongs in the cluster repository and must link a story in the pinned external story index |
 | `not-shipped` | `absent` | The pinned subject itself does not ship the advertised or anticipated capability |
 | `not-applicable` | `excluded` | The capability contradicts the selected scope and must carry a rationale |
 
-The checker rejects duplicate leaves, missing subject or implementation evidence, unknown ownership,
-invalid owner/status pairs, an open sipx row without a real non-done local story, a cluster row without an external link, an
-unreasoned exclusion, a stale ledger, and an inventory that omits any required surface category.
+The checker rejects duplicate leaves, a leaf-count change that did not deliberately move the count
+ratchet, missing subject or implementation evidence, unknown confidence or ownership, invalid
+owner/status pairs, an open sipx row without a real non-done local story, a cluster row whose link is
+not in the revision-pinned external story index, an unreasoned exclusion, a stale ledger, and an
+inventory that omits any required surface category.
 The required categories are core, transactions, transports, endpoint, authentication, dialogs,
 methods, lifecycle, media, examples and operations. They are a completeness floor, not a taxonomy
 applications must copy.
+
+Capability rows use the same visible confidence vocabulary with one narrower interpretation:
+`measured` means the leaf was read in the immutable source revision and its evidence links that
+source; `documented` relies on the subject's own prose; `assessed` requires a rationale. Capability
+rows cannot claim `generated`, because this repository cannot generate a fact from another
+repository's build.
+
+`capabilities/external/*.json` pins the repository revision and exact story paths accepted for
+cluster-owned rows. The checker derives the only permitted URLs from that index, so a misspelled
+repository, moving `main` link or generic roadmap cannot satisfy the ownership disposition offline.
 
 ### The confidence ladder
 
@@ -141,8 +154,9 @@ page.
 - a stack and dimension pair with neither a finding nor a `not_evaluated` marker;
 - `stacks.json` marking anything other than exactly one stack `is_self`;
 - `docs/comparison.md` differing from what the script would generate.
-- a capability ledger with duplicate, unowned, unevidenced or stale rows, an invalid disposition,
-  a missing open story, an unlinked cluster-owned row, or an omitted required surface category.
+- a capability ledger with duplicate, unowned, unevidenced or stale rows, an invalid confidence or
+  disposition, a count-ratchet mismatch, a missing open story, a cluster story absent from the
+  pinned external index, malformed scalar evidence, or an omitted required surface category.
 
 ### The generated column is never typed
 

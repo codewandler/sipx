@@ -38,6 +38,8 @@ that can prove the selected endpoint target is complete and can identify work ow
 
 ## Progress
 
-- In progress. The first pinned leaf-level inventory and its checker are being added on the
-  capability-ledger feature branch. Any newly discovered sipx-owned gap joins M13 before the load
-  milestone may start.
+- In progress. The pinned ledger now ratchets 40 leaves, publishes per-row confidence, validates
+  scalar evidence and accepts cluster ownership only through a revision-pinned external story
+  index. Independent review split three compound overclaims, added the omitted transport-source
+  policy leaf and filed S-42/M-53; X-98 and P-15 moved into late M13 to remove the load-responder
+  dependency cycle. The corrected branch awaits re-review and the deferred full gate.

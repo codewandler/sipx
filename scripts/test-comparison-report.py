@@ -102,6 +102,7 @@ def a_capability(**overrides):
         "title": "A public capability",
         "ownership": "sipx",
         "status": "implemented",
+        "confidence": "measured",
         "implementation": ["crates/sipx-sip/src/message.rs"],
         "evidence": [{"url": "https://example.invalid/source", "note": "the exported API"}],
     }
@@ -110,12 +111,14 @@ def a_capability(**overrides):
 
 
 def a_capability_ledger(capabilities=None, **overrides):
+    capabilities = capabilities or [a_capability()]
     ledger = {
         "subject": FIXTURE_STACK,
         "version_evaluated": "1.2.3",
         "evaluated_at": "2026-08-01",
         "source_revision": "0123456789abcdef",
-        "capabilities": capabilities or [a_capability()],
+        "expected_capabilities": len(capabilities),
+        "capabilities": capabilities,
         "_file": f"{FIXTURE_STACK}.json",
     }
     ledger.update(overrides)
@@ -153,11 +156,43 @@ class TheCapabilityLedger(unittest.TestCase):
         problems = capability_problems_for(a_capability(ownership="somebody"))
         self.assertTrue(any("unknown ownership" in problem for problem in problems), problems)
 
+    def test_an_unknown_subject_is_rejected(self) -> None:
+        ledger = a_complete_capability_ledger()
+        problems = report.capability_problems([ledger], [a_stack(id="another-stack")], TODAY)
+        self.assertTrue(any("does not declare" in problem for problem in problems), problems)
+
+    def test_a_mismatched_filename_is_rejected(self) -> None:
+        ledger = a_complete_capability_ledger()
+        ledger["_file"] = "wrong.json"
+        problems = report.capability_problems([ledger], [a_stack()], TODAY)
+        self.assertTrue(any("filename must match" in problem for problem in problems), problems)
+
+    def test_a_missing_revision_is_rejected(self) -> None:
+        ledger = a_complete_capability_ledger()
+        ledger["source_revision"] = ""
+        problems = report.capability_problems([ledger], [a_stack()], TODAY)
+        self.assertTrue(any("no immutable version" in problem for problem in problems), problems)
+
+    def test_an_invalid_owner_status_pair_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(status="tracked"))
+        self.assertTrue(any("not valid for ownership" in problem for problem in problems), problems)
+
     def test_a_duplicate_leaf_is_rejected(self) -> None:
         capability = a_capability()
         ledger = a_capability_ledger([capability, dict(capability)])
         problems = report.capability_problems([ledger], [a_stack()], TODAY)
         self.assertTrue(any("declares capability" in problem for problem in problems), problems)
+
+    def test_a_duplicate_subject_ledger_is_rejected(self) -> None:
+        ledger = a_complete_capability_ledger()
+        problems = report.capability_problems([ledger, dict(ledger)], [a_stack()], TODAY)
+        self.assertTrue(any("has 2 ledgers" in problem for problem in problems), problems)
+
+    def test_the_expected_count_ratchets_leaf_removal(self) -> None:
+        ledger = a_complete_capability_ledger()
+        ledger["capabilities"].pop()
+        problems = report.capability_problems([ledger], [a_stack()], TODAY)
+        self.assertTrue(any("expected capabilities" in problem for problem in problems), problems)
 
     def test_an_unevidenced_leaf_is_rejected(self) -> None:
         problems = capability_problems_for(a_capability(evidence=[]))
@@ -171,6 +206,51 @@ class TheCapabilityLedger(unittest.TestCase):
         problems = capability_problems_for(a_capability(implementation=["README.md"]))
         self.assertTrue(any("workspace crate" in problem for problem in problems), problems)
 
+    def test_non_sipx_rows_cannot_carry_implementation_evidence(self) -> None:
+        problems = capability_problems_for(
+            a_capability(ownership="not-shipped", status="absent")
+        )
+        self.assertTrue(
+            any("without implemented sipx ownership" in problem for problem in problems),
+            problems,
+        )
+
+    def test_an_open_row_with_a_done_story_is_rejected(self) -> None:
+        problems = capability_problems_for(
+            a_capability(
+                status="open",
+                implementation=None,
+                story="docs/stories/M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md",
+            )
+        )
+        self.assertTrue(any("is done" in problem for problem in problems), problems)
+
+    def test_an_open_row_with_a_non_story_file_is_rejected(self) -> None:
+        problems = capability_problems_for(
+            a_capability(status="open", implementation=None, story="README.md")
+        )
+        self.assertTrue(any("has no status" in problem for problem in problems), problems)
+
+    def test_a_cluster_story_must_be_in_the_pinned_index(self) -> None:
+        problems = capability_problems_for(
+            a_capability(
+                ownership="sipx-clstr",
+                status="tracked",
+                implementation=None,
+                story="https://example.invalid/story.md",
+            )
+        )
+        self.assertTrue(any("pinned external index" in problem for problem in problems), problems)
+
+    def test_every_required_category_must_remain(self) -> None:
+        ledger = a_complete_capability_ledger()
+        ledger["capabilities"] = [
+            row for row in ledger["capabilities"] if row["category"] != "transports"
+        ]
+        ledger["expected_capabilities"] = len(ledger["capabilities"])
+        problems = report.capability_problems([ledger], [a_stack()], TODAY)
+        self.assertTrue(any("omits required categories" in problem for problem in problems), problems)
+
     def test_a_stale_ledger_is_rejected(self) -> None:
         stale = TODAY - datetime.timedelta(days=report.MAX_OBSERVATION_AGE_DAYS + 1)
         problems = capability_problems_for(
@@ -183,6 +263,34 @@ class TheCapabilityLedger(unittest.TestCase):
             a_capability(ownership="not-applicable", status="excluded")
         )
         self.assertTrue(any("without a rationale" in problem for problem in problems), problems)
+
+    def test_an_unknown_confidence_is_rejected(self) -> None:
+        problems = capability_problems_for(a_capability(confidence="certain"))
+        self.assertTrue(any("unknown confidence" in problem for problem in problems), problems)
+
+    def test_assessed_confidence_requires_a_rationale(self) -> None:
+        problems = capability_problems_for(a_capability(confidence="assessed"))
+        self.assertTrue(any("assessed without a rationale" in problem for problem in problems), problems)
+
+    def test_scalar_schema_constraints_are_checked(self) -> None:
+        capability = a_capability(
+            id="",
+            title="",
+            evidence=[{"url": "not a uri", "note": ""}],
+        )
+        ledger = a_capability_ledger([capability], source_revision="x")
+        problems = report.capability_schema_problems(ledger)
+        problems.extend(report.capability_evidence_problems(ledger, capability))
+        for phrase in (
+            "source revision",
+            "stable capability key",
+            "empty title",
+            "empty note",
+            "invalid evidence URL",
+        ):
+            self.assertTrue(
+                any(phrase in problem for problem in problems), (phrase, problems)
+            )
 
     def test_a_leaf_reaches_the_rendered_document(self) -> None:
         rendered = report.render(
@@ -723,7 +831,10 @@ class TheRealDataset(unittest.TestCase):
         self.assertEqual(
             [],
             report.capability_problems(
-                report.capability_ledgers(), stacks, datetime.date.today()
+                report.capability_ledgers(),
+                stacks,
+                datetime.date.today(),
+                report.external_story_urls(),
             ),
         )
 

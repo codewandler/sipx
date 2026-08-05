@@ -37,6 +37,7 @@ import subprocess
 import sys
 import tomllib
 from collections import Counter
+from urllib.parse import urlparse
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 COMPARISON = ROOT / "docs" / "comparison"
@@ -100,11 +101,18 @@ FINDING_KEYS = (
 MARKER_KEYS = ({"stack", "dimension", "not_evaluated"}, set())
 EVIDENCE_KEYS = ({"note"}, {"url", "path"})
 CAPABILITY_LEDGER_KEYS = (
-    {"subject", "version_evaluated", "evaluated_at", "source_revision", "capabilities"},
+    {
+        "subject",
+        "version_evaluated",
+        "evaluated_at",
+        "source_revision",
+        "expected_capabilities",
+        "capabilities",
+    },
     set(),
 )
 CAPABILITY_KEYS = (
-    {"id", "category", "title", "ownership", "status", "evidence"},
+    {"id", "category", "title", "confidence", "ownership", "status", "evidence"},
     {"story", "rationale", "implementation"},
 )
 
@@ -115,6 +123,7 @@ CAPABILITY_STATUS = {
     "not-shipped": {"absent"},
     "not-applicable": {"excluded"},
 }
+CAPABILITY_CONFIDENCE = {"measured", "documented", "assessed"}
 REQUIRED_CAPABILITY_CATEGORIES = {
     "authentication",
     "core",
@@ -259,6 +268,64 @@ def capability_ledgers() -> list[dict]:
     return found
 
 
+def external_story_urls() -> set[str]:
+    """Story URLs proved against a pinned sibling-repository tree."""
+    found = set()
+    directory = CAPABILITIES / "external"
+    for path in sorted(directory.glob("*.json")):
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        repository = loaded.get("repository")
+        revision = loaded.get("source_revision")
+        stories = loaded.get("stories", [])
+        if not isinstance(repository, str) or not isinstance(revision, str):
+            continue
+        for story in stories if isinstance(stories, list) else []:
+            if isinstance(story, str):
+                found.add(f"{repository}/blob/{revision}/{story}")
+    return found
+
+
+def external_story_index_problems() -> list[str]:
+    """The offline external-story proof is itself closed and revision-pinned."""
+    problems = []
+    directory = CAPABILITIES / "external"
+    for path in sorted(directory.glob("*.json")):
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        where = f"external story index {path.name}"
+        if not isinstance(loaded, dict):
+            problems.append(f"{where} is not an object")
+            continue
+        keys = set(loaded)
+        required = {"repository", "source_revision", "stories"}
+        for key in sorted(required - keys):
+            problems.append(f"{where} is missing the required key {key!r}")
+        for key in sorted(keys - required):
+            problems.append(f"{where} carries the unknown key {key!r}")
+        repository = loaded.get("repository")
+        if not isinstance(repository, str):
+            problems.append(f"{where} has no repository URL")
+        else:
+            parsed = urlparse(repository)
+            if parsed.scheme != "https" or not parsed.netloc:
+                problems.append(f"{where} has an invalid repository URL")
+        revision = loaded.get("source_revision")
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            problems.append(f"{where} has no full immutable source revision")
+        stories = loaded.get("stories")
+        if not isinstance(stories, list) or not stories:
+            problems.append(f"{where} has no story paths")
+        elif len(stories) != len(set(stories)):
+            problems.append(f"{where} repeats a story path")
+        else:
+            for story in stories:
+                if (
+                    not isinstance(story, str)
+                    or re.fullmatch(r"docs/stories/[A-Za-z0-9-]+\.md", story) is None
+                ):
+                    problems.append(f"{where} has invalid story path {story!r}")
+    return problems
+
+
 def capability_where(ledger, capability=None) -> str:
     subject = ledger.get("subject", "?")
     if capability is None:
@@ -267,7 +334,7 @@ def capability_where(ledger, capability=None) -> str:
 
 
 def capability_schema_problems(ledger) -> list[str]:
-    """Closed key sets for ledgers and their leaves."""
+    """Closed key sets and the scalar constraints declared by the JSON schema."""
     problems = []
     required, optional = CAPABILITY_LEDGER_KEYS
     keys = {key for key in ledger if not key.startswith("_")}
@@ -279,6 +346,18 @@ def capability_schema_problems(ledger) -> list[str]:
         f"{where} carries the unknown key {key!r}"
         for key in sorted(keys - required - optional)
     )
+    subject = ledger.get("subject")
+    if (
+        not isinstance(subject, str)
+        or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", subject) is None
+    ):
+        problems.append(f"{where} has an invalid subject key")
+    revision = ledger.get("source_revision")
+    if not isinstance(revision, str) or len(revision) < 7:
+        problems.append(f"{where} has an invalid source revision")
+    expected = ledger.get("expected_capabilities")
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected < 1:
+        problems.append(f"{where} has an invalid expected capability count")
     capabilities = ledger.get("capabilities", [])
     if not isinstance(capabilities, list):
         return problems + [f"{where} has 'capabilities', which must be a list"]
@@ -296,6 +375,16 @@ def capability_schema_problems(ledger) -> list[str]:
             f"{leaf} carries the unknown key {key!r}"
             for key in sorted(keys - required - optional)
         )
+        cap_id = capability.get("id")
+        if (
+            not isinstance(cap_id, str)
+            or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", cap_id) is None
+        ):
+            problems.append(f"{leaf} has an invalid stable capability key")
+        for field in ("category", "title"):
+            value = capability.get(field)
+            if not isinstance(value, str) or not value.strip():
+                problems.append(f"{leaf} has an empty {field}")
     return problems
 
 
@@ -327,12 +416,23 @@ def capability_evidence_problems(ledger, capability) -> list[str]:
         path = entry.get("path")
         if isinstance(path, str) and path and not (ROOT / path).exists():
             problems.append(f"{where} cites {path}, which does not exist")
+        note = entry.get("note")
+        if not isinstance(note, str) or not note.strip():
+            problems.append(f"{where} has evidence with an empty note")
+        url = entry.get("url")
+        if isinstance(url, str):
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                problems.append(f"{where} cites an invalid evidence URL")
     return problems
 
 
-def capability_problems(ledger_list, stack_list, today: datetime.date) -> list[str]:
+def capability_problems(
+    ledger_list, stack_list, today: datetime.date, external_stories=None
+) -> list[str]:
     """Ownership, disposition and discovery closure for leaf-level inventories."""
     known_stacks = {stack.get("id") for stack in stack_list}
+    external_stories = set(external_stories or ())
     problems = []
     subjects = Counter()
     for ledger in ledger_list:
@@ -346,6 +446,16 @@ def capability_problems(ledger_list, stack_list, today: datetime.date) -> list[s
         if not ledger.get("version_evaluated") or not ledger.get("source_revision"):
             problems.append(f"{where} has no immutable version and source revision")
         problems.extend(capability_staleness_problems(ledger, today))
+        expected = ledger.get("expected_capabilities")
+        capabilities = ledger.get("capabilities", [])
+        if (
+            isinstance(expected, int)
+            and isinstance(capabilities, list)
+            and len(capabilities) != expected
+        ):
+            problems.append(
+                f"{where} declares {expected} expected capabilities but carries {len(capabilities)}"
+            )
 
         seen = Counter()
         categories = set()
@@ -358,6 +468,14 @@ def capability_problems(ledger_list, stack_list, today: datetime.date) -> list[s
             categories.add(capability.get("category"))
             owner = capability.get("ownership")
             status = capability.get("status")
+            confidence = capability.get("confidence")
+            if confidence not in CAPABILITY_CONFIDENCE:
+                problems.append(
+                    f"{leaf} has unknown confidence {confidence!r}; choose one of"
+                    f" {', '.join(sorted(CAPABILITY_CONFIDENCE))}"
+                )
+            elif confidence == "assessed" and not capability.get("rationale"):
+                problems.append(f"{leaf} is assessed without a rationale")
             if owner not in CAPABILITY_OWNERS:
                 problems.append(
                     f"{leaf} has unknown ownership {owner!r}; choose one of"
@@ -405,10 +523,10 @@ def capability_problems(ledger_list, stack_list, today: datetime.date) -> list[s
                 problems.append(
                     f"{leaf} carries implementation evidence without implemented sipx ownership"
                 )
-            if owner == "sipx-clstr" and (
-                not isinstance(story, str) or not story.startswith("https://")
-            ):
-                problems.append(f"{leaf} is cluster-owned and has no external story link")
+            if owner == "sipx-clstr" and story not in external_stories:
+                problems.append(
+                    f"{leaf} is cluster-owned and has no story in the pinned external index"
+                )
             if owner == "not-applicable" and not capability.get("rationale"):
                 problems.append(f"{leaf} is excluded without a rationale")
 
@@ -810,8 +928,8 @@ def render_capability_ledgers(ledger_list, stack_list) -> list[str]:
             "The immutable source revision is retained in the checked data and each row states the",
             "subject version it was evaluated against.",
             "",
-            "| Category | Capability | Subject version | Ownership | Status | Evidence | Story or rationale |",
-            "|---|---|---|---|---|---|---|",
+            "| Category | Capability | Subject version | Confidence | Ownership | Status | Evidence | Story or rationale |",
+            "|---|---|---|---|---|---|---|---|",
         ]
         for capability in ledger.get("capabilities", []):
             story = capability.get("story")
@@ -827,6 +945,7 @@ def render_capability_ledgers(ledger_list, stack_list) -> list[str]:
                 f"| {cell(str(capability.get('category', '—')))} |"
                 f" {cell(str(capability.get('title', capability.get('id', '—'))))} |"
                 f" `{cell(str(ledger.get('version_evaluated', '—')))}` |"
+                f" `{cell(str(capability.get('confidence', '—')))}` |"
                 f" `{cell(str(capability.get('ownership', '—')))}` |"
                 f" `{cell(str(capability.get('status', '—')))}` | {evidence} | {disposition} |"
             )
@@ -943,6 +1062,7 @@ def main() -> int:
     malformed += [p for s in stack_list for p in schema_problems("stack", s)]
     malformed += [p for o in observation_list for p in schema_problems(kind_of(o), o)]
     malformed += [p for ledger in ledger_list for p in capability_schema_problems(ledger)]
+    malformed += external_story_index_problems()
     if malformed:
         print("The comparison registry does not match its schema:", file=sys.stderr)
         for problem in malformed:
@@ -952,7 +1072,9 @@ def main() -> int:
     values = generated_values()
     today = datetime.date.today()
     problems = check(dimension_list, stack_list, observation_list, values, today)
-    problems.extend(capability_problems(ledger_list, stack_list, today))
+    problems.extend(
+        capability_problems(ledger_list, stack_list, today, external_story_urls())
+    )
     rendered = render(dimension_list, stack_list, observation_list, values, ledger_list)
 
     # Notice, not a result. Printed in both modes and before the verdict, so it is visible on the

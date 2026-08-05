@@ -32,12 +32,11 @@ highest-demand non-ICE connectivity path, with malformed ingress, entropy and SR
 invariants pinned. Stable `1.0.0`, TURN, video and the second PCM/G.722/jitter lane remain separate
 decisions rather than silent beta.4 scope growth.
 
-The selected post-beta.4 implementation wave is **M13 — Endpoint-complete**: nine stories across
-`stack-comparison`, `event-reachability`, `dialog-extensions`, `live-endpoint-policy` and
-`test-surfaces`, queryable as `parity-wave-1`. The ready frontier is X-97, S-35, S-37, S-40, X-75
-and T-31; their dependent stories remain backlog until those contracts land. M14 holds the bounded
-comparative signalling load run after M13, and M15 separately tracks the audio-only browser SDK,
-WASM kernel, browser-native WebRTC adapter and public demo. Neither is silently part of this wave.
+The selected post-beta.4 implementation wave is **M13 — Endpoint-complete**: thirteen stories across
+seven epics, queryable as `parity-wave-1`. X-97 discovered two additional endpoint gaps and pulled
+the bounded responder plus its prerequisite profile forward; M14 retains the actual comparative run.
+M15 separately tracks the audio-only browser SDK, WASM kernel, browser-native WebRTC adapter and
+public demo.
 
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `A` application SDK/release · `X` cross-cutting (build, CI, test infrastructure).
@@ -96,8 +95,8 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 
 ### comparative signalling load
 _The existing load scheduler, bounded CLI load command and soak checks measure sipx well, but they do_
-- [P-15 — Run a bounded call-load responder](P-15-run-a-bounded-call-load-responder.md) · Phone · after X-98 and X-75 · machine-ready signalling UAS with finite admission and cleanup
-- [X-98 — Specify the neutral comparative load profile](X-98-specify-the-neutral-comparative-load-profile.md) · Build · M14 starts after M13 · signalling-only common workload, safe supervisor and stable result schema
+- [P-15 — Run a bounded call-load responder](P-15-run-a-bounded-call-load-responder.md) · Phone · late M13 after X-98 and X-75 · machine-ready signalling UAS with finite admission and cleanup
+- [X-98 — Specify the neutral comparative load profile](X-98-specify-the-neutral-comparative-load-profile.md) · Build · late M13 dependency · signalling-only common workload, safe supervisor and stable result schema
 - [X-99 — Run and publish the comparative load result](X-99-run-and-publish-the-comparative-load-result.md) · Build · after M13, X-98 and P-15 · immutable builds, both directions, raw evidence before summary
 
 ### Conformance
@@ -137,6 +136,9 @@ _sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.
 - [S-38 — Place and maintain event subscriptions](S-38-place-and-maintain-event-subscriptions.md) · Signalling · after S-37 · reusable outbound SUBSCRIBE and NOTIFY tracking · S-24 is a consumer
 - [S-39 — Send and receive publications through an endpoint](S-39-send-and-receive-publications-through-an-endpoint.md) · Signalling · after S-37 · make the existing RFC 3903 compositor and entity tags wire-reachable
 
+### registration observation
+- [S-42 — Report the address learned during registration](S-42-report-the-address-learned-during-registration.md) · Signalling · discovered by X-97 · preserve received/rport observation in the typed registration outcome
+
 ### Ice
 - [M-24 — Gather a relayed candidate from a configured relay](M-24-ice-relayed-candidate.md) · Media · ice · RFC 8656 · after M-22 · the third RFC that made M-16 impossible as one story
 
@@ -147,6 +149,10 @@ _A long-running endpoint has two operational seams that currently require replac
 ### media security profiles
 _sipx implements exactly one SRTP protection profile:_
 - [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
+
+### supported test surfaces
+_The workspace has seeded links, virtual time and call fixtures; the selected wave makes their public seams executable._
+- [M-53 — Ship a runnable RTP echo example](M-53-ship-a-runnable-rtp-echo-example.md) · Media · discovered by X-97 · exercise the public RTP receive/send seam without inventing a second media stack
 
 ### Quic
 - [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · track: quic · T-12 delivered the transport; independent-peer evidence remains

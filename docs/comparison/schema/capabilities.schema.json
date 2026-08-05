@@ -4,23 +4,25 @@
   "title": "One subject's public capability ownership ledger",
   "type": "object",
   "additionalProperties": false,
-  "required": ["subject", "version_evaluated", "evaluated_at", "source_revision", "capabilities"],
+  "required": ["subject", "version_evaluated", "evaluated_at", "source_revision", "expected_capabilities", "capabilities"],
   "properties": {
     "subject": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
     "version_evaluated": {"type": "string", "minLength": 1},
     "evaluated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
     "source_revision": {"type": "string", "minLength": 7},
+    "expected_capabilities": {"type": "integer", "minimum": 1},
     "capabilities": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "category", "title", "ownership", "status", "evidence"],
+        "required": ["id", "category", "title", "confidence", "ownership", "status", "evidence"],
         "properties": {
           "id": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
           "category": {"type": "string", "minLength": 1},
           "title": {"type": "string", "minLength": 1},
+          "confidence": {"enum": ["measured", "documented", "assessed"]},
           "ownership": {"enum": ["sipx", "sipx-clstr", "not-shipped", "not-applicable"]},
           "status": {"enum": ["implemented", "open", "tracked", "absent", "excluded"]},
           "story": {"type": "string", "minLength": 1},
