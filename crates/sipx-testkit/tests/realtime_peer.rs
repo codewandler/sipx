@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use sipx_testkit::realtime_peer::{
     CancelPolicy, ClientEvent, Emission, F_RAMP_BASE64, F_SILENCE, F_SILENCE_BASE64,
     FIXTURE_BEARER, FRAME_BYTES, Malformed, PeerConfig, RealtimePeer, StallPoint, UpgradeOutcome,
-    Withhold, tone_frame,
+    Withhold, tone_bytes, tone_frame,
 };
 use tokio::net::TcpStream;
 use tokio_tungstenite::WebSocketStream;
@@ -101,6 +101,12 @@ async fn next_frame(client: &mut Client, expected: &str) -> Message {
         Ok(Some(Ok(message))) => message,
         other => panic!("expected {expected}, got {other:?}"),
     }
+}
+
+/// The next text frame, parsed.
+async fn next_event(client: &mut Client, expected: &str) -> Value {
+    let text = next_text(client, expected).await;
+    serde_json::from_str(&text).expect("an event parses as JSON")
 }
 
 /// The `type` member of a text frame, which is how every event in §5 identifies itself.
@@ -410,6 +416,11 @@ async fn the_tone_begins_with_the_specs_f_ramp_vector() {
         tone_frame(0),
         "successive frames must be distinguishable at the far end"
     );
+    assert_eq!(
+        tone_bytes(2),
+        [tone_frame(0), tone_frame(1)].concat(),
+        "what a bridge should receive is what the peer speaks"
+    );
 
     let peer = PeerConfig::new().start().await.expect("the peer binds");
     let mut client = connect(&peer).await;
@@ -588,6 +599,91 @@ async fn orb_14_a_stalled_peer_answers_the_upgrade_and_then_nothing() {
     );
 }
 
+/// The mid-call stall: setup is answered, audio starts, and *then* the far end goes quiet without
+/// closing. The difference from ORB-16's close is the whole point — nothing arrives, including the
+/// EOF that would let the client end the session on its own, so only the liveness timer can.
+#[tokio::test]
+async fn a_mid_call_stall_reads_the_frame_and_then_answers_nothing() {
+    let peer = PeerConfig::new()
+        .stalling_at(StallPoint::Session)
+        .start()
+        .await
+        .expect("the peer binds");
+    let mut client = connect(&peer).await;
+    establish(&peer, &mut client).await;
+
+    send(
+        &mut client,
+        &json!({"type": "input_audio_buffer.append", "audio": F_SILENCE_BASE64}),
+    )
+    .await;
+    let record = peer.await_appends(1).await.expect("the frame was read");
+    assert_eq!(
+        record.appended_audio,
+        F_SILENCE.to_vec(),
+        "the peer was alive when it went quiet"
+    );
+
+    client
+        .send(Message::Ping(WsBytes::from_static(b"live?")))
+        .await
+        .expect("the client pings");
+    // A definition of silence. The window has to be empty of *everything*: a Pong would mean the
+    // peer is still serving, and a close or an EOF would mean it ended the session instead of
+    // stalling. `Elapsed` is the only result that says the connection is open and unanswered.
+    let quiet = tokio::time::timeout(QUIET, client.next()).await;
+    assert!(
+        quiet.is_err(),
+        "a mid-call stall neither answers nor closes, got {quiet:?}"
+    );
+}
+
+/// The peer's half of the barge-in and cancel-race scripts (§4.3, ORB-8 and ORB-9): every server
+/// event the bridge consumes can be put on the wire, in order, with the members §5.2 names.
+#[tokio::test]
+async fn the_peer_scripts_every_server_event_the_bridge_consumes() {
+    let peer = PeerConfig::new().start().await.expect("the peer binds");
+    let mut client = connect(&peer).await;
+    establish(&peer, &mut client).await;
+
+    peer.send_speech_started().await.expect("speech_started");
+    let event = next_event(&mut client, "speech_started").await;
+    assert_eq!(event["type"], "input_audio_buffer.speech_started");
+    assert!(event.get("audio_start_ms").is_some());
+
+    peer.send_delta("resp_001", &tone_frame(0))
+        .await
+        .expect("a delta");
+    assert_eq!(
+        next_event(&mut client, "a delta").await["type"],
+        "response.output_audio.delta"
+    );
+
+    peer.send_audio_done("resp_001").await.expect("audio done");
+    let event = next_event(&mut client, "audio done").await;
+    assert_eq!(event["type"], "response.output_audio.done");
+    assert_eq!(event["response_id"], "resp_001");
+
+    peer.send_error("response_cancel_not_active", "no active response")
+        .await
+        .expect("an error");
+    let event = next_event(&mut client, "an error").await;
+    assert_eq!(event["type"], "error");
+    assert_eq!(event["error"]["code"], "response_cancel_not_active");
+
+    peer.send_response_done("resp_001", "completed")
+        .await
+        .expect("the response ends");
+    let event = next_event(&mut client, "response.done").await;
+    assert_eq!(event["type"], "response.done");
+    assert_eq!(event["response"]["status"], "completed");
+
+    assert!(
+        peer.record().events_outside_the_client_subset().is_empty(),
+        "the script cost the client nothing outside §5.1"
+    );
+}
+
 /// ORB-15: `session.created` withheld, and separately `session.updated` — each the peer being
 /// deliberately quiet while demonstrably alive, which is what separates this from a dead socket.
 #[tokio::test]
@@ -650,7 +746,19 @@ async fn orb_16_the_peer_closes_normally_and_resets() {
         Message::Close(Some(frame)) => assert_eq!(u16::from(frame.code), 1000),
         other => panic!("expected a 1000 close, got {other:?}"),
     }
-    assert_eq!(peer.record().upgrades.len(), 1, "no second upgrade");
+    // The peer does not drop the socket the instant it writes the close: it waits for the echo,
+    // which is what keeps a client's own close frame from landing on a socket that has gone. One
+    // more read is what sends that echo, and the session ends on it — the handshake, not a timer.
+    let echoed = tokio::time::timeout(ARRIVAL, client.next()).await; // a bound on failure
+    assert!(
+        matches!(echoed, Ok(None)),
+        "the close handshake completes, got {echoed:?}"
+    );
+    let record = peer
+        .observe("the session ending", |record| record.sessions_ended == 1)
+        .await
+        .expect("the session ends");
+    assert_eq!(record.upgrades.len(), 1, "no second upgrade");
 
     let peer = PeerConfig::new().start().await.expect("the peer binds");
     let mut client = connect(&peer).await;

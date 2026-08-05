@@ -33,7 +33,6 @@
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -293,9 +292,12 @@ pub enum Withhold {
 /// written and the client's liveness timer (§6: 30 s + 10 s) is the only thing that can end it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StallPoint {
-    /// Answer the upgrade, then nothing at all — not even `session.created`.
+    /// Answer the upgrade, then nothing at all — not even `session.created`. This is ORB-14's
+    /// script: "peer answers the upgrade then goes silent".
     Upgrade,
-    /// Complete setup, then go silent mid-call.
+    /// Answer setup normally, then go silent the moment the first uplink frame arrives: the
+    /// mid-call stall, where audio was already flowing when the far end stopped. The frame is
+    /// read and recorded first, so the record shows the peer was alive when it went quiet.
     Session,
 }
 
@@ -859,7 +861,7 @@ async fn serve(
             "event_id": session.next_event_id(),
             "session": {"id": "sess_fixture", "object": "realtime.session", "type": "realtime"},
         });
-        if write(&mut socket, created).await.is_break() {
+        if write(&mut socket, created).await == Next::End {
             finish(&shared, generation);
             return;
         }
@@ -872,8 +874,8 @@ async fn serve(
             frame = socket.next() => Step::Inbound(frame),
             directive = inbox.recv() => Step::Directed(directive),
         };
-        let flow = match step {
-            Step::Stop | Step::Directed(None) => ControlFlow::Break(()),
+        let next = match step {
+            Step::Stop | Step::Directed(None) => Next::End,
             Step::Inbound(frame) => {
                 inbound(frame, &mut socket, &config, &shared, &mut session).await
             }
@@ -881,8 +883,17 @@ async fn serve(
                 directed(directive, &mut socket, &config, &shared, &mut session).await
             }
         };
-        if flow.is_break() {
-            break;
+        match next {
+            Next::Serve => {}
+            Next::End => break,
+            Next::Stall => {
+                // Holding the socket is the whole behaviour: it stays established, unread and
+                // unwritten, so no Pong is ever produced and the client's liveness timer is the
+                // only thing that can end the session (ORB-14). Returning instead would send a
+                // FIN, which is a different vector.
+                shutdown.cancelled().await;
+                break;
+            }
         }
     }
     finish(&shared, generation);
@@ -893,6 +904,17 @@ enum Step {
     Stop,
     Inbound(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
     Directed(Option<Directive>),
+}
+
+/// What the connection loop does next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Next {
+    /// Keep serving.
+    Serve,
+    /// The connection is over.
+    End,
+    /// Stop serving *without* closing: hold the socket open, read nothing, write nothing.
+    Stall,
 }
 
 fn finish(shared: &Arc<Shared>, generation: u64) {
@@ -950,7 +972,7 @@ async fn inbound(
     config: &PeerConfig,
     shared: &Arc<Shared>,
     session: &mut Session,
-) -> ControlFlow<()> {
+) -> Next {
     match frame {
         Some(Ok(Message::Text(text))) => {
             let event = read_client_event(&text);
@@ -969,11 +991,14 @@ async fn inbound(
             }
             let reply_wanted = matches!(event, ClientEvent::SessionUpdate(_))
                 && config.withhold != Withhold::SessionUpdated;
+            let stall_now = config.stall == Some(StallPoint::Session)
+                && matches!(event, ClientEvent::Append { .. });
             shared.update(move |record| record.client_events.push(event));
-            if config.stall == Some(StallPoint::Session) {
-                // Mid-call silence (ORB-14): the event was read and recorded, and nothing is
-                // written from here on. The connection stays open until the peer is dropped.
-                return ControlFlow::Break(());
+            if stall_now {
+                // Mid-call silence: setup was answered and the first uplink frame was read and
+                // recorded, and nothing is written from here on. The record proves the peer was
+                // alive when it went quiet, which is what separates a stall from a dead socket.
+                return Next::Stall;
             }
             if reply_wanted {
                 let updated = json!({
@@ -983,7 +1008,7 @@ async fn inbound(
                 });
                 return write(socket, updated).await;
             }
-            ControlFlow::Continue(())
+            Next::Serve
         }
         Some(Ok(Message::Binary(bytes))) => {
             shared.update(move |record| {
@@ -991,17 +1016,17 @@ async fn inbound(
                     reason: format!("a binary frame of {} bytes", bytes.len()),
                 });
             });
-            ControlFlow::Continue(())
+            Next::Serve
         }
         Some(Ok(Message::Ping(_))) => {
             shared.update(|record| record.pings += 1);
             // tungstenite queues the Pong itself and writes it on the next read or write; this
             // flush is what makes "answered" true now rather than at the next frame.
             let _flushed = socket.flush().await;
-            ControlFlow::Continue(())
+            Next::Serve
         }
-        Some(Ok(Message::Pong(_) | Message::Frame(_))) => ControlFlow::Continue(()),
-        Some(Ok(Message::Close(_)) | Err(_)) | None => ControlFlow::Break(()),
+        Some(Ok(Message::Pong(_) | Message::Frame(_))) => Next::Serve,
+        Some(Ok(Message::Close(_)) | Err(_)) | None => Next::End,
     }
 }
 
@@ -1044,14 +1069,14 @@ async fn directed(
     config: &PeerConfig,
     shared: &Arc<Shared>,
     session: &mut Session,
-) -> ControlFlow<()> {
+) -> Next {
     let Directive { action, done } = directive;
     match action {
         Action::Delta { response, audio } => {
             if config.cancel == CancelPolicy::Truncate && session.is_cancelled(&response) {
                 shared.update(|record| record.deltas_suppressed += 1);
                 let _answered = done.send(Emission::SuppressedByCancel);
-                return ControlFlow::Continue(());
+                return Next::Serve;
             }
             session.in_flight = Some(response.clone());
             let delta = json!({
@@ -1064,7 +1089,7 @@ async fn directed(
                 "delta": BASE64.encode(&audio),
             });
             let flow = write(socket, delta).await;
-            if flow.is_continue() {
+            if flow == Next::Serve {
                 shared.update(|record| record.deltas_sent += 1);
             }
             answer(flow, done)
@@ -1084,11 +1109,7 @@ async fn directed(
             let _answered = done.send(Emission::Sent);
             // The connection ends when the client's close echo arrives, which the inbound arm
             // reads; breaking here would drop the socket before the echo had anywhere to go.
-            if sent {
-                ControlFlow::Continue(())
-            } else {
-                ControlFlow::Break(())
-            }
+            if sent { Next::Serve } else { Next::End }
         }
         Action::Reset => {
             // A zero linger turns the close into an RST: no close frame, no handshake, which is
@@ -1101,7 +1122,7 @@ async fn directed(
             #[allow(deprecated)]
             let _lingered = socket.get_ref().set_linger(Some(Duration::ZERO));
             let _answered = done.send(Emission::Sent);
-            ControlFlow::Break(())
+            Next::End
         }
     }
 }
@@ -1173,12 +1194,12 @@ async fn malformed_frame(
     socket: &mut Socket,
     session: &mut Session,
     done: oneshot::Sender<Emission>,
-) -> ControlFlow<()> {
+) -> Next {
     let flow = match malformed {
         Malformed::NotJson => socket
             .send(Message::Text(Utf8Bytes::from_static("not json{")))
             .await
-            .map_or(ControlFlow::Break(()), |()| ControlFlow::Continue(())),
+            .map_or(Next::End, |()| Next::Serve),
         Malformed::NoType => {
             let event = json!({"event_id": session.next_event_id(), "session": {}});
             write(socket, event).await
@@ -1186,7 +1207,7 @@ async fn malformed_frame(
         Malformed::Binary => socket
             .send(Message::Binary(WsBytes::from_static(b"\x00\x01binary")))
             .await
-            .map_or(ControlFlow::Break(()), |()| ControlFlow::Continue(())),
+            .map_or(Next::End, |()| Next::Serve),
         Malformed::DeltaNotBase64 { response } => {
             let event = json!({
                 "type": "response.output_audio.delta",
@@ -1222,8 +1243,8 @@ async fn malformed_frame(
 /// A failed write drops the sender rather than answering it, so the caller sees
 /// [`PeerError::SessionEnded`] instead of a claim that a frame reached a socket which had
 /// already gone.
-fn answer(flow: ControlFlow<()>, done: oneshot::Sender<Emission>) -> ControlFlow<()> {
-    if flow.is_continue() {
+fn answer(flow: Next, done: oneshot::Sender<Emission>) -> Next {
+    if flow == Next::Serve {
         let _answered = done.send(Emission::Sent);
     }
     flow
@@ -1231,17 +1252,17 @@ fn answer(flow: ControlFlow<()>, done: oneshot::Sender<Emission>) -> ControlFlow
 
 /// Write one event as a JSON text frame, flushing it so the directive that asked for it resolves
 /// after the bytes are on the socket rather than before.
-async fn write(socket: &mut Socket, event: Value) -> ControlFlow<()> {
+async fn write(socket: &mut Socket, event: Value) -> Next {
     if socket
         .send(Message::Text(event.to_string().into()))
         .await
         .is_err()
     {
-        return ControlFlow::Break(());
+        return Next::End;
     }
     match socket.flush().await {
-        Ok(()) => ControlFlow::Continue(()),
-        Err(_) => ControlFlow::Break(()),
+        Ok(()) => Next::Serve,
+        Err(_) => Next::End,
     }
 }
 
