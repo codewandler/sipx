@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Statically hold ordinary and recovery beta workflows to the release contract."""
+"""Statically hold ordinary and recovery workflows to the release contracts."""
 
 from __future__ import annotations
 
@@ -33,19 +33,19 @@ def workflow_problems(text: str) -> list[str]:
         ("release tag is not derived from the selected ref", r"RELEASE_TAG:\s*\$\{\{\s*github\.ref_name\s*\}\}"),
         ("manual confirmation is not captured separately", r"REQUESTED_RELEASE_TAG:\s*\$\{\{\s*inputs\.tag\s*\}\}"),
         ("release runs outside the approved environment", r"environment:\s*\n\s+name:\s*release"),
-        ("release job has no finite timeout", r"\n\s*release:\s*\n(?:(?!\n\s*github_release:).)*?timeout-minutes:\s*[1-9][0-9]*"),
+        ("release job has no finite timeout", r"\n  release:\s*\n\s+name:[^\n]*\n\s+runs-on:[^\n]*\n\s+timeout-minutes:\s*[1-9][0-9]*"),
         ("release concurrency can cancel a publication", r"cancel-in-progress:\s*false"),
         ("release concurrency is not keyed by tag", r"group:.*(?:inputs\.tag|RELEASE_TAG|ref_name)"),
         ("workflow cannot read Actions evidence", r"actions:\s*read"),
         ("workflow permissions are not read-only", r"permissions:\s*\n\s+actions:\s*read\s*\n\s+contents:\s*read\s*\n\s+pages:\s*read"),
-        ("GitHub prerelease is not a dependent job", r"\n\s*github_release:\s*\n.*?needs:\s*release"),
-        ("GitHub prerelease lacks job-scoped write authority", r"\n\s*github_release:\s*\n.*?permissions:\s*\n\s+contents:\s*write"),
+        ("GitHub release does not depend on registry and artifact evidence", r"\n\s*github_release:\s*\n.*?needs:\s*\[release, cli_artifact_set\]"),
+        ("GitHub release lacks job-scoped write authority", r"\n\s*github_release:\s*\n.*?permissions:\s*\n\s+contents:\s*write"),
         ("workflow cannot read Pages evidence", r"pages:\s*read"),
         ("Cargo secret does not use the repository convention", r"CARGO_REGISTRY_TOKEN:\s*\$\{\{\s*secrets\.CARGO_REGISTRY_TOKEN\s*\}\}"),
         ("empty Cargo secret is not refused", r"-z [\"']?\$CARGO_REGISTRY_TOKEN"),
         ("checkout does not select the release tag", r"ref:\s*\$\{\{\s*env\.RELEASE_TAG\s*\}\}"),
         ("checkout does not fetch tag history", r"fetch-depth:\s*0"),
-        ("release checkout persists a credential", r"Check out the exact tag(?:(?!Check out the reviewed release record).)*?persist-credentials:\s*false"),
+        ("release checkout persists a credential", r"Check out the exact tag\s*\n(?:(?!\n\s+- name:).)*?persist-credentials:\s*false"),
         ("workflow does not require the selected ref to be the release tag", r"GITHUB_REF_TYPE.*!= tag.*?GITHUB_REF.*refs/tags/\$RELEASE_TAG.*?GITHUB_REF_NAME.*\$RELEASE_TAG"),
         ("manual confirmation need not equal the selected tag", r"GITHUB_EVENT_NAME[^\n]*workflow_dispatch[^\n]*REQUESTED_RELEASE_TAG[^\n]*!=[^\n]*RELEASE_TAG"),
         ("workspace version is not matched to the tag", r"RELEASE_TAG.*v\$version"),
@@ -80,18 +80,44 @@ def workflow_problems(text: str) -> list[str]:
         ("GitHub read token is not scoped to the Pages step", r"Verify Pages deployment from the release commit\s*\n\s+env:\s*\n\s+GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}"),
         ("public guide is not probed", r"https://codewandler\.github\.io/sipx/docs/getting-started"),
         ("public API is not probed", r"https://codewandler\.github\.io/sipx/api/sipx_call/index\.html"),
-        ("GitHub prerelease checkout persists a credential", r"Check out the reviewed release record.*?persist-credentials:\s*false"),
-        ("GitHub write token is not scoped to the prerelease step", r"Create or verify the GitHub prerelease\s*\n\s+env:\s*\n\s+GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}"),
-        ("GitHub prerelease does not verify the existing tag", r"gh release create .*?--verify-tag"),
-        ("GitHub Release is not a prerelease", r"gh release create .*?--prerelease"),
-        ("GitHub prerelease does not consume reviewed notes", r"gh release create .*?--notes-file [\"']\$RELEASE_NOTES[\"']"),
-        ("resume does not verify the existing GitHub prerelease", r"gh release view .*?record\.get\([\"']prerelease[\"']\).*?reviewed notes differ"),
+        ("GitHub release checkout persists a credential", r"Check out the reviewed release record.*?persist-credentials:\s*false"),
+        ("GitHub write token is not scoped to the release step", r"Create or verify the GitHub release and assets\s*\n\s+env:\s*\n\s+GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}"),
+        ("GitHub release does not verify the existing tag", r"gh release create .*?--verify-tag"),
+        ("stable and prerelease kinds are not selected from the version", r"RELEASE_VERSION[\"']? == \*-\*.*?prerelease=true.*?release_flag=--prerelease"),
+        ("stable GitHub Release is not marked latest", r"release_flag=--latest"),
+        ("GitHub release does not consume reviewed notes", r"gh release create .*?--notes-file [\"']\$RELEASE_NOTES[\"']"),
+        ("existing GitHub release kind is not verified", r"record\.get\([\"']prerelease[\"']\) is not prerelease"),
+        ("resume does not verify the existing GitHub release", r"gh release view .*?record\.get\([\"']prerelease[\"']\).*?reviewed notes differ"),
+        ("release commit timestamp is not exported for deterministic artifacts", r"release_epoch=.*?git show -s --format=%ct.*?echo [\"']epoch=\$release_epoch"),
+        ("portable artifact matrix job is absent", r"\n\s*cli_artifacts:\s*\n.*?needs:\s*release"),
+        ("artifact matrix is not bounded", r"\n\s*cli_artifacts:\s*\n.*?timeout-minutes:\s*[1-9][0-9]*.*?fail-fast:\s*false"),
+        ("artifact source is not the validated release tag", r"Check out the immutable artifact source.*?ref:\s*\$\{\{\s*needs\.release\.outputs\.release_tag\s*\}\}.*?persist-credentials:\s*false"),
+        ("artifact toolchain is not selected from workspace rust-version", r"rust-version.*?RUSTUP_TOOLCHAIN=\$rust_version"),
+        ("artifact build does not use the locked no-feature target command", r"cargo build --locked --release -p sipx-cli --target [\"']\$TARGET[\"'] --no-default-features"),
+        ("portable device-audio compile check is absent", r"runner\.os == [\"']macOS[\"'] \|\| runner\.os == [\"']Windows[\"'].*?cargo check --locked -p sipx-cli --target [\"']\$TARGET[\"'] --all-targets --features device-audio"),
+        ("native artifact proof does not invoke the packager", r"release-artifacts\.py package.*?--binary [\"']\$BINARY[\"'].*?--source-date-epoch [\"']\$RELEASE_EPOCH[\"']"),
+        ("artifact aggregation does not require every matrix job", r"\n\s*cli_artifact_set:\s*\n.*?needs:\s*\[release, cli_artifacts\]"),
+        ("artifact aggregation does not invoke the exact-set validator", r"release-artifacts\.py aggregate.*?--input .*?--release-sha [\"']\$RELEASE_SHA[\"'].*?--source-date-epoch [\"']\$RELEASE_EPOCH[\"']"),
+        ("GitHub release does not download the verified asset set", r"Download the verified release asset set.*?name:\s*cli-release-assets"),
+        ("existing release assets are not byte-checked before upload", r"release-artifacts\.py compare.*?--allow-missing.*?gh release upload"),
+        ("completed release assets are not byte-checked", r"gh release download [\"']\$RELEASE_TAG[\"'] --dir [\"']\$verified[\"'].*?release-artifacts\.py compare.*?--actual [\"']\$verified[\"']"),
     )
     for label, pattern in checks:
         required(text, label, pattern, problems)
 
     if re.search(r"(?m)^\s*cargo\s+publish\b", text):
         problems.append("workflow calls cargo publish directly instead of the release helper")
+    for target, runner in (
+        ("x86_64-unknown-linux-musl", "ubuntu-24.04"),
+        ("aarch64-unknown-linux-musl", "ubuntu-24.04-arm"),
+        ("x86_64-apple-darwin", "macos-15-intel"),
+        ("aarch64-apple-darwin", "macos-15"),
+        ("x86_64-pc-windows-msvc", "windows-2025"),
+    ):
+        if len(re.findall(rf"target:\s*{re.escape(target)}\s*\n\s+runner:\s*{re.escape(runner)}", text)) != 1:
+            problems.append(f"artifact matrix does not contain exactly one {target} on {runner}")
+    if "--clobber" in text:
+        problems.append("release assets may be overwritten")
 
     if re.search(r"(?m)^  announce:\s*$", text):
         problems.append("workflow contains an announcement job")
@@ -119,7 +145,7 @@ def workflow_problems(text: str) -> list[str]:
         ("Publish dependency-ready frontiers", "publication"),
         ("Verify the exact registry consumer", "consumer proof"),
         ("Verify Pages deployment", "Pages proof"),
-        ("Create or verify the GitHub prerelease", "GitHub prerelease"),
+        ("Create or verify the GitHub release and assets", "GitHub release"),
     )
     positions = [(text.find(marker), label) for marker, label in ordered]
     if all(position >= 0 for position, _label in positions):
@@ -127,7 +153,7 @@ def workflow_problems(text: str) -> list[str]:
             position for position, _label in positions
         ):
             problems.append(
-                "locked rehearsal, publication, consumer, Pages and GitHub prerelease steps "
+                "locked rehearsal, publication, consumer, Pages and GitHub release steps "
                 "are out of order"
             )
 
@@ -291,6 +317,18 @@ def specification_problems(text: str) -> list[str]:
         r"Recovery tooling and\s+release bytes live in separate checkouts",
         problems,
     )
+    required(
+        text,
+        "specification does not distinguish stable and prerelease records",
+        r"prerelease suffix creates a prerelease; a\s+stable version creates a non-prerelease release",
+        problems,
+    )
+    required(
+        text,
+        "specification permits existing release assets to be replaced",
+        r"no existing\s+asset may be overwritten or deleted",
+        problems,
+    )
     return problems
 
 
@@ -326,8 +364,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"release workflow: {problem}", file=sys.stderr)
     if not problems:
         print(
-            "release workflow: approved tag and failed-run recovery, bounded registry, "
-            "Pages and resumable GitHub prerelease"
+            "release workflow: approved tag, bounded registry, portable artifacts, Pages, "
+            "resumable GitHub release and failed-run recovery"
         )
     return 1 if problems else 0
 

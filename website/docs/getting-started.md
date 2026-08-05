@@ -26,6 +26,40 @@ cargo install --git https://github.com/codewandler/sipx \
   --branch main --locked sipx-cli
 ```
 
+### Prebuilt stable binary
+
+Stable releases starting with `v1.0.0` also attach an exact native archive and SPDX bill of
+materials for each supported target:
+
+| Machine | Target and archive suffix |
+|---|---|
+| x86-64 Linux | `x86_64-unknown-linux-musl.tar.gz` |
+| Arm64 Linux | `aarch64-unknown-linux-musl.tar.gz` |
+| Intel macOS | `x86_64-apple-darwin.tar.gz` |
+| Apple silicon macOS | `aarch64-apple-darwin.tar.gz` |
+| x86-64 Windows | `x86_64-pc-windows-msvc.zip` |
+
+For example, install the static x86-64 Linux binary after verifying the published checksum:
+
+```bash
+VERSION=1.0.0
+TARGET=x86_64-unknown-linux-musl
+ARCHIVE="sipx-$VERSION-$TARGET.tar.gz"
+curl --fail --location --remote-name \
+  "https://github.com/codewandler/sipx/releases/download/v$VERSION/$ARCHIVE"
+curl --fail --location --remote-name \
+  "https://github.com/codewandler/sipx/releases/download/v$VERSION/SHA256SUMS"
+grep -F "  $ARCHIVE" SHA256SUMS | sha256sum --check
+tar -xzf "$ARCHIVE"
+install -m 755 "sipx-$VERSION-$TARGET/sipx" "$HOME/.local/bin/sipx"
+```
+
+Use the target from the table for another machine (`shasum -a 256 --check` supplies the macOS
+checksum command; Windows can compare `Get-FileHash -Algorithm SHA256` with `SHA256SUMS`). These
+portable executables deliberately contain no optional native features. Use the exact Cargo install
+above when you need `device-audio`, `opus` or `dtls`; the archive's `build-manifest.json` and SPDX
+sidecar record that distinction.
+
 Confirm which version was installed. This documentation build covers
 <!-- BEGIN generated:workspace-version -->1.0.0-beta.7<!-- END generated:workspace-version -->:
 

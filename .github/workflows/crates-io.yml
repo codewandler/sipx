@@ -1,4 +1,4 @@
-name: Publish crates.io beta
+name: Publish release
 
 on:
   push:
@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   release:
-    name: publish and verify prerelease
+    name: publish and verify release
     runs-on: ubuntu-latest
     timeout-minutes: 180
     environment:
@@ -31,6 +31,7 @@ jobs:
       release_tag: ${{ steps.release_facts.outputs.tag }}
       release_version: ${{ steps.release_facts.outputs.version }}
       release_sha: ${{ steps.release_facts.outputs.sha }}
+      release_epoch: ${{ steps.release_facts.outputs.epoch }}
       release_notes: ${{ steps.release_facts.outputs.notes }}
     env:
       RELEASE_TAG: ${{ github.ref_name }}
@@ -79,6 +80,7 @@ jobs:
             exit 1
           fi
           release_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          release_epoch="$(git show -s --format=%ct "$release_sha")"
           if [[ "$(git rev-parse HEAD)" != "$release_sha" ]]; then
             echo "checkout HEAD is not the commit named by $RELEASE_TAG" >&2
             exit 1
@@ -120,6 +122,7 @@ jobs:
             echo "tag=$RELEASE_TAG"
             echo "version=$version"
             echo "sha=$release_sha"
+            echo "epoch=$release_epoch"
             echo "notes=$notes"
           } >>"$GITHUB_OUTPUT"
 
@@ -223,9 +226,167 @@ jobs:
             --output /dev/null https://codewandler.github.io/sipx/api/sipx_call/index.html
           echo "Pages run $run_id job $deployment_job is bound to $RELEASE_SHA"
 
-  github_release:
-    name: publish or verify GitHub prerelease
+  cli_artifacts:
+    name: cli artifact (${{ matrix.target }})
     needs: release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            binary: target/x86_64-unknown-linux-musl/release/sipx
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            binary: target/aarch64-unknown-linux-musl/release/sipx
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            binary: target/x86_64-apple-darwin/release/sipx
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            binary: target/aarch64-apple-darwin/release/sipx
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            binary: target/x86_64-pc-windows-msvc/release/sipx.exe
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.release.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.release.outputs.release_version }}
+      RELEASE_SHA: ${{ needs.release.outputs.release_sha }}
+      RELEASE_EPOCH: ${{ needs.release.outputs.release_epoch }}
+      TARGET: ${{ matrix.target }}
+      BINARY: ${{ matrix.binary }}
+    steps:
+      - name: Check out the immutable artifact source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.release_tag }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate artifact inputs and select the release toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$RELEASE_SHA" ]]; then
+            echo "artifact checkout does not equal $RELEASE_SHA" >&2
+            exit 1
+          fi
+          python_command=python3
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            python_command=python
+          fi
+          version="$("$python_command" -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          rust_version="$("$python_command" -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["rust-version"])')"
+          if [[ "$version" != "$RELEASE_VERSION" || "$RELEASE_TAG" != "v$version" ]]; then
+            echo "artifact version is not bound to the release tag" >&2
+            exit 1
+          fi
+          if [[ "$(git show -s --format=%ct HEAD)" != "$RELEASE_EPOCH" ]]; then
+            echo "artifact epoch is not the release commit timestamp" >&2
+            exit 1
+          fi
+          echo "PYTHON=$python_command" >>"$GITHUB_ENV"
+          echo "RUSTUP_TOOLCHAIN=$rust_version" >>"$GITHUB_ENV"
+
+      - name: Install native artifact prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup target add "$TARGET" --toolchain "$RUSTUP_TOOLCHAIN"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+            linker_variable="CARGO_TARGET_$(printf '%s' "$TARGET" | tr '[:lower:]-' '[:upper:]_')_LINKER"
+            echo "$linker_variable=musl-gcc" >>"$GITHUB_ENV"
+            echo "CC=musl-gcc" >>"$GITHUB_ENV"
+          fi
+
+      - name: Build the no-optional-feature executable once
+        shell: bash
+        run: cargo build --locked --release -p sipx-cli --target "$TARGET" --no-default-features
+
+      - name: Compile-check the portable device-audio branch
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        shell: bash
+        run: cargo check --locked -p sipx-cli --target "$TARGET" --all-targets --features device-audio
+
+      - name: Prove and package the native artifact
+        shell: bash
+        run: |
+          "$PYTHON" scripts/release-artifacts.py package \
+            --binary "$BINARY" \
+            --out "$RUNNER_TEMP/sipx-artifact" \
+            --version "$RELEASE_VERSION" \
+            --target "$TARGET" \
+            --release-sha "$RELEASE_SHA" \
+            --source-date-epoch "$RELEASE_EPOCH"
+
+      - name: Preserve the target evidence for aggregation
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: ${{ runner.temp }}/sipx-artifact/*
+          if-no-files-found: error
+          retention-days: 7
+
+  cli_artifact_set:
+    name: aggregate portable cli artifacts
+    needs: [release, cli_artifacts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.release.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.release.outputs.release_version }}
+      RELEASE_SHA: ${{ needs.release.outputs.release_sha }}
+      RELEASE_EPOCH: ${{ needs.release.outputs.release_epoch }}
+    steps:
+      - name: Check out the immutable artifact validator
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.release_tag }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download all target evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: ${{ runner.temp }}/sipx-artifact-input
+          merge-multiple: true
+
+      - name: Validate and aggregate the exact target set
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$RELEASE_SHA" ]]; then
+            echo "artifact validator does not equal $RELEASE_SHA" >&2
+            exit 1
+          fi
+          python3 scripts/release-artifacts.py aggregate \
+            --input "$RUNNER_TEMP/sipx-artifact-input" \
+            --out "$RUNNER_TEMP/sipx-release-assets" \
+            --version "$RELEASE_VERSION" \
+            --release-sha "$RELEASE_SHA" \
+            --source-date-epoch "$RELEASE_EPOCH"
+
+      - name: Preserve the exact release asset set
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-release-assets
+          path: ${{ runner.temp }}/sipx-release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  github_release:
+    name: publish or verify GitHub release
+    needs: [release, cli_artifact_set]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -243,17 +404,33 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Create or verify the GitHub prerelease
+      - name: Download the verified release asset set
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-release-assets
+          path: ${{ runner.temp }}/sipx-release-assets
+
+      - name: Create or verify the GitHub release and assets
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+          expected="$RUNNER_TEMP/sipx-release-assets"
+          actual="$RUNNER_TEMP/sipx-existing-assets"
+          verified="$RUNNER_TEMP/sipx-verified-assets"
+          mkdir -p "$actual" "$verified"
+          prerelease=false
+          release_flag=--latest
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            prerelease=true
+            release_flag=--prerelease
+          fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             record="$RUNNER_TEMP/sipx-existing-release.json"
             gh api -H 'Accept: application/vnd.github+json' \
               "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$record"
-            python3 - "$record" "$RELEASE_NOTES" "$RELEASE_TAG" "$RELEASE_VERSION" <<'PY'
+            python3 - "$record" "$RELEASE_NOTES" "$RELEASE_TAG" "$RELEASE_VERSION" "$prerelease" <<'PY'
           import json
           import pathlib
           import sys
@@ -262,23 +439,46 @@ jobs:
           notes = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").strip()
           tag = sys.argv[3]
           version = sys.argv[4]
+          prerelease = sys.argv[5] == "true"
           problems = []
           if record.get("tag_name") != tag:
               problems.append("tag differs")
           if record.get("name") != f"sipx {version}":
               problems.append("title differs")
-          if record.get("draft") is not False or record.get("prerelease") is not True:
-              problems.append("release is not a published prerelease")
+          if record.get("draft") is not False or record.get("prerelease") is not prerelease:
+              problems.append("release kind differs")
           if str(record.get("body", "")).strip() != notes:
               problems.append("reviewed notes differ")
           if problems:
-              raise SystemExit("existing GitHub Release is not the reviewed prerelease: " + ", ".join(problems))
+              raise SystemExit("existing GitHub Release is not the reviewed release: " + ", ".join(problems))
           PY
+            if python3 - "$record" <<'PY'
+          import json
+          import pathlib
+          import sys
+          record = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          raise SystemExit(0 if record.get("assets") else 1)
+          PY
+            then
+              gh release download "$RELEASE_TAG" --dir "$actual"
+            fi
+            python3 scripts/release-artifacts.py compare \
+              --expected "$expected" --actual "$actual" --allow-missing
           else
             gh release create "$RELEASE_TAG" \
               --verify-tag \
               --target "$RELEASE_SHA" \
-              --prerelease \
+              "$release_flag" \
               --title "sipx $RELEASE_VERSION" \
               --notes-file "$RELEASE_NOTES"
           fi
+
+          for asset in "$expected"/*; do
+            name="$(basename "$asset")"
+            if [[ ! -e "$actual/$name" ]]; then
+              gh release upload "$RELEASE_TAG" "$asset"
+            fi
+          done
+          gh release download "$RELEASE_TAG" --dir "$verified"
+          python3 scripts/release-artifacts.py compare \
+            --expected "$expected" --actual "$verified"

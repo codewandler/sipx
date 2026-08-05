@@ -4,11 +4,11 @@
 
 ## 1. Scope
 
-This specification defines the repository-hosted orchestration for the current public beta
+This specification defines the repository-hosted orchestration for a public
 publication. It does not replace `scripts/release.py`: the helper remains the authority for package
 order, normalized bytes, registry visibility, partial-publication recovery and the exact consumer
 proof. The workflow supplies the approved environment, exact annotated tag, registry credential,
-bounded repetition, Pages evidence and one GitHub prerelease around that helper. The GitHub Release
+bounded repetition, Pages evidence and one GitHub Release around that helper. The GitHub Release
 is part of the release record, not a broader publicity campaign; the workflow MUST NOT post broader
 publicity to issues, pull requests, webhooks or other services.
 
@@ -74,7 +74,7 @@ push or Pages deployment, so ancestry is necessary but not sufficient for a veri
 | recovering | failed ordinary run for this tag whose gate and rehearsal passed and publication step failed | fixed controller reproduces every visible checksum, then advances at most one unchanged frontier per bounded invocation | protected job timeout and public-package count plus one invocations total |
 | distributed | every package visible | exact registry consumer and Opus-enabled installed CLI loopback pass | helper consumer and visibility bounds |
 | documented | distributed | successful `ci.yml` Pages deployment job whose `head_sha` equals the tag commit; public guide and API URLs answer | finite HTTP retries and job timeout |
-| released | documented | one non-draft GitHub prerelease for the exact tag and reviewed notes | one create, or exact verification of an existing release |
+| released | documented and portable artifacts aggregated | one non-draft GitHub Release for the exact tag, reviewed notes and byte-verified assets | one create, or exact verification of an existing release |
 
 The workflow MUST call `scripts/release.py --publish` rather than `cargo publish` directly. It MUST
 provide both the exact tag confirmation and the CI authorization `<tag>@<full commit SHA>` derived
@@ -92,7 +92,7 @@ release bytes live in separate checkouts. The helper receives distinct recovery 
 binding the workflow source SHA, exact tag and release SHA, failed run ID and current run identity.
 The ordinary tag-source authorization remains unchanged.
 
-## 5. Documentation and GitHub prerelease proof
+## 5. Documentation, artifacts and GitHub Release proof
 
 The successful Pages evidence MUST come from the push-triggered `ci.yml` run for `main` whose
 `head_sha` equals the peeled release tag commit, and that run's `deploy docs site` job MUST have
@@ -100,13 +100,15 @@ conclusion `success`. The workflow then probes both the public getting-started g
 generated `sipx-call` API index. A tag workflow or HTTP 200 by itself cannot establish the commit
 that supplied the page.
 
-Only after registry consumer and Pages proofs pass may the workflow create the GitHub Release. It
-MUST use the existing tag (`--verify-tag`), mark the release as a prerelease and take its body from
-`docs/releases/<version>.md`. A resume that finds the release already present MUST verify that it is
-non-draft, prerelease, names the same tag and has the reviewed body; it MUST NOT publish a second
-release or silently rewrite the first one. This repository-native prerelease is part of the beta
-cut. Broader publicity remains hypothetical and requires separate explicit authorization; the
-workflow MUST NOT post broader publicity.
+Only after registry consumer, Pages and the portable-artifact aggregation proofs pass may the
+workflow create the GitHub Release. It MUST use the existing tag (`--verify-tag`) and take its body
+from `docs/releases/<version>.md`. A version containing a prerelease suffix creates a prerelease; a
+stable version creates a non-prerelease release. A resume that finds the release already present
+MUST verify that it is non-draft, has the expected release kind, names the same tag and has the
+reviewed body. Existing asset bytes MUST be compared, missing assets MAY be added, and no existing
+asset may be overwritten or deleted. It MUST NOT publish a second release or silently rewrite the
+first one. Broader publicity remains hypothetical and requires separate explicit authorization;
+the workflow MUST NOT post broader publicity.
 
 ## 6. Static vectors
 
@@ -119,7 +121,7 @@ workflow MUST NOT post broader publicity.
 | `RWF-5` | call Cargo publication directly or omit exact helper tag/commit authorization | static check fails |
 | `RWF-6` | make frontier repetition unbounded or omit exact consumer proof | static check fails |
 | `RWF-7` | accept Pages without matching `head_sha`, deploy job and two probes | static check fails |
-| `RWF-8` | make the GitHub prerelease non-idempotent, unverified or inline-noted; or add broader posting | static check fails |
+| `RWF-8` | make the GitHub Release kind or asset set non-idempotent, unverified or inline-noted; or add broader posting | static check fails |
 | `RWF-9` | recovery omits protected environment, separate checkouts, failed-run step evidence, exact controller/tag/SHA binding, visible-byte proof or bounded frontier loop | static check fails |
 
 These are structural tests, not evidence that GitHub or crates.io accepted a write. Actual release

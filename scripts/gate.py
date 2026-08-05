@@ -120,7 +120,7 @@ def gate_steps(msrv: str) -> list[Step]:
         # registry connection; the exact clean release checkout runs the separate dry-run mode.
         Step("release rehearsal tests", "gate", ("python3", "scripts/test-release.py")),
         # A-12: the publication workflow is itself an authority boundary. Adversarial mutations
-        # hold its tag-selected dispatch, commit binding, finite frontier, GitHub prerelease order
+        # hold its tag-selected dispatch, commit binding, finite frontier, GitHub release order
         # and prohibition on broader publicity;
         # the structural check then holds the checked-in workflow to that contract.
         Step(
@@ -132,6 +132,14 @@ def gate_steps(msrv: str) -> list[Step]:
             "release workflow",
             "gate",
             ("./scripts/check-release-workflow.py", "--check"),
+        ),
+        # A-10/P-14: native builders are hosted per target, but deterministic archives, exact
+        # SPDX closure, static-linkage refusal, bounded call smoke and retry bytes are portable.
+        # Their adversarial fixtures run here so the tag workflow is not their first exercise.
+        Step(
+            "release artifact tests",
+            "gate",
+            ("python3", "scripts/test-release-artifacts.py"),
         ),
         # X-38: the surface checker decides which crates are on the reachable-from-a-call surface,
         # which makes its own bugs invisible — both the ones it had while being written reported

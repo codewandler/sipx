@@ -9,6 +9,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Release tags can produce portable, byte-verified CLI artifacts.** The protected workflow builds
+  native x86-64 and Arm64 musl Linux, Intel and Arm64 macOS, and x86-64 Windows executables with no
+  optional native features; each runs a bounded loopback call before deterministic packaging. The
+  exact release carries per-target SPDX documents and checksums, while a retry compares existing
+  asset bytes and never overwrites them.
+
 - **Calls expose an explicit, rate-converting linear PCM boundary and selectable mono L16.**
   Applications can play unsigned 8-bit or signed 16-bit mono PCM at a stated rate, capture at a
   caller-selected rate, and use the same bounded streaming resampler as WAV and device audio.

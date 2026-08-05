@@ -2,9 +2,9 @@
 id: P-14
 title: Ship portable CLI artifacts
 pillar: Phone
-status: backlog
+status: in-progress
 priority: 16
-design: docs/designs/demand.md
+design: docs/specs/release-artifacts.md
 epic: demand
 areas: [ci, sipx-cli]
 predicate:
@@ -37,7 +37,14 @@ Publish `sipx` binaries that run on the machines people have, without a runtime 
       reason so `gate.py --check` stays green.
 
 ## Progress
-- (not started)
+- 2026-08-05: selected with `A-10`; `docs/specs/release-artifacts.md` defines the exact five-target
+  archive matrix, static-musl evidence, feature disclosure, native loopback smoke proof, SPDX 2.3
+  documents, checksum aggregation and retry behavior before the build workflow is changed.
+- 2026-08-05: implemented the native matrix, deterministic archives, static ELF inspection,
+  target-filtered SPDX closure, exact-set aggregation and retry byte comparison. All 18 local
+  contract tests, the 33 workflow mutation tests, a real no-default-feature loopback call, the
+  release-workflow check, CI/gate drift check and public-site build pass. The story stays
+  in-progress until a tag run publishes and natively records all five artifacts.
 
 ## Notes
 - The single most-engaged issue in the surveyed CLI project is users hitting `GLIBC_2.29`/`2.32`/

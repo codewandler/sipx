@@ -173,9 +173,12 @@ jobs:
       - run: python3 scripts/test-release.py
       # A-12: mutate each workflow authority and evidence boundary, then hold the real workflow to
       # the same tag-selected, least-privilege, finite and commit-bound structure, including the
-      # resumable GitHub prerelease and prohibition on broader publicity. Neither check performs a write.
+      # resumable GitHub release and prohibition on broader publicity. Neither check performs a write.
       - run: python3 scripts/test-release-workflow.py
       - run: ./scripts/check-release-workflow.py --check
+      # A-10/P-14: matrix runners prove native execution. These portable fixtures hold the archive,
+      # SPDX, linkage-refusal, bounded-smoke and retry-byte logic without release authority.
+      - run: python3 scripts/test-release-artifacts.py
       # X-38: the surface checker's own suite. Both bugs it had while being written reported
       # nothing, which is indistinguishable from a clean tree — so it is tested on fabricated
       # workspaces whose claims the test wrote.

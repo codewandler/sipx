@@ -190,7 +190,7 @@ class DistributionMutations(unittest.TestCase):
         self.assertIn(rehearsal, WORKFLOW)
         mutated = WORKFLOW.replace(rehearsal, "", 1) + "\n" + rehearsal
         self.assertIn(
-            "locked rehearsal, publication, consumer, Pages and GitHub prerelease steps are out of order",
+            "locked rehearsal, publication, consumer, Pages and GitHub release steps are out of order",
             checker.workflow_problems(mutated),
         )
 
@@ -241,6 +241,55 @@ class EvidenceMutations(unittest.TestCase):
         )
 
 
+class ArtifactMutations(unittest.TestCase):
+    def assert_mutation(self, old: str, new: str, expected: str) -> None:
+        self.assertIn(old, WORKFLOW, f"fixture no longer contains {old!r}")
+        self.assertIn(expected, checker.workflow_problems(WORKFLOW.replace(old, new, 1)))
+
+    def test_every_native_target_and_runner_is_fixed(self) -> None:
+        self.assert_mutation(
+            "runner: ubuntu-24.04-arm",
+            "runner: ubuntu-24.04",
+            "artifact matrix does not contain exactly one aarch64-unknown-linux-musl on ubuntu-24.04-arm",
+        )
+        self.assert_mutation(
+            "target: x86_64-pc-windows-msvc",
+            "target: i686-pc-windows-msvc",
+            "artifact matrix does not contain exactly one x86_64-pc-windows-msvc on windows-2025",
+        )
+
+    def test_artifact_build_and_aggregation_are_exact(self) -> None:
+        self.assert_mutation(
+            'cargo build --locked --release -p sipx-cli --target "$TARGET" --no-default-features',
+            'cargo build --release -p sipx-cli --target "$TARGET"',
+            "artifact build does not use the locked no-feature target command",
+        )
+        self.assert_mutation(
+            "needs: [release, cli_artifacts]",
+            "needs: release",
+            "artifact aggregation does not require every matrix job",
+        )
+        self.assert_mutation(
+            "python3 scripts/release-artifacts.py aggregate",
+            "python3 scripts/release-artifacts.py summarize",
+            "artifact aggregation does not invoke the exact-set validator",
+        )
+
+    def test_stable_kind_and_asset_bytes_are_held(self) -> None:
+        self.assert_mutation(
+            "release_flag=--latest",
+            "release_flag=--prerelease",
+            "stable GitHub Release is not marked latest",
+        )
+        self.assert_mutation(
+            "--expected \"$expected\" --actual \"$actual\" --allow-missing",
+            "--expected \"$expected\" --actual \"$actual\"",
+            "existing release assets are not byte-checked before upload",
+        )
+        problems = checker.workflow_problems(WORKFLOW + "\n          gh release upload --clobber\n")
+        self.assertIn("release assets may be overwritten", problems)
+
+
 class PublicityBoundaryMutations(unittest.TestCase):
     def test_an_announcement_job_is_refused(self) -> None:
         mutated = WORKFLOW + "\n  announce:\n    runs-on: ubuntu-latest\n"
@@ -262,14 +311,14 @@ class PublicityBoundaryMutations(unittest.TestCase):
                     problems,
                 )
 
-    def test_the_github_prerelease_is_exact_and_resumable(self) -> None:
+    def test_the_github_release_is_exact_and_resumable(self) -> None:
         mutations = (
-            ("--verify-tag", "--generate-notes", "GitHub prerelease does not verify the existing tag"),
-            ("--prerelease", "--latest", "GitHub Release is not a prerelease"),
+            ("--verify-tag", "--generate-notes", "GitHub release does not verify the existing tag"),
+            ("--prerelease", "--draft", "stable and prerelease kinds are not selected from the version"),
             (
                 '--notes-file "$RELEASE_NOTES"',
                 '--notes "looks ready"',
-                "GitHub prerelease does not consume reviewed notes",
+                "GitHub release does not consume reviewed notes",
             ),
         )
         for old, new, expected in mutations:
@@ -295,6 +344,26 @@ class PublicityBoundaryMutations(unittest.TestCase):
         )
         self.assertIn(
             "specification does not confine the provenance denylist to the gate step",
+            checker.specification_problems(mutated),
+        )
+
+    def test_the_specification_holds_release_kind_and_asset_bytes(self) -> None:
+        mutated = SPEC_TEXT.replace(
+            "a\nstable version creates a non-prerelease release",
+            "every version creates a prerelease",
+            1,
+        )
+        self.assertIn(
+            "specification does not distinguish stable and prerelease records",
+            checker.specification_problems(mutated),
+        )
+        mutated = SPEC_TEXT.replace(
+            "no existing\nasset may be overwritten or deleted",
+            "existing assets may be overwritten",
+            1,
+        )
+        self.assertIn(
+            "specification permits existing release assets to be replaced",
             checker.specification_problems(mutated),
         )
 

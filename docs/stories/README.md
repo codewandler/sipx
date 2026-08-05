@@ -54,6 +54,8 @@ public demo.
 - [S-36 — Verify the reported call-control and registration traps](S-36-verify-the-reported-call-control-and-registration-traps.md) · Signalling · six field-reported failure modes · each becomes a passing test or a defect · cheap, high information
 - [M-43 — Carry linear PCM in and out without format assumptions](M-43-carry-linear-pcm-in-and-out-without-format-assumptions.md) · Media · four reported use cases resolve to one unopinionated PCM boundary · not an AI feature
 - [X-102 — Publish the peer endpoint load comparison](X-102-publish-the-peer-endpoint-load-comparison.md) · Build · compare endpoint responder capacity under the neutral profile; leave proxy workloads to sipx.clstr
+- [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
+- [P-14 — Ship portable CLI artifacts](P-14-ship-portable-cli-artifacts.md) · Phone · the surveyed stack's most-engaged issue is a glibc failure · Rust makes this a build-matrix problem
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -71,7 +73,6 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
-- [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
 - [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
 
 ### browser audio SDK
@@ -113,7 +114,6 @@ _Applications need to shape live call audio without forking the media runtime: o
 _sipx's backlog has been derived from RFCs, from our own review findings, and from what the design_
 - [M-44 — Negotiate and carry G.722](M-44-negotiate-and-carry-g722.md) · Media · the only codec with real demand that sipx lacks · static PT 9 with the RFC 3551 clock-rate trap
 - [M-45 — Hold incoming audio in a jitter buffer](M-45-hold-incoming-audio-in-a-jitter-buffer.md) · Media · two independent field reports of seconds of added delay · characterise the current buffer before changing it
-- [P-14 — Ship portable CLI artifacts](P-14-ship-portable-cli-artifacts.md) · Phone · the surveyed stack's most-engaged issue is a glibc failure · Rust makes this a build-matrix problem
 
 ### Depth
 - [X-67 — Split the call module along its seams](X-67-split-the-call-module-along-its-seams.md) · Build · call.rs is 6560 lines, ~6100 of them production · hold, transfer, session timers, re-INVITE and ICE restart in one file · follow-up
