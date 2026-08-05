@@ -10,8 +10,8 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.6` are published prereleases, and beta.7 is
-the authorized release candidate on `main`.** Beta.7 gives routing and forwarding consumers exact
+_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.7` are published prereleases, and beta.7 is
+current.** Beta.7 gives routing and forwarding consumers exact
 outgoing-INVITE cancellation, cleartext listener selection, typed privacy and identity fields, and
 lossless parser-owned URI editing. The retained load evidence covers the current endpoint direction
 only; no peer result or general ranking is claimed. Stable `1.0.0` remains a separate promotion and

@@ -21,11 +21,11 @@ test or CI job that carries every clause rather than against the mechanism under
 roadmap keeps both sections for the scoping arguments in them: [where M10
 stands](../roadmap.md#m10--reachable), [where M12 stands](../roadmap.md#m12--provable).
 
-The current published prerelease is **`1.0.0-beta.6`, not stable 1.0**. `A-36` is cutting the
-integrated post-beta.6 tree as the new immutable `1.0.0-beta.7` candidate; announcement predicate 6
-stays open until exact registry, CLI, Pages and GitHub release evidence agrees. The retained load
-evidence covers the current endpoint direction only, and beta.7 adds no new performance claim. The
-alpha-integrity table remains **7 of 7**.
+The current published prerelease is **`1.0.0-beta.7`, not stable 1.0**. `A-36` and the integrated
+post-beta.6 tree are published; exact registry, CLI, Pages and GitHub release evidence agrees, so all
+six announcement predicates are met. The retained load evidence covers the current endpoint
+direction only, and beta.7 adds no new performance claim. The alpha-integrity table remains **7 of
+7**.
 
 `A-15`, the other nine wave stories and the `M-38` epic exit are done. The wave delivers a
 fail-closed browser-audio profile, one nominated media component, an independent Opus proof and the
@@ -50,14 +50,6 @@ public demo.
 - [T-28 — Fall back to TCP when a request exceeds the path MTU](T-28-fall-back-to-tcp-when-a-request-exceeds-the-path-mtu.md) · Transport · RFC 3261 §18.1.1 · sipx currently refuses where the RFC says switch transport
 - [T-29 — Drain in-flight work on a graceful shutdown](T-29-drain-in-flight-work-on-a-graceful-shutdown.md) · Transport · restart without dropping calls · labelled critical and never delivered by the surveyed stack
 - [T-30 — Export signalling capture and media quality to a collector](T-30-export-signalling-capture-and-media-quality-to-a-collector.md) · Transport · the two observability asks people maintained private forks for · hooks, not a bundled exporter
-- [A-36 — Publish and verify 1.0.0-beta.7](A-36-publish-and-verify-beta7.md) · Application · next immutable beta from integrated main · exact registry, CLI, Pages and prerelease evidence
-- [T-34 — Cancel an outgoing INVITE transaction from a forwarding element](T-34-cancel-an-outgoing-invite-transaction.md) · Signalling · requested by sipx-clstr PX-12 — one public operation must cancel the exact outgoing INVITE branch
-- [T-35 — Bind only the selected cleartext transports](T-35-bind-only-the-selected-cleartext-transports.md) · Signalling · requested by sipx-clstr FC-1 — a TCP-only endpoint must not open an undeclared UDP socket
-- [S-44 — Expose lossless SIP URI user replacement](S-44-expose-lossless-uri-rewriting-primitives.md) · Signalling · downstream routing needs parser-owned, byte-exact SIP and SIPS user mutation
-- [S-45 — Type RFC 3325 asserted and preferred identity lists](S-45-type-rfc-3325-asserted-and-preferred-identity-lists.md) · Signalling · protocol-generic identity header grammar required by routing consumers
-- [S-46 — Type the Privacy header](S-46-type-the-privacy-header.md) · Signalling · RFC 3323 typed grammar needed by privacy and asserted-identity policy
-- [S-47 — Expose lossless nested URI editing](S-47-expose-lossless-nested-uri-editing.md) · Signalling · parser-owned request-line and address-list surgery for forwarding consumers
-- [S-48 — Expose lossless TEL URI subscriber editing](S-48-expose-lossless-tel-uri-subscriber-editing.md) · Signalling · public RFC 3966 split and parser-owned subscriber replacement for routing consumers
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-102 — Publish the peer endpoint load comparison](X-102-publish-the-peer-endpoint-load-comparison.md) · Build · compare endpoint responder capacity under the neutral profile; leave proxy workloads to sipx.clstr
@@ -194,6 +186,7 @@ _Typed understanding and policy-governed phone actions extending A-22's one deli
 - [A-22 — Bridge a call to an OpenAI agent](A-22-bridge-a-call-to-an-openai-agent.md) · Application · integrates A-19–A-21 — the bridge component, its host configuration, and the one-command product path
 - [A-24 — Publish and verify 1.0.0-beta.5](A-24-publish-and-verify-beta5.md) · Application · published immutable beta · exact registry, CLI, Pages and prerelease evidence recorded
 - [A-35 — Publish and verify 1.0.0-beta.6](A-35-publish-and-verify-beta6.md) · Application · published immutable beta · exact registry, CLI, Pages and prerelease evidence recorded
+- [A-36 — Publish and verify 1.0.0-beta.7](A-36-publish-and-verify-beta7.md) · Application · published immutable beta · exact registry, CLI, Pages and prerelease evidence recorded
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 gateway model · one live session crosses early and confirmed dialog state
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
@@ -298,6 +291,11 @@ _Typed understanding and policy-governed phone actions extending A-22's one deli
 - [S-40 — Surface application-owned dialog requests](S-40-surface-application-owned-dialog-requests.md) · Signalling · authenticated INFO, MESSAGE and admitted extension methods without bypassing dialog invariants
 - [S-42 — Report the address learned during registration](S-42-report-the-address-learned-during-registration.md) · Signalling · discovered by X-97 · preserve received/rport observation in the typed registration outcome
 - [S-43 — Serialize and restore dialog state](S-43-serialize-and-restore-dialog-state.md) · Signalling · discovered by X-97 · versioned sans-I/O snapshot without serializing sockets, tasks or secrets
+- [S-44 — Expose lossless SIP URI user replacement](S-44-expose-lossless-uri-rewriting-primitives.md) · Signalling · downstream routing needs parser-owned, byte-exact SIP and SIPS user mutation
+- [S-45 — Type RFC 3325 asserted and preferred identity lists](S-45-type-rfc-3325-asserted-and-preferred-identity-lists.md) · Signalling · protocol-generic identity header grammar required by routing consumers
+- [S-46 — Type the Privacy header](S-46-type-the-privacy-header.md) · Signalling · RFC 3323 typed grammar needed by privacy and asserted-identity policy
+- [S-47 — Expose lossless nested URI editing](S-47-expose-lossless-nested-uri-editing.md) · Signalling · parser-owned request-line and address-list surgery for forwarding consumers
+- [S-48 — Expose lossless TEL URI subscriber editing](S-48-expose-lossless-tel-uri-subscriber-editing.md) · Signalling · public RFC 3966 split and parser-owned subscriber replacement for routing consumers
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
@@ -325,6 +323,8 @@ _Typed understanding and policy-governed phone actions extending A-22's one deli
 - [T-27 — Reject invalid endpoint runtime configuration before binding](T-27-reject-invalid-endpoint-runtime-configuration-before-binding.md) · Signalling · R-06 and the WebSocket part of R-07 in the 2026-07-30 repository review — zero public capacities panic and zero keepalive terminates the task
 - [T-31 — Reload the TLS server identity without restarting](T-31-reload-the-tls-server-identity-without-restarting.md) · Transport · validate then atomically swap new-handshake identity · established connections survive
 - [T-32 — Expose bounded endpoint observation and policy hooks](T-32-expose-bounded-endpoint-observation-and-policy-hooks.md) · Transport · typed lifecycle seams · bounded observation · no arbitrary post-key message mutation
+- [T-34 — Cancel an outgoing INVITE transaction from a forwarding element](T-34-cancel-an-outgoing-invite-transaction.md) · Signalling · requested by sipx-clstr PX-12 — one public operation must cancel the exact outgoing INVITE branch
+- [T-35 — Bind only the selected cleartext transports](T-35-bind-only-the-selected-cleartext-transports.md) · Signalling · requested by sipx-clstr FC-1 — a TCP-only endpoint must not open an undeclared UDP socket
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core

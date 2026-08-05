@@ -2,7 +2,7 @@
 id: T-35
 title: Bind only the selected cleartext transports
 pillar: Signalling
-status: in-progress
+status: done
 priority: 2
 design: docs/designs/sip-transport.md
 epic: sip-transport
@@ -21,20 +21,20 @@ does not silently widen its network exposure to UDP.
 
 ## Acceptance
 
-- [ ] `Config` represents UDP-only, TCP-only and UDP+TCP explicitly. Each selection binds exactly
+- [x] `Config` represents UDP-only, TCP-only and UDP+TCP explicitly. Each selection binds exactly
       those listener kinds; an empty selection is a typed pre-bind configuration error unless the
       endpoint has another configured signalling listener.
-- [ ] UDP+TCP preserves today's same-address, same-port behavior, including the bounded retry when
+- [x] UDP+TCP preserves today's same-address, same-port behavior, including the bounded retry when
       port `0` chooses a UDP port whose TCP counterpart is occupied.
-- [ ] TCP-only with port `0` reports the TCP listener's chosen address and uses that port for `Via`
+- [x] TCP-only with port `0` reports the TCP listener's chosen address and uses that port for `Via`
       sent-by when no explicit advertised port was supplied. It creates no placeholder UDP socket.
-- [ ] Sending and receiving continue to work for every selected transport. Code that needs a UDP
+- [x] Sending and receiving continue to work for every selected transport. Code that needs a UDP
       socket handles its absence explicitly rather than routing TCP-only traffic through a dummy
       datagram path.
-- [ ] Failing-first test: `tcp_only_binds_no_udp_socket` requests TCP without UDP, connects to the
+- [x] Failing-first test: `tcp_only_binds_no_udp_socket` requests TCP without UDP, connects to the
       reported TCP address, and proves a UDP socket can simultaneously bind that same address.
       Companion tests pin UDP-only and the shared-port UDP+TCP case.
-- [ ] The transport spec's configuration and bind-state tables are updated before the driver, and
+- [x] The transport spec's configuration and bind-state tables are updated before the driver, and
       the full gate is green.
 
 ## Progress
@@ -51,6 +51,9 @@ does not silently widen its network exposure to UDP.
   listener tests are green. Integration's single full-gate invocation passed repository checks,
   workspace clippy and the complete workspace test suite, then stopped itself before `examples` at
   the disk floor. That infrastructure non-result was not rerun, so the story remains in progress.
+
+- 2026-08-05: the protected beta.7 workflow completed the full repository gate at the immutable
+  release tag. Every acceptance item is now satisfied and the story closes with that exact evidence.
 
 ## Notes
 

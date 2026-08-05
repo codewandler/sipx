@@ -2,7 +2,7 @@
 id: T-34
 title: Cancel an outgoing INVITE transaction from a forwarding element
 pillar: Signalling
-status: in-progress
+status: done
 priority: 1
 design: docs/designs/sip-transport.md
 epic: sip-transport
@@ -21,23 +21,23 @@ without reconstructing CANCEL or transaction association outside the kernel.
 
 ## Acceptance
 
-- [ ] The operation is anchored to the outgoing INVITE transaction created by `Handle::send`; a
+- [x] The operation is anchored to the outgoing INVITE transaction created by `Handle::send`; a
       caller cannot accidentally cancel a different branch or synthesize a second transaction key.
-- [ ] The CANCEL uses the INVITE's Request-URI, selected `Target`, top Via including its branch,
+- [x] The CANCEL uses the INVITE's Request-URI, selected `Target`, top Via including its branch,
       Call-ID, To, From and CSeq number, changing only the method where RFC 3261 §9.1 requires it.
-- [ ] Cancellation observes §9.1's provisional-response precondition: if requested before any
+- [x] Cancellation observes §9.1's provisional-response precondition: if requested before any
       provisional response, it waits for one before transmitting CANCEL; a final response that wins
       the race terminates cancellation without sending a late CANCEL.
-- [ ] The caller receives a typed result associated with that INVITE branch. Transport failure, a
+- [x] The caller receives a typed result associated with that INVITE branch. Transport failure, a
       final INVITE response that won the race and the CANCEL transaction's terminal outcome remain
       distinguishable without parsing logs.
-- [ ] Existing UA cancellation uses the same primitive. The private `sipx-call::send_cancel`
+- [x] Existing UA cancellation uses the same primitive. The private `sipx-call::send_cancel`
       builder is removed or reduced to call policy over the public transport operation; there is
       one RFC 3261 §9.1 construction path in the workspace.
-- [ ] Failing-first test: `a_forwarding_element_can_cancel_one_outgoing_invite_branch` requests
+- [x] Failing-first test: `a_forwarding_element_can_cancel_one_outgoing_invite_branch` requests
       cancellation before a loopback peer's `180`, proves no CANCEL precedes that `180`, and then
       verifies the original target, branch and §9.1 headers plus the returned branch identity.
-- [ ] The transport spec records the operation, state/race table and byte-level CANCEL vector before
+- [x] The transport spec records the operation, state/race table and byte-level CANCEL vector before
       implementation, and the full gate is green.
 
 ## Progress
@@ -53,6 +53,9 @@ without reconstructing CANCEL or transaction association outside the kernel.
   green. Integration's single full-gate invocation passed repository checks, workspace clippy and
   the complete workspace test suite, then stopped itself before `examples` at the disk floor. That
   infrastructure non-result was not rerun, so the story remains in progress.
+
+- 2026-08-05: the protected beta.7 workflow completed the full repository gate at the immutable
+  release tag. Every acceptance item is now satisfied and the story closes with that exact evidence.
 
 ## Notes
 

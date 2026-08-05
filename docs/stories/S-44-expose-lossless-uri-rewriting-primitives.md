@@ -2,7 +2,7 @@
 id: S-44
 title: Expose lossless SIP URI user replacement
 pillar: Signalling
-status: in-progress
+status: done
 priority: 3
 design: docs/specs/uri-rewriting.md
 epic: sip-core
@@ -21,15 +21,15 @@ changing any byte outside the parser-owned user span.
 
 ## Acceptance
 
-- [ ] A normative spec cites RFC 3261 §§19.1.1 and 25.1 and RFC 3986 §2.1, defines the public
+- [x] A normative spec cites RFC 3261 §§19.1.1 and 25.1 and RFC 3986 §2.1, defines the public
       byte-oriented API and records byte-level success, refusal and malformed-input vectors before
       code.
-- [ ] `Uri` can replace a SIP or SIPS user part while retaining its password, host, port, URI
+- [x] `Uri` can replace a SIP or SIPS user part while retaining its password, host, port, URI
       parameters and URI headers byte-for-byte; a successful mutation replaces only the
       parser-retained user span and invalidates the stale verbatim form.
-- [ ] Empty, malformed-percent and grammar-breaking replacement values return typed errors without
+- [x] Empty, malformed-percent and grammar-breaking replacement values return typed errors without
       partially mutating the URI, and opaque schemes are left byte-exactly untouched.
-- [ ] Public integration tests derive from every normative `UR-U` vector, and focused formatting,
+- [x] Public integration tests derive from every normative `UR-U` vector, and focused formatting,
       clippy, unit, feature-off and documentation checks pass.
 
 ## Progress
@@ -61,6 +61,9 @@ changing any byte outside the parser-owned user span.
 - 2026-08-05: Integration's single full-gate invocation passed repository checks, workspace clippy
   and the complete workspace test suite, then stopped itself before `examples` because the cold
   build exhausted the disk floor. It was an infrastructure non-result and was not rerun.
+
+- 2026-08-05: the protected beta.7 workflow completed the full repository gate at the immutable
+  release tag. Every acceptance item is now satisfied and the story closes with that exact evidence.
 
 ## Notes
 

@@ -2,7 +2,7 @@
 id: S-48
 title: Expose lossless TEL URI subscriber editing
 pillar: Signalling
-status: in-progress
+status: done
 priority: 3
 design: docs/specs/uri-rewriting.md
 epic: sip-core
@@ -21,15 +21,15 @@ Let protocol consumers inspect and replace a `tel:` telephone-subscriber without
 
 ## Acceptance
 
-- [ ] The shared normative spec cites RFC 3966 §§3–4, defines the public byte-oriented TEL APIs and
+- [x] The shared normative spec cites RFC 3966 §§3–4, defines the public byte-oriented TEL APIs and
       records byte-level success, refusal and malformed-input vectors before code.
-- [ ] A public typed view splits a `tel:` URI into its exact telephone-subscriber and optional raw
+- [x] A public typed view splits a `tel:` URI into its exact telephone-subscriber and optional raw
       parameter tail, preserving the distinction between no separator and an empty tail.
-- [ ] `Uri` can replace a validated RFC 3966 telephone-subscriber through its parser-retained span,
+- [x] `Uri` can replace a validated RFC 3966 telephone-subscriber through its parser-retained span,
       preserving mixed-case scheme spelling and the complete optional parameter tail byte-for-byte.
-- [ ] Global and local subscriber validation accepts only the RFC 3966 productions, returns a typed
+- [x] Global and local subscriber validation accepts only the RFC 3966 productions, returns a typed
       error atomically for invalid input, and leaves non-TEL schemes byte-exactly untouched.
-- [ ] Public integration tests derive from every normative `UR-T` vector, and focused formatting,
+- [x] Public integration tests derive from every normative `UR-T` vector, and focused formatting,
       clippy, unit, feature-off and documentation checks pass.
 
 ## Progress
@@ -53,6 +53,9 @@ Let protocol consumers inspect and replace a `tel:` telephone-subscriber without
 - 2026-08-05: Integration's single full-gate invocation passed repository checks, workspace clippy
   and the complete workspace test suite, then stopped itself before `examples` because the cold
   build exhausted the disk floor. It was an infrastructure non-result and was not rerun.
+
+- 2026-08-05: the protected beta.7 workflow completed the full repository gate at the immutable
+  release tag. Every acceptance item is now satisfied and the story closes with that exact evidence.
 
 ## Notes
 

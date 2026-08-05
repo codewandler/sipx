@@ -2,7 +2,7 @@
 id: S-47
 title: Expose lossless nested URI editing
 pillar: Signalling
-status: in-progress
+status: done
 priority: 3
 design: docs/specs/lossless-message-editing.md
 epic:
@@ -53,6 +53,9 @@ address-list value, without rebuilding or byte-searching the enclosing syntax.
 - 2026-08-05: Integration's single full-gate invocation passed repository checks, workspace clippy
   and the complete workspace test suite, then stopped itself before `examples` because the cold
   build exhausted the disk floor. It was an infrastructure non-result and was not rerun.
+
+- 2026-08-05: the protected beta.7 workflow completed the full repository gate at the immutable
+  release tag. Every acceptance item is now satisfied and the story closes with that exact evidence.
 
 ## Notes
 

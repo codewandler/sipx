@@ -37,9 +37,9 @@ does not turn RFC coverage into a weighted release score.
 | 3 | Browser-audio negotiation is complete and fail-closed | met | — |
 | 4 | One nominated component carries every browser-media protocol safely | met | — |
 | 5 | An independent browser endpoint carries Opus in both roles | met | — |
-| 6 | Exact registry, CLI, Pages and GitHub release evidence agrees | open | `A-36` |
+| 6 | Exact registry, CLI, Pages and GitHub release evidence agrees | met | — |
 
-**5 of 6 predicates met. All 6 are required; this is not a weighted score.** Integrity is derived from the alpha table above. Every other association lives in the blocking story's own `announcement:` frontmatter, so the report has no second list to drift. RFC coverage is intentionally absent from this gate: a smaller truthful surface is announceable and an overstated larger one is not. This informational threshold does not authorize publicity.
+**6 of 6 predicates met. All 6 are required; this is not a weighted score.** Integrity is derived from the alpha table above. Every other association lives in the blocking story's own `announcement:` frontmatter, so the report has no second list to drift. RFC coverage is intentionally absent from this gate: a smaller truthful surface is announceable and an overstated larger one is not. This informational threshold does not authorize publicity.
 
 ## RFC coverage, per layer
 
@@ -61,18 +61,18 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 | Pillar | Open stories |
 |---|---|
 | Media | 22 |
-| Application | 19 |
+| Application | 18 |
 | Build | 13 |
-| Signalling | 12 |
+| Signalling | 5 |
 | Transport | 5 |
 | Phone | 2 |
-| **total** | **73** |
+| **total** | **65** |
 
-230 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+238 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:c4ba319e4f8d81395302ce133207e621ae544e7658f07a855532ac3ac143ed04","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":27},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":68}} -->
+<!-- maturity-event-days: {"basis":"sha256:1af8aec758c449c6ee80d228d3526b6a80a08f0d957f289bb13d872df96f24af","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":68}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -85,7 +85,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-01 | 0 | 1 | +1 |
 | 2026-08-03 | 1 | 12 | +11 |
 | 2026-08-04 | 51 | 39 | -12 |
-| 2026-08-05 | 68 | 27 | -41 |
+| 2026-08-05 | 68 | 35 | -33 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 
