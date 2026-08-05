@@ -15,6 +15,7 @@ import pathlib
 import re
 import selectors
 import signal
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -415,8 +416,8 @@ def inspect_contents(
 
     # Workspace packaging makes Cargo stage its own temporary registry in dependency order. That
     # proves a dependent archive without requiring this prerelease version to exist on crates.io.
-    # The unpublished testkit is excluded, and path-only dev dependencies disappear during Cargo's
-    # normalization before any public archive is written.
+    # Path-only workspace fixture dependencies disappear during Cargo's normalization before any
+    # public archive is written, so package consumers do not inherit the repository's test graph.
     with tempfile.TemporaryDirectory(prefix="sipx-package-workspace-") as directory:
         target = pathlib.Path(directory)
         command = [
@@ -466,6 +467,166 @@ def inspect_contents(
                     )
                 )
     return problems
+
+
+def _extract_package_source(archive: pathlib.Path, destination: pathlib.Path) -> pathlib.Path:
+    """Extract one Cargo archive without trusting archive paths or links."""
+
+    with tarfile.open(archive, mode="r:gz") as bundle:
+        members = bundle.getmembers()
+        prefixes = {pathlib.PurePosixPath(member.name).parts[0] for member in members if member.name}
+        if len(prefixes) != 1:
+            raise ReleaseError(f"{archive.name}: package archive has no single source prefix")
+        prefix = next(iter(prefixes))
+        root = destination / prefix
+        for member in members:
+            path = pathlib.PurePosixPath(member.name)
+            if path.is_absolute() or not path.parts or path.parts[0] != prefix or ".." in path.parts:
+                raise ReleaseError(f"{archive.name}: package member escapes its source: {member.name}")
+            relative = pathlib.Path(*path.parts[1:])
+            target = root / relative
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                raise ReleaseError(
+                    f"{archive.name}: package member is not a regular file: {member.name}"
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = bundle.extractfile(member)
+            if source is None:
+                raise ReleaseError(f"{archive.name}: cannot read package member {member.name}")
+            with target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+        return root
+
+
+def local_package_consumer_manifest(
+    version: str, testkit_source: pathlib.Path, transport_source: pathlib.Path
+) -> str:
+    """A clean consumer of the exact locally staged package sources."""
+
+    testkit = json.dumps(str(testkit_source.resolve()))
+    transport = json.dumps(str(transport_source.resolve()))
+    return f"""[package]
+name = "sipx-local-package-example"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+sipx-testkit = {{ version = "={version}", path = {testkit} }}
+tokio = {{ version = "1", features = ["macros", "rt"] }}
+
+[patch.crates-io]
+sipx-transport = {{ version = "={version}", path = {transport} }}
+"""
+
+
+def local_package_lock_problems(lock: Mapping[str, object], version: str) -> list[str]:
+    """Prove the two package-set members came from staged paths, not the old registry release."""
+
+    records = [item for item in lock.get("package", []) if isinstance(item, dict)]
+    problems = []
+    for name in ("sipx-testkit", "sipx-transport"):
+        matches = [
+            item for item in records if item.get("name") == name and item.get("version") == version
+        ]
+        if len(matches) != 1:
+            problems.append(f"{name}: clean consumer did not resolve one exact {version} package")
+        elif matches[0].get("source") is not None:
+            problems.append(f"{name}: clean consumer resolved the registry instead of staged bytes")
+    return problems
+
+
+def verify_local_rtp_echo_package_set(
+    packages: Sequence[Package],
+    version: str,
+    *,
+    package_timeout: float,
+    consumer_timeout: float,
+    workspace_root: pathlib.Path = ROOT,
+) -> None:
+    """Package the dependency frontier together and compile its example as a clean consumer."""
+
+    by_name = {package.name: package for package in packages}
+    required = ("sipx-transport", "sipx-testkit")
+    missing = [name for name in required if name not in by_name or not by_name[name].public]
+    if missing:
+        raise ReleaseError("local RTP echo package set is not public: " + ", ".join(missing))
+
+    with tempfile.TemporaryDirectory(prefix="sipx-local-package-set-") as directory:
+        root = pathlib.Path(directory)
+        target = root / "package-target"
+        packaged = _bounded_run(
+            (
+                "cargo",
+                "package",
+                "--locked",
+                "--allow-dirty",
+                "--target-dir",
+                str(target),
+                "-p",
+                "sipx-transport",
+                "-p",
+                "sipx-testkit",
+            ),
+            cwd=workspace_root,
+            timeout=package_timeout,
+        )
+        if packaged.returncode != 0:
+            raise ReleaseError(
+                "dependency-ordered RTP echo package verification failed: "
+                + (packaged.stderr.strip() or f"status {packaged.returncode}")
+            )
+
+        staged = root / "staged"
+        sources = {}
+        for name in required:
+            archive = target / "package" / f"{name}-{version}.crate"
+            if not archive.is_file():
+                raise ReleaseError(f"{name}: Cargo did not create expected package {archive}")
+            sources[name] = _extract_package_source(archive, staged)
+
+        example = sources["sipx-testkit"] / "examples" / "rtp_echo.rs"
+        if not example.is_file():
+            raise ReleaseError("sipx-testkit package omits examples/rtp_echo.rs")
+        consumer = root / "consumer"
+        (consumer / "src").mkdir(parents=True)
+        (consumer / "Cargo.toml").write_text(
+            local_package_consumer_manifest(
+                version, sources["sipx-testkit"], sources["sipx-transport"]
+            ),
+            encoding="utf-8",
+        )
+        shutil.copyfile(example, consumer / "src" / "main.rs")
+        environment = consumer_environment(root / "cargo-home")
+        generated = _bounded_run(
+            ("cargo", "generate-lockfile"),
+            cwd=consumer,
+            timeout=consumer_timeout,
+            env=environment,
+        )
+        if generated.returncode != 0:
+            raise ReleaseError(
+                "local package-set consumer could not resolve: "
+                + (generated.stderr.strip() or f"status {generated.returncode}")
+            )
+        lock = tomllib.loads((consumer / "Cargo.lock").read_text(encoding="utf-8"))
+        lock_problems = local_package_lock_problems(lock, version)
+        if lock_problems:
+            raise ReleaseError("\n".join(lock_problems))
+        checked = _bounded_run(
+            ("cargo", "check", "--locked", "--all-targets"),
+            cwd=consumer,
+            timeout=consumer_timeout,
+            env=environment,
+        )
+        if checked.returncode != 0:
+            raise ReleaseError(
+                "exact staged RTP echo example failed in a clean consumer: "
+                + (checked.stderr.strip() or f"status {checked.returncode}")
+            )
 
 
 def _public_dependencies(package: Package, by_name: dict[str, Package]) -> set[str]:
@@ -1362,7 +1523,11 @@ def verify_registry_consumer(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--dry-run", action="store_true", help="run Cargo's locked publication rehearsal")
+    modes.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="verify the staged package pair, then run Cargo's locked publication rehearsal",
+    )
     modes.add_argument("--publish", action="store_true", help="publish one dependency-ready frontier")
     modes.add_argument(
         "--inspect-dirty-contents",
@@ -1373,6 +1538,11 @@ def _parser() -> argparse.ArgumentParser:
         "--verify-consumer",
         action="store_true",
         help="after publication, build exact registry crates, install the CLI and run loopback",
+    )
+    modes.add_argument(
+        "--verify-local-package-set",
+        action="store_true",
+        help="stage transport/testkit together and compile the packaged RTP echo example",
     )
     parser.add_argument(
         "--confirm-publish",
@@ -1428,6 +1598,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.inspect_dirty_contents
         else "verify-consumer"
         if args.verify_consumer
+        else "verify-local-package-set"
+        if args.verify_local_package_set
         else "check"
     )
     if args.confirm_publish is not None and mode != "publish":
@@ -1479,6 +1651,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             if problems:
                 raise ReleaseError("\n".join(f"- {problem}" for problem in problems))
             return 0
+        if mode == "verify-local-package-set":
+            if problems:
+                raise ReleaseError("\n".join(f"- {problem}" for problem in problems))
+            verify_local_rtp_echo_package_set(
+                packages,
+                version,
+                package_timeout=args.command_timeout_seconds,
+                consumer_timeout=args.consumer_timeout_seconds,
+                workspace_root=release_root,
+            )
+            print(
+                "exact staged sipx-transport/sipx-testkit packages and RTP echo example "
+                "passed the clean-consumer proof"
+            )
+            print("diagnostic only: local package-set proof does not claim registry visibility")
+            return 0
         dirty, tags, annotated_tags = _checkout(release_root)
         ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
         head_sha = (
@@ -1510,6 +1698,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         order = publication_order(packages)
         print(f"workspace {version}: {len(order)} public packages")
         print("dependency order: " + ", ".join(order))
+        if mode == "dry-run":
+            verify_local_rtp_echo_package_set(
+                packages,
+                version,
+                package_timeout=args.command_timeout_seconds,
+                consumer_timeout=args.consumer_timeout_seconds,
+                workspace_root=release_root,
+            )
+            print(
+                "exact staged sipx-transport/sipx-testkit packages and RTP echo example "
+                "passed the clean-consumer proof"
+            )
         if mode == "verify-consumer":
             visibility = poll_registry_visibility(
                 order,

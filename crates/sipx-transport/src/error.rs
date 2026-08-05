@@ -20,6 +20,9 @@ pub enum Error {
     /// The endpoint loop has stopped.
     #[error("the endpoint has shut down")]
     EndpointClosed,
+    /// An in-process endpoint was constructed without an entered Tokio runtime.
+    #[error("an entered Tokio runtime is required for the in-process endpoint")]
+    RuntimeUnavailable,
     /// The next hop asked this endpoint to reduce traffic and this request was not admitted.
     #[error("request rejected by overload control for {peer}")]
     Overloaded {

@@ -45,7 +45,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 rcgen.workspace = true
 sipx-sip.workspace = true
 hickory-resolver.workspace = true
-# Path-only so Cargo omits unpublished test support from the normalized registry manifest.
+# Path-only so Cargo omits workspace-only fixture support from the normalized registry manifest.
 sipx-testkit = { path = "../sipx-testkit" }
 # test-util gives the paused clock the timer-queue tests need: they assert on ordering and
 # cancellation, which would otherwise mean sleeping for real.

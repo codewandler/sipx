@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use sipx_sip::transaction::{Dispatch, Output, Timer, TransactionKey, TransactionLayer, TuEvent};
@@ -1230,6 +1230,264 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     tokio::spawn(driver.run());
 
     Ok((handle, incoming_rx))
+}
+
+/// One side of the hidden in-process construction seam.
+#[doc(hidden)]
+pub type InProcessEndpoint = (Handle, mpsc::Receiver<Incoming>);
+
+/// The two sides returned by the hidden in-process construction seam.
+#[doc(hidden)]
+pub type InProcessPair = (InProcessEndpoint, InProcessEndpoint);
+
+/// Build two endpoints joined by a bounded in-process signalling path.
+///
+/// This is a construction seam for `sipx-testkit`, not a second production transport. It drives
+/// the same public [`Handle`] contract as [`bind`] — including client response streams, server
+/// [`Incoming`] values, and direct 2xx ACK delivery — while opening no signalling socket. Media
+/// remains owned by the call layer and is deliberately outside this seam.
+///
+/// Hidden from the rendered API because downstream tests should use the higher-level testkit
+/// harness, whose call-scoped ownership prevents one exchange from observing another's events.
+/// Construction returns a typed error unless called inside an entered Tokio runtime.
+#[doc(hidden)]
+pub fn in_process_pair(capacity: usize) -> Result<InProcessPair> {
+    let runtime = tokio::runtime::Handle::try_current().map_err(|_| Error::RuntimeUnavailable)?;
+    let capacity = capacity.max(1);
+    let routes = Arc::new(Mutex::new(HashMap::<
+        (InProcessSide, TransactionKey),
+        ClientSink,
+    >::new()));
+    let left_addr = SocketAddr::from(([127, 0, 0, 1], 50_600));
+    let right_addr = SocketAddr::from(([127, 0, 0, 1], 50_601));
+    let (left, left_commands, left_incoming_tx, left_incoming_rx) =
+        in_process_handle(left_addr, capacity);
+    let (right, right_commands, right_incoming_tx, right_incoming_rx) =
+        in_process_handle(right_addr, capacity);
+
+    runtime.spawn(run_in_process(
+        InProcessSide::Left,
+        left_addr,
+        capacity,
+        left_commands,
+        right_incoming_tx,
+        Arc::clone(&routes),
+        Arc::clone(&left.shutdown),
+    ));
+    runtime.spawn(run_in_process(
+        InProcessSide::Right,
+        right_addr,
+        capacity,
+        right_commands,
+        left_incoming_tx,
+        routes,
+        Arc::clone(&right.shutdown),
+    ));
+
+    Ok(((left, left_incoming_rx), (right, right_incoming_rx)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum InProcessSide {
+    Left,
+    Right,
+}
+
+impl InProcessSide {
+    const fn peer(self) -> Self {
+        match self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+        }
+    }
+}
+
+type InProcessRoutes = Arc<Mutex<HashMap<(InProcessSide, TransactionKey), ClientSink>>>;
+
+fn insert_in_process_route(
+    routes: &InProcessRoutes,
+    capacity: usize,
+    owner: InProcessSide,
+    key: TransactionKey,
+    sink: ClientSink,
+    peer: SocketAddr,
+) -> Result<()> {
+    let mut routes = routes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    routes.retain(|_, client| !client.events.is_closed());
+    if routes.len() >= capacity {
+        return Err(Error::Overloaded { peer });
+    }
+    routes.insert((owner, key), sink);
+    Ok(())
+}
+
+fn in_process_response_events(
+    routes: &InProcessRoutes,
+    owner: InProcessSide,
+    key: TransactionKey,
+    final_response: bool,
+) -> Option<mpsc::Sender<TuEvent>> {
+    let mut routes = routes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if final_response {
+        routes.remove(&(owner, key)).map(|client| client.events)
+    } else {
+        routes
+            .get(&(owner, key))
+            .map(|client| client.events.clone())
+    }
+}
+
+fn clear_in_process_routes(routes: &InProcessRoutes) {
+    routes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+fn in_process_handle(
+    local_addr: SocketAddr,
+    capacity: usize,
+) -> (
+    Handle,
+    mpsc::Receiver<Command>,
+    mpsc::Sender<Incoming>,
+    mpsc::Receiver<Incoming>,
+) {
+    let (commands, command_rx) = mpsc::channel(capacity);
+    let incoming = mpsc::channel(capacity);
+    let shutdown = Arc::new(ShutdownState::default());
+    let sent_by = Arc::new(local_addr.ip().to_string());
+    let handle = Handle {
+        commands,
+        shutdown,
+        local_addr,
+        meters: Arc::new(Meters::default()),
+        #[cfg(feature = "tls")]
+        tls_addr: None,
+        #[cfg(feature = "ws")]
+        ws_addr: None,
+        #[cfg(feature = "wss")]
+        wss_addr: None,
+        #[cfg(feature = "quic")]
+        quic_addr: None,
+        #[cfg(feature = "ws")]
+        ws_sent_by: Arc::from(format!("in-process-{}", local_addr.port())),
+        advertise_overload: false,
+        sent_by,
+        sent_by_port: local_addr.port(),
+    };
+    (handle, command_rx, incoming.0, incoming.1)
+}
+
+async fn run_in_process(
+    side: InProcessSide,
+    local_addr: SocketAddr,
+    capacity: usize,
+    mut commands: mpsc::Receiver<Command>,
+    peer_incoming: mpsc::Sender<Incoming>,
+    routes: InProcessRoutes,
+    shutdown: Arc<ShutdownState>,
+) {
+    while let Some(command) = commands.recv().await {
+        match command {
+            Command::Request {
+                request,
+                target,
+                events,
+                failures,
+                reply,
+            } => {
+                let Some(client_key) = TransactionKey::from_sent_request(&request) else {
+                    let _ = reply.send(Err(Error::NoVia));
+                    continue;
+                };
+                let Some(server_key) = TransactionKey::from_request(&request) else {
+                    let _ = reply.send(Err(Error::NoVia));
+                    continue;
+                };
+                if let Err(error) = insert_in_process_route(
+                    &routes,
+                    capacity,
+                    side.peer(),
+                    server_key.clone(),
+                    ClientSink { events, failures },
+                    target.addr,
+                ) {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
+                let _ = reply.send(Ok(client_key));
+                if peer_incoming
+                    .send(Incoming {
+                        key: server_key,
+                        request: *request,
+                        source: local_addr,
+                        transport: target.transport,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Command::Respond {
+                key,
+                response,
+                sent,
+            } => {
+                let events =
+                    in_process_response_events(&routes, side, key, response.status.is_final());
+                let result = if let Some(events) = events {
+                    events
+                        .send(TuEvent::Response(response))
+                        .await
+                        .map_err(|_| Error::EndpointClosed)
+                } else {
+                    Err(Error::EndpointClosed)
+                };
+                let _ = sent.send(result);
+            }
+            Command::Direct {
+                request,
+                target,
+                sent,
+            } => {
+                let result = match TransactionKey::from_request(&request) {
+                    Some(key) => peer_incoming
+                        .send(Incoming {
+                            key,
+                            request: *request,
+                            source: local_addr,
+                            transport: target.transport,
+                        })
+                        .await
+                        .map_err(|_| Error::EndpointClosed),
+                    None => Err(Error::NoVia),
+                };
+                let _ = sent.send(result);
+            }
+            Command::Keepalive { answered, .. } => {
+                let _ = answered.send(Ok(None));
+            }
+            Command::WatchUnmatched(_) => {}
+            Command::Outstanding(answered) => {
+                let count = routes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .keys()
+                    .filter(|(owner, _)| *owner == side)
+                    .count();
+                let _ = answered.send(count);
+            }
+            Command::Shutdown => break,
+        }
+    }
+    clear_in_process_routes(&routes);
+    shutdown.complete();
 }
 
 /// Listen for TLS connections, handshaking each off the accept path.
@@ -3083,6 +3341,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use bytes::Bytes;
+    use sipx_sip::build::{RequestBuilder, ResponseBuilder};
+    use sipx_sip::{HeaderName, Host, HostName, Method, StatusCode, Uri};
     use tokio::net::TcpStream;
     #[cfg(any(feature = "tls", feature = "ws"))]
     use tokio::sync::Semaphore;
@@ -3093,6 +3354,74 @@ mod tests {
     use super::{Background, Driver, Message, ShutdownState, Target, TransportKind};
 
     const IDENTIFIER_SAMPLE_SIZE: u64 = 4096;
+
+    fn in_process_request(call_id: &'static [u8]) -> sipx_sip::Request {
+        let uri = Uri::sip(Host::Name(
+            HostName::new("callee.example").expect("valid host"),
+        ));
+        RequestBuilder::new(Method::Options, uri)
+            .header(HeaderName::To, Bytes::from_static(b"<sip:callee.example>"))
+            .expect("valid To")
+            .header(
+                HeaderName::From,
+                Bytes::from_static(b"<sip:caller.example>;tag=caller"),
+            )
+            .expect("valid From")
+            .header(HeaderName::CallId, Bytes::from_static(call_id))
+            .expect("valid Call-ID")
+            .cseq(1, &Method::Options)
+            .expect("valid CSeq")
+            .max_forwards(70)
+            .build()
+    }
+
+    #[tokio::test]
+    async fn in_process_routes_are_bounded_and_closed_consumers_release_capacity() {
+        let ((originating, _), (answering, mut incoming)) =
+            super::in_process_pair(1).expect("runtime is entered");
+        let target = Target::new(answering.local_addr(), TransportKind::Udp);
+        let first = originating
+            .send(in_process_request(b"first@example"), target.clone())
+            .await
+            .expect("first route is admitted");
+        let _ = incoming.recv().await.expect("first request arrives");
+
+        let refused = originating
+            .send(in_process_request(b"second@example"), target.clone())
+            .await
+            .expect_err("the one-slot route table is full");
+        assert!(matches!(refused, crate::Error::Overloaded { .. }));
+
+        drop(first);
+        originating
+            .send(in_process_request(b"third@example"), target)
+            .await
+            .expect("a closed response stream releases its route");
+    }
+
+    #[tokio::test]
+    async fn a_final_in_process_response_releases_its_route() {
+        let ((originating, _), (answering, mut incoming)) =
+            super::in_process_pair(1).expect("runtime is entered");
+        let target = Target::new(answering.local_addr(), TransportKind::Udp);
+        let mut responses = originating
+            .send(in_process_request(b"final@example"), target)
+            .await
+            .expect("route is admitted");
+        let invitation = incoming.recv().await.expect("request arrives");
+        assert_eq!(answering.outstanding().await.expect("route count"), 1);
+
+        let status = StatusCode::new(200).expect("valid final status");
+        let response = ResponseBuilder::to_request(&invitation.request, status, "OK")
+            .expect("response headers")
+            .build();
+        answering
+            .respond(&invitation.key, response)
+            .await
+            .expect("final response is delivered");
+        assert!(responses.next().await.is_some());
+        assert_eq!(answering.outstanding().await.expect("route count"), 0);
+    }
 
     fn bit_counts(values: impl IntoIterator<Item = u64>) -> [usize; 64] {
         let mut counts = [0; 64];

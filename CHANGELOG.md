@@ -7,6 +7,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A packaged RTP/PCMU echo fixture now makes a media boundary executable from a shell.**
+  `sipx-testkit::rtp_echo` owns one UDP socket and no background task, requires exact peer, packet
+  and runtime bounds, rejects malformed or foreign traffic with typed errors, and returns decoded
+  audio on a deterministic RTP sequence/timestamp timeline. Its compiled example and public guide
+  keep the scope explicit: a finite test peer, not call signalling, acoustic-echo cancellation, a
+  production reflector or a load service. The pre-publication dry-run also stages the testkit and
+  transport archives together and compiles this exact example in an isolated consumer before any
+  release may proceed.
+
+- **Downstream applications can place and answer SIP signalling under deterministic virtual time.**
+  The newly published `sipx-testkit` exposes a supported socket-free `CallHarness` over its seeded
+  in-process link, with a compiled public example and guide. Library crates remain silent unless
+  the embedding host installs a tracing subscriber, and the public logging reference fixes the
+  level policy so per-message signalling detail never enters ordinary `info` output.
+
 ## [1.0.0-beta.4] — 2026-08-04
 
 This prerelease ships the beta.4 feature-and-security wave: explicit non-ICE deployment

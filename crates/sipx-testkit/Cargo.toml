@@ -1,6 +1,6 @@
 [package]
 name = "sipx-testkit"
-description = "Test harnesses for sipx: loopback transports, RFC 4475 torture corpus, interop fixtures"
+description = "Deterministic SIP and RTP tests with bounded peers, virtual time, and RFC corpora"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,25 +9,26 @@ repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
-publish = false
 
 [dependencies]
 sipx-sip.workspace = true
+sipx-call.workspace = true
+sipx-audio.workspace = true
+sipx-rtp.workspace = true
 # The loopback link's tests drive the transaction machines against the shared timer queue, which
 # lives in the transport crate — the point of `X-14` being that both take `now` as an argument.
 sipx-transport.workspace = true
 # Not a dev-dependency: the fixtures this crate *is* are what other crates' tests depend on.
 rcgen.workspace = true
 bytes.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
-tokio-util.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
+thiserror.workspace = true
 
 [dev-dependencies]
 # `test-util` gives the paused clock the pacing test needs: it asserts on *when* calls start,
 # which would otherwise mean sleeping for real.
 tokio = { workspace = true, features = ["full", "test-util"] }
+tracing.workspace = true
 
 [lints]
 workspace = true

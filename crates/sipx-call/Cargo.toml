@@ -40,7 +40,7 @@ base64.workspace = true
 serde_json.workspace = true
 sipx-rtp.workspace = true
 bytes.workspace = true
-# Path-only so Cargo omits unpublished test support from the normalized registry manifest.
+# Path-only so Cargo omits workspace-only fixture support from the normalized registry manifest.
 sipx-testkit = { path = "../sipx-testkit" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 pretty_assertions.workspace = true

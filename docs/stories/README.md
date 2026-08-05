@@ -52,6 +52,11 @@ _A long-running endpoint has two operational seams that currently require replac
 - [T-31 — Reload the TLS server identity without restarting](T-31-reload-the-tls-server-identity-without-restarting.md) · Transport · validate then atomically swap new-handshake identity · established connections survive
 - [T-32 — Expose bounded endpoint observation and policy hooks](T-32-expose-bounded-endpoint-observation-and-policy-hooks.md) · Transport · typed lifecycle seams · bounded observation · no arbitrary post-key message mutation
 
+### supported test surfaces
+_The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
+- [X-75 — Be quiet by default and easy to test against](X-75-be-quiet-by-default-and-easy-to-test-against.md) · Build · recurring complaint against the surveyed stack · a library that spams logs and cannot be tested against
+- [M-53 — Ship a runnable RTP echo example](M-53-ship-a-runnable-rtp-echo-example.md) · Media · discovered by X-97 · exercise the public RTP receive/send seam without inventing a second media stack
+
 ## Next (ready — take the top one unless the user named a story)
 
 ### application-owned dialog extensions
@@ -62,10 +67,6 @@ _Calls already specialize the methods whose semantics the stack owns: BYE, re-IN
 _sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.rs`: a subscription_
 - [S-35 — Accept an inbound subscription from a socket](S-35-accept-an-inbound-subscription-from-a-socket.md) · Signalling · RFC 6665 notifier is implemented and unreachable · nothing in the workspace receives a SUBSCRIBE · unblocks S-24 · follow-up
 - [S-37 — Specify endpoint event-client behavior](S-37-specify-endpoint-event-client-behavior.md) · Signalling · spec before code · generic RFC 6665 client contract consumed by S-24
-
-### supported test surfaces
-_The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
-- [X-75 — Be quiet by default and easy to test against](X-75-be-quiet-by-default-and-easy-to-test-against.md) · Build · recurring complaint against the surveyed stack · a library that spams logs and cannot be tested against
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first

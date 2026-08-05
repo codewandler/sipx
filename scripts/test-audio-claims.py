@@ -148,7 +148,7 @@ class TheMembershipRule(unittest.TestCase):
         self.assertIn("sipx-app", problems[0])
 
     def test_a_table_row_for_a_crate_that_does_not_publish_is_reported(self):
-        """`README.md` listed `sipx-testkit`, which is `publish = false`."""
+        """A table cannot advertise a crate excluded by package metadata."""
         problems = guard.membership_problems(
             {ROOT / "README.md": {"sipx-sip": "core", "sipx-testkit": "harnesses"}},
             ["sipx-sip"],

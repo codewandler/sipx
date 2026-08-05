@@ -2480,12 +2480,14 @@ version = "1.0.0-beta.4"
 dependencies = [
  "bytes",
  "rcgen",
+ "sipx-audio",
+ "sipx-call",
+ "sipx-rtp",
  "sipx-sip",
  "sipx-transport",
+ "thiserror 2.0.19",
  "tokio",
- "tokio-util",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
