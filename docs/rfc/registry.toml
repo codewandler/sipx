@@ -43,6 +43,7 @@ headers = ["Via", "From", "To", "CallId", "CSeq", "Contact", "MaxForwards", "Rou
 methods = ["INVITE", "ACK", "BYE", "CANCEL", "REGISTER", "OPTIONS"]
 evidence = [
   "crates/sipx-sip/src/parser.rs",
+  "crates/sipx-sip/src/uri.rs",
   "crates/sipx-sip/src/transaction/mod.rs",
   "crates/sipx-call/src/dispatch.rs",
   "crates/sipx-call/src/snapshot.rs",
@@ -53,7 +54,7 @@ evidence = [
   "crates/sipx-call/src/signalling.rs",
   "crates/sipx-call/tests/signalling.rs",
 ]
-note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2). A registering UA retains the top response Via's received/rport pair as a typed, non-authoritative observation; missing or invalid observation data does not alter the successful binding. A confirmed quiescent dialog's §§12.1–12.2 state can be captured in a bounded versioned snapshot and attached to explicit fresh drivers: identifier orientation, route order, refreshed target and independent sequence numbers survive, while transactions, sockets, tasks, clocks, credentials and media keys do not. The bounded signalling responder sends final INVITE responses, validates ACK and remote sequence ordering, accepts or originates BYE, retransmits its final response through Timer H, and joins owned timer work before release."
+note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. Existing SIP/SIPS URI user parts can be replaced through the structured grammar with typed, atomic validation; on parsed URIs only the parser-retained user span changes and every other wire byte remains exact. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2). A registering UA retains the top response Via's received/rport pair as a typed, non-authoritative observation; missing or invalid observation data does not alter the successful binding. A confirmed quiescent dialog's §§12.1–12.2 state can be captured in a bounded versioned snapshot and attached to explicit fresh drivers: identifier orientation, route order, refreshed target and independent sequence numbers survive, while transactions, sockets, tasks, clocks, credentials and media keys do not. The bounded signalling responder sends final INVITE responses, validates ACK and remote sequence ordering, accepts or originates BYE, retransmits its final response through Timer H, and joins owned timer work before release."
 
 [[rfc]]
 number = 4475
@@ -91,7 +92,8 @@ title = "The tel URI for Telephone Numbers"
 layer = "wire"
 status = "syntax"
 evidence = ["crates/sipx-sip/src/uri.rs"]
-note = "Represented and round-tripped. Nothing normalises or routes on a tel URI."
+spec = "docs/specs/uri-rewriting.md"
+note = "Represented, round-tripped and exposed as an exact borrowed telephone-subscriber/parameter-tail view. Nothing normalises or routes on a tel URI."
 
 [[rfc]]
 number = 2606
@@ -407,6 +409,35 @@ status = "syntax"
 headers = ["AcceptContact", "RejectContact", "RequestDisposition"]
 evidence = ["crates/sipx-sip/src/name.rs"]
 note = "The headers parse and round-trip. Nothing acts on a preference."
+
+[[rfc]]
+number = 3323
+title = "A Privacy Mechanism for the Session Initiation Protocol (SIP)"
+layer = "core"
+status = "syntax"
+headers = ["Privacy"]
+spec = "docs/specs/sip-privacy.md"
+evidence = [
+  "crates/sipx-sip/src/headers/privacy.rs",
+  "crates/sipx-sip/tests/privacy_header.rs",
+]
+note = "Privacy is a typed comma-delimited list under verified RFC 3323 erratum 5184, with checked construction and deterministic serialization. Comma-joined and repeated rows form one validated list. The seven currently registered tokens are explicit variants, later extension tokens retain their spelling, and malformed tokens, message-wide duplicates, none combined with another value, or misplaced critical return typed errors. This syntax claim does not provide RFC 3323's privacy-service behavior; the narrower RFC 7044 history policy is tracked in that RFC's own row."
+
+[[rfc]]
+number = 3325
+title = "Private Extensions to the Session Initiation Protocol (SIP) for Asserted Identity within Trusted Networks"
+layer = "core"
+status = "syntax"
+headers = ["PAssertedIdentity", "PPreferredIdentity", "Privacy"]
+evidence = [
+  "crates/sipx-sip/src/headers/identity.rs",
+  "crates/sipx-sip/tests/asserted_identity.rs",
+  "crates/sipx-sip/src/headers/privacy.rs",
+  "crates/sipx-sip/tests/privacy_header.rs",
+  "docs/specs/sip-privacy.md",
+]
+spec = "docs/specs/sip-asserted-identity.md"
+note = "P-Asserted-Identity and P-Preferred-Identity are recognized typed address lists. Decoding enforces the one-or-two value rule and SIP/SIPS-plus-tel pairing across comma-joined and repeated rows; checked construction preserves the same invariants. RFC 3325's id privacy token is an explicit typed Privacy value. Trust-domain assertion, authorization, forwarding and privacy-service behavior remain application policy."
 
 [[rfc]]
 number = 3326

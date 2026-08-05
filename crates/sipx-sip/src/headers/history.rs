@@ -502,7 +502,7 @@ impl HistoryInfo {
         &mut self,
         headers: &crate::message::Headers,
     ) -> Result<(), HeaderError> {
-        self.apply_privacy(message_requests_history_privacy(headers))
+        self.apply_privacy(message_requests_history_privacy(headers)?)
     }
 
     /// Serialize the complete comma-separated list.
@@ -537,19 +537,21 @@ pub(crate) fn for_response(
         }
         HistoryInfo::initial(request.uri.clone())
     };
-    let message_privacy = message_requests_history_privacy(&request.headers);
+    let message_privacy = message_requests_history_privacy(&request.headers).ok()?;
     history.apply_privacy(message_privacy).ok()?;
     Some(history.to_bytes())
 }
 
-fn message_requests_history_privacy(headers: &crate::message::Headers) -> bool {
-    headers.get_all(&HeaderName::Privacy).any(|header| {
-        let value = header.value();
-        value.split(|&b| b == b';').any(|token| {
-            let token = trim(token);
-            token.eq_ignore_ascii_case(b"history") || token.eq_ignore_ascii_case(b"header")
-        })
-    })
+fn message_requests_history_privacy(
+    headers: &crate::message::Headers,
+) -> Result<bool, HeaderError> {
+    let mut requested = false;
+    for privacy in headers.typed_all::<crate::headers::Privacy>() {
+        let privacy = privacy?;
+        requested |= privacy.is(&crate::headers::PrivacyValue::History)
+            || privacy.is(&crate::headers::PrivacyValue::Header);
+    }
+    Ok(requested)
 }
 
 impl TypedHeader for HistoryInfo {

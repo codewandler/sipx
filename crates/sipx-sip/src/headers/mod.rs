@@ -24,7 +24,9 @@
 pub mod address;
 pub(crate) mod grammar;
 pub mod history;
+pub mod identity;
 pub mod misc;
+pub mod privacy;
 pub mod via;
 
 pub use address::{Address, Contact, ContactValue, From, RecordRoute, Route, To};
@@ -32,10 +34,12 @@ pub use grammar::HeaderParam;
 pub use history::{
     HistoryEntry, HistoryIndex, HistoryInfo, Reason, ReasonValue, TargetChange, TargetChangeKind,
 };
+pub use identity::{PAssertedIdentity, PPreferredIdentity};
 pub use misc::{
     Allow, CSeq, CallId, ContentLength, ContentType, Date, Expires, MaxForwards, ProxyRequire,
     Require, Supported, TokenList, Unsupported,
 };
+pub use privacy::{Privacy, PrivacyList, PrivacyValue};
 pub use via::{
     BRANCH_MAGIC_COOKIE, OcParameter, OverloadAlgorithm, OverloadSequence, Via, ViaOverload,
     first_hop_end,

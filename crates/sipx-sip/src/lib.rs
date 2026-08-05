@@ -61,8 +61,9 @@ pub mod validate;
 pub use build::{RequestBuilder, ResponseBuilder};
 pub use error::{BuildError, HeaderError, UriError};
 pub use headers::{
-    Address, CSeq, CallId, HistoryEntry, HistoryIndex, HistoryInfo, Reason, ReasonValue,
-    TargetChange, TargetChangeKind, Via,
+    Address, CSeq, CallId, HistoryEntry, HistoryIndex, HistoryInfo, PAssertedIdentity,
+    PPreferredIdentity, Privacy, PrivacyList, PrivacyValue, Reason, ReasonValue, TargetChange,
+    TargetChangeKind, Via,
 };
 pub use message::{
     Header, Headers, Message, Method, Request, Response, StatusCode, TypedHeader, Version,
@@ -74,5 +75,5 @@ pub use transaction::{
     ClientTransaction, Output, Reliability, ServerTransaction, Timer, Timers, TransactionKey,
     TransactionLayer, TuEvent,
 };
-pub use uri::{Host, HostName, Scheme, Uri, UriTransport, UriTransportError};
+pub use uri::{Host, HostName, Scheme, TelUriParts, Uri, UriTransport, UriTransportError};
 pub use validate::{Finding, validate, validate_request, validate_response};
