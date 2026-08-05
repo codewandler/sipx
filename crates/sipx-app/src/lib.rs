@@ -64,3 +64,4 @@ pub mod harness;
 pub mod host;
 pub mod session;
 pub mod webhook;
+pub mod wss;
