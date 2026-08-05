@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use sipx_sip::transaction::{Dispatch, Output, Timer, TransactionKey, TransactionLayer, TuEvent};
@@ -1031,6 +1031,215 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     tokio::spawn(driver.run());
 
     Ok((handle, incoming_rx))
+}
+
+/// Build two endpoints joined by a bounded in-process signalling path.
+///
+/// This is a construction seam for `sipx-testkit`, not a second production transport. It drives
+/// the same public [`Handle`] contract as [`bind`] — including client response streams, server
+/// [`Incoming`] values, and direct 2xx ACK delivery — while opening no signalling socket. Media
+/// remains owned by the call layer and is deliberately outside this seam.
+///
+/// Hidden from the rendered API because downstream tests should use the higher-level testkit
+/// harness, whose call-scoped ownership prevents one exchange from observing another's events.
+#[doc(hidden)]
+#[must_use]
+pub fn in_process_pair(
+    capacity: usize,
+) -> (
+    (Handle, mpsc::Receiver<Incoming>),
+    (Handle, mpsc::Receiver<Incoming>),
+) {
+    let capacity = capacity.max(1);
+    let routes = Arc::new(Mutex::new(HashMap::<
+        (InProcessSide, TransactionKey),
+        ClientSink,
+    >::new()));
+    let left_addr = SocketAddr::from(([127, 0, 0, 1], 50_600));
+    let right_addr = SocketAddr::from(([127, 0, 0, 1], 50_601));
+    let (left, left_commands, left_incoming_tx, left_incoming_rx) =
+        in_process_handle(left_addr, capacity);
+    let (right, right_commands, right_incoming_tx, right_incoming_rx) =
+        in_process_handle(right_addr, capacity);
+
+    tokio::spawn(run_in_process(
+        InProcessSide::Left,
+        left_addr,
+        left_commands,
+        right_incoming_tx,
+        Arc::clone(&routes),
+        Arc::clone(&left.shutdown),
+    ));
+    tokio::spawn(run_in_process(
+        InProcessSide::Right,
+        right_addr,
+        right_commands,
+        left_incoming_tx,
+        routes,
+        Arc::clone(&right.shutdown),
+    ));
+
+    ((left, left_incoming_rx), (right, right_incoming_rx))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum InProcessSide {
+    Left,
+    Right,
+}
+
+impl InProcessSide {
+    const fn peer(self) -> Self {
+        match self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+        }
+    }
+}
+
+type InProcessRoutes = Arc<Mutex<HashMap<(InProcessSide, TransactionKey), ClientSink>>>;
+
+fn in_process_handle(
+    local_addr: SocketAddr,
+    capacity: usize,
+) -> (
+    Handle,
+    mpsc::Receiver<Command>,
+    mpsc::Sender<Incoming>,
+    mpsc::Receiver<Incoming>,
+) {
+    let (commands, command_rx) = mpsc::channel(capacity);
+    let incoming = mpsc::channel(capacity);
+    let shutdown = Arc::new(ShutdownState::default());
+    let sent_by = Arc::new(local_addr.ip().to_string());
+    let handle = Handle {
+        commands,
+        shutdown,
+        local_addr,
+        meters: Arc::new(Meters::default()),
+        #[cfg(feature = "tls")]
+        tls_addr: None,
+        #[cfg(feature = "ws")]
+        ws_addr: None,
+        #[cfg(feature = "wss")]
+        wss_addr: None,
+        #[cfg(feature = "quic")]
+        quic_addr: None,
+        #[cfg(feature = "ws")]
+        ws_sent_by: Arc::from(format!("in-process-{}", local_addr.port())),
+        advertise_overload: false,
+        sent_by,
+        sent_by_port: local_addr.port(),
+    };
+    (handle, command_rx, incoming.0, incoming.1)
+}
+
+async fn run_in_process(
+    side: InProcessSide,
+    local_addr: SocketAddr,
+    mut commands: mpsc::Receiver<Command>,
+    peer_incoming: mpsc::Sender<Incoming>,
+    routes: InProcessRoutes,
+    shutdown: Arc<ShutdownState>,
+) {
+    while let Some(command) = commands.recv().await {
+        match command {
+            Command::Request {
+                request,
+                target,
+                events,
+                failures,
+                reply,
+            } => {
+                let Some(client_key) = TransactionKey::from_sent_request(&request) else {
+                    let _ = reply.send(Err(Error::NoVia));
+                    continue;
+                };
+                let Some(server_key) = TransactionKey::from_request(&request) else {
+                    let _ = reply.send(Err(Error::NoVia));
+                    continue;
+                };
+                routes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        (side.peer(), server_key.clone()),
+                        ClientSink { events, failures },
+                    );
+                let _ = reply.send(Ok(client_key));
+                if peer_incoming
+                    .send(Incoming {
+                        key: server_key,
+                        request: *request,
+                        source: local_addr,
+                        transport: target.transport,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Command::Respond {
+                key,
+                response,
+                sent,
+            } => {
+                let events = routes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&(side, key))
+                    .map(|client| client.events.clone());
+                let result = if let Some(events) = events {
+                    events
+                        .send(TuEvent::Response(response))
+                        .await
+                        .map_err(|_| Error::EndpointClosed)
+                } else {
+                    Err(Error::EndpointClosed)
+                };
+                let _ = sent.send(result);
+            }
+            Command::Direct {
+                request,
+                target,
+                sent,
+            } => {
+                let result = match TransactionKey::from_request(&request) {
+                    Some(key) => peer_incoming
+                        .send(Incoming {
+                            key,
+                            request: *request,
+                            source: local_addr,
+                            transport: target.transport,
+                        })
+                        .await
+                        .map_err(|_| Error::EndpointClosed),
+                    None => Err(Error::NoVia),
+                };
+                let _ = sent.send(result);
+            }
+            Command::Keepalive { answered, .. } => {
+                let _ = answered.send(Ok(None));
+            }
+            Command::WatchUnmatched(_) => {}
+            Command::Outstanding(answered) => {
+                let count = routes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .keys()
+                    .filter(|(owner, _)| *owner == side)
+                    .count();
+                let _ = answered.send(count);
+            }
+            Command::Shutdown => break,
+        }
+    }
+    routes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|(owner, _), _| *owner != side && *owner != side.peer());
+    shutdown.complete();
 }
 
 /// Listen for TLS connections, handshaking each off the accept path.

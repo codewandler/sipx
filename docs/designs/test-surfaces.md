@@ -18,20 +18,25 @@ turn a deterministic library test into a wall-clock load generator.
 
 ## Supported boundary
 
-`sipx-testkit::call::CallHarness` is the downstream surface. It owns two real
-`sipx-sip::transaction::TransactionLayer` values and joins them with
-`sipx-testkit::link::Link<Virtual>`. A caller supplies a complete request, observes the invitation,
-answers it with either the convenience `200 OK` or an application-built response, and observes the
-answer. `advance(Duration)` is the only way time moves. There is no runtime, socket or clock read in
-that path.
+`sipx-testkit::call::CallHarness` is the downstream application surface. It gives `sipx-call` two
+ordinary `sipx-transport::Handle` values joined by a bounded in-process signalling driver. Its
+`dial` path takes `DialOptions`, invokes `sipx_call::dial`, returns the exact `Incoming` invitation
+for that attempt, invokes `sipx_call::answer`, and does not report establishment until the resulting
+ACK has been handed to the answering `Call::handle`. The result owns both real `Call` values and
+their normal event streams. A pending-call value owns one dial task, invitation and response stream;
+no scan over earlier traffic can satisfy a later exchange.
 
-The harness ends at answered INVITE signalling. It does not pretend to provide a media endpoint or
-to replace network interoperability tests. That narrow boundary is intentional: it exposes the
-already-tested transaction path without making internal `sipx-call` media machinery public merely
-for tests.
+The in-process boundary applies to SIP signalling. The calls intentionally create their ordinary
+RTP/RTCP media ports, because a `Call` that bypassed `sipx-call`'s media negotiation would not prove
+the application API. Tests that need deterministic packet faults rather than an application call
+use `TransactionHarness` below; network interoperability remains a separate bounded integration
+test.
 
 `Link` is generic over its instant with the existing Tokio instant as its default, preserving its
-current callers while allowing the harness to use a zero-based virtual instant. Seeded loss,
+current callers while allowing `TransactionHarness` to use a zero-based virtual instant. `Virtual`
+stores nanoseconds, so adding a sub-millisecond `Duration` loses no precision. An advance visits
+each link delivery and timer deadline in chronological order before reaching its requested end;
+one large advance therefore has the same result as the equivalent smaller advances. Seeded loss,
 duplication, latency and jitter remain the link's inputs.
 
 ## Package decision
@@ -55,12 +60,14 @@ owners and are deliberately outside this table.
 | `sipx-ua` | 0 | 4 | 1 | 0 | registration lifecycle and push/refresh failure |
 
 The canonical level policy is the public logging reference; it is not repeated in source modules.
-`library_output.rs` ratchets both halves: library source cannot acquire a direct output/global
-subscriber site, and constructing the public harness leaves the process without a global
-subscriber.
+`library_output.rs` ratchets both halves: library source cannot acquire `print`/`eprint` output,
+write directly to stdout/stderr, or initialize a global/default subscriber through the common
+constructor variants. Its isolated subprocess establishes a real application call through the
+public harness and compares both process streams with a no-library control.
 
 ## Exit
 
-A downstream package can place and answer a socket-free call under deterministic time, inspect the
-result, and follow a public runnable example; no library crate installs output globally; and the gate
-compiles the exact example the guide presents.
+A downstream package can place and answer a call through socket-free SIP signalling, observe the
+real `Call` event streams after ACK, and separately drive transaction faults under deterministic
+time; no library crate installs output globally; and the gate compiles the exact example the guide
+presents.

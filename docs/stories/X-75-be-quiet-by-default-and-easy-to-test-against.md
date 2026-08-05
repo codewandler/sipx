@@ -56,6 +56,15 @@ call in their own tests.
   verification, release-helper tests, public-doc synchronisation/tests, capability-front-door
   checks, maturity, provenance and formatting. The full gate is deliberately left for integration,
   so the story remains `in-progress` and its final acceptance item remains open.
+- 2026-08-05: follow-up review replaced the raw-request public façade with the real `sipx-call`
+  application path. `CallHarness` now drives `DialOptions`, `dial`, `answer`, two `Call` values,
+  their events and the final ACK over an in-process signalling handle pair. Pending exchanges own
+  their invitation and response stream, so stale history cannot satisfy a later call.
+- 2026-08-05: `TransactionHarness::advance` now visits deliveries and timer deadlines in order;
+  its regression proves one 600 ms jump matches 500 ms plus 100 ms through a dropped INVITE and
+  retransmission. `Virtual` stores nanoseconds, and the output ratchet now covers `print`/`eprint`,
+  stdout/stderr `write` variants and subscriber initializer variants while its subprocess executes
+  a complete call path.
 
 ## Notes
 - Two separate recurring themes in the demand survey collapse into this one story: users could not

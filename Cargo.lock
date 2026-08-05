@@ -2480,6 +2480,7 @@ version = "1.0.0-beta.4"
 dependencies = [
  "bytes",
  "rcgen",
+ "sipx-call",
  "sipx-sip",
  "sipx-transport",
  "thiserror 2.0.19",

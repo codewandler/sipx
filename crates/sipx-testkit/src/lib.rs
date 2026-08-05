@@ -1,9 +1,8 @@
 //! Shared test machinery for the sipx workspace.
 //!
-//! Provides a loopback transport that lets two full stacks talk inside one process with no
-//! sockets, the RFC 4475 and RFC 5118 torture-message corpora and their harnesses, a private
-//! certificate authority for the TLS tests, and fixtures for interoperability runs against
-//! third-party servers.
+//! Provides an application-call harness with in-process SIP signalling, a seeded virtual-time
+//! transaction link, the RFC 4475 and RFC 5118 torture-message corpora and their harnesses, and a
+//! private certificate authority for TLS tests.
 //!
 //! Published so downstream applications can use the same deterministic call surface as the
 //! workspace. The corpus and certificate modules are support utilities; [`call`] is the small,
@@ -15,9 +14,10 @@
 //! for breaking changes; new enum variants and fields may still appear before 1.0. **Experimental**
 //! APIs may change shape without a migration note.
 //!
-//! **Supported:** [`call`], [`link`] and [`time`] — the socket-free call harness, seeded fault link
-//! and explicit virtual clock. **Experimental:** certificate, corpus, soak and transaction-sequence
-//! utilities; these primarily serve workspace verification and their shape follows those suites.
+//! **Supported:** [`call`], [`link`] and [`time`] — the real application-call harness over
+//! socket-free SIP signalling, seeded fault link and nanosecond virtual clock. **Experimental:**
+//! certificate, corpus, soak and transaction-sequence utilities; these primarily serve workspace
+//! verification and their shape follows those suites.
 
 pub mod call;
 pub mod certs;

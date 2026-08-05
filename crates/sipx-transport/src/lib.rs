@@ -55,7 +55,9 @@ pub use counters::{
     CaptureCounts, Counters, DiscardCounts, ShedCounts, TimeoutCounts, TransportCounts,
     UnsentCounts,
 };
-pub use endpoint::{Config, Handle, Incoming, Responses, Unmatched, bind, new_branch};
+pub use endpoint::{
+    Config, Handle, Incoming, Responses, Unmatched, bind, in_process_pair, new_branch,
+};
 pub use error::{Error, Result};
 pub use overload::{OverloadConfig, OverloadFeedback, RequestCategory};
 pub use resolve::{Naptr, Resolver, Srv, resolve};

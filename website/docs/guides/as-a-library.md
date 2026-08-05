@@ -172,7 +172,9 @@ embedded runtime or TypeScript SDK is shipped.
 ## Runtime and feature boundaries
 
 - `sipx-sip` and `sipx-sdp` are sans-I/O and have no async runtime.
-- `sipx-testkit::call` is synchronous and socket-free; its clock advances only when a test asks.
+- `sipx-testkit::call::CallHarness` asynchronously drives the real call API over socket-free SIP
+  signalling; `TransactionHarness` is the seeded, nanosecond virtual-time surface whose clock
+  advances only when a test asks.
 - `sipx-transport`, `sipx-ua`, `sipx-media`, and `sipx-call` use Tokio for I/O-facing work.
 - `sipx-transport` enables UDP, TCP, DNS, TLS, WebSocket, secure WebSocket, and the Experimental
   SIP-over-QUIC mapping by default. Use `default-features = false` with an explicit feature list
@@ -198,7 +200,7 @@ docs.rs so that it always matches the guides next to it. Start points:
 | `sipx-rtp` | [`srtp`](https://codewandler.github.io/sipx/api/sipx_rtp/srtp/index.html) · [`rtcp`](https://codewandler.github.io/sipx/api/sipx_rtp/rtcp/index.html) |
 | `sipx-media` | [`MediaSession`](https://codewandler.github.io/sipx/api/sipx_media/session/struct.MediaSession.html) |
 | `sipx-call` | [`dial`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.dial.html) · [`answer`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.answer.html) · [`Call`](https://codewandler.github.io/sipx/api/sipx_call/call/struct.Call.html) |
-| `sipx-testkit` | [`CallHarness`](https://codewandler.github.io/sipx/api/sipx_testkit/call/struct.CallHarness.html) · [`Faults`](https://codewandler.github.io/sipx/api/sipx_testkit/link/struct.Faults.html) |
+| `sipx-testkit` | [`CallHarness`](https://codewandler.github.io/sipx/api/sipx_testkit/call/struct.CallHarness.html) · [`TransactionHarness`](https://codewandler.github.io/sipx/api/sipx_testkit/call/struct.TransactionHarness.html) · [`Faults`](https://codewandler.github.io/sipx/api/sipx_testkit/link/struct.Faults.html) |
 
 The API reference is generated from the same `main` branch as this site. When using the tagged
 release, consult the checked-out source documentation if an API has changed on `main`.
