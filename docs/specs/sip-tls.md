@@ -231,11 +231,13 @@ The *transport* is in the key because TCP, TLS and WebSocket to one address are 
 interchangeable — they can share a port, and a `sips:` request riding a cleartext socket has
 silently become the thing it asked not to be.
 
-The *verified identity* is in the key because two names that resolve to one address are two
-connections. Reusing one for the other would mean traffic for `a.example.com` travelling over a
-connection authenticated as `b.example.com`, which defeats the check that was just performed. A
-connection a peer opened has no identity — sipx verified nothing about it — so it can never
-stand in for a name it never checked.
+The *URI authority / verified identity* is in the key because two names that resolve to one address
+are two connections. Under TLS/WSS, reusing one for the other would mean traffic for
+`a.example.com` travelling over a connection authenticated as `b.example.com`, which defeats the
+check that was just performed. Under clear WS there is no certificate claim, but the same field is
+the HTTP `Host` authority: an upgrade accepted for one virtual host is not authority for another.
+A connection a peer opened has no outbound authority — sipx selected and verified no name and sent
+no client-side Host — so it cannot stand in for a named outbound target.
 
 The *WebSocket resource* is in the key for the same reason one step down (§4): a socket upgraded
 at `/ws` was accepted by whatever serves `/ws`, and lending it to traffic that asked for
@@ -243,7 +245,7 @@ somewhere else discards the only thing the target said about where it was going.
 everywhere the question does not arise — every other transport, and every connection a peer
 opened.
 
-**[sipx] The identity is the URI host, and it survives resolution.** RFC 3263 turns one name
+**[sipx] The authority/identity is the URI host, and it survives resolution.** RFC 3263 turns one name
 into a list of addresses by way of NAPTR and SRV records that may name something else entirely;
 the certificate is still checked against what the URI said. Attaching the resolved name instead
 would leave the handshake succeeding, the check apparently running, and whoever can influence

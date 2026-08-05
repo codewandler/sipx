@@ -47,6 +47,14 @@ public demo.
 ## Now (in progress)
 - [X-97 — Track capability parity as generated data](X-97-track-capability-parity-as-generated-data.md) · Build · M13 discovery gate · every public capability gets evidence, ownership and a disposition
 
+### event reachability
+_sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.rs`: a subscription_
+- [S-37 — Specify endpoint event-client behavior](S-37-specify-endpoint-event-client-behavior.md) · Signalling · spec before code · generic RFC 6665 client contract consumed by S-24
+- [S-35 — Accept an inbound subscription from a socket](S-35-accept-an-inbound-subscription-from-a-socket.md) · Signalling · RFC 6665 notifier is implemented and unreachable · nothing in the workspace receives a SUBSCRIBE · unblocks S-24 · follow-up
+- [S-38 — Place and maintain event subscriptions](S-38-place-and-maintain-event-subscriptions.md) · Signalling · reusable outbound SUBSCRIBE and NOTIFY tracking
+- [S-39 — Send and receive publications through an endpoint](S-39-send-and-receive-publications-through-an-endpoint.md) · Signalling · make the RFC 3903 compositor and entity tags wire-reachable
+- [S-24 — Learn who is registered, with the registration event package](S-24-learn-who-is-registered.md) · Signalling · consume bounded registration-event state from a live registrar
+
 ### dialog persistence
 _A host can preserve the protocol facts of a confirmed call without treating its live runtime as durable state._
 - [S-43 — Serialize and restore dialog state](S-43-serialize-and-restore-dialog-state.md) · Signalling · discovered by X-97 · versioned sans-I/O snapshot without serializing sockets, tasks or secrets
@@ -67,13 +75,6 @@ _The workspace has seeded links, virtual time and call fixtures, but downstream 
 ### application-owned dialog extensions
 _Calls already specialize the methods whose semantics the stack owns: BYE, re-INVITE, UPDATE,_
 - [S-40 — Surface application-owned dialog requests](S-40-surface-application-owned-dialog-requests.md) · Signalling · authenticated INFO, MESSAGE and admitted extension methods without bypassing dialog invariants
-
-## Next (ready — take the top one unless the user named a story)
-
-### event reachability
-_sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.rs`: a subscription_
-- [S-35 — Accept an inbound subscription from a socket](S-35-accept-an-inbound-subscription-from-a-socket.md) · Signalling · RFC 6665 notifier is implemented and unreachable · nothing in the workspace receives a SUBSCRIBE · unblocks S-24 · follow-up
-- [S-37 — Specify endpoint event-client behavior](S-37-specify-endpoint-event-client-behavior.md) · Signalling · spec before code · generic RFC 6665 client contract consumed by S-24
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first

@@ -13,6 +13,7 @@
 )]
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -353,6 +354,39 @@ async fn a_target_can_name_the_resource_the_peer_serves_sip_at() {
         .expect("the peer received the request");
 }
 
+#[tokio::test]
+async fn a_clear_websocket_target_carries_hostname_authority_path_and_pool_identity() {
+    let (addr, served) = a_peer_serving_sip_only_at("/sip-events").await;
+    let (client, _rx) = bind(Config::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
+    let target = Target::new(addr, TransportKind::Ws)
+        .verifying("edge.example.test")
+        .at_path("/sip-events");
+    let key = target.connection();
+    assert_eq!(key.identity.as_deref(), Some("edge.example.test"));
+    assert_eq!(key.path.as_deref(), Some("/sip-events"));
+
+    let mut responses = client
+        .send(options_to("example.com"), target)
+        .await
+        .expect("sends");
+    assert_eq!(
+        responses
+            .final_response()
+            .await
+            .expect("peer answers")
+            .status
+            .code(),
+        200
+    );
+    let (_, authority) = served
+        .await
+        .expect("server joins")
+        .expect("peer receives request");
+    assert_eq!(authority, format!("edge.example.test:{}", addr.port()));
+}
+
 /// And the reason the test above is not vacuous: this peer really does refuse the root. Without
 /// this, a fixture that had quietly upgraded on any path would let the test pass whatever the
 /// handshake asked for.
@@ -389,7 +423,10 @@ async fn the_default_resource_is_refused_by_a_peer_that_serves_sip_elsewhere() {
 #[allow(clippy::result_large_err)]
 async fn a_peer_serving_sip_only_at(
     resource: &'static str,
-) -> (SocketAddr, tokio::task::JoinHandle<Option<String>>) {
+) -> (
+    SocketAddr,
+    tokio::task::JoinHandle<Option<(String, String)>>,
+) {
     use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
     use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode as HttpStatus};
 
@@ -420,9 +457,18 @@ async fn a_peer_serving_sip_only_at(
         // and the peer stays up for the next one exactly as a real server would.
         loop {
             let (stream, _) = listener.accept().await.expect("accepts");
+            let observed = Arc::new(Mutex::new(None));
+            let observation = Arc::clone(&observed);
             let upgraded = tokio_tungstenite::accept_hdr_async(
                 stream,
-                |request: &Request, response: Response| route(resource, request, response),
+                move |request: &Request, response: Response| {
+                    *observation.lock().expect("observation lock") = request
+                        .headers()
+                        .get("Host")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    route(resource, request, response)
+                },
             )
             .await;
             let Ok(mut socket) = upgraded else {
@@ -451,7 +497,12 @@ async fn a_peer_serving_sip_only_at(
                 ))
                 .await
                 .expect("responds");
-            return Some(received);
+            let authority = observed
+                .lock()
+                .expect("observation lock")
+                .clone()
+                .expect("Host authority");
+            return Some((received, authority));
         }
     });
 

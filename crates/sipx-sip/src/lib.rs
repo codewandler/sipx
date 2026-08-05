@@ -74,5 +74,5 @@ pub use transaction::{
     ClientTransaction, Output, Reliability, ServerTransaction, Timer, Timers, TransactionKey,
     TransactionLayer, TuEvent,
 };
-pub use uri::{Host, HostName, Scheme, Uri};
+pub use uri::{Host, HostName, Scheme, Uri, UriTransport, UriTransportError};
 pub use validate::{Finding, validate, validate_request, validate_response};

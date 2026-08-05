@@ -389,6 +389,8 @@ pub struct Incoming {
     pub source: SocketAddr,
     /// How it arrived.
     pub transport: TransportKind,
+    /// Exact stream generation which carried the request; absent for UDP.
+    pub connection_generation: Option<u64>,
 }
 
 /// Events from a client transaction: responses, then a terminal event.
@@ -397,9 +399,16 @@ pub struct Responses {
     rx: mpsc::Receiver<TuEvent>,
     failures: mpsc::Receiver<Error>,
     peeked: Option<TuEvent>,
+    connection_generation: Option<u64>,
 }
 
 impl Responses {
+    /// Exact stream generation selected for the outbound request; absent for UDP.
+    #[must_use]
+    pub fn connection_generation(&self) -> Option<u64> {
+        self.connection_generation
+    }
+
     /// The next event, or `None` once the transaction has finished.
     pub async fn next(&mut self) -> Option<TuEvent> {
         if let Some(event) = self.peeked.take() {
@@ -452,7 +461,7 @@ enum Command {
         target: Target,
         events: mpsc::Sender<TuEvent>,
         failures: mpsc::Sender<Error>,
-        reply: oneshot::Sender<Result<TransactionKey>>,
+        reply: oneshot::Sender<Result<(TransactionKey, Option<u64>)>>,
     },
     Respond {
         key: TransactionKey,
@@ -701,11 +710,12 @@ impl Handle {
             })
             .await
             .map_err(|_| Error::EndpointClosed)?;
-        reply_rx.await.map_err(|_| Error::EndpointClosed)??;
+        let (_, connection_generation) = reply_rx.await.map_err(|_| Error::EndpointClosed)??;
         Ok(Responses {
             rx: events_rx,
             failures: failures_rx,
             peeked: None,
+            connection_generation,
         })
     }
 
@@ -2453,9 +2463,7 @@ impl Driver {
             Message::Response(response) => Some(response.clone()),
             Message::Request(_) => None,
         };
-        // The one site inbound messages are counted, whichever transport carried them here: a
-        // datagram arrives through `on_datagram` and a stream message through `on_net_event`, and
-        // both funnel into this method (§12).
+        // Datagram and stream messages both funnel here, the one inbound counter site (§12).
         self.meters
             .message_in(transport, matches!(message, Message::Response(_)));
         let message = apply_network_source(message, source);
@@ -2480,7 +2488,6 @@ impl Driver {
                 .unwrap_or_else(|| Target::new(source, transport)),
             _ => Target::new(source, transport),
         };
-
         match self.layer.receive(message, transport.reliability()) {
             Dispatch::Created { key, outputs } => {
                 self.observe_inbound(
@@ -2529,7 +2536,7 @@ impl Driver {
                     transport,
                     TransactionClass::Unmatched,
                 );
-                self.on_unmatched(message, source, transport);
+                self.on_unmatched(message, source, transport, generation);
             }
         }
     }
@@ -2539,6 +2546,7 @@ impl Driver {
         message: Box<Message>,
         source: SocketAddr,
         transport: TransportKind,
+        connection_generation: Option<u64>,
     ) {
         tracing::debug!(%source, "message matched no transaction");
         // Counted before the question of whether anyone is watching: §16.7 makes an unmatched
@@ -2574,12 +2582,13 @@ impl Driver {
             let method = request.method.clone();
             if self
                 .incoming
-                .try_send(Incoming {
+                .try_send(Self::incoming_request(
                     key,
                     request,
                     source,
                     transport,
-                })
+                    connection_generation,
+                ))
                 .is_err()
             {
                 // There is no transaction here to answer with a 503, so count the loss and name it.
@@ -2590,6 +2599,22 @@ impl Driver {
                     "application queue full; an unmatched request was dropped"
                 );
             }
+        }
+    }
+
+    fn incoming_request(
+        key: TransactionKey,
+        request: Request,
+        source: SocketAddr,
+        transport: TransportKind,
+        connection_generation: Option<u64>,
+    ) -> Incoming {
+        Incoming {
+            key,
+            request,
+            source,
+            transport,
+            connection_generation,
         }
     }
 
@@ -2711,8 +2736,9 @@ impl Driver {
                     .insert(key.clone(), ClientSink { events, failures });
                 // discard: the caller stopped waiting. A dropped receiver means nobody is listening
                 // for this answer, so nothing is lost and there is nothing worth counting.
-                let _ = reply.send(Ok(key.clone()));
                 self.perform(&key, outputs, None).await;
+                let generation = self.transaction_generations.get(&key).map(|value| value.id);
+                let _ = reply.send(Ok((key, generation)));
             }
             Command::Respond {
                 key,
@@ -2892,10 +2918,9 @@ impl Driver {
                         Err(error) => {
                             self.meters.discard_send_failure();
                             // And by method, when it was a request (§12.3). This is where the
-                            // wire is actually missed: `Handle::send` has already returned `Ok`
-                            // with the transaction key by now, so counting at that hand-off would
-                            // miss every refused connection, unreachable peer and over-MTU
-                            // datagram — which is the whole of "why did that call linger".
+                            // wire is actually missed. Counting before this hand-off would miss
+                            // every refused connection, unreachable peer and over-MTU datagram —
+                            // which is the whole of "why did that call linger".
                             if let Some(method) = &method {
                                 self.meters.unsent(method);
                             }
@@ -3218,6 +3243,10 @@ impl Driver {
                         request: *request,
                         source,
                         transport,
+                        connection_generation: self
+                            .transaction_generations
+                            .get(key)
+                            .map(|value| value.id),
                     })
                     .is_err()
                 {
@@ -3440,6 +3469,43 @@ mod tests {
                 "{subject} bit {bit} had {ones} ones in {IDENTIFIER_SAMPLE_SIZE} samples"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn stream_generation_is_reported_on_both_transaction_boundaries() {
+        let mut server_config = crate::Config::new("127.0.0.1:0".parse().expect("address"));
+        server_config.tcp = true;
+        let (server, mut incoming) = super::bind(server_config).await.expect("server");
+        let mut client_config = crate::Config::new("127.0.0.1:0".parse().expect("address"));
+        client_config.tcp = true;
+        let (client, _) = super::bind(client_config).await.expect("client");
+        let uri = Uri::parse(Bytes::from(format!("sip:{}", server.local_addr()))).expect("URI");
+        let request = RequestBuilder::new(Method::Options, uri)
+            .header(HeaderName::To, "<sip:server@example.test>")
+            .expect("To")
+            .header(HeaderName::From, "<sip:client@example.test>;tag=a")
+            .expect("From")
+            .header(HeaderName::CallId, "generation@example.test")
+            .expect("Call-ID")
+            .cseq(1, &Method::Options)
+            .expect("CSeq")
+            .max_forwards(70)
+            .build();
+        let responses = client
+            .send(
+                request,
+                Target::new(server.local_addr(), TransportKind::Tcp),
+            )
+            .await
+            .expect("transaction starts");
+        assert!(responses.connection_generation().is_some());
+        let received = tokio::time::timeout(Duration::from_secs(2), incoming.recv())
+            .await
+            .expect("request is bounded")
+            .expect("server stays open");
+        assert!(received.connection_generation.is_some());
+        client.shutdown().await;
+        server.shutdown().await;
     }
 
     /// RFC 3261 §8.1.1.7 requires the magic cookie. The remaining sixteen hexadecimal digits

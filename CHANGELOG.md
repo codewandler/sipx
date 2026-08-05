@@ -39,6 +39,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   media policy and current time; it cannot downgrade signalling or media security, silently renew
   an elapsed session, serialize keys, or attach one context twice. Storage, encryption,
   distribution and failover ownership remain host responsibilities.
+- **A registrar can now be a live source for `sipx peers`** (`S-24`). The built-in RFC 3680
+  consumer uses the generic authenticated subscription runtime, applies bounded full/partial
+  `reginfo` documents atomically, removes expired contacts, and reports each current contact with
+  registrar source and observation age. `--watch` retains subsequent updates for a finite
+  user-selected window; 403, 489 and a missing initial NOTIFY are explicit non-zero outcomes, never
+  partial success. Review also closed a secure-target gap: event subscriptions and publications now
+  preserve TLS certificate identity and WebSocket resource through the live driver.
+
+- **Applications can now receive and originate conditional presence publications** (`S-39`). The
+  dispatcher routes authenticated PUBLISH requests through an injected, bounded compositor and
+  returns fresh entity tags for create, refresh, modify and remove. A public publisher retains the
+  exact granted expiry and latest tag across authenticated live transactions, schedules bounded
+  refresh and local-expiry work, stops on stale authority, and exposes zero-residue cleanup counts.
+  The protocol core remains sans-I/O; authorization, durable storage and projection into NOTIFY
+  documents remain explicit application policy.
+
+- **Applications can now place and maintain generic SIP event subscriptions** (`S-38`). A bounded
+  sans-I/O state machine and live endpoint driver cover authenticated SUBSCRIBE, mandatory NOTIFY,
+  refresh, unsubscribe and shutdown while keeping package parsing behind an application-supplied
+  consumer. Dialog targets and route sets, remote and local CSeq, exact expiry rules, peer trust,
+  transport-selected stream identity, byte-exact tags, terminal retry eligibility, delivery
+  backpressure and joined timer/transaction cleanup are enforced and tested from the public API.
+  Record-Route hops now select their exact transport, default or explicit port, secure verification
+  authority and connection generation without permitting a SIPS-to-UDP downgrade. Subscription and
+  publication admission also share an atomic shutdown barrier, so no task can spawn after its owner
+  has drained the registry. Named clear-WebSocket routes retain their HTTP Host authority and path
+  in the connection key without implying TLS authentication.
 
 ## [1.0.0-beta.4] — 2026-08-04
 

@@ -169,6 +169,130 @@ authenticated full-duplex sessions. A granted session can originate calls. The R
 are Supported under the policy above; the `sipx.app.v1` wire line remains Experimental, and no
 embedded runtime or TypeScript SDK is shipped.
 
+## Serve inbound event subscriptions
+
+`sipx-call::Notifier` attaches to the same dispatcher that routes calls. Its handle observes the
+exact `sipx_ua::subscribe::Subscriptions` allocation used by the socket path and exposes task and
+shedding counters:
+
+```rust
+use std::time::Duration;
+use sipx_call::{Dispatcher, Notifier};
+
+let notifier = Notifier::new(Duration::from_secs(300), 128);
+let observations = notifier.handle();
+let dispatcher = Dispatcher::new(endpoint, incoming).with_notifier(notifier);
+
+assert_eq!(observations.subscriptions().lock()?.capacity(), 128);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Polling `Dispatcher::next` serves `dialog`, `reg`, and `presence` SUBSCRIBE requests, sends the
+required initial NOTIFY, and re-arms or terminates the one owned expiry task on refresh or
+unsubscribe. This notifier API is Experimental. It sends valid empty full snapshots initially;
+automatic projection of live calls, registrations and published presence into later documents is
+not part of this surface yet.
+
+## Place outbound event subscriptions
+
+The matching Experimental subscriber is split at the same I/O boundary as the rest of sipx.
+`sipx_ua::event_client::EventClient` is the deterministic state machine; it receives responses,
+NOTIFY requests and fired timer generations as values. `sipx_call::EventSubscriptions` applies
+those outputs through the dispatcher and a real endpoint:
+
+```rust
+use sipx_call::{Dispatcher, EventSubscriptions};
+use sipx_ua::event_client::{Config as EventConfig, PackageConsumer, Start};
+# async fn run<C: PackageConsumer>(endpoint: sipx_transport::Handle,
+#     incoming: tokio::sync::mpsc::Receiver<sipx_transport::Incoming>,
+#     start: Start<C>) -> Result<(), Box<dyn std::error::Error>> {
+let endpoint_shutdown = endpoint.clone();
+let events = EventSubscriptions::new(EventConfig::default())?;
+let event_handle = events.handle();
+let mut dispatcher = Dispatcher::new(endpoint, incoming).with_event_subscriptions(events);
+let dispatch = tokio::spawn(async move { while dispatcher.next().await.is_some() {} });
+let mut subscription = event_handle.subscribe(start)?;
+if let Some(notification) = subscription.recv().await {
+    let _package_value = notification.value;
+}
+subscription.unsubscribe().await?;
+drop(subscription);
+endpoint_shutdown.shutdown().await;
+dispatch.await?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+# }
+```
+
+`Start`'s consumer implements `PackageConsumer`; it declares the Event token, accepted media types,
+neutral value and bounded synchronous body parser. The initializer also carries the selected target,
+local Contact, fresh Call-ID/tag/CSeq, optional digest credentials and NOTIFY trust policy.
+
+The full initializer is intentionally explicit: matching Call-ID/tags is correlation, not
+authorization. The default `SamePeer` policy accepts NOTIFY only from the exact selected peer and
+transport; proxy deployments inject a finite allow-list or authenticated policy. Every usage has a
+provisional expiry before the first response, Timer N, one refresh timer, one in-flight SUBSCRIBE,
+  a bounded delivery queue, non-wrapping CSeq and observable task/timer/transaction counts.
+
+For registration discovery, the built-in `RegistrationConsumer` is the concrete package policy;
+the lifecycle remains the same generic code:
+
+```rust
+use sipx_ua::reginfo::RegistrationConsumer;
+
+let consumer = RegistrationConsumer::new("sip:alice@example.com", 4096)?;
+// Put `consumer` in event_client::Start, then pass Start to event_handle.subscribe(...).
+// Each accepted value is a complete RegistrationSnapshot, not a fragment.
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The consumer requires a version-zero full document before any partial document, applies exact-next
+versions atomically, and retains at most the configured number of active contacts. Gaps, duplicate
+contact identities, malformed XML, DTD/entity input and overflow are rejected without replacing the
+last snapshot. `EventNotification::received_at` is the monotonic observation time; applications can
+use `EventSubscription::next_event` to wait for either the first snapshot or a typed refusal.
+
+## Publish event state through an endpoint
+
+`sipx-call::Publications` is the matching Experimental RFC 3903 service in both roles. Attach it to
+the dispatcher to route live inbound PUBLISH requests through the exact compositor allocation and
+authorization policy supplied by the application:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use sipx_call::{
+    AllowPublications, Dispatcher, PublicationConfig, Publications, ReplacePublicationState,
+};
+use sipx_ua::presence::Compositor;
+
+let publications = Publications::new(
+    PublicationConfig::default(),
+    Compositor::new(Duration::from_secs(3_600)),
+    Arc::new(ReplacePublicationState),
+    Arc::new(AllowPublications),
+)?;
+let publication_handle = publications.handle();
+let dispatcher = Dispatcher::new(endpoint, incoming).with_publications(publications);
+
+assert_eq!(publication_handle.counts().active_publications, 0);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`AllowPublications` is deliberately explicit and is suitable only when an authenticated frontend
+has already made the identity decision. A production endpoint implements `PublicationAuthorization`
+to bind source, transport, resource and Event package to its own policy. Accepted initial,
+conditional refresh, modification and removal requests receive fresh entity tags; stale, expired or
+cross-resource tags fail with 412 without mutating the compositor. Body size, active resources,
+publishers, queues, retries, timers and transactions are finite.
+
+For outbound state, call `publication_handle.publish(Start { ... })` with the selected peer,
+credentials and complete initial body. The returned `Publication` reports authoritative tag/expiry
+changes, accepts bounded conditional `modify` and `remove` commands, and refreshes automatically at
+four fifths of the granted interval. A 412 is terminal and discards the tag: the application must
+start a new publication with a complete body. Dropping the handle requests removal, while dispatcher
+shutdown cancels and joins owned work. Durable storage and projection from the compositor into later
+presence NOTIFY documents remain application responsibilities.
+
 ## Runtime and feature boundaries
 
 - `sipx-sip` and `sipx-sdp` are sans-I/O and have no async runtime.
@@ -199,11 +323,11 @@ docs.rs so that it always matches the guides next to it. Start points:
 |---|---|
 | `sipx-sip` | [`parser`](https://codewandler.github.io/sipx/api/sipx_sip/parser/index.html) · [`transaction`](https://codewandler.github.io/sipx/api/sipx_sip/transaction/index.html) |
 | `sipx-transport` | [`bind`](https://codewandler.github.io/sipx/api/sipx_transport/endpoint/fn.bind.html) · [`Target`](https://codewandler.github.io/sipx/api/sipx_transport/target/struct.Target.html) |
-| `sipx-ua` | [`UserAgent`](https://codewandler.github.io/sipx/api/sipx_ua/agent/struct.UserAgent.html) |
+| `sipx-ua` | [`UserAgent`](https://codewandler.github.io/sipx/api/sipx_ua/agent/struct.UserAgent.html) · [`event_client`](https://codewandler.github.io/sipx/api/sipx_ua/event_client/index.html) · [`publication_client`](https://codewandler.github.io/sipx/api/sipx_ua/publication_client/index.html) |
 | `sipx-sdp` | [`answer`](https://codewandler.github.io/sipx/api/sipx_sdp/answer/fn.answer.html) |
 | `sipx-rtp` | [`srtp`](https://codewandler.github.io/sipx/api/sipx_rtp/srtp/index.html) · [`rtcp`](https://codewandler.github.io/sipx/api/sipx_rtp/rtcp/index.html) |
 | `sipx-media` | [`MediaSession`](https://codewandler.github.io/sipx/api/sipx_media/session/struct.MediaSession.html) |
-| `sipx-call` | [`dial`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.dial.html) · [`answer`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.answer.html) · [`Call`](https://codewandler.github.io/sipx/api/sipx_call/call/struct.Call.html) |
+| `sipx-call` | [`dial`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.dial.html) · [`answer`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.answer.html) · [`Call`](https://codewandler.github.io/sipx/api/sipx_call/call/struct.Call.html) · [`EventSubscriptions`](https://codewandler.github.io/sipx/api/sipx_call/subscriber/struct.EventSubscriptions.html) · [`Publications`](https://codewandler.github.io/sipx/api/sipx_call/publication/struct.Publications.html) |
 | `sipx-testkit` | [`CallHarness`](https://codewandler.github.io/sipx/api/sipx_testkit/call/struct.CallHarness.html) · [`TransactionHarness`](https://codewandler.github.io/sipx/api/sipx_testkit/call/struct.TransactionHarness.html) · [`Faults`](https://codewandler.github.io/sipx/api/sipx_testkit/link/struct.Faults.html) |
 
 The API reference is generated from the same `main` branch as this site. When using the tagged

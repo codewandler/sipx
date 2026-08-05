@@ -70,6 +70,7 @@ sha2 = "0.10"
 p256 = "0.13"
 base64 = "0.22"
 serde_json = "1"
+quick-xml = "0.41.0"
 tracing = "0.1"
 # The document-mode application host is the only HTTP client in the workspace. Redirects and
 # serialization policy are deliberately selected by `sipx-app`, not hidden in a kernel crate.

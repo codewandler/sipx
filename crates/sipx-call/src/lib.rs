@@ -28,6 +28,8 @@
 //! **Experimental**: choosing what a call offers — [`CodecPreference`], [`Codecs`], [`IcePolicy`],
 //! [`Keying`], [`MediaPolicy`], [`MediaProfile`], [`MediaAddress`],
 //! [`OutboundIdentityPolicy`], [`InboundIdentityPolicy`],
+//! the bounded inbound event [`Notifier`], outbound [`EventSubscriptions`] and bidirectional
+//! publication [`Publications`] runtimes,
 //! the two-dialog ownership and relay surface in [`coupling`],
 //! [`DialOptions::with_codecs`], [`DialOptions::with_initial_direction`],
 //! [`DialOptions::with_media_policy`],
@@ -68,8 +70,11 @@ pub mod extension;
 pub mod identity;
 pub mod load;
 mod media_policy;
+pub mod notifier;
+pub mod publication;
 pub mod rel;
 mod snapshot;
+pub mod subscriber;
 pub mod transfer;
 // Crate-private: every item in it is `pub(crate)`, and a `pub mod` whose contents are all
 // private renders as an empty page in the API reference — a promise of surface that is not there.
@@ -97,6 +102,12 @@ pub use media_policy::{
     CodecPreference, CodecSelectionError, Codecs, IcePolicy, Keying, MediaPolicy, MediaProfile,
     NegotiatedKeying,
 };
+pub use notifier::{Notifier, NotifierCounts, NotifierHandle};
+pub use publication::{
+    AllowPublications, Publication, PublicationAuthorization, PublicationComposition,
+    PublicationConfig, PublicationCounts, PublicationError, Publications, PublicationsHandle,
+    ReplacePublicationState,
+};
 pub use rel::{
     Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_early_with_policy_at,
     ring_offer_early, ring_offer_early_with_policy, ring_offer_early_with_policy_at,
@@ -105,5 +116,9 @@ pub use snapshot::{
     DialogNotQuiescent, DialogPersistenceError, DialogRestoreContext, DialogSessionAction,
     DialogSnapshot, MAX_FIELD_BYTES, MAX_ID_BYTES, MAX_ROUTES, MAX_SNAPSHOT_BYTES,
     MAX_VARIABLE_BYTES,
+};
+pub use subscriber::{
+    EventNotification, EventSubscription, EventSubscriptionCounts, EventSubscriptionError,
+    EventSubscriptions, EventSubscriptionsHandle,
 };
 pub use transfer::{Referral, Replaces, Transfer, TransferState};

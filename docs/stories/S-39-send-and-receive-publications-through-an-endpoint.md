@@ -2,7 +2,7 @@
 id: S-39
 title: Send and receive publications through an endpoint
 pillar: Signalling
-status: backlog
+status: in-progress
 priority: 8
 design: docs/designs/event-reachability.md
 epic: event-reachability
@@ -21,19 +21,30 @@ PUBLISH paths without introducing another presence store.
 
 ## Acceptance
 
-- [ ] The dispatcher routes inbound PUBLISH to the compositor shipped by `S-18`, and 200, 412 and
+- [x] The dispatcher routes inbound PUBLISH to the compositor shipped by `S-18`, and 200, 412 and
       423-class outcomes plus the current `SIP-ETag` leave on the wire.
-- [ ] A public publisher creates, refreshes, modifies and removes publication state while retaining
+- [x] A public publisher creates, refreshes, modifies and removes publication state while retaining
       the latest entity tag and granted expiry across requests.
-- [ ] 401/407 retry, stale-tag recovery and conditional update behavior follow RFC 3903 and return
+- [x] 401/407 retry, stale-tag recovery and conditional update behavior follow RFC 3903 and return
       typed errors when the application must republish from scratch.
-- [ ] Publication bodies, active publications and refresh timers are bounded; cancellation drains
+- [x] Publication bodies, active publications and refresh timers are bounded; cancellation drains
       owned work and a failing-first test observes no residual publication or transaction.
-- [ ] Composition policy, authorization policy and durable or distributed storage remain injected
+- [x] Composition policy, authorization policy and durable or distributed storage remain injected
       application concerns.
 - [ ] RFC 3903 registry evidence moves to the reachable endpoint paths and `./scripts/gate.py` is
       green.
 
 ## Progress
 
-- Not started. Begins after S-37 so SUBSCRIBE and PUBLISH share one timer/authentication doctrine.
+- Added the normative publication endpoint contract, typed PUBLISH headers and a bounded sans-I/O
+  publisher with digest/interval retry, conditional state, exact response validation and finite
+  timers.
+- Added dispatcher-owned inbound and outbound live endpoint paths. Wire tests cover create,
+  refresh, modify, remove, stale cross-resource tags, authentication, timer refresh and zero
+  residual publication/transaction work.
+- Review found two cross-layer ownership defects and both now have focused proofs: TLS identity and
+  WebSocket resource survive every publisher send, and dispatcher shutdown cancels then joins a
+  live silent transaction and every publication timer before its barrier returns. Re-review made
+  the driver registry the admission linearization point and deterministically proves racing and
+  post-shutdown publishes cannot spawn beyond the barrier.
+- Integration still owns the complete gate and generated board before marking this story done.

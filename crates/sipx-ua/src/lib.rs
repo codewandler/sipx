@@ -51,10 +51,13 @@
 //! §8.2's answer read back, and §4.1.3's refresh through `UserAgent::woken`. Outbound is earned
 //! only as far as the registration goes, which is what the wording above says and no further.
 //!
-//! **Experimental**: `presence`, `subscribe` and `packages`. They are public, tested and reachable from
-//! nothing above this crate — no `sipx-cli` command subscribes or publishes, and nothing in the
-//! workspace receives a SUBSCRIBE or PUBLISH off a socket. Their shape has never been constrained by a
-//! caller, which is exactly when an API is still soft.
+//! **Experimental**: `presence`, `subscribe`, `event_client`, `publication_client` and `packages`.
+//! They are public and tested. `sipx-call::Notifier` serves inbound SUBSCRIBE through this crate's
+//! exact store, `event_client` is the bounded sans-I/O subscriber driven by
+//! `sipx-call::EventSubscriptions`, and `sipx-call::Publications` carries the publication core and
+//! exact compositor through live endpoints. The bounded `reginfo` consumer is reached by
+//! `sipx peers --registrar`; no CLI command publishes, and published presence is not automatically
+//! projected into later NOTIFY documents. Their pre-1.0 API shape is still soft.
 //!
 //! By that same rule, and named here rather than left for a reader to discover: the rest of
 //! Outbound is experimental too. `Flows` and `Attempt` — one registration per outbound proxy,
@@ -69,6 +72,7 @@ pub mod auth;
 pub mod challenge;
 #[cfg(feature = "runtime")]
 pub mod error;
+pub mod event_client;
 #[cfg(feature = "runtime")]
 pub mod flows;
 pub mod gruu;
@@ -77,7 +81,9 @@ pub mod identity;
 pub mod outbound;
 pub mod packages;
 pub mod presence;
+pub mod publication_client;
 pub mod push;
+pub mod reginfo;
 pub mod registrar;
 pub mod subscribe;
 

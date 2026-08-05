@@ -7,8 +7,8 @@
 //! Time is a parameter, not a call to a clock, for the same reason it is in the timer queue: a
 //! notifier driven by a scheduler somebody else owns has to be able to say what "now" is, and a
 //! test that wants to watch a subscription expire should not have to wait an hour.
-//! **Experimental** (`A-8`): public and tested, with no caller above this crate — nothing in the
-//! workspace receives a SUBSCRIBE off a socket.
+//! **Experimental** (`A-8`): public and tested. `sipx-call::Notifier` now drives this exact store
+//! from the dispatcher; the pre-1.0 observation and runtime API may still change shape.
 //!
 
 use std::time::Duration;
@@ -16,7 +16,8 @@ use std::time::Duration;
 use sipx_sip::event::{
     BAD_EVENT, Packages, Reason, State, Subscription, granted_expiry, is_unsubscribe,
 };
-use sipx_sip::{HeaderName, Request};
+use sipx_sip::headers::{CSeq, Expires, From as FromHeader};
+use sipx_sip::{HeaderName, Method, Request};
 
 /// What identifies one subscription (RFC 6665 §4.4.1).
 ///
@@ -29,7 +30,7 @@ pub struct Id {
     pub call_id: String,
     /// The subscriber's tag.
     pub from_tag: String,
-    /// The `Event` package, with its `id` parameter if it has one.
+    /// The exact `Event` type, with only its `id` parameter if it has one.
     pub event: String,
 }
 
@@ -37,25 +38,145 @@ impl Id {
     /// Read the identity out of a SUBSCRIBE.
     #[must_use]
     pub fn from_request(request: &Request) -> Option<Self> {
-        let text = |name: &HeaderName| {
-            request
-                .headers
-                .value(name)
-                .map(|value| String::from_utf8_lossy(&value).into_owned())
-        };
+        if request.headers.count(&HeaderName::CallId) != 1
+            || request.headers.count(&HeaderName::From) != 1
+            || request.headers.count(&HeaderName::Event) != 1
+        {
+            return None;
+        }
+        let call_id = request.headers.value(&HeaderName::CallId)?;
+        let call_id = std::str::from_utf8(&call_id).ok()?;
+        if call_id.is_empty() {
+            return None;
+        }
+        let from = request.headers.typed::<FromHeader>()?.ok()?;
+        let mut tags = from.params.iter().filter(|parameter| parameter.is("tag"));
+        let tag = tags.next()?.value.as_deref()?;
+        if tags.next().is_some() || tag.is_empty() || !tag.iter().copied().all(is_token_char) {
+            return None;
+        }
         Some(Self {
-            call_id: text(&HeaderName::CallId)?,
-            from_tag: tag_of(&text(&HeaderName::From)?)?,
-            event: text(&HeaderName::Event)?.trim().to_owned(),
+            call_id: call_id.to_owned(),
+            from_tag: std::str::from_utf8(tag).ok()?.to_owned(),
+            event: event_identity(&request.headers.value(&HeaderName::Event)?)?,
         })
     }
 }
 
-fn tag_of(address: &str) -> Option<String> {
-    let start = address.to_ascii_lowercase().find(";tag=")? + 5;
-    let rest = address.get(start..)?;
-    let end = rest.find(';').unwrap_or(rest.len());
-    Some(rest.get(..end)?.trim().to_owned())
+fn event_identity(value: &[u8]) -> Option<String> {
+    let segments = event_segments(value)?;
+    let event = trim_ows(segments.first()?);
+    if !valid_event_type(event) {
+        return None;
+    }
+
+    let mut id = None;
+    for segment in segments.iter().skip(1) {
+        let parameter = trim_ows(segment);
+        if parameter.is_empty() {
+            return None;
+        }
+        let (name, value) =
+            parameter
+                .iter()
+                .position(|byte| *byte == b'=')
+                .map_or((parameter, None), |equals| {
+                    (
+                        trim_ows(parameter.get(..equals).unwrap_or_default()),
+                        Some(trim_ows(
+                            parameter
+                                .get(equals.saturating_add(1)..)
+                                .unwrap_or_default(),
+                        )),
+                    )
+                });
+        if name.is_empty() || !name.iter().copied().all(is_token_char) {
+            return None;
+        }
+        if name.eq_ignore_ascii_case(b"id") {
+            let value = value?;
+            if id.is_some() || value.is_empty() || !value.iter().copied().all(is_token_char) {
+                return None;
+            }
+            id = Some(value);
+        } else if !value.is_none_or(valid_generic_value) {
+            return None;
+        }
+    }
+
+    let event = std::str::from_utf8(event).ok()?;
+    match id {
+        Some(id) => Some(format!("{event};id={}", std::str::from_utf8(id).ok()?)),
+        None => Some(event.to_owned()),
+    }
+}
+
+fn event_segments(value: &[u8]) -> Option<Vec<&[u8]>> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, byte) in value.iter().copied().enumerate() {
+        if quoted && escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b';' if !quoted => {
+                segments.push(value.get(start..index)?);
+                start = index.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    if quoted || escaped {
+        return None;
+    }
+    segments.push(value.get(start..)?);
+    Some(segments)
+}
+
+fn valid_event_type(value: &[u8]) -> bool {
+    !value.is_empty()
+        && value
+            .split(|byte| *byte == b'.')
+            .all(|token| !token.is_empty() && token.iter().copied().all(is_token_nodot_char))
+}
+
+fn valid_generic_value(value: &[u8]) -> bool {
+    if value.len() >= 2 && value.first() == Some(&b'"') && value.last() == Some(&b'"') {
+        return true;
+    }
+    !value.is_empty()
+        && value.iter().all(|byte| {
+            byte.is_ascii_graphic() && !matches!(byte, b';' | b',' | b'"' | b'<' | b'>')
+        })
+}
+
+fn trim_ows(mut value: &[u8]) -> &[u8] {
+    while matches!(value.first(), Some(b' ' | b'\t')) {
+        value = value.get(1..).unwrap_or_default();
+    }
+    while matches!(value.last(), Some(b' ' | b'\t')) {
+        value = value
+            .get(..value.len().saturating_sub(1))
+            .unwrap_or_default();
+    }
+    value
+}
+
+fn is_token_char(byte: u8) -> bool {
+    is_token_nodot_char(byte) || byte == b'.'
+}
+
+fn is_token_nodot_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'-' | b'!' | b'%' | b'*' | b'_' | b'+' | b'`' | b'\'' | b'~'
+        )
 }
 
 /// One subscription being served.
@@ -67,6 +188,8 @@ pub struct Served {
     pub state: State,
     /// When it expires, in seconds on the caller's clock.
     pub expires_at: u64,
+    /// The last accepted remote SUBSCRIBE sequence number.
+    pub remote_cseq: u32,
 }
 
 /// What answering a SUBSCRIBE concluded.
@@ -99,8 +222,15 @@ pub enum Answer {
         /// The status to answer with — 489, and not 400 or 501.
         status: u16,
     },
+    /// A new subscription would exceed this notifier's configured peer-driven resource bound.
+    AtCapacity,
     /// The request could not be read as a SUBSCRIBE at all.
     Malformed,
+    /// A matching subscription received an equal or lower remote `CSeq`.
+    OutOfOrder {
+        /// The subscription that was deliberately left unchanged.
+        id: Id,
+    },
 }
 
 /// The subscriptions one notifier is serving.
@@ -108,6 +238,7 @@ pub enum Answer {
 pub struct Subscriptions {
     packages: Packages,
     policy_maximum: Duration,
+    capacity: usize,
     held: Vec<Served>,
 }
 
@@ -118,8 +249,25 @@ impl Subscriptions {
         Self {
             packages,
             policy_maximum,
+            capacity: 1024,
             held: Vec::new(),
         }
+    }
+
+    /// Apply a finite concurrent-subscription bound.
+    ///
+    /// Zero is raised to one: a notifier configured with no capacity could advertise packages but
+    /// never serve one, which is almost certainly a configuration mistake rather than policy.
+    #[must_use]
+    pub fn with_capacity(mut self, capacity: usize) -> Self {
+        self.capacity = capacity.max(1);
+        self
+    }
+
+    /// The concurrent-subscription bound.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// The packages served, for an `Allow-Events` header.
@@ -145,6 +293,20 @@ impl Subscriptions {
 
     /// Answer a SUBSCRIBE.
     pub fn on_subscribe(&mut self, request: &Request, now: u64) -> Answer {
+        let cseq = if request.headers.count(&HeaderName::CSeq) == 1 {
+            match request.headers.typed::<CSeq>() {
+                Some(Ok(CSeq {
+                    sequence,
+                    method: Method::Subscribe,
+                })) => sequence,
+                _ => return Answer::Malformed,
+            }
+        } else {
+            return Answer::Malformed;
+        };
+        if request.headers.count(&HeaderName::Expires) > 1 {
+            return Answer::Malformed;
+        }
         let Some(id) = Id::from_request(request) else {
             return Answer::Malformed;
         };
@@ -154,17 +316,21 @@ impl Subscriptions {
             return Answer::Unserved { status: BAD_EVENT };
         }
 
-        let requested = request
-            .headers
-            .value(&HeaderName::Expires)
-            .and_then(|value| String::from_utf8_lossy(&value).trim().parse::<u64>().ok())
-            .map_or(self.policy_maximum, Duration::from_secs);
+        let requested = match request.headers.typed::<Expires>() {
+            None => self.policy_maximum,
+            Some(Ok(expires)) => Duration::from_secs(u64::from(expires.0)),
+            Some(Err(_)) => return Answer::Malformed,
+        };
 
         if is_unsubscribe(requested) {
             // Marked terminated rather than removed, so a NOTIFY that crosses it on the wire finds
             // a terminated subscription rather than no subscription at all — which is the
             // difference between "this is over" and "this never existed".
             if let Some(held) = self.held.iter_mut().find(|held| held.id == id) {
+                if cseq <= held.remote_cseq {
+                    return Answer::OutOfOrder { id };
+                }
+                held.remote_cseq = cseq;
                 held.state = State::Terminated;
             }
             return Answer::Unsubscribed { id };
@@ -177,18 +343,27 @@ impl Subscriptions {
             // §4.1.2.2: a refresh on an existing dialog pushes the timer out. A *terminated*
             // subscription is not refreshed back to life — §4.1.3 makes termination final, and a
             // subscriber that wants another one sends a SUBSCRIBE in a new dialog.
+            if cseq <= held.remote_cseq {
+                return Answer::OutOfOrder { id };
+            }
             if held.state == State::Terminated {
                 return Answer::Unserved { status: BAD_EVENT };
             }
+            held.remote_cseq = cseq;
             held.expires_at = expires_at;
             held.state = State::Active;
             return Answer::Refreshed { id, expires };
+        }
+
+        if self.active() >= self.capacity {
+            return Answer::AtCapacity;
         }
 
         self.held.push(Served {
             id: id.clone(),
             state: State::Active,
             expires_at,
+            remote_cseq: cseq,
         });
         Answer::Established { id, expires }
     }
@@ -266,6 +441,10 @@ mod tests {
     const NOW: u64 = 1_700_000_000;
 
     fn subscribe(event: &str, expires: Option<u64>, tag: &str) -> Request {
+        subscribe_with_cseq(event, expires, tag, 1)
+    }
+
+    fn subscribe_with_cseq(event: &str, expires: Option<u64>, tag: &str, cseq: u32) -> Request {
         let expires_line =
             expires.map_or_else(String::new, |seconds| format!("Expires: {seconds}\r\n"));
         let text = format!(
@@ -274,7 +453,7 @@ mod tests {
              To: <sip:alice@sipx.test>\r\n\
              From: <sip:watcher@example.net>;tag={tag}\r\n\
              Call-ID: sub-1@watcher\r\n\
-             CSeq: 1 SUBSCRIBE\r\n\
+             CSeq: {cseq} SUBSCRIBE\r\n\
              Event: {event}\r\n\
              {expires_line}\
              Max-Forwards: 70\r\n\
@@ -291,6 +470,45 @@ mod tests {
             Packages::new().with("dialog").with("presence"),
             Duration::from_secs(3600),
         )
+    }
+
+    #[test]
+    fn a_new_subscription_is_refused_at_the_bound_but_a_refresh_is_not() {
+        let mut notifier = notifier().with_capacity(1);
+        let first = subscribe("dialog", Some(600), "w1");
+        assert!(matches!(
+            notifier.on_subscribe(&first, NOW),
+            Answer::Established { .. }
+        ));
+
+        let second = subscribe("presence", Some(600), "w2");
+        assert_eq!(notifier.on_subscribe(&second, NOW), Answer::AtCapacity);
+        assert_eq!(notifier.active(), 1);
+
+        let refresh = subscribe_with_cseq("dialog", Some(600), "w1", 2);
+        assert!(matches!(
+            notifier.on_subscribe(&refresh, NOW + 1),
+            Answer::Refreshed { .. }
+        ));
+    }
+
+    #[test]
+    fn malformed_expiry_and_cseq_do_not_mutate_the_store() {
+        let mut notifier = notifier();
+        for (name, value) in [
+            (HeaderName::Expires, "4294967296"),
+            (HeaderName::CSeq, "not-a-cseq"),
+            (HeaderName::CSeq, "2 MESSAGE"),
+        ] {
+            let mut request = subscribe("dialog", Some(600), "w1");
+            request.headers.remove_all(&name);
+            request
+                .headers
+                .push(sipx_sip::Header::build(name, value).expect("syntactic header"));
+            assert_eq!(notifier.on_subscribe(&request, NOW), Answer::Malformed);
+            assert_eq!(notifier.active(), 0);
+            assert!(notifier.all().is_empty());
+        }
     }
 
     /// The story's failing-first test.
@@ -323,7 +541,7 @@ mod tests {
 
         // And a refresh does not bring it back. §4.1.3 makes termination final; a subscriber that
         // wants another subscription starts a new dialog.
-        let refresh = subscribe("dialog", Some(600), "w1");
+        let refresh = subscribe_with_cseq("dialog", Some(600), "w1", 2);
         assert_eq!(
             notifier.on_subscribe(&refresh, NOW),
             Answer::Unserved { status: BAD_EVENT },
@@ -342,7 +560,10 @@ mod tests {
         assert_eq!(expires, Duration::from_secs(600));
         assert_eq!(notifier.active(), 1);
 
-        let again = notifier.on_subscribe(&subscribe("dialog", Some(900), "w1"), NOW + 300);
+        let again = notifier.on_subscribe(
+            &subscribe_with_cseq("dialog", Some(900), "w1", 2),
+            NOW + 300,
+        );
         assert_eq!(
             again,
             Answer::Refreshed {
@@ -387,7 +608,7 @@ mod tests {
         };
 
         assert_eq!(
-            notifier.on_subscribe(&subscribe("dialog", Some(0), "w1"), NOW),
+            notifier.on_subscribe(&subscribe_with_cseq("dialog", Some(0), "w1", 2), NOW,),
             Answer::Unsubscribed { id: id.clone() }
         );
         assert_eq!(notifier.active(), 0);
@@ -502,5 +723,88 @@ mod tests {
             panic!("a new subscription");
         };
         assert_eq!(expires, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn replayed_subscribe_cseq_cannot_refresh_or_terminate() {
+        let mut notifier = notifier();
+        let Answer::Established { id, .. } =
+            notifier.on_subscribe(&subscribe_with_cseq("dialog", Some(600), "w1", 20), NOW)
+        else {
+            panic!("a new subscription");
+        };
+        let before = notifier.notify_state(&id, NOW).expect("active");
+
+        for request in [
+            subscribe_with_cseq("dialog", Some(900), "w1", 20),
+            subscribe_with_cseq("dialog", Some(0), "w1", 19),
+        ] {
+            assert_eq!(
+                notifier.on_subscribe(&request, NOW + 30),
+                Answer::OutOfOrder { id: id.clone() }
+            );
+            assert_eq!(notifier.notify_state(&id, NOW), Some(before.clone()));
+            assert_eq!(notifier.active(), 1);
+        }
+
+        assert!(matches!(
+            notifier.on_subscribe(
+                &subscribe_with_cseq("dialog", Some(900), "w1", 21),
+                NOW + 30,
+            ),
+            Answer::Refreshed { .. }
+        ));
+        assert_eq!(
+            notifier
+                .all()
+                .iter()
+                .find(|served| served.id == id)
+                .expect("subscription remains")
+                .remote_cseq,
+            21
+        );
+    }
+
+    #[test]
+    fn event_identity_uses_only_exact_type_and_id_tokens() {
+        let reordered = Id::from_request(&subscribe(
+            "dialog;vendor=one;ID=Opaque-A;mode=full",
+            Some(600),
+            "w1",
+        ))
+        .expect("identity");
+        let differently_ordered = Id::from_request(&subscribe(
+            "dialog;mode=partial;id=Opaque-A;vendor=two",
+            Some(600),
+            "w1",
+        ))
+        .expect("identity");
+        assert_eq!(reordered, differently_ordered);
+        assert_eq!(reordered.event, "dialog;id=Opaque-A");
+
+        let changed_type_case =
+            Id::from_request(&subscribe("Dialog;id=Opaque-A", Some(600), "w1")).expect("identity");
+        let changed_id_case =
+            Id::from_request(&subscribe("dialog;id=opaque-a", Some(600), "w1")).expect("identity");
+        assert_ne!(reordered, changed_type_case, "event-type is byte matched");
+        assert_ne!(reordered, changed_id_case, "id is an opaque token");
+
+        assert!(
+            Id::from_request(&subscribe("dialog;id=one;ID=two", Some(600), "w1")).is_none(),
+            "duplicate identity parameters fail closed"
+        );
+    }
+
+    #[test]
+    fn duplicate_identity_headers_fail_before_first_value_selection() {
+        for name in [HeaderName::CallId, HeaderName::From, HeaderName::Event] {
+            let mut request = subscribe("dialog", Some(600), "w1");
+            let value = request.headers.value(&name).expect("header").into_owned();
+            request
+                .headers
+                .push(sipx_sip::Header::build(name, value).expect("syntactic header"));
+            assert!(Id::from_request(&request).is_none());
+            assert_eq!(notifier().on_subscribe(&request, NOW), Answer::Malformed);
+        }
     }
 }

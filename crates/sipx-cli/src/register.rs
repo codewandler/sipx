@@ -362,7 +362,7 @@ fn report_failure(format: Format, error: &sipx_ua::Error) -> Exit {
 }
 
 /// Split `sip:user@domain` into its two halves.
-fn parse_aor(aor: &str) -> Option<(String, String)> {
+pub(crate) fn parse_aor(aor: &str) -> Option<(String, String)> {
     let rest = aor
         .strip_prefix("sip:")
         .or_else(|| aor.strip_prefix("sips:"))?;
@@ -377,7 +377,7 @@ fn parse_aor(aor: &str) -> Option<(String, String)> {
 
 /// Where to send. An explicit `--target` wins; otherwise the domain must already be an address,
 /// since resolving a name is the resolver's job and this command does not carry one.
-fn resolve_target(
+pub(crate) fn resolve_target(
     explicit: Option<&str>,
     domain: &str,
     transport: TransportKind,

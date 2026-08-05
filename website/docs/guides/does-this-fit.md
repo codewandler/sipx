@@ -29,6 +29,12 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
   server to select a server-reflexive ICE path.
 - **A two-leg call controller.** `sipx-call::EarlyCoupling` and `Coupling` own both dialogs, relay
   offer/answer changes and termination, and can attach the bounded media bridge.
+- **An inbound SIP event notifier.** A dispatcher can serve bounded `dialog`, `reg`, and `presence`
+  subscriptions, negotiate expiry, send the required initial NOTIFY, and expose shedding and owned
+  task lifetime through counters.
+- **Registration discovery from an existing registrar.** The generic subscriber has a bounded
+  RFC 3680 consumer, and `sipx peers --registrar` keeps a current contact view with explicit source
+  and age. Enumeration still depends on the registrar authorizing the subscription.
 
 ## Choose something else when you need
 
@@ -52,9 +58,11 @@ claim and the places sipx loses stated plainly — see [How sipx compares](../re
   and optional Opus, not arbitrary application-supplied codecs.
 - **A ready-made routing product.** The two-dialog coupling primitive is available, but listener
   configuration, routing policy, a location service, and dial plans belong to the application.
-- **Automatic presence from live stack state.** Subscription and event-package components are
-  present, but applications must supply the documents they publish; live calls and registrations
-  are not automatically projected into presence state.
+- **Automatic event documents from live stack state.** The socket notifier sends valid initial
+  `dialog`, `reg`, and PIDF documents, but live calls, registrations and published presence are not
+  yet projected into later NOTIFY bodies. A bounded generic subscriber does originate authenticated
+  SUBSCRIBE and consume NOTIFY through an injected package parser and origin policy; registration
+  discovery has a built-in consumer, while dialog and presence consumers remain application policy.
 - **SIP instant messaging.** `MESSAGE` can be parsed but has no user-agent behavior.
 
 ## Security boundary

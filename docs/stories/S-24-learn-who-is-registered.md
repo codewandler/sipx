@@ -2,12 +2,12 @@
 id: S-24
 title: Learn who is registered, with the registration event package
 pillar: Signalling
-status: backlog
-priority:
+status: in-progress
+priority: 7
 design: docs/designs/discovery.md
 epic: discovery
 areas: [sipx-ua, sipx-sip]
-note: RFC 3680 is `partial` today — sipx parses the package and never subscribes to it
+note: live bounded UAC landed on the epic branch; full integration gate remains
 ---
 
 # Learn who is registered, with the registration event package
@@ -17,21 +17,31 @@ Ask a registrar who is registered, and keep the answer current. The `discovery` 
 the case where real infrastructure exists.
 
 ## Acceptance
-- [ ] sipx subscribes to the `reg` event package (RFC 3680) at a registrar and turns the NOTIFY
+- [x] sipx subscribes to the `reg` event package (RFC 3680) at a registrar and turns the NOTIFY
       bodies into peers the epic's list can show. The package is already `partial` in the registry
       — `sipx-sip` parses it and nothing ever subscribes.
-- [ ] The list stays current from subsequent NOTIFYs rather than being fetched once: a contact
+- [x] The list stays current from subsequent NOTIFYs rather than being fetched once: a contact
       that registers or expires while the subscription is live changes what `sipx peers` prints.
-- [ ] **A refusal is surfaced as a refusal.** A registrar may reasonably decline to enumerate its
+- [x] **A refusal is surfaced as a refusal.** A registrar may reasonably decline to enumerate its
       users, and RFC 3680 subscriptions are authorized for exactly that reason. A `403`, a `489` or
       a subscription that is never granted must produce a stated error — never a partial list
       presented as complete, and never a suggestion that discovery routes around authorization.
-- [ ] Peers from this source are labelled as such in the output `P-5` defined, with their age.
-- [ ] The RFC registry row for 3680 moves off `partial` or says precisely what is still missing.
-- [ ] Failing-first test: `a_contact_that_registers_while_subscribed_appears_in_the_list`.
+- [x] Peers from this source are labelled as such in the output `P-5` defined, with their age.
+- [x] The RFC registry row for 3680 moves off `partial` or says precisely what is still missing.
+- [x] Failing-first test: `a_contact_that_registers_while_subscribed_appears_in_the_list`.
 
 ## Progress
-- Not started. Needs `P-5` for somewhere to put the result.
+- `RegistrationConsumer` is the concrete `reg` package policy behind S-38. It parses bounded XML,
+  requires an authoritative version-zero full document, applies exact-next partial changes
+  atomically, retains current typed contacts and rejects gaps, duplicate identities, DTD/entity
+  input and capacity overflow without publishing a truncated snapshot.
+- `EventSubscriptions` records the monotonic observation instant. `sipx peers --registrar` waits for
+  the first complete snapshot, optionally observes later NOTIFYs for `--watch`, reports source and
+  age, and maps 403, 489 and missing initial NOTIFY to scriptable non-zero outcomes. An explicit
+  `--book` merges local facts; no implicit book can disguise a refused registrar result.
+- The live failing-first test observes a registration arrive and expire over real SIP transactions,
+  then verifies unsubscribe cleanup. Focused compilation and tests run on the epic branch; story
+  completion waits for the integration branch's final gate.
 
 ## Notes
 - Third story of the `discovery` epic; see [the design](../designs/discovery.md).
