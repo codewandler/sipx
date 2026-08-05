@@ -73,6 +73,7 @@ mod media_policy;
 pub mod notifier;
 pub mod publication;
 pub mod rel;
+mod signalling;
 mod snapshot;
 pub mod subscriber;
 pub mod transfer;
@@ -112,6 +113,7 @@ pub use rel::{
     Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_early_with_policy_at,
     ring_offer_early, ring_offer_early_with_policy, ring_offer_early_with_policy_at,
 };
+pub use signalling::{SignallingCall, SignallingEvent};
 pub use snapshot::{
     DialogNotQuiescent, DialogPersistenceError, DialogRestoreContext, DialogSessionAction,
     DialogSnapshot, MAX_FIELD_BYTES, MAX_ID_BYTES, MAX_ROUTES, MAX_SNAPSHOT_BYTES,

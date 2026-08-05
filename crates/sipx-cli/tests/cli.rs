@@ -2459,6 +2459,984 @@ async fn bounded_load_stops_at_the_call_limit_and_emits_one_stable_summary() {
     );
 }
 
+/// P-15 through the shipped process: readiness is the start barrier, then the exact SDP-free
+/// INVITE/2xx/ACK/BYE/2xx flow drains every owned route, transaction and task before the terminal
+/// record appears.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn bounded_load_responder_drives_readiness_through_zero_state() {
+    let _scenario = process_scenario().await;
+    let mut command = sipx();
+    command
+        .args([
+            "load-responder",
+            "--max-active",
+            "2",
+            "--calls",
+            "1",
+            "--cleanup",
+            "5",
+            "--dialog-duration",
+            "5",
+            "--seed",
+            "41",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("responder starts");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("readiness is bounded")
+        .expect("readiness can be read")
+        .expect("readiness line exists");
+    let ready: serde_json::Value = serde_json::from_str(&ready_line).expect("readiness JSON");
+    assert_eq!(ready["schema"], "sipx.comparative-load.ready.v1");
+    assert_eq!(ready["role"], "responder");
+    let address: std::net::SocketAddr = ready["address"]
+        .as_str()
+        .expect("readiness address")
+        .parse()
+        .expect("IP socket address");
+
+    let (peer, _incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("peer binds");
+    let mut orphan_bye = peer
+        .send(
+            load_dialog_request(
+                &peer,
+                address,
+                bytes::Bytes::from_static(b"<sip:load@load.invalid>;tag=absent"),
+                &Method::Bye,
+                2,
+            ),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("orphan BYE sends");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), orphan_bye.final_response())
+            .await
+            .expect("orphan BYE response is bounded")
+            .expect("orphan BYE response")
+            .status
+            .code(),
+        481
+    );
+    let malformed_peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("malformed peer binds");
+    let malformed_address = malformed_peer.local_addr().expect("malformed peer address");
+    let malformed = format!(
+        "INVITE sip:load@{address} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP {malformed_address};branch=z9hG4bKbadcseq;rport\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:driver@driver.invalid>;tag=f-bad\r\n\
+         To: <sip:load@{address}>\r\n\
+         Call-ID: cl-0123456789abcdef0123456789abcdef-9@driver.invalid\r\n\
+         CSeq: 1 BYE\r\n\
+         Contact: <sip:driver@{malformed_address}>\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    malformed_peer
+        .send_to(malformed.as_bytes(), address)
+        .await
+        .expect("malformed INVITE sends");
+    let mut malformed_response = [0_u8; 4096];
+    let (malformed_length, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        malformed_peer.recv_from(&mut malformed_response),
+    )
+    .await
+    .expect("malformed INVITE response is bounded")
+    .expect("malformed INVITE response");
+    assert!(
+        malformed_response[..malformed_length].starts_with(b"SIP/2.0 400 "),
+        "{}",
+        String::from_utf8_lossy(&malformed_response[..malformed_length])
+    );
+    let missing_contact = format!(
+        "INVITE sip:load@{address} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP {malformed_address};branch=z9hG4bKmissingcontact;rport\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:driver@driver.invalid>;tag=f-missing-contact\r\n\
+         To: <sip:load@{address}>\r\n\
+         Call-ID: cl-0123456789abcdef0123456789abcdef-10@driver.invalid\r\n\
+         CSeq: 1 INVITE\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    malformed_peer
+        .send_to(missing_contact.as_bytes(), address)
+        .await
+        .expect("contact-less INVITE sends");
+    let (missing_length, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        malformed_peer.recv_from(&mut malformed_response),
+    )
+    .await
+    .expect("contact-less INVITE response is bounded")
+    .expect("contact-less INVITE response");
+    assert!(
+        malformed_response[..missing_length].starts_with(b"SIP/2.0 400 "),
+        "{}",
+        String::from_utf8_lossy(&malformed_response[..missing_length])
+    );
+    let call_id = "cl-0123456789abcdef0123456789abcdef-0@driver.invalid";
+    let request_uri = sipx_sip::Uri::parse(bytes::Bytes::from(format!("sip:load@{address}")))
+        .expect("request URI");
+    let from = bytes::Bytes::from_static(b"<sip:driver@driver.invalid>;tag=f-fixed");
+    let to = bytes::Bytes::from(format!("<sip:load@{address}>"));
+    let contact = bytes::Bytes::from(format!("<sip:driver@{}>", peer.local_addr()));
+    let invite = sipx_sip::build::RequestBuilder::new(Method::Invite, request_uri.clone())
+        .header(HeaderName::To, to)
+        .expect("To")
+        .header(HeaderName::From, from.clone())
+        .expect("From")
+        .header(
+            HeaderName::CallId,
+            bytes::Bytes::from_static(call_id.as_bytes()),
+        )
+        .expect("Call-ID")
+        .cseq(1, &Method::Invite)
+        .expect("CSeq")
+        .header(HeaderName::Contact, contact.clone())
+        .expect("Contact")
+        .max_forwards(70)
+        .build();
+    let mut invite_responses = peer
+        .send(invite, sipx_transport::Target::udp(address))
+        .await
+        .expect("INVITE sends");
+    let accepted = tokio::time::timeout(Duration::from_secs(5), invite_responses.final_response())
+        .await
+        .expect("answer is bounded")
+        .expect("INVITE final response");
+    assert_eq!(accepted.status.code(), 200);
+    assert!(accepted.body().is_empty(), "signalling mode creates no SDP");
+    let tagged_to = bytes::Bytes::copy_from_slice(
+        &accepted
+            .headers
+            .value(&HeaderName::To)
+            .expect("accepted To tag"),
+    );
+    assert!(
+        String::from_utf8_lossy(&tagged_to).contains(";tag=t-"),
+        "deterministic load tag: {}",
+        String::from_utf8_lossy(&tagged_to)
+    );
+
+    let in_dialog = |method: Method, cseq: u32| {
+        sipx_sip::build::RequestBuilder::new(method.clone(), request_uri.clone())
+            .header(
+                HeaderName::Via,
+                bytes::Bytes::from(format!(
+                    "SIP/2.0/UDP {};rport;branch={}",
+                    peer.sent_by_for(sipx_transport::TransportKind::Udp),
+                    sipx_transport::new_branch()
+                )),
+            )
+            .expect("Via")
+            .header(HeaderName::To, tagged_to.clone())
+            .expect("To")
+            .header(HeaderName::From, from.clone())
+            .expect("From")
+            .header(
+                HeaderName::CallId,
+                bytes::Bytes::from_static(call_id.as_bytes()),
+            )
+            .expect("Call-ID")
+            .cseq(cseq, &method)
+            .expect("CSeq")
+            .header(HeaderName::Contact, contact.clone())
+            .expect("Contact")
+            .max_forwards(70)
+            .build()
+    };
+    peer.send_directly(
+        in_dialog(Method::Ack, 1),
+        sipx_transport::Target::udp(address),
+    )
+    .await
+    .expect("ACK sends");
+    let mut bye_responses = peer
+        .send(
+            in_dialog(Method::Bye, 2),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("BYE sends");
+    let ended = tokio::time::timeout(Duration::from_secs(5), bye_responses.final_response())
+        .await
+        .expect("teardown is bounded")
+        .expect("BYE final response");
+    assert_eq!(ended.status.code(), 200);
+
+    let summary_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("summary follows cleanup")
+        .expect("summary can be read")
+        .expect("summary line exists");
+    let summary: serde_json::Value = serde_json::from_str(&summary_line).expect("summary JSON");
+    assert_eq!(summary["schema"], "sipx.load-responder.v1");
+    assert_eq!(summary["status"], "completed");
+    assert_eq!(summary["counts"]["invitations"], 1);
+    assert_eq!(summary["counts"]["established"], 1);
+    assert_eq!(summary["counts"]["completed"], 1);
+    assert_eq!(summary["counts"]["active_high_water"], 1);
+    assert_eq!(summary["counts"]["invalid_messages"], 3);
+    assert_eq!(summary["responses"]["481"], 1);
+    assert_eq!(summary["responses"]["400"], 2);
+    assert_eq!(summary["post_drain"]["active_dialogs"], 0);
+    assert_eq!(summary["post_drain"]["dispatcher_routes"], 0);
+    assert_eq!(summary["post_drain"]["endpoint_transactions"], 0);
+    assert_eq!(summary["post_drain"]["owned_tasks"], 0);
+
+    let complaint = drain_stderr(&mut child).await;
+    exits_cleanly(&mut child, &complaint).await;
+    peer.shutdown().await;
+}
+
+/// A dialog lifetime is not establishment evidence: without a valid ACK, even a successfully
+/// answered cleanup BYE remains a failed invitation.
+#[tokio::test]
+async fn load_responder_never_completes_a_dialog_before_ack() {
+    let _scenario = process_scenario().await;
+    let mut command = sipx();
+    command
+        .args([
+            "load-responder",
+            "--max-active",
+            "1",
+            "--calls",
+            "1",
+            "--cleanup",
+            "5",
+            "--dialog-duration",
+            "1",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("responder starts");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("readiness is bounded")
+            .expect("readiness can be read")
+            .expect("readiness line exists"),
+    )
+    .expect("readiness JSON");
+    let address = ready["address"]
+        .as_str()
+        .expect("readiness address")
+        .parse()
+        .expect("IP socket address");
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("peer binds");
+    let mut invite = peer
+        .send(
+            load_invite(&peer, address, 0),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("INVITE sends");
+    assert_eq!(
+        invite
+            .final_response()
+            .await
+            .expect("INVITE final response")
+            .status
+            .code(),
+        200
+    );
+
+    let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("cleanup BYE is bounded")
+        .expect("cleanup BYE arrives");
+    assert_eq!(bye.request.method, Method::Bye);
+    let response = sipx_sip::build::ResponseBuilder::to_request(
+        &bye.request,
+        sipx_sip::StatusCode::new(200).expect("valid status"),
+        "OK",
+    )
+    .expect("response")
+    .build();
+    peer.respond(&bye.key, response)
+        .await
+        .expect("cleanup response sends");
+
+    let summary: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("summary is bounded")
+            .expect("summary can be read")
+            .expect("summary line exists"),
+    )
+    .expect("summary JSON");
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(summary["counts"]["established"], 0);
+    assert_eq!(summary["counts"]["completed"], 0);
+    assert_eq!(summary["counts"]["failed"], 1);
+    assert_eq!(summary["post_drain"]["active_dialogs"], 0);
+
+    let complaint = drain_stderr(&mut child).await;
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("failed responder exits")
+        .expect("status");
+    assert_eq!(status.code(), Some(1), "{complaint}");
+    peer.shutdown().await;
+}
+
+/// P-15 generated media uses the ordinary call teardown but keeps the load summary's exact wire
+/// semantics: a valid non-success final response to its BYE is evidence once, and is still a
+/// failed dialog rather than a synthetic completion.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn generated_load_responder_records_a_valid_non_success_bye_final() {
+    let _scenario = process_scenario().await;
+    let mut command = sipx();
+    command
+        .args([
+            "load-responder",
+            "--mode",
+            "generated-media",
+            "--max-active",
+            "1",
+            "--calls",
+            "1",
+            "--cleanup",
+            "5",
+            "--dialog-duration",
+            "1",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("responder starts");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("readiness is bounded")
+            .expect("readiness can be read")
+            .expect("readiness line exists"),
+    )
+    .expect("readiness JSON");
+    let address = ready["address"]
+        .as_str()
+        .expect("readiness address")
+        .parse()
+        .expect("IP socket address");
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("peer binds");
+    let mut invite = peer
+        .send(
+            load_media_invite(&peer, address),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("INVITE sends");
+    let accepted = invite
+        .final_response()
+        .await
+        .expect("INVITE final response");
+    assert_eq!(accepted.status.code(), 200);
+    let tagged_to = bytes::Bytes::copy_from_slice(
+        &accepted
+            .headers
+            .value(&HeaderName::To)
+            .expect("accepted To tag"),
+    );
+    peer.send_directly(
+        load_dialog_request(&peer, address, tagged_to, &Method::Ack, 1),
+        sipx_transport::Target::udp(address),
+    )
+    .await
+    .expect("ACK sends");
+
+    let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("cleanup BYE is bounded")
+        .expect("cleanup BYE arrives");
+    assert_eq!(bye.request.method, Method::Bye);
+    let refusal = sipx_sip::build::ResponseBuilder::to_request(
+        &bye.request,
+        sipx_sip::StatusCode::new(481).expect("valid status"),
+        "Call Does Not Exist",
+    )
+    .expect("response")
+    .build();
+    peer.respond(&bye.key, refusal)
+        .await
+        .expect("cleanup refusal sends");
+
+    let summary: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("summary is bounded")
+            .expect("summary can be read")
+            .expect("summary line exists"),
+    )
+    .expect("summary JSON");
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(summary["counts"]["established"], 1);
+    assert_eq!(summary["counts"]["completed"], 0);
+    assert_eq!(summary["counts"]["failed"], 1);
+    assert_eq!(summary["counts"]["invalid_messages"], 0);
+    assert_eq!(summary["responses"]["200"], 1);
+    assert_eq!(summary["responses"]["481"], 1);
+    assert_eq!(summary["post_drain"]["active_dialogs"], 0);
+
+    let complaint = drain_stderr(&mut child).await;
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("failed responder exits")
+        .expect("status");
+    assert_eq!(status.code(), Some(1), "{complaint}");
+    peer.shutdown().await;
+}
+
+/// A final status is not evidence merely because it arrived on the BYE transaction: the ordinary
+/// media call must validate dialog identity before the responder can count it.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn generated_load_responder_rejects_a_wrong_dialog_bye_final() {
+    let _scenario = process_scenario().await;
+    let mut command = sipx();
+    command
+        .args([
+            "load-responder",
+            "--mode",
+            "generated-media",
+            "--max-active",
+            "1",
+            "--calls",
+            "1",
+            "--cleanup",
+            "5",
+            "--dialog-duration",
+            "1",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("responder starts");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("readiness is bounded")
+            .expect("readiness can be read")
+            .expect("readiness line exists"),
+    )
+    .expect("readiness JSON");
+    let address = ready["address"]
+        .as_str()
+        .expect("readiness address")
+        .parse()
+        .expect("IP socket address");
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("peer binds");
+    let mut invite = peer
+        .send(
+            load_media_invite(&peer, address),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("INVITE sends");
+    let accepted = invite
+        .final_response()
+        .await
+        .expect("INVITE final response");
+    assert_eq!(accepted.status.code(), 200);
+    let tagged_to = bytes::Bytes::copy_from_slice(
+        &accepted
+            .headers
+            .value(&HeaderName::To)
+            .expect("accepted To tag"),
+    );
+    peer.send_directly(
+        load_dialog_request(&peer, address, tagged_to.clone(), &Method::Ack, 1),
+        sipx_transport::Target::udp(address),
+    )
+    .await
+    .expect("ACK sends");
+
+    let mut duplicate = load_dialog_request(&peer, address, tagged_to, &Method::Bye, 2);
+    duplicate.headers.push(
+        sipx_sip::Header::build(
+            HeaderName::CallId,
+            bytes::Bytes::from_static(b"cl-0123456789abcdef0123456789abcdef-0@driver.invalid"),
+        )
+        .expect("duplicate Call-ID"),
+    );
+    let mut duplicate_responses = peer
+        .send(duplicate, sipx_transport::Target::udp(address))
+        .await
+        .expect("duplicate-header BYE sends");
+    assert_eq!(
+        duplicate_responses
+            .final_response()
+            .await
+            .expect("duplicate-header refusal")
+            .status
+            .code(),
+        400
+    );
+
+    let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("cleanup BYE is bounded")
+        .expect("cleanup BYE arrives");
+    let invalid = sipx_sip::build::ResponseBuilder::to_request(
+        &bye.request,
+        sipx_sip::StatusCode::new(200).expect("valid status"),
+        "OK",
+    )
+    .expect("response")
+    .set_header(
+        &HeaderName::CallId,
+        bytes::Bytes::from_static(b"wrong-dialog@driver.invalid"),
+    )
+    .expect("wrong Call-ID")
+    .build();
+    peer.respond(&bye.key, invalid)
+        .await
+        .expect("invalid final sends");
+
+    let summary: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("summary is bounded")
+            .expect("summary can be read")
+            .expect("summary line exists"),
+    )
+    .expect("summary JSON");
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(summary["counts"]["established"], 1);
+    assert_eq!(summary["counts"]["completed"], 0);
+    assert_eq!(summary["counts"]["failed"], 1);
+    assert_eq!(summary["counts"]["invalid_messages"], 2);
+    assert_eq!(summary["responses"]["200"], 1);
+    assert_eq!(summary["responses"]["400"], 1);
+    assert!(summary["responses"].get("481").is_none());
+    assert_eq!(summary["post_drain"]["active_dialogs"], 0);
+
+    let complaint = drain_stderr(&mut child).await;
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("failed responder exits")
+        .expect("status");
+    assert_eq!(status.code(), Some(1), "{complaint}");
+    peer.shutdown().await;
+}
+
+/// Forced cleanup must retain both a terminal classification and the state that missed its
+/// deadline; neither may be replaced by a synthetic zero.
+#[tokio::test]
+async fn load_responder_reports_workers_aborted_at_the_cleanup_deadline() {
+    let _scenario = process_scenario().await;
+    let mut command = sipx();
+    command
+        .args([
+            "load-responder",
+            "--max-active",
+            "1",
+            "--calls",
+            "1",
+            "--cleanup",
+            "1",
+            "--dialog-duration",
+            "40",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("responder starts");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("readiness is bounded")
+            .expect("readiness can be read")
+            .expect("readiness line exists"),
+    )
+    .expect("readiness JSON");
+    let address = ready["address"]
+        .as_str()
+        .expect("readiness address")
+        .parse()
+        .expect("IP socket address");
+    let (peer, _incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("peer binds");
+    let mut invite = peer
+        .send(
+            load_invite(&peer, address, 0),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("INVITE sends");
+    assert_eq!(
+        invite
+            .final_response()
+            .await
+            .expect("INVITE final response")
+            .status
+            .code(),
+        200
+    );
+
+    let summary: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("cleanup deadline is bounded")
+            .expect("summary can be read")
+            .expect("summary line exists"),
+    )
+    .expect("summary JSON");
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(summary["counts"]["invitations"], 1);
+    assert_eq!(summary["counts"]["failed"], 1);
+    assert_eq!(summary["post_drain"]["owned_tasks"], 1);
+    assert_eq!(summary["post_drain"]["active_dialogs"], 1);
+
+    let complaint = drain_stderr(&mut child).await;
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("failed responder exits")
+        .expect("status");
+    assert_eq!(status.code(), Some(1), "{complaint}");
+    peer.shutdown().await;
+}
+
+fn load_invite(
+    peer: &sipx_transport::Handle,
+    address: std::net::SocketAddr,
+    index: usize,
+) -> sipx_sip::Request {
+    load_invite_with_cseq(peer, address, index, &Method::Invite)
+}
+
+fn load_media_invite(
+    peer: &sipx_transport::Handle,
+    address: std::net::SocketAddr,
+) -> sipx_sip::Request {
+    let request_uri = sipx_sip::Uri::parse(bytes::Bytes::from(format!("sip:load@{address}")))
+        .expect("request URI");
+    let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\n\
+               t=0 0\r\nm=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+    sipx_sip::build::RequestBuilder::new(Method::Invite, request_uri)
+        .header(
+            HeaderName::Via,
+            bytes::Bytes::from(format!(
+                "SIP/2.0/UDP {};rport;branch={}",
+                peer.sent_by_for(sipx_transport::TransportKind::Udp),
+                sipx_transport::new_branch()
+            )),
+        )
+        .expect("Via")
+        .header(
+            HeaderName::To,
+            bytes::Bytes::from(format!("<sip:load@{address}>")),
+        )
+        .expect("To")
+        .header(
+            HeaderName::From,
+            bytes::Bytes::from_static(b"<sip:driver@driver.invalid>;tag=f-0"),
+        )
+        .expect("From")
+        .header(
+            HeaderName::CallId,
+            bytes::Bytes::from_static(b"cl-0123456789abcdef0123456789abcdef-0@driver.invalid"),
+        )
+        .expect("Call-ID")
+        .cseq(1, &Method::Invite)
+        .expect("CSeq")
+        .header(
+            HeaderName::Contact,
+            bytes::Bytes::from(format!("<sip:driver@{}>", peer.local_addr())),
+        )
+        .expect("Contact")
+        .header(
+            HeaderName::ContentType,
+            bytes::Bytes::from_static(b"application/sdp"),
+        )
+        .expect("Content-Type")
+        .max_forwards(70)
+        .body(bytes::Bytes::from_static(sdp.as_bytes()))
+        .build()
+}
+
+fn load_invite_with_cseq(
+    peer: &sipx_transport::Handle,
+    address: std::net::SocketAddr,
+    index: usize,
+    cseq_method: &Method,
+) -> sipx_sip::Request {
+    let request_uri = sipx_sip::Uri::parse(bytes::Bytes::from(format!("sip:load@{address}")))
+        .expect("request URI");
+    sipx_sip::build::RequestBuilder::new(Method::Invite, request_uri)
+        .header(
+            HeaderName::Via,
+            bytes::Bytes::from(format!(
+                "SIP/2.0/UDP {};rport;branch={}",
+                peer.sent_by_for(sipx_transport::TransportKind::Udp),
+                sipx_transport::new_branch()
+            )),
+        )
+        .expect("Via")
+        .header(
+            HeaderName::To,
+            bytes::Bytes::from(format!("<sip:load@{address}>")),
+        )
+        .expect("To")
+        .header(
+            HeaderName::From,
+            bytes::Bytes::from(format!("<sip:driver@driver.invalid>;tag=f-{index}")),
+        )
+        .expect("From")
+        .header(
+            HeaderName::CallId,
+            bytes::Bytes::from(format!(
+                "cl-0123456789abcdef0123456789abcdef-{index}@driver.invalid"
+            )),
+        )
+        .expect("Call-ID")
+        .cseq(1, cseq_method)
+        .expect("CSeq")
+        .header(
+            HeaderName::Contact,
+            bytes::Bytes::from(format!("<sip:driver@{}>", peer.local_addr())),
+        )
+        .expect("Contact")
+        .max_forwards(70)
+        .build()
+}
+
+fn load_cancel(invite: &sipx_sip::Request) -> sipx_sip::Request {
+    let copy = |name: &HeaderName| {
+        bytes::Bytes::from(
+            invite
+                .headers
+                .value(name)
+                .expect("INVITE header")
+                .into_owned(),
+        )
+    };
+    sipx_sip::build::RequestBuilder::new(Method::Cancel, invite.uri.clone())
+        .header(HeaderName::Via, copy(&HeaderName::Via))
+        .expect("Via")
+        .header(HeaderName::To, copy(&HeaderName::To))
+        .expect("To")
+        .header(HeaderName::From, copy(&HeaderName::From))
+        .expect("From")
+        .header(HeaderName::CallId, copy(&HeaderName::CallId))
+        .expect("Call-ID")
+        .cseq(1, &Method::Cancel)
+        .expect("CSeq")
+        .max_forwards(70)
+        .build()
+}
+
+fn load_dialog_request(
+    peer: &sipx_transport::Handle,
+    address: std::net::SocketAddr,
+    tagged_to: bytes::Bytes,
+    method: &Method,
+    cseq: u32,
+) -> sipx_sip::Request {
+    let request_uri = sipx_sip::Uri::parse(bytes::Bytes::from(format!("sip:load@{address}")))
+        .expect("request URI");
+    sipx_sip::build::RequestBuilder::new(method.clone(), request_uri)
+        .header(
+            HeaderName::Via,
+            bytes::Bytes::from(format!(
+                "SIP/2.0/UDP {};rport;branch={}",
+                peer.sent_by_for(sipx_transport::TransportKind::Udp),
+                sipx_transport::new_branch()
+            )),
+        )
+        .expect("Via")
+        .header(HeaderName::To, tagged_to)
+        .expect("To")
+        .header(
+            HeaderName::From,
+            bytes::Bytes::from_static(b"<sip:driver@driver.invalid>;tag=f-0"),
+        )
+        .expect("From")
+        .header(
+            HeaderName::CallId,
+            bytes::Bytes::from_static(b"cl-0123456789abcdef0123456789abcdef-0@driver.invalid"),
+        )
+        .expect("Call-ID")
+        .cseq(cseq, method)
+        .expect("CSeq")
+        .header(
+            HeaderName::Contact,
+            bytes::Bytes::from(format!("<sip:driver@{}>", peer.local_addr())),
+        )
+        .expect("Contact")
+        .max_forwards(70)
+        .build()
+}
+
+/// P-15's active-dialog ceiling is admission, not a reporting hint: a second concurrent INVITE is
+/// refused while the first remains live, and the admitted dialog can still complete and drain.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
+    let _scenario = process_scenario().await;
+    let mut command = sipx();
+    command
+        .args([
+            "load-responder",
+            "--max-active",
+            "1",
+            "--calls",
+            "2",
+            "--cleanup",
+            "5",
+            "--dialog-duration",
+            "5",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("responder starts");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("readiness is bounded")
+        .expect("readiness can be read")
+        .expect("readiness line exists");
+    let ready: serde_json::Value = serde_json::from_str(&ready_line).expect("readiness JSON");
+    let address: std::net::SocketAddr = ready["address"]
+        .as_str()
+        .expect("readiness address")
+        .parse()
+        .expect("IP socket address");
+    let (peer, _incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("peer binds");
+
+    let first_request = load_invite(&peer, address, 0);
+    let mut first = peer
+        .send(first_request.clone(), sipx_transport::Target::udp(address))
+        .await
+        .expect("first INVITE sends");
+    let accepted = tokio::time::timeout(Duration::from_secs(5), first.final_response())
+        .await
+        .expect("first answer is bounded")
+        .expect("first final response");
+    assert_eq!(accepted.status.code(), 200);
+    let tagged_to =
+        bytes::Bytes::copy_from_slice(&accepted.headers.value(&HeaderName::To).expect("tagged To"));
+
+    let mut late_cancel = peer
+        .send(
+            load_cancel(&first_request),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("late CANCEL sends");
+    assert_eq!(
+        late_cancel
+            .final_response()
+            .await
+            .expect("late CANCEL response")
+            .status
+            .code(),
+        200
+    );
+
+    let mut second = peer
+        .send(
+            load_invite(&peer, address, 1),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("second INVITE sends");
+    let refused = tokio::time::timeout(Duration::from_secs(5), second.final_response())
+        .await
+        .expect("overload answer is bounded")
+        .expect("overload final response");
+    assert_eq!(refused.status.code(), 503);
+
+    peer.send_directly(
+        load_dialog_request(&peer, address, tagged_to.clone(), &Method::Ack, 1),
+        sipx_transport::Target::udp(address),
+    )
+    .await
+    .expect("ACK sends");
+    let mut bye = peer
+        .send(
+            load_dialog_request(&peer, address, tagged_to, &Method::Bye, 2),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("BYE sends");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), bye.final_response())
+            .await
+            .expect("BYE response is bounded")
+            .expect("BYE final response")
+            .status
+            .code(),
+        200
+    );
+
+    let summary_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("summary follows drain")
+        .expect("summary can be read")
+        .expect("summary line exists");
+    let summary: serde_json::Value = serde_json::from_str(&summary_line).expect("summary JSON");
+    assert_eq!(summary["status"], "completed");
+    assert_eq!(summary["counts"]["invitations"], 2);
+    assert_eq!(summary["counts"]["admitted"], 1);
+    assert_eq!(summary["counts"]["rejected"], 1);
+    assert_eq!(summary["counts"]["established"], 1);
+    assert_eq!(summary["counts"]["completed"], 1);
+    assert_eq!(summary["counts"]["active_high_water"], 1);
+    assert_eq!(summary["responses"]["200"], 3);
+    assert_eq!(summary["responses"]["503"], 1);
+    assert_eq!(summary["post_drain"]["active_dialogs"], 0);
+    assert_eq!(summary["post_drain"]["dispatcher_routes"], 0);
+    assert_eq!(summary["post_drain"]["endpoint_transactions"], 0);
+    assert_eq!(summary["post_drain"]["owned_tasks"], 0);
+
+    let complaint = drain_stderr(&mut child).await;
+    exits_cleanly(&mut child, &complaint).await;
+    peer.shutdown().await;
+}
+
 /// DPH-11 through the process boundary: signal only after the peer has observed the first INVITE,
 /// then require the one final summary to follow cleanup. Concurrency one is load-bearing: no second
 /// invitation can be admitted while the owned first call is still cleaning up.

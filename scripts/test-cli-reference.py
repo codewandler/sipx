@@ -73,6 +73,13 @@ class HelpComparison(unittest.TestCase):
 
 
 class JsonComparison(unittest.TestCase):
+    def test_a_rust_module_name_may_identify_the_producer(self):
+        document = DOCUMENT.replace("`dial`", "`load_responder`")
+        actual = {
+            "sipx.test.v1": checker.JsonContract("load_responder", {"schema", "status"})
+        }
+        self.assertEqual(checker.json_drift(document, actual), [])
+
     def test_a_missing_json_field_is_a_failure(self):
         actual = {"sipx.test.v1": checker.JsonContract("dial", {"schema", "status", "peer"})}
         problems = checker.json_drift(DOCUMENT, actual)

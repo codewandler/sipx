@@ -34,9 +34,11 @@ sipx-audio.workspace = true
 anyhow.workspace = true
 rand.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["full"] }
+tokio-util.workspace = true
 cpal = { workspace = true, optional = true }
 
 [dev-dependencies]

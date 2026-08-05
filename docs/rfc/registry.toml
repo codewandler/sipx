@@ -50,8 +50,10 @@ evidence = [
   "crates/sipx-ua/src/registrar.rs",
   "crates/sipx-ua/tests/registration_observation.rs",
   "crates/sipx-call/tests/dialog_persistence.rs",
+  "crates/sipx-call/src/signalling.rs",
+  "crates/sipx-call/tests/signalling.rs",
 ]
-note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2). A registering UA retains the top response Via's received/rport pair as a typed, non-authoritative observation; missing or invalid observation data does not alter the successful binding. A confirmed quiescent dialog's §§12.1–12.2 state can be captured in a bounded versioned snapshot and attached to explicit fresh drivers: identifier orientation, route order, refreshed target and independent sequence numbers survive, while transactions, sockets, tasks, clocks, credentials and media keys do not."
+note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2). A registering UA retains the top response Via's received/rport pair as a typed, non-authoritative observation; missing or invalid observation data does not alter the successful binding. A confirmed quiescent dialog's §§12.1–12.2 state can be captured in a bounded versioned snapshot and attached to explicit fresh drivers: identifier orientation, route order, refreshed target and independent sequence numbers survive, while transactions, sockets, tasks, clocks, credentials and media keys do not. The bounded signalling responder sends final INVITE responses, validates ACK and remote sequence ordering, accepts or originates BYE, retransmits its final response through Timer H, and joins owned timer work before release."
 
 [[rfc]]
 number = 4475

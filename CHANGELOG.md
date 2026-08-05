@@ -66,6 +66,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   publication admission also share an atomic shutdown barrier, so no task can spawn after its owner
   has drained the registry. Named clear-WebSocket routes retain their HTTP Host authority and path
   in the connection key without implying TLS authentication.
+- **A finite, machine-ready signalling responder now completes the local comparative-load
+  surface** (`P-15`). `sipx load-responder` publishes its bound UDP address before admission,
+  requires finite admission, concurrency, dialog-lifetime and cleanup limits, applies reproducible
+  seeded answer policy, validates ACK/CANCEL/BYE dialog actions, and reports versioned latency,
+  outcome, high-water and post-drain zero-state evidence. Signalling-only remains the default;
+  deterministic generated media is an explicit separate mode.
+
 - **A neutral, bounded signalling-load contract** (`X-98`) now fixes the exact SDP-free dialog flow,
   six-rate/five-repetition protocol, result schema and process-group cleanup required before a
   comparative run. Its checker rejects unbounded phases, incomplete metadata, false zero resource
