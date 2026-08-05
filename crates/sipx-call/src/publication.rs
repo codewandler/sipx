@@ -851,6 +851,9 @@ impl Drop for WorkGuard {
     }
 }
 
+// `fetch_update` remains the spelling available at the workspace MSRV; current nightly deprecates
+// it before the replacement is available on that supported toolchain.
+#[allow(deprecated)]
 fn reserve(shared: &Shared) -> Result<(), PublicationError> {
     shared
         .counters

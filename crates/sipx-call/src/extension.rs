@@ -181,6 +181,9 @@ where
     Ok(())
 }
 
+// `fetch_update` is the name available at the workspace MSRV; current nightly calls it deprecated
+// before the replacement is available on that supported toolchain.
+#[allow(deprecated)]
 impl Clone for ResponseCapability {
     fn clone(&self) -> Self {
         // Saturation keeps cloning panic-free. Reaching usize::MAX live application handles is
@@ -198,6 +201,8 @@ impl Clone for ResponseCapability {
     }
 }
 
+// Keep the same MSRV/nightly compatibility bridge as the clone-side owner update above.
+#[allow(deprecated)]
 impl Drop for ResponseCapability {
     fn drop(&mut self) {
         let was_last = self
