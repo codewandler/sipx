@@ -53,3 +53,7 @@ conflating endpoint signalling with proxy or registrar workloads.
   contract change invalidates both recorded runs by hash, and the checker refuses publication as
   designed. Fresh side-by-side runs wait for `X-103`'s implementation to have an immutable
   revision; recorded hashes will not be edited forward.
+- 2026-08-05: the optimized endpoint was retained under the current contract as run
+  `056391cbff0d7d2345a61a11c93e15b3`. The incompatible prior runs were removed rather than edited
+  forward. A compatible peer refresh is deliberately deferred; the generated comparison therefore
+  says `not measured` for that direction instead of presenting old or partial evidence.

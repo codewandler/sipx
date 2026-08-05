@@ -214,33 +214,19 @@ The following are **not inferred** from this result: secure transports, connecti
 
 | Rate (calls/s) | Outcome | Median achieved (dialogs/s) | Spread [min, max] | Setup p99 (ms, median) |
 |---|---|---|---|---|
-| 32 | supported (5/5) | 32.0 | [32.0, 32.0] | 2 |
-| 64 | supported (5/5) | 64.0 | [64.0, 64.0] | 2 |
-| 128 | supported (5/5) | 128.0 | [128.0, 128.0] | 14 |
-| 256 | failed (2/5 repetitions passed) | 255.9 | [237.5, 256.0] | 7501 |
-| 512 | failed (0/5 repetitions passed) | 208.9 | [194.6, 238.9] | 11207 |
-| 1024 | failed (0/5 repetitions passed) | 374.6 | [374.6, 374.6] | 0 |
+| 32 | supported (5/5) | 32.0 | [32.0, 32.0] | 1 |
+| 64 | supported (5/5) | 64.0 | [64.0, 64.0] | 3 |
+| 128 | supported (5/5) | 128.0 | [128.0, 128.0] | 3 |
+| 256 | supported (5/5) | 256.0 | [256.0, 256.0] | 2 |
+| 512 | supported (5/5) | 512.0 | [512.0, 512.0] | 1 |
+| 1024 | supported (5/5) | 1024.0 | [1024.0, 1024.0] | 0 |
 
-Capacity point: **128 calls/s**, achieved interval [128.0, 128.0] dialogs/s over five repetitions.
+Capacity is at least **1024 calls/s**: the highest tested rate passed, so this ladder established a lower bound rather than finding a failure ceiling. Achieved interval [1024.0, 1024.0] dialogs/s over five repetitions.
 
 - Caller (UAC) direction: not measured — the pinned build exposes a bounded responder but no neutral-profile caller command
 - Internal state visibility: `endpoint-reported` — post-drain dialog, transaction, route and task state comes from the endpoint's terminal summary
 
 ### Responder capacity: sipgo
 
-| Rate (calls/s) | Outcome | Median achieved (dialogs/s) | Spread [min, max] | Setup p99 (ms, median) |
-|---|---|---|---|---|
-| 32 | supported (5/5) | 32.0 | [32.0, 32.0] | 1 |
-| 64 | supported (5/5) | 64.0 | [64.0, 64.0] | 1 |
-| 128 | supported (5/5) | 128.0 | [128.0, 128.0] | 1 |
-| 256 | supported (5/5) | 256.0 | [256.0, 256.0] | 0 |
-| 512 | supported (5/5) | 512.0 | [512.0, 512.0] | 0 |
-| 1024 | supported (5/5) | 1024.0 | [1024.0, 1024.0] | 0 |
-
-Capacity is at least **1024 calls/s**: the highest tested rate passed, so this ladder established a lower bound rather than finding a failure ceiling. Achieved interval [1024.0, 1024.0] dialogs/s over five repetitions.
-
-- Caller (UAC) direction: not measured — the pinned library was adapted only as a neutral-profile responder; caller behavior is outside this endpoint comparison
-- Internal state visibility: `harness-observed` — the adapter reports active profile dialogs; transaction cleanup is evidenced by bounded process shutdown rather than subject-internal counters
-
-The measured interval for sipgo is higher on this machine and profile than the interval for sipx. That statement holds for these exact builds, this machine and this profile only — it is not a general ranking.
+_Not measured: no compatible retained run has been captured under the current profile contract_
 

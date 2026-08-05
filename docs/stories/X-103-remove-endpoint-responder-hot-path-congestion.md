@@ -67,3 +67,11 @@ the sans-I/O boundary, protocol behavior, bounded ownership and correctness pred
   35 response retransmissions without an error or incomplete dialog. These temporary records are
   provisional: five retained repetitions and the full ladder must be captured from an immutable
   revision before they may replace the published baseline.
+- 2026-08-05: immutable run `056391cbff0d7d2345a61a11c93e15b3` retained all six rates at 5/5
+  repetitions through 1,024 calls/s from revision `82fe7c8f85cf39a949d272db786b28372478961a`.
+  All 604,800 measured dialogs completed and every repetition observed zero endpoint state before
+  unforced process-group exit.
+- 2026-08-05: an earlier incomplete run exposed a measuring-instrument defect: an invalid
+  successful-coded packet was added to validated response totals before being classified as
+  `invalid_message`. A failing-first regression now keeps malformed or out-of-order packets solely
+  in the error evidence; the incomplete generated directory was discarded.

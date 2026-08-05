@@ -1,8 +1,8 @@
 {
  "driver": {
-  "artifact_sha256": "3b7ddf25cadc45512e8684863a065858acb29c5110643a7b5ce5a49a75b11acf",
+  "artifact_sha256": "b87006a8c623972300fd30ed620c913c092ccd4612162e7d3e33cf94e472b2f2",
   "id": "profile-driver",
-  "revision": "source-sha256:3b7ddf25cadc45512e8684863a065858acb29c5110643a7b5ce5a49a75b11acf"
+  "revision": "source-sha256:b87006a8c623972300fd30ed620c913c092ccd4612162e7d3e33cf94e472b2f2"
  },
  "endpoints": [
   {
@@ -11,7 +11,7 @@
     "status": "not_measured"
    },
    "as_responder": {
-    "run": "runs/69f791e60abc94c63fcef1db9cebdb0f",
+    "run": "runs/056391cbff0d7d2345a61a11c93e15b3",
     "status": "measured"
    },
    "id": "sipx",
@@ -26,8 +26,8 @@
     "status": "not_measured"
    },
    "as_responder": {
-    "run": "runs/f13e4cb0dbabd467ffada90872654a85",
-    "status": "measured"
+    "reason": "no compatible retained run has been captured under the current profile contract",
+    "status": "not_measured"
    },
    "id": "sipgo",
    "internal_state": {
