@@ -31,6 +31,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   consumer. Dialog targets and route sets, remote and local CSeq, exact expiry rules, peer trust,
   transport-selected stream identity, byte-exact tags, terminal retry eligibility, delivery
   backpressure and joined timer/transaction cleanup are enforced and tested from the public API.
+  Record-Route hops now select their exact transport, default or explicit port, secure verification
+  authority and connection generation without permitting a SIPS-to-UDP downgrade. Subscription and
+  publication admission also share an atomic shutdown barrier, so no task can spawn after its owner
+  has drained the registry.
 
 ## [1.0.0-beta.4] — 2026-08-04
 

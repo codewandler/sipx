@@ -14,7 +14,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use sipx_sip::{Host, Uri};
+use sipx_sip::{Host, Uri, UriTransport};
 
 use crate::target::{Target, TransportKind};
 
@@ -127,11 +127,6 @@ fn permitted(uri: &Uri) -> Vec<TransportKind> {
     }
 }
 
-/// The transport a URI names explicitly, if any.
-fn explicit_transport(uri: &Uri) -> Option<TransportKind> {
-    uri.transport().and_then(TransportKind::parse)
-}
-
 /// The transport to use when no NAPTR or SRV record narrows it down.
 ///
 /// For a `sips:` URI the `transport` parameter names the transport carried *under* TLS
@@ -144,16 +139,16 @@ fn explicit_transport(uri: &Uri) -> Option<TransportKind> {
 /// `sips:` URI asking for UDP has no secure candidate, and inventing a cleartext one is the
 /// single answer that is wrong.
 fn default_transport(uri: &Uri) -> Option<TransportKind> {
-    let explicit = explicit_transport(uri);
-    if !uri.scheme().is_secure() {
-        return Some(explicit.unwrap_or(TransportKind::Udp));
-    }
-    match explicit {
-        None | Some(TransportKind::Tcp | TransportKind::Tls) => Some(TransportKind::Tls),
-        Some(TransportKind::Ws | TransportKind::Wss) => Some(TransportKind::Wss),
-        Some(TransportKind::Quic) => Some(TransportKind::Quic),
-        Some(TransportKind::Udp) => None,
-    }
+    uri.selected_transport()
+        .ok()
+        .map(|transport| match transport {
+            UriTransport::Udp => TransportKind::Udp,
+            UriTransport::Tcp => TransportKind::Tcp,
+            UriTransport::Tls => TransportKind::Tls,
+            UriTransport::Ws => TransportKind::Ws,
+            UriTransport::Wss => TransportKind::Wss,
+            UriTransport::Quic => TransportKind::Quic,
+        })
 }
 
 /// Map a NAPTR service field to a transport (RFC 3263 §4.1).
@@ -249,7 +244,7 @@ fn candidates<R: Resolver + ?Sized, G: Rng + ?Sized>(
     // An explicit `transport=` parameter skips NAPTR: the caller has already chosen. What it
     // chose is `default_transport`, which has already resolved the parameter against the
     // scheme rather than trusting it verbatim.
-    let transports: Vec<(TransportKind, String)> = if explicit_transport(uri).is_some() {
+    let transports: Vec<(TransportKind, String)> = if uri.transport().is_some() {
         vec![(
             default_transport,
             format!("{}{domain}", srv_prefix(default_transport)),

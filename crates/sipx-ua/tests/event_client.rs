@@ -938,3 +938,124 @@ fn strict_route_set_rewrites_the_in_dialog_request_target() {
         ]
     );
 }
+
+#[test]
+fn record_route_selects_transport_port_authority_and_generation() {
+    let cases = [
+        (
+            "sip:route@192.0.2.40;transport=tcp",
+            Transport::Tcp,
+            5060,
+            None,
+        ),
+        ("sip:route@192.0.2.40;transport=ws", Transport::Ws, 80, None),
+        (
+            "sips:route@192.0.2.40;transport=tcp",
+            Transport::Tls,
+            5061,
+            Some("192.0.2.40"),
+        ),
+        (
+            "sips:route@192.0.2.40;transport=tls",
+            Transport::Tls,
+            5061,
+            Some("192.0.2.40"),
+        ),
+        (
+            "sips:route@192.0.2.40;transport=ws",
+            Transport::Wss,
+            443,
+            Some("192.0.2.40"),
+        ),
+        (
+            "sips:route@192.0.2.40:7443;transport=wss",
+            Transport::Wss,
+            7443,
+            Some("192.0.2.40"),
+        ),
+        (
+            "sips:route@edge.example.test;transport=tcp",
+            Transport::Tls,
+            5061,
+            Some("edge.example.test"),
+        ),
+    ];
+    for (route, transport, port, identity) in cases {
+        let mut client = EventClient::new(Config::default()).expect("config");
+        let (id, _) = start(&mut client);
+        client.consumer_drained(id, 1);
+        let accepted = response(200, Some(REMOTE_TAG), &[(&HeaderName::Expires, "300")]);
+        let _ = client.response(id, Some(&accepted), "unused");
+        let mut establishing = notify(
+            REMOTE_TAG,
+            1,
+            "test-state;id=alpha",
+            "active;expires=300",
+            &["<sip:notifier@192.0.2.20:5060>"],
+            b"one",
+        );
+        establishing.headers.push(
+            Header::build(HeaderName::RecordRoute, format!("<{route};lr>")).expect("Record-Route"),
+        );
+        let established = client.notify(20, &establishing, peer(5060));
+        let (generation, _) = timer(&established, Timer::Refresh);
+        let refresh = client.timer_fired(id, Timer::Refresh, generation);
+        let target = sent_target(&refresh).clone();
+        assert_eq!(target.transport, transport, "{route}");
+        assert_eq!(target.address.port(), port, "{route}");
+        assert_eq!(target.identity.as_deref(), identity, "{route}");
+
+        client.connection_selected(id, Some(77));
+        let mut source = target;
+        source.connection = Some(77);
+        let followup = notify(
+            REMOTE_TAG,
+            2,
+            "test-state;id=alpha",
+            "active;expires=300",
+            &["<sip:notifier@192.0.2.21:5060>"],
+            b"two",
+        );
+        assert_eq!(
+            status(&client.notify(21, &followup, source)),
+            200,
+            "{route}"
+        );
+    }
+}
+
+#[test]
+fn secure_datagram_route_is_a_typed_refusal_without_a_send() {
+    let mut client = EventClient::new(Config::default()).expect("config");
+    let (id, _) = start(&mut client);
+    client.consumer_drained(id, 1);
+    let accepted = response(200, Some(REMOTE_TAG), &[(&HeaderName::Expires, "300")]);
+    let _ = client.response(id, Some(&accepted), "unused");
+    let mut establishing = notify(
+        REMOTE_TAG,
+        1,
+        "test-state;id=alpha",
+        "active;expires=300",
+        &["<sip:notifier@192.0.2.20:5060>"],
+        b"one",
+    );
+    establishing.headers.push(
+        Header::build(
+            HeaderName::RecordRoute,
+            "<sips:route@192.0.2.40;transport=udp;lr>",
+        )
+        .expect("Record-Route"),
+    );
+    let refused = client.notify(20, &establishing, peer(5060));
+    assert_eq!(status(&refused), 400);
+    assert!(has_change(
+        &refused,
+        &StateChange::Terminated(Termination::UnsupportedRouteTransport)
+    ));
+    assert!(
+        !refused
+            .iter()
+            .any(|output| matches!(output, Output::SendSubscribe { .. }))
+    );
+    assert!(!client.contains(id));
+}

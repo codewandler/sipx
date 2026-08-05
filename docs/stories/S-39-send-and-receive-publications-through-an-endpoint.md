@@ -44,5 +44,7 @@ PUBLISH paths without introducing another presence store.
   residual publication/transaction work.
 - Review found two cross-layer ownership defects and both now have focused proofs: TLS identity and
   WebSocket resource survive every publisher send, and dispatcher shutdown cancels then joins a
-  live silent transaction and every publication timer before its barrier returns.
+  live silent transaction and every publication timer before its barrier returns. Re-review made
+  the driver registry the admission linearization point and deterministically proves racing and
+  post-shutdown publishes cannot spawn beyond the barrier.
 - Integration still owns the complete gate and generated board before marking this story done.

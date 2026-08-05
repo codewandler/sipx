@@ -23,7 +23,7 @@ dialog, without embedding any event package's application policy in the transpor
 
 - [x] The public API establishes, refreshes and terminates a subscription through the state machine
       and byte vectors in [`docs/specs/event-client.md`](../specs/event-client.md), specifically
-      `S37-V1` through `S37-V14`.
+      `S37-V1` through `S37-V16`.
 - [x] 401 and 407 challenges reuse endpoint credentials; refreshes use the granted expiry; initial
       and subsequent NOTIFY requests are ordered and surfaced with typed subscription state.
 - [x] The dialog remote target, route set and CSeq rules are honored for every request, and a
@@ -50,8 +50,10 @@ dialog, without embedding any event package's application policy in the transpor
   event boundary; V14 now preserves both through initial send, authentication and target refresh.
   Review additionally pinned the selected stream generation on both transaction boundaries, the
   route-set's first hop as the transport target, byte-exact dialog tags, bounded terminal-reason
-  retry eligibility, and an async shutdown barrier that joins every driver-owned task. The final
-  full-gate item intentionally remains open for the integration branch.
+  retry eligibility, and an async shutdown barrier that joins every driver-owned task. Re-review
+  then completed route-hop scheme/transport/port/authority derivation and made the driver registry
+  the atomic admission/shutdown boundary. The final full-gate item intentionally remains open for
+  the integration branch.
 
 ## Required failing-first tests
 
@@ -71,3 +73,6 @@ The tests below cite the normative vectors rather than restating them:
 - `notify_trust_and_contact_rejections_do_not_mutate` — `S37-V12`.
 - `refresh_timer_n_preserves_only_the_authoritative_expiry` — `S37-V13`.
 - `secure_target_identity_and_resource_survive_every_send` — `S37-V14`.
+- `record_route_selects_transport_port_authority_and_generation` — `S37-V15`.
+- `secure_datagram_route_is_a_typed_refusal_without_a_send` — `S37-V15`.
+- `racing_shutdown_closes_admission_before_any_spawn` — `S37-V16`.

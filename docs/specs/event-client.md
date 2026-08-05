@@ -108,6 +108,16 @@ than an inferred or stale pool value. UDP has no generation. For an established 
 route-set URI is the transport next hop even when strict routing rewrites the request URI; without a
 route set, the current remote target is the next hop.
 
+Route-hop transport selection is the pure URI rule shared with RFC 3263 resolution. An explicit
+port always wins; otherwise `sip;transport=tcp` uses TCP/5060, `sip;transport=ws` uses WS/80,
+`sips;transport=tcp|tls` uses TLS/5061, and `sips;transport=ws|wss` uses WSS/443. A `sips` route
+requesting UDP is a typed `UnsupportedRouteTransport` termination and MUST NOT emit a downgraded
+request. TLS/WSS verification authority is the selected route URI's host, never the Contact host or
+the address inherited from the previous target. A Contact-only target refresh changes the remote
+address and explicit port while retaining V14's selected transport, certificate identity and
+WebSocket resource. A stream generation is retained only while all resulting next-hop selectors
+still match the target for which the endpoint issued it.
+
 ## 3. Resource and timer bounds
 
 The public configuration exposes the limits below and refuses zero values. The defaults are part of
@@ -317,6 +327,13 @@ all Refresh/Retry firings, including already queued stale generations, are ignor
 remain answerable during drain. At the global Shutdown timer, the client cancels every remaining
 timer, drops every queued delivery and transaction handle, emits a termination fact for each owned
 subscription, then emits one `Stopped`. No background task or timer survives `Stopped`.
+
+The endpoint runtime uses its driver-registry mutex as the admission linearization point. Start
+checks the one-way shutdown token while holding that mutex and holds it through task spawn and
+registry insertion. Shutdown holds the same mutex while cancelling admission and draining every
+JoinHandle, then awaits the drained handles. A driver never removes its own final JoinHandle; a
+later admission may reap it only after `is_finished`. Thus a start racing shutdown either enters the
+drained set or returns typed `ShuttingDown`, and a start after the barrier always returns that error.
 
 ## 9. Byte-level vectors
 
@@ -553,6 +570,25 @@ target whose connection key still contains that identity and path. A target-refr
 replace the socket address while retaining both secure selectors. No secure request is sent through
 an address-only target.
 
+### S37-V15 — route hop selects transport, port, authority and generation
+
+Establish independent dialogs whose first Record-Route URI names `sip;transport=tcp`,
+`sip;transport=ws`, `sips;transport=tcp`, `sips;transport=tls`, `sips;transport=ws` and
+`sips;transport=wss`, first without and then with an explicit port. Refresh targets use the mapping
+in §2.3, and every explicit port wins. Secure targets verify the route host. A
+`sips;transport=udp` route emits no refresh and terminates `UnsupportedRouteTransport`. After the
+driver records a selected connection generation, a matching next NOTIFY passes `SamePeer`; changing
+any route selector clears that generation. A dialog with no Record-Route retains V14's identity and
+WebSocket resource across a Contact-only refresh.
+
+### S37-V16 — shutdown and admission have one linearization point
+
+Hold the driver registry lock while a second thread attempts `subscribe`, close admission under
+that lock, and release it. The attempt and a second post-shutdown attempt both return
+`ShuttingDown`; no task enters the registry. In the opposite ordering, a task inserted before
+shutdown is present in the drained JoinHandle set and the shutdown barrier waits for it. No test
+uses a wall-clock delay to choose the winner.
+
 ## 10. S-38 conformance mapping
 
 `S-38` MUST derive failing-first tests from the vectors, without copying their expected behavior into
@@ -574,6 +610,9 @@ a second prose contract:
 | `notify_trust_and_contact_rejections_do_not_mutate` | V12 |
 | `refresh_timer_n_preserves_only_the_authoritative_expiry` | V13 |
 | `secure_target_identity_and_resource_survive_every_send` | V14 |
+| `record_route_selects_transport_port_authority_and_generation` | V15 |
+| `secure_datagram_route_is_a_typed_refusal_without_a_send` | V15 |
+| `racing_shutdown_closes_admission_before_any_spawn` | V16 |
 
 The implementation is incomplete if any vector is asserted only against a helper rather than the
 public event-client surface and a real SIP transaction layer.

@@ -155,6 +155,9 @@ pub enum PublicationError {
     /// The publisher driver is not attached to a dispatcher.
     #[error("publications are not attached to a dispatcher")]
     NotAttached,
+    /// Dispatcher shutdown has atomically closed admission.
+    #[error("publication shutdown has closed admission")]
+    ShuttingDown,
     /// Runtime configuration is invalid.
     #[error("invalid publication configuration")]
     InvalidConfiguration,
@@ -245,11 +248,19 @@ pub struct PublicationsHandle {
 impl PublicationsHandle {
     /// Start one serialized outbound publication.
     pub fn publish(&self, start: Start) -> Result<Publication, PublicationError> {
+        let resource = start.resource.to_bytes().to_vec();
+        let mut drivers = lock(&self.shared.drivers);
+        drivers.retain(|_, task| !task.is_finished());
+        if self.shared.shutdown.is_cancelled() {
+            return Err(PublicationError::ShuttingDown);
+        }
+        if drivers.contains_key(&resource) {
+            return Err(PublicationError::DuplicateResource);
+        }
         let endpoint = lock(&self.shared.endpoint)
             .clone()
             .ok_or(PublicationError::NotAttached)?;
         reserve(&self.shared)?;
-        let resource = start.resource.to_bytes().to_vec();
         let mut resources = lock(&self.shared.resources);
         if resources.contains(&resource) {
             release(&self.shared.counters);
@@ -277,7 +288,6 @@ impl PublicationsHandle {
             timers: HashMap::new(),
             shared: Arc::clone(&self.shared),
         };
-        let mut drivers = lock(&self.shared.drivers);
         let task = tokio::spawn(driver.run(initial));
         drivers.insert(resource, task);
         drop(drivers);
@@ -588,15 +598,15 @@ impl Publications {
 
     /// Cancel the dispatcher-owned service and join every task before returning.
     pub(crate) async fn shutdown(&mut self) {
-        self.shared.shutdown.cancel();
+        let drivers: Vec<_> = {
+            let mut drivers = lock(&self.shared.drivers);
+            self.shared.shutdown.cancel();
+            drivers.drain().map(|(_, task)| task).collect()
+        };
         let expiry_tasks: Vec<_> = self.expiry_tasks.drain().map(|(_, task)| task).collect();
         for task in expiry_tasks {
             abort_and_join(task).await;
         }
-        let drivers: Vec<_> = lock(&self.shared.drivers)
-            .drain()
-            .map(|(_, task)| task)
-            .collect();
         for task in drivers {
             if let Err(error) = task.await {
                 tracing::warn!(%error, "publication driver did not join cleanly");
@@ -607,6 +617,7 @@ impl Publications {
 
 impl Drop for Publications {
     fn drop(&mut self) {
+        let _drivers = lock(&self.shared.drivers);
         self.shared.shutdown.cancel();
         for task in self.expiry_tasks.values() {
             task.abort();
@@ -682,7 +693,6 @@ impl Driver {
             abort_and_join(timer).await;
         }
         lock(&self.shared.resources).remove(&self.resource);
-        lock(&self.shared.drivers).remove(&self.resource);
     }
 
     async fn apply(&mut self, outputs: Vec<Output>) {
@@ -980,6 +990,84 @@ fn transport_target(peer: sipx_ua::event_client::Peer) -> Target {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod admission_tests {
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use sipx_transport::{Config as TransportConfig, bind};
+    use sipx_ua::event_client::{Peer, Transport};
+    use sipx_ua::presence::Compositor;
+    use sipx_ua::publication_client::Start;
+
+    use super::*;
+
+    fn start(target: std::net::SocketAddr) -> Start {
+        Start {
+            resource: sipx_sip::Uri::parse(Bytes::from_static(b"sip:resource@example.test"))
+                .expect("URI"),
+            local_identity: "<sip:client@example.test>".to_owned(),
+            target: Peer::new(target, Transport::Udp),
+            event: "presence".to_owned(),
+            expires: Duration::from_secs(60),
+            body: Bytes::from_static(b"<presence/>"),
+            content_type: "application/pidf+xml".to_owned(),
+            credentials: None,
+            call_id: "admission@example.test".to_owned(),
+            from_tag: "admission".to_owned(),
+            initial_cseq: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn racing_shutdown_closes_admission_before_any_spawn() {
+        let (endpoint, _) = bind(TransportConfig::new(
+            "127.0.0.1:0".parse().expect("address"),
+        ))
+        .await
+        .expect("endpoint");
+        let mut runtime = Publications::new(
+            PublicationConfig::default(),
+            Compositor::new(Duration::from_secs(60)),
+            Arc::new(ReplacePublicationState),
+            Arc::new(AllowPublications),
+        )
+        .expect("runtime");
+        runtime.attach(endpoint.clone());
+        let handle = runtime.handle();
+        let post_shutdown = handle.clone();
+        let shared = Arc::clone(&runtime.shared);
+        let drivers = lock(&shared.drivers);
+        let barrier = Arc::new(Barrier::new(2));
+        let contender = Arc::clone(&barrier);
+        let target = endpoint.local_addr();
+        let attempt = std::thread::spawn(move || {
+            contender.wait();
+            handle.publish(start(target))
+        });
+        barrier.wait();
+        shared.shutdown.cancel();
+        drop(drivers);
+        assert!(matches!(
+            attempt.join().expect("thread"),
+            Err(PublicationError::ShuttingDown)
+        ));
+        assert!(matches!(
+            post_shutdown.publish(start(target)),
+            Err(PublicationError::ShuttingDown)
+        ));
+        assert!(lock(&shared.drivers).is_empty());
+        endpoint.shutdown().await;
+    }
 }
 
 #[cfg(test)]

@@ -169,6 +169,9 @@ Order: if the URI names an IP address or a port, that is the answer and nothing 
 Otherwise NAPTR → SRV → A/AAAA, with RFC 2782 weighted selection among equal priorities.
 
 **[RFC]** A `sips:` URI restricts candidates to TLS-capable transports.
+**[sipx]** The pure `Uri::selected_transport` rule is the single mapping used both here and by
+dialog route-set consumers. It maps the URI scheme and transport parameter before resolution,
+supplies the transport's default port, rejects unknown transports and rejects `sips` over UDP.
 **[sipx]** Resolution is behind a trait so tests use a fixture and never touch DNS. The
 weighted selection takes its randomness from an injectable source, so the distribution is
 testable with a fixed seed.

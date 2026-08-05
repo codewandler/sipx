@@ -57,6 +57,9 @@ pub enum EventSubscriptionError {
     /// The client has not been attached to a dispatcher yet.
     #[error("event subscriptions are not attached to a dispatcher")]
     NotAttached,
+    /// Dispatcher shutdown has atomically closed admission.
+    #[error("event subscription shutdown has closed admission")]
+    ShuttingDown,
     /// A peer-driven or configured client bound was reached.
     #[error("event subscription capacity exceeded")]
     CapacityExceeded,
@@ -173,11 +176,19 @@ impl EventSubscriptionsHandle {
         &self,
         start: Start<C>,
     ) -> Result<EventSubscription<C::Value>, EventSubscriptionError> {
+        let call_id = start.call_id.as_bytes().to_vec();
+        let mut drivers = lock(&self.shared.drivers);
+        drivers.retain(|_, task| !task.is_finished());
+        if self.shared.shutdown.is_cancelled() {
+            return Err(EventSubscriptionError::ShuttingDown);
+        }
+        if drivers.contains_key(&call_id) {
+            return Err(EventSubscriptionError::DuplicateIdentity);
+        }
         let endpoint = lock(&self.shared.endpoint)
             .clone()
             .ok_or(EventSubscriptionError::NotAttached)?;
         reserve(&self.shared)?;
-        let call_id = start.call_id.as_bytes().to_vec();
         let mut core = match EventClient::new(self.shared.config.clone()) {
             Ok(core) => core,
             Err(error) => {
@@ -218,7 +229,6 @@ impl EventSubscriptionsHandle {
             shared: Arc::clone(&self.shared),
         };
         self.shared.counters.started.fetch_add(1, Ordering::Relaxed);
-        let mut drivers = lock(&self.shared.drivers);
         let task = tokio::spawn(driver.run(initial));
         drivers.insert(call_id, task);
         drop(drivers);
@@ -314,11 +324,11 @@ impl EventSubscriptions {
     }
 
     pub(crate) async fn shutdown(&mut self) {
-        self.shared.shutdown.cancel();
-        let drivers: Vec<_> = lock(&self.shared.drivers)
-            .drain()
-            .map(|(_, task)| task)
-            .collect();
+        let drivers: Vec<_> = {
+            let mut drivers = lock(&self.shared.drivers);
+            self.shared.shutdown.cancel();
+            drivers.drain().map(|(_, task)| task).collect()
+        };
         for task in drivers {
             if let Err(error) = task.await {
                 tracing::warn!(%error, "event subscription driver did not join cleanly");
@@ -329,6 +339,7 @@ impl EventSubscriptions {
 
 impl Drop for EventSubscriptions {
     fn drop(&mut self) {
+        let _drivers = lock(&self.shared.drivers);
         self.shared.shutdown.cancel();
     }
 }
@@ -421,7 +432,6 @@ impl<C: PackageConsumer> Driver<C> {
             abort_and_join(timer).await;
         }
         lock(&self.shared.routes).remove(&self.call_id);
-        lock(&self.shared.drivers).remove(&self.call_id);
         drop(guard);
     }
 
@@ -666,5 +676,96 @@ async fn answer_notify(
     };
     if let Err(error) = endpoint.respond(&incoming.key, builder.build()).await {
         tracing::warn!(%error, "could not answer event NOTIFY");
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod admission_tests {
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use sipx_transport::{Config as TransportConfig, bind};
+    use sipx_ua::event_client::{PackageRejection, SamePeer, Start, Transport};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct Package;
+
+    impl PackageConsumer for Package {
+        type Value = ();
+        fn event(&self) -> &'static str {
+            "admission"
+        }
+        fn accept(&self) -> &[String] {
+            &[]
+        }
+        fn neutral(&mut self) -> Option<()> {
+            None
+        }
+        fn consume(&mut self, _: Option<&[u8]>, _: &[u8]) -> Result<(), PackageRejection> {
+            Ok(())
+        }
+    }
+
+    fn start(target: std::net::SocketAddr) -> Start<Package> {
+        Start {
+            resource: sipx_sip::Uri::parse(Bytes::from_static(b"sip:resource@example.test"))
+                .expect("URI"),
+            local_identity: "<sip:client@example.test>".to_owned(),
+            contact: "<sip:client@127.0.0.1>".to_owned(),
+            target: Peer::new(target, Transport::Udp),
+            expires: Duration::from_secs(60),
+            body: Bytes::new(),
+            content_type: None,
+            credentials: None,
+            call_id: "admission@example.test".to_owned(),
+            from_tag: "admission".to_owned(),
+            initial_cseq: 1,
+            consumer: Package,
+            trust: Arc::new(SamePeer),
+        }
+    }
+
+    #[tokio::test]
+    async fn racing_shutdown_closes_admission_before_any_spawn() {
+        let (endpoint, _) = bind(TransportConfig::new(
+            "127.0.0.1:0".parse().expect("address"),
+        ))
+        .await
+        .expect("endpoint");
+        let runtime = EventSubscriptions::new(Config::default()).expect("runtime");
+        runtime.attach(endpoint.clone());
+        let handle = runtime.handle();
+        let post_shutdown = handle.clone();
+        let shared = Arc::clone(&runtime.shared);
+        let drivers = lock(&shared.drivers);
+        let barrier = Arc::new(Barrier::new(2));
+        let contender = Arc::clone(&barrier);
+        let target = endpoint.local_addr();
+        let attempt = std::thread::spawn(move || {
+            contender.wait();
+            handle.subscribe(start(target))
+        });
+        barrier.wait();
+        shared.shutdown.cancel();
+        drop(drivers);
+        assert!(matches!(
+            attempt.join().expect("thread"),
+            Err(EventSubscriptionError::ShuttingDown)
+        ));
+        assert!(matches!(
+            post_shutdown.subscribe(start(target)),
+            Err(EventSubscriptionError::ShuttingDown)
+        ));
+        assert!(lock(&shared.drivers).is_empty());
+        endpoint.shutdown().await;
     }
 }

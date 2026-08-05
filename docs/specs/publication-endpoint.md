@@ -86,6 +86,13 @@ remove uses that tag with `Expires: 0`.
 Application bodies, logical publishers, command queues and deliveries are all bounded. The driver
 owns at most one transaction task, one Refresh task and one Expiry task per publication.
 
+Publisher admission and shutdown share the driver-registry mutex as their linearization point.
+Publish holds it from the one-way shutdown-token check through task insertion; shutdown holds it
+while cancelling admission and draining every JoinHandle, then awaits those handles. A driver does
+not remove its own handle before returning. Completed handles may be reaped only after
+`is_finished`. A racing publish therefore either enters the drained set or returns typed
+`ShuttingDown`; every post-barrier publish is refused.
+
 ## 5. Conformance vectors
 
 - **S39-V1 — inbound lifecycle.** Initial PIDF PUBLISH receives 200 with tag A and granted expiry;
@@ -107,3 +114,6 @@ owns at most one transaction task, one Refresh task and one Expiry task per publ
 - **S39-V8 — owned cleanup.** With paused time and real endpoints, removal and dispatcher shutdown
   leave publisher tasks, timers, transactions, compositor publications and endpoint transactions
   at zero after the protocol retention horizon.
+- **S39-V9 — atomic admission closure.** Hold the driver registry lock while another thread calls
+  `publish`, close admission under that lock, then release it. Both the racing call and a second
+  post-shutdown call return `ShuttingDown`, no task is spawned, and no fixed delay selects the race.

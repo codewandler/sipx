@@ -14,7 +14,7 @@ use sipx_sip::auth::{Challenge, Credentials, respond, strongest};
 use sipx_sip::build::RequestBuilder;
 use sipx_sip::event::{Reason, State, Subscription};
 use sipx_sip::headers::{CSeq, Contact, Expires, From as FromHeader, RecordRoute, To};
-use sipx_sip::{Address, Header, HeaderName, Method, Request, Response, Uri};
+use sipx_sip::{Address, Header, HeaderName, Host, Method, Request, Response, Uri, UriTransport};
 use thiserror::Error;
 
 /// RFC 6665's Timer N: 64 times SIP's default 500 ms T1.
@@ -43,6 +43,17 @@ pub enum Transport {
     Wss,
     /// QUIC connection.
     Quic,
+}
+
+impl Transport {
+    fn default_port(self) -> u16 {
+        match self {
+            Self::Udp | Self::Tcp => 5060,
+            Self::Tls | Self::Quic => 5061,
+            Self::Ws => 80,
+            Self::Wss => 443,
+        }
+    }
 }
 
 /// The peer and, for a stream, exact connection generation used by an exchange.
@@ -333,6 +344,8 @@ pub enum Termination {
     Rejected(u16),
     /// The transaction ended without a final response.
     TransactionFailed,
+    /// A route URI selected no safe supported transport.
+    UnsupportedRouteTransport,
     /// The notifier supplied a terminal framework reason.
     Remote(Option<Reason>),
     /// Unsubscribe ended without peer confirmation.
@@ -470,6 +483,8 @@ struct Dialog {
     remote_target: Uri,
     route_set: Vec<RouteHop>,
     peer: Peer,
+    route_peer: Option<Peer>,
+    selected_peer: Option<Peer>,
     remote_cseq: u32,
 }
 
@@ -564,8 +579,12 @@ impl<C: PackageConsumer> EventClient<C> {
         let Some(entry) = self.entries.get_mut(&id) else {
             return;
         };
-        if let Some(dialog) = entry.dialog.as_mut() {
-            dialog.peer.connection = generation;
+        if entry.dialog.is_some() {
+            let mut selected = request_peer(entry);
+            selected.connection = generation;
+            if let Some(dialog) = entry.dialog.as_mut() {
+                dialog.selected_peer = Some(selected);
+            }
         } else {
             entry.target.connection = generation;
         }
@@ -1041,10 +1060,31 @@ impl<C: PackageConsumer> EventClient<C> {
             path: selected_target.path.clone(),
             ..source
         };
+        let refreshed_peer = contact_peer(&contact.uri, &source);
+        let route_peer = if entry.dialog.is_none() {
+            if let Ok(peer) = routes
+                .first()
+                .map(|route| route_peer(&route.uri, &source))
+                .transpose()
+            {
+                peer
+            } else {
+                outputs.push(respond_notify(transaction, 400, None));
+                cancel_all(entry, id, &mut outputs);
+                outputs.push(Output::StateChanged {
+                    id,
+                    change: StateChange::Terminated(Termination::UnsupportedRouteTransport),
+                });
+                finish_if_terminal(&mut self.entries, id, &outputs);
+                return outputs;
+            }
+        } else {
+            None
+        };
         match entry.dialog.as_mut() {
             Some(dialog) => {
                 dialog.remote_target = contact.uri.clone();
-                dialog.peer = peer_for_uri(&contact.uri, &source);
+                dialog.peer = refreshed_peer;
                 dialog.remote_cseq = cseq;
             }
             None => {
@@ -1054,7 +1094,9 @@ impl<C: PackageConsumer> EventClient<C> {
                     remote,
                     remote_target: contact.uri.clone(),
                     route_set: routes,
-                    peer: peer_for_uri(&contact.uri, &source),
+                    peer: refreshed_peer,
+                    route_peer,
+                    selected_peer: Some(selected_target),
                     remote_cseq: cseq,
                 });
             }
@@ -1542,10 +1584,13 @@ fn request_peer<C>(entry: &Entry<C>) -> Peer {
     let Some(dialog) = entry.dialog.as_ref() else {
         return entry.target.clone();
     };
-    dialog.route_set.first().map_or_else(
-        || dialog.peer.clone(),
-        |route| peer_for_uri(&route.uri, &dialog.peer),
-    )
+    let mut peer = dialog.route_peer.as_ref().unwrap_or(&dialog.peer).clone();
+    peer.connection = dialog
+        .selected_peer
+        .as_ref()
+        .filter(|selected| same_target_selectors(selected, &peer))
+        .and_then(|selected| selected.connection);
+    peer
 }
 
 fn refresh_dialog_from_response<C>(entry: &mut Entry<C>, response: &Response) {
@@ -1555,18 +1600,72 @@ fn refresh_dialog_from_response<C>(entry: &mut Entry<C>, response: &Response) {
     };
     if let Some(dialog) = entry.dialog.as_mut() {
         dialog.remote_target = contact.uri.clone();
-        dialog.peer = peer_for_uri(&contact.uri, &dialog.peer);
+        dialog.peer = contact_peer(&contact.uri, &dialog.peer);
     }
 }
 
-fn peer_for_uri(uri: &Uri, fallback: &Peer) -> Peer {
-    let Some(sipx_sip::Host::Ip(ip)) = uri.host() else {
-        return fallback.clone();
+fn contact_peer(uri: &Uri, fallback: &Peer) -> Peer {
+    let ip = match uri.host() {
+        Some(Host::Ip(ip)) => *ip,
+        _ => fallback.address.ip(),
     };
-    Peer {
-        address: SocketAddr::new(*ip, uri.port().unwrap_or(5060)),
-        ..fallback.clone()
+    let address = SocketAddr::new(
+        ip,
+        uri.port()
+            .unwrap_or_else(|| fallback.transport.default_port()),
+    );
+    let mut peer = fallback.clone();
+    if peer.address != address {
+        peer.connection = None;
     }
+    peer.address = address;
+    peer
+}
+
+fn route_peer(uri: &Uri, fallback: &Peer) -> Result<Peer, ()> {
+    let selected = uri.selected_transport().map_err(|_| ())?;
+    let transport = match selected {
+        UriTransport::Udp => Transport::Udp,
+        UriTransport::Tcp => Transport::Tcp,
+        UriTransport::Tls => Transport::Tls,
+        UriTransport::Ws => Transport::Ws,
+        UriTransport::Wss => Transport::Wss,
+        UriTransport::Quic => Transport::Quic,
+    };
+    let ip = match uri.host() {
+        Some(Host::Ip(ip)) => *ip,
+        Some(Host::Name(_)) => fallback.address.ip(),
+        None => return Err(()),
+    };
+    let identity = if matches!(transport, Transport::Tls | Transport::Wss | Transport::Quic) {
+        uri.host()
+            .map(|host| Arc::from(String::from_utf8_lossy(&host.to_bytes()).into_owned()))
+    } else {
+        None
+    };
+    let path = if matches!(transport, Transport::Ws | Transport::Wss) {
+        fallback.path.clone()
+    } else {
+        None
+    };
+    let mut peer = Peer {
+        address: SocketAddr::new(ip, uri.port().unwrap_or(selected.default_port())),
+        transport,
+        connection: None,
+        identity,
+        path,
+    };
+    if same_target_selectors(&peer, fallback) {
+        peer.connection = fallback.connection;
+    }
+    Ok(peer)
+}
+
+fn same_target_selectors(left: &Peer, right: &Peer) -> bool {
+    left.address == right.address
+        && left.transport == right.transport
+        && left.identity == right.identity
+        && left.path == right.path
 }
 
 fn respond_notify<V>(transaction: u64, status: u16, retry_after: Option<Duration>) -> Output<V> {
