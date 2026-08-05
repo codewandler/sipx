@@ -1967,9 +1967,13 @@ impl Call {
         self.end_with_reason(cause, &reason).await
     }
 
-    async fn end_with_reason(&mut self, cause: EndCause, reason: &ReasonValue) -> Result<()> {
+    async fn begin_end(
+        &mut self,
+        cause: EndCause,
+        reason: &ReasonValue,
+    ) -> Result<Option<(Request, u32)>> {
         if self.ended {
-            return Ok(());
+            return Ok(None);
         }
         self.media.flush(Duration::from_secs(5)).await;
         self.media.stop();
@@ -1982,6 +1986,13 @@ impl Call {
 
         let cseq = self.dialog.next_cseq();
         let bye = bye_request(&self.dialog, cseq, reason)?;
+        Ok(Some((bye, cseq)))
+    }
+
+    async fn end_with_reason(&mut self, cause: EndCause, reason: &ReasonValue) -> Result<()> {
+        let Some((bye, _)) = self.begin_end(cause, reason).await? else {
+            return Ok(());
+        };
         let mut responses = self.endpoint.send(bye, self.target.clone()).await?;
         // A BYE that is never answered still ends the call locally: the alternative is a call
         // that cannot be hung up because the far end has already gone.
@@ -1998,6 +2009,37 @@ impl Call {
     /// End the call because this side decided to.
     pub async fn hang_up(&mut self) -> Result<()> {
         self.end(EndCause::LocalHangup).await
+    }
+
+    /// End the call and return the valid final response to the originated BYE.
+    ///
+    /// Unlike [`Self::hang_up`], this is an evidence-producing teardown: `within` bounds failure,
+    /// and success requires the final response to name this exact dialog and the BYE's exact
+    /// `CSeq`.
+    /// A valid non-2xx is returned as [`Error::Rejected`], while a mismatched response is
+    /// [`Error::InvalidDialogResponse`].
+    pub async fn hang_up_observed(&mut self, within: Duration) -> Result<u16> {
+        let reason = normal_clearing_reason();
+        let Some((bye, cseq)) = self.begin_end(EndCause::LocalHangup, &reason).await? else {
+            return Err(Error::InvalidDialogResponse);
+        };
+        let mut responses = self.endpoint.send(bye, self.target.clone()).await?;
+        // Fixed duration bounds a failed teardown; the final response is the happens-before.
+        let response = tokio::time::timeout(within, responses.final_response())
+            .await
+            .map_err(|_| Error::SignallingTeardownTimeout(within))?
+            .ok_or(Error::SignallingTeardownTimeout(within))?;
+        if !crate::signalling::response_matches_dialog(&response, &self.dialog, cseq) {
+            return Err(Error::InvalidDialogResponse);
+        }
+        let status = response.status.code();
+        if !response.status.is_success() {
+            return Err(Error::Rejected {
+                status,
+                reason: String::from_utf8_lossy(&response.reason).into_owned(),
+            });
+        }
+        Ok(status)
     }
 
     /// End the call with an explicit protocol cause.

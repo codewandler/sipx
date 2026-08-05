@@ -404,7 +404,18 @@ impl SignallingCall {
     }
 }
 
-fn response_matches_dialog(response: &Response, dialog: &Dialog, sequence: u32) -> bool {
+pub(crate) fn response_matches_dialog(response: &Response, dialog: &Dialog, sequence: u32) -> bool {
+    let unique_required = [
+        HeaderName::CallId,
+        HeaderName::From,
+        HeaderName::To,
+        HeaderName::CSeq,
+    ]
+    .iter()
+    .all(|name| response.headers.count(name) == 1);
+    if !unique_required {
+        return false;
+    }
     let call_id_matches = response
         .headers
         .value(&HeaderName::CallId)
@@ -482,7 +493,11 @@ fn valid_tag(tag: &str) -> bool {
     clippy::indexing_slicing
 )]
 mod tests {
-    use super::valid_tag;
+    use bytes::Bytes;
+    use sipx_sip::{HeaderName, Message, Uri};
+
+    use super::{response_matches_dialog, valid_tag};
+    use crate::{Dialog, DialogId, Role};
 
     #[test]
     fn dialog_tags_are_bounded_sip_tokens() {
@@ -491,5 +506,74 @@ mod tests {
         assert!(!valid_tag(""));
         assert!(!valid_tag("space is not a token"));
         assert!(!valid_tag(&"x".repeat(129)));
+    }
+
+    fn bye_response(call_id: &str, from_tag: &str, to_tag: &str, cseq: &str) -> sipx_sip::Response {
+        let wire = format!(
+            "SIP/2.0 200 OK\r\nCall-ID: {call_id}\r\n\
+             From: <sip:local@load.invalid>;tag={from_tag}\r\n\
+             To: <sip:remote@driver.invalid>;tag={to_tag}\r\n\
+             CSeq: {cseq}\r\nContent-Length: 0\r\n\r\n"
+        );
+        match sipx_sip::parse_datagram(Bytes::from(wire), &sipx_sip::Limits::datagram())
+            .expect("response parses")
+        {
+            Message::Response(response) => response,
+            Message::Request(_) => panic!("a response"),
+        }
+    }
+
+    #[test]
+    fn observed_bye_response_requires_every_dialog_identifier_and_exact_cseq() {
+        // Each mutation below leaves a syntactically valid final response and changes one identity
+        // coordinate, so transaction matching alone cannot make this assertion pass.
+        let dialog = Dialog {
+            role: Role::Callee,
+            id: DialogId {
+                call_id: b"observed@load.invalid".to_vec(),
+                local_tag: b"local".to_vec(),
+                remote_tag: b"remote".to_vec(),
+            },
+            local_uri: "<sip:local@load.invalid>".to_owned(),
+            remote_uri: "<sip:remote@driver.invalid>".to_owned(),
+            remote_target: Uri::parse(Bytes::from_static(b"sip:remote@driver.invalid"))
+                .expect("target URI"),
+            local_cseq: 2,
+            remote_cseq: Some(1),
+            route_set: Vec::new(),
+        };
+        assert!(response_matches_dialog(
+            &bye_response("observed@load.invalid", "local", "remote", "2 BYE"),
+            &dialog,
+            2
+        ));
+        for invalid in [
+            bye_response("wrong@load.invalid", "local", "remote", "2 BYE"),
+            bye_response("observed@load.invalid", "wrong", "remote", "2 BYE"),
+            bye_response("observed@load.invalid", "local", "wrong", "2 BYE"),
+            bye_response("observed@load.invalid", "local", "remote", "3 BYE"),
+            bye_response("observed@load.invalid", "local", "remote", "2 INVITE"),
+        ] {
+            assert!(!response_matches_dialog(&invalid, &dialog, 2));
+        }
+
+        let valid = bye_response("observed@load.invalid", "local", "remote", "2 BYE");
+        for name in [
+            HeaderName::CallId,
+            HeaderName::From,
+            HeaderName::To,
+            HeaderName::CSeq,
+        ] {
+            let mut duplicate = valid.clone();
+            let value = duplicate
+                .headers
+                .value(&name)
+                .expect("required response header")
+                .into_owned();
+            duplicate
+                .headers
+                .push(sipx_sip::Header::build(name, Bytes::from(value)).expect("duplicate header"));
+            assert!(!response_matches_dialog(&duplicate, &dialog, 2));
+        }
     }
 }
