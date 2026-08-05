@@ -14,6 +14,7 @@ import datetime
 import hashlib
 import ipaddress
 import json
+import multiprocessing
 import os
 import pathlib
 import queue
@@ -74,6 +75,136 @@ RFC3339_UTC = re.compile(
 
 class ContractError(ValueError):
     """The manifest, evidence or supervised lifecycle contradicted the v1 contract."""
+
+
+def _orderly_stop_worker(callback: Callable[[], None], channel: object) -> None:
+    """Run one registered callback in a killable process group, never a detached thread."""
+
+    try:
+        os.setsid()
+        # A worker forked after ProcessSupervisor entered inherits the parent's INT/TERM cleanup
+        # handlers. It owns neither the parent's endpoint objects nor their groups, so restore
+        # ordinary child-process signal semantics before announcing readiness.
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        channel.send(("ready",))
+        if channel.recv() != "run":
+            return
+        try:
+            callback()
+        except BaseException as error:
+            channel.send(("error", type(error).__name__, str(error)))
+        else:
+            channel.send(("ok",))
+    except BaseException as error:
+        try:
+            channel.send(("worker_error", type(error).__name__, str(error)))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        channel.close()
+
+
+class _OrderlyStopWorker:
+    """A registered graceful action whose whole process group can be cancelled and joined."""
+
+    STARTUP_BOUND_SECONDS = 5.0
+
+    def __init__(self, callback: Callable[[], None]) -> None:
+        context = multiprocessing.get_context("fork")
+        parent, child = context.Pipe(duplex=True)
+        self.channel = parent
+        self.process = context.Process(
+            target=_orderly_stop_worker,
+            args=(callback, child),
+            name="comparative-load-orderly-stop",
+        )
+        self.process.start()
+        self._closed = False
+        atexit.register(self._on_exit)
+        child.close()
+        if not self.channel.poll(self.STARTUP_BOUND_SECONDS):
+            self._stop(self.STARTUP_BOUND_SECONDS)
+            raise ContractError("orderly-stop worker did not become ready inside its failure bound")
+        try:
+            ready = self.channel.recv()
+        except EOFError as error:
+            self._stop(self.STARTUP_BOUND_SECONDS)
+            raise ContractError("orderly-stop worker exited before readiness") from error
+        if ready != ("ready",):
+            self._stop(self.STARTUP_BOUND_SECONDS)
+            raise ContractError(f"orderly-stop worker failed during startup: {ready!r}")
+
+    @property
+    def pid(self) -> int:
+        if self.process.pid is None:
+            raise ContractError("orderly-stop worker has no process identifier")
+        return self.process.pid
+
+    def _signal_group(self, signum: signal.Signals) -> None:
+        try:
+            os.killpg(self.pid, signum)
+        except ProcessLookupError:
+            pass
+
+    def _join(self, timeout_seconds: float) -> bool:
+        self.process.join(timeout_seconds)
+        return not self.process.is_alive()
+
+    def _stop(self, timeout_seconds: float) -> None:
+        if self._closed:
+            return
+        if self.process.is_alive():
+            self._signal_group(signal.SIGTERM)
+        if not self._join(timeout_seconds):
+            self._signal_group(signal.SIGKILL)
+        if not self._join(timeout_seconds):
+            raise ContractError("orderly-stop worker remained alive after KILL")
+        self.channel.close()
+        self._closed = True
+        atexit.unregister(self._on_exit)
+
+    def _on_exit(self) -> None:
+        try:
+            self._stop(0.25)
+        except ContractError as error:
+            print(f"comparative-load orderly-stop cleanup: {error}", file=sys.stderr)
+
+    def run(self, timeout_seconds: float) -> BaseException | None:
+        if self._closed:
+            return None
+        try:
+            self.channel.send("run")
+        except (BrokenPipeError, EOFError, OSError):
+            self._stop(timeout_seconds)
+            return ContractError("orderly-stop worker exited before its callback request")
+
+        outcome: tuple[object, ...] | None = None
+        if self.channel.poll(timeout_seconds):
+            try:
+                candidate = self.channel.recv()
+            except EOFError:
+                candidate = ("worker_error", "EOFError", "worker closed its evidence pipe")
+            if isinstance(candidate, tuple):
+                outcome = candidate
+        if outcome is None:
+            error: BaseException | None = ContractError(
+                f"orderly-stop callback exceeded its {timeout_seconds:g}s failure bound"
+            )
+        elif outcome == ("ok",):
+            error = None
+        elif len(outcome) == 3 and outcome[0] in {"error", "worker_error"}:
+            error = ContractError(
+                f"orderly-stop callback failed ({outcome[1]}): {outcome[2]}"
+            )
+        else:
+            error = ContractError(f"orderly-stop worker emitted an invalid result: {outcome!r}")
+
+        try:
+            self._stop(timeout_seconds)
+        except ContractError as stop_error:
+            return stop_error
+        return error
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -690,6 +821,13 @@ def validate_result(value: object, manifest_value: object) -> Mapping[str, objec
     if cleanup["escalation"] not in ("none", "term", "kill"):
         _fail("result.cleanup.escalation", "must be none, term or kill")
     _nonnegative_int(cleanup["elapsed_ms"], "result.cleanup.elapsed_ms")
+    process_crashes = int(errors["process_crash"])
+    leader_failed = cleanup["leader_status"] != 0
+    if process_crashes != int(leader_failed):
+        _fail(
+            "result.errors.process_crash",
+            "must be exactly one when leader status is non-zero, otherwise zero",
+        )
 
     if status == "passed":
         if counts["offered"] < 1_000 or counts["completed"] * 1_000 < counts["offered"] * 999:
@@ -705,6 +843,10 @@ def validate_result(value: object, manifest_value: object) -> Mapping[str, objec
         for name in ("admission_stopped", "zero_state_observed", "process_group_exited", "descendant_pipe_eof"):
             if cleanup[name] is not True:
                 _fail(f"result.cleanup.{name}", "must be true for a passed result")
+        if cleanup["leader_status"] != 0:
+            _fail("result.cleanup.leader_status", "must be zero for a passed result")
+        if cleanup["escalation"] != "none":
+            _fail("result.cleanup.escalation", "must be none for a passed result")
     return result
 
 
@@ -808,6 +950,7 @@ class SupervisedProcess:
         *,
         cwd: pathlib.Path | None = None,
         env: Mapping[str, str] | None = None,
+        graceful: Callable[[], None] | None = None,
         stdout_limit: int = MAX_LOG_BYTES,
         stderr_limit: int = MAX_LOG_BYTES,
     ) -> None:
@@ -820,15 +963,21 @@ class SupervisedProcess:
         if not 0 < stdout_limit <= MAX_LOG_BYTES or not 0 < stderr_limit <= MAX_LOG_BYTES:
             raise ContractError("output bounds must be positive and no larger than 16 MiB")
         self.role = role
-        self.process = subprocess.Popen(
-            list(argv),
-            cwd=cwd,
-            env=None if env is None else dict(env),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
+        self._orderly_stop = _OrderlyStopWorker(graceful) if graceful is not None else None
+        try:
+            self.process = subprocess.Popen(
+                list(argv),
+                cwd=cwd,
+                env=None if env is None else dict(env),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except BaseException:
+            if self._orderly_stop is not None:
+                self._orderly_stop._stop(0.25)
+            raise
         if self.process.stdout is None or self.process.stderr is None:
             raise ContractError("supervised process pipes were not created")
         self.stdout = _BoundedReader(self.process.stdout, stdout_limit, readiness=True)
@@ -840,6 +989,12 @@ class SupervisedProcess:
     @property
     def pgid(self) -> int:
         return self.process.pid
+
+    @property
+    def orderly_stop_worker_pid(self) -> int | None:
+        """PID of the supervisor-owned graceful-action worker, when one was registered."""
+
+        return None if self._orderly_stop is None else self._orderly_stop.pid
 
     def wait_ready(self, timeout_ms: int = READINESS_MS) -> Mapping[str, object]:
         """Wait for the readiness fact, with the duration serving only as a failure bound."""
@@ -920,7 +1075,6 @@ class SupervisedProcess:
 
     def close(
         self,
-        graceful: Callable[[], None] | None = None,
         *,
         timeout_seconds: float = 5.0,
     ) -> str:
@@ -932,32 +1086,8 @@ class SupervisedProcess:
             raise ContractError("each cleanup wait bound must be in (0, 5] seconds")
         self._closed = True
         graceful_error: BaseException | None = None
-        if graceful is not None:
-            completed = threading.Event()
-            errors: list[BaseException] = []
-
-            def request_orderly_stop() -> None:
-                try:
-                    graceful()
-                except BaseException as error:
-                    errors.append(error)
-                finally:
-                    completed.set()
-
-            callback = threading.Thread(
-                target=request_orderly_stop,
-                name=f"comparative-load-graceful-{self.process.pid}",
-                daemon=True,
-            )
-            callback.start()
-            if not completed.wait(timeout_seconds):
-                graceful_error = ContractError(
-                    f"orderly-stop callback exceeded its {timeout_seconds:g}s failure bound"
-                )
-            elif errors:
-                # An orderly-stop failure is evidence, never permission to abandon the process
-                # group. Preserve it for the caller after forced cleanup has completed.
-                graceful_error = errors[0]
+        if self._orderly_stop is not None:
+            graceful_error = self._orderly_stop.run(timeout_seconds)
         escalation = "none"
         group_exited = self._wait_for_group_exit(timeout_seconds)
         if not group_exited:

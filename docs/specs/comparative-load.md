@@ -226,8 +226,12 @@ limit terminates the repetition as `evidence_overflow` instead of truncating a s
 Secrets and raw packet bodies are forbidden in evidence.
 
 The supervisor starts every external command directly, never through a shell, in a new process
-group. It owns that group until every descendant exits. Its outer runner installs `EXIT`, `INT` and
-`TERM` cleanup before the first child starts. Cleanup performs these observable steps:
+group. It owns that group until every descendant exits. An optional orderly-stop callback is
+registered before the endpoint starts and executes in its own supervisor-owned process group; it
+communicates with the endpoint only through external I/O and does not rely on mutations to the
+supervisor's memory. The supervisor terminates and joins that entire callback group on timeout, so a
+callback that blocks forever cannot leave a thread or process behind. Its outer runner installs
+`EXIT`, `INT` and `TERM` cleanup before the first child starts. Cleanup performs these observable steps:
 
 1. stop admission and request orderly endpoint shutdown, bounding the orderly-stop callback itself
    by 5 seconds; a callback failure or timeout is retained as evidence but cannot prevent escalation;
@@ -284,6 +288,12 @@ legitimately be zero. Missing required metadata, unknown keys, non-finite number
 inconsistent totals, a percentile without samples, or a success with non-zero post-drain state makes
 the record invalid rather than partial.
 
+`cleanup.leader_status` is the exact supervisor-observed process status: zero is a clean exit, a
+positive value is an exit code and a negative value is termination by that signal. Because one
+result names one endpoint leader, `errors.process_crash` MUST be exactly one when leader status is
+non-zero and zero otherwise. A `passed` result additionally requires leader status zero and
+`cleanup.escalation: none`; forced TERM/KILL cleanup is valid failure evidence, never a successful run.
+
 Raw records, stdout/stderr (within their bounds), manifest, hashes and environment inventory are
 written before any aggregate. A generated summary may only point at those immutable inputs.
 
@@ -295,6 +305,7 @@ A repetition passes capacity only when all of these are true:
 - every `invalid_message`, crash, internal error, evidence overflow and cleanup timeout count is zero;
 - loopback setup p99 is at most 250 ms;
 - every post-drain count is zero and the process group plus inherited pipes are closed.
+- the endpoint leader exits with status zero and cleanup needs no TERM/KILL escalation.
 
 A rate is supported only when all five repetitions pass. The capacity point is the highest supported
 rate below the first pair of consecutive failed rates. Report the five achieved-throughput values as

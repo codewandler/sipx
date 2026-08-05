@@ -938,6 +938,37 @@ class TheComparativeLoadContract(unittest.TestCase):
         changed["cleanup"]["descendant_pipe_eof"] = False
         self.assert_result_refused(changed)
 
+    def test_passed_status_requires_clean_unforced_process_exit(self) -> None:
+        result = a_load_result()
+
+        changed = self.changed(result)
+        changed["cleanup"]["leader_status"] = 1
+        self.assert_result_refused(changed)
+
+        changed = self.changed(result)
+        changed["cleanup"]["leader_status"] = -signal.SIGKILL
+        self.assert_result_refused(changed)
+
+        changed = self.changed(result)
+        changed["cleanup"]["escalation"] = "kill"
+        self.assert_result_refused(changed)
+
+    def test_process_crash_count_and_leader_status_must_agree(self) -> None:
+        result = a_load_result()
+        result["status"] = "failed"
+
+        crashed_without_accounting = self.changed(result)
+        crashed_without_accounting["cleanup"]["leader_status"] = 2
+        self.assert_result_refused(crashed_without_accounting)
+
+        accounting_without_crash = self.changed(result)
+        accounting_without_crash["errors"]["process_crash"] = 1
+        self.assert_result_refused(accounting_without_crash)
+
+        result["cleanup"]["leader_status"] = 2
+        result["errors"]["process_crash"] = 1
+        load_contract.validate_result(result, a_load_manifest())
+
     def test_unsupported_resources_are_absent_not_zero(self) -> None:
         result = a_load_result()
         changed = self.changed(result)
@@ -1039,23 +1070,26 @@ print(json.dumps({
 }), flush=True)
 signal.pause()
 """
+        def fail_to_stop_orderly():
+            raise RuntimeError("orderly stop failed")
+
         supervised = load_contract.SupervisedProcess(
             [sys.executable, "-c", helper],
             "responder",
+            graceful=fail_to_stop_orderly,
             stdout_limit=4096,
             stderr_limit=4096,
         )
         pgid = supervised.pgid
+        worker_pid = supervised.orderly_stop_worker_pid
         try:
             supervised.wait_ready(timeout_ms=2_000)
-
-            def fail_to_stop_orderly():
-                raise RuntimeError("orderly stop failed")
-
-            with self.assertRaisesRegex(RuntimeError, "orderly stop failed"):
-                supervised.close(graceful=fail_to_stop_orderly, timeout_seconds=0.25)
+            with self.assertRaisesRegex(load_contract.ContractError, "orderly stop failed"):
+                supervised.close(timeout_seconds=0.25)
             self.assertIsNotNone(supervised.process.returncode)
             self.assertFalse(process_group_exists(pgid))
+            self.assertIsNotNone(worker_pid)
+            self.assertFalse(process_group_exists(worker_pid))
             self.assertTrue(supervised.stdout.eof.is_set())
             self.assertTrue(supervised.stderr.eof.is_set())
         finally:
@@ -1075,27 +1109,31 @@ print(json.dumps({
 }), flush=True)
 signal.pause()
 """
+        def block_orderly_stop():
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.pause()
+
         supervised = load_contract.SupervisedProcess(
             [sys.executable, "-c", helper],
             "responder",
+            graceful=block_orderly_stop,
             stdout_limit=4096,
             stderr_limit=4096,
         )
         pgid = supervised.pgid
+        worker_pid = supervised.orderly_stop_worker_pid
         try:
             supervised.wait_ready(timeout_ms=2_000)
-
-            def block_orderly_stop():
-                time.sleep(0.75)
-
             started = time.monotonic()
             with self.assertRaisesRegex(
                 load_contract.ContractError, "orderly-stop callback exceeded"
             ):
-                supervised.close(graceful=block_orderly_stop, timeout_seconds=0.1)
+                supervised.close(timeout_seconds=0.1)
             self.assertLess(time.monotonic() - started, 0.7)
             self.assertIsNotNone(supervised.process.returncode)
             self.assertFalse(process_group_exists(pgid))
+            self.assertIsNotNone(worker_pid)
+            self.assertFalse(process_group_exists(worker_pid))
             self.assertTrue(supervised.stdout.eof.is_set())
             self.assertTrue(supervised.stderr.eof.is_set())
         finally:

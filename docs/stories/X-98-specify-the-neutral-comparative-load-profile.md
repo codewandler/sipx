@@ -50,5 +50,8 @@ comparison before implementing or running it.
 - Re-review hardening bounds even a blocking orderly-stop callback before group escalation, makes
   the manifest's `none`/`trying_100` provisional policy executable, and ties exact 200/non-2xx
   response totals to established, completed, rejected and admission-refused dialogs.
+- Final supervision review moves the arbitrary orderly-stop action into its own cancellable,
+  joinable process group and proves a forever-blocked action leaves no worker. Passed evidence now
+  requires a clean, unforced leader exit, with every non-zero status tied to one crash count.
 - The full gate is intentionally deferred until the reviewed M13 branches reach integration, so the
   final Acceptance item and story status remain open. The actual comparative measurement is M14.
