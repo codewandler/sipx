@@ -58,6 +58,9 @@ public demo.
 - [P-14 — Ship portable CLI artifacts](P-14-ship-portable-cli-artifacts.md) · Phone · the surveyed stack's most-engaged issue is a glibc failure · Rust makes this a build-matrix problem
 
 ## Next (ready — take the top one unless the user named a story)
+- [T-36 — Refresh server-transaction liveness on provisional progress](T-36-refresh-server-transaction-liveness-on-provisional-progress.md) · Signalling · requested by sipx-clstr CX-19 · unanswered_limit currently measures from first handoff even while the application keeps reporting progress
+- [S-50 — Expose lossless address-presentation editing](S-50-expose-lossless-address-presentation-editing.md) · Signalling · requested by sipx-clstr CX-17 — one atomic display-name and URI splice retaining all header parameters
+- [S-51 — Expose lossless Warning-agent editing](S-51-expose-lossless-warning-agent-editing.md) · Signalling · requested by sipx-clstr CX-17 — parser-owned warn-agent replacement retaining code and text
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first

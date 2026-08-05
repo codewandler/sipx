@@ -1,7 +1,7 @@
 # Design: Transport layer
 
 **Status:** active · **Pillar:** Signalling · **Epic:** `sip-transport` ·
-**Stories:** T-1 … T-4, T-22, T-34
+**Stories:** T-1 … T-4, T-22, T-34, T-36
 
 ## Why
 
@@ -43,6 +43,27 @@ remains is a generous deadline that is a bound on *failure* in `X-29`'s sense, w
 lengthen it.
 
 Filed and closed as `X-36`; the mistaken rationale it replaced came from `X-29`.
+
+## Provisional application progress refreshes the unanswered guard
+
+**Decision:** the endpoint's finite application-leak backstop ages from the latest successfully
+performed application response, not forever from the first request handoff. A 100–199 sent through
+the exact-key `Handle::respond` operation refreshes the guard. A successful final response leaves
+the guard immediately while its server transaction continues through the RFC 3261
+retransmission/ACK absorption lifetime.
+
+Only a new application provisional counts. The transaction layer's automatic 100 Trying and its
+retransmission of a stored response prove network activity, not that the application which owns the
+request is still making progress, so neither refreshes the guard. Silence since handoff or the last
+application provisional remains finitely collected, logged and counted. A missing, abandoned or
+fully terminated key continues to fail `Handle::respond` with `Error::NoTransaction`; progress can
+neither recreate a transaction nor hide stale ownership.
+
+There is no separate `progress(key)` operation. It would let an application keep an abandoned
+transaction forever without producing a SIP response, while the useful progress signal at this
+layer already has a typed status, an exact transaction key and a performed-on-wire result. Aggregate
+`Handle::outstanding()` remains observability for the endpoint as a whole, never a per-key lifecycle
+oracle. Filed as `T-36` from the downstream `CX-19` kernel-only paused-time reproduction.
 
 ## Overload control belongs on the endpoint loop
 
