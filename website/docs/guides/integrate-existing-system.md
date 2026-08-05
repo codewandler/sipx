@@ -30,6 +30,8 @@ Good first integrations are endpoints with explicit inputs and outputs:
 - a health probe that places a call and checks the result;
 - an announcement endpoint that answers, plays a WAV file, and records the caller;
 - a notification dialler that reports JSON and branches on the exit code;
+- an endpoint that subscribes to an existing registrar's registration event package and reports the
+  current contacts without taking ownership of registration storage;
 - a Rust service that registers one endpoint and owns its calls.
 
 Keep routing, registration storage, queues, and other network-wide policy in the system that
@@ -100,6 +102,19 @@ endpoint will actually run, not only on loopback.
 `with_service_route` writes the preloaded `Route` headers but does not resolve them. Resolve the
 outermost proxy in the application and pass that address as the `Target` to `dial`; the called
 party remains in the Request-URI.
+
+For a long-lived endpoint, keep operational policy at the transport boundary. A host can rotate the
+TLS identity used by new handshakes, attach one bounded message/connection observer, atomically
+replace the admitted source-prefix set, and install an immutable pre-transaction request policy.
+Those seams do not replace routing or authorization: protected SIP fields cannot be rewritten, and
+established connections keep the identity and source-admission generation that accepted them. See
+[Use sipx as a library](as-a-library.md#operate-a-live-transport-endpoint) for the exact API boundary.
+
+The same Rust process can attach inbound and outbound event services, registration discovery, and
+conditional presence publication to its dispatcher. Established calls can also surface and answer
+application-owned INFO or MESSAGE requests without exposing the stack-owned BYE, negotiation, or
+transfer paths. The corresponding ownership and bounds are in
+[the library guide](as-a-library.md#handle-application-owned-dialog-requests).
 
 ## Know the application boundary
 

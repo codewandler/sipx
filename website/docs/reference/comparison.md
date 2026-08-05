@@ -12,6 +12,11 @@ It is generated from a checked registry, the same way the [RFC compliance](compl
 A claim with no evidence behind it, or one that has aged past its limit, fails the build rather
 than appearing here with a caveat.
 
+On a narrow screen, scroll the dense evidence tables horizontally; their columns keep a readable
+width rather than being compressed into vertical strips.
+
+<div className="sipx-comparison-page">
+
 <!-- BEGIN generated:comparison -->
 What choosing sipx wins and what it costs, against the stacks a reader is actually
 weighing it against. Every cell carries the tier of confidence behind it, because this
@@ -229,6 +234,8 @@ Capacity point: **128 calls/s**, achieved interval [128.0, 128.0] dialogs/s over
 - Caller (UAC) direction: not measured — the pinned build exposes a bounded responder but no neutral-profile caller command
 - Internal state visibility: `endpoint-reported` — post-drain dialog, transaction, route and task state comes from the endpoint's terminal summary
 <!-- END generated:comparison -->
+
+</div>
 
 ## How this was produced
 

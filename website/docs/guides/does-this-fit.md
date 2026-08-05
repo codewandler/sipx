@@ -29,12 +29,20 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
   server to select a server-reflexive ICE path.
 - **A two-leg call controller.** `sipx-call::EarlyCoupling` and `Coupling` own both dialogs, relay
   offer/answer changes and termination, and can attach the bounded media bridge.
-- **An inbound SIP event notifier.** A dispatcher can serve bounded `dialog`, `reg`, and `presence`
-  subscriptions, negotiate expiry, send the required initial NOTIFY, and expose shedding and owned
-  task lifetime through counters.
+- **Managed transport endpoints.** New TLS and secure-WebSocket handshakes can select an atomically
+  replaced server identity while established connections survive. Bounded observation, immutable
+  pre-transaction request policy, and live source-prefix admission let a host inspect or constrain
+  the endpoint without moving arbitrary mutation into the transport driver.
+- **SIP event services in both roles.** A dispatcher can serve bounded `dialog`, `reg`, and
+  `presence` subscriptions; a generic authenticated client maintains outbound subscriptions; and
+  conditional presence publication is available in both roles. Package bodies, authorization,
+  projection and durable state remain application policy.
 - **Registration discovery from an existing registrar.** The generic subscriber has a bounded
   RFC 3680 consumer, and `sipx peers --registrar` keeps a current contact view with explicit source
   and age. Enumeration still depends on the registrar authorizing the subscription.
+- **Application-owned requests inside a call.** INFO, MESSAGE, and explicitly admitted private
+  methods can be sent and answered on an established dialog while the call state machine retains
+  ownership of negotiation, transfer, capability and teardown methods.
 
 ## Choose something else when you need
 
@@ -63,7 +71,9 @@ claim and the places sipx loses stated plainly — see [How sipx compares](../re
   yet projected into later NOTIFY bodies. A bounded generic subscriber does originate authenticated
   SUBSCRIBE and consume NOTIFY through an injected package parser and origin policy; registration
   discovery has a built-in consumer, while dialog and presence consumers remain application policy.
-- **SIP instant messaging.** `MESSAGE` can be parsed but has no user-agent behavior.
+- **A ready-made instant-messaging service.** The call API can send and answer bounded MESSAGE
+  requests inside an established dialog, but sipx does not provide an out-of-dialog messaging
+  client, message store, delivery policy, or user-facing chat product.
 
 ## Security boundary
 
@@ -81,11 +91,14 @@ See [Security](../reference/security.md) for the CLI-versus-library matrix,
 ## Application host status
 
 The `sipx-host` binary reads configuration, binds listeners, and serves real calls to document-mode
-webhooks or authenticated full-duplex sessions. A granted session can originate a call. The Rust
-host surfaces are Supported under the pre-1.0 policy, while the language-neutral `sipx.app.v1` wire
-contract remains Experimental. There is no embedded runtime or TypeScript SDK, so do not select it
-when either is a requirement. The [application host overview](../sdk/overview.md) gives the binding
-and trust boundaries.
+webhooks, authenticated full-duplex sessions, or a configured realtime audio binding. A granted
+session can originate a call; a realtime binding carries one routed G.711 call to one authenticated
+WebSocket session. The Rust host surfaces are Supported under the pre-1.0 policy, while the
+language-neutral `sipx.app.v1` wire contract remains Experimental. The deterministic peer proof is
+part of the default test matrix, but the credentialed live-endpoint interoperability proof has not
+yet been recorded. There is no embedded runtime or TypeScript SDK, so do not select it when either
+is a requirement. The [application host overview](../sdk/overview.md) gives the binding and trust
+boundaries.
 
 ## Make the decision
 

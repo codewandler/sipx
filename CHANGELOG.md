@@ -152,6 +152,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   run with no credentials. The document is normative for this workspace and observational
   toward the vendor, carrying the date its published contract was read.
 
+### Fixed
+
+- **The public adoption path now covers the complete post-beta.4 `main` wave** (`X-101`). The
+  current-main notes distinguish unreleased work from the immutable registry packages; transport
+  guidance now explains live identity rotation, bounded observation, request policy and source
+  admission; call guidance covers application-owned INFO, MESSAGE and private dialog methods; and
+  the front doors agree that the realtime binding is implemented while its credentialed
+  live-endpoint interoperability proof remains outstanding. A public-content guard now rejects the
+  retired claim that MESSAGE has no user-agent behavior. Dense comparison evidence now scrolls at a
+  readable column width instead of collapsing into exceptionally tall rows.
+
 ## [1.0.0-beta.4] — 2026-08-04
 
 This prerelease ships the beta.4 feature-and-security wave: explicit non-ICE deployment

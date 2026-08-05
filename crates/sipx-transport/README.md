@@ -1,11 +1,18 @@
 # sipx-transport
 
-Async SIP transports: UDP, TCP, TLS, WebSocket, experimental QUIC, and RFC 3263 resolution.
+Async SIP transports: UDP, TCP, TLS, WebSocket, experimental QUIC, RFC 3263 resolution, and bounded
+live endpoint operations.
 
 ## What this is
 
 The I/O driver for `sipx-sip`. It owns sockets, connection reuse, target resolution, timers, and
 capture while feeding received bytes and fired timers into the sans-I/O transaction core.
+
+An embedding host can atomically rotate the identity used by new TLS and secure-WebSocket
+handshakes, observe parsed messages and connection transitions through one bounded non-blocking
+receiver, install an immutable pre-transaction request policy, and replace a bounded source-prefix
+admission generation before parsing or handshake work. Existing connections are not silently
+renegotiated or reclassified.
 
 ## Stability
 
@@ -21,5 +28,7 @@ endpoint and incoming-message interfaces without moving their policy into the so
 ## See also
 
 - [`docs/specs/sip-transport.md`](../../docs/specs/sip-transport.md) — transport and pooling rules.
+- [`docs/designs/live-endpoint-policy.md`](../../docs/designs/live-endpoint-policy.md) — ownership and
+  limits of identity rotation, observation, request policy, and source admission.
 - [`docs/specs/sip-quic.md`](../../docs/specs/sip-quic.md) — sipx's experimental QUIC mapping.
 - [`sipx-sip`](../sipx-sip/README.md) — the core driven by these transports.

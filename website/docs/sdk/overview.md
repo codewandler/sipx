@@ -59,6 +59,12 @@ A realtime app is declared under `[app.<name>]` with `binding = "realtime"`, `en
 `sipx-host host.toml` is the one command that answers routed calls; each completed bridge writes a
 JSON line naming `codec`, `packet_duration_ms`, and `session_outcome`.
 
+The default test matrix proves the complete bridge contract against a deterministic loopback peer,
+including authentication refusal, both audio directions, barge-in, stalls, close/reset behavior and
+bounded cleanup. The credentialed live-endpoint interoperability proof has not yet been recorded,
+so the implemented binding is not presented as evidence that the external service still matches
+the observed contract.
+
 ## The intended model
 
 The contract expresses call behavior as data:

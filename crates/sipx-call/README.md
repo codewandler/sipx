@@ -1,12 +1,18 @@
 # sipx-call
 
-Call framework: dial, answer, couple dialogs, play, record, send DTMF, and transfer.
+Call framework: dial, answer, couple dialogs, play, record, send DTMF, transfer, serve SIP event
+services, and handle application-owned dialog requests.
 
 ## What this is
 
 The layer where SIP dialogs, SDP negotiation, and media sessions become a call. It owns the
 single-call lifecycle, can couple two dialogs with optional bridged media, and exposes the
 operations and typed events an application uses.
+
+The dispatcher can attach bounded inbound notifiers, outbound event subscriptions and conditional
+publication services. An established call can originate or surface INFO, MESSAGE and explicitly
+admitted private methods while retaining stack ownership of negotiation, transfer, capability and
+teardown methods.
 
 Confirmed, quiescent dialogs can be captured as bounded versioned bytes and attached to a fresh
 endpoint and an already-created matching media session. This is protocol-state persistence, not a

@@ -51,7 +51,9 @@ supports UDP, TCP, TLS, WebSocket, and secure WebSocket.
 | Registration | Digest authentication, lease refresh, Outbound flows, `Path`, `Service-Route`, GRUU, push-assisted refresh |
 | Audio | G.711, DTMF, WAV playback and recording; selectable Opus behind a Cargo feature |
 | Media | RTP/RTCP, jitter buffering, quality statistics, ICE, SDES-keyed SRTP, optional DTLS-SRTP |
-| Transports | UDP, TCP, TLS, WebSocket, secure WebSocket in the libraries |
+| Transports | UDP, TCP, TLS, WebSocket, secure WebSocket; live server-identity rotation and bounded endpoint policy/observation |
+| SIP events | Inbound and outbound subscriptions, registration discovery, conditional presence publication, application-owned in-dialog requests |
+| Operations and tests | Quiet-by-default libraries, deterministic call and realtime peers, finite RTP echo, bounded signalling load responder |
 | Core | Sans-I/O parsing, transactions, dialogs, and SDP offer/answer |
 
 sipx is a **user agent**, not a proxy, registrar, or configuration-driven PBX. It does not
@@ -63,10 +65,13 @@ TURN relay, video, and a general browser media stack remain outside the shipped 
 
 ## Application host and contract
 
-The workspace includes the `sipx-host` process. Document-mode webhooks can drive real calls, and
-authenticated full-duplex sessions can replace call programs and originate calls. The Rust host
-surfaces are Supported under the pre-1.0 policy; the language-neutral `sipx.app.v1` wire contract
-remains Experimental. There is no embedded runtime or TypeScript SDK. See the
+The workspace includes the `sipx-host` process. Document-mode webhooks can drive real calls,
+authenticated full-duplex sessions can replace call programs and originate calls, and a configured
+realtime binding can carry one routed G.711 call to one authenticated realtime WebSocket session.
+The Rust host surfaces are Supported under the pre-1.0 policy; the language-neutral `sipx.app.v1`
+wire contract remains Experimental. The realtime contract is proven against a deterministic peer,
+but its credentialed live-endpoint interoperability proof has not yet been recorded. There is no
+embedded runtime or TypeScript SDK. See the
 [Application host overview](sdk/overview.md) for that boundary.
 
 ## Design guarantees

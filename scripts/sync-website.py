@@ -98,10 +98,19 @@ ADOPTION_REQUIREMENTS = {
         ("registry honesty", re.compile(r"published as exact crates\.io packages", re.I)),
         ("Rust-crates-first adoption", re.compile(r"adoption surface leads with the modular Rust crates", re.I)),
         ("intentional omissions", re.compile(r"release intentionally does not provide", re.I)),
+        ("current-main changes", re.compile(r"Unreleased on `main`", re.I)),
     ),
     "website/docs/sdk/overview.md": (
         ("implemented webhook binding", re.compile(r"\| Webhook \|.*\| Implemented \|", re.I)),
         ("implemented session binding", re.compile(r"\| Session \|.*\| Implemented \|", re.I)),
+        ("implemented realtime binding", re.compile(r"\| Realtime \|.*\| Implemented \|", re.I)),
+        (
+            "live-endpoint proof boundary",
+            re.compile(
+                r"credentialed live-endpoint interoperability proof has not yet been recorded",
+                re.I,
+            ),
+        ),
         ("absent embedded binding", re.compile(r"\| Embedded handler \|.*\| Not implemented \|", re.I)),
     ),
 }
@@ -132,6 +141,7 @@ STALE_CURRENT_CLAIMS = (
     re.compile(r"\bcallback bindings? (?:are|is) not implemented\b", re.I),
     re.compile(r"\ball three binding adapters are unavailable\b", re.I),
     re.compile(r"\bDTLS components cannot yet key\b", re.I),
+    re.compile(r"\bMESSAGE\b.*\bno user-agent behavior\b", re.I),
 )
 
 AUDIO_CLAIMS = ROOT / "scripts" / "check-audio-claims.py"

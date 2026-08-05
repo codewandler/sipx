@@ -5,6 +5,40 @@ description: Release highlights and adoption notes for the sipx 1.0.0-beta.4 pre
 
 # What's new
 
+## Unreleased on `main` — 2026-08-05
+
+The website follows `main`, which currently contains a substantial endpoint and application wave
+newer than the immutable beta.4 packages. Use a Git dependency when intentionally testing these
+surfaces; installing `1.0.0-beta.4` does not provide them.
+
+- **Long-lived endpoints gained explicit operational seams.** A TLS or secure-WebSocket listener can
+  atomically replace the certificate identity used by new handshakes without closing established
+  connections. A bounded, non-blocking stream exposes parsed messages and connection transitions;
+  immutable request policy can allow, reject, or append only application-owned headers; and a live
+  bounded IP-prefix set can refuse new sources before parsing or handshake work.
+- **SIP event and dialog services now reach the live endpoint.** Applications can serve and originate
+  bounded subscriptions, discover current registrations through the registration event package,
+  receive and originate conditional presence publication, and handle application-owned INFO,
+  MESSAGE, or explicitly admitted private methods inside an established dialog. Confirmed quiescent
+  dialogs can also be encoded as bounded versioned protocol state and attached to fresh runtime
+  resources under host-owned persistence policy.
+- **Testing and operations have executable public surfaces.** The published testkit now includes a
+  socket-free call harness, virtual time, a finite RTP/PCMU echo peer, and a deterministic realtime
+  peer. The CLI adds a bounded signalling load responder with versioned JSON evidence, while the
+  logging reference fixes the library's quiet-by-default level policy.
+- **The application host gained a realtime audio binding.** One routed G.711 call can bridge to one
+  authenticated realtime WebSocket session with bounded queues, counted loss, barge-in, typed
+  terminal outcomes, and joined cleanup. The default suite proves this contract against a
+  deterministic loopback peer; the credentialed live-endpoint interoperability proof has not yet
+  been recorded.
+- **Capability comparison and signalling-load evidence are checked data.** The public comparison and
+  compliance pages are generated from evidenced registries. The first bounded UDP dialog-signalling
+  run now publishes its correctness qualification, exact revisions and environment, raw hashed
+  repetitions, median and spread, unsupported direction, and post-drain zero-state. It makes no
+  claim about secure transports, connection churn, audio, or an overall winner; read the
+  [comparative signalling-load result](reference/comparison.md#comparative-signalling-load) with
+  those limits intact.
+
 <!-- BEGIN generated:release-heading -->
 ## 1.0.0-beta.4 — 2026-08-04
 <!-- END generated:release-heading -->

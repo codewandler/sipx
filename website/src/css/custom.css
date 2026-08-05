@@ -85,3 +85,47 @@
   font-size: 0.9rem;
   color: var(--ifm-color-emphasis-700);
 }
+
+/*
+ * Comparison evidence needs more horizontal room than ordinary prose. Keep short
+ * reference tables fluid, but let tables with five or more columns scroll at a
+ * useful reading width instead of collapsing their evidence into vertical strips.
+ */
+.sipx-comparison-page table:has(th:nth-child(5)) {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+}
+
+.sipx-comparison-page table:has(th:nth-child(5)) th,
+.sipx-comparison-page table:has(th:nth-child(5)) td {
+  vertical-align: top;
+}
+
+.sipx-comparison-page table:has(th:nth-child(5)) th:first-child,
+.sipx-comparison-page table:has(th:nth-child(5)) td:first-child {
+  min-width: 6rem;
+}
+
+.sipx-comparison-page table:has(th:nth-child(5)) th:nth-child(2),
+.sipx-comparison-page table:has(th:nth-child(5)) td:nth-child(2) {
+  min-width: 18rem;
+}
+
+.sipx-comparison-page table:has(th:nth-child(5)) th:nth-child(3),
+.sipx-comparison-page table:has(th:nth-child(5)) td:nth-child(3) {
+  min-width: 8rem;
+}
+
+.sipx-comparison-page table:has(th:nth-child(5)) th:nth-child(4),
+.sipx-comparison-page table:has(th:nth-child(5)) td:nth-child(4) {
+  min-width: 12rem;
+}
+
+.sipx-comparison-page table:has(th:nth-child(5)) th:nth-child(n + 5),
+.sipx-comparison-page table:has(th:nth-child(5)) td:nth-child(n + 5) {
+  min-width: 16rem;
+}

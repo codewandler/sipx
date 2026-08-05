@@ -153,12 +153,12 @@ Those properties make the core deterministic to drive from another runtime or a 
 |---|---|
 | Parse and build SIP messages, transactions, dialogs | `sipx-sip` |
 | SDP and offer/answer | `sipx-sdp` |
-| Sockets, TLS, WebSocket, RFC 3263 resolution | `sipx-transport` |
-| Registration and digest authentication | `sipx-ua` |
+| Sockets, TLS, WebSocket, RFC 3263 resolution, identity rotation and bounded endpoint policy | `sipx-transport` |
+| Registration, digest authentication, event subscriptions and publication | `sipx-ua` |
 | RTP, RTCP, jitter buffer, quality statistics, SRTP | `sipx-rtp` |
 | G.711 (µ-law and A-law), mixing, WAV, and Opus behind the `opus` feature | `sipx-audio` |
 | RTP/RTCP sockets bound to negotiated SDP with NAT handling, bridging, conferencing | `sipx-media` |
-| Calls with playback, recording, DTMF, transfer, and confirmed-dialog snapshots | `sipx-call` |
+| Calls with playback, recording, DTMF, transfer, event services, application-owned dialog requests, and confirmed-dialog snapshots | `sipx-call` |
 | Socket-free call signalling tests with seeded faults and virtual time | `sipx-testkit` |
 | A phone to run rather than embed — the `sipx` binary | `sipx-cli` |
 | The `sipx.app.v1` contract: its types, wire format and interpreter | `sipx-app-protocol` |
@@ -168,6 +168,26 @@ Those properties make the core deterministic to drive from another runtime or a 
 authenticated full-duplex sessions, or a configured realtime audio bridge. A granted session can
 originate calls. The Rust host surfaces are Supported under the policy above; the `sipx.app.v1`
 wire line remains Experimental, and no embedded runtime or TypeScript SDK is shipped.
+
+## Operate a live transport endpoint
+
+The transport handle exposes three deliberately narrow host seams. `Handle::observe(capacity)`
+replaces the optional bounded receiver for parsed inbound and finalized outbound messages plus
+connection lifecycle transitions. Producers never wait for it: overflow increments
+`Counters::observation_dropped`, and dropping the receiver detaches observation.
+
+`Config::request_policy` accepts a `RequestPolicyRef` that sees an immutable finalized request and
+target before transaction creation. It may allow, reject, or add application-owned headers; route,
+dialog, authentication and framing fields remain protected. `Handle::replace_source_admission`
+atomically publishes a complete bounded `SourcePrefix` generation for new UDP sources and new
+stream connections, before parsing or handshake work. Existing admitted connections retain the
+generation that accepted them; `clear_source_admission` returns to allow-all.
+
+With the `tls` feature and a configured TLS or secure-WebSocket listener,
+`Handle::reload_server_identity` validates a complete `tls::Identity` and atomically selects it for
+later handshakes. A malformed chain or mismatched key leaves the prior identity active. Existing
+connections are neither renegotiated nor closed, and file watching or secret-store I/O remains the
+embedding host's responsibility.
 
 ## Serve inbound event subscriptions
 
@@ -293,6 +313,19 @@ start a new publication with a complete body. Dropping the handle requests remov
 shutdown cancels and joins owned work. Durable storage and projection from the compositor into later
 presence NOTIFY documents remain application responsibilities.
 
+## Handle application-owned dialog requests
+
+On an established call, `Call::send_dialog_request` originates INFO and MESSAGE directly, plus an
+exact private method first admitted with `Call::admit_dialog_method`. The call constructs the
+Request-URI, route set, dialog identifiers and monotonic CSeq, protects stack-owned headers, enforces
+a 64 KiB body ceiling, and performs one bounded digest retry from the dialog's credentials.
+
+Incoming requests arrive as `CallEvent::ApplicationRequest`. The owned `ApplicationRequest`
+preserves the validated headers and bounded body and carries an exactly-once final-response
+capability. Responding, dropping the last owner, or reaching the response deadline always resolves
+the server transaction. BYE, OPTIONS, re-INVITE, UPDATE, REFER, NOTIFY and other stack-owned methods
+cannot be intercepted or forged through this surface.
+
 ## Runtime and feature boundaries
 
 - `sipx-sip` and `sipx-sdp` are sans-I/O and have no async runtime.
@@ -323,12 +356,12 @@ docs.rs so that it always matches the guides next to it. Start points:
 | Crate | Start at |
 |---|---|
 | `sipx-sip` | [`parser`](https://codewandler.github.io/sipx/api/sipx_sip/parser/index.html) · [`transaction`](https://codewandler.github.io/sipx/api/sipx_sip/transaction/index.html) |
-| `sipx-transport` | [`bind`](https://codewandler.github.io/sipx/api/sipx_transport/endpoint/fn.bind.html) · [`Target`](https://codewandler.github.io/sipx/api/sipx_transport/target/struct.Target.html) |
+| `sipx-transport` | [`bind`](https://codewandler.github.io/sipx/api/sipx_transport/endpoint/fn.bind.html) · [`Handle`](https://codewandler.github.io/sipx/api/sipx_transport/endpoint/struct.Handle.html) · [`RequestPolicy`](https://codewandler.github.io/sipx/api/sipx_transport/policy/trait.RequestPolicy.html) · [`EndpointObservation`](https://codewandler.github.io/sipx/api/sipx_transport/policy/enum.EndpointObservation.html) · [`Target`](https://codewandler.github.io/sipx/api/sipx_transport/target/struct.Target.html) |
 | `sipx-ua` | [`UserAgent`](https://codewandler.github.io/sipx/api/sipx_ua/agent/struct.UserAgent.html) · [`event_client`](https://codewandler.github.io/sipx/api/sipx_ua/event_client/index.html) · [`publication_client`](https://codewandler.github.io/sipx/api/sipx_ua/publication_client/index.html) |
 | `sipx-sdp` | [`answer`](https://codewandler.github.io/sipx/api/sipx_sdp/answer/fn.answer.html) |
 | `sipx-rtp` | [`srtp`](https://codewandler.github.io/sipx/api/sipx_rtp/srtp/index.html) · [`rtcp`](https://codewandler.github.io/sipx/api/sipx_rtp/rtcp/index.html) |
 | `sipx-media` | [`MediaSession`](https://codewandler.github.io/sipx/api/sipx_media/session/struct.MediaSession.html) |
-| `sipx-call` | [`dial`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.dial.html) · [`answer`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.answer.html) · [`Call`](https://codewandler.github.io/sipx/api/sipx_call/call/struct.Call.html) · [`EventSubscriptions`](https://codewandler.github.io/sipx/api/sipx_call/subscriber/struct.EventSubscriptions.html) · [`Publications`](https://codewandler.github.io/sipx/api/sipx_call/publication/struct.Publications.html) |
+| `sipx-call` | [`dial`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.dial.html) · [`answer`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.answer.html) · [`Call`](https://codewandler.github.io/sipx/api/sipx_call/call/struct.Call.html) · [`ApplicationRequest`](https://codewandler.github.io/sipx/api/sipx_call/extension/struct.ApplicationRequest.html) · [`EventSubscriptions`](https://codewandler.github.io/sipx/api/sipx_call/subscriber/struct.EventSubscriptions.html) · [`Publications`](https://codewandler.github.io/sipx/api/sipx_call/publication/struct.Publications.html) |
 | `sipx-testkit` | [`CallHarness`](https://codewandler.github.io/sipx/api/sipx_testkit/call/struct.CallHarness.html) · [`TransactionHarness`](https://codewandler.github.io/sipx/api/sipx_testkit/call/struct.TransactionHarness.html) · [`RealtimePeer`](https://codewandler.github.io/sipx/api/sipx_testkit/realtime_peer/struct.RealtimePeer.html) · [`Faults`](https://codewandler.github.io/sipx/api/sipx_testkit/link/struct.Faults.html) |
 
 The API reference is generated from the same `main` branch as this site. When using the tagged

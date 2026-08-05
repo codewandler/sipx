@@ -241,6 +241,17 @@ class PublicGuardTests(unittest.TestCase):
         self.assertTrue(any("missing published public-beta status" in p for p in problems))
         self.assertTrue(any("stale current-main capability claim" in p for p in problems))
 
+    def test_adoption_guard_rejects_the_retired_message_denial(self) -> None:
+        sources = set(SYNC.ADOPTION_REQUIREMENTS) | set(SYNC.CURRENT_SURFACE_PAGES)
+        contents = {
+            source: (ROOT / source).read_text(encoding="utf-8") for source in sources
+        }
+        contents["website/docs/guides/does-this-fit.md"] += (
+            "\nMESSAGE can be parsed but has no user-agent behavior.\n"
+        )
+        problems = SYNC.public_adoption_problems(contents)
+        self.assertTrue(any("stale current-main capability claim" in p for p in problems))
+
 
 class RustDocExampleGuardTests(unittest.TestCase):
     def test_rust_doc_examples_refuse_panic_access_indexing_and_detached_tasks(self) -> None:

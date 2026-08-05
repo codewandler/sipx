@@ -353,6 +353,7 @@ _Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) 
 - [X-97 — Track capability parity as generated data](X-97-track-capability-parity-as-generated-data.md) · Build · M13 discovery gate · every public capability gets evidence, ownership and a disposition
 - [X-98 — Specify the neutral comparative load profile](X-98-specify-the-neutral-comparative-load-profile.md) · Build · late M13 dependency · signalling-only common workload, safe supervisor and stable result schema
 - [X-99 — Run and publish the comparative load result](X-99-run-and-publish-the-comparative-load-result.md) · Build · after M13, X-98 and P-15 · immutable builds, both directions, raw evidence before summary
+- [X-101 — Reconcile unpublished main with the public docs](X-101-reconcile-unpublished-main-with-public-docs.md) · Build · audit every shipped capability in origin/main..main against the public adoption surface and remove stale denials
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
