@@ -233,7 +233,14 @@ List what can be called: `sipx peers --json`
 
 | Flag | Meaning |
 |---|---|
-| `--book <FILE>` | Read this peer book rather than the default one |
+| `--book <FILE>` | Read this peer book; with `--registrar`, merge it explicitly |
+| `--registrar <AOR>` | Subscribe to this registrar's current registrations |
+| `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is visible |
+| `--target <ADDR>` | Registrar socket when it cannot be derived from the AOR |
+| `--expires <S>` | Positive requested subscription lifetime (default 3600) |
+| `--watch <S>` | Keep applying updates for this many seconds after the first snapshot |
+| `--local <ADDR>` | Local signalling bind address |
+| `--transport <T>` | `udp`, `tcp`, `tls`, `ws`, or `wss`, with the shared TLS options |
 
 The book is looked for in `--book`, then `$SIPX_PEERS`, then `$XDG_CONFIG_HOME/sipx/peers`, then
 `$HOME/.config/sipx/peers`. It is a text file a shell can write — one peer per line, a name and a
@@ -250,16 +257,29 @@ echo "carol sip:carol@192.0.2.30:5060" >> ~/.config/sipx/peers
 sipx peers --json | jq -r 'select(.source == "book") | .uri'
 ```
 
-Reports one line per peer with `status` (always `peer`), `name`, `uri` and `source`. `source` says
-where the entry was learned from — `book` is the only one today, and it is what keeps the list
-extensible when other sources are merged into it.
+Reports one line per peer with `status` (always `peer`), `name`, `uri` and `source`. Book entries
+carry `source=book` and no invented age. Live contacts carry `source=registrar` and `age`, in whole
+seconds since the last complete snapshot was accepted.
+
+```sh
+SIPX_PASSWORD="$secret" sipx peers \
+  --registrar sip:alice@example.com \
+  --target 192.0.2.20:5060 \
+  --watch 30 --json
+```
+
+The command waits for a full registration snapshot, applies later partial NOTIFY documents, and
+prints only the final current set. Pass `--book` in that form to merge a local book; environment and
+default book locations are deliberately not implicit in a registrar query. A 403 exits
+`unauthorized`, a 489 exits `rejected`, and a missing initial NOTIFY exits `timeout`. None falls back
+to a book-only success, because that would present an incomplete answer as complete.
 
 A book that cannot be read — missing, unreadable, or holding a line that is not a name and a URI —
 exits non-zero and names the file and the line. It never prints an empty list: on a fresh machine
 that would read as "there is nobody to call" when the truth is "you have not been told about
 anyone". A book that exists and holds no peers prints nothing and exits 0.
 
-The command consults no network. It opens no socket and needs no registrar.
+Without `--registrar`, the command remains file-only and opens no socket.
 
 ## `sipx devices`
 

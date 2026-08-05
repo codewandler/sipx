@@ -25,6 +25,8 @@ pub const DEFAULT_CAPACITY: usize = 1_024;
 pub const DEFAULT_DELIVERY_CAPACITY: usize = 32;
 /// Default maximum body accepted in either direction.
 pub const DEFAULT_BODY_LIMIT: usize = 65_536;
+/// Default delay for a probation termination without `retry-after`.
+pub const DEFAULT_PROBATION_BACKOFF: Duration = Duration::from_secs(60);
 
 /// A transport identity supplied by the I/O driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -44,7 +46,7 @@ pub enum Transport {
 }
 
 /// The peer and, for a stream, exact connection generation used by an exchange.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Peer {
     /// Remote socket address.
     pub address: SocketAddr,
@@ -52,6 +54,43 @@ pub struct Peer {
     pub transport: Transport,
     /// Driver-defined stream generation; absent for UDP.
     pub connection: Option<u64>,
+    /// Certificate identity selected before address resolution for TLS/WSS.
+    pub identity: Option<Arc<str>>,
+    /// WebSocket request resource; absent means `/` and is ignored outside WS/WSS.
+    pub path: Option<Arc<str>>,
+}
+
+impl Peer {
+    /// A target with no certificate identity or non-default WebSocket resource.
+    #[must_use]
+    pub fn new(address: SocketAddr, transport: Transport) -> Self {
+        Self {
+            address,
+            transport,
+            connection: None,
+            identity: None,
+            path: None,
+        }
+    }
+
+    /// Preserve the name the secure transport must verify.
+    #[must_use]
+    pub fn verifying(mut self, identity: impl AsRef<str>) -> Self {
+        self.identity = Some(Arc::from(identity.as_ref()));
+        self
+    }
+
+    /// Preserve the WebSocket request resource.
+    #[must_use]
+    pub fn at_path(mut self, path: impl AsRef<str>) -> Self {
+        let path = path.as_ref();
+        self.path = Some(if path.starts_with('/') {
+            Arc::from(path)
+        } else {
+            Arc::from(format!("/{path}"))
+        });
+        self
+    }
 }
 
 /// Default fail-closed NOTIFY origin policy.
@@ -61,12 +100,14 @@ pub struct SamePeer;
 /// Policy applied before a NOTIFY can select or mutate a dialog.
 pub trait NotifyTrustPolicy: Send + Sync + 'static {
     /// Whether this request arrived through an authorized peer/connection.
-    fn accepts(&self, selected_target: Peer, received_from: Peer, request: &Request) -> bool;
+    fn accepts(&self, selected_target: &Peer, received_from: &Peer, request: &Request) -> bool;
 }
 
 impl NotifyTrustPolicy for SamePeer {
-    fn accepts(&self, selected_target: Peer, received_from: Peer, _request: &Request) -> bool {
-        selected_target == received_from
+    fn accepts(&self, selected_target: &Peer, received_from: &Peer, _request: &Request) -> bool {
+        selected_target.address == received_from.address
+            && selected_target.transport == received_from.transport
+            && selected_target.connection == received_from.connection
     }
 }
 
@@ -142,6 +183,8 @@ pub struct Config {
     pub timer_n: Duration,
     /// Host maximum accepted interval.
     pub maximum_expiry: Duration,
+    /// Delay used when probation omits `retry-after`.
+    pub probation_backoff: Duration,
 }
 
 impl Default for Config {
@@ -155,6 +198,7 @@ impl Default for Config {
             interval_retries: 1,
             timer_n: DEFAULT_TIMER_N,
             maximum_expiry: Duration::from_secs(u64::from(u32::MAX)),
+            probation_backoff: DEFAULT_PROBATION_BACKOFF,
         }
     }
 }
@@ -170,6 +214,7 @@ impl Config {
             || self.interval_retries == 0
             || self.timer_n.is_zero()
             || self.maximum_expiry.is_zero()
+            || self.probation_backoff.is_zero()
             || self.maximum_expiry.as_secs() > u64::from(u32::MAX)
         {
             return Err(StartError::InvalidConfiguration);
@@ -263,6 +308,8 @@ pub enum Lifecycle {
     Pending,
     /// Waiting for the terminal NOTIFY after Expires 0.
     Unsubscribing,
+    /// Waiting for package-directed retry eligibility.
+    RetryWait,
 }
 
 /// Typed terminal outcome.
@@ -303,6 +350,8 @@ pub enum StateChange {
     ConflictingSubscribeResponse,
     /// Timer N ended a refresh attempt; the prior authoritative expiry remains unchanged.
     RefreshUnconfirmed,
+    /// The application may start a fresh subscription with fresh dialog identity now.
+    MayRetryNow,
     /// A terminal state released the subscription.
     Terminated(Termination),
 }
@@ -460,6 +509,7 @@ struct Entry<C> {
     pending_unsubscribe: bool,
     timers: Timers,
     queued: usize,
+    retry_termination: Option<Termination>,
 }
 
 /// Reusable sans-I/O event subscriber.
@@ -507,6 +557,18 @@ impl<C: PackageConsumer> EventClient<C> {
     #[must_use]
     pub fn contains(&self, id: SubscriptionId) -> bool {
         self.entries.contains_key(&id)
+    }
+
+    /// Record the exact stream generation selected by the transport for the latest SUBSCRIBE.
+    pub fn connection_selected(&mut self, id: SubscriptionId, generation: Option<u64>) {
+        let Some(entry) = self.entries.get_mut(&id) else {
+            return;
+        };
+        if let Some(dialog) = entry.dialog.as_mut() {
+            dialog.peer.connection = generation;
+        } else {
+            entry.target.connection = generation;
+        }
     }
 
     /// Begin one subscription and return its ordered initial outputs.
@@ -567,6 +629,7 @@ impl<C: PackageConsumer> EventClient<C> {
             pending_unsubscribe: false,
             timers: Timers::default(),
             queued: 0,
+            retry_termination: None,
         };
         let mut outputs = Vec::new();
         if let Some(value) = entry.consumer.neutral() {
@@ -580,7 +643,7 @@ impl<C: PackageConsumer> EventClient<C> {
         outputs.push(Output::SendSubscribe {
             id,
             request: Box::new(request),
-            target: entry.target,
+            target: entry.target.clone(),
         });
         arm(&mut entry, id, Timer::N, self.config.timer_n, &mut outputs);
         arm(&mut entry, id, Timer::Expiry, start.expires, &mut outputs);
@@ -751,9 +814,8 @@ impl<C: PackageConsumer> EventClient<C> {
                 OperationKind::Initial => entry.dialog.is_some() || tag.is_some(),
                 OperationKind::Refresh | OperationKind::Unsubscribe => {
                     entry.dialog.as_ref().is_some_and(|dialog| {
-                        tag.as_ref().is_some_and(|tag| {
-                            tag.eq_ignore_ascii_case(dialog.remote_tag.as_slice())
-                        })
+                        tag.as_ref()
+                            .is_some_and(|tag| tag == dialog.remote_tag.as_slice())
                     })
                 }
             };
@@ -825,6 +887,7 @@ impl<C: PackageConsumer> EventClient<C> {
     /// [`Output::RespondNotify`].
     #[allow(
         clippy::too_many_lines,
+        clippy::needless_pass_by_value,
         reason = "the fail-closed NOTIFY validation order mirrors the normative decision table"
     )]
     pub fn notify(
@@ -865,20 +928,21 @@ impl<C: PackageConsumer> EventClient<C> {
             outputs.push(respond_notify(transaction, 400, None));
             return outputs;
         };
-        if entry.dialog.as_ref().is_some_and(|dialog| {
-            !dialog
-                .remote_tag
-                .eq_ignore_ascii_case(remote_tag.as_slice())
-        }) || (entry.dialog.is_none()
-            && entry
-                .response_tag
-                .as_ref()
-                .is_some_and(|candidate| !candidate.eq_ignore_ascii_case(remote_tag.as_slice())))
+        if entry
+            .dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.remote_tag.as_slice() != remote_tag.as_slice())
+            || (entry.dialog.is_none()
+                && entry
+                    .response_tag
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.as_slice() != remote_tag.as_slice()))
         {
             outputs.push(respond_notify(transaction, 481, None));
             return outputs;
         }
-        if !entry.trust.accepts(request_peer(entry), source, request) {
+        let selected_target = request_peer(entry);
+        if !entry.trust.accepts(&selected_target, &source, request) {
             outputs.push(respond_notify(transaction, 403, None));
             return outputs;
         }
@@ -972,10 +1036,15 @@ impl<C: PackageConsumer> EventClient<C> {
             outputs.push(respond_notify(transaction, 400, None));
             return outputs;
         };
+        let source = Peer {
+            identity: selected_target.identity.clone(),
+            path: selected_target.path.clone(),
+            ..source
+        };
         match entry.dialog.as_mut() {
             Some(dialog) => {
                 dialog.remote_target = contact.uri.clone();
-                dialog.peer = peer_for_uri(&contact.uri, source);
+                dialog.peer = peer_for_uri(&contact.uri, &source);
                 dialog.remote_cseq = cseq;
             }
             None => {
@@ -985,7 +1054,7 @@ impl<C: PackageConsumer> EventClient<C> {
                     remote,
                     remote_target: contact.uri.clone(),
                     route_set: routes,
-                    peer: peer_for_uri(&contact.uri, source),
+                    peer: peer_for_uri(&contact.uri, &source),
                     remote_cseq: cseq,
                 });
             }
@@ -1040,10 +1109,40 @@ impl<C: PackageConsumer> EventClient<C> {
                         value,
                     });
                 }
-                outputs.push(Output::StateChanged {
-                    id,
-                    change: StateChange::Terminated(Termination::Remote(state.reason)),
-                });
+                let termination = Termination::Remote(state.reason);
+                let retry = if entry.lifecycle == Lifecycle::Unsubscribing
+                    || entry.pending_unsubscribe
+                    || self.shutting_down
+                {
+                    RetryPolicy::Never
+                } else {
+                    retry_policy(&state, self.config.probation_backoff)
+                };
+                match retry {
+                    RetryPolicy::Never => outputs.push(Output::StateChanged {
+                        id,
+                        change: StateChange::Terminated(termination),
+                    }),
+                    RetryPolicy::Immediate => {
+                        outputs.push(Output::StateChanged {
+                            id,
+                            change: StateChange::MayRetryNow,
+                        });
+                        outputs.push(Output::StateChanged {
+                            id,
+                            change: StateChange::Terminated(termination),
+                        });
+                    }
+                    RetryPolicy::After(after) => {
+                        entry.lifecycle = Lifecycle::RetryWait;
+                        entry.retry_termination = Some(termination);
+                        arm(entry, id, Timer::Retry, after, &mut outputs);
+                        outputs.push(Output::StateChanged {
+                            id,
+                            change: StateChange::State(Lifecycle::RetryWait),
+                        });
+                    }
+                }
             }
         }
         finish_if_terminal(&mut self.entries, id, &outputs);
@@ -1091,6 +1190,13 @@ impl<C: PackageConsumer> EventClient<C> {
                     });
                     maybe_begin_pending_unsubscribe(entry, id, self.config.timer_n, &mut outputs);
                 }
+                Lifecycle::RetryWait => {
+                    let reason = entry
+                        .retry_termination
+                        .take()
+                        .unwrap_or(Termination::TransactionFailed);
+                    terminate(entry, id, reason, &mut outputs);
+                }
             },
             Timer::Expiry => terminate(entry, id, Termination::LocalExpiry, &mut outputs),
             Timer::Refresh => {
@@ -1121,7 +1227,17 @@ impl<C: PackageConsumer> EventClient<C> {
                     }
                 }
             }
-            Timer::Retry => {}
+            Timer::Retry => {
+                outputs.push(Output::StateChanged {
+                    id,
+                    change: StateChange::MayRetryNow,
+                });
+                let reason = entry
+                    .retry_termination
+                    .take()
+                    .unwrap_or(Termination::TransactionFailed);
+                terminate(entry, id, reason, &mut outputs);
+            }
         }
         finish_if_terminal(&mut self.entries, id, &outputs);
         outputs
@@ -1135,7 +1251,13 @@ impl<C: PackageConsumer> EventClient<C> {
         };
         cancel(entry, id, Timer::Refresh, &mut outputs);
         cancel(entry, id, Timer::Retry, &mut outputs);
-        if entry.operation.is_some() {
+        if entry.lifecycle == Lifecycle::RetryWait {
+            let reason = entry
+                .retry_termination
+                .take()
+                .unwrap_or(Termination::TransactionFailed);
+            terminate(entry, id, reason, &mut outputs);
+        } else if entry.operation.is_some() {
             entry.pending_unsubscribe = true;
         } else if entry.dialog.is_none() {
             terminate(
@@ -1417,10 +1539,13 @@ fn strict_scalar(response: &Response, name: &HeaderName) -> Option<Duration> {
 }
 
 fn request_peer<C>(entry: &Entry<C>) -> Peer {
-    entry
-        .dialog
-        .as_ref()
-        .map_or(entry.target, |dialog| dialog.peer)
+    let Some(dialog) = entry.dialog.as_ref() else {
+        return entry.target.clone();
+    };
+    dialog.route_set.first().map_or_else(
+        || dialog.peer.clone(),
+        |route| peer_for_uri(&route.uri, &dialog.peer),
+    )
 }
 
 fn refresh_dialog_from_response<C>(entry: &mut Entry<C>, response: &Response) {
@@ -1430,17 +1555,17 @@ fn refresh_dialog_from_response<C>(entry: &mut Entry<C>, response: &Response) {
     };
     if let Some(dialog) = entry.dialog.as_mut() {
         dialog.remote_target = contact.uri.clone();
-        dialog.peer = peer_for_uri(&contact.uri, dialog.peer);
+        dialog.peer = peer_for_uri(&contact.uri, &dialog.peer);
     }
 }
 
-fn peer_for_uri(uri: &Uri, fallback: Peer) -> Peer {
+fn peer_for_uri(uri: &Uri, fallback: &Peer) -> Peer {
     let Some(sipx_sip::Host::Ip(ip)) = uri.host() else {
-        return fallback;
+        return fallback.clone();
     };
     Peer {
         address: SocketAddr::new(*ip, uri.port().unwrap_or(5060)),
-        ..fallback
+        ..fallback.clone()
     }
 }
 
@@ -1449,6 +1574,28 @@ fn respond_notify<V>(transaction: u64, status: u16, retry_after: Option<Duration
         transaction,
         status,
         retry_after,
+    }
+}
+
+enum RetryPolicy {
+    Never,
+    Immediate,
+    After(Duration),
+}
+
+fn retry_policy(state: &Subscription, probation_backoff: Duration) -> RetryPolicy {
+    match state.reason {
+        Some(Reason::Deactivated) => RetryPolicy::After(Duration::ZERO),
+        Some(Reason::Timeout) => RetryPolicy::Immediate,
+        Some(Reason::Probation) => {
+            RetryPolicy::After(state.retry_after.unwrap_or(probation_backoff))
+        }
+        Some(Reason::GiveUp) | None => state
+            .retry_after
+            .map_or(RetryPolicy::Immediate, RetryPolicy::After),
+        Some(Reason::Rejected | Reason::NoResource | Reason::Invariant | Reason::BadFilter) => {
+            RetryPolicy::Never
+        }
     }
 }
 
@@ -1558,7 +1705,7 @@ fn operation_failure<C: PackageConsumer, V>(
     outputs: &mut Vec<Output<V>>,
 ) {
     match entry.lifecycle {
-        Lifecycle::NotifyWait => terminate(entry, id, reason, outputs),
+        Lifecycle::NotifyWait | Lifecycle::RetryWait => terminate(entry, id, reason, outputs),
         Lifecycle::Active | Lifecycle::Pending => {
             cancel(entry, id, Timer::N, outputs);
             outputs.push(Output::StateChanged {

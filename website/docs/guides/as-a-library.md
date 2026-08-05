@@ -230,9 +230,25 @@ The full initializer is intentionally explicit: matching Call-ID/tags is correla
 authorization. The default `SamePeer` policy accepts NOTIFY only from the exact selected peer and
 transport; proxy deployments inject a finite allow-list or authenticated policy. Every usage has a
 provisional expiry before the first response, Timer N, one refresh timer, one in-flight SUBSCRIBE,
-a bounded delivery queue, non-wrapping CSeq and observable task/timer/transaction counts. The
-generic path does not imply a built-in application model: registration discovery remains the
-separate `reg` package consumer story.
+  a bounded delivery queue, non-wrapping CSeq and observable task/timer/transaction counts.
+
+For registration discovery, the built-in `RegistrationConsumer` is the concrete package policy;
+the lifecycle remains the same generic code:
+
+```rust
+use sipx_ua::reginfo::RegistrationConsumer;
+
+let consumer = RegistrationConsumer::new("sip:alice@example.com", 4096)?;
+// Put `consumer` in event_client::Start, then pass Start to event_handle.subscribe(...).
+// Each accepted value is a complete RegistrationSnapshot, not a fragment.
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The consumer requires a version-zero full document before any partial document, applies exact-next
+versions atomically, and retains at most the configured number of active contacts. Gaps, duplicate
+contact identities, malformed XML, DTD/entity input and overflow are rejected without replacing the
+last snapshot. `EventNotification::received_at` is the monotonic observation time; applications can
+use `EventSubscription::next_event` to wait for either the first snapshot or a typed refusal.
 
 ## Publish event state through an endpoint
 

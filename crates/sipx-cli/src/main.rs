@@ -94,9 +94,7 @@ async fn main() -> ExitCode {
         Some("answer") => answer::run(&args, format).await,
         Some("devices") => device::list(&args, format),
         Some("load") => load::run(&args, format).await,
-        // Not async, and deliberately so: listing what can be called reads a file and opens no
-        // socket. The registrar and local-link sources are separate stories.
-        Some("peers") => peers::run(&args, format),
+        Some("peers") => peers::run(&args, format).await,
         Some("scenario") => scenario::run(&args).await,
         Some("version" | "--version" | "-V") => {
             println!("sipx {}", env!("CARGO_PKG_VERSION"));
@@ -470,6 +468,8 @@ const VALUED_FLAGS: &[&str] = &[
     "--advertise",
     "--target",
     "--book",
+    "--registrar",
+    "--watch",
     "--instance",
     "--push-provider",
     "--push-prid",
@@ -514,6 +514,7 @@ const NUMERIC_FLAGS: &[&str] = &[
     "--timeout",
     "--wait",
     "--expires",
+    "--watch",
     "--call-duration",
 ];
 

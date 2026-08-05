@@ -87,6 +87,27 @@ used for the current SUBSCRIBE transaction; on a connection-oriented transport t
 generation MUST also match. Deployments that receive NOTIFY through a trusted proxy must inject an
 explicit allow-list or authenticated-identity policy. There is no accept-any default.
 
+### 2.3 Complete transport targets
+
+`Peer` is a sans-I/O description, but it MUST retain every fact the endpoint driver needs to
+reconstruct the selected transport target: socket address, transport, optional stream generation,
+optional TLS certificate identity and optional WebSocket resource. Identity and resource are
+bounded owned strings supplied on `Start`; the core neither resolves nor verifies them.
+
+Every `SendSubscribe` before a target refresh carries those facts unchanged. The live driver MUST
+rebuild `Target` with the certificate identity and WebSocket resource rather than using address and
+transport alone. A target refresh from a NOTIFY Contact may change the address but inherits the
+selected secure identity/resource unless an injected routing policy replaces them. Losing either is
+a security failure: an address without its DNS-derived identity cannot select the intended
+certificate, and a WebSocket connection for `/` is not authority for `/sip`.
+
+The endpoint reports the exact stream generation selected for each outbound SUBSCRIBE. The driver
+records it before accepting a NOTIFY, and inbound requests carry the generation of the stream that
+delivered them. `SamePeer` therefore compares two endpoint-issued generation identifiers rather
+than an inferred or stale pool value. UDP has no generation. For an established dialog the first
+route-set URI is the transport next hop even when strict routing rewrites the request URI; without a
+route set, the current remote target is the next hop.
+
 ## 3. Resource and timer bounds
 
 The public configuration exposes the limits below and refuses zero values. The defaults are part of
@@ -264,12 +285,14 @@ on the same input.
 | unsubscribe 2xx without terminal NOTIFY | remain `Unsubscribing` until N; the 2xx alone does not end the usage |
 | unsubscribe N/failure | terminate locally and surface whether peer confirmation was missing |
 
-Automatic re-subscription occurs only while the original application intent remains open and always
-uses a fresh Call-ID and From tag:
+The core never resurrects a terminated dialog. Instead it applies the following bounded delay and
+surfaces `MayRetryNow` when the application may create a new subscription with a fresh Call-ID and
+From tag. Once the application has requested unsubscribe or shutdown has begun, every terminal
+NOTIFY terminates without retry eligibility regardless of its reason:
 
-| Termination reason | Automatic policy |
+| Termination reason | Retry-eligibility policy |
 |---|---|
-| `deactivated` | retry on the next driver turn, never recursively in the same input |
+| `deactivated` | surface eligibility on the next driver turn, never recursively in the same input |
 | `probation` | arm Retry for `retry-after`; without it use configured probation backoff (default 60 s) |
 | `timeout` | no automatic retry by default; surface `MayRetryNow` |
 | `giveup` | wait for `retry-after`, or surface `MayRetryNow` when absent |
@@ -277,7 +300,9 @@ uses a fresh Call-ID and From tag:
 | `rejected`, `noresource`, `invariant`, `badfilter` | never retry automatically; ignore `retry-after` where RFC 6665 gives it no semantics |
 
 An application may explicitly start a new subscription after any terminal state except while client
-shutdown is in progress. A terminated subscription is never changed back to active or pending.
+shutdown is in progress. Delayed eligibility retains only the typed terminal reason and one bounded
+Retry timer; it retains no dialog operation. A terminated subscription is never changed back to
+active or pending.
 
 ## 8. Shutdown
 
@@ -519,6 +544,15 @@ already-authoritative Expiry remain; their generation and deadline do not change
 SUBSCRIBE is emitted. Firing that retained Expiry then terminates `LocalExpiry` and releases all
 state. A late refresh response may complete its transport transaction but changes no client state.
 
+### S37-V14 — secure target identity and resource survive the core/driver boundary
+
+Start independent TLS and WSS subscriptions whose peer descriptions carry certificate identity
+`registrar.example.test`; the WSS peer additionally carries `/sip-events`. Initial, authenticated
+retry and in-dialog refresh outputs preserve the exact values. The runtime maps them to a transport
+target whose connection key still contains that identity and path. A target-refresh Contact may
+replace the socket address while retaining both secure selectors. No secure request is sent through
+an address-only target.
+
 ## 10. S-38 conformance mapping
 
 `S-38` MUST derive failing-first tests from the vectors, without copying their expected behavior into
@@ -539,6 +573,7 @@ a second prose contract:
 | `response_intervals_fail_closed_for_every_operation` | V11 |
 | `notify_trust_and_contact_rejections_do_not_mutate` | V12 |
 | `refresh_timer_n_preserves_only_the_authoritative_expiry` | V13 |
+| `secure_target_identity_and_resource_survive_every_send` | V14 |
 
 The implementation is incomplete if any vector is asserted only against a helper rather than the
 public event-client surface and a real SIP transaction layer.

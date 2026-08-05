@@ -63,11 +63,7 @@ impl PackageConsumer for TestPackage {
 }
 
 fn peer(port: u16) -> Peer {
-    Peer {
-        address: SocketAddr::from(([192, 0, 2, 20], port)),
-        transport: Transport::Udp,
-        connection: None,
-    }
+    Peer::new(SocketAddr::from(([192, 0, 2, 20], port)), Transport::Udp)
 }
 
 fn start_with(cseq: u32, expires: u64, trust: Arc<dyn NotifyTrustPolicy>) -> Start<TestPackage> {
@@ -174,6 +170,16 @@ fn sent(outputs: &[Output<String>]) -> &Request {
         .expect("SUBSCRIBE output")
 }
 
+fn sent_target(outputs: &[Output<String>]) -> &Peer {
+    outputs
+        .iter()
+        .find_map(|output| match output {
+            Output::SendSubscribe { target, .. } => Some(target),
+            _ => None,
+        })
+        .expect("SUBSCRIBE target")
+}
+
 fn status(outputs: &[Output<String>]) -> u16 {
     outputs
         .iter()
@@ -271,6 +277,58 @@ fn authenticated_subscription_establishes_from_notify() {
     assert_eq!(timer(&outputs, Timer::Refresh).1, Duration::from_secs(1440));
 }
 
+/// S37-V14.
+#[test]
+fn secure_target_identity_and_resource_survive_every_send() {
+    let selected = Peer::new(SocketAddr::from(([192, 0, 2, 20], 7443)), Transport::Wss)
+        .verifying("registrar.example.test")
+        .at_path("/sip-events");
+    let mut start = start_with(1, 3_600, Arc::new(SamePeer));
+    start.target = selected.clone();
+    let mut client = EventClient::new(Config::default()).expect("config");
+    let (id, initial) = client.start(start).expect("starts");
+    client.consumer_drained(id, 1);
+    assert_eq!(sent_target(&initial), &selected);
+
+    let challenge = response(
+        401,
+        None,
+        &[(
+            &HeaderName::WwwAuthenticate,
+            "Digest realm=\"example.test\", nonce=\"n1\", qop=\"auth\", algorithm=SHA-256",
+        )],
+    );
+    let retry = client.response(id, Some(&challenge), "c1");
+    assert_eq!(sent_target(&retry), &selected);
+    let accepted = response(200, Some(REMOTE_TAG), &[(&HeaderName::Expires, "1800")]);
+    let _ = client.response(id, Some(&accepted), "unused");
+
+    let received = Peer::new(selected.address, selected.transport);
+    let established = client.notify(
+        14,
+        &notify(
+            REMOTE_TAG,
+            40,
+            "test-state;id=alpha",
+            "active;expires=1800",
+            &["<sip:notifier@192.0.2.30:7443>"],
+            b"state=one",
+        ),
+        received,
+    );
+    assert_eq!(status(&established), 200);
+    let (refresh_generation, _) = timer(&established, Timer::Refresh);
+    let refresh = client.timer_fired(id, Timer::Refresh, refresh_generation);
+    let refreshed = sent_target(&refresh);
+    assert_eq!(refreshed.address, SocketAddr::from(([192, 0, 2, 30], 7443)));
+    assert_eq!(refreshed.transport, Transport::Wss);
+    assert_eq!(
+        refreshed.identity.as_deref(),
+        Some("registrar.example.test")
+    );
+    assert_eq!(refreshed.path.as_deref(), Some("/sip-events"));
+}
+
 /// S37-V2.
 #[test]
 fn notify_before_response_selects_one_dialog() {
@@ -358,6 +416,114 @@ fn notify_expiry_overrides_refresh_response() {
         timer(&notify_outputs, Timer::Refresh).1,
         Duration::from_secs(720)
     );
+}
+
+#[test]
+fn dialog_tags_are_opaque_and_case_sensitive() {
+    let mut client = EventClient::new(Config::default()).expect("config");
+    let (id, _) = start(&mut client);
+    client.consumer_drained(id, 1);
+    let accepted = response(200, Some("Notifier-A"), &[(&HeaderName::Expires, "300")]);
+    let _ = client.response(id, Some(&accepted), "unused");
+    let wrong_case = client.notify(
+        21,
+        &notify(
+            "notifier-a",
+            1,
+            "test-state;id=alpha",
+            "active;expires=300",
+            &["<sip:notifier@192.0.2.20:5060>"],
+            b"one",
+        ),
+        peer(5060),
+    );
+    assert_eq!(status(&wrong_case), 481);
+}
+
+#[test]
+fn transport_selected_connection_generation_is_used_by_notify_trust() {
+    let mut start = start_with(1, 300, Arc::new(SamePeer));
+    start.target.transport = Transport::Tcp;
+    let mut client = EventClient::new(Config::default()).expect("config");
+    let (id, _) = client.start(start).expect("starts");
+    client.consumer_drained(id, 1);
+    client.connection_selected(id, Some(7));
+    let request = notify(
+        REMOTE_TAG,
+        1,
+        "test-state;id=alpha",
+        "active;expires=300",
+        &["<sip:notifier@192.0.2.20:5060>"],
+        b"one",
+    );
+    let mut wrong = peer(5060);
+    wrong.transport = Transport::Tcp;
+    wrong.connection = Some(8);
+    assert_eq!(status(&client.notify(22, &request, wrong)), 403);
+
+    let mut exact = peer(5060);
+    exact.transport = Transport::Tcp;
+    exact.connection = Some(7);
+    assert_eq!(status(&client.notify(23, &request, exact)), 200);
+}
+
+#[test]
+fn terminal_reasons_apply_bounded_retry_policy() {
+    let config = Config {
+        probation_backoff: Duration::from_secs(17),
+        ..Config::default()
+    };
+    let mut client = EventClient::new(config).expect("config");
+    let (id, _) = establish(&mut client);
+    client.consumer_drained(id, 2);
+    let probation = client.notify(
+        24,
+        &notify(
+            REMOTE_TAG,
+            41,
+            "test-state;id=alpha",
+            "terminated;reason=probation",
+            &["<sip:notifier@192.0.2.20:5060>"],
+            b"",
+        ),
+        peer(5060),
+    );
+    let (generation, after) = timer(&probation, Timer::Retry);
+    assert_eq!(after, Duration::from_secs(17));
+    assert!(client.contains(id));
+    let eligible = client.timer_fired(id, Timer::Retry, generation);
+    assert!(has_change(&eligible, &StateChange::MayRetryNow));
+    assert!(has_change(
+        &eligible,
+        &StateChange::Terminated(Termination::Remote(Some(
+            sipx_sip::event::Reason::Probation
+        )))
+    ));
+    assert!(!client.contains(id));
+
+    let mut rejected = EventClient::new(Config::default()).expect("config");
+    let (id, _) = establish(&mut rejected);
+    rejected.consumer_drained(id, 2);
+    let ended = rejected.notify(
+        25,
+        &notify(
+            REMOTE_TAG,
+            41,
+            "test-state;id=alpha",
+            "terminated;reason=rejected;retry-after=1",
+            &["<sip:notifier@192.0.2.20:5060>"],
+            b"",
+        ),
+        peer(5060),
+    );
+    assert!(!has_change(&ended, &StateChange::MayRetryNow));
+    assert!(!ended.iter().any(|output| matches!(
+        output,
+        Output::ArmTimer {
+            timer: Timer::Retry,
+            ..
+        }
+    )));
 }
 
 /// S37-V4.
@@ -750,6 +916,11 @@ fn strict_route_set_rewrites_the_in_dialog_request_target() {
     let (refresh_generation, _) = timer(&established, Timer::Refresh);
     let refresh = client.timer_fired(id, Timer::Refresh, refresh_generation);
     let request = sent(&refresh);
+    assert_eq!(
+        sent_target(&refresh).address,
+        SocketAddr::from(([192, 0, 2, 40], 5060)),
+        "the first route, not the Contact, is the transport next hop"
+    );
     assert_eq!(
         request.uri.to_bytes().as_ref(),
         b"sip:strict@192.0.2.40:5060"

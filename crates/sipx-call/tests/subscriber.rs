@@ -190,11 +190,7 @@ async fn a_public_subscription_authenticates_refreshes_and_drains_owned_work() {
             resource: Uri::parse(Bytes::from_static(b"sip:resource@example.test")).expect("URI"),
             local_identity: "<sip:client@example.test>".to_owned(),
             contact: format!("<sip:client@{}>", client_endpoint.local_addr()),
-            target: Peer {
-                address: notifier.local_addr(),
-                transport: Transport::Udp,
-                connection: None,
-            },
+            target: Peer::new(notifier.local_addr(), Transport::Udp),
             expires: Duration::from_secs(10),
             body: Bytes::new(),
             content_type: None,
@@ -329,4 +325,60 @@ async fn a_public_subscription_authenticates_refreshes_and_drains_owned_work() {
     }
     assert_eq!(client_endpoint.outstanding().await.expect("endpoint"), 0);
     dispatch.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn dispatcher_shutdown_joins_a_silent_subscription_transaction_and_timers() {
+    let (client, client_incoming) = endpoint().await;
+    let (silent, mut silent_incoming) = endpoint().await;
+    let runtime = EventSubscriptions::new(Config::default()).expect("runtime");
+    let handle = runtime.handle();
+    let mut dispatcher =
+        Dispatcher::new(client.clone(), client_incoming).with_event_subscriptions(runtime);
+    let dispatch = tokio::spawn(async move { while dispatcher.next().await.is_some() {} });
+    let mut subscription = handle
+        .subscribe(Start {
+            resource: Uri::parse(Bytes::from_static(b"sip:resource@example.test")).expect("URI"),
+            local_identity: "<sip:client@example.test>".to_owned(),
+            contact: format!("<sip:client@{}>", client.local_addr()),
+            target: Peer::new(silent.local_addr(), Transport::Udp),
+            expires: Duration::from_secs(10),
+            body: Bytes::new(),
+            content_type: None,
+            credentials: None,
+            call_id: "cancel-subscription@example.test".to_owned(),
+            from_tag: "cancel-subscription".to_owned(),
+            initial_cseq: 1,
+            consumer: TextPackage,
+            trust: Arc::new(SamePeer),
+        })
+        .expect("subscription starts");
+    let _neutral = subscription.recv().await.expect("neutral");
+    let _unanswered = next_request(&mut silent_incoming, Method::Subscribe).await;
+    for _ in 0..8 {
+        let counts = handle.counts();
+        if counts.active_transactions == 1 && counts.active_timers >= 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let live = handle.counts();
+    assert_eq!(live.active_transactions, 1);
+    assert!(live.active_timers >= 1);
+
+    client.shutdown().await;
+    dispatch.await.expect("dispatcher joins subscription work");
+    while let Some(change) = subscription.next_state().await {
+        if matches!(
+            change,
+            StateChange::Terminated(Termination::Shutdown | Termination::TransactionFailed)
+        ) {
+            break;
+        }
+    }
+    let stopped = handle.counts();
+    assert_eq!(stopped.active_tasks, 0);
+    assert_eq!(stopped.active_timers, 0);
+    assert_eq!(stopped.active_transactions, 0);
+    silent.shutdown().await;
 }

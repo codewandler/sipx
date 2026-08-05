@@ -35,7 +35,7 @@ sequenced so the cheapest lands first.
 | Source | Answers | RFC | Today |
 |---|---|---|---|
 | **The peer book** | "What has this phone been told about?" | none | absent |
-| **A registrar** | "Who is registered at this domain?" | 3680 | `partial` |
+| **A registrar** | "Who is registered at this domain?" | 3680 | live UAC; automatic gap recovery remains |
 | **The local link** | "Who is on this network right now?" | 6762 + 6763 | absent |
 
 1. **`sipx peers` (`P-5`)** — one command, one merged list, machine-readable in the form `P-1`

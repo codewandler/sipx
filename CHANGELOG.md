@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A registrar can now be a live source for `sipx peers`** (`S-24`). The built-in RFC 3680
+  consumer uses the generic authenticated subscription runtime, applies bounded full/partial
+  `reginfo` documents atomically, removes expired contacts, and reports each current contact with
+  registrar source and observation age. `--watch` retains subsequent updates for a finite
+  user-selected window; 403, 489 and a missing initial NOTIFY are explicit non-zero outcomes, never
+  partial success. Review also closed a secure-target gap: event subscriptions and publications now
+  preserve TLS certificate identity and WebSocket resource through the live driver.
+
 - **Applications can now receive and originate conditional presence publications** (`S-39`). The
   dispatcher routes authenticated PUBLISH requests through an injected, bounded compositor and
   returns fresh entity tags for create, refresh, modify and remove. A public publisher retains the
@@ -21,8 +29,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sans-I/O state machine and live endpoint driver cover authenticated SUBSCRIBE, mandatory NOTIFY,
   refresh, unsubscribe and shutdown while keeping package parsing behind an application-supplied
   consumer. Dialog targets and route sets, remote and local CSeq, exact expiry rules, peer trust,
-  delivery backpressure and owned timer/transaction cleanup are enforced and tested from the public
-  API.
+  transport-selected stream identity, byte-exact tags, terminal retry eligibility, delivery
+  backpressure and joined timer/transaction cleanup are enforced and tested from the public API.
 
 ## [1.0.0-beta.4] — 2026-08-04
 

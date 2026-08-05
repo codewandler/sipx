@@ -299,6 +299,7 @@ impl Notifier {
             Some(expires),
         )
         .await;
+        // discard: a vanished task has already released this subscription; the 200 is final.
         let _ = running.command.send(Command::Refresh(expires));
     }
 
@@ -327,6 +328,7 @@ impl Notifier {
             Some(Duration::ZERO),
         )
         .await;
+        // discard: a vanished task has already released this subscription; the 200 is final.
         let _ = running
             .command
             .send(Command::Terminate(Reason::Deactivated));
@@ -500,6 +502,7 @@ impl Lifecycle {
             Ok(mut responses) => {
                 // This duration bounds a failed NOTIFY transaction; subscription state does not
                 // depend on whether the peer supplies the final response.
+                // discard: the bounded response is deliberately observational, never authoritative.
                 let _ =
                     tokio::time::timeout(NOTIFY_RESPONSE_BOUND, responses.final_response()).await;
             }

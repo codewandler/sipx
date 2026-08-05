@@ -42,4 +42,7 @@ PUBLISH paths without introducing another presence store.
 - Added dispatcher-owned inbound and outbound live endpoint paths. Wire tests cover create,
   refresh, modify, remove, stale cross-resource tags, authentication, timer refresh and zero
   residual publication/transaction work.
+- Review found two cross-layer ownership defects and both now have focused proofs: TLS identity and
+  WebSocket resource survive every publisher send, and dispatcher shutdown cancels then joins a
+  live silent transaction and every publication timer before its barrier returns.
 - Integration still owns the complete gate and generated board before marking this story done.

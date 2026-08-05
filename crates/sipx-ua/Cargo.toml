@@ -22,6 +22,7 @@ sipx-sip.workspace = true
 sipx-transport = { workspace = true, optional = true }
 bytes.workspace = true
 thiserror.workspace = true
+quick-xml.workspace = true
 tracing.workspace = true
 rand.workspace = true
 md-5.workspace = true

@@ -71,10 +71,21 @@ pub enum EventSubscriptionError {
 /// One application delivery from a package consumer.
 #[derive(Debug)]
 pub struct EventNotification<V> {
+    /// Local monotonic instant when the runtime accepted this package value.
+    pub received_at: tokio::time::Instant,
     /// Framework state and remote sequence; absent for the initial neutral value.
     pub metadata: Option<NotificationMeta>,
     /// Parsed package value.
     pub value: V,
+}
+
+/// One application-visible event from a running subscription.
+#[derive(Debug)]
+pub enum EventSubscriptionEvent<V> {
+    /// A package value was accepted from a NOTIFY.
+    Notification(EventNotification<V>),
+    /// The framework lifecycle changed.
+    State(StateChange),
 }
 
 /// Application ownership of one running subscription.
@@ -96,6 +107,7 @@ impl<V> EventSubscription<V> {
     /// Receive one package value and release its bounded queue slot.
     pub async fn recv(&mut self) -> Option<EventNotification<V>> {
         let delivery = self.deliveries.recv().await?;
+        // discard: the bounded command queue cannot fill before its equally bounded deliveries.
         let _ = self.commands.try_send(Command::Drained(1));
         Some(delivery)
     }
@@ -103,6 +115,23 @@ impl<V> EventSubscription<V> {
     /// Receive one lifecycle fact.
     pub async fn next_state(&mut self) -> Option<StateChange> {
         self.states.recv().await
+    }
+
+    /// Receive the next package value or lifecycle fact without favoring either channel.
+    ///
+    /// This is the cancellation-safe choice for applications which must distinguish an initial
+    /// refusal from the first package snapshot. [`Self::recv`] and [`Self::next_state`] remain
+    /// available when an application intentionally observes only one side.
+    pub async fn next_event(&mut self) -> Option<EventSubscriptionEvent<V>> {
+        tokio::select! {
+            Some(delivery) = self.deliveries.recv() => {
+                // discard: the bounded command queue cannot fill before its bounded deliveries.
+                let _ = self.commands.try_send(Command::Drained(1));
+                Some(EventSubscriptionEvent::Notification(delivery))
+            }
+            Some(change) = self.states.recv() => Some(EventSubscriptionEvent::State(change)),
+            else => None,
+        }
     }
 
     /// Send Expires 0 and wait only for command admission. Terminal NOTIFY or Timer N completes
@@ -117,6 +146,7 @@ impl<V> EventSubscription<V> {
 
 impl<V> Drop for EventSubscription<V> {
     fn drop(&mut self) {
+        // discard: Drop cannot wait; finite expiry and dispatcher shutdown remain backstops.
         let _ = self.commands.try_send(Command::Unsubscribe);
     }
 }
@@ -125,6 +155,7 @@ impl<V> Drop for EventSubscription<V> {
 struct Shared {
     endpoint: Mutex<Option<Handle>>,
     routes: Mutex<HashMap<Vec<u8>, mpsc::Sender<Incoming>>>,
+    drivers: Mutex<HashMap<Vec<u8>, JoinHandle<()>>>,
     config: Config,
     counters: Arc<Counters>,
     shutdown: CancellationToken,
@@ -174,7 +205,7 @@ impl EventSubscriptionsHandle {
         let (command_tx, command_rx) = mpsc::channel(DRIVER_QUEUE);
         let driver = Driver {
             id,
-            call_id,
+            call_id: call_id.clone(),
             endpoint,
             core,
             incoming: incoming_rx,
@@ -187,7 +218,10 @@ impl EventSubscriptionsHandle {
             shared: Arc::clone(&self.shared),
         };
         self.shared.counters.started.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(driver.run(initial));
+        let mut drivers = lock(&self.shared.drivers);
+        let task = tokio::spawn(driver.run(initial));
+        drivers.insert(call_id, task);
+        drop(drivers);
         Ok(EventSubscription {
             id,
             deliveries,
@@ -225,6 +259,7 @@ impl EventSubscriptions {
             shared: Arc::new(Shared {
                 endpoint: Mutex::new(None),
                 routes: Mutex::new(HashMap::new()),
+                drivers: Mutex::new(HashMap::new()),
                 config,
                 counters: Arc::new(Counters::default()),
                 shutdown: CancellationToken::new(),
@@ -258,6 +293,7 @@ impl EventSubscriptions {
             request: incoming.request.clone(),
             source: incoming.source,
             transport: incoming.transport,
+            connection_generation: incoming.connection_generation,
         };
         match sender.try_send(cloned) {
             Ok(()) => true,
@@ -274,6 +310,19 @@ impl EventSubscriptions {
                 true
             }
             Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    }
+
+    pub(crate) async fn shutdown(&mut self) {
+        self.shared.shutdown.cancel();
+        let drivers: Vec<_> = lock(&self.shared.drivers)
+            .drain()
+            .map(|(_, task)| task)
+            .collect();
+        for task in drivers {
+            if let Err(error) = task.await {
+                tracing::warn!(%error, "event subscription driver did not join cleanly");
+            }
         }
     }
 }
@@ -366,12 +415,13 @@ impl<C: PackageConsumer> Driver<C> {
             self.apply(outputs, None).await;
         }
         if let Some(response) = self.response.take() {
-            response.abort();
+            abort_and_join(response).await;
         }
         for (_, timer) in self.timers.drain() {
-            timer.abort();
+            abort_and_join(timer).await;
         }
         lock(&self.shared.routes).remove(&self.call_id);
+        lock(&self.shared.drivers).remove(&self.call_id);
         drop(guard);
     }
 
@@ -393,22 +443,26 @@ impl<C: PackageConsumer> Driver<C> {
                 Output::Deliver {
                     metadata, value, ..
                 } => {
-                    let _ = self
-                        .delivery
-                        .try_send(EventNotification { metadata, value });
+                    // discard: failure requires concurrent consumer closure; the driver then stops.
+                    let _ = self.delivery.try_send(EventNotification {
+                        received_at: tokio::time::Instant::now(),
+                        metadata,
+                        value,
+                    });
                 }
                 Output::ArmTimer {
                     timer,
                     generation,
                     after,
                     ..
-                } => self.arm(timer, generation, after),
+                } => self.arm(timer, generation, after).await,
                 Output::CancelTimer { timer, .. } => {
                     if let Some(task) = self.timers.remove(&timer) {
-                        task.abort();
+                        abort_and_join(task).await;
                     }
                 }
                 Output::StateChanged { change, .. } => {
+                    // discard: a full or closed state channel means its consumer chose not to read.
                     let _ = self.states.try_send(change);
                 }
                 Output::Stopped => {}
@@ -418,31 +472,35 @@ impl<C: PackageConsumer> Driver<C> {
 
     async fn send(&mut self, request: sipx_sip::Request, peer: Peer) {
         if let Some(response) = self.response.take() {
-            response.abort();
+            abort_and_join(response).await;
         }
         let Some((events, _)) = self.events.as_ref() else {
             return;
         };
         match self.endpoint.send(request, target(peer)).await {
             Ok(mut responses) => {
+                self.core
+                    .connection_selected(self.id, responses.connection_generation());
                 let events = events.clone();
                 let counters = Arc::clone(&self.shared.counters);
                 self.response = Some(tokio::spawn(async move {
                     let _guard = WorkGuard::transaction(counters);
                     let response = responses.final_response().await;
+                    // discard: closure means the owning driver is already tearing down.
                     let _ = events.send(RuntimeEvent::Response(response)).await;
                 }));
             }
             Err(error) => {
                 tracing::warn!(%error, "could not send event SUBSCRIBE");
+                // discard: closure means the owning driver is already tearing down.
                 let _ = events.try_send(RuntimeEvent::Response(None));
             }
         }
     }
 
-    fn arm(&mut self, timer: Timer, generation: u64, after: Duration) {
+    async fn arm(&mut self, timer: Timer, generation: u64, after: Duration) {
         if let Some(previous) = self.timers.remove(&timer) {
-            previous.abort();
+            abort_and_join(previous).await;
         }
         let Some((events, _)) = self.events.as_ref() else {
             return;
@@ -455,10 +513,17 @@ impl<C: PackageConsumer> Driver<C> {
                 let _guard = WorkGuard::timer(counters);
                 // Protocol timer: the duration is the state-machine input this task represents.
                 tokio::time::sleep(after).await;
+                // discard: closure means the owning driver has cancelled this timer's state.
                 let _ = events.send(RuntimeEvent::Timer(timer, generation)).await;
             }),
         );
     }
+}
+
+async fn abort_and_join(task: JoinHandle<()>) {
+    task.abort();
+    // discard: cancellation is the requested outcome; the await is solely the ownership barrier.
+    let _ = task.await;
 }
 
 enum DriverInput {
@@ -541,15 +606,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn peer_from_incoming(incoming: &Incoming) -> Peer {
-    Peer {
-        address: incoming.source,
-        transport: from_transport(incoming.transport),
-        connection: None,
-    }
+    let mut peer = Peer::new(incoming.source, from_transport(incoming.transport));
+    peer.connection = incoming.connection_generation;
+    peer
 }
 
 fn target(peer: Peer) -> Target {
-    Target::new(peer.address, to_transport(peer.transport))
+    let mut target = Target::new(peer.address, to_transport(peer.transport));
+    if let Some(identity) = peer.identity {
+        target = target.verifying(identity);
+    }
+    if let Some(path) = peer.path {
+        target = target.at_path(path);
+    }
+    target
 }
 
 fn from_transport(transport: TransportKind) -> Transport {

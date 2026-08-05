@@ -55,9 +55,9 @@
 //! They are public and tested. `sipx-call::Notifier` serves inbound SUBSCRIBE through this crate's
 //! exact store, `event_client` is the bounded sans-I/O subscriber driven by
 //! `sipx-call::EventSubscriptions`, and `sipx-call::Publications` carries the publication core and
-//! exact compositor through live endpoints. No `sipx-cli` command subscribes or publishes, no
-//! built-in package consumer turns `reg` into a peer list yet, and published presence is not
-//! automatically projected into later NOTIFY documents. Their pre-1.0 API shape is still soft.
+//! exact compositor through live endpoints. The bounded `reginfo` consumer is reached by
+//! `sipx peers --registrar`; no CLI command publishes, and published presence is not automatically
+//! projected into later NOTIFY documents. Their pre-1.0 API shape is still soft.
 //!
 //! By that same rule, and named here rather than left for a reader to discover: the rest of
 //! Outbound is experimental too. `Flows` and `Attempt` — one registration per outbound proxy,
@@ -83,6 +83,7 @@ pub mod packages;
 pub mod presence;
 pub mod publication_client;
 pub mod push;
+pub mod reginfo;
 pub mod registrar;
 pub mod subscribe;
 

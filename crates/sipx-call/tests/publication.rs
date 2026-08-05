@@ -283,11 +283,7 @@ async fn outbound_publisher_authenticates_and_drains_every_owned_resource() {
         .publish(Start {
             resource: Uri::parse(Bytes::from_static(b"sip:alice@example.test")).expect("URI"),
             local_identity: "<sip:alice@example.test>".to_owned(),
-            target: Peer {
-                address: server.local_addr(),
-                transport: Transport::Udp,
-                connection: None,
-            },
+            target: Peer::new(server.local_addr(), Transport::Udp),
             event: "presence".to_owned(),
             expires: Duration::from_secs(10),
             body: Bytes::from_static(b"<presence>one</presence>"),
@@ -401,4 +397,77 @@ async fn outbound_publisher_authenticates_and_drains_every_owned_resource() {
     client.shutdown().await;
     server.shutdown().await;
     dispatch.await.expect("dispatcher joins");
+}
+
+/// S39-V8: dispatcher shutdown is an ownership barrier even while the peer is silent.
+#[tokio::test(start_paused = true)]
+async fn dispatcher_shutdown_joins_a_live_publication_transaction_and_timer() {
+    let (client, client_incoming) = endpoint().await;
+    let runtime = Publications::new(
+        config(),
+        Compositor::new(Duration::from_secs(10)),
+        Arc::new(ReplacePublicationState),
+        Arc::new(AllowPublications),
+    )
+    .expect("runtime");
+    let handle = runtime.handle();
+    let mut dispatcher =
+        Dispatcher::new(client.clone(), client_incoming).with_publications(runtime);
+    let dispatch = tokio::spawn(async move { while dispatcher.next().await.is_some() {} });
+    let (silent, mut silent_incoming) = endpoint().await;
+    let mut publication = handle
+        .publish(Start {
+            resource: Uri::parse(Bytes::from_static(b"sip:alice@example.test")).expect("URI"),
+            local_identity: "<sip:alice@example.test>".to_owned(),
+            target: Peer::new(silent.local_addr(), Transport::Udp),
+            event: "presence".to_owned(),
+            expires: Duration::from_secs(10),
+            body: Bytes::from_static(b"<presence>one</presence>"),
+            content_type: PIDF_TYPE.to_owned(),
+            credentials: None,
+            call_id: "cancel-publication@example.test".to_owned(),
+            from_tag: "cancel-outbound".to_owned(),
+            initial_cseq: 1,
+        })
+        .expect("publisher starts");
+    tokio::task::yield_now().await;
+    let initial = next_publish(&mut silent_incoming).await;
+    success(&silent, &initial, "tag-a", 10).await;
+    assert!(matches!(
+        publication.next_state().await,
+        Some(StateChange::Published(state)) if state.tag == "tag-a"
+    ));
+    publication
+        .modify(Bytes::from_static(b"<presence>two</presence>"), PIDF_TYPE)
+        .await
+        .expect("modify admitted");
+    let _unanswered = next_publish(&mut silent_incoming).await;
+    for _ in 0..8 {
+        let counts = handle.counts();
+        if counts.active_transactions == 1 && counts.active_timers >= 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let live = handle.counts();
+    assert_eq!(live.active_publishers, 1);
+    assert_eq!(live.active_transactions, 1);
+    assert!(live.active_timers >= 1);
+
+    client.shutdown().await;
+    dispatch
+        .await
+        .expect("dispatcher joins every publication task");
+    assert!(matches!(
+        publication.next_state().await,
+        Some(StateChange::Terminated(
+            Termination::Shutdown | Termination::TransactionFailed
+        ))
+    ));
+    let stopped = handle.counts();
+    assert_eq!(stopped.active_publishers, 0);
+    assert_eq!(stopped.active_tasks, 0);
+    assert_eq!(stopped.active_timers, 0);
+    assert_eq!(stopped.active_transactions, 0);
+    silent.shutdown().await;
 }

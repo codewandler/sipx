@@ -886,7 +886,15 @@ impl Dispatcher {
     /// while it is being polled. `None` once the endpoint has shut down.
     pub async fn next(&mut self) -> Option<Dispatched> {
         loop {
-            let incoming = self.incoming.recv().await?;
+            let Some(incoming) = self.incoming.recv().await else {
+                if let Some(subscriptions) = self.event_subscriptions.as_mut() {
+                    subscriptions.shutdown().await;
+                }
+                if let Some(publications) = self.publications.as_mut() {
+                    publications.shutdown().await;
+                }
+                return None;
+            };
             if let Some(surfaced) = self.route(incoming).await {
                 return Some(surfaced);
             }

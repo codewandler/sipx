@@ -23,7 +23,7 @@ dialog, without embedding any event package's application policy in the transpor
 
 - [x] The public API establishes, refreshes and terminates a subscription through the state machine
       and byte vectors in [`docs/specs/event-client.md`](../specs/event-client.md), specifically
-      `S37-V1` through `S37-V13`.
+      `S37-V1` through `S37-V14`.
 - [x] 401 and 407 challenges reuse endpoint credentials; refreshes use the granted expiry; initial
       and subsequent NOTIFY requests are ordered and surfaced with typed subscription state.
 - [x] The dialog remote target, route set and CSeq rules are honored for every request, and a
@@ -35,19 +35,23 @@ dialog, without embedding any event package's application policy in the transpor
       operations; an expiry-less initial NOTIFY retains a finite provisional bound.
 - [x] Live subscriptions, pending notification delivery and refresh timers are bounded. Cancellation
       waits for owned work and a test observes zero residual transactions and timers.
-- [ ] A synthetic package proves the generic API; `S-24` consumes it for `reg` without copying the
+- [x] A synthetic package proves the generic API; `S-24` consumes it for `reg` without copying the
       subscriber state machine.
 - [ ] RFC registry evidence is updated with reachable Rust paths and `./scripts/gate.py` is green.
 
 ## Progress
 
-- The generic sans-I/O client and endpoint driver implement all thirteen contract vectors. The live
+- The generic sans-I/O client and endpoint driver implement all fourteen contract vectors. The live
   endpoint proof covers authentication, refresh, ordered delivery, unsubscribe, joined shutdown and
   zero residual transactions/timers; focused route-set and operation-serialization tests cover the
   dialog edge cases found during review.
-- The synthetic package proves the package seam. `S-24` remains the separately tracked `reg` package
-  consumer, so that acceptance item and the final full-gate item intentionally remain open for the
-  integration branch.
+- The synthetic package proves the package seam and `S-24` now consumes it for `reg`. Review also
+  found that secure endpoint targets lost their certificate identity and WebSocket resource at the
+  event boundary; V14 now preserves both through initial send, authentication and target refresh.
+  Review additionally pinned the selected stream generation on both transaction boundaries, the
+  route-set's first hop as the transport target, byte-exact dialog tags, bounded terminal-reason
+  retry eligibility, and an async shutdown barrier that joins every driver-owned task. The final
+  full-gate item intentionally remains open for the integration branch.
 
 ## Required failing-first tests
 
@@ -66,3 +70,4 @@ The tests below cite the normative vectors rather than restating them:
 - `response_intervals_fail_closed_for_every_operation` — `S37-V11`.
 - `notify_trust_and_contact_rejections_do_not_mutate` — `S37-V12`.
 - `refresh_timer_n_preserves_only_the_authoritative_expiry` — `S37-V13`.
+- `secure_target_identity_and_resource_survive_every_send` — `S37-V14`.

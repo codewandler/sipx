@@ -19,11 +19,7 @@ use sipx_ua::publication_client::{
 };
 
 fn peer() -> Peer {
-    Peer {
-        address: "192.0.2.20:5060".parse().expect("peer"),
-        transport: Transport::Udp,
-        connection: None,
-    }
+    Peer::new("192.0.2.20:5060".parse().expect("peer"), Transport::Udp)
 }
 
 fn start(cseq: u32) -> Start {
@@ -61,6 +57,16 @@ fn sent(outputs: &[Output]) -> &sipx_sip::Request {
             _ => None,
         })
         .expect("PUBLISH output")
+}
+
+fn sent_target(outputs: &[Output]) -> &Peer {
+    outputs
+        .iter()
+        .find_map(|output| match output {
+            Output::SendPublish { target, .. } => Some(target),
+            _ => None,
+        })
+        .expect("PUBLISH target")
 }
 
 fn timer(outputs: &[Output], wanted: Timer) -> (u64, Duration) {
@@ -170,6 +176,31 @@ fn authenticated_publication_refreshes_modifies_and_removes() {
     let removed = publisher.response(Some(&accepted("tag-d", 0)), "unused");
     assert!(terminated(&removed, &Termination::Removed));
     assert!(!publisher.is_active());
+}
+
+#[test]
+fn secure_target_identity_and_resource_survive_every_publish() {
+    let selected = Peer::new("192.0.2.20:7443".parse().expect("peer"), Transport::Wss)
+        .verifying("compositor.example.test")
+        .at_path("/publish");
+    let mut start = start(1);
+    start.target = selected.clone();
+    let (mut publisher, initial) = Publisher::start(Config::default(), start).expect("starts");
+    assert_eq!(sent_target(&initial), &selected);
+
+    let challenge = response(
+        401,
+        &[(
+            &HeaderName::WwwAuthenticate,
+            "Digest realm=\"example.test\", nonce=\"n1\", qop=\"auth\", algorithm=SHA-256",
+        )],
+    );
+    let retry = publisher.response(Some(&challenge), "c1");
+    assert_eq!(sent_target(&retry), &selected);
+    let accepted_outputs = publisher.response(Some(&accepted("tag-a", 10)), "unused");
+    let (refresh_generation, _) = timer(&accepted_outputs, Timer::Refresh);
+    let refresh = publisher.timer_fired(Timer::Refresh, refresh_generation);
+    assert_eq!(sent_target(&refresh), &selected);
 }
 
 /// S39-V6.

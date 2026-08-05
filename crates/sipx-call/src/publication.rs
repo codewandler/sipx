@@ -176,6 +176,7 @@ pub enum PublicationError {
 struct Shared {
     endpoint: Mutex<Option<Handle>>,
     resources: Mutex<HashSet<Vec<u8>>>,
+    drivers: Mutex<HashMap<Vec<u8>, JoinHandle<()>>>,
     config: PublisherConfig,
     counters: Arc<Counters>,
     shutdown: CancellationToken,
@@ -229,6 +230,7 @@ impl Publication {
 impl Drop for Publication {
     fn drop(&mut self) {
         let (reply, _) = oneshot::channel();
+        // discard: Drop cannot wait; the finite lease and dispatcher shutdown remain backstops.
         let _ = self.commands.try_send(Command::Remove(reply));
     }
 }
@@ -267,7 +269,7 @@ impl PublicationsHandle {
         let driver = Driver {
             endpoint,
             publisher,
-            resource,
+            resource: resource.clone(),
             commands: command_rx,
             states,
             events: None,
@@ -275,7 +277,10 @@ impl PublicationsHandle {
             timers: HashMap::new(),
             shared: Arc::clone(&self.shared),
         };
-        tokio::spawn(driver.run(initial));
+        let mut drivers = lock(&self.shared.drivers);
+        let task = tokio::spawn(driver.run(initial));
+        drivers.insert(resource, task);
+        drop(drivers);
         Ok(Publication {
             commands,
             states: state_rx,
@@ -347,6 +352,7 @@ impl Publications {
             shared: Arc::new(Shared {
                 endpoint: Mutex::new(None),
                 resources: Mutex::new(HashSet::new()),
+                drivers: Mutex::new(HashMap::new()),
                 config: config.publisher,
                 counters,
                 shutdown: CancellationToken::new(),
@@ -515,7 +521,7 @@ impl Publications {
                     None,
                 )
                 .await;
-                self.arm_expiry(entity, expires);
+                self.arm_expiry(entity, expires).await;
             }
             Published::Removed { tag } => {
                 answer(
@@ -529,7 +535,7 @@ impl Publications {
                 )
                 .await;
                 if let Some(task) = self.expiry_tasks.remove(&entity) {
-                    task.abort();
+                    abort_and_join(task).await;
                 }
             }
             Published::ConditionFailed => {
@@ -562,9 +568,9 @@ impl Publications {
         }
     }
 
-    fn arm_expiry(&mut self, entity: String, expires: Duration) {
+    async fn arm_expiry(&mut self, entity: String, expires: Duration) {
         if let Some(previous) = self.expiry_tasks.remove(&entity) {
-            previous.abort();
+            abort_and_join(previous).await;
         }
         let compositor = Arc::clone(&self.compositor);
         let counters = Arc::clone(&self.shared.counters);
@@ -578,6 +584,24 @@ impl Publications {
                 lock(&compositor).expire(origin.elapsed().as_secs());
             }),
         );
+    }
+
+    /// Cancel the dispatcher-owned service and join every task before returning.
+    pub(crate) async fn shutdown(&mut self) {
+        self.shared.shutdown.cancel();
+        let expiry_tasks: Vec<_> = self.expiry_tasks.drain().map(|(_, task)| task).collect();
+        for task in expiry_tasks {
+            abort_and_join(task).await;
+        }
+        let drivers: Vec<_> = lock(&self.shared.drivers)
+            .drain()
+            .map(|(_, task)| task)
+            .collect();
+        for task in drivers {
+            if let Err(error) = task.await {
+                tracing::warn!(%error, "publication driver did not join cleanly");
+            }
+        }
     }
 }
 
@@ -626,6 +650,7 @@ impl Driver {
                     break;
                 };
                 tokio::select! {
+                    biased;
                     () = self.shared.shutdown.cancelled() => DriverInput::Shutdown,
                     command = self.commands.recv() => DriverInput::Command(command),
                     event = events.recv() => DriverInput::Event(event),
@@ -651,12 +676,13 @@ impl Driver {
             self.apply(outputs).await;
         }
         if let Some(response) = self.response.take() {
-            response.abort();
+            abort_and_join(response).await;
         }
         for (_, timer) in self.timers.drain() {
-            timer.abort();
+            abort_and_join(timer).await;
         }
         lock(&self.shared.resources).remove(&self.resource);
+        lock(&self.shared.drivers).remove(&self.resource);
     }
 
     async fn apply(&mut self, outputs: Vec<Output>) {
@@ -667,13 +693,14 @@ impl Driver {
                     timer,
                     generation,
                     after,
-                } => self.arm(timer, generation, after),
+                } => self.arm(timer, generation, after).await,
                 Output::CancelTimer { timer, .. } => {
                     if let Some(task) = self.timers.remove(&timer) {
-                        task.abort();
+                        abort_and_join(task).await;
                     }
                 }
                 Output::StateChanged(change) => {
+                    // discard: no receiver means the application released its observation handle.
                     let _ = self.states.send(Some(change));
                 }
             }
@@ -682,38 +709,33 @@ impl Driver {
 
     async fn send(&mut self, request: Request, peer: sipx_ua::event_client::Peer) {
         if let Some(previous) = self.response.take() {
-            previous.abort();
+            abort_and_join(previous).await;
         }
         let Some((events, _)) = self.events.as_ref() else {
             return;
         };
-        match self
-            .endpoint
-            .send(
-                request,
-                Target::new(peer.address, transport(peer.transport)),
-            )
-            .await
-        {
+        match self.endpoint.send(request, transport_target(peer)).await {
             Ok(mut responses) => {
                 let events = events.clone();
                 let counters = Arc::clone(&self.shared.counters);
                 self.response = Some(tokio::spawn(async move {
                     let _guard = WorkGuard::transaction(counters);
                     let response = responses.final_response().await;
+                    // discard: closure means the owning driver is already tearing down.
                     let _ = events.send(RuntimeEvent::Response(response)).await;
                 }));
             }
             Err(error) => {
                 tracing::warn!(%error, "could not send PUBLISH");
+                // discard: closure means the owning driver is already tearing down.
                 let _ = events.try_send(RuntimeEvent::Response(None));
             }
         }
     }
 
-    fn arm(&mut self, timer: Timer, generation: u64, after: Duration) {
+    async fn arm(&mut self, timer: Timer, generation: u64, after: Duration) {
         if let Some(previous) = self.timers.remove(&timer) {
-            previous.abort();
+            abort_and_join(previous).await;
         }
         let Some((events, _)) = self.events.as_ref() else {
             return;
@@ -726,10 +748,17 @@ impl Driver {
                 let _guard = WorkGuard::timer(counters);
                 // Protocol timer: the duration is the state-machine input this task represents.
                 tokio::time::sleep(after).await;
+                // discard: closure means the owning driver has cancelled this timer's state.
                 let _ = events.send(RuntimeEvent::Timer(timer, generation)).await;
             }),
         );
     }
+}
+
+async fn abort_and_join(task: JoinHandle<()>) {
+    task.abort();
+    // discard: cancellation is the requested outcome; the await is solely the ownership barrier.
+    let _ = task.await;
 }
 
 enum DriverInput {
@@ -744,10 +773,12 @@ fn command_result(
 ) -> Vec<Output> {
     match result {
         Ok(outputs) => {
+            // discard: the command still took effect if its caller stopped waiting for the reply.
             let _ = reply.send(Ok(()));
             outputs
         }
         Err(error) => {
+            // discard: the typed failure has no observer after its caller cancels the command.
             let _ = reply.send(Err(error));
             Vec::new()
         }
@@ -936,6 +967,40 @@ fn transport(value: sipx_ua::event_client::Transport) -> TransportKind {
     }
 }
 
+fn transport_target(peer: sipx_ua::event_client::Peer) -> Target {
+    let mut target = Target::new(peer.address, transport(peer.transport));
+    if let Some(identity) = peer.identity {
+        target = target.verifying(identity);
+    }
+    if let Some(path) = peer.path {
+        target = target.at_path(path);
+    }
+    target
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+    use sipx_ua::event_client::{Peer, Transport};
+
+    #[test]
+    fn publication_driver_preserves_secure_target_identity_and_resource() {
+        let peer = Peer::new("192.0.2.20:7443".parse().expect("peer"), Transport::Wss)
+            .verifying("compositor.example.test")
+            .at_path("/publish");
+        let target = transport_target(peer);
+        assert_eq!(target.transport, TransportKind::Wss);
+        assert_eq!(target.verify_as.as_deref(), Some("compositor.example.test"));
+        assert_eq!(target.path.as_deref(), Some("/publish"));
+    }
 }

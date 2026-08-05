@@ -380,10 +380,12 @@ evidence = [
   "crates/sipx-ua/tests/event_client.rs",
   "crates/sipx-call/src/subscriber.rs",
   "crates/sipx-call/tests/subscriber.rs",
+  "crates/sipx-ua/src/reginfo.rs",
+  "crates/sipx-call/tests/registration_discovery.rs",
   "crates/sipx-call/src/transfer.rs",
 ]
 spec = "docs/specs/event-notifier.md"
-note = "Both generic roles are socket-reachable through the call dispatcher. The notifier uses one bounded store keyed on dialog/package (§4.4.1), sends the mandatory initial NOTIFY, negotiates expiry and owns observable termination. The subscriber issues authenticated SUBSCRIBE, accepts the initial-NOTIFY race through an explicit origin policy, rejects forks, tracks target/route/CSeq and refreshes or unsubscribes under finite timer generations. Package bodies are injected bounded consumers; the shipped `dialog`, `reg` and `presence` renderers have separate rows, while their application-facing subscriber consumers remain later package stories. REFER's implicit subscription uses the same typed `Subscription-State` vocabulary."
+note = "Both generic roles are socket-reachable through the call dispatcher. The notifier uses one bounded store keyed on dialog/package (§4.4.1), sends the mandatory initial NOTIFY, negotiates expiry and owns observable termination. The subscriber issues authenticated SUBSCRIBE, accepts the initial-NOTIFY race through an explicit origin policy, rejects forks, tracks target/route/CSeq and refreshes or unsubscribes under finite timer generations. Package bodies are injected bounded consumers; registration discovery ships a concrete consumer, while dialog and presence subscription consumers remain later package policy. REFER's implicit subscription uses the same typed `Subscription-State` vocabulary."
 
 [[rfc]]
 number = 3841
@@ -953,9 +955,9 @@ number = 3680
 title = "A SIP Event Package for Registrations"
 layer = "services"
 status = "partial"
-roles = ["uas"]
-evidence = ["crates/sipx-ua/src/packages.rs", "crates/sipx-ua/tests/packages.rs", "crates/sipx-call/src/notifier.rs", "crates/sipx-call/tests/notifier.rs"]
-note = "`reginfo` documents preserve per-contact state and distinguish registered, refreshed, expired and unregistered. The dispatcher now serves a bounded inbound `reg` subscription and originates the full initial document. Missing: the socket notifier is not joined to a live registrar, and sipx is not itself a registrar."
+roles = ["uac", "uas"]
+evidence = ["crates/sipx-ua/src/packages.rs", "crates/sipx-ua/src/reginfo.rs", "crates/sipx-ua/tests/packages.rs", "crates/sipx-ua/tests/reginfo.rs", "crates/sipx-call/src/notifier.rs", "crates/sipx-call/src/subscriber.rs", "crates/sipx-call/tests/notifier.rs", "crates/sipx-call/tests/registration_discovery.rs"]
+note = "Both endpoint roles are live. The UAS emits bounded full `reginfo` through the dispatcher. The UAC subscribes through the generic authenticated event runtime and atomically maintains a typed, bounded current-contact set from full and partial documents; `sipx peers --registrar` exposes it with source and observation age. Partial because a version gap is rejected without automatically starting a fresh full-state subscription, and the UAS notifier is not automatically projected from an application registration store."
 
 [[rfc]]
 number = 4235

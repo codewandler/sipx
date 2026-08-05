@@ -296,7 +296,7 @@ impl Publisher {
         )?;
         let output = Output::SendPublish {
             request: Box::new(request.clone()),
-            target: start.target,
+            target: start.target.clone(),
         };
         Ok((
             Self {
@@ -408,7 +408,7 @@ impl Publisher {
                     self.operation = Some(operation);
                     outputs.push(Output::SendPublish {
                         request: Box::new(retry),
-                        target: self.target,
+                        target: self.target.clone(),
                     });
                     return outputs;
                 }
@@ -439,7 +439,7 @@ impl Publisher {
                 self.operation = Some(operation);
                 outputs.push(Output::SendPublish {
                     request: Box::new(retry),
-                    target: self.target,
+                    target: self.target.clone(),
                 });
                 return outputs;
             }
@@ -603,7 +603,7 @@ fn begin(
             });
             outputs.push(Output::SendPublish {
                 request: Box::new(request),
-                target: publisher.target,
+                target: publisher.target.clone(),
             });
         }
         Err(_) => terminate(publisher, Termination::MalformedResponse, outputs),
