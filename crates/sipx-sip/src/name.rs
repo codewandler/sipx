@@ -130,6 +130,8 @@ header_names! {
     Server              => "Server";
     ServiceRoute        => "Service-Route";               // RFC 3608
     SessionExpires      => "Session-Expires" | b'x';      // RFC 4028
+    SipETag             => "SIP-ETag";                    // RFC 3903
+    SipIfMatch          => "SIP-If-Match";                // RFC 3903
     Subject             => "Subject" | b's';
     SubscriptionState   => "Subscription-State";          // RFC 6665
     Supported           => "Supported" | b'k';
@@ -202,6 +204,8 @@ impl HeaderName {
                 | Self::MinExpires
                 | Self::Organization
                 | Self::Server
+                | Self::SipETag
+                | Self::SipIfMatch
                 | Self::Subject
                 | Self::Timestamp
                 | Self::To
@@ -261,6 +265,8 @@ mod tests {
         assert_eq!(name("MaX-fOrWaRdS"), HeaderName::MaxForwards);
         assert_eq!(name("content-length"), HeaderName::ContentLength);
         assert_eq!(name("WWW-Authenticate"), HeaderName::WwwAuthenticate);
+        assert_eq!(name("sip-etag"), HeaderName::SipETag);
+        assert_eq!(name("SIP-IF-MATCH"), HeaderName::SipIfMatch);
     }
 
     #[test]
@@ -334,6 +340,9 @@ mod tests {
         // The RFC names the authentication headers as the exception: their values contain
         // commas of their own.
         assert!(!HeaderName::WwwAuthenticate.is_comma_separated_list());
+        assert!(HeaderName::SipETag.is_single_value());
+        assert!(HeaderName::SipIfMatch.is_single_value());
+        assert!(!HeaderName::SipETag.is_comma_separated_list());
         assert!(!HeaderName::Authorization.is_comma_separated_list());
         assert!(!HeaderName::ProxyAuthenticate.is_comma_separated_list());
 

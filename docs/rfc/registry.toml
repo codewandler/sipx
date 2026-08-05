@@ -924,10 +924,12 @@ number = 3903
 title = "SIP Extension for Event State Publication"
 layer = "services"
 status = "implemented"
-roles = ["uas"]
+roles = ["uac", "uas"]
 methods = ["PUBLISH"]
-evidence = ["crates/sipx-ua/src/presence.rs"]
-note = "Soft state with entity tags: initial publication, refresh, modify and remove read from what is present (§4.1), a fresh `SIP-ETag` on every acceptance (§6 step 6), and 412 for a tag the compositor does not hold (§6 step 3) — including one whose state expired, which must not be accepted as a new publication. Expiry is judged on the clock rather than on whether a sweep has run, so the answer is not a race. Composition policy is deliberately absent: a second publication for one presentity replaces the first, and merging several publishers is a policy question for whoever has one. **The role is the library's, not the binary's**: `Compositor::apply` decides what a PUBLISH means and what to answer, and an application supplies the request — nothing in this workspace receives a PUBLISH off a socket, and `sipx-call`'s dispatcher deliberately does not advertise the method on `Allow`. `X-33` resolved this row and the three other package rows individually rather than as a batch; `docs/designs/rfc-registry-grain.md` says why each keeps `uas` and what would take it away."
+headers = ["SipETag", "SipIfMatch"]
+evidence = ["crates/sipx-sip/src/name.rs", "crates/sipx-ua/src/presence.rs", "crates/sipx-ua/src/publication_client.rs", "crates/sipx-ua/tests/publication_client.rs", "crates/sipx-call/src/publication.rs", "crates/sipx-call/tests/publication.rs"]
+spec = "docs/specs/publication-endpoint.md"
+note = "Live UAC and UAS endpoint paths implement bounded RFC 3903 publication soft state. Inbound PUBLISH uses an injected authorization policy and the exact compositor allocation; every accepted create, refresh, modify or remove returns a fresh `SIP-ETag`, stale or cross-resource conditions return 412, and interval policy returns 423. The public outbound publisher retains each granted expiry and fresh entity tag across authenticated conditional operations, never retries 412, and exposes typed terminal state and owned-work counts. Publication is intentionally not a dialog, and applications still own durable or distributed storage, identity policy and projection of published presence into later NOTIFY documents. The dispatcher handles PUBLISH when this service is attached but does not use that optional attachment to change its static OPTIONS advertisement."
 
 [[rfc]]
 number = 3856

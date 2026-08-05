@@ -28,7 +28,8 @@
 //! **Experimental**: choosing what a call offers — [`CodecPreference`], [`Codecs`], [`IcePolicy`],
 //! [`Keying`], [`MediaPolicy`], [`MediaProfile`], [`MediaAddress`],
 //! [`OutboundIdentityPolicy`], [`InboundIdentityPolicy`],
-//! the bounded inbound event [`Notifier`] and outbound [`EventSubscriptions`] runtimes,
+//! the bounded inbound event [`Notifier`], outbound [`EventSubscriptions`] and bidirectional
+//! publication [`Publications`] runtimes,
 //! the two-dialog ownership and relay surface in [`coupling`],
 //! [`DialOptions::with_codecs`], [`DialOptions::with_initial_direction`],
 //! [`DialOptions::with_media_policy`],
@@ -66,6 +67,7 @@ pub mod identity;
 pub mod load;
 mod media_policy;
 pub mod notifier;
+pub mod publication;
 pub mod rel;
 pub mod subscriber;
 pub mod transfer;
@@ -95,6 +97,11 @@ pub use media_policy::{
     NegotiatedKeying,
 };
 pub use notifier::{Notifier, NotifierCounts, NotifierHandle};
+pub use publication::{
+    AllowPublications, Publication, PublicationAuthorization, PublicationComposition,
+    PublicationConfig, PublicationCounts, PublicationError, Publications, PublicationsHandle,
+    ReplacePublicationState,
+};
 pub use rel::{
     Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_early_with_policy_at,
     ring_offer_early, ring_offer_early_with_policy, ring_offer_early_with_policy_at,

@@ -234,6 +234,48 @@ a bounded delivery queue, non-wrapping CSeq and observable task/timer/transactio
 generic path does not imply a built-in application model: registration discovery remains the
 separate `reg` package consumer story.
 
+## Publish event state through an endpoint
+
+`sipx-call::Publications` is the matching Experimental RFC 3903 service in both roles. Attach it to
+the dispatcher to route live inbound PUBLISH requests through the exact compositor allocation and
+authorization policy supplied by the application:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use sipx_call::{
+    AllowPublications, Dispatcher, PublicationConfig, Publications, ReplacePublicationState,
+};
+use sipx_ua::presence::Compositor;
+
+let publications = Publications::new(
+    PublicationConfig::default(),
+    Compositor::new(Duration::from_secs(3_600)),
+    Arc::new(ReplacePublicationState),
+    Arc::new(AllowPublications),
+)?;
+let publication_handle = publications.handle();
+let dispatcher = Dispatcher::new(endpoint, incoming).with_publications(publications);
+
+assert_eq!(publication_handle.counts().active_publications, 0);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`AllowPublications` is deliberately explicit and is suitable only when an authenticated frontend
+has already made the identity decision. A production endpoint implements `PublicationAuthorization`
+to bind source, transport, resource and Event package to its own policy. Accepted initial,
+conditional refresh, modification and removal requests receive fresh entity tags; stale, expired or
+cross-resource tags fail with 412 without mutating the compositor. Body size, active resources,
+publishers, queues, retries, timers and transactions are finite.
+
+For outbound state, call `publication_handle.publish(Start { ... })` with the selected peer,
+credentials and complete initial body. The returned `Publication` reports authoritative tag/expiry
+changes, accepts bounded conditional `modify` and `remove` commands, and refreshes automatically at
+four fifths of the granted interval. A 412 is terminal and discards the tag: the application must
+start a new publication with a complete body. Dropping the handle requests removal, while dispatcher
+shutdown cancels and joins owned work. Durable storage and projection from the compositor into later
+presence NOTIFY documents remain application responsibilities.
+
 ## Runtime and feature boundaries
 
 - `sipx-sip` and `sipx-sdp` are sans-I/O and have no async runtime.
@@ -257,11 +299,11 @@ docs.rs so that it always matches the guides next to it. Start points:
 |---|---|
 | `sipx-sip` | [`parser`](https://codewandler.github.io/sipx/api/sipx_sip/parser/index.html) · [`transaction`](https://codewandler.github.io/sipx/api/sipx_sip/transaction/index.html) |
 | `sipx-transport` | [`bind`](https://codewandler.github.io/sipx/api/sipx_transport/endpoint/fn.bind.html) · [`Target`](https://codewandler.github.io/sipx/api/sipx_transport/target/struct.Target.html) |
-| `sipx-ua` | [`UserAgent`](https://codewandler.github.io/sipx/api/sipx_ua/agent/struct.UserAgent.html) · [`event_client`](https://codewandler.github.io/sipx/api/sipx_ua/event_client/index.html) |
+| `sipx-ua` | [`UserAgent`](https://codewandler.github.io/sipx/api/sipx_ua/agent/struct.UserAgent.html) · [`event_client`](https://codewandler.github.io/sipx/api/sipx_ua/event_client/index.html) · [`publication_client`](https://codewandler.github.io/sipx/api/sipx_ua/publication_client/index.html) |
 | `sipx-sdp` | [`answer`](https://codewandler.github.io/sipx/api/sipx_sdp/answer/fn.answer.html) |
 | `sipx-rtp` | [`srtp`](https://codewandler.github.io/sipx/api/sipx_rtp/srtp/index.html) · [`rtcp`](https://codewandler.github.io/sipx/api/sipx_rtp/rtcp/index.html) |
 | `sipx-media` | [`MediaSession`](https://codewandler.github.io/sipx/api/sipx_media/session/struct.MediaSession.html) |
-| `sipx-call` | [`dial`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.dial.html) · [`answer`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.answer.html) · [`Call`](https://codewandler.github.io/sipx/api/sipx_call/call/struct.Call.html) · [`EventSubscriptions`](https://codewandler.github.io/sipx/api/sipx_call/subscriber/struct.EventSubscriptions.html) |
+| `sipx-call` | [`dial`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.dial.html) · [`answer`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.answer.html) · [`Call`](https://codewandler.github.io/sipx/api/sipx_call/call/struct.Call.html) · [`EventSubscriptions`](https://codewandler.github.io/sipx/api/sipx_call/subscriber/struct.EventSubscriptions.html) · [`Publications`](https://codewandler.github.io/sipx/api/sipx_call/publication/struct.Publications.html) |
 
 The API reference is generated from the same `main` branch as this site. When using the tagged
 release, consult the checked-out source documentation if an API has changed on `main`.

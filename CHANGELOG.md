@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Applications can now receive and originate conditional presence publications** (`S-39`). The
+  dispatcher routes authenticated PUBLISH requests through an injected, bounded compositor and
+  returns fresh entity tags for create, refresh, modify and remove. A public publisher retains the
+  exact granted expiry and latest tag across authenticated live transactions, schedules bounded
+  refresh and local-expiry work, stops on stale authority, and exposes zero-residue cleanup counts.
+  The protocol core remains sans-I/O; authorization, durable storage and projection into NOTIFY
+  documents remain explicit application policy.
+
 - **Applications can now place and maintain generic SIP event subscriptions** (`S-38`). A bounded
   sans-I/O state machine and live endpoint driver cover authenticated SUBSCRIBE, mandatory NOTIFY,
   refresh, unsubscribe and shutdown while keeping package parsing behind an application-supplied

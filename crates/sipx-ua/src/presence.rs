@@ -9,8 +9,10 @@
 //! publishers for one resource silently overwrite each other and neither can tell; with it, a
 //! publisher whose state has expired is told to start again rather than allowed to resurrect a
 //! document the server has already forgotten.
-//! **Experimental** (`A-8`): public and tested, with no caller above this crate — no CLI command
-//! publishes, and nothing in the workspace receives a PUBLISH off a socket.
+//! **Experimental** (`A-8`): public and tested. `sipx-call::Publications` now carries this exact
+//! compositor through live inbound PUBLISH and exposes a bounded outbound publisher. No CLI
+//! command publishes, and projection from this store into later presence NOTIFY documents remains
+//! an application policy.
 //!
 
 use std::fmt::Write as _;
@@ -247,8 +249,12 @@ pub enum Published {
         /// How long the state will live.
         expires: Duration,
     },
-    /// Removed.
-    Removed,
+    /// Removed. Its fresh response tag identifies no retained state because the granted lifetime
+    /// is zero.
+    Removed {
+        /// The new entity tag required on every successful response.
+        tag: String,
+    },
     /// The entity tag names state this server does not have (§6 step 3).
     ///
     /// **412, not 404 and not silently accepting it as new.** A publisher whose state expired
@@ -258,6 +264,8 @@ pub enum Published {
     ConditionFailed,
     /// Nothing to publish and nothing to identify (§6 step 5).
     Invalid,
+    /// The compositor could not mint another unique entity tag.
+    Unavailable,
 }
 
 /// The status a stale entity tag is refused with (RFC 3903 §6 step 3).
@@ -320,7 +328,9 @@ impl Compositor {
             Publish::Empty => Published::Invalid,
             Publish::Initial { body, expires } => {
                 let expires = expires.min(self.maximum);
-                let tag = self.mint();
+                let Some(tag) = self.mint() else {
+                    return Published::Unavailable;
+                };
                 // A second publication for one presentity replaces the first. Composing several
                 // publishers' documents is what the RFC calls composition policy, and it is a
                 // policy question rather than a mechanism — so it belongs to whoever has one.
@@ -335,10 +345,12 @@ impl Compositor {
             }
             Publish::Refresh { tag, expires } => {
                 let expires = expires.min(self.maximum);
-                let Some(index) = self.find(&tag, now) else {
+                let Some(index) = self.find(entity, &tag, now) else {
                     return Published::ConditionFailed;
                 };
-                let fresh = self.mint();
+                let Some(fresh) = self.mint() else {
+                    return Published::Unavailable;
+                };
                 let Some(entry) = self.held.get_mut(index) else {
                     return Published::ConditionFailed;
                 };
@@ -351,10 +363,12 @@ impl Compositor {
             }
             Publish::Modify { tag, body, expires } => {
                 let expires = expires.min(self.maximum);
-                let Some(index) = self.find(&tag, now) else {
+                let Some(index) = self.find(entity, &tag, now) else {
                     return Published::ConditionFailed;
                 };
-                let fresh = self.mint();
+                let Some(fresh) = self.mint() else {
+                    return Published::Unavailable;
+                };
                 let Some(entry) = self.held.get_mut(index) else {
                     return Published::ConditionFailed;
                 };
@@ -367,11 +381,14 @@ impl Compositor {
                 }
             }
             Publish::Remove { tag } => {
-                let Some(index) = self.find(&tag, now) else {
+                let Some(index) = self.find(entity, &tag, now) else {
                     return Published::ConditionFailed;
                 };
+                let Some(fresh) = self.mint() else {
+                    return Published::Unavailable;
+                };
                 self.held.remove(index);
-                Published::Removed
+                Published::Removed { tag: fresh }
             }
         }
     }
@@ -388,15 +405,15 @@ impl Compositor {
     /// Expiry is checked here rather than only in `expire`, so a refresh arriving after the state
     /// lapsed is refused whether or not anyone has swept yet. Otherwise whether a publisher is
     /// told 412 would depend on how recently a timer ran.
-    fn find(&self, tag: &str, now: u64) -> Option<usize> {
+    fn find(&self, entity: &str, tag: &str, now: u64) -> Option<usize> {
         self.held
             .iter()
-            .position(|entry| entry.tag == tag && entry.expires_at > now)
+            .position(|entry| entry.entity == entity && entry.tag == tag && entry.expires_at > now)
     }
 
-    fn mint(&mut self) -> String {
-        self.next_tag = self.next_tag.saturating_add(1);
-        format!("sipx-{:016x}", self.next_tag)
+    fn mint(&mut self) -> Option<String> {
+        self.next_tag = self.next_tag.checked_add(1)?;
+        Some(format!("sipx-{:016x}", self.next_tag))
     }
 }
 
@@ -600,14 +617,14 @@ mod tests {
         ) else {
             panic!("accepted");
         };
-        assert_eq!(
+        assert!(matches!(
             compositor.apply(
                 "sip:alice@sipx.test",
                 Publish::read(Some(tag), None, Duration::ZERO),
                 NOW
             ),
-            Published::Removed
-        );
+            Published::Removed { tag: _ }
+        ));
         assert!(compositor.is_empty());
         assert!(compositor.document("sip:alice@sipx.test").is_none());
     }

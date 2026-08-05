@@ -70,6 +70,7 @@ use crate::event::{CallEvents, EndCause, EventSink};
 use crate::identity::InboundIdentityPolicy;
 use crate::media_policy::{Codecs, MediaPolicy};
 use crate::notifier::Notifier;
+use crate::publication::Publications;
 use crate::subscriber::EventSubscriptions;
 
 /// How many requests one call's inbox holds before the dispatcher sheds for it.
@@ -794,6 +795,7 @@ pub struct Dispatcher {
     identity: Option<InboundIdentityPolicy>,
     notifier: Option<Notifier>,
     event_subscriptions: Option<EventSubscriptions>,
+    publications: Option<Publications>,
 }
 
 impl Dispatcher {
@@ -820,6 +822,7 @@ impl Dispatcher {
             identity: None,
             notifier: None,
             event_subscriptions: None,
+            publications: None,
         }
     }
 
@@ -847,6 +850,14 @@ impl Dispatcher {
     pub fn with_event_subscriptions(mut self, subscriptions: EventSubscriptions) -> Self {
         subscriptions.attach(self.endpoint.clone());
         self.event_subscriptions = Some(subscriptions);
+        self
+    }
+
+    /// Serve inbound PUBLISH and attach outbound publication transactions to this endpoint.
+    #[must_use]
+    pub fn with_publications(mut self, mut publications: Publications) -> Self {
+        publications.attach(self.endpoint.clone());
+        self.publications = Some(publications);
         self
     }
 
@@ -947,6 +958,15 @@ impl Dispatcher {
             && let Some(notifier) = self.notifier.as_mut()
         {
             notifier.receive(&incoming).await;
+            return None;
+        }
+
+        // PUBLISH creates no dialog. The publication service serializes and authorizes its own
+        // resource state before anything can be mistaken for an INVITE-dialog request.
+        if incoming.request.method == Method::Publish
+            && let Some(publications) = self.publications.as_mut()
+        {
+            publications.receive(&incoming).await;
             return None;
         }
 

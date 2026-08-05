@@ -83,6 +83,10 @@ logic, but no endpoint can receive or originate PUBLISH.
 
 `S-35` made the three existing notifier packages socket-reachable. `S-38` adds the other generic
 role: a public sans-I/O subscriber plus a dispatcher-owned runtime for authenticated SUBSCRIBE,
-NOTIFY validation, refresh, unsubscribe and observable cleanup. The runtime deliberately supplies
-no package-specific application model. `S-24` still owns turning `reginfo` into discovered peers,
-and `S-39` still owns live PUBLISH reachability; neither is hidden inside the generic lifecycle.
+NOTIFY validation, refresh, unsubscribe and observable cleanup. `S-39` carries the existing
+publication compositor through a bounded inbound PUBLISH service and adds the corresponding
+authenticated outbound publisher, including conditional refresh, modification, removal and
+observable cleanup. These runtimes deliberately supply no package-specific application model.
+`S-24` still owns turning `reginfo` into discovered peers, and projecting live compositor state into
+later presence NOTIFY documents remains application policy rather than a hidden lifecycle side
+effect.
