@@ -108,6 +108,8 @@ header_names! {
     MinSe               => "Min-SE";                      // RFC 4028
     Organization        => "Organization";
     Path                => "Path";                        // RFC 3327
+    PAssertedIdentity   => "P-Asserted-Identity";         // RFC 3325
+    PPreferredIdentity  => "P-Preferred-Identity";        // RFC 3325
     Priority            => "Priority";
     Privacy             => "Privacy";                     // RFC 3323
     ProxyAuthenticate   => "Proxy-Authenticate";
@@ -171,6 +173,9 @@ impl HeaderName {
                 | Self::HistoryInfo
                 | Self::InReplyTo
                 | Self::Path
+                | Self::PAssertedIdentity
+                | Self::PPreferredIdentity
+                | Self::Privacy
                 | Self::ProxyRequire
                 | Self::RecordRoute
                 | Self::Reason

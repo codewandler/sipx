@@ -675,6 +675,16 @@ pub trait TypedHeader: Sized {
     fn decode_list(value: &[u8]) -> Result<Vec<Self>, HeaderError> {
         Self::decode(value).map(|one| vec![one])
     }
+
+    /// Validate all decoded values of this field across the complete message.
+    ///
+    /// Most SIP list fields have no message-wide constraint, so the default accepts every
+    /// sequence. A field whose grammar constrains the number or relationship of values can
+    /// override this; [`Headers::typed_all`] calls it after expanding every comma-separated row
+    /// and repeated field line into wire order.
+    fn validate_list(_values: &[&Self]) -> Result<(), HeaderError> {
+        Ok(())
+    }
 }
 
 impl Headers {
@@ -694,13 +704,30 @@ impl Headers {
     pub fn typed_all<'a, H: TypedHeader + 'a>(
         &'a self,
     ) -> impl Iterator<Item = Result<H, HeaderError>> + 'a {
-        self.entries
+        let mut decoded: Vec<Result<H, HeaderError>> = self
+            .entries
             .iter()
             .filter(|h| h.name() == &H::NAME)
             .flat_map(|h| match H::decode_list(&h.value()) {
                 Ok(values) => values.into_iter().map(Ok).collect::<Vec<_>>(),
                 Err(e) => vec![Err(e)],
             })
+            .collect();
+
+        // A row-level decoder failure is already the most precise typed result. Validate the
+        // field-wide relationship only when every element parsed, and only when the field was
+        // present: an empty iterator means absence rather than an empty field value.
+        if !decoded.is_empty() && decoded.iter().all(Result::is_ok) {
+            let values: Vec<&H> = decoded
+                .iter()
+                .filter_map(|result| result.as_ref().ok())
+                .collect();
+            if let Err(error) = H::validate_list(&values) {
+                decoded = vec![Err(error)];
+            }
+        }
+
+        decoded.into_iter()
     }
 }
 

@@ -106,6 +106,37 @@ impl Address {
         })
     }
 
+    /// Parse a `name-addr / addr-spec` field that has no header-parameter tail.
+    ///
+    /// In an ordinary address header, a semicolon after a bare URI begins a header parameter.
+    /// Some extension fields use `addr-spec` directly and define no such parameters, so the same
+    /// semicolon remains part of the URI. The angle-bracket form still goes through the complete
+    /// shared address grammar; only the bare-form delimiter rule differs.
+    pub(crate) fn parse_without_header_params(
+        value: &[u8],
+        header: &'static str,
+    ) -> Result<Self, HeaderError> {
+        let value = trim(value);
+        if value.first() == Some(&b'"') || find_angle(value, 0).is_some() {
+            let address = Self::parse(value, header)?;
+            if !address.params.is_empty() {
+                return Err(HeaderError::Syntax { header });
+            }
+            return Ok(address);
+        }
+
+        if value.is_empty() {
+            return Err(HeaderError::Syntax { header });
+        }
+        let uri = Uri::parse(Bytes::copy_from_slice(value))
+            .map_err(|source| HeaderError::Uri { header, source })?;
+        Ok(Self {
+            display_name: None,
+            uri,
+            params: Vec::new(),
+        })
+    }
+
     /// Parse a header value carrying one or more comma-separated addresses.
     ///
     /// RFC 3261 §7.3: for `Contact`, `Route` and `Record-Route` a comma-joined row is
