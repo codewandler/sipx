@@ -132,6 +132,12 @@ pub enum CallEvent {
     Muted,
     /// This side let its outbound audio through again ([`Call::unmute`](crate::Call::unmute)).
     Unmuted,
+    /// An application-owned method arrived inside this dialog.
+    ///
+    /// INFO and MESSAGE are admitted directly. A private extension token appears here only after
+    /// [`Call::admit_dialog_method`](crate::Call::admit_dialog_method) admitted it. The owned
+    /// value must be answered or dropped; either outcome resolves its server transaction.
+    ApplicationRequest(crate::ApplicationRequest),
     /// The call is over. Always the last event on the stream — the channel's delivery policy
     /// reserves a slot for it specifically so this is never the one an overflow drops.
     Ended(EndCause),

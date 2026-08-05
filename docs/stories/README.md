@@ -60,11 +60,11 @@ _The workspace has seeded links, virtual time and call fixtures, but downstream 
 ### registration observation
 - [S-42 — Report the address learned during registration](S-42-report-the-address-learned-during-registration.md) · Signalling · discovered by X-97 · preserve received/rport observation in the typed registration outcome
 
-## Next (ready — take the top one unless the user named a story)
-
 ### application-owned dialog extensions
 _Calls already specialize the methods whose semantics the stack owns: BYE, re-INVITE, UPDATE,_
 - [S-40 — Surface application-owned dialog requests](S-40-surface-application-owned-dialog-requests.md) · Signalling · authenticated INFO, MESSAGE and admitted extension methods without bypassing dialog invariants
+
+## Next (ready — take the top one unless the user named a story)
 
 ### event reachability
 _sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.rs`: a subscription_

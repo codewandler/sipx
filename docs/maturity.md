@@ -50,7 +50,7 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 | core | 9 | 5 | 3 | 0 | 1 | application |
 | media | 22 | 5 | 16 | 0 | 1 | application + path check |
 | security | 11 | 10 | 0 | 0 | 1 | application + path check |
-| services | 16 | 5 | 7 | 2 | 2 | application |
+| services | 16 | 5 | 9 | 2 | 0 | application |
 | transport | 14 | 8 | 6 | 0 | 0 | application |
 | wire | 6 | 3 | 2 | 0 | 1 | application |
 

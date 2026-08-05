@@ -904,19 +904,21 @@ note = "`Refer-Sub: false` on the REFER *and* echoed in the 2xx, because §3 mak
 number = 3428
 title = "SIP Extension for Instant Messaging"
 layer = "services"
-status = "syntax"
+status = "partial"
+roles = ["uac", "uas"]
 methods = ["MESSAGE"]
-evidence = ["crates/sipx-sip/src/message.rs"]
-note = "The method is represented and nothing handles it."
+evidence = ["crates/sipx-sip/src/message.rs", "crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call.rs"]
+note = "Applications can send and answer bounded MESSAGE requests inside an established dialog, including a bounded digest-authentication retry. Out-of-dialog instant messaging and message-store policy are not implemented."
 
 [[rfc]]
 number = 6086
 title = "SIP INFO Method and Package Framework"
 layer = "services"
-status = "syntax"
+status = "partial"
+roles = ["uac", "uas"]
 methods = ["INFO"]
-evidence = ["crates/sipx-sip/src/message.rs"]
-note = "The method is represented. sipx sends DTMF as RFC 4733 rather than as INFO."
+evidence = ["crates/sipx-sip/src/message.rs", "crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call.rs"]
+note = "Applications can send and answer bounded INFO requests inside an established dialog, including a bounded digest-authentication retry. INFO package negotiation and package semantics remain application policy; sipx sends DTMF as RFC 4733 rather than as INFO."
 
 [[rfc]]
 number = 3903

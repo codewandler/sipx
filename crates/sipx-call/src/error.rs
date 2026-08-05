@@ -1,5 +1,6 @@
 //! Call errors.
 
+use sipx_sip::{HeaderName, Method};
 use thiserror::Error;
 
 /// What can go wrong establishing or running a call.
@@ -138,6 +139,35 @@ pub enum Error {
     /// asked in advance.
     #[error("this invitation has no early session to answer")]
     NoEarlySession,
+    /// A stack-owned or unadmitted method was passed to the application-owned dialog API.
+    #[error("{0} is not an application-owned method on this dialog")]
+    StackOwnedDialogMethod(Method),
+    /// Application content exceeded the retained request-body bound.
+    #[error("application-owned body is {actual} octets; the limit is {limit}")]
+    ApplicationBodyTooLarge {
+        /// Observed body length.
+        actual: usize,
+        /// Maximum retained body length.
+        limit: usize,
+    },
+    /// A non-empty application-owned body did not name its media type.
+    #[error("a non-empty application-owned body requires Content-Type")]
+    ApplicationContentTypeRequired,
+    /// An application tried to supply a dialog- or transaction-owned header.
+    #[error("the stack owns the {0:?} header on in-dialog requests")]
+    ProtectedApplicationHeader(HeaderName),
+    /// An application response must end the transaction rather than being provisional.
+    #[error("application response status {0} is provisional; a final response is required")]
+    ApplicationFinalResponseRequired(u16),
+    /// The request's exactly-once response capability was already claimed.
+    #[error("the application-owned request has already been answered")]
+    ApplicationResponseAlreadySent,
+    /// A response capability could not capture the runtime that owns its transport work.
+    #[error("an application response requires an active Tokio runtime")]
+    ApplicationRuntimeUnavailable,
+    /// An operation requiring a live dialog was attempted after call teardown.
+    #[error("the dialog has ended")]
+    DialogEnded,
 }
 
 /// A call result.
