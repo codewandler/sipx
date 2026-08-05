@@ -137,15 +137,15 @@ fn parse_spanned(value: &[u8], header: &'static str) -> Result<ParsedAddress, He
     if uri_bytes.is_empty() {
         return Err(HeaderError::Syntax { header });
     }
-    let parsed_uri = Uri::parse(Bytes::copy_from_slice(uri_bytes))
-        .map_err(|source| HeaderError::Uri { header, source })?;
 
-    // RFC 3261 §20: a URI carrying headers must be enclosed in angle brackets, because
-    // otherwise there is no way to tell where the URI stops and the header's own parameters
-    // start. RFC 4475 §3.1.2.13 is exactly this mistake.
-    if value.get(i) != Some(&b'<') && parsed_uri.has_headers() {
+    // RFC 8217 applies to every `(name-addr / addr-spec)` choice, independent of URI scheme.
+    // A bare question mark is therefore malformed before scheme-specific URI parsing decides
+    // whether it represents a structured SIP header component or belongs to an opaque body.
+    if value.get(i) != Some(&b'<') && uri_bytes.contains(&b'?') {
         return Err(HeaderError::Syntax { header });
     }
+    let parsed_uri = Uri::parse(Bytes::copy_from_slice(uri_bytes))
+        .map_err(|source| HeaderError::Uri { header, source })?;
 
     let params = grammar::parse_params(trim(params_tail), header)?;
     let uri_span = add_offset(uri_span, outer.start, header)?;
@@ -514,27 +514,28 @@ mod tests {
         assert!(matches!(err, Err(HeaderError::Uri { .. })));
     }
 
-    /// RFC 4475 3.1.2.13: a URI with headers must be in angle brackets, or there is no way to
-    /// tell where it ends.
+    /// RFC 8217: a question mark requires name-addr for every URI scheme, or there is no way to
+    /// tell where the URI ends.
     #[test]
-    fn rejects_an_unbracketed_uri_carrying_headers() {
-        let err = Address::parse(
-            b"sip:user@example.com?Route=%3Csip:sip.example.com%3E",
-            "Contact",
-        );
-        assert!(matches!(
-            err,
-            Err(HeaderError::Syntax { header: "Contact" })
-        ));
+    fn rejects_an_unbracketed_question_mark_for_every_uri_scheme() {
+        for bare in [
+            b"sip:user@example.com?Route=%3Csip:sip.example.com%3E".as_slice(),
+            b"tel:+12015550123?x=y",
+            b"mailto:alice@example.com?subject=hello",
+        ] {
+            assert!(matches!(
+                Address::parse(bare, "Contact"),
+                Err(HeaderError::Syntax { header: "Contact" })
+            ));
+        }
 
-        // In brackets the same URI is fine.
-        assert!(
-            Address::parse(
-                b"<sip:user@example.com?Route=%3Csip:sip.example.com%3E>",
-                "Contact"
-            )
-            .is_ok()
-        );
+        // In brackets syntactically valid SIP and opaque URIs are fine.
+        for bracketed in [
+            b"<sip:user@example.com?Route=%3Csip:sip.example.com%3E>".as_slice(),
+            b"<mailto:alice@example.com?subject=hello>",
+        ] {
+            assert!(Address::parse(bracketed, "Contact").is_ok());
+        }
     }
 
     /// RFC 3261 §7.3: a comma-joined row is exactly equivalent to the same values on

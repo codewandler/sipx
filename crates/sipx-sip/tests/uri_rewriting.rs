@@ -278,3 +278,28 @@ fn ur_t_7_non_tel_schemes_are_unchanged_without_validating_a_subscriber() {
         assert_eq!(value.to_bytes(), original);
     }
 }
+
+#[test]
+fn ur_t_8_parsing_rejects_an_invalid_tel_subscriber() {
+    for raw in [b"tel:".as_slice(), b"tel:+"] {
+        assert_eq!(
+            Uri::parse(Bytes::copy_from_slice(raw)).err(),
+            Some(UriError::TelephoneSubscriber),
+            "subscriber in {raw:?}"
+        );
+    }
+}
+
+#[test]
+fn ur_o_1_opaque_uris_validate_percent_escape_shape() {
+    assert_eq!(
+        Uri::parse(Bytes::from_static(b"mailto:%GG")).err(),
+        Some(UriError::PercentEscape)
+    );
+
+    let valid = Bytes::from_static(b"mailto:alice%40example.com");
+    assert_eq!(
+        Uri::parse(valid.clone()).map(|uri| uri.to_bytes()),
+        Ok(valid)
+    );
+}

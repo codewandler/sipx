@@ -305,10 +305,15 @@ impl Uri {
         }
         let scheme = Scheme::parse(&scheme_raw);
         let rest = raw.slice(colon + 1..);
+        if !escape::escapes_are_well_formed(&rest) {
+            return Err(UriError::PercentEscape);
+        }
 
         let raw_tel_subscriber_span = if matches!(scheme, Scheme::Tel) {
             let body_offset = colon.checked_add(1).ok_or(UriError::TelephoneSubscriber)?;
-            let subscriber_len = split_tel_body(&rest).subscriber.len();
+            let subscriber = split_tel_body(&rest).subscriber;
+            validate_tel_subscriber(subscriber)?;
+            let subscriber_len = subscriber.len();
             let end = body_offset
                 .checked_add(subscriber_len)
                 .ok_or(UriError::TelephoneSubscriber)?;

@@ -210,8 +210,8 @@ pub enum UriError {
     /// A SIP user part is empty or contains a byte outside RFC 3261's `user` production.
     #[error("invalid SIP URI user part")]
     User,
-    /// A replacement `tel:` subscriber is empty or falls outside RFC 3966's global and local
-    /// telephone-subscriber productions.
+    /// A parsed or replacement `tel:` subscriber is empty or falls outside RFC 3966's global and
+    /// local telephone-subscriber productions.
     #[error("invalid tel URI telephone-subscriber")]
     TelephoneSubscriber,
     /// A parsed message's retained URI span no longer points inside its retained wire bytes.

@@ -415,14 +415,14 @@ impl Header {
 
 fn trim(mut b: &[u8]) -> &[u8] {
     while let Some((first, rest)) = b.split_first() {
-        if first.is_ascii_whitespace() {
+        if matches!(first, b' ' | b'\t') {
             b = rest;
         } else {
             break;
         }
     }
     while let Some((last, rest)) = b.split_last() {
-        if last.is_ascii_whitespace() {
+        if matches!(last, b' ' | b'\t') {
             b = rest;
         } else {
             break;

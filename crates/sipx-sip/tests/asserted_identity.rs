@@ -414,10 +414,7 @@ fn ih_27_rfc_8217_question_mark_rule_is_independent_of_uri_scheme() {
         &b"mailto:alice@example.com?subject=hello"[..],
     ] {
         assert!(matches!(
-            PAssertedIdentityList::from_headers(&headers(
-                &HeaderName::PAssertedIdentity,
-                &[row]
-            )),
+            PAssertedIdentityList::from_headers(&headers(&HeaderName::PAssertedIdentity, &[row])),
             Err(HeaderError::Syntax {
                 header: "P-Asserted-Identity"
             })
@@ -442,10 +439,7 @@ fn ih_27_rfc_8217_question_mark_rule_is_independent_of_uri_scheme() {
 fn ih_28_malformed_tel_and_opaque_uris_are_not_received_as_identities() {
     for row in [&b"<tel:>"[..], &b"<tel:+>"[..]] {
         assert!(matches!(
-            PAssertedIdentityList::from_headers(&headers(
-                &HeaderName::PAssertedIdentity,
-                &[row]
-            )),
+            PAssertedIdentityList::from_headers(&headers(&HeaderName::PAssertedIdentity, &[row])),
             Err(HeaderError::Uri {
                 header: "P-Asserted-Identity",
                 source: UriError::TelephoneSubscriber
