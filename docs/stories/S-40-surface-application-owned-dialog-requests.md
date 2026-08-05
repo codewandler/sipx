@@ -2,7 +2,7 @@
 id: S-40
 title: Surface application-owned dialog requests
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 4
 design: docs/designs/dialog-extensions.md
 epic: dialog-extensions
@@ -37,4 +37,4 @@ the stack's specialized handling of session, transfer and teardown methods.
 
 ## Progress
 
-- Not started. Independent M13 frontier work.
+- In progress on the independent `dialog-extensions` epic branch.

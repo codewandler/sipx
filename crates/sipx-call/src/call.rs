@@ -26,6 +26,7 @@ pub use sipx_sip::auth::Credentials;
 use crate::dialog::{Dialog, strip_header_params};
 use crate::error::{Error, Result};
 use crate::event::{CallEvent, CallEvents, EndCause, EventSink};
+use crate::extension::{self, ApplicationRequest};
 use crate::identity::OutboundIdentityPolicy;
 use crate::media_policy::{Codecs, IcePolicy, Keying, MediaPolicy, MediaProfile, NegotiatedKeying};
 use crate::transfer::{
@@ -201,6 +202,10 @@ pub struct Call {
     /// call. Retained because the application cannot recover it after the transaction stream is
     /// consumed by call setup.
     history: Option<HistoryInfo>,
+    /// Digest credentials retained for authenticated requests originated inside this dialog.
+    dialog_credentials: Option<Credentials>,
+    /// Case-sensitive private method tokens the application explicitly admitted.
+    admitted_dialog_methods: Vec<Bytes>,
 }
 
 /// The pure half of accepting a peer's in-dialog offer.
@@ -546,6 +551,100 @@ impl Call {
         self.events_rx.take()
     }
 
+    /// Retain credentials for authenticated requests originated inside this dialog.
+    ///
+    /// Outbound calls inherit [`DialOptions::credentials`]. This setter supplies the equivalent
+    /// policy for answered calls or rotates the credentials on an existing call.
+    pub fn set_dialog_credentials(&mut self, credentials: Credentials) {
+        self.dialog_credentials = Some(credentials);
+    }
+
+    /// Admit one private, case-sensitive method token to the application-owned dialog path.
+    ///
+    /// Known SIP methods are refused: their ownership is decided by the stack, not converted into
+    /// a private extension by application policy.
+    pub fn admit_dialog_method(&mut self, method: &Method) -> Result<()> {
+        let token = extension::validate_method_for_admission(method)?;
+        if !self.admitted_dialog_methods.contains(&token) {
+            self.admitted_dialog_methods.push(token);
+        }
+        Ok(())
+    }
+
+    /// Send an application-owned request inside this dialog.
+    ///
+    /// The dialog supplies the Request-URI, route set, identifiers and next `CSeq`. `headers` may
+    /// contain application fields such as `Content-Type`, but never routing, dialog, framing, or
+    /// authorization fields. A supported 401/407 challenge is retried once when dialog credentials
+    /// are available.
+    pub async fn send_dialog_request(
+        &mut self,
+        method: Method,
+        headers: &[sipx_sip::Header],
+        body: Bytes,
+    ) -> Result<Response> {
+        if self.ended {
+            return Err(Error::DialogEnded);
+        }
+        if !extension::application_owned(&method, &self.admitted_dialog_methods) {
+            return Err(Error::StackOwnedDialogMethod(method));
+        }
+        extension::validate_request_parts(headers, &body)?;
+
+        let credentials = self.dialog_credentials.clone();
+        let first = self
+            .send_application_attempt(&method, headers, body.clone(), None)
+            .await?;
+        if first.status.is_success() {
+            self.dialog.refresh_target(&first.headers);
+            self.target = in_dialog_target(&self.dialog, self.target.clone());
+            return Ok(first);
+        }
+
+        let failure = rejection(&first);
+        let Error::AuthenticationChallenge { challenge, .. } = failure else {
+            return Err(failure);
+        };
+        let Some(credentials) = credentials else {
+            return Err(Error::Rejected {
+                status: first.status.code(),
+                reason: String::from_utf8_lossy(&first.reason).into_owned(),
+            });
+        };
+        let cnonce = token();
+        let authorization = Authorization {
+            challenge: &challenge,
+            credentials: &credentials,
+            nonce_count: 1,
+            cnonce: &cnonce,
+        };
+        let response = self
+            .send_application_attempt(&method, headers, body, Some(&authorization))
+            .await?;
+        if !response.status.is_success() {
+            return Err(rejection(&response));
+        }
+        self.dialog.refresh_target(&response.headers);
+        self.target = in_dialog_target(&self.dialog, self.target.clone());
+        Ok(response)
+    }
+
+    async fn send_application_attempt(
+        &mut self,
+        method: &Method,
+        headers: &[sipx_sip::Header],
+        body: Bytes,
+        authorization: Option<&Authorization<'_>>,
+    ) -> Result<Response> {
+        let cseq = self.dialog.next_cseq();
+        let mut request = application_request(&self.dialog, method, cseq, headers, body)?;
+        if let Some(authorization) = authorization {
+            authorize_invite(&mut request, authorization)?;
+        }
+        let mut responses = self.endpoint.send(request, self.target.clone()).await?;
+        responses.final_response().await.ok_or(Error::NoResponse)
+    }
+
     /// Feed an in-dialog request to the call.
     ///
     /// Returns whether it belonged here. Without this an incoming BYE reaches nothing and the
@@ -627,6 +726,37 @@ impl Call {
                 let response =
                     ResponseBuilder::to_request(&incoming.request, ok_status(), "OK")?.build();
                 self.endpoint.respond(&incoming.key, response).await?;
+                Ok(true)
+            }
+            ref method if extension::application_owned(method, &self.admitted_dialog_methods) => {
+                if self.out_of_order(&incoming.request) {
+                    self.refuse(incoming, 500, "Server Internal Error").await?;
+                    return Ok(true);
+                }
+                if incoming.request.body().len() > extension::MAX_APPLICATION_BODY {
+                    self.refuse(incoming, 413, "Content Too Large").await?;
+                    return Err(Error::ApplicationBodyTooLarge {
+                        actual: incoming.request.body().len(),
+                        limit: extension::MAX_APPLICATION_BODY,
+                    });
+                }
+                if !incoming.request.body().is_empty()
+                    && incoming
+                        .request
+                        .headers
+                        .get(&HeaderName::ContentType)
+                        .is_none()
+                {
+                    self.refuse(incoming, 415, "Unsupported Media Type").await?;
+                    return Err(Error::ApplicationContentTypeRequired);
+                }
+                self.record_remote_cseq(&incoming.request);
+                self.events
+                    .emit(CallEvent::ApplicationRequest(ApplicationRequest::new(
+                        self.endpoint.clone(),
+                        incoming.key.clone(),
+                        &incoming.request,
+                    )));
                 Ok(true)
             }
             _ => Ok(false),
@@ -2150,6 +2280,31 @@ pub(crate) fn add_routes(
     Ok(builder)
 }
 
+/// Build one application-owned request entirely from live dialog state.
+fn application_request(
+    dialog: &Dialog,
+    method: &Method,
+    cseq: u32,
+    headers: &[sipx_sip::Header],
+    body: Bytes,
+) -> Result<Request> {
+    let (local, remote) = dialog.local_and_remote();
+    let (uri, routes) = dialog.request_target();
+    let mut builder = RequestBuilder::new(method.clone(), uri)
+        .header(HeaderName::To, Bytes::from(remote))?
+        .header(HeaderName::From, Bytes::from(local))?
+        .header(HeaderName::CallId, Bytes::from(dialog.id.call_id.clone()))?
+        .cseq(cseq, method)?
+        .max_forwards(70);
+    for header in headers {
+        builder = builder.header(
+            header.name().clone(),
+            Bytes::copy_from_slice(header.raw_value()),
+        )?;
+    }
+    Ok(add_routes(builder, &routes)?.body(body).build())
+}
+
 fn bye_request(dialog: &Dialog, cseq: u32, reason: &ReasonValue) -> Result<Request> {
     let (local, remote) = dialog.local_and_remote();
     let (uri, routes) = dialog.request_target();
@@ -3364,6 +3519,8 @@ async fn dial_with(
                 events_rx: Some(events_rx),
                 history: HistoryInfo::from_headers(&response.headers)
                     .and_then(std::result::Result::ok),
+                dialog_credentials: options.credentials.clone(),
+                admitted_dialog_methods: Vec::new(),
             })
         }
         Err(error) => {
@@ -4882,6 +5039,8 @@ impl Dialing {
                     events_rx,
                     history: HistoryInfo::from_headers(&response.headers)
                         .and_then(std::result::Result::ok),
+                    dialog_credentials: self.options.credentials.clone(),
+                    admitted_dialog_methods: Vec::new(),
                 })
             }
             Err(error) => {
@@ -5600,6 +5759,8 @@ pub async fn answer_early(
         events_rx: Some(events_rx),
         history: HistoryInfo::from_headers(&incoming.request.headers)
             .and_then(std::result::Result::ok),
+        dialog_credentials: None,
+        admitted_dialog_methods: Vec::new(),
     })
 }
 
@@ -5884,6 +6045,8 @@ async fn answer_negotiated(
         events_rx: Some(events_rx),
         history: HistoryInfo::from_headers(&incoming.request.headers)
             .and_then(std::result::Result::ok),
+        dialog_credentials: None,
+        admitted_dialog_methods: Vec::new(),
     })
 }
 

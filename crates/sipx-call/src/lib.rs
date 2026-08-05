@@ -61,6 +61,7 @@ pub mod dialog;
 pub mod dispatch;
 pub mod error;
 pub mod event;
+pub mod extension;
 pub mod identity;
 pub mod load;
 mod media_policy;
@@ -86,6 +87,7 @@ pub use dialog::{Dialog, DialogId, Role};
 pub use dispatch::{Calls, DispatchCounts, Dispatched, Dispatcher, Invitation};
 pub use error::{Error, Result};
 pub use event::{CallEvent, CallEvents, EndCause};
+pub use extension::{ApplicationRequest, MAX_APPLICATION_BODY};
 pub use identity::{InboundIdentityPolicy, OutboundIdentityPolicy};
 pub use media_policy::{
     CodecPreference, CodecSelectionError, Codecs, IcePolicy, Keying, MediaPolicy, MediaProfile,
