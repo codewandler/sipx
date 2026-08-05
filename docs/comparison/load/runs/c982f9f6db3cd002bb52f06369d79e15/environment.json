@@ -1,0 +1,68 @@
+{
+ "builds": [
+  {
+   "artifact": "scripts/comparative-load-driver.py",
+   "artifact_sha256": "b0fef27a935f9088bb2aa43c0072973e36409e3e9080c873178ff1ba35a27380",
+   "build_command": "none: an interpreted single-file instrument; the artifact hash pins its source bytes",
+   "dependencies": [],
+   "endpoint_id": "profile-driver",
+   "features": [],
+   "revision": "2d6d70fc6834b8191c1cc6a6157d4ed3f0ee3c91",
+   "role": "driver",
+   "toolchain": "python3 (exact interpreter recorded per run in environment.json toolchains)"
+  },
+  {
+   "artifact": "target/release/sipx",
+   "artifact_sha256": "98f7eb56f11cd8cfddc02ce19e86351ca637367ba7e619b84a3cb7e9f24593ec",
+   "build_command": "cargo build --release -p sipx-cli",
+   "dependencies": [
+    "resolved by the workspace Cargo.lock at the pinned revision"
+   ],
+   "endpoint_id": "sipx",
+   "features": [
+    "default"
+   ],
+   "revision": "e311e82ad427920eeb8d475cdc11b95152303a35",
+   "role": "responder",
+   "toolchain": "rustc 1.97.0 (2d8144b78 2026-07-07)"
+  }
+ ],
+ "captured_utc": "2026-08-05T09:02:29Z",
+ "commands": [
+  "scripts/comparative-load-run.py --endpoint docs/comparison/load/endpoints/sipx.json --driver docs/comparison/load/endpoints/profile-driver.json --ceiling 1024 --seed 7"
+ ],
+ "contract_sha256": "cbf5dbfd39fc8072fdf450fa1d43fc16abbb9c3fa5a4cbb7fac21309eec411bf",
+ "host": {
+  "architecture": "x86_64",
+  "clock": "CLOCK_MONOTONIC",
+  "cpu_governor": "powersave",
+  "kernel": "#1 SMP PREEMPT_DYNAMIC Tue Jul 14 15:26:32 UTC 2026",
+  "logical_cpus": 20,
+  "memory_bytes": 67321208832,
+  "os": "Linux 6.6.144-3-MANJARO"
+ },
+ "schema": "sipx.comparative-load.environment.v1",
+ "seed": 7,
+ "socket_limits": {
+  "rlimit_nofile_hard": 1000000,
+  "rlimit_nofile_soft": 1000000,
+  "rmem_default": 212992,
+  "rmem_max": 212992,
+  "wmem_default": 212992,
+  "wmem_max": 212992
+ },
+ "toolchains": [
+  {
+   "tool": "python3",
+   "version": "Python 3.14.6"
+  },
+  {
+   "tool": "rustc",
+   "version": "rustc 1.97.0 (2d8144b78 2026-07-07)"
+  },
+  {
+   "tool": "cargo",
+   "version": "cargo 1.97.0 (c980f4866 2026-06-30)"
+  }
+ ]
+}

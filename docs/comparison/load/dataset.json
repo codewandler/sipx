@@ -1,0 +1,34 @@
+{
+ "driver": {
+  "artifact_sha256": "3b7ddf25cadc45512e8684863a065858acb29c5110643a7b5ce5a49a75b11acf",
+  "id": "profile-driver",
+  "revision": "source-sha256:3b7ddf25cadc45512e8684863a065858acb29c5110643a7b5ce5a49a75b11acf"
+ },
+ "endpoints": [
+  {
+   "as_driver": {
+    "reason": "the pinned build exposes a bounded responder but no neutral-profile caller command",
+    "status": "not_measured"
+   },
+   "as_responder": {
+    "run": "runs/69f791e60abc94c63fcef1db9cebdb0f",
+    "status": "measured"
+   },
+   "id": "sipx",
+   "internal_state": {
+    "note": "post-drain dialog, transaction, route and task state comes from the endpoint's terminal summary",
+    "visibility": "endpoint-reported"
+   }
+  }
+ ],
+ "evaluated_at": "2026-08-05",
+ "schema": "sipx.comparative-load.dataset.v1",
+ "scope": {
+  "not_inferred": [
+   "secure transports",
+   "connection churn",
+   "audio"
+  ],
+  "workload": "UDP dialog signalling without SDP or media"
+ }
+}

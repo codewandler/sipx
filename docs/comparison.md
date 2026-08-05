@@ -194,3 +194,27 @@ subject version it was evaluated against.
 | endpoint | WebAssembly endpoint target | `v0.5.21` | `documented` | `not-shipped` | `absent` | [WASM remains unchecked in the public TODO](https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/README.md) | — |
 | media | Bundled WebRTC media engine | `v0.5.21` | `documented` | `not-applicable` | `excluded` | [WebRTC is described as an integration use case](https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/README.md) | The subject describes WebRTC integration as a use case but ships no media engine; sipx likewise keeps browser-native WebRTC outside the Rust stack. |
 
+## Comparative signalling load
+
+**One neutral workload — UDP dialog signalling without SDP or media — offered by the same pinned driver to each endpoint acting as responder.**
+
+The driver proves at least twice the tested ceiling against a packaged minimal fixture before any endpoint is measured, one hundred low-rate dialogs qualify protocol correctness before any capacity work, and the fixed six-rate ladder runs five repetitions per rate at open-loop offered load — the driver never raises or lowers what it offers as a target slows. Raw per-repetition records, environment inventory and hashes live under `docs/comparison/load/` and regenerate this section.
+
+The following are **not inferred** from this result: secure transports, connection churn, audio.
+
+### Responder capacity: sipx
+
+| Rate (calls/s) | Outcome | Median achieved (dialogs/s) | Spread [min, max] | Setup p99 (ms, median) |
+|---|---|---|---|---|
+| 32 | supported (5/5) | 32.0 | [32.0, 32.0] | 2 |
+| 64 | supported (5/5) | 64.0 | [64.0, 64.0] | 2 |
+| 128 | supported (5/5) | 128.0 | [128.0, 128.0] | 14 |
+| 256 | failed (2/5 repetitions passed) | 255.9 | [237.5, 256.0] | 7501 |
+| 512 | failed (0/5 repetitions passed) | 208.9 | [194.6, 238.9] | 11207 |
+| 1024 | failed (0/5 repetitions passed) | 374.6 | [374.6, 374.6] | 0 |
+
+Capacity point: **128 calls/s**, achieved interval [128.0, 128.0] dialogs/s over five repetitions.
+
+- Caller (UAC) direction: not measured — the pinned build exposes a bounded responder but no neutral-profile caller command
+- Internal state visibility: `endpoint-reported` — post-drain dialog, transaction, route and task state comes from the endpoint's terminal summary
+

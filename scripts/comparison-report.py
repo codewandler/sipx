@@ -29,10 +29,12 @@ inside the provenance scope this file is not — see `COMPARISON_SCOPE` in
 
 import argparse
 import datetime
+import importlib.util
 import json
 import os.path
 import pathlib
 import re
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -805,6 +807,709 @@ def capability_problems(
     return problems
 
 
+def _comparative_load_contract():
+    """Import the neutral load contract, whose hyphenated name keeps it off the import path."""
+    spec = importlib.util.spec_from_file_location(
+        "comparative_load", ROOT / "scripts" / "comparative-load.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+load_contract = _comparative_load_contract()
+
+LOAD = COMPARISON / "load"
+LOAD_DATASET_FILE = LOAD / "dataset.json"
+
+#: Named in the load staleness failure for the same reason `REFRESH_COMMAND` is: a red gate on a
+#: date with no code change behind it must say what to do about it.
+LOAD_REFRESH_COMMAND = (
+    "re-run it with scripts/comparative-load-run.py, then ./scripts/comparison-report.py"
+)
+
+LOAD_DATASET_SCHEMA = "sipx.comparative-load.dataset.v1"
+LOAD_ENVIRONMENT_SCHEMA = "sipx.comparative-load.environment.v1"
+LOAD_PREFLIGHT_SCHEMA = "sipx.comparative-load.preflight.v1"
+LOAD_HEADROOM_SCHEMA = "sipx.comparative-load.headroom.v1"
+LOAD_OMISSIONS_SCHEMA = "sipx.comparative-load.omissions.v1"
+LOAD_OMISSION_REASON = "two_consecutive_failed_rates"
+
+# The load evidence key sets are closed for the reason every other key set here is: a record
+# that can quietly gain a field can quietly gain a claim nobody checks.
+LOAD_DATASET_KEYS = {"schema", "evaluated_at", "driver", "endpoints", "scope"}
+LOAD_DRIVER_KEYS = {"id", "revision", "artifact_sha256"}
+LOAD_ENDPOINT_KEYS = {"id", "as_responder", "as_driver", "internal_state"}
+LOAD_INTERNAL_KEYS = {"visibility", "note"}
+LOAD_SCOPE_KEYS = {"workload", "not_inferred"}
+LOAD_ENVIRONMENT_KEYS = {
+    "schema",
+    "captured_utc",
+    "host",
+    "socket_limits",
+    "toolchains",
+    "builds",
+    "commands",
+    "seed",
+    "contract_sha256",
+}
+LOAD_HOST_KEYS = {
+    "os",
+    "kernel",
+    "architecture",
+    "logical_cpus",
+    "memory_bytes",
+    "cpu_governor",
+    "clock",
+}
+LOAD_SOCKET_KEYS = {
+    "rlimit_nofile_soft",
+    "rlimit_nofile_hard",
+    "rmem_max",
+    "wmem_max",
+    "rmem_default",
+    "wmem_default",
+}
+LOAD_ENV_BUILD_KEYS = {
+    "endpoint_id",
+    "role",
+    "revision",
+    "artifact",
+    "artifact_sha256",
+    "build_command",
+    "toolchain",
+    "features",
+    "dependencies",
+}
+LOAD_PREFLIGHT_KEYS = {
+    "schema",
+    "phase",
+    "rate_per_second",
+    "dialogs",
+    "offered",
+    "completed",
+    "five_steps_observed",
+    "post_drain_zero",
+    "passed",
+    "started_utc",
+    "elapsed_ms",
+}
+LOAD_HEADROOM_KEYS = {
+    "schema",
+    "fixture",
+    "rate_per_second",
+    "offered",
+    "completed",
+    "completion_ratio",
+    "setup_p99_ms",
+    "driver_cpu_fraction",
+    "passed",
+    "started_utc",
+    "elapsed_ms",
+}
+LOAD_OMISSIONS_KEYS = {"schema", "omitted"}
+LOAD_OMITTED_KEYS = {"rate_index", "rate_per_second", "reason"}
+
+#: The correctness qualification X-99 requires before any capacity work: one hundred low-rate
+#: dialogs per measured direction, on top of the contract's own twenty-dialog preflight.
+LOAD_QUALIFICATION_DIALOGS = 100
+LOAD_PREFLIGHT_DIALOGS = 20
+LOAD_LOW_RATE = 1
+LOAD_HEADROOM_CPU_LIMIT = 0.8
+
+LOAD_RUN_PARTS = (
+    "manifest",
+    "environment",
+    "preflight",
+    "qualification",
+    "headroom",
+    "omissions",
+)
+
+
+def load_dataset():
+    """The published comparative-load dataset, or None when the evidence does not exist."""
+    if not LOAD_DATASET_FILE.exists():
+        return None
+    return json.loads(LOAD_DATASET_FILE.read_text(encoding="utf-8"))
+
+
+def _measured_run_keys(dataset):
+    keys = []
+    for endpoint in (dataset or {}).get("endpoints", []):
+        if not isinstance(endpoint, dict):
+            continue
+        for role in ("as_responder", "as_driver"):
+            entry = endpoint.get(role)
+            if isinstance(entry, dict) and entry.get("status") == "measured":
+                run = entry.get("run")
+                if isinstance(run, str) and run:
+                    keys.append(run)
+    return keys
+
+
+def load_runs(dataset, base=None):
+    """Every measured run directory the dataset references, loaded the way it is checked."""
+    base = pathlib.Path(base) if base is not None else LOAD
+    runs = {}
+    for key in _measured_run_keys(dataset):
+        directory = base / key
+        run = {}
+        for part in LOAD_RUN_PARTS:
+            path = directory / f"{part}.json"
+            if path.is_file():
+                run[part] = json.loads(path.read_text(encoding="utf-8"))
+        results = {}
+        for path in sorted((directory / "results").glob("rate*-rep*.json")):
+            found = re.fullmatch(r"rate(\d+)-rep(\d+)\.json", path.name)
+            if found is None:
+                continue
+            results[(int(found.group(1)), int(found.group(2)))] = json.loads(
+                path.read_text(encoding="utf-8")
+            )
+        run["results"] = results
+        runs[key] = run
+    return runs
+
+
+def _load_keys(where, record, required) -> list[str]:
+    if not isinstance(record, dict):
+        return [f"{where} is not an object"]
+    keys = set(record)
+    problems = [f"{where} is missing the required key {key!r}" for key in sorted(required - keys)]
+    problems.extend(
+        f"{where} carries the unknown key {key!r}" for key in sorted(keys - required)
+    )
+    return problems
+
+
+def _load_staleness(dataset, today) -> list[str]:
+    stamp = dataset.get("evaluated_at")
+    if not isinstance(stamp, str) or not stamp:
+        return ["comparative load dataset has no 'evaluated_at'"]
+    try:
+        taken = datetime.date.fromisoformat(stamp)
+    except ValueError:
+        return [f"comparative load dataset has evaluated_at {stamp!r}, not a YYYY-MM-DD date"]
+    age = (today - taken).days
+    if age > MAX_OBSERVATION_AGE_DAYS:
+        return [
+            f"comparative load dataset is stale: evaluated {age} days ago, and the limit is"
+            f" {MAX_OBSERVATION_AGE_DAYS}. {LOAD_REFRESH_COMMAND}"
+        ]
+    return []
+
+
+def _load_role_problems(where, entry, runs) -> list[str]:
+    if not isinstance(entry, dict):
+        return [f"{where} is not an object"]
+    status = entry.get("status")
+    if status == "measured":
+        problems = _load_keys(where, entry, {"status", "run"})
+        run = entry.get("run")
+        if not isinstance(run, str) or not run:
+            problems.append(f"{where} is measured and names no run directory")
+        elif run not in runs:
+            problems.append(f"{where} names the run {run!r}, which was not loaded")
+        return problems
+    if status == "not_measured":
+        problems = _load_keys(where, entry, {"status", "reason"})
+        if "run" in entry:
+            problems.append(
+                f"{where} is not_measured and still names a run; a disclosed omission can"
+                " never carry a performance number"
+            )
+        reason = entry.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            problems.append(f"{where} discloses no reason; an unexplained omission reads as a finding")
+        return problems
+    return [f"{where} has status {status!r}; it must be measured or not_measured"]
+
+
+def _load_preflight_problems(where, record, phase, dialogs) -> list[str]:
+    problems = _load_keys(where, record, LOAD_PREFLIGHT_KEYS)
+    if problems:
+        return problems
+    if record.get("schema") != LOAD_PREFLIGHT_SCHEMA:
+        problems.append(f"{where} must carry schema {LOAD_PREFLIGHT_SCHEMA!r}")
+    if record.get("phase") != phase:
+        problems.append(f"{where} must record the {phase!r} phase")
+    if record.get("rate_per_second") != LOAD_LOW_RATE:
+        problems.append(f"{where} must offer dialogs at the low rate of {LOAD_LOW_RATE}/s")
+    if record.get("dialogs") != dialogs:
+        problems.append(
+            f"{where} configured {record.get('dialogs')!r} dialogs; the {phase} phase requires"
+            f" exactly {dialogs} (one hundred low-rate dialogs qualify a direction)"
+            if phase == "qualification"
+            else f"{where} configured {record.get('dialogs')!r} dialogs; the {phase} phase"
+            f" requires exactly {dialogs}"
+        )
+    complete = (
+        record.get("passed") is True
+        and record.get("completed") == record.get("offered") == record.get("dialogs")
+        and record.get("five_steps_observed") is True
+        and record.get("post_drain_zero") is True
+    )
+    if not complete:
+        problems.append(
+            f"{where} is recorded under a measured direction, but its correctness"
+            " prerequisite failed; record the direction as not measured: correctness"
+            " prerequisite failed, never as a performance number"
+        )
+    return problems
+
+
+def _load_headroom_problems(where, record, ceiling) -> list[str]:
+    problems = _load_keys(where, record, LOAD_HEADROOM_KEYS)
+    if problems:
+        return problems
+    if record.get("schema") != LOAD_HEADROOM_SCHEMA:
+        problems.append(f"{where} must carry schema {LOAD_HEADROOM_SCHEMA!r}")
+    if record.get("rate_per_second") != 2 * ceiling:
+        problems.append(
+            f"{where} ran at {record.get('rate_per_second')!r}/s; the driver must prove twice"
+            f" the tested ceiling ({2 * ceiling}/s) before any endpoint is measured"
+        )
+    fraction = record.get("driver_cpu_fraction")
+    if not isinstance(fraction, (int, float)) or isinstance(fraction, bool) or not (
+        0 <= fraction < LOAD_HEADROOM_CPU_LIMIT
+    ):
+        problems.append(
+            f"{where} records driver CPU fraction {fraction!r}, which is not under the"
+            f" {LOAD_HEADROOM_CPU_LIMIT} headroom threshold; the driver may be the bottleneck"
+            " and the execution is invalid"
+        )
+    offered = record.get("offered")
+    completed = record.get("completed")
+    ratio_ok = (
+        isinstance(offered, int)
+        and isinstance(completed, int)
+        and offered >= 1_000
+        and completed * 1_000 >= offered * 999
+    )
+    if record.get("passed") is not True or not ratio_ok:
+        problems.append(f"{where} did not meet the capacity predicate at twice the ceiling")
+    p99 = record.get("setup_p99_ms")
+    if not isinstance(p99, int) or isinstance(p99, bool) or p99 > 250:
+        problems.append(f"{where} setup p99 {p99!r} does not meet the 250 ms loopback bound")
+    return problems
+
+
+def _load_environment_problems(where, environment, manifest, dataset) -> list[str]:
+    problems = _load_keys(where, environment, LOAD_ENVIRONMENT_KEYS)
+    if problems:
+        return problems
+    if environment.get("schema") != LOAD_ENVIRONMENT_SCHEMA:
+        problems.append(f"{where} must carry schema {LOAD_ENVIRONMENT_SCHEMA!r}")
+    problems.extend(_load_keys(f"{where}.host", environment.get("host"), LOAD_HOST_KEYS))
+    problems.extend(
+        _load_keys(f"{where}.socket_limits", environment.get("socket_limits"), LOAD_SOCKET_KEYS)
+    )
+    toolchains = environment.get("toolchains")
+    if not isinstance(toolchains, list) or not toolchains:
+        problems.append(f"{where} records no toolchains")
+    commands = environment.get("commands")
+    if not isinstance(commands, list) or not commands:
+        problems.append(f"{where} records no commands")
+    if environment.get("contract_sha256") != load_contract.contract_hash():
+        problems.append(
+            f"{where} contract hash does not match docs/specs/comparative-load.md; the recorded"
+            f" run predates the current contract. {LOAD_REFRESH_COMMAND}"
+        )
+    if manifest is not None and environment.get("seed") != manifest.get("seed"):
+        problems.append(f"{where} seed disagrees with the manifest")
+    builds = environment.get("builds")
+    if not isinstance(builds, list) or len(builds) != 2:
+        problems.append(f"{where} must record exactly the driver and responder builds")
+        return problems
+    by_role = {}
+    for index, build in enumerate(builds):
+        build_where = f"{where}.builds[{index}]"
+        problems.extend(_load_keys(build_where, build, LOAD_ENV_BUILD_KEYS))
+        if isinstance(build, dict):
+            by_role[build.get("role")] = build
+    if manifest is not None:
+        for manifest_build in manifest.get("builds", []):
+            role = manifest_build.get("role")
+            build = by_role.get(role)
+            if build is None:
+                problems.append(f"{where} records no {role} build")
+                continue
+            for field in ("endpoint_id", "revision", "artifact_sha256"):
+                if build.get(field) != manifest_build.get(field):
+                    problems.append(
+                        f"{where} {role} build {field} disagrees with the manifest artifact"
+                        " hash and pin; the evidence does not describe the build that ran"
+                    )
+    driver = (dataset or {}).get("driver", {})
+    driver_build = by_role.get("driver")
+    if isinstance(driver, dict) and isinstance(driver_build, dict):
+        if driver_build.get("artifact_sha256") != driver.get("artifact_sha256"):
+            problems.append(
+                f"{where} driver artifact hash disagrees with the dataset's pinned driver;"
+                " a comparison across runs requires the same measured instrument"
+            )
+    return problems
+
+
+def _load_ladder_problems(where, run) -> list[str]:
+    manifest = run.get("manifest")
+    if not isinstance(manifest, dict):
+        return []
+    try:
+        rates = load_contract.ladder_rates(int(manifest["ceiling"]))
+    except (KeyError, TypeError, ValueError, load_contract.ContractError):
+        return []
+    problems = []
+    results = run.get("results", {})
+    by_rate = {}
+    for (rate_index, repetition), record in sorted(results.items()):
+        result_where = f"{where}/results/rate{rate_index}-rep{repetition}.json"
+        try:
+            load_contract.validate_result(record, manifest)
+        except load_contract.ContractError as error:
+            problems.append(f"{result_where}: {error}")
+            continue
+        run_part = record.get("run", {})
+        if run_part.get("rate_index") != rate_index or run_part.get("repetition") != repetition:
+            problems.append(f"{result_where} is filed under the wrong rate or repetition")
+            continue
+        by_rate.setdefault(rate_index, {})[repetition] = record
+    attempted = sorted(by_rate)
+    if attempted != list(range(len(attempted))):
+        problems.append(f"{where} attempted rates must be the ladder prefix, without gaps")
+        return problems
+    rate_alive = []
+    for rate_index in attempted:
+        repetitions = by_rate[rate_index]
+        if sorted(repetitions) != list(range(load_contract.REPETITIONS)):
+            problems.append(
+                f"{where} rate {rates[rate_index]}/s must carry exactly"
+                f" {load_contract.REPETITIONS} repetitions"
+            )
+        rate_alive.append(
+            any(record.get("status") == "passed" for record in repetitions.values())
+        )
+    expected_omitted = set()
+    for index in range(1, len(rate_alive)):
+        if not rate_alive[index] and not rate_alive[index - 1]:
+            expected_omitted = set(range(index + 1, len(rates)))
+            break
+    if set(attempted) & expected_omitted:
+        problems.append(f"{where} measured a rate after two consecutive rates had failed")
+    missing = set(range(len(rates))) - set(attempted) - expected_omitted
+    if missing:
+        problems.append(
+            f"{where} omitted rate indices {sorted(missing)} without two consecutive failed"
+            " rates to justify the omission"
+        )
+    omissions = run.get("omissions")
+    listed = set()
+    if isinstance(omissions, dict):
+        problems.extend(_load_keys(f"{where}/omissions.json", omissions, LOAD_OMISSIONS_KEYS))
+        if omissions.get("schema") not in (None, LOAD_OMISSIONS_SCHEMA):
+            problems.append(f"{where}/omissions.json must carry schema {LOAD_OMISSIONS_SCHEMA!r}")
+        for entry in omissions.get("omitted", []) if isinstance(omissions.get("omitted"), list) else []:
+            entry_where = f"{where}/omissions.json"
+            problems.extend(_load_keys(entry_where, entry, LOAD_OMITTED_KEYS))
+            if not isinstance(entry, dict):
+                continue
+            rate_index = entry.get("rate_index")
+            if isinstance(rate_index, int) and not isinstance(rate_index, bool):
+                listed.add(rate_index)
+                if 0 <= rate_index < len(rates) and entry.get("rate_per_second") != rates[rate_index]:
+                    problems.append(
+                        f"{entry_where} omitted rate {rate_index} does not carry its ladder rate"
+                    )
+            if entry.get("reason") != LOAD_OMISSION_REASON:
+                problems.append(
+                    f"{entry_where} omission reason must be {LOAD_OMISSION_REASON!r}; an"
+                    " unattempted rate is an omission fact, never a zero measurement"
+                )
+    if listed != expected_omitted:
+        problems.append(
+            f"{where} omission record lists rates {sorted(listed)} but the results justify"
+            f" {sorted(expected_omitted)}; omitted and measured rates must agree"
+        )
+    return problems
+
+
+def _load_run_problems(where, run, dataset, endpoint_id, role) -> list[str]:
+    problems = []
+    for part in LOAD_RUN_PARTS:
+        if part not in run:
+            problems.append(f"{where} is missing {part}.json")
+    manifest = run.get("manifest")
+    if manifest is not None:
+        try:
+            load_contract.validate_manifest(manifest)
+        except load_contract.ContractError as error:
+            problems.append(f"{where}/manifest.json: {error}")
+            manifest = None
+    if manifest is not None:
+        direction = manifest.get("direction", {})
+        if direction.get(role) != endpoint_id:
+            problems.append(
+                f"{where}/manifest.json direction does not put {endpoint_id!r} in the"
+                f" {role} role this dataset claims"
+            )
+        driver = (dataset or {}).get("driver", {})
+        if isinstance(driver, dict) and direction.get("driver" if role == "responder" else "responder") != driver.get("id"):
+            problems.append(
+                f"{where}/manifest.json does not pair {endpoint_id!r} with the dataset's"
+                " pinned measuring driver"
+            )
+    if "environment" in run:
+        problems.extend(
+            _load_environment_problems(f"{where}/environment.json", run["environment"], manifest, dataset)
+        )
+    if "preflight" in run:
+        problems.extend(
+            _load_preflight_problems(
+                f"{where}/preflight.json", run["preflight"], "preflight", LOAD_PREFLIGHT_DIALOGS
+            )
+        )
+    if "qualification" in run:
+        problems.extend(
+            _load_preflight_problems(
+                f"{where}/qualification.json",
+                run["qualification"],
+                "qualification",
+                LOAD_QUALIFICATION_DIALOGS,
+            )
+        )
+    if "headroom" in run and manifest is not None:
+        problems.extend(
+            _load_headroom_problems(f"{where}/headroom.json", run["headroom"], int(manifest["ceiling"]))
+        )
+    if manifest is not None and not run.get("results"):
+        problems.append(f"{where} carries no raw per-repetition results")
+    problems.extend(_load_ladder_problems(where, run))
+    return problems
+
+
+def load_problems(dataset, runs, stack_list, today) -> list[str]:
+    """Every way the published load result could outrun its evidence."""
+    if dataset is None:
+        return [
+            "docs/comparison/load/dataset.json is missing; the comparative load result is"
+            " X-99 evidence and the page cannot publish measurements it does not hold"
+        ]
+    problems = _load_keys("comparative load dataset", dataset, LOAD_DATASET_KEYS)
+    if problems:
+        return problems
+    if dataset.get("schema") != LOAD_DATASET_SCHEMA:
+        problems.append(f"comparative load dataset must carry schema {LOAD_DATASET_SCHEMA!r}")
+    problems.extend(_load_staleness(dataset, today))
+    driver = dataset.get("driver")
+    problems.extend(_load_keys("comparative load driver", driver, LOAD_DRIVER_KEYS))
+    if isinstance(driver, dict):
+        artifact = driver.get("artifact_sha256")
+        if not isinstance(artifact, str) or len(artifact) != 64:
+            problems.append("comparative load driver has no full artifact hash")
+    known_stacks = {stack.get("id") for stack in stack_list}
+    endpoints = dataset.get("endpoints")
+    if not isinstance(endpoints, list) or not endpoints:
+        problems.append("comparative load dataset names no endpoints")
+        return problems
+    scope = dataset.get("scope")
+    problems.extend(_load_keys("comparative load scope", scope, LOAD_SCOPE_KEYS))
+    if isinstance(scope, dict):
+        workload = scope.get("workload")
+        if not isinstance(workload, str) or not workload.strip():
+            problems.append("comparative load scope states no workload")
+        not_inferred = scope.get("not_inferred")
+        if not isinstance(not_inferred, list) or not not_inferred:
+            problems.append(
+                "comparative load scope must name what the first result does not cover;"
+                " an unstated limitation reads as coverage"
+            )
+    for endpoint in endpoints:
+        where = f"comparative load endpoint {endpoint.get('id', '?') if isinstance(endpoint, dict) else '?'}"
+        problems.extend(_load_keys(where, endpoint, LOAD_ENDPOINT_KEYS))
+        if not isinstance(endpoint, dict):
+            continue
+        endpoint_id = endpoint.get("id")
+        if endpoint_id not in known_stacks:
+            problems.append(f"{where} names a subject stacks.json does not declare")
+        if isinstance(driver, dict) and endpoint_id == driver.get("id"):
+            problems.append(f"{where} is also the measuring driver; the instrument is not a subject")
+        internal = endpoint.get("internal_state")
+        problems.extend(_load_keys(f"{where}.internal_state", internal, LOAD_INTERNAL_KEYS))
+        if isinstance(internal, dict):
+            if internal.get("visibility") not in ("endpoint-reported", "harness-observed"):
+                problems.append(
+                    f"{where}.internal_state visibility must be endpoint-reported or"
+                    " harness-observed; unobserved internal state is disclosed, not inferred"
+                )
+            note = internal.get("note")
+            if not isinstance(note, str) or not note.strip():
+                problems.append(f"{where}.internal_state carries no disclosure note")
+        for role_key, role in (("as_responder", "responder"), ("as_driver", "driver")):
+            entry = endpoint.get(role_key)
+            role_where = f"{where}.{role_key}"
+            problems.extend(_load_role_problems(role_where, entry, runs))
+            if isinstance(entry, dict) and entry.get("status") == "measured":
+                run = runs.get(entry.get("run"))
+                if run is not None:
+                    problems.extend(
+                        _load_run_problems(entry.get("run"), run, dataset, endpoint_id, role)
+                    )
+    return problems
+
+
+def _achieved(record) -> float:
+    return record.get("counts", {}).get("completed", 0) / (
+        load_contract.MEASUREMENT_MS / 1_000
+    )
+
+
+def _rate_rows(run):
+    """Per-rate outcome rows: (rate, outcome, median achieved, spread, p99) or omissions."""
+    manifest = run.get("manifest", {})
+    rates = load_contract.ladder_rates(int(manifest.get("ceiling", 1)))
+    by_rate = {}
+    for (rate_index, repetition), record in sorted(run.get("results", {}).items()):
+        by_rate.setdefault(rate_index, []).append(record)
+    omitted = {
+        entry.get("rate_index")
+        for entry in run.get("omissions", {}).get("omitted", [])
+        if isinstance(entry, dict)
+    }
+    rows = []
+    for rate_index, rate in enumerate(rates):
+        if rate_index in omitted or rate_index not in by_rate:
+            rows.append((rate, None))
+            continue
+        records = by_rate[rate_index]
+        achieved = sorted(_achieved(record) for record in records)
+        passed = sum(1 for record in records if record.get("status") == "passed")
+        p99 = statistics.median(
+            record.get("latency_ms", {}).get("setup", {}).get("p99", 0) for record in records
+        )
+        rows.append((rate, (passed, len(records), achieved, p99)))
+    return rows
+
+
+def _capacity(run):
+    """The §7 capacity point: highest fully supported rate below the first failed pair."""
+    rows = _rate_rows(run)
+    supported = []
+    consecutive_failures = 0
+    for rate, outcome in rows:
+        if outcome is None:
+            break
+        passed, total, achieved, _ = outcome
+        if passed == total:
+            supported.append((rate, achieved))
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+            if consecutive_failures >= 2:
+                break
+    if not supported:
+        return None
+    return supported[-1]
+
+
+def render_load_section(dataset, runs, stack_list) -> list[str]:
+    """The generated summary: medians and spread, disclosed omissions, and no ranking."""
+    if dataset is None:
+        return []
+    names = {stack.get("id"): stack.get("name", stack.get("id", "?")) for stack in stack_list}
+    scope = dataset.get("scope", {})
+    not_inferred = ", ".join(scope.get("not_inferred", []))
+    out = [
+        "## Comparative signalling load",
+        "",
+        f"**One neutral workload — {cell(scope.get('workload', ''))} — offered by the same"
+        " pinned driver to each endpoint acting as responder.**",
+        "",
+        "The driver proves at least twice the tested ceiling against a packaged minimal fixture"
+        " before any endpoint is measured, one hundred low-rate dialogs qualify protocol"
+        " correctness before any capacity work, and the fixed six-rate ladder runs five"
+        " repetitions per rate at open-loop offered load — the driver never raises or lowers"
+        " what it offers as a target slows. Raw per-repetition records, environment inventory"
+        " and hashes live under `docs/comparison/load/` and regenerate this section.",
+        "",
+        f"The following are **not inferred** from this result: {cell(not_inferred)}.",
+        "",
+    ]
+    capacities = []
+    for endpoint in dataset.get("endpoints", []):
+        endpoint_id = endpoint.get("id")
+        name = cell(str(names.get(endpoint_id, endpoint_id)))
+        out.append(f"### Responder capacity: {name}")
+        out.append("")
+        responder = endpoint.get("as_responder", {})
+        if responder.get("status") != "measured":
+            out.append(f"_Not measured: {cell(responder.get('reason', ''))}_")
+            out.append("")
+            continue
+        run = runs.get(responder.get("run"), {})
+        out += [
+            "| Rate (calls/s) | Outcome | Median achieved (dialogs/s) | Spread [min, max] | Setup p99 (ms, median) |",
+            "|---|---|---|---|---|",
+        ]
+        for rate, outcome in _rate_rows(run):
+            if outcome is None:
+                out.append(
+                    f"| {rate} | _not run: two consecutive rates failed_ | — | — | — |"
+                )
+                continue
+            passed, total, achieved, p99 = outcome
+            verdict = (
+                f"supported ({passed}/{total})"
+                if passed == total
+                else f"failed ({passed}/{total} repetitions passed)"
+            )
+            median = statistics.median(achieved)
+            out.append(
+                f"| {rate} | {verdict} | {median:.1f} | [{achieved[0]:.1f}, {achieved[-1]:.1f}]"
+                f" | {p99:.0f} |"
+            )
+        out.append("")
+        capacity = _capacity(run)
+        if capacity is None:
+            out.append("No rate was supported by all five repetitions.")
+        else:
+            rate, achieved = capacity
+            out.append(
+                f"Capacity point: **{rate} calls/s**, achieved interval"
+                f" [{achieved[0]:.1f}, {achieved[-1]:.1f}] dialogs/s over five repetitions."
+            )
+            capacities.append((name, achieved[0], achieved[-1]))
+        out.append("")
+        driver_entry = endpoint.get("as_driver", {})
+        if driver_entry.get("status") != "measured":
+            out.append(
+                f"- Caller (UAC) direction: not measured — {cell(driver_entry.get('reason', ''))}"
+            )
+        internal = endpoint.get("internal_state", {})
+        out.append(
+            f"- Internal state visibility: `{internal.get('visibility', '?')}` —"
+            f" {cell(internal.get('note', ''))}"
+        )
+        out.append("")
+    if len(capacities) >= 2:
+        (name_a, low_a, high_a), (name_b, low_b, high_b) = capacities[0], capacities[1]
+        if low_a <= high_b and low_b <= high_a:
+            out.append(
+                "The achieved-throughput intervals overlap, so this comparison is"
+                " **inconclusive** on this machine and profile."
+            )
+        else:
+            higher = name_a if low_a > high_b else name_b
+            lower = name_b if higher == name_a else name_a
+            out.append(
+                f"The measured interval for {higher} is higher on this machine and profile"
+                f" than the interval for {lower}. That statement holds for these exact builds,"
+                " this machine and this profile only — it is not a general ranking."
+            )
+        out.append("")
+    return out
+
+
 def is_marker(observation) -> bool:
     return "not_evaluated" in observation
 
@@ -1218,7 +1923,7 @@ def render_capability_ledgers(ledger_list, stack_list) -> list[str]:
     return out
 
 
-def render(dimension_list, stack_list, observation_list, values, ledger_list=None) -> str:
+def render(dimension_list, stack_list, observation_list, values, ledger_list=None, load=None) -> str:
     answers = {
         (o.get("stack"), o.get("dimension")): o for o in observation_list
     }
@@ -1307,6 +2012,10 @@ def render(dimension_list, stack_list, observation_list, values, ledger_list=Non
 
     out.extend(render_capability_ledgers(ledger_list or [], stack_list))
 
+    if load is not None:
+        load_data, load_run_map = load
+        out.extend(render_load_section(load_data, load_run_map, stack_list))
+
     return "\n".join(out) + "\n"
 
 
@@ -1348,7 +2057,17 @@ def main() -> int:
             expectations,
         )
     )
-    rendered = render(dimension_list, stack_list, observation_list, values, ledger_list)
+    load_data = load_dataset()
+    load_run_map = load_runs(load_data)
+    problems.extend(load_problems(load_data, load_run_map, stack_list, today))
+    rendered = render(
+        dimension_list,
+        stack_list,
+        observation_list,
+        values,
+        ledger_list,
+        load=(load_data, load_run_map),
+    )
 
     # Notice, not a result. Printed in both modes and before the verdict, so it is visible on the
     # run that still passes — which is the only run on which it is any use.

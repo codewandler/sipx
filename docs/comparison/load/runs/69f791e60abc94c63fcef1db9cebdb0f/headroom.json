@@ -1,0 +1,13 @@
+{
+ "completed": 122847,
+ "completion_ratio": 0.9997314453125,
+ "driver_cpu_fraction": 0.26955392933053735,
+ "elapsed_ms": 70347,
+ "fixture": "packaged minimal fixture (scripts/comparative-load-driver.py --role fixture)",
+ "offered": 122880,
+ "passed": true,
+ "rate_per_second": 2048,
+ "schema": "sipx.comparative-load.headroom.v1",
+ "setup_p99_ms": 11,
+ "started_utc": "2026-08-05T09:40:13Z"
+}

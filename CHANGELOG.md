@@ -9,6 +9,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Comparative signalling load is now a reproducible measurement rather than a benchmark claim**
+  (`X-99`). A source-hash-pinned open-loop driver qualifies protocol correctness, proves twice-ceiling
+  headroom, and records five repetitions at every fixed ladder rate with exact build, toolchain,
+  host, socket-limit, seed, resource and cleanup evidence. The generated comparison publishes
+  median and spread, discloses the unsupported caller direction and unmeasured transports/media,
+  and refuses to turn one machine's result into an overall winner.
+
 - **The live endpoint graduates the UA service primitives it now constrains.** The subscription
   store and built-in dialog, registration and presence package documents are now Supported because
   `sipx-call::Notifier` selects them from the application-reachable dispatcher. Pre-1.0 breaking

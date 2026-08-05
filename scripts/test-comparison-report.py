@@ -12,6 +12,7 @@ into a fixture here would be caught by the provenance check — the same reason
 `test-provenance.py` invents its own term.
 """
 
+import argparse
 import datetime
 import importlib.util
 import json
@@ -54,6 +55,19 @@ def load_comparative_module():
 
 
 load_contract = load_comparative_module()
+
+
+def load_comparative_runner_module():
+    """Import the execution runner while keeping the scripts directory off the import path."""
+    spec = importlib.util.spec_from_file_location(
+        "comparative_load_runner", ROOT / "scripts" / "comparative-load-run.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+load_runner = load_comparative_runner_module()
 
 #: The reserved fixture identity. Assertions filter on it so a fixture's problem can never be
 #: confused with a problem the real dataset has.
@@ -1915,6 +1929,419 @@ print(json.dumps({{
             load_contract.validate_readiness(invalid_driver, "driver")
 
 
+def a_load_environment(manifest):
+    """The immutable execution inventory X-99 records beside each run's manifest."""
+    builds = []
+    for build in manifest["builds"]:
+        builds.append(
+            {
+                "endpoint_id": build["endpoint_id"],
+                "role": build["role"],
+                "revision": build["revision"],
+                "artifact": f"/opt/{build['endpoint_id']}",
+                "artifact_sha256": build["artifact_sha256"],
+                "build_command": "make release",
+                "toolchain": "fixture-compiler 1.0.0",
+                "features": [],
+                "dependencies": [],
+            }
+        )
+    return {
+        "schema": "sipx.comparative-load.environment.v1",
+        "captured_utc": "2026-08-05T11:00:00Z",
+        "host": {
+            "os": "fixture-os",
+            "kernel": "6.0.0-fixture",
+            "architecture": "fixture-arch",
+            "logical_cpus": 8,
+            "memory_bytes": 8 * 1024 * 1024 * 1024,
+            "cpu_governor": "performance",
+            "clock": "monotonic",
+        },
+        "socket_limits": {
+            "rlimit_nofile_soft": 1024,
+            "rlimit_nofile_hard": 4096,
+            "rmem_max": 212_992,
+            "wmem_max": 212_992,
+            "rmem_default": 212_992,
+            "wmem_default": 212_992,
+        },
+        "toolchains": [{"tool": "fixture-compiler", "version": "1.0.0"}],
+        "builds": builds,
+        "commands": ["comparative-load-run --plan fixture"],
+        "seed": manifest["seed"],
+        "contract_sha256": load_contract.contract_hash(),
+    }
+
+
+def a_load_preflight(phase="preflight", dialogs=20):
+    """Correctness evidence gathered before any capacity work."""
+    return {
+        "schema": "sipx.comparative-load.preflight.v1",
+        "phase": phase,
+        "rate_per_second": 1,
+        "dialogs": dialogs,
+        "offered": dialogs,
+        "completed": dialogs,
+        "five_steps_observed": True,
+        "post_drain_zero": True,
+        "passed": True,
+        "started_utc": "2026-08-05T11:05:00Z",
+        "elapsed_ms": dialogs * 1000 + 500,
+    }
+
+
+def a_load_headroom(manifest):
+    """The driver's proof that it is not the bottleneck at twice the tested ceiling."""
+    rate = 2 * manifest["ceiling"]
+    offered = rate * 60
+    return {
+        "schema": "sipx.comparative-load.headroom.v1",
+        "fixture": "packaged-minimal-fixture",
+        "rate_per_second": rate,
+        "offered": offered,
+        "completed": offered,
+        "completion_ratio": 1.0,
+        "setup_p99_ms": 4,
+        "driver_cpu_fraction": 0.21,
+        "passed": True,
+        "started_utc": "2026-08-05T11:07:00Z",
+        "elapsed_ms": 70_500,
+    }
+
+
+def a_rate_result(manifest, rate_index, repetition, passed=True):
+    """One ladder repetition consistent with the manifest's derived seed and rate."""
+    rate = load_contract.ladder_rates(manifest["ceiling"])[rate_index]
+    offered = rate * 60
+    missed = 0 if passed else max(offered // 100, 1)
+    completed = offered - missed
+    result = a_load_result(manifest)
+    result["status"] = "passed" if passed else "failed"
+    result["run"].update(
+        {
+            "rate_index": rate_index,
+            "rate_per_second": rate,
+            "repetition": repetition,
+            "seed": manifest["seed"]
+            ^ (manifest["direction"]["index"] << 56)
+            ^ (rate_index << 32)
+            ^ repetition,
+        }
+    )
+    result["counts"].update(
+        {"offered": offered, "established": completed, "completed": completed}
+    )
+    result["responses"] = {
+        "provisional": {"100": offered}
+        if manifest["provisional_policy"] == "trying_100" and passed
+        else ({"100": completed} if manifest["provisional_policy"] == "trying_100" else {}),
+        "final": {"200": completed * 2},
+    }
+    result["errors"] = {
+        name: 0 for name in load_contract.TERMINAL_ERRORS + load_contract.RUN_ERRORS
+    }
+    result["errors"]["transaction_timeout"] = missed
+    result["latency_ms"]["setup"]["count"] = completed
+    result["latency_ms"]["teardown"]["count"] = completed
+    return result
+
+
+def a_full_ladder(manifest, failed_rates=()):
+    """Five repetitions for every attempted rate, stopping after two consecutive failures."""
+    results = {}
+    consecutive = 0
+    for rate_index in range(len(load_contract.LADDER_DIVISORS)):
+        if consecutive >= 2:
+            break
+        passed = rate_index not in failed_rates
+        for repetition in range(load_contract.REPETITIONS):
+            results[(rate_index, repetition)] = a_rate_result(
+                manifest, rate_index, repetition, passed=passed
+            )
+        consecutive = consecutive + 1 if not passed else 0
+    return results
+
+
+def a_load_run(manifest=None, results=None, omitted=None):
+    """One complete measured run directory, loaded the way the checker reads it."""
+    manifest = manifest or a_load_manifest()
+    if results is None:
+        results = a_full_ladder(manifest)
+    return {
+        "manifest": manifest,
+        "environment": a_load_environment(manifest),
+        "preflight": a_load_preflight(),
+        "qualification": a_load_preflight(phase="qualification", dialogs=100),
+        "headroom": a_load_headroom(manifest),
+        "results": results,
+        "omissions": {
+            "schema": "sipx.comparative-load.omissions.v1",
+            "omitted": list(omitted or ()),
+        },
+    }
+
+
+class TheComparativeLoadRunner(unittest.TestCase):
+    """The measuring ends agree on one explicit provisional-response policy."""
+
+    def test_the_runner_requests_one_trying_from_every_dialog(self) -> None:
+        execution = load_runner.Execution(
+            argparse.Namespace(
+                endpoint=ROOT / "docs" / "comparison" / "load" / "endpoints" / "sipx.json",
+                driver=ROOT
+                / "docs"
+                / "comparison"
+                / "load"
+                / "endpoints"
+                / "profile-driver.json",
+                ceiling=1024,
+                seed=7,
+                run_id="0123456789abcdef0123456789abcdef",
+                out=None,
+                phases=None,
+                direction_index=0,
+                resume=False,
+            )
+        )
+        self.assertEqual("trying_100", load_runner.PROVISIONAL_POLICY)
+        driver = execution.driver_template()
+        self.assertEqual(
+            load_runner.PROVISIONAL_POLICY, driver[driver.index("--provisional") + 1]
+        )
+        fixture = execution.fixture_template()
+        self.assertEqual(
+            load_runner.PROVISIONAL_POLICY, fixture[fixture.index("--provisional") + 1]
+        )
+        responder = execution.responder_template()
+        self.assertEqual("100", responder[responder.index("--provisional-percent") + 1])
+
+
+LOAD_RUN_KEY = "runs/0123456789abcdef0123456789abcdef"
+
+
+def a_load_dataset():
+    """The published dataset: measured directions, disclosed omissions, explicit scope."""
+    return {
+        "schema": "sipx.comparative-load.dataset.v1",
+        "evaluated_at": TODAY.isoformat(),
+        "driver": {
+            "id": "endpoint-a",
+            "revision": "revision-a",
+            "artifact_sha256": "a" * 64,
+        },
+        "endpoints": [
+            {
+                "id": "endpoint-b",
+                "as_responder": {"status": "measured", "run": LOAD_RUN_KEY},
+                "as_driver": {
+                    "status": "not_measured",
+                    "reason": "the pinned build ships no neutral-profile driver",
+                },
+                "internal_state": {
+                    "visibility": "endpoint-reported",
+                    "note": "post-drain state is read from the endpoint's own summary",
+                },
+            }
+        ],
+        "scope": {
+            "workload": "UDP dialog signalling without SDP or media",
+            "not_inferred": ["secure transports", "connection churn", "audio"],
+        },
+    }
+
+
+def a_second_load_run(endpoint_id="endpoint-c", run_id="fedcba9876543210fedcba9876543210", **kwargs):
+    """A second measured endpoint, for cross-endpoint interval tests."""
+    manifest = a_load_manifest()
+    manifest["run_id"] = run_id
+    manifest["direction"]["responder"] = endpoint_id
+    manifest["builds"][1]["endpoint_id"] = endpoint_id
+    manifest["builds"][1]["revision"] = "revision-c"
+    manifest["builds"][1]["artifact_sha256"] = "c" * 64
+    return manifest, a_load_run(manifest, **kwargs)
+
+
+def load_dataset_problems(dataset=None, runs=None, stacks=None, today=TODAY):
+    dataset = dataset if dataset is not None else a_load_dataset()
+    if runs is None:
+        runs = {LOAD_RUN_KEY: a_load_run()}
+    stack_list = stacks if stacks is not None else [a_stack(id="endpoint-b", name="Fixture B")]
+    return report.load_problems(dataset, runs, stack_list, today)
+
+
+class TheComparativeLoadDataset(unittest.TestCase):
+    """X-99's published result: fresh, hash-pinned, qualified first, and never a ranking."""
+
+    def test_a_complete_dataset_has_no_problems(self) -> None:
+        self.assertEqual([], load_dataset_problems())
+
+    def test_a_stale_dataset_names_the_refresh_command(self) -> None:
+        dataset = a_load_dataset()
+        dataset["evaluated_at"] = (
+            TODAY - datetime.timedelta(days=report.MAX_OBSERVATION_AGE_DAYS + 1)
+        ).isoformat()
+        problems = load_dataset_problems(dataset)
+        self.assertTrue(any("stale" in p for p in problems), problems)
+        self.assertTrue(any(report.LOAD_REFRESH_COMMAND in p for p in problems), problems)
+
+    def test_an_artifact_hash_disagreement_is_refused(self) -> None:
+        run = a_load_run()
+        run["environment"]["builds"][1]["artifact_sha256"] = "d" * 64
+        problems = load_dataset_problems(runs={LOAD_RUN_KEY: run})
+        self.assertTrue(
+            any("artifact" in p and "manifest" in p for p in problems), problems
+        )
+
+    def test_contract_drift_is_refused(self) -> None:
+        run = a_load_run()
+        run["environment"]["contract_sha256"] = "e" * 64
+        problems = load_dataset_problems(runs={LOAD_RUN_KEY: run})
+        self.assertTrue(any("contract" in p for p in problems), problems)
+
+    def test_a_failed_qualification_cannot_carry_measurements(self) -> None:
+        run = a_load_run()
+        run["qualification"]["completed"] = 40
+        run["qualification"]["passed"] = False
+        problems = load_dataset_problems(runs={LOAD_RUN_KEY: run})
+        self.assertTrue(
+            any("correctness prerequisite failed" in p for p in problems), problems
+        )
+
+    def test_a_qualification_below_one_hundred_dialogs_is_refused(self) -> None:
+        run = a_load_run()
+        run["qualification"]["dialogs"] = 60
+        run["qualification"]["offered"] = 60
+        run["qualification"]["completed"] = 60
+        problems = load_dataset_problems(runs={LOAD_RUN_KEY: run})
+        self.assertTrue(any("one hundred" in p or "100" in p for p in problems), problems)
+
+    def test_a_missing_direction_needs_a_reason(self) -> None:
+        dataset = a_load_dataset()
+        dataset["endpoints"][0]["as_driver"]["reason"] = ""
+        problems = load_dataset_problems(dataset)
+        self.assertTrue(any("reason" in p for p in problems), problems)
+
+    def test_a_disclosed_direction_cannot_smuggle_a_run(self) -> None:
+        dataset = a_load_dataset()
+        dataset["endpoints"][0]["as_driver"]["run"] = LOAD_RUN_KEY
+        problems = load_dataset_problems(dataset)
+        self.assertTrue(any("not_measured" in p for p in problems), problems)
+
+    def test_headroom_below_twice_the_ceiling_is_refused(self) -> None:
+        run = a_load_run()
+        run["headroom"]["rate_per_second"] = run["manifest"]["ceiling"]
+        problems = load_dataset_problems(runs={LOAD_RUN_KEY: run})
+        self.assertTrue(any("twice" in p for p in problems), problems)
+
+    def test_a_hot_driver_invalidates_the_execution(self) -> None:
+        run = a_load_run()
+        run["headroom"]["driver_cpu_fraction"] = 0.93
+        problems = load_dataset_problems(runs={LOAD_RUN_KEY: run})
+        self.assertTrue(any("cpu" in p.lower() for p in problems), problems)
+
+    def test_an_undeclared_endpoint_is_refused(self) -> None:
+        problems = load_dataset_problems(stacks=[])
+        self.assertTrue(any("stacks.json" in p for p in problems), problems)
+
+    def test_an_inconsistent_omission_is_refused(self) -> None:
+        run = a_load_run(omitted=[{"rate_index": 5, "rate_per_second": 1024, "reason": "two_consecutive_failed_rates"}])
+        problems = load_dataset_problems(runs={LOAD_RUN_KEY: run})
+        self.assertTrue(any("omission" in p or "omitted" in p for p in problems), problems)
+
+    def test_omitted_rates_render_as_not_run_rather_than_zero(self) -> None:
+        manifest = a_load_manifest()
+        results = a_full_ladder(manifest, failed_rates={3, 4})
+        rates = load_contract.ladder_rates(manifest["ceiling"])
+        run = a_load_run(
+            manifest,
+            results=results,
+            omitted=[
+                {
+                    "rate_index": 5,
+                    "rate_per_second": rates[5],
+                    "reason": "two_consecutive_failed_rates",
+                }
+            ],
+        )
+        runs = {LOAD_RUN_KEY: run}
+        self.assertEqual([], load_dataset_problems(runs=runs))
+        text = "\n".join(
+            report.render_load_section(
+                a_load_dataset(), runs, [a_stack(id="endpoint-b", name="Fixture B")]
+            )
+        )
+        self.assertIn("not run: two consecutive rates failed", text)
+        self.assertNotIn("| 0/s |", text)
+
+    def test_overlapping_intervals_are_labelled_inconclusive(self) -> None:
+        dataset = a_load_dataset()
+        manifest_c, run_c = a_second_load_run()
+        dataset["endpoints"].append(
+            {
+                "id": "endpoint-c",
+                "as_responder": {"status": "measured", "run": "runs/" + manifest_c["run_id"]},
+                "as_driver": {
+                    "status": "not_measured",
+                    "reason": "the pinned build ships no neutral-profile driver",
+                },
+                "internal_state": {
+                    "visibility": "harness-observed",
+                    "note": "post-drain state is observed by the harness only",
+                },
+            }
+        )
+        runs = {LOAD_RUN_KEY: a_load_run(), "runs/" + manifest_c["run_id"]: run_c}
+        stacks = [
+            a_stack(id="endpoint-b", name="Fixture B"),
+            a_stack(id="endpoint-c", name="Fixture C"),
+        ]
+        self.assertEqual([], report.load_problems(dataset, runs, stacks, TODAY))
+        text = "\n".join(report.render_load_section(dataset, runs, stacks))
+        self.assertIn("inconclusive", text)
+        self.assertNotIn("winner", text.lower())
+
+    def test_distinct_intervals_still_never_claim_a_winner(self) -> None:
+        dataset = a_load_dataset()
+        manifest_c, run_c = a_second_load_run(
+            **{"results": None}
+        )
+        run_c["results"] = a_full_ladder(manifest_c, failed_rates={4, 5})
+        dataset["endpoints"].append(
+            {
+                "id": "endpoint-c",
+                "as_responder": {"status": "measured", "run": "runs/" + manifest_c["run_id"]},
+                "as_driver": {
+                    "status": "not_measured",
+                    "reason": "the pinned build ships no neutral-profile driver",
+                },
+                "internal_state": {
+                    "visibility": "harness-observed",
+                    "note": "post-drain state is observed by the harness only",
+                },
+            }
+        )
+        runs = {LOAD_RUN_KEY: a_load_run(), "runs/" + manifest_c["run_id"]: run_c}
+        stacks = [
+            a_stack(id="endpoint-b", name="Fixture B"),
+            a_stack(id="endpoint-c", name="Fixture C"),
+        ]
+        text = "\n".join(report.render_load_section(dataset, runs, stacks))
+        self.assertIn("higher on this machine", text)
+        self.assertNotIn("winner", text.lower())
+        self.assertIn("not a general ranking", text)
+
+    def test_the_scope_limitation_is_rendered(self) -> None:
+        runs = {LOAD_RUN_KEY: a_load_run()}
+        text = "\n".join(
+            report.render_load_section(
+                a_load_dataset(), runs, [a_stack(id="endpoint-b", name="Fixture B")]
+            )
+        )
+        self.assertIn("UDP dialog signalling without SDP or media", text)
+        self.assertIn("not inferred", text)
+
+
 class TheRealDataset(unittest.TestCase):
     """The guard is only worth having if the dataset it guards already satisfies it."""
 
@@ -1951,14 +2378,25 @@ class TheRealDataset(unittest.TestCase):
         selves = [s for s in stacks if s.get("is_self")]
         self.assertEqual(1, len(selves), "exactly one stack may hold generated cells")
 
+    def test_the_load_dataset_has_no_outstanding_problems(self) -> None:
+        dataset = report.load_dataset()
+        self.assertIsNotNone(dataset, "docs/comparison/load/dataset.json is X-99 evidence")
+        _, stacks, _ = report.dataset()
+        runs = report.load_runs(dataset)
+        self.assertEqual(
+            [], report.load_problems(dataset, runs, stacks, datetime.date.today())
+        )
+
     def test_the_report_is_current(self) -> None:
         dimensions, stacks, observations = report.dataset()
+        load = report.load_dataset()
         rendered = report.render(
             dimensions,
             stacks,
             observations,
             report.generated_values(),
             report.capability_ledgers(),
+            load=(load, report.load_runs(load)),
         )
         self.assertEqual(
             report.REPORT.read_text(encoding="utf-8"),

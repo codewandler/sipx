@@ -1,0 +1,29 @@
+{
+  "id": "sipx",
+  "revision": "e311e82ad427920eeb8d475cdc11b95152303a35",
+  "version": "1.0.0-beta.4",
+  "artifact": "target/release/sipx",
+  "build_command": "cargo build --release -p sipx-cli",
+  "toolchain": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+  "features": ["default"],
+  "dependencies": [
+    "resolved by the workspace Cargo.lock at the pinned revision"
+  ],
+  "responder_argv": [
+    "{artifact}",
+    "load-responder",
+    "--max-active",
+    "{max_active}",
+    "--cleanup",
+    "{cleanup_s}",
+    "--duration",
+    "{duration_s}",
+    "--seed",
+    "{seed}",
+    "--provisional-percent",
+    "100",
+    "--local",
+    "127.0.0.1:0",
+    "--json"
+  ]
+}
