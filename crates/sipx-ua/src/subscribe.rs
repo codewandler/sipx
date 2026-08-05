@@ -16,7 +16,8 @@ use std::time::Duration;
 use sipx_sip::event::{
     BAD_EVENT, Packages, Reason, State, Subscription, granted_expiry, is_unsubscribe,
 };
-use sipx_sip::{HeaderName, Request};
+use sipx_sip::headers::{CSeq, Expires};
+use sipx_sip::{HeaderName, Method, Request};
 
 /// What identifies one subscription (RFC 6665 §4.4.1).
 ///
@@ -165,6 +166,18 @@ impl Subscriptions {
 
     /// Answer a SUBSCRIBE.
     pub fn on_subscribe(&mut self, request: &Request, now: u64) -> Answer {
+        if request.headers.count(&HeaderName::CSeq) != 1
+            || !matches!(
+                request.headers.typed::<CSeq>(),
+                Some(Ok(CSeq {
+                    method: Method::Subscribe,
+                    ..
+                }))
+            )
+            || request.headers.count(&HeaderName::Expires) > 1
+        {
+            return Answer::Malformed;
+        }
         let Some(id) = Id::from_request(request) else {
             return Answer::Malformed;
         };
@@ -174,11 +187,11 @@ impl Subscriptions {
             return Answer::Unserved { status: BAD_EVENT };
         }
 
-        let requested = request
-            .headers
-            .value(&HeaderName::Expires)
-            .and_then(|value| String::from_utf8_lossy(&value).trim().parse::<u64>().ok())
-            .map_or(self.policy_maximum, Duration::from_secs);
+        let requested = match request.headers.typed::<Expires>() {
+            None => self.policy_maximum,
+            Some(Ok(expires)) => Duration::from_secs(u64::from(expires.0)),
+            Some(Err(_)) => return Answer::Malformed,
+        };
 
         if is_unsubscribe(requested) {
             // Marked terminated rather than removed, so a NOTIFY that crosses it on the wire finds
@@ -334,6 +347,25 @@ mod tests {
             notifier.on_subscribe(&first, NOW + 1),
             Answer::Refreshed { .. }
         ));
+    }
+
+    #[test]
+    fn malformed_expiry_and_cseq_do_not_mutate_the_store() {
+        let mut notifier = notifier();
+        for (name, value) in [
+            (HeaderName::Expires, "4294967296"),
+            (HeaderName::CSeq, "not-a-cseq"),
+            (HeaderName::CSeq, "2 MESSAGE"),
+        ] {
+            let mut request = subscribe("dialog", Some(600), "w1");
+            request.headers.remove_all(&name);
+            request
+                .headers
+                .push(sipx_sip::Header::build(name, value).expect("syntactic header"));
+            assert_eq!(notifier.on_subscribe(&request, NOW), Answer::Malformed);
+            assert_eq!(notifier.active(), 0);
+            assert!(notifier.all().is_empty());
+        }
     }
 
     /// The story's failing-first test.

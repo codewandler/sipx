@@ -47,6 +47,9 @@ library-only.
 - 2026-08-05: socket-driver contract is being specified before the dispatcher and runtime change.
 - 2026-08-05: notifier runtime, loopback proofs, RFC evidence and public docs are complete. The
   story remains in progress because the integration branch owns the deferred full gate.
+- 2026-08-05: independent review made header parsing fail closed, narrowed runtime package
+  admission to the three rendered tokens, rejected untagged identity collisions, bounded each
+  NOTIFY transaction, and added paused-time expiry plus all-package wire proofs.
 
 ## Notes
 - The sharpest instance of the pattern the 2026-08-04 capability review named as sipx's real feature

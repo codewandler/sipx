@@ -20,6 +20,11 @@ One notifier has these finite resources:
 - at most one package-state object and one expiry task per accepted subscription; and
 - a fixed three-entry package renderer table: `dialog`, `reg`, and `presence`.
 
+Admission uses those three exact, case-insensitive package tokens (before Event parameters). The
+template relationship understood by the general `Packages` registry is not runtime support:
+`dialog.winfo`, `reg.winfo`, `presence.winfo`, and every other derived token receive 489. Adding a
+template requires its own renderer and state contract before it may be admitted here.
+
 An application may inspect the shared store and the runtime counters through the notifier handle.
 It does not route requests or mutate notifier dialog bookkeeping.
 
@@ -34,6 +39,10 @@ An initial SUBSCRIBE has no `To` tag. Acceptance mints one local tag and records
 subscription. A refresh or unsubscribe has a `To` tag and MUST match the recorded local tag for the
 same `Id`; otherwise it is answered `481 Call/Transaction Does Not Exist` and does not enter the
 pure state machine. Thus a stale dialog cannot accidentally create a new subscription.
+
+An untagged request whose `Id` is already owned by a live subscription is also answered 481. It is
+not treated as a refresh and MUST NOT replace the existing task, tag, target, package document or
+store row.
 
 The initial remote target is the request's Contact URI. Missing or malformed Contact, mandatory
 dialog headers, CSeq or Event is `400 Bad Request`. The route set is the request's Record-Route
@@ -51,9 +60,11 @@ is elapsed whole seconds from that origin.
 | Matching refresh, positive Expires | `Refreshed` | `200`, same `To` tag, granted `Expires` | re-arm the owned expiry task; no mandatory state-change NOTIFY |
 | Matching unsubscribe, `Expires: 0` | `Unsubscribed` | `200`, same `To` tag, `Expires: 0` | cancel expiry task; send one terminating NOTIFY; remove wire state after the send attempt |
 | Initial while at capacity | no mutation | `503`, `Retry-After: 5` | increment `shed`; no task or package state |
-| Unserved Event | `Unserved` | `489 Bad Event`, `Allow-Events` | none |
+| Unserved or template-derived Event | no mutation | `489 Bad Event`, `Allow-Events` | none |
 | In-dialog request with unknown identity/tag | no mutation | `481` | none |
-| Malformed | `Malformed` | `400` | none |
+| Untagged request colliding with a live identity | no mutation | `481` | none |
+| Missing, malformed or duplicate CSeq; CSeq method other than SUBSCRIBE | `Malformed` | `400` | none |
+| Malformed or duplicate Expires | `Malformed` | `400` | none |
 | Expiry task fires | `terminate(id, timeout)` | none | send one terminating NOTIFY; remove wire state after the send attempt |
 
 RFC 6665 §4.2.1.1 permits a notifier to shorten an expiry and forbids lengthening it. Every 200
@@ -124,8 +135,12 @@ creating a second one. Termination is proven by those counters reaching zero; re
 alone is not evidence that scheduled work stopped.
 
 Dropping the runtime owner aborts all owned tasks. No task holds the runtime owner alive. A NOTIFY
-transaction response is awaited only under a finite failure-bound timeout; completion of that wait
-does not decide whether the subscription exists.
+transaction awaits its final response for at most two seconds. This is a failure bound, not a
+protocol timer: timeout, transport failure and every final status are observed completion of the
+send attempt and do not decide whether the subscription exists. The expiry deadline is fixed before
+the initial send, so a silent peer cannot lengthen the granted lifetime. After the application wait
+ends, the endpoint still owns the RFC 3261 transaction until its protocol timer completes; that
+bounded residue is included in `Handle::outstanding()` rather than hidden by the notifier.
 
 ## 6. Required tests
 
@@ -138,3 +153,7 @@ does not decide whether the subscription exists.
 4. Unsubscribe and separately expire under paused time; observe active tasks fall to zero and
    finished tasks rise after the terminating NOTIFY attempt.
 5. Assert no public method issues SUBSCRIBE or consumes NOTIFY in this story.
+6. For each exact built-in package, receive and answer the initial NOTIFY, and assert its MIME type
+   and full-document marker. Refuse a template-derived package with 489.
+7. Send malformed Expires and CSeq values over a socket and observe 400 without store mutation;
+   reject an untagged live-identity collision with 481 without replacing its task.

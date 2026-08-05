@@ -13,6 +13,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
 use sipx_sip::event::{Packages, Reason, Subscription};
+use sipx_sip::headers::{CSeq, Expires};
 use sipx_sip::{HeaderName, Method, Request, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
 use sipx_ua::packages::{DIALOG_INFO_TYPE, DialogWatch, REGINFO_TYPE, RegistrationWatch};
@@ -27,6 +28,7 @@ use crate::dialog::{Dialog, to_tag};
 use crate::dispatch::with_to_tag;
 
 const RETRY_AFTER: &[u8] = b"5";
+const NOTIFY_RESPONSE_BOUND: Duration = Duration::from_secs(2);
 
 /// Runtime measurements for an endpoint event notifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,10 +130,44 @@ impl Notifier {
         let Some(endpoint) = self.endpoint.clone() else {
             return;
         };
+        if !valid_subscribe_headers(&incoming.request) {
+            answer(&endpoint, incoming, 400, "Bad Request", None, None, None).await;
+            return;
+        }
         let Some(id) = Id::from_request(&incoming.request) else {
             answer(&endpoint, incoming, 400, "Bad Request", None, None, None).await;
             return;
         };
+
+        if !PackageState::supports(&id.event) {
+            let allow = lock(&self.store).packages().allow_events();
+            answer(
+                &endpoint,
+                incoming,
+                489,
+                "Bad Event",
+                Some((HeaderName::AllowEvents, Bytes::from(allow))),
+                None,
+                None,
+            )
+            .await;
+            return;
+        }
+
+        let is_initial = to_tag(&incoming.request.headers).is_none();
+        if is_initial && self.tasks.contains_key(&id) {
+            answer(
+                &endpoint,
+                incoming,
+                481,
+                "Call/Transaction Does Not Exist",
+                None,
+                None,
+                None,
+            )
+            .await;
+            return;
+        }
 
         if let Some(tag) = to_tag(&incoming.request.headers) {
             let known = self.tasks.get(&id).is_some_and(|task| {
@@ -157,7 +193,6 @@ impl Notifier {
         // A terminating task still owns one package document and one scheduler slot. Do not let a
         // rapid unsubscribe/re-subscribe cycle exceed the configured peer-driven task bound while
         // that final NOTIFY is leaving.
-        let is_initial = to_tag(&incoming.request.headers).is_none();
         let at_runtime_capacity = {
             let store = lock(&self.store);
             is_initial
@@ -378,9 +413,9 @@ struct Lifecycle {
 
 impl Lifecycle {
     async fn run(mut self, expires: Duration, _guard: TaskGuard) {
+        let mut deadline = Instant::now() + expires;
         let active = Subscription::active(expires);
         self.send_notify(&active).await;
-        let mut deadline = Instant::now() + expires;
 
         loop {
             tokio::select! {
@@ -450,8 +485,16 @@ impl Lifecycle {
                 return;
             }
         };
-        if let Err(error) = self.endpoint.send(request, self.target.clone()).await {
-            tracing::warn!(%error, "could not send subscription NOTIFY");
+        match self.endpoint.send(request, self.target.clone()).await {
+            Ok(mut responses) => {
+                // This duration bounds a failed NOTIFY transaction; subscription state does not
+                // depend on whether the peer supplies the final response.
+                let _ =
+                    tokio::time::timeout(NOTIFY_RESPONSE_BOUND, responses.final_response()).await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not send subscription NOTIFY");
+            }
         }
     }
 }
@@ -473,9 +516,19 @@ enum PackageState {
 }
 
 impl PackageState {
+    fn supports(event: &str) -> bool {
+        matches!(
+            event.split(';').next().map(str::trim),
+            Some(package)
+                if package.eq_ignore_ascii_case("dialog")
+                    || package.eq_ignore_ascii_case("reg")
+                    || package.eq_ignore_ascii_case("presence")
+        )
+    }
+
     fn for_request(request: &Request, event: &str) -> Option<Self> {
         let entity = String::from_utf8_lossy(&request.uri.to_bytes()).into_owned();
-        match event.split(';').next()?.split('.').next()?.trim() {
+        match event.split(';').next()?.trim() {
             package if package.eq_ignore_ascii_case("dialog") => {
                 Some(Self::Dialog(DialogWatch::new(entity)))
             }
@@ -505,6 +558,20 @@ impl PackageState {
 
 fn lock(store: &Arc<Mutex<Subscriptions>>) -> MutexGuard<'_, Subscriptions> {
     store.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn valid_subscribe_headers(request: &Request) -> bool {
+    request.method == Method::Subscribe
+        && request.headers.count(&HeaderName::CSeq) == 1
+        && matches!(
+            request.headers.typed::<CSeq>(),
+            Some(Ok(CSeq {
+                method: Method::Subscribe,
+                ..
+            }))
+        )
+        && request.headers.count(&HeaderName::Expires) <= 1
+        && !matches!(request.headers.typed::<Expires>(), Some(Err(_)))
 }
 
 async fn answer(
