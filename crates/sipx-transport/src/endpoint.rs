@@ -1371,13 +1371,19 @@ fn in_process_handle(
     let incoming = mpsc::channel(capacity);
     let shutdown = Arc::new(ShutdownState::default());
     let sent_by = Arc::new(local_addr.ip().to_string());
+    let meters = Arc::new(Meters::default());
     let handle = Handle {
         commands,
         shutdown,
         local_addr,
-        meters: Arc::new(Meters::default()),
+        meters: Arc::clone(&meters),
+        admission: Arc::new(SourceAdmission::default()),
+        observations: Arc::new(ObservationHub::new(meters)),
+        request_policy: None,
         #[cfg(feature = "tls")]
         tls_addr: None,
+        #[cfg(feature = "tls")]
+        server_identity: None,
         #[cfg(feature = "ws")]
         ws_addr: None,
         #[cfg(feature = "wss")]
@@ -1430,13 +1436,14 @@ async fn run_in_process(
                     let _ = reply.send(Err(error));
                     continue;
                 }
-                let _ = reply.send(Ok(client_key));
+                let _ = reply.send(Ok((client_key, None)));
                 if peer_incoming
                     .send(Incoming {
                         key: server_key,
                         request: *request,
                         source: local_addr,
                         transport: target.transport,
+                        connection_generation: None,
                     })
                     .await
                     .is_err()
@@ -1473,6 +1480,7 @@ async fn run_in_process(
                             request: *request,
                             source: local_addr,
                             transport: target.transport,
+                            connection_generation: None,
                         })
                         .await
                         .map_err(|_| Error::EndpointClosed),

@@ -407,6 +407,10 @@ impl Call {
             }),
             negotiation: update::Negotiation::idle(),
             peer_allows_update: snapshot.peer_allows_update_value(),
+            // Application-owned extension admission and credentials are runtime policy, not
+            // durable dialog facts. The host must install them again after restoration.
+            dialog_credentials: None,
+            admitted_dialog_methods: Vec::new(),
             events,
             events_rx: Some(events_rx),
             history: None,
