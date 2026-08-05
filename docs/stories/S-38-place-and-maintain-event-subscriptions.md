@@ -22,7 +22,8 @@ dialog, without embedding any event package's application policy in the transpor
 ## Acceptance
 
 - [ ] The public API establishes, refreshes and terminates a subscription through the state machine
-      and byte vectors specified by `S-37`.
+      and byte vectors in [`docs/specs/event-client.md`](../specs/event-client.md), specifically
+      `S37-V1` through `S37-V8`.
 - [ ] 401 and 407 challenges reuse endpoint credentials; refreshes use the granted expiry; initial
       and subsequent NOTIFY requests are ordered and surfaced with typed subscription state.
 - [ ] The dialog remote target, route set and CSeq rules are honored for every request, and a
@@ -35,4 +36,18 @@ dialog, without embedding any event package's application policy in the transpor
 
 ## Progress
 
-- Not started. Depends on S-37; may run beside S-35 once the spec is accepted.
+- Not started. Depends on S-37's integration gate; the implementation contract and test mapping are
+  now fixed in `docs/specs/event-client.md` and may be implemented beside S-35 after that gate.
+
+## Required failing-first tests
+
+The tests below cite the normative vectors rather than restating them:
+
+- `authenticated_subscription_establishes_from_notify` — `S37-V1`.
+- `notify_before_response_selects_one_dialog` — `S37-V2`.
+- `notify_expiry_overrides_refresh_response` — `S37-V3`.
+- `local_expiry_releases_everything` — `S37-V4`.
+- `unsubscribe_waits_for_terminal_notify` — `S37-V5`.
+- `stale_notify_is_refused_without_delivery` — `S37-V6`.
+- `unsupported_event_is_489` — `S37-V7`.
+- `shutdown_cancels_a_due_refresh_and_drains` — `S37-V8`.

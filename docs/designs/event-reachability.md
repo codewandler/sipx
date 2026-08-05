@@ -45,6 +45,10 @@ logic, but no endpoint can receive or originate PUBLISH.
   tracks `Subscription-State`, authenticates, refreshes and terminates it without giving any event
   package ownership of transport or timers. `S-24` is one consumer and remains responsible only for
   translating the `reg` package into peers.
+- The contract is [`docs/specs/event-client.md`](../specs/event-client.md): NOTIFY establishes the
+  subscriber route set, initial NOTIFY may beat the SUBSCRIBE response, one `Start` accepts one
+  dialog rather than silently multiplying work through forks, and package parsing is a bounded
+  injected consumer behind the generic lifecycle.
 - `S-39` carries the existing RFC 3903 compositor and entity-tag lifecycle through live inbound and
   outbound PUBLISH paths. It reuses the store from `S-18`; it does not create a second presence
   service or durable publication database.
@@ -68,8 +72,9 @@ logic, but no endpoint can receive or originate PUBLISH.
   `sipx-ua` where a remote party causes sipx to originate traffic on a schedule. The bound and the
   shutdown path need the same treatment as the transport layer's, and the story must show the
   timers stop when the subscription is terminated, not merely that state is removed.
-- Whether a subscription's NOTIFY traffic should share the dialog's transport connection or resolve
-  independently is an open question the story answers with reference to `docs/specs/sip-transport.md`
-  §8 rather than by choosing convenience.
-- RFC 6665 §4.4.1 forking behaviour is out of scope in a UA that does not fork, but the refusal
-  needs to be stated rather than assumed.
+- NOTIFY establishes the dialog's route set and remote target. Subsequent in-dialog SUBSCRIBE uses
+  that route/target through the ordinary transport connection pool in `docs/specs/sip-transport.md`
+  §8; it does not resolve independently around the dialog.
+- RFC 6665 permits package-specific fork handling. The generic client deliberately accepts the
+  first dialog and refuses competing NOTIFY dialogs with 481, keeping one refresh/timer budget per
+  application request.
