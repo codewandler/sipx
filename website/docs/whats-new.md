@@ -1,17 +1,21 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.1 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.2 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.1 — 2026-08-05
+## 1.0.0-rc.2 — 2026-08-05
 <!-- END generated:release-heading -->
 
-RC.1 is sipx's first release candidate. It gathers the complete post-beta.7 transport, media,
+RC.2 is sipx's first published release candidate. It gathers the complete post-beta.7 transport, media,
 signalling, observability and distribution work into one immutable version for external review. It
 does not move or overwrite an existing tag, package or asset.
+
+The immutable RC.1 cut was not published: its protected gate passed, then the registry rehearsal
+found one stale internal version requirement and stopped before any package, archive or release
+record was created. RC.2 corrects that manifest edge and adds a live-graph regression test.
 
 - **Endpoints handle deployment edges explicitly.** Oversized UDP requests follow RFC 3261's TCP
   fallback before transaction creation, and applications can drain new-dialog admission while
@@ -41,14 +45,14 @@ does not move or overwrite an existing tag, package or asset.
 Install the exact CLI release with:
 
 ```bash
-cargo install --locked --version =1.0.0-rc.1 sipx-cli
+cargo install --locked --version =1.0.0-rc.2 sipx-cli
 ```
 
 The [getting-started guide](getting-started.md#prebuilt-release-binaries) also shows the exact binary
 archive, checksum and SPDX path. Those portable executables deliberately omit optional native
 features; use Cargo when `device-audio`, `opus` or `dtls` is required.
 
-The one source migration in RC.1 renames `sipx_transport::Config::mtu` to `path_mtu`: pass the path
+The one source migration in RC.2 renames `sipx_transport::Config::mtu` to `path_mtu`: pass the path
 MTU as `Some(value)`, or `None` for the RFC 3261 unknown-path rule. Supported APIs are still not
 frozen before stable 1.0 and receive migration guidance when they change; Experimental APIs may
 change or disappear without that guide. The project still has no recorded independent production
@@ -314,5 +318,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.1` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.2` merely because it appears on this
 site.

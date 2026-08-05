@@ -10,7 +10,7 @@ sipx is a SIP and VoIP stack in Rust for engineers building telephony systems. U
 `sipx` command for repeatable calls from a shell, or embed the crates for control over
 signalling, registration, calls, and media.
 
-The current public prerelease is **`1.0.0-rc.1`**. The latest `main` branch can move ahead of
+The current public prerelease is **`1.0.0-rc.2`**. The latest `main` branch can move ahead of
 that release, and this website documents the branch. Public APIs are not frozen before 1.0:
 Supported APIs receive migration notes when they break, while Experimental APIs may change or be
 removed without one. For a reproducible installation, use the tagged release in
@@ -24,7 +24,7 @@ Place or answer a call, register an address, play and record WAV audio, send DTM
 machine-readable results:
 
 ```bash
-cargo install --locked --version =1.0.0-rc.1 sipx-cli
+cargo install --locked --version =1.0.0-rc.2 sipx-cli
 sipx version
 ```
 

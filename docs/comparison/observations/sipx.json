@@ -18,7 +18,7 @@
           "note": "non-negotiable 3, which also forbids panics on network input"
         }
       ],
-      "version_evaluated": "1.0.0-rc.1",
+      "version_evaluated": "1.0.0-rc.2",
       "evaluated_at": "2026-08-05"
     },
     {
@@ -42,7 +42,7 @@
           "note": "the per-feature build matrix"
         }
       ],
-      "version_evaluated": "1.0.0-rc.1",
+      "version_evaluated": "1.0.0-rc.2",
       "evaluated_at": "2026-08-05"
     },
     {
@@ -74,7 +74,7 @@
           "note": "the native-browser compatibility job that runs the proof"
         }
       ],
-      "version_evaluated": "1.0.0-rc.1",
+      "version_evaluated": "1.0.0-rc.2",
       "evaluated_at": "2026-08-05"
     },
     {
@@ -95,7 +95,7 @@
           "note": "the generated maturity report, including what is still open"
         }
       ],
-      "version_evaluated": "1.0.0-rc.1",
+      "version_evaluated": "1.0.0-rc.2",
       "evaluated_at": "2026-08-05"
     },
     {
@@ -120,7 +120,7 @@
           "note": "every way the conformance check fails"
         }
       ],
-      "version_evaluated": "1.0.0-rc.1",
+      "version_evaluated": "1.0.0-rc.2",
       "evaluated_at": "2026-08-05"
     },
     {
@@ -141,7 +141,7 @@
           "note": "the two independent peers the suite runs against"
         }
       ],
-      "version_evaluated": "1.0.0-rc.1",
+      "version_evaluated": "1.0.0-rc.2",
       "evaluated_at": "2026-08-05"
     }
   ]

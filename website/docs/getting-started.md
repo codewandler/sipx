@@ -14,7 +14,7 @@ move ahead of it.
 Install the exact release with Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```bash
-cargo install --locked --version =1.0.0-rc.1 sipx-cli
+cargo install --locked --version =1.0.0-rc.2 sipx-cli
 ```
 
 The exact `--version` requirement makes the installation reproducible. This site follows the
@@ -28,7 +28,7 @@ cargo install --git https://github.com/codewandler/sipx \
 
 ### Prebuilt release binaries
 
-Release candidates and stable releases starting with `v1.0.0-rc.1` also attach an exact native
+Release candidates and stable releases starting with `v1.0.0-rc.2` also attach an exact native
 archive and SPDX bill of materials for each supported target:
 
 | Machine | Target and archive suffix |
@@ -42,7 +42,7 @@ archive and SPDX bill of materials for each supported target:
 For example, install the static x86-64 Linux binary after verifying the published checksum:
 
 ```bash
-VERSION=1.0.0-rc.1
+VERSION=1.0.0-rc.2
 TARGET=x86_64-unknown-linux-musl
 ARCHIVE="sipx-$VERSION-$TARGET.tar.gz"
 curl --fail --location --remote-name \
@@ -61,11 +61,11 @@ above when you need `device-audio`, `opus` or `dtls`; the archive's `build-manif
 sidecar record that distinction.
 
 Confirm which version was installed. This documentation build covers
-<!-- BEGIN generated:workspace-version -->1.0.0-rc.1<!-- END generated:workspace-version -->:
+<!-- BEGIN generated:workspace-version -->1.0.0-rc.2<!-- END generated:workspace-version -->:
 
 ```console
 $ sipx version
-sipx 1.0.0-rc.1
+sipx 1.0.0-rc.2
 ```
 
 ## Prepare audio
@@ -115,7 +115,7 @@ For the narrower browser-compatible path, install the same exact release with th
 and `dtls` features:
 
 ```bash
-cargo install --locked --version =1.0.0-rc.1 --features opus,dtls sipx-cli
+cargo install --locked --version =1.0.0-rc.2 --features opus,dtls sipx-cli
 ```
 
 Then select the fail-closed `browser-audio` profile over WSS. It composes Opus, host or

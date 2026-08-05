@@ -525,6 +525,17 @@ example = "public_harness"
             workspace_root=ROOT,
         )
 
+    def test_live_release_graph_names_the_current_workspace_version(self) -> None:
+        """Keep the protected rehearsal from being the first live-graph version check."""
+
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
+        version = str(workspace["package"]["version"])
+        metadata = release._metadata(ROOT)
+        records = metadata.get("packages")
+        self.assertIsInstance(records, list)
+        packages = release.package_records(records, version, ROOT)
+        self.assertEqual([], release.graph_problems(packages, version, ROOT))
+
 
 class ThePackagedVcsEvidence(unittest.TestCase):
     def package(self) -> release.Package:

@@ -7,12 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.0.0-rc.1] — 2026-08-05
+## [1.0.0-rc.2] — 2026-08-05
 
-This is the first release candidate for stable 1.0. It integrates the post-beta.7 transport,
-media, signalling, observability and distribution work as one reviewable boundary. It remains a
-prerelease: Supported APIs still receive migration guidance when they change, Experimental APIs
-may change without that guide, and stable promotion still requires independent application use.
+This is the first published release candidate for stable 1.0. It integrates the post-beta.7
+transport, media, signalling, observability and distribution work as one reviewable boundary. It
+remains a prerelease: Supported APIs still receive migration guidance when they change,
+Experimental APIs may change without that guide, and stable promotion still requires independent
+application use.
 
 ### Added
 
@@ -70,6 +71,11 @@ may change without that guide, and stable promotion still requires independent a
 
 ### Fixed
 
+- **The live workspace release graph is checked before a protected publication rehearsal.** RC.1's
+  protected gate passed, but its rehearsal then found one internal dependency requirement left at
+  beta.7 and stopped before publishing anything. RC.2 names the candidate version on that edge and
+  adds the actual workspace graph to the release tests.
+
 - **Long-ringing server transactions remain answerable while the application reports progress.**
   Each successfully transmitted application provisional response refreshes the endpoint's finite
   unanswered guard under the exact transaction key. Silence is still collected and counted, final
@@ -85,6 +91,13 @@ may change without that guide, and stable promotion still requires independent a
 - **Registration refresh survives one transient failure within the granted lease.** The retry is
   bounded and scheduled from the actual time remaining after the failed attempt, while provisional
   responses and fresh-nonce re-challenges retain their existing successful paths.
+
+## [1.0.0-rc.1] — 2026-08-05
+
+The immutable RC.1 tag was a refused release cut, not a published prerelease. Its protected gate
+passed, then the registry rehearsal found a stale internal dependency requirement and stopped
+before any registry package, portable asset or GitHub Release was created. The tag was not moved or
+deleted; RC.2 fixes forward from it.
 
 ## [1.0.0-beta.7] — 2026-08-05
 
@@ -3154,7 +3167,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.1...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.2...HEAD
+[1.0.0-rc.2]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.1...v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.7...v1.0.0-rc.1
 [1.0.0-beta.7]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.6...v1.0.0-beta.7
 [1.0.0-beta.6]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.5...v1.0.0-beta.6
