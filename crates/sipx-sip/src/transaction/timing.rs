@@ -42,6 +42,26 @@ pub enum Timer {
     Trying100,
 }
 
+impl Timer {
+    /// Every transaction timer, for drivers that terminate one transaction and must discard its
+    /// whole bounded timer set without scanning timers belonging to other transactions.
+    pub const ALL: [Self; 13] = [
+        Self::A,
+        Self::B,
+        Self::D,
+        Self::E,
+        Self::F,
+        Self::G,
+        Self::H,
+        Self::I,
+        Self::J,
+        Self::K,
+        Self::L,
+        Self::M,
+        Self::Trying100,
+    ];
+}
+
 /// The three constants everything else is derived from.
 #[derive(Debug, Clone, Copy)]
 pub struct Timers {

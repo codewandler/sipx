@@ -1355,6 +1355,55 @@ def load_problems(dataset, runs, stack_list, today) -> list[str]:
                     problems.extend(
                         _load_run_problems(entry.get("run"), run, dataset, endpoint_id, role)
                     )
+    problems.extend(_load_cross_run_problems(dataset, runs))
+    return problems
+
+
+def _load_cross_run_problems(dataset, runs) -> list[str]:
+    """Require every published endpoint result to be comparable by construction."""
+    measured = []
+    for key in _measured_run_keys(dataset):
+        run = runs.get(key)
+        if not isinstance(run, dict):
+            continue
+        manifest = run.get("manifest")
+        environment = run.get("environment")
+        if isinstance(manifest, dict) and isinstance(environment, dict):
+            measured.append((key, manifest, environment))
+    if len(measured) < 2:
+        return []
+
+    baseline_key, baseline_manifest, baseline_environment = measured[0]
+    problems = []
+    for key, manifest, environment in measured[1:]:
+        if manifest.get("machine") != baseline_manifest.get("machine"):
+            problems.append(
+                f"{key} and {baseline_key} were not run on the same host; cross-endpoint"
+                " results cannot be compared"
+            )
+        if environment.get("host") != baseline_environment.get("host"):
+            problems.append(
+                f"{key} and {baseline_key} do not carry the same host inventory;"
+                " cross-endpoint results cannot be compared"
+            )
+        if environment.get("socket_limits") != baseline_environment.get("socket_limits"):
+            problems.append(
+                f"{key} and {baseline_key} do not carry the same socket limits;"
+                " cross-endpoint results cannot be compared"
+            )
+        for field, label in (
+            ("ceiling", "ceiling"),
+            ("seed", "seed"),
+            ("provisional_policy", "provisional-response policy"),
+            ("limits", "resource limits"),
+            ("phases", "phase durations"),
+            ("ladder", "ladder definition"),
+        ):
+            if manifest.get(field) != baseline_manifest.get(field):
+                problems.append(
+                    f"{key} and {baseline_key} do not use the same {label};"
+                    " cross-endpoint results cannot be compared"
+                )
     return problems
 
 
@@ -1392,7 +1441,7 @@ def _rate_rows(run):
 
 
 def _capacity(run):
-    """The §7 capacity point: highest fully supported rate below the first failed pair."""
+    """Highest supported rate, its interval, and whether the ladder found only a lower bound."""
     rows = _rate_rows(run)
     supported = []
     consecutive_failures = 0
@@ -1409,7 +1458,9 @@ def _capacity(run):
                 break
     if not supported:
         return None
-    return supported[-1]
+    rate, achieved = supported[-1]
+    ceiling = int(run.get("manifest", {}).get("ceiling", 0))
+    return rate, achieved, rate == ceiling
 
 
 def render_load_section(dataset, runs, stack_list) -> list[str]:
@@ -1425,12 +1476,23 @@ def render_load_section(dataset, runs, stack_list) -> list[str]:
         f"**One neutral workload — {cell(scope.get('workload', ''))} — offered by the same"
         " pinned driver to each endpoint acting as responder.**",
         "",
-        "The driver proves at least twice the tested ceiling against a packaged minimal fixture"
-        " before any endpoint is measured, one hundred low-rate dialogs qualify protocol"
-        " correctness before any capacity work, and the fixed six-rate ladder runs five"
-        " repetitions per rate at open-loop offered load — the driver never raises or lowers"
-        " what it offers as a target slows. Raw per-repetition records, environment inventory"
-        " and hashes live under `docs/comparison/load/` and regenerate this section.",
+        "### What the harness measures",
+        "",
+        "- **Fixed load:** fixed open-loop offered load, so a slowing responder never causes the"
+        " caller to quietly offer less work.",
+        "- **Validity before speed:** correctness qualification completes one hundred low-rate"
+        " five-message dialogs before any capacity number is admitted.",
+        "- **Instrument margin:** driver headroom is proven against a packaged minimal fixture at"
+        " twice the tested ceiling.",
+        "- **Repeatability:** six rates and five repetitions per rate expose a supported point and"
+        " its achieved-throughput spread rather than one best run.",
+        "- **Behavior and cost:** setup and teardown latency, process resource samples, response"
+        " counts and errors are retained for every repetition.",
+        "- **Finite ownership:** bounded cleanup must stop admission, drain state and exit the"
+        " supervised process group without escalation.",
+        "- **Auditability:** raw evidence includes manifests, environment and toolchain inventory,"
+        " exact commands, seeds, artifact hashes and per-repetition JSON under"
+        " `docs/comparison/load/`.",
         "",
         f"The following are **not inferred** from this result: {cell(not_inferred)}.",
         "",
@@ -1473,11 +1535,19 @@ def render_load_section(dataset, runs, stack_list) -> list[str]:
         if capacity is None:
             out.append("No rate was supported by all five repetitions.")
         else:
-            rate, achieved = capacity
-            out.append(
-                f"Capacity point: **{rate} calls/s**, achieved interval"
-                f" [{achieved[0]:.1f}, {achieved[-1]:.1f}] dialogs/s over five repetitions."
-            )
+            rate, achieved, lower_bound = capacity
+            if lower_bound:
+                out.append(
+                    f"Capacity is at least **{rate} calls/s**: the highest tested rate passed,"
+                    " so this ladder established a lower bound rather than finding a failure"
+                    " ceiling. Achieved interval"
+                    f" [{achieved[0]:.1f}, {achieved[-1]:.1f}] dialogs/s over five repetitions."
+                )
+            else:
+                out.append(
+                    f"Capacity point: **{rate} calls/s**, achieved interval"
+                    f" [{achieved[0]:.1f}, {achieved[-1]:.1f}] dialogs/s over five repetitions."
+                )
             capacities.append((name, achieved[0], achieved[-1]))
         out.append("")
         driver_entry = endpoint.get("as_driver", {})

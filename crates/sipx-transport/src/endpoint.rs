@@ -36,6 +36,9 @@ use crate::target::{ConnectionKey, Target, TransportKind, response_destination};
 use crate::tcp::{self, Pool, PoolConfig};
 use crate::timers::TimerQueue;
 
+/// Most ready UDP datagrams copied off the socket before the reader yields to its bounded queue.
+const UDP_RECEIVE_BATCH: usize = 512;
+
 /// How an endpoint is configured.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -180,6 +183,12 @@ impl Config {
         };
         if self.capacity == 0 {
             return Err(nonzero("capacity"));
+        }
+        if self.capacity > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(Error::InvalidConfig {
+                field: "capacity",
+                reason: "exceeds the runtime channel limit",
+            });
         }
         if self.pool.max_connections == 0 {
             return Err(nonzero("pool.max_connections"));
@@ -1171,6 +1180,13 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     };
 
     let (net_tx, net_rx) = mpsc::channel(config.capacity);
+    let (udp_tx, udp_rx) = mpsc::channel(config.capacity);
+    let socket = Arc::new(socket);
+    background.spawn(receive_udp_until(
+        Arc::clone(&socket),
+        udp_tx,
+        background.cancel.clone(),
+    ));
     let (accept_tx, accept_rx) = mpsc::channel(64);
     if let Some(listener) = listener {
         let cancel = background.cancel.clone();
@@ -1184,7 +1200,8 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     }
 
     let driver = Driver {
-        socket: Arc::new(socket),
+        socket,
+        udp: udp_rx,
         layer: TransactionLayer::new(config.timers),
         timers: TimerQueue::new(),
         destinations: HashMap::new(),
@@ -1989,6 +2006,8 @@ async fn bind_matching_ports(
 
 struct Driver {
     socket: Arc<UdpSocket>,
+    /// Ordered datagrams copied off the socket by the bounded, state-free reader task.
+    udp: mpsc::Receiver<(Bytes, SocketAddr)>,
     layer: TransactionLayer,
     timers: TimerQueue<(TransactionKey, Timer)>,
     destinations: HashMap<TransactionKey, Target>,
@@ -2068,6 +2087,15 @@ struct Driver {
     shutdown: Arc<ShutdownState>,
 }
 
+fn forget_transaction_timers(
+    timers: &mut TimerQueue<(TransactionKey, Timer)>,
+    key: &TransactionKey,
+) {
+    for timer in Timer::ALL {
+        timers.forget(&(key.clone(), timer));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ConnectionGeneration {
     key: ConnectionKey,
@@ -2107,7 +2135,6 @@ impl Performed {
 
 impl Driver {
     async fn run(mut self) {
-        let mut buf = vec![0u8; 65_536];
         // Idle connections are swept periodically rather than given a timer each; the pool is
         // small and the sweep is cheap.
         let mut idle_sweep = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -2115,15 +2142,7 @@ impl Driver {
         loop {
             let deadline = self.timers.next_deadline();
             tokio::select! {
-                received = self.socket.recv_from(&mut buf) => match received {
-                    Ok((len, source)) => {
-                        let datagram = Bytes::copy_from_slice(buf.get(..len).unwrap_or(&[]));
-                        self.on_datagram(datagram, source).await;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "receive failed");
-                    }
-                },
+                Some((datagram, source)) = self.udp.recv() => self.on_datagram(datagram, source).await,
                 () = sleep_until(deadline), if deadline.is_some() => {
                     self.on_timers().await;
                 }
@@ -2686,7 +2705,7 @@ impl Driver {
             if self.clients.contains_key(&key) {
                 continue;
             }
-            self.timers.forget_matching(|(k, _)| k == &key);
+            forget_transaction_timers(&mut self.timers, &key);
             self.destinations.remove(&key);
             self.transaction_generations.remove(&key);
             #[cfg(feature = "quic")]
@@ -2953,7 +2972,7 @@ impl Driver {
                 Output::ClearTimer(timer) => self.timers.clear(&(key.clone(), timer)),
                 Output::ToTu(event) => self.deliver(key, *event, origin).await,
                 Output::Terminated(_) => {
-                    self.timers.forget_matching(|(k, _)| k == key);
+                    forget_transaction_timers(&mut self.timers, key);
                     self.destinations.remove(key);
                     self.transaction_generations.remove(key);
                     #[cfg(feature = "quic")]
@@ -3359,6 +3378,59 @@ impl Driver {
     }
 }
 
+async fn receive_udp_until(
+    socket: Arc<UdpSocket>,
+    datagrams: mpsc::Sender<(Bytes, SocketAddr)>,
+    cancel: CancellationToken,
+) {
+    let mut buf = vec![0u8; 65_536];
+    loop {
+        let received = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return,
+            received = socket.recv_from(&mut buf) => received,
+        };
+        let (len, source) = match received {
+            Ok(received) => received,
+            Err(error) => {
+                tracing::warn!(%error, "UDP receive task stopped");
+                return;
+            }
+        };
+        let mut ready = Vec::with_capacity(UDP_RECEIVE_BATCH);
+        ready.push((
+            Bytes::copy_from_slice(buf.get(..len).unwrap_or(&[])),
+            source,
+        ));
+        while ready.len() < UDP_RECEIVE_BATCH {
+            match socket.try_recv_from(&mut buf) {
+                Ok((len, source)) => {
+                    ready.push((
+                        Bytes::copy_from_slice(buf.get(..len).unwrap_or(&[])),
+                        source,
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    tracing::warn!(%error, "UDP receive task stopped");
+                    return;
+                }
+            }
+        }
+        for datagram in ready {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                sent = datagrams.send(datagram) => {
+                    if sent.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn sleep_until(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -3572,6 +3644,7 @@ mod tests {
         );
         let local_addr = socket.local_addr().expect("local address");
         let (_commands_tx, commands) = mpsc::channel(8);
+        let (_udp_tx, udp) = mpsc::channel(8);
         let (incoming, _incoming_rx) = mpsc::channel(8);
         let (_accepts_tx, accepts) = mpsc::channel(8);
         let (adopt, adopts) = mpsc::channel(8);
@@ -3580,6 +3653,7 @@ mod tests {
         let observations = Arc::new(crate::policy::ObservationHub::new(Arc::clone(&meters)));
         Driver {
             socket,
+            udp,
             layer: sipx_sip::transaction::TransactionLayer::new(sipx_sip::Timers::default()),
             timers: crate::timers::TimerQueue::new(),
             destinations: std::collections::HashMap::new(),

@@ -1,0 +1,29 @@
+{
+  "id": "sipgo",
+  "revision": "769e4bc958376e2363566c8f7042202b410becdc",
+  "version": "v1.4.3",
+  "artifact": "target/comparison/peer-endpoint-responder",
+  "build_command": "mkdir -p target/comparison && (cd docs/comparison/load/endpoints/peer-endpoint-responder && go build -trimpath -ldflags=-buildid= -o ../../../../../target/comparison/peer-endpoint-responder .)",
+  "toolchain": "go version go1.26.5-X:nodwarf5 linux/amd64",
+  "features": [
+    "UDP transaction server",
+    "comparison-profile adapter"
+  ],
+  "dependencies": [
+    "github.com/emiago/sipgo v1.4.3 and the checksums in go.sum"
+  ],
+  "responder_argv": [
+    "{artifact}",
+    "--local",
+    "127.0.0.1:0",
+    "--max-active",
+    "{max_active}",
+    "--cleanup",
+    "{cleanup_s}",
+    "--duration",
+    "{duration_s}",
+    "--seed",
+    "{seed}"
+  ]
+}
+

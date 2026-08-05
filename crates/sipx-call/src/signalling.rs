@@ -125,6 +125,7 @@ pub(crate) async fn establish(
         invite_cseq: prepared.invite_cseq,
         acknowledged: false,
         ended: false,
+        deferred_remote_bye: false,
         retransmission: Some(retransmission),
         last_request_elapsed: None,
         last_response_status: None,
@@ -155,6 +156,8 @@ pub struct SignallingCall {
     invite_cseq: u32,
     acknowledged: bool,
     ended: bool,
+    /// A valid BYE already answered while the peer's earlier ACK was still in flight.
+    deferred_remote_bye: bool,
     retransmission: Option<Retransmission>,
     last_request_elapsed: Option<Duration>,
     last_response_status: Option<u16>,
@@ -199,6 +202,12 @@ impl SignallingCall {
     /// panics or escapes as an internal error.
     pub async fn next(&mut self) -> Option<SignallingEvent> {
         loop {
+            if self.acknowledged && self.deferred_remote_bye {
+                self.deferred_remote_bye = false;
+                self.ended = true;
+                self.last_response_status = Some(200);
+                return Some(SignallingEvent::RemoteBye);
+            }
             if self.ended {
                 return None;
             }
@@ -215,7 +224,9 @@ impl SignallingCall {
                     let started = tokio::time::Instant::now();
                     let event = self.handle(*incoming).await;
                     self.last_request_elapsed = Some(started.elapsed());
-                    return Some(event);
+                    if let Some(event) = event {
+                        return Some(event);
+                    }
                 }
                 SignallingInput::Request(None) => {
                     self.stop();
@@ -279,7 +290,7 @@ impl SignallingCall {
         self.finish_retransmission();
     }
 
-    async fn handle(&mut self, incoming: Incoming) -> SignallingEvent {
+    async fn handle(&mut self, incoming: Incoming) -> Option<SignallingEvent> {
         self.last_response_status = None;
         if !self.dialog.matches(&incoming.request) {
             if incoming.request.method != Method::Ack
@@ -287,12 +298,12 @@ impl SignallingCall {
                     .await
                     .is_err()
             {
-                return SignallingEvent::TransportFailed;
+                return Some(SignallingEvent::TransportFailed);
             }
             if incoming.request.method != Method::Ack {
                 self.last_response_status = Some(481);
             }
-            return SignallingEvent::InvalidDialog;
+            return Some(SignallingEvent::InvalidDialog);
         }
 
         match incoming.request.method {
@@ -301,11 +312,11 @@ impl SignallingCall {
                     value.method == Method::Ack && value.sequence == self.invite_cseq
                 });
                 if !valid {
-                    return SignallingEvent::InvalidAck;
+                    return Some(SignallingEvent::InvalidAck);
                 }
                 self.acknowledged = true;
                 self.finish_retransmission();
-                SignallingEvent::Acknowledged
+                Some(SignallingEvent::Acknowledged)
             }
             Method::Bye => {
                 let Some(sequence) = cseq(&incoming.request)
@@ -316,10 +327,10 @@ impl SignallingCall {
                         .await
                         .is_err()
                     {
-                        return SignallingEvent::TransportFailed;
+                        return Some(SignallingEvent::TransportFailed);
                     }
                     self.last_response_status = Some(400);
-                    return SignallingEvent::InvalidCSeq;
+                    return Some(SignallingEvent::InvalidCSeq);
                 };
                 if self
                     .dialog
@@ -336,22 +347,25 @@ impl SignallingCall {
                     .await
                     .is_err()
                     {
-                        return SignallingEvent::TransportFailed;
+                        return Some(SignallingEvent::TransportFailed);
                     }
                     self.last_response_status = Some(500);
-                    return SignallingEvent::InvalidCSeq;
+                    return Some(SignallingEvent::InvalidCSeq);
                 }
                 self.dialog.record_remote_cseq(&incoming.request);
-                self.finish_retransmission();
-                self.ended = true;
                 if respond(&self.endpoint, &incoming, 200, "OK", None)
                     .await
                     .is_err()
                 {
-                    SignallingEvent::TransportFailed
-                } else {
+                    Some(SignallingEvent::TransportFailed)
+                } else if self.acknowledged {
+                    self.finish_retransmission();
+                    self.ended = true;
                     self.last_response_status = Some(200);
-                    SignallingEvent::RemoteBye
+                    Some(SignallingEvent::RemoteBye)
+                } else {
+                    self.deferred_remote_bye = true;
+                    None
                 }
             }
             _ => {
@@ -365,10 +379,10 @@ impl SignallingCall {
                 .await
                 .is_err()
                 {
-                    SignallingEvent::TransportFailed
+                    Some(SignallingEvent::TransportFailed)
                 } else {
                     self.last_response_status = Some(405);
-                    SignallingEvent::Unsupported
+                    Some(SignallingEvent::Unsupported)
                 }
             }
         }

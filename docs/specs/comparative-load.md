@@ -399,6 +399,8 @@ The signalling-only state machine is:
 | pending | matching CANCEL wins | dispatcher sends `200` to CANCEL and `487` to INVITE | terminal cancelled |
 | pending | policy accepts | claim INVITE; send bodyless `200`; arm RFC 3261 G/H retransmission | awaiting ACK |
 | awaiting ACK | matching ACK with INVITE CSeq | stop 2xx retransmission | established |
+| awaiting ACK | valid increasing BYE | send `200`; retain the completed dialog outcome until ACK | awaiting ACK, remote BYE pending |
+| awaiting ACK, remote BYE pending | matching ACK with INVITE CSeq | stop 2xx retransmission; publish ACK then remote-BYE outcomes | terminal completed |
 | awaiting ACK | final-response timer H | classify failure; release dialog | terminal failed |
 | established | valid increasing BYE | send `200`; release dialog | terminal completed |
 | established | dialog-duration deadline | originate BYE; require final 2xx within cleanup bound | terminal completed/failed |
@@ -407,7 +409,11 @@ The signalling-only state machine is:
 The 2xx retransmission schedule is driven inside the dialog worker rather than by a nested task, so
 worker completion is the complete ownership barrier. An ACK is validated
 against the dialog identifiers and the INVITE sequence; an arbitrary packet cannot establish a
-dialog. A BYE is validated against both tags, Call-ID, method-consistent CSeq and monotonically
+dialog. A valid BYE may reach the UAS before the ACK that the peer sent first: the BYE transaction
+is answered immediately, while the dialog worker retains its bounded completion outcome and keeps
+the 2xx retransmission active until the matching ACK arrives or Timer H expires. It then exposes
+the logical ACK-before-BYE outcome required by the profile without treating UDP arrival order as
+protocol order. A BYE is validated against both tags, Call-ID, method-consistent CSeq and monotonically
 increasing remote sequence before its `200` is counted. A final response to a locally originated
 BYE must likewise match both dialog tags, Call-ID and that BYE's exact CSeq before it can complete
 the dialog; each of Call-ID, From, To and CSeq occurs exactly once in that response. CANCEL remains

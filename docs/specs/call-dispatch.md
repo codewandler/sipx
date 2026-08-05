@@ -143,7 +143,11 @@ must not become a stack that drops the established calls of every other task.
 
 When the inbox is *closed* — the application dropped the receiver, which is what ending a call
 does — the route is removed and the request gets the answer an unknown dialog gets (§3 row 6).
-Routes are also swept on registration, so a long-lived dispatcher does not accumulate the dead.
+`Calls::forget` removes a known finished route immediately. Routes dropped without that explicit
+signal are also swept on observation and after each fixed interval of registrations, so a
+long-lived dispatcher does not accumulate the dead and a burst of N invitations does not perform
+N full routing-table walks. The interval bounds newly dead entries awaiting an insertion-path
+sweep; it does not change routing or overload outcomes.
 
 ## 6. `serve` is the one-call convenience
 

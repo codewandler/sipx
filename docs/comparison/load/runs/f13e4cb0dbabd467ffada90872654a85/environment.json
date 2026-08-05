@@ -1,0 +1,69 @@
+{
+ "builds": [
+  {
+   "artifact": "scripts/comparative-load-driver.py",
+   "artifact_sha256": "3b7ddf25cadc45512e8684863a065858acb29c5110643a7b5ce5a49a75b11acf",
+   "build_command": "none: an interpreted single-file instrument; the artifact hash pins its source bytes",
+   "dependencies": [],
+   "endpoint_id": "profile-driver",
+   "features": [],
+   "revision": "source-sha256:3b7ddf25cadc45512e8684863a065858acb29c5110643a7b5ce5a49a75b11acf",
+   "role": "driver",
+   "toolchain": "python3 (exact interpreter recorded per run in environment.json toolchains)"
+  },
+  {
+   "artifact": "target/comparison/peer-endpoint-responder",
+   "artifact_sha256": "b8b0f08660743202c02a85301296c2468d07375f066064e62f777b22584951e9",
+   "build_command": "mkdir -p target/comparison && (cd docs/comparison/load/endpoints/peer-endpoint-responder && go build -trimpath -ldflags=-buildid= -o ../../../../../target/comparison/peer-endpoint-responder .)",
+   "dependencies": [
+    "github.com/emiago/sipgo v1.4.3 and the checksums in go.sum"
+   ],
+   "endpoint_id": "sipgo",
+   "features": [
+    "UDP transaction server",
+    "comparison-profile adapter"
+   ],
+   "revision": "769e4bc958376e2363566c8f7042202b410becdc",
+   "role": "responder",
+   "toolchain": "go version go1.26.5-X:nodwarf5 linux/amd64"
+  }
+ ],
+ "captured_utc": "2026-08-05T10:33:24Z",
+ "commands": [
+  "scripts/comparative-load-run.py --endpoint docs/comparison/load/endpoints/sipgo.json --driver docs/comparison/load/endpoints/profile-driver.json --ceiling 1024 --seed 7"
+ ],
+ "contract_sha256": "cbf5dbfd39fc8072fdf450fa1d43fc16abbb9c3fa5a4cbb7fac21309eec411bf",
+ "host": {
+  "architecture": "x86_64",
+  "clock": "CLOCK_MONOTONIC",
+  "cpu_governor": "powersave",
+  "kernel": "#1 SMP PREEMPT_DYNAMIC Tue Jul 14 15:26:32 UTC 2026",
+  "logical_cpus": 20,
+  "memory_bytes": 67321208832,
+  "os": "Linux 6.6.144-3-MANJARO"
+ },
+ "schema": "sipx.comparative-load.environment.v1",
+ "seed": 7,
+ "socket_limits": {
+  "rlimit_nofile_hard": 1000000,
+  "rlimit_nofile_soft": 1000000,
+  "rmem_default": 212992,
+  "rmem_max": 212992,
+  "wmem_default": 212992,
+  "wmem_max": 212992
+ },
+ "toolchains": [
+  {
+   "tool": "python3",
+   "version": "Python 3.14.6"
+  },
+  {
+   "tool": "rustc",
+   "version": "rustc 1.97.0 (2d8144b78 2026-07-07)"
+  },
+  {
+   "tool": "cargo",
+   "version": "cargo 1.97.0 (c980f4866 2026-06-30)"
+  }
+ ]
+}

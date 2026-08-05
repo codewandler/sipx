@@ -214,9 +214,17 @@ subject version it was evaluated against.
 
 **One neutral workload — UDP dialog signalling without SDP or media — offered by the same pinned driver to each endpoint acting as responder.**
 
-The driver proves at least twice the tested ceiling against a packaged minimal fixture before any endpoint is measured, one hundred low-rate dialogs qualify protocol correctness before any capacity work, and the fixed six-rate ladder runs five repetitions per rate at open-loop offered load — the driver never raises or lowers what it offers as a target slows. Raw per-repetition records, environment inventory and hashes live under `docs/comparison/load/` and regenerate this section.
+### What the harness measures
 
-The following are **not inferred** from this result: secure transports, connection churn, audio.
+- **Fixed load:** fixed open-loop offered load, so a slowing responder never causes the caller to quietly offer less work.
+- **Validity before speed:** correctness qualification completes one hundred low-rate five-message dialogs before any capacity number is admitted.
+- **Instrument margin:** driver headroom is proven against a packaged minimal fixture at twice the tested ceiling.
+- **Repeatability:** six rates and five repetitions per rate expose a supported point and its achieved-throughput spread rather than one best run.
+- **Behavior and cost:** setup and teardown latency, process resource samples, response counts and errors are retained for every repetition.
+- **Finite ownership:** bounded cleanup must stop admission, drain state and exit the supervised process group without escalation.
+- **Auditability:** raw evidence includes manifests, environment and toolchain inventory, exact commands, seeds, artifact hashes and per-repetition JSON under `docs/comparison/load/`.
+
+The following are **not inferred** from this result: secure transports, connection churn, audio, proxy, registrar, routing or cluster behavior; those workloads belong to [sipx.clstr](https://github.com/codewandler/sipx-clstr).
 
 ### Responder capacity: sipx
 
@@ -233,6 +241,24 @@ Capacity point: **128 calls/s**, achieved interval [128.0, 128.0] dialogs/s over
 
 - Caller (UAC) direction: not measured — the pinned build exposes a bounded responder but no neutral-profile caller command
 - Internal state visibility: `endpoint-reported` — post-drain dialog, transaction, route and task state comes from the endpoint's terminal summary
+
+### Responder capacity: sipgo
+
+| Rate (calls/s) | Outcome | Median achieved (dialogs/s) | Spread [min, max] | Setup p99 (ms, median) |
+|---|---|---|---|---|
+| 32 | supported (5/5) | 32.0 | [32.0, 32.0] | 1 |
+| 64 | supported (5/5) | 64.0 | [64.0, 64.0] | 1 |
+| 128 | supported (5/5) | 128.0 | [128.0, 128.0] | 1 |
+| 256 | supported (5/5) | 256.0 | [256.0, 256.0] | 0 |
+| 512 | supported (5/5) | 512.0 | [512.0, 512.0] | 0 |
+| 1024 | supported (5/5) | 1024.0 | [1024.0, 1024.0] | 0 |
+
+Capacity is at least **1024 calls/s**: the highest tested rate passed, so this ladder established a lower bound rather than finding a failure ceiling. Achieved interval [1024.0, 1024.0] dialogs/s over five repetitions.
+
+- Caller (UAC) direction: not measured — the pinned library was adapted only as a neutral-profile responder; caller behavior is outside this endpoint comparison
+- Internal state visibility: `harness-observed` — the adapter reports active profile dialogs; transaction cleanup is evidenced by bounded process shutdown rather than subject-internal counters
+
+The measured interval for sipgo is higher on this machine and profile than the interval for sipx. That statement holds for these exact builds, this machine and this profile only — it is not a general ranking.
 <!-- END generated:comparison -->
 
 </div>

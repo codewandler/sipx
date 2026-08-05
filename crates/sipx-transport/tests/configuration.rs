@@ -48,6 +48,33 @@ async fn zero_application_capacity_is_a_pre_bind_configuration_error() {
 }
 
 #[tokio::test]
+async fn application_capacity_above_the_runtime_limit_is_rejected_before_binding() {
+    let address = unused_address().await;
+    let mut config = Config::new(address);
+    config.capacity = tokio::sync::Semaphore::MAX_PERMITS + 1;
+    let error = bind(config)
+        .await
+        .expect_err("an oversized channel capacity is invalid");
+    assert!(
+        matches!(
+            error,
+            Error::InvalidConfig {
+                field: "capacity",
+                reason: "exceeds the runtime channel limit"
+            }
+        ),
+        "unexpected error: {error}"
+    );
+    let udp = UdpSocket::bind(address)
+        .await
+        .expect("validation left UDP unbound");
+    let tcp = TcpListener::bind(address)
+        .await
+        .expect("validation left TCP unbound");
+    drop((udp, tcp));
+}
+
+#[tokio::test]
 async fn zero_pool_limit_is_a_pre_bind_configuration_error() {
     let address = unused_address().await;
     let mut config = Config::new(address);

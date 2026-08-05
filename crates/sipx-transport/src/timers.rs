@@ -58,6 +58,9 @@ impl<K: Eq, I: Ord> PartialOrd for Entry<K, I> {
 pub struct TimerQueue<K, I = Instant> {
     heap: BinaryHeap<Reverse<Entry<K, I>>>,
     generations: HashMap<K, u64>,
+    /// Queue-global identity for the next schedule, so forgetting and reusing a key cannot make a
+    /// stale heap entry live again.
+    next_generation: u64,
 }
 
 // The bounds match `Entry`'s `Ord` impl rather than `new`'s: `BinaryHeap::new` requires its element
@@ -68,6 +71,7 @@ impl<K: Eq, I: Ord> Default for TimerQueue<K, I> {
         Self {
             heap: BinaryHeap::new(),
             generations: HashMap::new(),
+            next_generation: 0,
         }
     }
 }
@@ -110,6 +114,15 @@ impl<K: Clone + Eq + Hash, I: Ord + Copy + Add<Duration, Output = I>> TimerQueue
         self.bump(key);
     }
 
+    /// Forget one timer key and its generation counter.
+    ///
+    /// The heap entry, if any, becomes stale and is discarded when it reaches the front. This is
+    /// the constant-time termination path for callers that can enumerate their small timer set;
+    /// [`Self::forget_matching`] remains the general full-map operation.
+    pub fn forget(&mut self, key: &K) {
+        self.generations.remove(key);
+    }
+
     /// Cancel every timer whose key matches.
     ///
     /// The general form of "cancel everything belonging to this transaction", which is what
@@ -128,9 +141,32 @@ impl<K: Clone + Eq + Hash, I: Ord + Copy + Add<Duration, Output = I>> TimerQueue
     }
 
     fn bump(&mut self, key: &K) -> u64 {
-        let slot = self.generations.entry(key.clone()).or_insert(0);
-        *slot += 1;
-        *slot
+        if self.next_generation == u64::MAX {
+            self.compact_generations();
+        }
+        self.next_generation += 1;
+        self.generations.insert(key.clone(), self.next_generation);
+        self.next_generation
+    }
+
+    /// Discard every stale entry and renumber the live set before the global identity wraps.
+    ///
+    /// This path requires `u64::MAX` schedules from one queue before it runs. Keeping it complete
+    /// avoids either a debug-build overflow panic or a wrapped identity reviving an old entry.
+    fn compact_generations(&mut self) {
+        let previous = std::mem::take(&mut self.generations);
+        let entries = std::mem::take(&mut self.heap);
+        self.next_generation = 0;
+        for Reverse(mut entry) in entries {
+            if previous.get(&entry.key) != Some(&entry.generation) {
+                continue;
+            }
+            self.next_generation += 1;
+            entry.generation = self.next_generation;
+            self.generations
+                .insert(entry.key.clone(), self.next_generation);
+            self.heap.push(Reverse(entry));
+        }
     }
 
     /// When the next live timer is due, if any.
@@ -241,6 +277,38 @@ mod tests {
         q.clear(&(key("a"), Timer::A));
 
         assert!(q.take_due(now + Duration::from_millis(200)).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn forgetting_one_timer_discards_its_generation_without_scanning_others() {
+        let mut q = Transactions::new();
+        let now = Instant::now();
+        let forgotten = (key("a"), Timer::A);
+        let live = (key("z"), Timer::B);
+        q.set(forgotten.clone(), now, Duration::from_millis(100));
+        q.set(live.clone(), now, Duration::from_millis(200));
+
+        q.forget(&forgotten);
+
+        assert!(!q.generations.contains_key(&forgotten));
+        assert!(q.generations.contains_key(&live));
+        assert_eq!(q.take_due(now + Duration::from_millis(300)), vec![live]);
+    }
+
+    /// A peer may reuse a transaction key after its previous transaction has terminated. Its new
+    /// first timer must not share the old heap entry's generation and make that stale entry live.
+    #[tokio::test(start_paused = true)]
+    async fn reusing_a_forgotten_key_does_not_revive_its_stale_timer() {
+        let mut q = Transactions::new();
+        let now = Instant::now();
+        let reused = (key("a"), Timer::A);
+        q.set(reused.clone(), now, Duration::from_millis(100));
+        q.forget(&reused);
+
+        q.set(reused.clone(), now, Duration::from_millis(200));
+
+        assert!(q.take_due(now + Duration::from_millis(100)).is_empty());
+        assert_eq!(q.take_due(now + Duration::from_millis(200)), vec![reused]);
     }
 
     /// Re-setting a timer replaces it rather than adding a second one — the retransmission case,

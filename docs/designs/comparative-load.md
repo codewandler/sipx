@@ -1,7 +1,7 @@
 # Design: comparative signalling load
 
 **Status:** accepted · **Pillar:** Build · **Epic:** `comparative-load` · **Stories:** X-98, P-15,
-X-99
+X-99, X-102
 
 ## Why
 
@@ -29,6 +29,11 @@ finite fixed-rate ladder uses five repetitions with warm-up, measurement and dra
 failure is reported as not measured, and overlapping uncertainty is inconclusive. Subject-specific
 names, revision pins, commands and results stay in the comparison data directory; generic code,
 specification and stories stay subject-neutral.
+
+The profile compares SIP endpoints acting as one dialog peer, not network services forwarding for
+other peers. Proxy forwarding, registration, routing, forking and cluster behavior have different
+state and topology costs and therefore belong to separate profiles in sipx.clstr. Neither an
+endpoint result nor a difference between endpoint results may be presented as proxy capacity.
 
 ## Exit
 

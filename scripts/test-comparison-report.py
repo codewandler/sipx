@@ -2173,6 +2173,37 @@ def load_dataset_problems(dataset=None, runs=None, stacks=None, today=TODAY):
 class TheComparativeLoadDataset(unittest.TestCase):
     """X-99's published result: fresh, hash-pinned, qualified first, and never a ranking."""
 
+    def comparable_pair(self, change_manifest=lambda manifest: None):
+        dataset = a_load_dataset()
+        manifest = a_load_manifest()
+        manifest["run_id"] = "fedcba9876543210fedcba9876543210"
+        manifest["direction"]["responder"] = "endpoint-c"
+        manifest["builds"][1]["endpoint_id"] = "endpoint-c"
+        manifest["builds"][1]["revision"] = "revision-c"
+        manifest["builds"][1]["artifact_sha256"] = "c" * 64
+        change_manifest(manifest)
+        key = "runs/" + manifest["run_id"]
+        dataset["endpoints"].append(
+            {
+                "id": "endpoint-c",
+                "as_responder": {"status": "measured", "run": key},
+                "as_driver": {
+                    "status": "not_measured",
+                    "reason": "the pinned build ships no neutral-profile driver",
+                },
+                "internal_state": {
+                    "visibility": "harness-observed",
+                    "note": "post-drain state is observed by the harness only",
+                },
+            }
+        )
+        runs = {LOAD_RUN_KEY: a_load_run(), key: a_load_run(manifest)}
+        stacks = [
+            a_stack(id="endpoint-b", name="Fixture B"),
+            a_stack(id="endpoint-c", name="Fixture C"),
+        ]
+        return dataset, runs, stacks
+
     def test_a_complete_dataset_has_no_problems(self) -> None:
         self.assertEqual([], load_dataset_problems())
 
@@ -2192,6 +2223,28 @@ class TheComparativeLoadDataset(unittest.TestCase):
         self.assertTrue(
             any("artifact" in p and "manifest" in p for p in problems), problems
         )
+
+    def test_cross_endpoint_results_must_share_the_same_host(self) -> None:
+        dataset, runs, stacks = self.comparable_pair(
+            lambda manifest: manifest["machine"].update({"logical_cpus": 16})
+        )
+        problems = report.load_problems(dataset, runs, stacks, TODAY)
+        self.assertTrue(any("same host" in p for p in problems), problems)
+
+    def test_cross_endpoint_results_must_share_the_execution_profile(self) -> None:
+        changes = (
+            ("ceiling", lambda manifest: manifest.update({"ceiling": 2048})),
+            ("seed", lambda manifest: manifest.update({"seed": 19})),
+            (
+                "provisional-response policy",
+                lambda manifest: manifest.update({"provisional_policy": "none"}),
+            ),
+        )
+        for expected, change in changes:
+            with self.subTest(expected=expected):
+                dataset, runs, stacks = self.comparable_pair(change)
+                problems = report.load_problems(dataset, runs, stacks, TODAY)
+                self.assertTrue(any(expected in p for p in problems), problems)
 
     def test_contract_drift_is_refused(self) -> None:
         run = a_load_run()
@@ -2340,6 +2393,43 @@ class TheComparativeLoadDataset(unittest.TestCase):
         )
         self.assertIn("UDP dialog signalling without SDP or media", text)
         self.assertIn("not inferred", text)
+
+    def test_the_harness_capabilities_and_proxy_boundary_are_rendered(self) -> None:
+        dataset = a_load_dataset()
+        dataset["scope"]["not_inferred"].append(
+            "proxy, registrar, routing or cluster behavior; those workloads belong to sipx.clstr"
+        )
+        text = "\n".join(
+            report.render_load_section(
+                dataset,
+                {LOAD_RUN_KEY: a_load_run()},
+                [a_stack(id="endpoint-b", name="Fixture B")],
+            )
+        )
+        for capability in (
+            "fixed open-loop offered load",
+            "correctness qualification",
+            "driver headroom",
+            "six rates",
+            "five repetitions",
+            "setup and teardown latency",
+            "process resource samples",
+            "bounded cleanup",
+            "raw evidence",
+        ):
+            self.assertIn(capability, text)
+        self.assertIn("sipx.clstr", text)
+
+    def test_a_supported_top_rate_is_rendered_as_a_lower_bound(self) -> None:
+        text = "\n".join(
+            report.render_load_section(
+                a_load_dataset(),
+                {LOAD_RUN_KEY: a_load_run()},
+                [a_stack(id="endpoint-b", name="Fixture B")],
+            )
+        )
+        self.assertIn("at least **1024 calls/s**", text)
+        self.assertIn("highest tested rate", text)
 
 
 class TheRealDataset(unittest.TestCase):

@@ -1,0 +1,98 @@
+{
+ "builds": [
+  {
+   "argv": [
+    "/usr/bin/python3",
+    "/home/timo/projects/sipx/.claude/worktrees/load-peer-comparison/scripts/comparative-load-driver.py",
+    "--role",
+    "driver",
+    "--target",
+    "{target}",
+    "--seed",
+    "{seed}",
+    "--run-id",
+    "f13e4cb0dbabd467ffada90872654a85",
+    "--max-active",
+    "8192",
+    "--provisional",
+    "trying_100"
+   ],
+   "artifact_sha256": "3b7ddf25cadc45512e8684863a065858acb29c5110643a7b5ce5a49a75b11acf",
+   "cwd": "/home/timo/projects/sipx/.claude/worktrees/load-peer-comparison",
+   "endpoint_id": "profile-driver",
+   "env_keys": [
+    "PATH"
+   ],
+   "revision": "source-sha256:3b7ddf25cadc45512e8684863a065858acb29c5110643a7b5ce5a49a75b11acf",
+   "role": "driver"
+  },
+  {
+   "argv": [
+    "/home/timo/projects/sipx/.claude/worktrees/load-peer-comparison/target/comparison/peer-endpoint-responder",
+    "--local",
+    "127.0.0.1:0",
+    "--max-active",
+    "{max_active}",
+    "--cleanup",
+    "{cleanup_s}",
+    "--duration",
+    "{duration_s}",
+    "--seed",
+    "{seed}"
+   ],
+   "artifact_sha256": "b8b0f08660743202c02a85301296c2468d07375f066064e62f777b22584951e9",
+   "cwd": "/home/timo/projects/sipx/.claude/worktrees/load-peer-comparison",
+   "endpoint_id": "sipgo",
+   "env_keys": [
+    "PATH"
+   ],
+   "revision": "769e4bc958376e2363566c8f7042202b410becdc",
+   "role": "responder"
+  }
+ ],
+ "ceiling": 1024,
+ "direction": {
+  "driver": "profile-driver",
+  "index": 0,
+  "responder": "sipgo"
+ },
+ "ladder": {
+  "divisors": [
+   32,
+   16,
+   8,
+   4,
+   2,
+   1
+  ],
+  "repetitions": 5,
+  "stop_after_failed_rates": 2
+ },
+ "limits": {
+  "active": 8192,
+  "event_bytes": 67108864,
+  "events": 65536,
+  "stderr_bytes": 16777216,
+  "stdout_bytes": 16777216
+ },
+ "machine": {
+  "architecture": "x86_64",
+  "clock": "CLOCK_MONOTONIC",
+  "logical_cpus": 20,
+  "memory_bytes": 67321208832,
+  "os": "Linux 6.6.144-3-MANJARO"
+ },
+ "phases": {
+  "correctness_dialogs": 20,
+  "correctness_rate": 1,
+  "drain_ms": 40000,
+  "headroom_multiplier": 2,
+  "measurement_ms": 60000,
+  "readiness_ms": 10000,
+  "warmup_ms": 10000
+ },
+ "provisional_policy": "trying_100",
+ "run_id": "f13e4cb0dbabd467ffada90872654a85",
+ "schema": "sipx.comparative-load.manifest.v1",
+ "seed": 7
+}

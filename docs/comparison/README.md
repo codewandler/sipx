@@ -113,6 +113,32 @@ mutable URL. `documented` relies on the subject's own prose; `assessed` requires
 Capability rows cannot claim `generated`, because this repository cannot generate a fact from
 another repository's build.
 
+### `load/`: comparative endpoint-load evidence
+
+The load registry holds a different kind of comparison: executions of the same neutral endpoint
+profile rather than observations read from source. `load/dataset.json` names the pinned driver,
+the measured endpoint roles, the raw run directory for each role, internal-state visibility and
+the behaviors the result does not infer.
+
+Each `load/endpoints/<id>.json` fixes an endpoint revision, version, artifact, build command,
+toolchain, dependency inventory and responder argument vector. A small profile adapter may live
+beside that descriptor when an endpoint exposes a library rather than a compatible command. The
+adapter is measurement glue: it must preserve the subject's transaction implementation while
+supplying only the deterministic tags, readiness and terminal summary required by the neutral
+profile. Its source and dependency checksums are part of the evidence.
+
+One run directory contains `manifest.json`, `environment.json`, correctness `preflight.json` and
+`qualification.json`, driver `headroom.json`, `omissions.json`, and every raw rate/repetition result.
+The checker refuses a side-by-side publication unless all measured endpoints share the same host,
+host inventory, socket limits, driver artifact, ceiling, seed, provisional-response policy,
+resource limits, phase durations and ladder definition. This makes “same workload” a checked fact
+rather than a caption.
+
+The harness measures fixed open-loop offered load, completed-dialog throughput, setup and teardown
+latency, process resource samples, response/error counts and bounded cleanup. It does not measure
+proxy forwarding, registrar lookup, routing, forking or cluster behavior. Those profiles and their
+results belong in sipx.clstr and must not be inferred from an endpoint capacity point here.
+
 `capabilities/external/*.json` pins the repository revision, exact story paths and their Git blob
 identities for cluster-owned rows. The checker fetches the pinned commit and resolves each path's
 blob before deriving the only permitted URLs, so a misspelled repository, moving `main` link,

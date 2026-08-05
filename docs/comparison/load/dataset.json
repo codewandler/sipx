@@ -19,6 +19,21 @@
     "note": "post-drain dialog, transaction, route and task state comes from the endpoint's terminal summary",
     "visibility": "endpoint-reported"
    }
+  },
+  {
+   "as_driver": {
+    "reason": "the pinned library was adapted only as a neutral-profile responder; caller behavior is outside this endpoint comparison",
+    "status": "not_measured"
+   },
+   "as_responder": {
+    "run": "runs/f13e4cb0dbabd467ffada90872654a85",
+    "status": "measured"
+   },
+   "id": "sipgo",
+   "internal_state": {
+    "note": "the adapter reports active profile dialogs; transaction cleanup is evidenced by bounded process shutdown rather than subject-internal counters",
+    "visibility": "harness-observed"
+   }
   }
  ],
  "evaluated_at": "2026-08-05",
@@ -27,7 +42,8 @@
   "not_inferred": [
    "secure transports",
    "connection churn",
-   "audio"
+   "audio",
+   "proxy, registrar, routing or cluster behavior; those workloads belong to [sipx.clstr](https://github.com/codewandler/sipx-clstr)"
   ],
   "workload": "UDP dialog signalling without SDP or media"
  }

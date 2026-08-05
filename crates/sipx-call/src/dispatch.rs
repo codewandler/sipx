@@ -81,6 +81,13 @@ use crate::subscriber::EventSubscriptions;
 /// buffered for. Override with [`Dispatcher::with_queue`].
 pub const DEFAULT_QUEUE: usize = 16;
 
+/// Amortize dead-route collection instead of walking both routing indexes for every INVITE.
+///
+/// The interval is a memory bound as well as a CPU budget: at most this many newly dead routes
+/// can accumulate between insertion-path sweeps. Explicit [`Calls::forget`] and observations
+/// through [`Calls::len`] still remove routes immediately or on demand.
+const DEAD_ROUTE_SWEEP_INTERVAL: usize = 256;
+
 /// The `Retry-After` a shed request carries, in seconds.
 ///
 /// The same value [`sipx_transport`] sheds with, for the same reason: the peer is being told the
@@ -647,6 +654,23 @@ struct Routing {
     /// Every INVITE server transaction this dispatcher has surfaced and not yet swept, keyed by
     /// [`TransactionKey::for_cancelled_invite`]'s answer for the CANCEL that would name it.
     invites: HashMap<TransactionKey, Arc<Pending>>,
+    /// Registrations since the last insertion-path dead-route sweep.
+    registrations_since_sweep: usize,
+}
+
+impl Routing {
+    fn sweep_dead(&mut self) {
+        self.by_dialog.retain(|_, route| !route.tx.is_closed());
+        self.invites.retain(|_, pending| !pending.route.is_closed());
+        self.registrations_since_sweep = 0;
+    }
+
+    fn sweep_dead_if_due(&mut self) {
+        self.registrations_since_sweep = self.registrations_since_sweep.saturating_add(1);
+        if self.registrations_since_sweep >= DEAD_ROUTE_SWEEP_INTERVAL {
+            self.sweep_dead();
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -710,10 +734,7 @@ impl Calls {
     #[must_use]
     pub fn len(&self) -> usize {
         let mut routing = self.lock();
-        routing.by_dialog.retain(|_, route| !route.tx.is_closed());
-        routing
-            .invites
-            .retain(|_, pending| !pending.route.is_closed());
+        routing.sweep_dead();
         routing.by_dialog.len()
     }
 
@@ -835,11 +856,12 @@ impl Calls {
         (rx, pending, stream)
     }
 
-    /// Put a route in the table, replacing whatever was there, and sweep the dead on the way.
+    /// Put a route in the table, replacing whatever was there, and periodically sweep the dead.
     ///
     /// A call that has ended dropped its inbox, so its route is dead weight until something
-    /// arrives for it. Sweeping on the operations that are already taking the lock keeps a
-    /// long-lived dispatcher from accumulating them.
+    /// arrives for it. Sweeping on a bounded fraction of the operations that already take the
+    /// lock keeps a long-lived dispatcher from accumulating them without turning N concurrent
+    /// invitations into N full walks over both routing indexes.
     ///
     /// An INVITE transaction is swept with the route it reserved, and only then: a CANCEL for an
     /// invitation that has been answered still has to draw the `200` of RFC 3261 §9.2, and that
@@ -851,10 +873,7 @@ impl Calls {
     ) -> (mpsc::Sender<Incoming>, mpsc::Receiver<Incoming>) {
         let (tx, rx) = mpsc::channel(self.0.queue);
         let mut routing = self.lock();
-        routing.by_dialog.retain(|_, route| !route.tx.is_closed());
-        routing
-            .invites
-            .retain(|_, pending| !pending.route.is_closed());
+        routing.sweep_dead_if_due();
         routing.by_dialog.insert(
             key,
             Route {
@@ -1431,6 +1450,15 @@ mod tests {
     use super::*;
     use sipx_sip::{Limits, Message, parse_datagram};
 
+    fn calls_for_test() -> Calls {
+        Calls(Arc::new(Table {
+            routes: Mutex::new(Routing::default()),
+            counts: Counters::default(),
+            responses: Mutex::new(BTreeMap::new()),
+            queue: 1,
+        }))
+    }
+
     fn request(text: &str) -> Request {
         match parse_datagram(Bytes::from(text.to_owned()), &Limits::datagram()).expect("parses") {
             Message::Request(r) => r,
@@ -1480,6 +1508,25 @@ mod tests {
              Content-Length: 0\r\n\r\n",
         );
         assert!(RouteKey::of(&tagless).is_none(), "no From tag, no route");
+    }
+
+    /// A full-table retain on every registration made a burst of N invitations quadratic. Dead
+    /// routes may wait for collection, but only for the fixed amortization interval.
+    #[test]
+    fn registration_sweeps_dead_routes_at_a_bounded_interval() {
+        let calls = calls_for_test();
+        for index in 0..DEAD_ROUTE_SWEEP_INTERVAL {
+            let key = RouteKey {
+                call_id: format!("call-{index}").into_bytes(),
+                peer_tag: b"peer".to_vec(),
+            };
+            let receiver = calls.install(key, None).1;
+            drop(receiver);
+        }
+
+        let routing = calls.lock();
+        assert_eq!(routing.by_dialog.len(), 1);
+        assert_eq!(routing.registrations_since_sweep, 0);
     }
 
     /// The 405's `Allow` and this predicate must be the same list, or one message advertises a

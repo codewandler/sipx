@@ -41,6 +41,17 @@ retransmission fires for something not yet sent.
 there are no locks in the signalling path and no way to observe a half-applied transition.
 The application talks to the loop over channels.
 
+**[sipx] UDP receipt is separated from transaction work by the configured bounded event queue.**
+The socket reader owns no transaction state: it copies datagrams in kernel arrival order into one
+`Config::capacity` channel, while the driver remains the only task that parses them and mutates the
+transaction layer. On each readiness it first copies at most `UDP_RECEIVE_BATCH` ready datagrams,
+then enqueues those datagrams individually; batching reduces scheduler handoffs but cannot enlarge
+the channel's event bound. This keeps a small kernel receive buffer from becoming the burst
+boundary. A full userspace queue backpressures the reader and is therefore still a finite overload
+boundary; shutdown cancels and joins the reader before the driver reports completion. A configured
+capacity above the runtime channel limit is a typed pre-bind refusal, never a channel-construction
+panic.
+
 ## 3. Timers
 
 **[sipx]** A single earliest-deadline-first queue for the whole endpoint, keyed by
@@ -50,6 +61,10 @@ profile.
 
 **[sipx]** `ClearTimer` marks the entry dead rather than removing it from the middle of the
 queue; the entry is discarded when it surfaces. Cancellation is common and cheap this way.
+
+**[sipx]** Transaction termination forgets the fixed RFC timer vocabulary for that transaction
+by exact key. It MUST NOT scan timer-generation entries belonging to every other live transaction;
+termination cost is bounded by `Timer::ALL`, not by endpoint concurrency.
 
 **[sipx]** A timer that fires for a transaction that no longer exists is dropped silently. It
 is a race the design permits, not an error.

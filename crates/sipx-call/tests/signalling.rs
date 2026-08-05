@@ -171,6 +171,101 @@ async fn bodyless_invite_ack_bye_is_a_complete_signalling_dialog() {
 }
 
 #[tokio::test]
+async fn a_bye_delivered_before_its_ack_preserves_the_logical_dialog_order() {
+    let (callee, incoming) = endpoint().await;
+    let callee_addr = callee.local_addr();
+    let mut dispatcher = Dispatcher::new(callee.clone(), incoming);
+    let (surfaced, mut invitations) = mpsc::channel(1);
+    let pump = tokio::spawn(async move {
+        while let Some(item) = dispatcher.next().await {
+            if surfaced.send(item).await.is_err() {
+                return;
+            }
+        }
+    });
+    let (peer, _peer_incoming) = endpoint().await;
+    let invite = request(
+        &peer,
+        &Method::Invite,
+        "signal-reordered@driver.invalid",
+        None,
+        1,
+    );
+    let asking = {
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            let mut responses = peer
+                .send(invite, Target::udp(callee_addr))
+                .await
+                .expect("INVITE sends");
+            responses.final_response().await.expect("accepted")
+        })
+    };
+    let invitation = match invitations.recv().await.expect("surfaced") {
+        Dispatched::Invitation(invitation) => invitation,
+        other => panic!("expected invitation, got {other:?}"),
+    };
+    let mut call = invitation
+        .answer_signalling_with_tag(
+            &callee,
+            format!("<sip:load@{}>", callee.advertised()),
+            "t-fixed",
+        )
+        .await
+        .expect("answers");
+    assert_eq!(asking.await.expect("joins").status.code(), 200);
+
+    let bye = request(
+        &peer,
+        &Method::Bye,
+        "signal-reordered@driver.invalid",
+        Some("t-fixed"),
+        2,
+    );
+    let mut bye_responses = peer
+        .send(bye, Target::udp(callee_addr))
+        .await
+        .expect("BYE sends first");
+    peer.send_directly(
+        request(
+            &peer,
+            &Method::Ack,
+            "signal-reordered@driver.invalid",
+            Some("t-fixed"),
+            1,
+        ),
+        Target::udp(callee_addr),
+    )
+    .await
+    .expect("ACK sends second");
+
+    assert_eq!(
+        call.next().await.expect("logical ACK event"),
+        SignallingEvent::Acknowledged
+    );
+    assert_eq!(
+        call.next().await.expect("deferred BYE event"),
+        SignallingEvent::RemoteBye
+    );
+    assert_eq!(call.take_response_status(), Some(200));
+    assert_eq!(
+        bye_responses
+            .final_response()
+            .await
+            .expect("BYE was answered without waiting for ACK")
+            .status
+            .code(),
+        200
+    );
+    assert!(call.is_ended());
+
+    pump.abort();
+    let _ = pump.await;
+    callee.shutdown().await;
+    peer.shutdown().await;
+}
+
+#[tokio::test]
 async fn wrong_ack_sequence_is_typed_and_does_not_establish() {
     let (callee, incoming) = endpoint().await;
     let callee_addr = callee.local_addr();

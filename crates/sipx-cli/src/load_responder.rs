@@ -47,6 +47,12 @@ const DEFAULT_DIALOG_DURATION: Duration = Duration::from_secs(40);
 const PER_DIALOG_QUEUE: usize = 8;
 const MAX_LATENCY_SAMPLES: usize = 65_536;
 
+fn endpoint_event_capacity(max_active: usize) -> usize {
+    max_active
+        .saturating_mul(PER_DIALOG_QUEUE)
+        .clamp(1, tokio::sync::Semaphore::MAX_PERMITS)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Signalling,
@@ -96,6 +102,13 @@ impl Limits {
             return Err(format!(
                 "--max-active must not exceed {}",
                 tokio::sync::Semaphore::MAX_PERMITS
+            ));
+        }
+        let event_capacity = endpoint_event_capacity(max_active);
+        if event_capacity / PER_DIALOG_QUEUE != max_active {
+            return Err(format!(
+                "--max-active must not exceed {} when each dialog reserves {PER_DIALOG_QUEUE} events",
+                tokio::sync::Semaphore::MAX_PERMITS / PER_DIALOG_QUEUE
             ));
         }
         let calls = args
@@ -418,11 +431,16 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     };
     let mut config = TransportConfig::new(local);
     config.sent_by = local.ip().to_string();
+    let queued_events = endpoint_event_capacity(limits.max_active);
+    // The readiness budget is also the transport-to-application queue budget. Leaving the
+    // generic endpoint default here made this bounded responder advertise 16,384 events while
+    // shedding at 1,024, turning queue pressure into retransmission amplification well below its
+    // configured active-dialog limit.
+    config.capacity = queued_events;
     let (endpoint, incoming) = match bind(config).await {
         Ok(endpoint) => endpoint,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
     };
-    let queued_events = limits.max_active.saturating_mul(PER_DIALOG_QUEUE);
     if let Err(error) =
         crate::load_responder_readiness::emit(&endpoint, limits.max_active, queued_events)
     {
@@ -451,6 +469,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     let mut deadline_leftovers = None;
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
     let mut signal_open = true;
+    let mut data_priority = DataPriority::Dispatch;
     loop {
         if !admission_open && workers.is_empty() {
             let routes = calls.len();
@@ -462,24 +481,42 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             }
         }
 
-        let selected = tokio::select! {
-            biased;
-            signal = &mut ctrl_c, if signal_open => {
-                signal_open = false;
-                match signal {
-                    Ok(()) => LoopEvent::Interrupt,
-                    Err(error) => LoopEvent::Internal(format!("signal handler failed: {error}")),
+        let selected = {
+            let control = async {
+                tokio::select! {
+                    biased;
+                    signal = &mut ctrl_c, if signal_open => {
+                        signal_open = false;
+                        match signal {
+                            Ok(()) => LoopEvent::Interrupt,
+                            Err(error) => LoopEvent::Internal(format!("signal handler failed: {error}")),
+                        }
+                    }
+                    () = sleep_until(admission_deadline), if admission_open && admission_deadline.is_some() => {
+                        LoopEvent::AdmissionElapsed
+                    }
+                    () = sleep_until(cleanup_deadline), if !admission_open && cleanup_deadline.is_some() => {
+                        LoopEvent::CleanupElapsed
+                    }
                 }
+            };
+            tokio::pin!(control);
+            match data_priority {
+                DataPriority::Dispatch => tokio::select! {
+                    biased;
+                    event = &mut control => event,
+                    surfaced = dispatcher.next() => LoopEvent::Dispatched(surfaced),
+                    joined = workers.join_next(), if !workers.is_empty() => LoopEvent::Worker(joined),
+                },
+                DataPriority::Worker => tokio::select! {
+                    biased;
+                    event = &mut control => event,
+                    joined = workers.join_next(), if !workers.is_empty() => LoopEvent::Worker(joined),
+                    surfaced = dispatcher.next() => LoopEvent::Dispatched(surfaced),
+                },
             }
-            () = sleep_until(admission_deadline), if admission_open && admission_deadline.is_some() => {
-                LoopEvent::AdmissionElapsed
-            }
-            () = sleep_until(cleanup_deadline), if !admission_open && cleanup_deadline.is_some() => {
-                LoopEvent::CleanupElapsed
-            }
-            joined = workers.join_next(), if !workers.is_empty() => LoopEvent::Worker(joined),
-            surfaced = dispatcher.next() => LoopEvent::Dispatched(surfaced),
         };
+        data_priority = data_priority.after(&selected);
 
         match selected {
             LoopEvent::Interrupt => {
@@ -694,6 +731,22 @@ enum LoopEvent {
     CleanupElapsed,
     Worker(Option<Result<WorkerResult, tokio::task::JoinError>>),
     Dispatched(Option<Dispatched>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DataPriority {
+    Dispatch,
+    Worker,
+}
+
+impl DataPriority {
+    const fn after(self, event: &LoopEvent) -> Self {
+        match event {
+            LoopEvent::Dispatched(_) => Self::Worker,
+            LoopEvent::Worker(_) => Self::Dispatch,
+            _ => self,
+        }
+    }
 }
 
 fn close_admission(open: &mut bool, deadline: &mut Option<Instant>, cleanup: Duration) {
@@ -1472,6 +1525,37 @@ fn emit_summary(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoint_queue_covers_the_advertised_event_budget() {
+        let maximum = 2_048;
+        assert_eq!(endpoint_event_capacity(maximum), maximum * PER_DIALOG_QUEUE);
+    }
+
+    #[test]
+    fn active_limit_cannot_overrun_the_endpoint_event_queue() {
+        let too_many = tokio::sync::Semaphore::MAX_PERMITS / PER_DIALOG_QUEUE + 1;
+        let raw = args(&[
+            "load-responder",
+            "--max-active",
+            &too_many.to_string(),
+            "--calls",
+            "1",
+            "--cleanup",
+            "40",
+        ]);
+        let parsed = crate::Args::new(&raw).expect("argument shape");
+        assert!(Limits::parse(&parsed).is_err());
+    }
+
+    #[test]
+    fn busy_dispatch_and_completion_sources_alternate_priority() {
+        let mut priority = DataPriority::Dispatch;
+        priority = priority.after(&LoopEvent::Dispatched(None));
+        assert_eq!(priority, DataPriority::Worker);
+        priority = priority.after(&LoopEvent::Worker(None));
+        assert_eq!(priority, DataPriority::Dispatch);
+    }
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
