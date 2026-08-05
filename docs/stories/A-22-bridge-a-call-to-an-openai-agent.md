@@ -71,6 +71,16 @@ stand-in peer.
   the downlink is exactly a burst source. Liveness is **strict about Pongs**: a peer streaming
   deltas at full rate while never answering a probe is declared `Stalled` mid-burst, by
   design and matching `session-binding.md`.
+- **Gaps in `A-21`'s fixture that land on this story's vectors**, from its review. ORB-16 is
+  yours to enforce and the peer's reset arm is currently asserted only as "not a Close
+  frame", which an ordinary EOF or a timeout also satisfies — removing the zero-linger left
+  that test green, so assert the reset as a reset (the client sees a `ConnectionReset` I/O
+  error). ORB-3 is yours too, and the peer retains only *decoded* append bytes, so assert
+  `encode(appended_audio) == F_SILENCE_BASE64` rather than the member as it travelled. Also
+  worth knowing while scripting: a directive issued to a stalled session never resolves
+  (`direct()` is the one unbounded wait), a directive before the client has read
+  `session.created` returns `NoSession`, and directives route to the most recently
+  registered connection, so a two-session script can only drive the newer one.
 - Whether the product path is a new CLI verb or an app-host binding mode is the
   implementor's call within the design's constraint: one command, host discipline, no
   second config language.

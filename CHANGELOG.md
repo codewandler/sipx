@@ -9,6 +9,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A deterministic stand-in for the realtime peer** (`A-21`). `sipx-testkit` gains a loopback
+  WebSocket server that speaks `docs/specs/openai-realtime.md` from the vendor's side, so the
+  whole bridge loop is provable in the default `cargo test` matrix with no account, no
+  credential, no network, no Docker and no certificate material. It accepts a configured bearer
+  and refuses any other before the upgrade completes, acknowledges the session, consumes append
+  events, and streams deltas carrying the spec's own §4.2 tone vectors as literals. Its negative
+  modes are first-class configuration rather than afterthoughts — malformed and unreadable
+  events, an oversize frame, withheld session acknowledgements, a genuine mid-call stall, a
+  clean close and an abrupt reset, cancel-honouring and cancel-ignoring responses — and **every
+  one has a test proving the peer actually misbehaves**, asserted from the client's side of the
+  socket, several with a control arm so the negative cannot pass vacuously. Cleartext on
+  loopback by design: no vector asks the peer for TLS, and the client refuses cleartext
+  anywhere else.
 - **A general-purpose secure WebSocket client for non-SIP peers** (`A-20`). `sipx-app` gains
   `WssClient`/`WssRequest`/`WssConnection`: an RFC 6455 client composed over the workspace's one
   TLS policy — `tokio-tungstenite`'s handshake over `sipx-transport`'s `ClientTls`, so a
