@@ -9,7 +9,7 @@
     "subject": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
     "version_evaluated": {"type": "string", "minLength": 1},
     "evaluated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
-    "source_revision": {"type": "string", "minLength": 7},
+    "source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "expected_capabilities": {"type": "integer", "minimum": 1},
     "capabilities": {
       "type": "array",
@@ -41,7 +41,7 @@
               "required": ["note"],
               "properties": {
                 "url": {"type": "string", "format": "uri"},
-                "path": {"type": "string"},
+                "path": {"type": "string", "minLength": 1},
                 "note": {"type": "string", "minLength": 1}
               },
               "oneOf": [{"required": ["url"]}, {"required": ["path"]}]

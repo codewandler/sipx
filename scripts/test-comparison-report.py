@@ -14,8 +14,10 @@ into a fixture here would be caught by the provenance check — the same reason
 
 import datetime
 import importlib.util
+import json
 import pathlib
 import sys
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -40,6 +42,7 @@ report = load_report_module()
 #: confused with a problem the real dataset has.
 FIXTURE_STACK = "zz-fixture-stack"
 FIXTURE_DIMENSION = "zz-fixture-dimension"
+FIXTURE_REVISION = "0123456789abcdef0123456789abcdef01234567"
 TODAY = datetime.date(2026, 8, 4)
 
 
@@ -104,7 +107,12 @@ def a_capability(**overrides):
         "status": "implemented",
         "confidence": "measured",
         "implementation": ["crates/sipx-sip/src/message.rs"],
-        "evidence": [{"url": "https://example.invalid/source", "note": "the exported API"}],
+        "evidence": [
+            {
+                "url": f"https://example.invalid/source/{FIXTURE_REVISION}",
+                "note": "the exported API",
+            }
+        ],
     }
     capability.update(overrides)
     return capability
@@ -116,7 +124,7 @@ def a_capability_ledger(capabilities=None, **overrides):
         "subject": FIXTURE_STACK,
         "version_evaluated": "1.2.3",
         "evaluated_at": "2026-08-01",
-        "source_revision": "0123456789abcdef",
+        "source_revision": FIXTURE_REVISION,
         "expected_capabilities": len(capabilities),
         "capabilities": capabilities,
         "_file": f"{FIXTURE_STACK}.json",
@@ -127,7 +135,26 @@ def a_capability_ledger(capabilities=None, **overrides):
 
 def capability_problems_for(capability, **ledger_overrides):
     ledger = a_capability_ledger([capability], **ledger_overrides)
-    return report.capability_problems([ledger], [a_stack()], TODAY)
+    return checked_capability_problems([ledger])
+
+
+def expectations_for(ledgers):
+    return {
+        ledger["subject"]: (
+            ledger["source_revision"],
+            {capability["id"] for capability in ledger["capabilities"]},
+        )
+        for ledger in ledgers
+    }
+
+
+def checked_capability_problems(ledgers, stacks=None):
+    return report.capability_problems(
+        ledgers,
+        stacks or [a_stack()],
+        TODAY,
+        expectations=expectations_for(ledgers),
+    )
 
 
 def a_complete_capability_ledger():
@@ -147,9 +174,7 @@ class TheCapabilityLedger(unittest.TestCase):
     def test_a_complete_fresh_ledger_is_accepted(self) -> None:
         self.assertEqual(
             [],
-            report.capability_problems(
-                [a_complete_capability_ledger()], [a_stack()], TODAY
-            ),
+            checked_capability_problems([a_complete_capability_ledger()]),
         )
 
     def test_an_unknown_owner_is_rejected(self) -> None:
@@ -158,19 +183,21 @@ class TheCapabilityLedger(unittest.TestCase):
 
     def test_an_unknown_subject_is_rejected(self) -> None:
         ledger = a_complete_capability_ledger()
-        problems = report.capability_problems([ledger], [a_stack(id="another-stack")], TODAY)
+        problems = checked_capability_problems(
+            [ledger], [a_stack(id="another-stack")]
+        )
         self.assertTrue(any("does not declare" in problem for problem in problems), problems)
 
     def test_a_mismatched_filename_is_rejected(self) -> None:
         ledger = a_complete_capability_ledger()
         ledger["_file"] = "wrong.json"
-        problems = report.capability_problems([ledger], [a_stack()], TODAY)
+        problems = checked_capability_problems([ledger])
         self.assertTrue(any("filename must match" in problem for problem in problems), problems)
 
     def test_a_missing_revision_is_rejected(self) -> None:
         ledger = a_complete_capability_ledger()
         ledger["source_revision"] = ""
-        problems = report.capability_problems([ledger], [a_stack()], TODAY)
+        problems = checked_capability_problems([ledger])
         self.assertTrue(any("no immutable version" in problem for problem in problems), problems)
 
     def test_an_invalid_owner_status_pair_is_rejected(self) -> None:
@@ -180,19 +207,32 @@ class TheCapabilityLedger(unittest.TestCase):
     def test_a_duplicate_leaf_is_rejected(self) -> None:
         capability = a_capability()
         ledger = a_capability_ledger([capability, dict(capability)])
-        problems = report.capability_problems([ledger], [a_stack()], TODAY)
+        problems = checked_capability_problems([ledger])
         self.assertTrue(any("declares capability" in problem for problem in problems), problems)
 
     def test_a_duplicate_subject_ledger_is_rejected(self) -> None:
         ledger = a_complete_capability_ledger()
-        problems = report.capability_problems([ledger, dict(ledger)], [a_stack()], TODAY)
+        problems = checked_capability_problems([ledger, dict(ledger)])
         self.assertTrue(any("has 2 ledgers" in problem for problem in problems), problems)
 
     def test_the_expected_count_ratchets_leaf_removal(self) -> None:
         ledger = a_complete_capability_ledger()
         ledger["capabilities"].pop()
-        problems = report.capability_problems([ledger], [a_stack()], TODAY)
+        problems = checked_capability_problems([ledger])
         self.assertTrue(any("expected capabilities" in problem for problem in problems), problems)
+
+    def test_the_separate_exact_id_inventory_survives_a_coedited_count(self) -> None:
+        ledger = a_complete_capability_ledger()
+        expectations = expectations_for([ledger])
+        removed = ledger["capabilities"].pop()["id"]
+        ledger["expected_capabilities"] -= 1
+        problems = report.capability_problems(
+            [ledger], [a_stack()], TODAY, expectations=expectations
+        )
+        self.assertTrue(
+            any(removed in problem and "omits expected" in problem for problem in problems),
+            problems,
+        )
 
     def test_an_unevidenced_leaf_is_rejected(self) -> None:
         problems = capability_problems_for(a_capability(evidence=[]))
@@ -248,7 +288,7 @@ class TheCapabilityLedger(unittest.TestCase):
             row for row in ledger["capabilities"] if row["category"] != "transports"
         ]
         ledger["expected_capabilities"] = len(ledger["capabilities"])
-        problems = report.capability_problems([ledger], [a_stack()], TODAY)
+        problems = checked_capability_problems([ledger])
         self.assertTrue(any("omits required categories" in problem for problem in problems), problems)
 
     def test_a_stale_ledger_is_rejected(self) -> None:
@@ -271,6 +311,43 @@ class TheCapabilityLedger(unittest.TestCase):
     def test_assessed_confidence_requires_a_rationale(self) -> None:
         problems = capability_problems_for(a_capability(confidence="assessed"))
         self.assertTrue(any("assessed without a rationale" in problem for problem in problems), problems)
+
+    def test_measured_confidence_requires_the_exact_source_revision(self) -> None:
+        problems = capability_problems_for(
+            a_capability(
+                evidence=[
+                    {
+                        "url": "https://example.invalid/source/v1.2.3",
+                        "note": "a mutable tag",
+                    }
+                ]
+            )
+        )
+        self.assertTrue(any("without pinning" in problem for problem in problems), problems)
+
+    def test_documented_confidence_may_cite_versioned_prose(self) -> None:
+        capability = a_capability(
+            confidence="documented",
+            evidence=[
+                {
+                    "url": "https://example.invalid/docs/v1.2.3",
+                    "note": "the subject documentation",
+                }
+            ],
+        )
+        self.assertFalse(
+            any("without pinning" in problem for problem in capability_problems_for(capability))
+        )
+
+    def test_schema_rejects_non_string_evidence_paths(self) -> None:
+        capability = a_capability(evidence=[{"path": 123, "note": "not a path"}])
+        problems = report.capability_schema_problems(a_capability_ledger([capability]))
+        self.assertTrue(any("evidence path value" in problem for problem in problems), problems)
+
+    def test_schema_rejects_empty_optional_implementation_lists(self) -> None:
+        capability = a_capability(status="open", story="README.md", implementation=[])
+        problems = report.capability_schema_problems(a_capability_ledger([capability]))
+        self.assertTrue(any("implementation list" in problem for problem in problems), problems)
 
     def test_scalar_schema_constraints_are_checked(self) -> None:
         capability = a_capability(
@@ -302,6 +379,125 @@ class TheCapabilityLedger(unittest.TestCase):
         )
         self.assertIn("A public capability", rendered)
         self.assertIn("Endpoint capability ledger", rendered)
+
+
+class TheExternalStoryIndex(unittest.TestCase):
+    """Cluster ownership cites an exact commit, path and Git blob identity offline."""
+
+    def valid_index(self):
+        return {
+            "repository": "https://example.invalid/cluster",
+            "source_revision": "a" * 40,
+            "stories": [
+                {
+                    "path": "docs/stories/ZZ-1-a-story.md",
+                    "blob_sha": "b" * 40,
+                }
+            ],
+        }
+
+    def problems_for(self, value):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = pathlib.Path(raw)
+            (directory / "cluster.json").write_text(json.dumps(value), encoding="utf-8")
+            return report.external_story_index_problems(directory)
+
+    def test_a_complete_pinned_index_is_accepted_and_derives_the_url(self) -> None:
+        value = self.valid_index()
+        with tempfile.TemporaryDirectory() as raw:
+            directory = pathlib.Path(raw)
+            (directory / "cluster.json").write_text(json.dumps(value), encoding="utf-8")
+            self.assertEqual([], report.external_story_index_problems(directory))
+            self.assertEqual(
+                {
+                    "https://example.invalid/cluster/blob/"
+                    f"{'a' * 40}/docs/stories/ZZ-1-a-story.md"
+                },
+                report.external_story_urls(directory),
+            )
+
+    def test_each_external_index_refusal_has_a_mutated_fixture(self) -> None:
+        mutations = []
+        value = self.valid_index()
+        value["extra"] = True
+        mutations.append((value, "unknown key"))
+        value = self.valid_index()
+        value["repository"] = "git@example.invalid:cluster"
+        mutations.append((value, "repository URL"))
+        value = self.valid_index()
+        value["source_revision"] = "main"
+        mutations.append((value, "source revision"))
+        value = self.valid_index()
+        value["stories"] = []
+        mutations.append((value, "no story paths"))
+        value = self.valid_index()
+        value["stories"] = ["docs/stories/ZZ-1-a-story.md"]
+        mutations.append((value, "not an object"))
+        value = self.valid_index()
+        value["stories"][0]["extra"] = True
+        mutations.append((value, "require exactly"))
+        value = self.valid_index()
+        value["stories"][0]["path"] = "README.md"
+        mutations.append((value, "invalid story path"))
+        value = self.valid_index()
+        value["stories"][0]["blob_sha"] = "not-a-blob"
+        mutations.append((value, "blob identity"))
+        value = self.valid_index()
+        value["stories"].append(dict(value["stories"][0]))
+        mutations.append((value, "repeats story path"))
+
+        for value, phrase in mutations:
+            with self.subTest(phrase=phrase):
+                problems = self.problems_for(value)
+                self.assertTrue(any(phrase in problem for problem in problems), problems)
+
+
+class TheExactCapabilityInventory(unittest.TestCase):
+    """Expected IDs are reviewed separately from the disposition ledger they ratchet."""
+
+    def valid_inventory(self):
+        return {
+            "subject": FIXTURE_STACK,
+            "source_revision": FIXTURE_REVISION,
+            "expected_ids": ["zz-capability"],
+        }
+
+    def load(self, value, filename=f"{FIXTURE_STACK}.json"):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = pathlib.Path(raw)
+            (directory / filename).write_text(json.dumps(value), encoding="utf-8")
+            return report.capability_expectations(directory)
+
+    def test_a_complete_exact_id_inventory_is_accepted(self) -> None:
+        expectations, problems = self.load(self.valid_inventory())
+        self.assertEqual([], problems)
+        self.assertEqual(
+            (FIXTURE_REVISION, {"zz-capability"}), expectations[FIXTURE_STACK]
+        )
+
+    def test_each_exact_inventory_refusal_has_a_mutated_fixture(self) -> None:
+        mutations = []
+        value = self.valid_inventory()
+        value["extra"] = True
+        mutations.append((value, f"{FIXTURE_STACK}.json", "requires exactly"))
+        mutations.append((self.valid_inventory(), "wrong.json", "subject or filename"))
+        value = self.valid_inventory()
+        value["source_revision"] = "main"
+        mutations.append((value, f"{FIXTURE_STACK}.json", "source revision"))
+        value = self.valid_inventory()
+        value["expected_ids"] = []
+        mutations.append((value, f"{FIXTURE_STACK}.json", "no expected"))
+        value = self.valid_inventory()
+        value["expected_ids"] = ["NOT A KEY"]
+        mutations.append((value, f"{FIXTURE_STACK}.json", "invalid capability"))
+        value = self.valid_inventory()
+        value["expected_ids"] *= 2
+        mutations.append((value, f"{FIXTURE_STACK}.json", "repeats a capability"))
+
+        for value, filename, phrase in mutations:
+            with self.subTest(phrase=phrase):
+                _, problems = self.load(value, filename)
+                self.assertTrue(any(phrase in problem for problem in problems), problems)
 
 
 class TheClosedKeySet(unittest.TestCase):
@@ -828,6 +1024,8 @@ class TheRealDataset(unittest.TestCase):
 
     def test_the_capability_ledgers_have_no_outstanding_problems(self) -> None:
         _, stacks, _ = report.dataset()
+        expectations, expectation_problems = report.capability_expectations()
+        self.assertEqual([], expectation_problems)
         self.assertEqual(
             [],
             report.capability_problems(
@@ -835,6 +1033,7 @@ class TheRealDataset(unittest.TestCase):
                 stacks,
                 datetime.date.today(),
                 report.external_story_urls(),
+                expectations,
             ),
         )
 

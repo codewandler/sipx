@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Exact capability IDs expected from one pinned subject revision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["subject", "source_revision", "expected_ids"],
+  "properties": {
+    "subject": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+    "source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "expected_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"}
+    }
+  }
+}

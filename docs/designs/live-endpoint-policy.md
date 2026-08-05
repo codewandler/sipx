@@ -22,6 +22,13 @@ finalized outbound messages plus connection lifecycle, with loss counted. A narr
 policy may approve, reject or add application-owned headers before transaction keys, Digest, Via and
 Content-Length are finalized. There is no arbitrary post-key mutator and no second target resolver.
 
+Source admission is earlier still. UDP source addresses are checked before parsing a datagram;
+connection source addresses are checked before TLS/WebSocket handshake and stream framing. Its live
+configuration is an atomically replaced bounded IP/prefix set, not an async application callback and
+not a parsed-message hook. A refused source creates no per-source task or transaction and increments
+an observable counter. Existing admitted connections keep the generation that admitted them; a
+replacement governs new datagrams and new connections rather than retroactively tearing down work.
+
 ## Exit
 
 Concurrent reload tests observe only complete old or complete new identities; invalid replacements

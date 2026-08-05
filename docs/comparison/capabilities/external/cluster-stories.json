@@ -2,8 +2,13 @@
   "repository": "https://github.com/codewandler/sipx-clstr",
   "source_revision": "6b2a3f45869a0ca1c0796c5615826b23e1abfe17",
   "stories": [
-    "docs/stories/PX-5-implement-stateful-forwarding-with-forking.md",
-    "docs/stories/PX-8-decide-whether-topology-hiding-is-in-scope.md",
-    "docs/stories/RG-3-implement-register-processing-on-the-in-memory-store.md"
+    {
+      "path": "docs/stories/PX-5-implement-stateful-forwarding-with-forking.md",
+      "blob_sha": "3f85ee5131f6a6e11dbdcad89049bd3a6d67b31a"
+    },
+    {
+      "path": "docs/stories/RG-3-implement-register-processing-on-the-in-memory-store.md",
+      "blob_sha": "cd80ebacdfb352031b9759c008e3aec01bdca5c1"
+    }
   ]
 }

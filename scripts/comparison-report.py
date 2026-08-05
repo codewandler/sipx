@@ -45,6 +45,8 @@ DIMENSIONS = COMPARISON / "dimensions.json"
 STACKS = COMPARISON / "stacks.json"
 OBSERVATIONS = COMPARISON / "observations"
 CAPABILITIES = COMPARISON / "capabilities"
+CAPABILITY_EXPECTED = CAPABILITIES / "expected"
+EXTERNAL_STORIES = CAPABILITIES / "external"
 REPORT = ROOT / "docs" / "comparison.md"
 
 # Live sources for the generated tier. Each is read by its own rule below.
@@ -268,10 +270,10 @@ def capability_ledgers() -> list[dict]:
     return found
 
 
-def external_story_urls() -> set[str]:
-    """Story URLs proved against a pinned sibling-repository tree."""
+def external_story_urls(directory=None) -> set[str]:
+    """Story URLs whose commit, path and Git blob identity are pinned in comparison data."""
     found = set()
-    directory = CAPABILITIES / "external"
+    directory = pathlib.Path(directory) if directory is not None else EXTERNAL_STORIES
     for path in sorted(directory.glob("*.json")):
         loaded = json.loads(path.read_text(encoding="utf-8"))
         repository = loaded.get("repository")
@@ -280,15 +282,15 @@ def external_story_urls() -> set[str]:
         if not isinstance(repository, str) or not isinstance(revision, str):
             continue
         for story in stories if isinstance(stories, list) else []:
-            if isinstance(story, str):
-                found.add(f"{repository}/blob/{revision}/{story}")
+            if isinstance(story, dict) and isinstance(story.get("path"), str):
+                found.add(f"{repository}/blob/{revision}/{story['path']}")
     return found
 
 
-def external_story_index_problems() -> list[str]:
-    """The offline external-story proof is itself closed and revision-pinned."""
+def external_story_index_problems(directory=None) -> list[str]:
+    """The offline external-story evidence is closed and pins each Git blob identity."""
     problems = []
-    directory = CAPABILITIES / "external"
+    directory = pathlib.Path(directory) if directory is not None else EXTERNAL_STORIES
     for path in sorted(directory.glob("*.json")):
         loaded = json.loads(path.read_text(encoding="utf-8"))
         where = f"external story index {path.name}"
@@ -314,16 +316,75 @@ def external_story_index_problems() -> list[str]:
         stories = loaded.get("stories")
         if not isinstance(stories, list) or not stories:
             problems.append(f"{where} has no story paths")
-        elif len(stories) != len(set(stories)):
-            problems.append(f"{where} repeats a story path")
         else:
+            seen = Counter()
             for story in stories:
+                if not isinstance(story, dict):
+                    problems.append(f"{where} has a story entry that is not an object")
+                    continue
+                story_keys = set(story)
+                if story_keys != {"path", "blob_sha"}:
+                    problems.append(
+                        f"{where} story entries require exactly 'path' and 'blob_sha'"
+                    )
+                story_path = story.get("path")
                 if (
-                    not isinstance(story, str)
-                    or re.fullmatch(r"docs/stories/[A-Za-z0-9-]+\.md", story) is None
+                    not isinstance(story_path, str)
+                    or re.fullmatch(r"docs/stories/[A-Za-z0-9-]+\.md", story_path)
+                    is None
                 ):
-                    problems.append(f"{where} has invalid story path {story!r}")
+                    problems.append(f"{where} has invalid story path {story_path!r}")
+                else:
+                    seen[story_path] += 1
+                blob = story.get("blob_sha")
+                if not isinstance(blob, str) or re.fullmatch(r"[0-9a-f]{40}", blob) is None:
+                    problems.append(f"{where} has no Git blob identity for {story_path!r}")
+            for story_path, count in seen.items():
+                if count > 1:
+                    problems.append(f"{where} repeats story path {story_path!r}")
     return problems
+
+
+def capability_expectations(directory=None) -> tuple[dict[str, tuple[str, set[str]]], list[str]]:
+    """Load the separately reviewed exact-ID inventory for each pinned subject revision."""
+    directory = pathlib.Path(directory) if directory is not None else CAPABILITY_EXPECTED
+    expectations = {}
+    problems = []
+    for path in sorted(directory.glob("*.json")):
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        where = f"capability expectation {path.name}"
+        if not isinstance(loaded, dict):
+            problems.append(f"{where} is not an object")
+            continue
+        if set(loaded) != {"subject", "source_revision", "expected_ids"}:
+            problems.append(
+                f"{where} requires exactly 'subject', 'source_revision' and 'expected_ids'"
+            )
+        subject = loaded.get("subject")
+        revision = loaded.get("source_revision")
+        expected_ids = loaded.get("expected_ids")
+        if not isinstance(subject, str) or path.name != f"{subject}.json":
+            problems.append(f"{where} has an invalid subject or filename")
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            problems.append(f"{where} has no full immutable source revision")
+        if not isinstance(expected_ids, list) or not expected_ids:
+            problems.append(f"{where} has no expected capability IDs")
+            continue
+        invalid = [
+            cap_id
+            for cap_id in expected_ids
+            if not isinstance(cap_id, str)
+            or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", cap_id) is None
+        ]
+        if invalid:
+            problems.append(f"{where} has invalid capability IDs: {invalid!r}")
+        if len(expected_ids) != len(set(expected_ids)):
+            problems.append(f"{where} repeats a capability ID")
+        if isinstance(subject, str) and isinstance(revision, str):
+            if subject in expectations:
+                problems.append(f"{where} repeats subject {subject!r}")
+            expectations[subject] = (revision, set(expected_ids))
+    return expectations, problems
 
 
 def capability_where(ledger, capability=None) -> str:
@@ -335,6 +396,8 @@ def capability_where(ledger, capability=None) -> str:
 
 def capability_schema_problems(ledger) -> list[str]:
     """Closed key sets and the scalar constraints declared by the JSON schema."""
+    if not isinstance(ledger, dict):
+        return ["capability ledger is not an object"]
     problems = []
     required, optional = CAPABILITY_LEDGER_KEYS
     keys = {key for key in ledger if not key.startswith("_")}
@@ -353,13 +416,19 @@ def capability_schema_problems(ledger) -> list[str]:
     ):
         problems.append(f"{where} has an invalid subject key")
     revision = ledger.get("source_revision")
-    if not isinstance(revision, str) or len(revision) < 7:
+    if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
         problems.append(f"{where} has an invalid source revision")
+    version = ledger.get("version_evaluated")
+    if not isinstance(version, str) or not version.strip():
+        problems.append(f"{where} has an empty evaluated version")
+    evaluated_at = ledger.get("evaluated_at")
+    if not isinstance(evaluated_at, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", evaluated_at) is None:
+        problems.append(f"{where} has an invalid evaluation date")
     expected = ledger.get("expected_capabilities")
     if not isinstance(expected, int) or isinstance(expected, bool) or expected < 1:
         problems.append(f"{where} has an invalid expected capability count")
     capabilities = ledger.get("capabilities", [])
-    if not isinstance(capabilities, list):
+    if not isinstance(capabilities, list) or not capabilities:
         return problems + [f"{where} has 'capabilities', which must be a list"]
     for capability in capabilities:
         if not isinstance(capability, dict):
@@ -385,6 +454,46 @@ def capability_schema_problems(ledger) -> list[str]:
             value = capability.get(field)
             if not isinstance(value, str) or not value.strip():
                 problems.append(f"{leaf} has an empty {field}")
+        for field in ("story", "rationale"):
+            if field in capability:
+                value = capability.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    problems.append(f"{leaf} has an invalid {field}")
+        if "implementation" in capability:
+            implementation = capability.get("implementation")
+            if not isinstance(implementation, list) or not implementation:
+                problems.append(f"{leaf} has an invalid implementation list")
+            else:
+                for source in implementation:
+                    if (
+                        not isinstance(source, str)
+                        or re.fullmatch(r"crates/.+\.rs", source) is None
+                    ):
+                        problems.append(f"{leaf} has invalid implementation path {source!r}")
+        entries = capability.get("evidence")
+        if not isinstance(entries, list) or not entries:
+            problems.append(f"{leaf} has an invalid evidence list")
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                problems.append(f"{leaf} has evidence that is not an object")
+                continue
+            entry_keys = set(entry)
+            if "note" not in entry_keys or entry_keys - {"note", "url", "path"}:
+                problems.append(f"{leaf} has evidence with invalid keys")
+            note = entry.get("note")
+            if not isinstance(note, str) or not note.strip():
+                problems.append(f"{leaf} has evidence with an empty note")
+            has_url = "url" in entry
+            has_path = "path" in entry
+            if has_url == has_path:
+                problems.append(f"{leaf} evidence requires exactly one url or path")
+            if has_url and (not isinstance(entry.get("url"), str) or not entry.get("url")):
+                problems.append(f"{leaf} has an invalid evidence URL value")
+            if has_path and (
+                not isinstance(entry.get("path"), str) or not entry.get("path")
+            ):
+                problems.append(f"{leaf} has an invalid evidence path value")
     return problems
 
 
@@ -414,25 +523,44 @@ def capability_evidence_problems(ledger, capability) -> list[str]:
         if len(pointers) != 1:
             problems.append(f"{where} must give exactly one evidence url or path")
         path = entry.get("path")
-        if isinstance(path, str) and path and not (ROOT / path).exists():
-            problems.append(f"{where} cites {path}, which does not exist")
+        if path is not None:
+            if not isinstance(path, str) or not path:
+                problems.append(f"{where} cites an invalid evidence path")
+            elif not (ROOT / path).exists():
+                problems.append(f"{where} cites {path}, which does not exist")
         note = entry.get("note")
         if not isinstance(note, str) or not note.strip():
             problems.append(f"{where} has evidence with an empty note")
         url = entry.get("url")
-        if isinstance(url, str):
+        if url is not None and not isinstance(url, str):
+            problems.append(f"{where} cites a non-string evidence URL")
+        elif isinstance(url, str):
             parsed = urlparse(url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 problems.append(f"{where} cites an invalid evidence URL")
+            if (
+                capability.get("confidence") == "measured"
+                and ledger.get("source_revision") not in url
+            ):
+                problems.append(
+                    f"{where} claims measured confidence without pinning its source revision"
+                )
+        if capability.get("confidence") == "measured" and not isinstance(url, str):
+            problems.append(f"{where} claims measured confidence without immutable source evidence")
     return problems
 
 
 def capability_problems(
-    ledger_list, stack_list, today: datetime.date, external_stories=None
+    ledger_list,
+    stack_list,
+    today: datetime.date,
+    external_stories=None,
+    expectations=None,
 ) -> list[str]:
     """Ownership, disposition and discovery closure for leaf-level inventories."""
     known_stacks = {stack.get("id") for stack in stack_list}
     external_stories = set(external_stories or ())
+    expectations = expectations or {}
     problems = []
     subjects = Counter()
     for ledger in ledger_list:
@@ -456,6 +584,32 @@ def capability_problems(
             problems.append(
                 f"{where} declares {expected} expected capabilities but carries {len(capabilities)}"
             )
+        expectation = expectations.get(subject)
+        if expectation is None:
+            problems.append(f"{where} has no separately reviewed exact-ID inventory")
+        elif isinstance(capabilities, list):
+            expected_revision, expected_ids = expectation
+            actual_ids = {
+                capability.get("id")
+                for capability in capabilities
+                if isinstance(capability, dict)
+            }
+            if ledger.get("source_revision") != expected_revision:
+                problems.append(f"{where} and its exact-ID inventory pin different revisions")
+            missing_ids = expected_ids - actual_ids
+            extra_ids = actual_ids - expected_ids
+            if missing_ids:
+                problems.append(
+                    f"{where} omits expected capability IDs: {', '.join(sorted(missing_ids))}"
+                )
+            if extra_ids:
+                problems.append(
+                    f"{where} carries unreviewed capability IDs: {', '.join(sorted(extra_ids))}"
+                )
+            if isinstance(expected, int) and expected != len(expected_ids):
+                problems.append(
+                    f"{where} count ratchet disagrees with its exact-ID inventory"
+                )
 
         seen = Counter()
         categories = set()
@@ -1054,6 +1208,7 @@ def main() -> int:
 
     dimension_list, stack_list, observation_list = dataset()
     ledger_list = capability_ledgers()
+    expectations, expectation_problems = capability_expectations()
 
     # Shape before substance. `render` reads records directly, so a malformed one would crash it —
     # and a traceback in place of "sipx/media carries the unknown key 'score'" tells whoever added
@@ -1063,6 +1218,7 @@ def main() -> int:
     malformed += [p for o in observation_list for p in schema_problems(kind_of(o), o)]
     malformed += [p for ledger in ledger_list for p in capability_schema_problems(ledger)]
     malformed += external_story_index_problems()
+    malformed += expectation_problems
     if malformed:
         print("The comparison registry does not match its schema:", file=sys.stderr)
         for problem in malformed:
@@ -1073,7 +1229,13 @@ def main() -> int:
     today = datetime.date.today()
     problems = check(dimension_list, stack_list, observation_list, values, today)
     problems.extend(
-        capability_problems(ledger_list, stack_list, today, external_story_urls())
+        capability_problems(
+            ledger_list,
+            stack_list,
+            today,
+            external_story_urls(),
+            expectations,
+        )
     )
     rendered = render(dimension_list, stack_list, observation_list, values, ledger_list)
 

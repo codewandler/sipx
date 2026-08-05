@@ -32,8 +32,8 @@ highest-demand non-ICE connectivity path, with malformed ingress, entropy and SR
 invariants pinned. Stable `1.0.0`, TURN, video and the second PCM/G.722/jitter lane remain separate
 decisions rather than silent beta.4 scope growth.
 
-The selected post-beta.4 implementation wave is **M13 — Endpoint-complete**: thirteen stories across
-seven epics, queryable as `parity-wave-1`. X-97 discovered two additional endpoint gaps and pulled
+The selected post-beta.4 implementation wave is **M13 — Endpoint-complete**: fourteen stories across
+eight epics, queryable as `parity-wave-1`. X-97 discovered three additional endpoint gaps and pulled
 the bounded responder plus its prerequisite profile forward; M14 retains the actual comparative run.
 M15 separately tracks the audio-only browser SDK, WASM kernel, browser-native WebRTC adapter and
 public demo.
@@ -135,6 +135,9 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 _sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.rs`: a subscription_
 - [S-38 — Place and maintain event subscriptions](S-38-place-and-maintain-event-subscriptions.md) · Signalling · after S-37 · reusable outbound SUBSCRIBE and NOTIFY tracking · S-24 is a consumer
 - [S-39 — Send and receive publications through an endpoint](S-39-send-and-receive-publications-through-an-endpoint.md) · Signalling · after S-37 · make the existing RFC 3903 compositor and entity tags wire-reachable
+
+### dialog persistence
+- [S-43 — Serialize and restore dialog state](S-43-serialize-and-restore-dialog-state.md) · Signalling · discovered by X-97 · versioned sans-I/O snapshot without serializing sockets, tasks or secrets
 
 ### registration observation
 - [S-42 — Report the address learned during registration](S-42-report-the-address-learned-during-registration.md) · Signalling · discovered by X-97 · preserve received/rport observation in the typed registration outcome

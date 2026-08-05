@@ -38,8 +38,10 @@ that can prove the selected endpoint target is complete and can identify work ow
 
 ## Progress
 
-- In progress. The pinned ledger now ratchets 40 leaves, publishes per-row confidence, validates
-  scalar evidence and accepts cluster ownership only through a revision-pinned external story
-  index. Independent review split three compound overclaims, added the omitted transport-source
-  policy leaf and filed S-42/M-53; X-98 and P-15 moved into late M13 to remove the load-responder
-  dependency cycle. The corrected branch awaits re-review and the deferred full gate.
+- In progress. The pinned ledger now ratchets 40 leaves against a separately reviewed exact-ID
+  inventory, publishes per-row confidence, requires exact-revision evidence for measured rows,
+  validates the full scalar shape and accepts cluster ownership only through a commit/path/blob
+  index. Independent review split compound overclaims, added the omitted transport-source policy
+  leaf, expanded T-32 and filed S-42/M-53/S-43; X-98 and P-15 moved into late M13 to remove the
+  load-responder dependency cycle. The corrected branch awaits another re-review and the deferred
+  full gate.

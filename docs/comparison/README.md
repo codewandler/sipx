@@ -96,8 +96,9 @@ Ownership and status are paired rather than freely combined:
 | `not-shipped` | `absent` | The pinned subject itself does not ship the advertised or anticipated capability |
 | `not-applicable` | `excluded` | The capability contradicts the selected scope and must carry a rationale |
 
-The checker rejects duplicate leaves, a leaf-count change that did not deliberately move the count
-ratchet, missing subject or implementation evidence, unknown confidence or ownership, invalid
+The checker rejects duplicate leaves, any difference from the separately reviewed exact-ID inventory
+under `capabilities/expected/`, a count that disagrees with that inventory, missing subject or
+implementation evidence, unknown confidence or ownership, invalid
 owner/status pairs, an open sipx row without a real non-done local story, a cluster row whose link is
 not in the revision-pinned external story index, an unreasoned exclusion, a stale ledger, and an
 inventory that omits any required surface category.
@@ -106,14 +107,21 @@ methods, lifecycle, media, examples and operations. They are a completeness floo
 applications must copy.
 
 Capability rows use the same visible confidence vocabulary with one narrower interpretation:
-`measured` means the leaf was read in the immutable source revision and its evidence links that
-source; `documented` relies on the subject's own prose; `assessed` requires a rationale. Capability
+`measured` means the leaf was read in the immutable source revision and every evidence URL contains
+that exact revision; `documented` relies on the subject's own prose; `assessed` requires a rationale. Capability
 rows cannot claim `generated`, because this repository cannot generate a fact from another
 repository's build.
 
-`capabilities/external/*.json` pins the repository revision and exact story paths accepted for
-cluster-owned rows. The checker derives the only permitted URLs from that index, so a misspelled
-repository, moving `main` link or generic roadmap cannot satisfy the ownership disposition offline.
+`capabilities/external/*.json` pins the repository revision, exact story paths and their Git blob
+identities for cluster-owned rows. The checker derives the only permitted URLs from that index, so a
+misspelled repository, moving `main` link, generic roadmap or unreviewed content identity cannot
+satisfy the ownership disposition offline. The blob IDs are captured from `git ls-tree` at the
+declared revision during refresh; the offline check validates and publishes that immutable evidence.
+
+`capabilities/expected/<stack-id>.json` is the separate completeness ratchet. It lists the exact
+capability IDs discovered from the pinned public surface. Removing a row and decrementing the
+ledger's count still fails until this second artifact changes in the same reviewed diff; the checker
+also requires both files to pin the same source revision.
 
 ### The confidence ladder
 
@@ -155,8 +163,9 @@ page.
 - `stacks.json` marking anything other than exactly one stack `is_self`;
 - `docs/comparison.md` differing from what the script would generate.
 - a capability ledger with duplicate, unowned, unevidenced or stale rows, an invalid confidence or
-  disposition, a count-ratchet mismatch, a missing open story, a cluster story absent from the
-  pinned external index, malformed scalar evidence, or an omitted required surface category.
+  disposition, a count/exact-ID mismatch, mutable evidence behind a measured claim, a missing open
+  story, a cluster story absent from the commit/path/blob index, malformed scalar evidence, or an
+  omitted required surface category.
 
 ### The generated column is never typed
 
