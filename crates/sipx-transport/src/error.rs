@@ -26,6 +26,18 @@ pub enum Error {
         /// The downstream server whose active report caused the rejection.
         peer: std::net::SocketAddr,
     },
+    /// A configured pre-transaction policy refused the request.
+    #[error("request rejected by endpoint policy: {reason}")]
+    PolicyRejected {
+        /// Host-supplied, non-secret reason.
+        reason: String,
+    },
+    /// A policy attempted to add a stack-owned identity, routing, authentication or framing field.
+    #[error("endpoint policy may not add protected header {name}")]
+    ProtectedPolicyHeader {
+        /// Canonical field name.
+        name: String,
+    },
     /// A request could not be sent because it has no usable `Via`, so no transaction could be
     /// keyed on it and no response could ever be matched.
     #[error("the request has no usable Via")]

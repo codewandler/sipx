@@ -27,6 +27,11 @@ use crate::counters::{Counters, Meters, ShedCounts};
 use crate::error::{Error, Result};
 use crate::nat::apply_received_and_rport;
 use crate::overload::{Controller as OverloadController, OverloadConfig};
+use crate::policy::{
+    ConnectionState, EndpointObservation, MessageDirection, MessageObservation, ObservationHub,
+    RequestPolicyDecision, RequestPolicyRef, SourceAdmission, SourcePrefix, TransactionClass,
+    connection_event, protected_header,
+};
 use crate::target::{ConnectionKey, Target, TransportKind, response_destination};
 use crate::tcp::{self, Pool, PoolConfig};
 use crate::timers::TimerQueue;
@@ -118,6 +123,8 @@ pub struct Config {
     /// Hop-by-hop overload feedback, client advertisement, rate tolerance, prioritization, and
     /// randomness. Client advertisement is off by default; see [`OverloadConfig::advertise`].
     pub overload: OverloadConfig,
+    /// Optional immutable pre-transaction request policy.
+    pub request_policy: Option<RequestPolicyRef>,
 }
 
 impl Config {
@@ -153,6 +160,7 @@ impl Config {
             wss_server: None,
             capture: None,
             overload: OverloadConfig::default(),
+            request_policy: None,
             #[cfg(feature = "ws")]
             ws_keepalive: std::time::Duration::from_secs(25),
             unanswered_limit: std::time::Duration::from_secs(180),
@@ -503,6 +511,9 @@ pub struct Handle {
     /// Every counter, shared with the driver so they can be read while the driver is busy —
     /// which is the only time they are interesting (§12).
     meters: Arc<Meters>,
+    admission: Arc<SourceAdmission>,
+    observations: Arc<ObservationHub>,
+    request_policy: Option<RequestPolicyRef>,
     #[cfg(feature = "tls")]
     tls_addr: Option<SocketAddr>,
     /// Atomic publication point for the identity selected by later TLS and WSS handshakes.
@@ -529,6 +540,48 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// Replace the complete live source-admission set and return its generation.
+    ///
+    /// An empty set refuses every new source. Use [`Self::clear_source_admission`] to allow all.
+    pub fn replace_source_admission(&self, prefixes: Vec<SourcePrefix>) -> u64 {
+        self.admission.replace(prefixes)
+    }
+
+    /// Clear source admission to allow all new sources and return the new generation.
+    pub fn clear_source_admission(&self) -> u64 {
+        self.admission.clear()
+    }
+
+    /// Replace the optional bounded endpoint observer.
+    ///
+    /// Producers never await this receiver. A full receiver drops and increments
+    /// [`Counters::observation_dropped`]; dropping it simply detaches observation.
+    #[must_use]
+    pub fn observe(&self, capacity: usize) -> mpsc::Receiver<EndpointObservation> {
+        self.observations.subscribe(capacity)
+    }
+
+    fn apply_request_policy(&self, request: &mut Request, target: &Target) -> Result<()> {
+        let Some(policy) = &self.request_policy else {
+            return Ok(());
+        };
+        match policy.decide(request, target) {
+            RequestPolicyDecision::Allow => Ok(()),
+            RequestPolicyDecision::Reject(reason) => Err(Error::PolicyRejected { reason }),
+            RequestPolicyDecision::AddHeaders(headers) => {
+                for header in headers {
+                    if protected_header(header.name()) {
+                        return Err(Error::ProtectedPolicyHeader {
+                            name: String::from_utf8_lossy(header.name().canonical()).into_owned(),
+                        });
+                    }
+                    request.headers.push(header);
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// The address the endpoint is bound to.
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
@@ -606,6 +659,7 @@ impl Handle {
     /// A `Via` is added if the request has none — the transport owns that header, since only
     /// it knows the branch and where responses should come back to.
     pub async fn send(&self, mut request: Request, target: Target) -> Result<Responses> {
+        self.apply_request_policy(&mut request, &target)?;
         if request.headers.get(&HeaderName::Via).is_none() {
             let via = format!(
                 "SIP/2.0/{} {};rport;branch={}",
@@ -655,6 +709,7 @@ impl Handle {
     ///
     /// Returns once the bytes have been handed to the socket.
     pub async fn send_directly(&self, mut request: Request, target: Target) -> Result<()> {
+        self.apply_request_policy(&mut request, &target)?;
         if self.advertise_overload {
             crate::overload::advertise(&mut request);
         }
@@ -927,6 +982,9 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     config.validate()?;
     let (socket, listener, local_addr) = bind_matching_ports(&config).await?;
     let background = Background::new();
+    let meters = Arc::new(Meters::default());
+    let admission = Arc::new(SourceAdmission::default());
+    let observations = Arc::new(ObservationHub::new(Arc::clone(&meters)));
     #[cfg(any(feature = "tls", feature = "ws"))]
     let handshakes = HandshakeRuntime {
         deadline: config.handshake_timeout,
@@ -977,6 +1035,8 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
                 ServerHandshakePolicy::new(server, server_identity_rx.clone()),
                 &adopt_tx,
                 &handshakes,
+                Arc::clone(&admission),
+                Arc::clone(&meters),
             )
             .await?,
         ),
@@ -992,6 +1052,8 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
                 config.limits,
                 &adopt_tx,
                 &handshakes,
+                Arc::clone(&admission),
+                Arc::clone(&meters),
             )
             .await?,
         ),
@@ -1008,6 +1070,8 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
                 config.limits,
                 &adopt_tx,
                 &handshakes,
+                Arc::clone(&admission),
+                Arc::clone(&meters),
             )
             .await?,
         ),
@@ -1029,7 +1093,13 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     let quic_addr = match (&quic_endpoint, &config.quic_server) {
         (Some(endpoint), Some(_)) => {
             let addr = endpoint.local_addr()?;
-            listen_quic(endpoint.clone(), &adopt_tx, &handshakes);
+            listen_quic(
+                endpoint.clone(),
+                &adopt_tx,
+                &handshakes,
+                Arc::clone(&admission),
+                Arc::clone(&meters),
+            );
             Some(addr)
         }
         _ => None,
@@ -1039,12 +1109,14 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     let (incoming_tx, incoming_rx) = mpsc::channel(config.capacity);
     let shutdown = Arc::new(ShutdownState::default());
 
-    let meters = Arc::new(Meters::default());
     let handle = Handle {
         commands: commands_tx,
         shutdown: Arc::clone(&shutdown),
         local_addr,
         meters: Arc::clone(&meters),
+        admission: Arc::clone(&admission),
+        observations: Arc::clone(&observations),
+        request_policy: config.request_policy.clone(),
         #[cfg(feature = "tls")]
         tls_addr: secure_addr,
         #[cfg(feature = "tls")]
@@ -1078,7 +1150,13 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     let (accept_tx, accept_rx) = mpsc::channel(64);
     if let Some(listener) = listener {
         let cancel = background.cancel.clone();
-        background.spawn(tcp::accept_loop_until(listener, accept_tx, cancel));
+        background.spawn(accept_tcp_until(
+            listener,
+            accept_tx,
+            cancel,
+            Arc::clone(&admission),
+            Arc::clone(&meters),
+        ));
     }
 
     let driver = Driver {
@@ -1114,10 +1192,17 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         quic_client: config.quic_client.clone(),
         #[cfg(feature = "quic")]
         quic_endpoint,
-        pool: Pool::new(config.pool, config.limits, net_tx),
+        pool: Pool::new_observed(
+            config.pool,
+            config.limits,
+            net_tx,
+            Arc::clone(&observations),
+        ),
         limits: config.limits,
         mtu: config.mtu,
         meters,
+        admission,
+        observations,
         capture,
         local_addr,
         unmatched: None,
@@ -1145,6 +1230,8 @@ async fn listen_tls(
     server: ServerHandshakePolicy,
     adopt: &mpsc::Sender<Adopt>,
     runtime: &HandshakeRuntime,
+    admission: Arc<SourceAdmission>,
+    meters: Arc<Meters>,
 ) -> Result<SocketAddr> {
     let listener = TcpListener::bind(SocketAddr::new(ip, port)).await?;
     let addr = listener.local_addr()?;
@@ -1168,6 +1255,11 @@ async fn listen_tls(
                     tracing::warn!(%error, "TLS accept failed");
                     break;
                 }
+            };
+            let Some(admission_generation) = admission.admit(peer.ip()) else {
+                meters.source_refusal(TransportKind::Tls);
+                tracing::debug!(%peer, "refused inbound TLS source before handshake");
+                continue;
             };
             let permit = Arc::clone(&permits).try_acquire_owned();
             #[cfg(test)]
@@ -1206,7 +1298,7 @@ async fn listen_tls(
                         tokio::select! {
                             biased;
                             () = cancel.cancelled() => {}
-                            result = adopt.send(Box::new(move |pool: &mut Pool| pool.accept_tls(tls, peer))) => {
+                            result = adopt.send(Box::new(move |pool: &mut Pool| pool.accept_tls_admitted(tls, peer, admission_generation))) => {
                                 let _ = result;
                             }
                         }
@@ -1227,7 +1319,13 @@ async fn listen_tls(
 /// Accept QUIC handshakes off the driver loop and adopt established connections through the
 /// same bounded channel as every other optional transport.
 #[cfg(feature = "quic")]
-fn listen_quic(endpoint: quinn::Endpoint, adopt: &mpsc::Sender<Adopt>, runtime: &HandshakeRuntime) {
+fn listen_quic(
+    endpoint: quinn::Endpoint,
+    adopt: &mpsc::Sender<Adopt>,
+    runtime: &HandshakeRuntime,
+    admission: Arc<SourceAdmission>,
+    meters: Arc<Meters>,
+) {
     let adopt = adopt.clone();
     let owner = runtime.owner.clone();
     let cancel = owner.cancel.clone();
@@ -1244,6 +1342,12 @@ fn listen_quic(endpoint: quinn::Endpoint, adopt: &mpsc::Sender<Adopt>, runtime: 
                 break;
             };
             let peer = incoming.remote_address();
+            let Some(admission_generation) = admission.admit(peer.ip()) else {
+                incoming.refuse();
+                meters.source_refusal(TransportKind::Quic);
+                tracing::debug!(%peer, "refused inbound QUIC source before handshake");
+                continue;
+            };
             let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
                 incoming.refuse();
                 tracing::debug!(%peer, "refused inbound QUIC handshake at capacity");
@@ -1261,7 +1365,7 @@ fn listen_quic(endpoint: quinn::Endpoint, adopt: &mpsc::Sender<Adopt>, runtime: 
                     Some(Ok(Ok(connection))) => {
                         let result = adopt
                             .send(Box::new(move |pool: &mut Pool| {
-                                pool.accept_quic(connection, peer);
+                                pool.accept_quic_admitted(connection, peer, admission_generation);
                             }))
                             .await;
                         if result.is_err() {
@@ -1282,6 +1386,7 @@ fn listen_quic(endpoint: quinn::Endpoint, adopt: &mpsc::Sender<Adopt>, runtime: 
 
 /// Listen for WebSocket connections, upgrading each off the accept path.
 #[cfg(feature = "ws")]
+#[allow(clippy::too_many_arguments)]
 async fn listen_ws(
     ip: std::net::IpAddr,
     port: u16,
@@ -1289,6 +1394,8 @@ async fn listen_ws(
     limits: Limits,
     adopt: &mpsc::Sender<Adopt>,
     runtime: &HandshakeRuntime,
+    admission: Arc<SourceAdmission>,
+    meters: Arc<Meters>,
 ) -> Result<SocketAddr> {
     let listener = TcpListener::bind(SocketAddr::new(ip, port)).await?;
     let addr = listener.local_addr()?;
@@ -1312,6 +1419,11 @@ async fn listen_ws(
                     tracing::warn!(%error, "WebSocket accept failed");
                     break;
                 }
+            };
+            let Some(admission_generation) = admission.admit(peer.ip()) else {
+                meters.source_refusal(TransportKind::Ws);
+                tracing::debug!(%peer, "refused inbound WebSocket source before handshake");
+                continue;
             };
             let permit = Arc::clone(&permits).try_acquire_owned();
             #[cfg(test)]
@@ -1342,8 +1454,16 @@ async fn listen_ws(
                 };
                 match upgraded {
                     Some(Ok(result)) => {
-                        adopt_upgraded(result, peer, TransportKind::Ws, keepalive, &adopt, &cancel)
-                            .await;
+                        adopt_upgraded(
+                            result,
+                            peer,
+                            TransportKind::Ws,
+                            keepalive,
+                            admission_generation,
+                            &adopt,
+                            &cancel,
+                        )
+                        .await;
                     }
                     Some(Err(_)) => tracing::debug!(%peer, "inbound WebSocket handshake timed out"),
                     None => {}
@@ -1361,6 +1481,7 @@ async fn listen_ws(
 /// from the same [`crate::tls::ServerTls`]. A second implementation of a security check is how
 /// one of the two ends up weaker.
 #[cfg(feature = "wss")]
+#[allow(clippy::too_many_arguments)]
 async fn listen_wss(
     ip: std::net::IpAddr,
     port: u16,
@@ -1369,6 +1490,8 @@ async fn listen_wss(
     limits: Limits,
     adopt: &mpsc::Sender<Adopt>,
     runtime: &HandshakeRuntime,
+    admission: Arc<SourceAdmission>,
+    meters: Arc<Meters>,
 ) -> Result<SocketAddr> {
     let listener = TcpListener::bind(SocketAddr::new(ip, port)).await?;
     let addr = listener.local_addr()?;
@@ -1392,6 +1515,11 @@ async fn listen_wss(
                     tracing::warn!(%error, "WSS accept failed");
                     break;
                 }
+            };
+            let Some(admission_generation) = admission.admit(peer.ip()) else {
+                meters.source_refusal(TransportKind::Wss);
+                tracing::debug!(%peer, "refused inbound WSS source before handshake");
+                continue;
             };
             let permit = Arc::clone(&permits).try_acquire_owned();
             #[cfg(test)]
@@ -1430,6 +1558,7 @@ async fn listen_wss(
                             peer,
                             TransportKind::Wss,
                             keepalive,
+                            admission_generation,
                             &adopt,
                             &cancel,
                         )
@@ -1455,6 +1584,7 @@ async fn adopt_upgraded<S>(
     peer: SocketAddr,
     transport: TransportKind,
     keepalive: std::time::Duration,
+    admission_generation: u64,
     adopt: &mpsc::Sender<Adopt>,
     cancel: &CancellationToken,
 ) where
@@ -1471,13 +1601,51 @@ async fn adopt_upgraded<S>(
                 biased;
                 () = cancel.cancelled() => {}
                 result = adopt.send(Box::new(move |pool: &mut Pool| {
-                        pool.accept_ws(socket, key, keepalive);
+                        pool.accept_ws_admitted(socket, key, keepalive, admission_generation);
                     })) => {
                     let _ = result;
                 }
             }
         }
         Err(error) => tracing::debug!(%error, %peer, "inbound websocket handshake failed"),
+    }
+}
+
+/// Accept clear TCP only from the current source-admission generation.
+async fn accept_tcp_until(
+    listener: TcpListener,
+    incoming: mpsc::Sender<(tokio::net::TcpStream, SocketAddr, u64)>,
+    cancel: CancellationToken,
+    admission: Arc<SourceAdmission>,
+    meters: Arc<Meters>,
+) {
+    loop {
+        let accepted = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return,
+            accepted = listener.accept() => accepted,
+        };
+        let (stream, peer) = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                tracing::warn!(%error, "accept failed");
+                return;
+            }
+        };
+        let Some(generation) = admission.admit(peer.ip()) else {
+            meters.source_refusal(TransportKind::Tcp);
+            tracing::debug!(%peer, "refused inbound TCP source before stream parsing");
+            continue;
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => return,
+            result = incoming.send((stream, peer, generation)) => {
+                if result.is_err() {
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -1559,7 +1727,7 @@ struct Driver {
     incoming: mpsc::Sender<Incoming>,
     commands: mpsc::Receiver<Command>,
     net: mpsc::Receiver<tcp::Event>,
-    accepts: mpsc::Receiver<(tokio::net::TcpStream, SocketAddr)>,
+    accepts: mpsc::Receiver<(tokio::net::TcpStream, SocketAddr, u64)>,
     adopts: mpsc::Receiver<Adopt>,
     /// Held only to keep the adoption channel open when no optional listener is configured. A
     /// closed channel would leave that `select!` branch resolving instantly on every pass.
@@ -1577,6 +1745,8 @@ struct Driver {
     mtu: usize,
     /// Every counter, shared with every [`Handle`]; see [`Counters`].
     meters: Arc<Meters>,
+    admission: Arc<SourceAdmission>,
+    observations: Arc<ObservationHub>,
     /// The running capture, if one was configured (§13). `None` is the ordinary case.
     capture: Option<Capture>,
     /// The address this endpoint is bound to.
@@ -1672,7 +1842,9 @@ impl Driver {
                     Some(command) => self.on_command(command).await,
                 },
                 Some(event) = self.net.recv() => self.on_net_event(event).await,
-                Some((stream, peer)) = self.accepts.recv() => self.pool.accept(stream, peer),
+                Some((stream, peer, generation)) = self.accepts.recv() => {
+                    self.pool.accept_admitted(stream, peer, generation);
+                },
                 Some(adopt) = self.adopts.recv() => adopt(&mut self.pool),
                 _ = idle_sweep.tick() => {
                     for closed in self.pool.evict_idle() {
@@ -1693,6 +1865,11 @@ impl Driver {
     }
 
     async fn on_datagram(&mut self, datagram: Bytes, source: SocketAddr) {
+        if self.admission.admit(source.ip()).is_none() {
+            self.meters.source_refusal(TransportKind::Udp);
+            tracing::debug!(%source, "refused inbound UDP source before parsing");
+            return;
+        }
         // RFC 5389 §7.3's test, before the SIP parser sees it: a STUN response is not a SIP
         // message and would be dropped as malformed, taking the keep-alive with it.
         if crate::stun::is_stun(&datagram) {
@@ -1813,6 +1990,10 @@ impl Driver {
         let _ = waiter.send(answer);
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exhaustive transport-event dispatch keeps ordering and loss accounting visible"
+    )]
     async fn on_net_event(&mut self, event: tcp::Event) {
         match event {
             tcp::Event::Message {
@@ -1840,6 +2021,14 @@ impl Driver {
                 .await;
             }
             tcp::Event::FramingFailed { key } => {
+                if let Some((id, admission_generation)) = self.pool.observation_generation(&key) {
+                    self.observations.emit(connection_event(
+                        key.clone(),
+                        id,
+                        admission_generation,
+                        ConnectionState::Failed,
+                    ));
+                }
                 // The stream half of a parse failure, counted against the transport that carried it
                 // (§12). `Closed` follows and fails the transactions bound to the connection; this
                 // is the *loss* — everything in flight on a stream whose framing is gone — which
@@ -1860,6 +2049,17 @@ impl Driver {
             }
             #[cfg(feature = "tls")]
             tcp::Event::HandshakeFailed { key, id, detail } => {
+                let admission_generation = self
+                    .pool
+                    .observation_generation(&key)
+                    .filter(|(current, _)| *current == id)
+                    .and_then(|(_, admission_generation)| admission_generation);
+                self.observations.emit(connection_event(
+                    key.clone(),
+                    id,
+                    admission_generation,
+                    ConnectionState::Failed,
+                ));
                 // Authentication failure is terminal for this generation. Remove it now and fail
                 // its transactions with the typed cause; the `Closed` emitted by the task wrapper
                 // then becomes a stale close and has no second effect.
@@ -1987,6 +2187,7 @@ impl Driver {
         self.meters
             .message_in(transport, matches!(message, Message::Response(_)));
         let message = apply_network_source(message, source);
+        let observed_message = message.clone();
 
         // A server transaction's responses go wherever its topmost Via says, which is why the
         // destination is computed now, from the request as amended above.
@@ -2010,6 +2211,12 @@ impl Driver {
 
         match self.layer.receive(message, transport.reliability()) {
             Dispatch::Created { key, outputs } => {
+                self.observe_inbound(
+                    observed_message,
+                    source,
+                    transport,
+                    TransactionClass::ServerCreated,
+                );
                 self.destinations.insert(key.clone(), reply_to);
                 if let Some(id) = generation {
                     self.transaction_generations.insert(
@@ -2034,72 +2241,82 @@ impl Driver {
                 self.perform(&key, outputs, Some((source, transport))).await;
             }
             Dispatch::Matched { key, outputs } => {
+                self.observe_inbound(
+                    observed_message,
+                    source,
+                    transport,
+                    TransactionClass::Matched,
+                );
                 self.observe_overload_response(source, overload_response.as_ref());
                 self.perform(&key, outputs, Some((source, transport))).await;
             }
             Dispatch::Unmatched(message) => {
-                tracing::debug!(%source, "message matched no transaction");
-                // Counted before the question of whether anyone is watching: §16.7 makes an
-                // unmatched response a forwarding element's business and a user agent's non-problem,
-                // and the *rate* is worth knowing to either of them.
-                if matches!(&*message, Message::Response(_)) {
-                    self.meters.unmatched_response();
-                }
-                // A response that matched nothing. RFC 3261 §16.7 step 1 makes this a forwarding
-                // element's business — it must forward such a response statelessly — and no
-                // business at all of a user agent, which is why it goes only to a caller that
-                // asked for it.
-                if let Message::Response(response) = &*message {
-                    if let Some(sink) = &self.unmatched {
-                        // `try_send`, and a full watcher's channel is its own problem: blocking
-                        // the loop here would stop every timer in the endpoint to wait for a
-                        // consumer that is already behind.
-                        if sink
-                            .try_send(Unmatched {
-                                response: response.clone(),
-                                source,
-                                transport,
-                            })
-                            .is_err()
-                        {
-                            self.meters.shed.unmatched.fetch_add(1, Ordering::Relaxed);
-                            tracing::warn!(
-                                %source,
-                                "unmatched-response watcher is not keeping up; dropped one"
-                            );
-                        }
-                    }
-                    return;
-                }
-                // An unmatched ACK belongs to the application; anything else is noise it can
-                // still choose to look at.
-                if let Message::Request(request) = *message {
-                    let Some(key) = TransactionKey::from_request(&request) else {
-                        return;
-                    };
-                    let method = request.method.clone();
-                    if self
-                        .incoming
-                        .try_send(Incoming {
-                            key,
-                            request,
-                            source,
-                            transport,
-                        })
-                        .is_err()
-                    {
-                        // Previously `let _ = …`: the request was gone, nothing was logged, and no
-                        // counter moved. There is no transaction here to answer with a 503 — this
-                        // request matched none — so counting and saying so is the whole of what
-                        // can be done, and it is a great deal more than nothing.
-                        self.meters.shed.unmatched.fetch_add(1, Ordering::Relaxed);
-                        tracing::warn!(
-                            %source,
-                            method = %method,
-                            "application queue full; an unmatched request was dropped"
-                        );
-                    }
-                }
+                self.observe_inbound(
+                    observed_message,
+                    source,
+                    transport,
+                    TransactionClass::Unmatched,
+                );
+                self.on_unmatched(message, source, transport);
+            }
+        }
+    }
+
+    fn on_unmatched(
+        &mut self,
+        message: Box<Message>,
+        source: SocketAddr,
+        transport: TransportKind,
+    ) {
+        tracing::debug!(%source, "message matched no transaction");
+        // Counted before the question of whether anyone is watching: §16.7 makes an unmatched
+        // response a forwarding element's business and a user agent's non-problem, and the rate
+        // is worth knowing to either of them.
+        if let Message::Response(response) = &*message {
+            self.meters.unmatched_response();
+            if let Some(sink) = &self.unmatched
+                && sink
+                    .try_send(Unmatched {
+                        response: response.clone(),
+                        source,
+                        transport,
+                    })
+                    .is_err()
+            {
+                // A full watcher must not stop every endpoint timer while it catches up.
+                self.meters.shed.unmatched.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    %source,
+                    "unmatched-response watcher is not keeping up; dropped one"
+                );
+            }
+            return;
+        }
+
+        // An unmatched ACK belongs to the application; anything else is noise it can still
+        // choose to look at.
+        if let Message::Request(request) = *message {
+            let Some(key) = TransactionKey::from_request(&request) else {
+                return;
+            };
+            let method = request.method.clone();
+            if self
+                .incoming
+                .try_send(Incoming {
+                    key,
+                    request,
+                    source,
+                    transport,
+                })
+                .is_err()
+            {
+                // There is no transaction here to answer with a 503, so count the loss and name it.
+                self.meters.shed.unmatched.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    %source,
+                    method = %method,
+                    "application queue full; an unmatched request was dropped"
+                );
             }
         }
     }
@@ -2246,7 +2463,15 @@ impl Driver {
                     return;
                 }
                 let method = request.method.clone();
-                let bytes = Message::Request(*request).to_bytes();
+                let message = Message::Request(*request);
+                self.observe_message(
+                    message.clone(),
+                    target.addr,
+                    target.transport,
+                    MessageDirection::Outbound,
+                    TransactionClass::Direct,
+                );
+                let bytes = message.to_bytes();
                 self.observe_out(&bytes, &target, false);
                 let result = self.transmit(bytes, target, false, None).await.map(|_| ());
                 if result.is_err() {
@@ -2355,6 +2580,17 @@ impl Driver {
                         Message::Response(_) => None,
                     };
                     let is_response = method.is_none();
+                    self.observe_message(
+                        message.clone(),
+                        target.addr,
+                        target.transport,
+                        MessageDirection::Outbound,
+                        if is_response {
+                            TransactionClass::Matched
+                        } else {
+                            TransactionClass::ClientCreated
+                        },
+                    );
                     let bytes = message.to_bytes();
                     let addr = target.addr;
                     self.observe_out(&bytes, &target, is_response);
@@ -2450,6 +2686,41 @@ impl Driver {
             transport,
             direction,
             bytes,
+        );
+    }
+
+    fn observe_message(
+        &self,
+        message: Message,
+        peer: SocketAddr,
+        transport: TransportKind,
+        direction: MessageDirection,
+        transaction: TransactionClass,
+    ) {
+        self.observations
+            .emit(EndpointObservation::Message(Box::new(MessageObservation {
+                message,
+                local: self.local_addr,
+                peer,
+                transport,
+                direction,
+                transaction,
+            })));
+    }
+
+    fn observe_inbound(
+        &self,
+        message: Message,
+        peer: SocketAddr,
+        transport: TransportKind,
+        transaction: TransactionClass,
+    ) {
+        self.observe_message(
+            message,
+            peer,
+            transport,
+            MessageDirection::Inbound,
+            transaction,
         );
     }
 
@@ -2887,6 +3158,9 @@ mod tests {
         let (incoming, _incoming_rx) = mpsc::channel(8);
         let (_accepts_tx, accepts) = mpsc::channel(8);
         let (adopt, adopts) = mpsc::channel(8);
+        let meters = Arc::new(crate::counters::Meters::default());
+        let admission = Arc::new(crate::policy::SourceAdmission::default());
+        let observations = Arc::new(crate::policy::ObservationHub::new(Arc::clone(&meters)));
         Driver {
             socket,
             layer: sipx_sip::transaction::TransactionLayer::new(sipx_sip::Timers::default()),
@@ -2919,7 +3193,9 @@ mod tests {
             pool,
             limits: sipx_sip::Limits::stream(),
             mtu: 1300,
-            meters: Arc::new(crate::counters::Meters::default()),
+            meters,
+            admission,
+            observations,
             capture: None,
             local_addr,
             unmatched: None,
@@ -3160,11 +3436,15 @@ mod tests {
         commands: mpsc::Sender<super::Command>,
         shutdown: Arc<ShutdownState>,
     ) -> super::Handle {
+        let meters = Arc::new(crate::counters::Meters::default());
         super::Handle {
             commands,
             shutdown,
             local_addr: "127.0.0.1:5060".parse().expect("address"),
-            meters: Arc::new(crate::counters::Meters::default()),
+            meters: Arc::clone(&meters),
+            admission: Arc::new(crate::policy::SourceAdmission::default()),
+            observations: Arc::new(crate::policy::ObservationHub::new(meters)),
+            request_policy: None,
             #[cfg(feature = "tls")]
             tls_addr: None,
             #[cfg(feature = "tls")]
@@ -3293,11 +3573,23 @@ mod tests {
         .expect("peer closes within the configured handshake deadline");
     }
 
+    #[cfg(any(feature = "tls", feature = "ws"))]
+    fn open_source_policy() -> (
+        Arc<crate::policy::SourceAdmission>,
+        Arc<crate::counters::Meters>,
+    ) {
+        (
+            Arc::new(crate::policy::SourceAdmission::default()),
+            Arc::new(crate::counters::Meters::default()),
+        )
+    }
+
     /// X18: incomplete upgrades have one endpoint-wide budget and an observed admission barrier.
     #[cfg(feature = "ws")]
     #[tokio::test]
     async fn websocket_handshake_budget_has_deterministic_admission_and_reclamation() {
         let (owner, runtime, mut observed) = handshake_runtime(2);
+        let (admission, meters) = open_source_policy();
         let (adopt, mut adopted) = mpsc::channel::<Adopt>(8);
         let address = super::listen_ws(
             "127.0.0.1".parse().expect("loopback"),
@@ -3306,6 +3598,8 @@ mod tests {
             sipx_sip::Limits::stream(),
             &adopt,
             &runtime,
+            admission,
+            meters,
         )
         .await
         .expect("listener binds");
@@ -3352,6 +3646,7 @@ mod tests {
         let identity =
             Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("an identity");
         let (owner, runtime, mut observed) = handshake_runtime(1);
+        let (admission, meters) = open_source_policy();
         let (adopt, mut adopted) = mpsc::channel::<Adopt>(8);
         let (_identity_tx, identity_rx) = tokio::sync::watch::channel(None);
         let tls_address = super::listen_tls(
@@ -3363,6 +3658,8 @@ mod tests {
             ),
             &adopt,
             &runtime,
+            Arc::clone(&admission),
+            Arc::clone(&meters),
         )
         .await
         .expect("TLS listener binds");
@@ -3373,6 +3670,8 @@ mod tests {
             sipx_sip::Limits::stream(),
             &adopt,
             &runtime,
+            admission,
+            meters,
         )
         .await
         .expect("WebSocket listener binds");
@@ -3414,6 +3713,7 @@ mod tests {
         let identity =
             Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("an identity");
         let (owner, runtime, mut observed) = handshake_runtime(1);
+        let (admission, meters) = open_source_policy();
         let (adopt, _adopted) = mpsc::channel::<Adopt>(8);
         let (_identity_tx, identity_rx) = tokio::sync::watch::channel(None);
         let address = super::listen_wss(
@@ -3427,6 +3727,8 @@ mod tests {
             sipx_sip::Limits::stream(),
             &adopt,
             &runtime,
+            admission,
+            meters,
         )
         .await
         .expect("WSS listener binds");
