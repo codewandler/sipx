@@ -2,7 +2,7 @@
 id: A-20
 title: A WSS client for non-SIP peers
 pillar: Application
-status: in-progress
+status: done
 priority: 2
 design: docs/designs/openai.md
 epic: openai
@@ -45,7 +45,6 @@ by contract, and must stay that way.
 
 ## Progress
 
-- (running log / checklist — a resuming agent reads this to know exactly where things stand)
 - 2026-08-05 (`impl/A-20`): implemented as `crates/sipx-app/src/wss.rs` — `WssClient` /
   `WssRequest` / `WssConnection` / `WssMessage` / `WssError`, `tokio-tungstenite`'s client
   handshake composed over `sipx_transport::tls::ClientTls` on a `TcpStream`. TLS refusals pass
@@ -81,6 +80,20 @@ by contract, and must stay that way.
   module itself, marked **Experimental** (`A-8`) deliberately. No crate joins the dependency
   closure and nothing graduates, so the *supported* surface is unchanged; the module graduates
   when `A-22`'s bridge (or an external caller) constrains its shape.
+
+- 2026-08-05 (integration): independent review PASS after two rework rounds; merged and gated
+  green (36 steps). Five minors accepted rather than reworked, three of which are contracts
+  `A-22` inherits and one of which is a sentence that is wrong rather than code that is:
+  **`Stalled` is not sticky** — after it returns, `held`/`awaiting_pong`/`probe` persist and a
+  caller that calls `next` again is handed each held message before `Stalled` recurs, so a
+  consumer must treat the first one as terminal; **the fatal drain's backlog is discarded** on
+  that path, which contradicts the field doc's "owed to the caller … never dropped" (the
+  behaviour is right for a connection just declared dead, the sentence is not); **`held` has no
+  aggregate cap**, bounded only by what one liveness pass finds already buffered, which is a
+  local or fast hostile peer's opening and only while a grace is expired; and
+  `WssError::Subprotocol` with an empty `offered` renders with a double space and reads
+  backwards for the peer-named-one-nobody-offered case. Filed forward into `A-22`'s Notes
+  rather than fixed here, because the bridge is the caller that will constrain them.
 
 ## Notes
 

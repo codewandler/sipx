@@ -59,6 +59,18 @@ stand-in peer.
   A-21 (the peer its proof runs against).
 - `MediaSession::set_relay(true)` + `recv_encoded`/`send_encoded` are the passthrough
   primitives (`crates/sipx-media/src/session.rs`); `Call::media()` exposes them.
+- **Contracts inherited from `A-20`'s client, surfaced by its review and not yet constrained
+  by any caller — this story is that caller.** `WssError::Stalled` is *not* sticky: after it
+  returns, the connection's liveness state and its held-message queue persist, so a `next`
+  called again yields each held message before `Stalled` recurs. Treat the first one as
+  terminal. On that same path the drain's buffered backlog is discarded, which the field's
+  own doc contradicts ("owed to the caller … never dropped") — the behaviour is defensible
+  for a connection just declared dead, the sentence is what is wrong, and whichever this
+  story depends on should be made true in one place. The held queue has no aggregate cap
+  (bounded only by what one liveness pass finds already buffered), which matters here because
+  the downlink is exactly a burst source. Liveness is **strict about Pongs**: a peer streaming
+  deltas at full rate while never answering a probe is declared `Stalled` mid-burst, by
+  design and matching `session-binding.md`.
 - Whether the product path is a new CLI verb or an app-host binding mode is the
   implementor's call within the design's constraint: one command, host discipline, no
   second config language.

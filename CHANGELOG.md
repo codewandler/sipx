@@ -9,6 +9,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A general-purpose secure WebSocket client for non-SIP peers** (`A-20`). `sipx-app` gains
+  `WssClient`/`WssRequest`/`WssConnection`: an RFC 6455 client composed over the workspace's one
+  TLS policy — `tokio-tungstenite`'s handshake over `sipx-transport`'s `ClientTls`, so a
+  wrong-name or unknown-issuer certificate is refused by the same check every SIP transport
+  verifies with, and the dependency keeps its no-TLS-features stance. The SIP WebSocket client is
+  untouched and still refuses any peer that does not negotiate the `sip` subprotocol. Caller-supplied
+  request headers (an `Authorization` bearer being the case it exists for), no subprotocol offered
+  unless named, message and frame bounds installed at the handshake so an oversize message is a
+  typed refusal rather than an allocation, and Ping/Pong liveness on the session-binding cadence.
+  **Credentials never travel in a URL**: userinfo is a typed refusal, the authority that reaches
+  the wire is rebuilt from the parsed host and port, and every printed URL is redacted from the
+  raw string, so a URL too malformed — or too scheme-less — to parse still cannot leak into a log.
+  Cleartext `ws` reaches loopback only, decided by the *name* so resolution never gets a vote on
+  whether encryption happens. Liveness is strict about Pongs in both directions that matters: a
+  Pong that arrived while the caller was away still counts, and a peer streaming data while
+  withholding Pongs is still declared gone at the grace. Experimental (`A-8`): the module
+  graduates when a caller constrains its shape.
+
 - **A normative spec for bridging a call to an OpenAI realtime session** (`A-19`).
   `docs/specs/openai-realtime.md` pins the contract the rest of the `openai` epic is built and
   tested against: the `wss` endpoint and bearer credential resolved from a *named* secret

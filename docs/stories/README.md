@@ -42,10 +42,7 @@ decisions rather than silent beta.4 scope growth.
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
-
-### Bridge a call to an OpenAI realtime agent
-_Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) §3, SRTP held to_
-- [A-20 — A WSS client for non-SIP peers](A-20-a-wss-client-for-non-sip-peers.md) · Application · independent of A-19 — a general RFC 6455 client over the existing TLS policy, no vendor knowledge
+_None._
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -133,6 +130,7 @@ _Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) 
 - [A-14 — Publish 1.0.0-beta.3 from latest main](A-14-publish-beta3-from-latest-main.md) · Application · new immutable prerelease from latest main; beta.2 remains untouched
 - [A-15 — Publish and verify 1.0.0-beta.4](A-15-publish-beta4.md) · Application · beta.4 capstone · immutable tag, exact registry consumer, installed Opus CLI, Pages and GitHub prerelease
 - [A-19 — Specify the OpenAI realtime bridge](A-19-specify-the-openai-realtime-bridge.md) · Application · spec before code — every later story in the epic derives its tests from this document's vectors
+- [A-20 — A WSS client for non-SIP peers](A-20-a-wss-client-for-non-sip-peers.md) · Application · independent of A-19 — a general RFC 6455 client over the existing TLS policy, no vendor knowledge
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 gateway model · one live session crosses early and confirmed dialog state
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
