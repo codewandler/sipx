@@ -123,7 +123,9 @@ comparison check.
 `capabilities/expected/<stack-id>.json` is the separate completeness ratchet. It lists the exact
 capability IDs discovered from the pinned public surface. Removing a row and decrementing the
 ledger's count still fails until this second artifact changes in the same reviewed diff; the checker
-also requires both files to pin the same source revision.
+also requires both files to pin the same source revision. The independent `stacks.json` subject row
+sets `capability_inventory: true`; that marker requires both files, and the checker refuses a dataset
+with no marked subject, so deleting the ledger and its ratchet together cannot erase the inventory.
 
 ### The confidence ladder
 

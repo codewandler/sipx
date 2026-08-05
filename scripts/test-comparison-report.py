@@ -66,6 +66,7 @@ def a_stack(**overrides):
         "language": "Rust",
         "repository": "https://example.invalid/zz-fixture-stack",
         "license": "MIT",
+        "capability_inventory": True,
     }
     stack.update(overrides)
     return stack
@@ -243,6 +244,17 @@ class TheCapabilityLedger(unittest.TestCase):
         )
         self.assertTrue(any("no corresponding ledger" in problem for problem in problems), problems)
 
+    def test_deleting_both_inventory_files_is_rejected_by_the_stack_anchor(self) -> None:
+        problems = report.capability_problems([], [a_stack()], TODAY, expectations={})
+        for phrase in ("requires a capability ledger", "requires an exact-ID inventory"):
+            self.assertTrue(any(phrase in problem for problem in problems), problems)
+
+    def test_removing_every_stack_anchor_is_rejected(self) -> None:
+        stack = a_stack()
+        del stack["capability_inventory"]
+        problems = report.capability_problems([], [stack], TODAY, expectations={})
+        self.assertTrue(any("no comparison stack requires" in problem for problem in problems), problems)
+
     def test_an_unevidenced_leaf_is_rejected(self) -> None:
         problems = capability_problems_for(a_capability(evidence=[]))
         self.assertTrue(any("cites no evidence" in problem for problem in problems), problems)
@@ -396,6 +408,22 @@ class TheCapabilityLedger(unittest.TestCase):
             self.assertTrue(
                 any(phrase in problem for problem in problems), (phrase, problems)
             )
+
+    def test_non_scalar_dispositions_are_refused_without_a_crash(self) -> None:
+        for field in ("confidence", "ownership", "status"):
+            for value in (["not", "scalar"], {"not": "scalar"}):
+                with self.subTest(field=field, value=value):
+                    capability = a_capability(**{field: value})
+                    ledger = a_capability_ledger([capability])
+                    schema = report.capability_schema_problems(ledger)
+                    self.assertTrue(any(f"invalid {field}" in p for p in schema), schema)
+                    substantive = report.capability_problems(
+                        [ledger],
+                        [a_stack()],
+                        TODAY,
+                        expectations=expectations_for([ledger]),
+                    )
+                    self.assertTrue(substantive)
 
     def test_a_leaf_reaches_the_rendered_document(self) -> None:
         rendered = report.render(
@@ -606,6 +634,10 @@ class TheClosedKeySet(unittest.TestCase):
             any("weight" in p and "unknown key" in p for p in problems),
             f"a weighted dimension was accepted; problems={problems}",
         )
+
+    def test_a_capability_inventory_marker_must_be_boolean(self) -> None:
+        problems = report.schema_problems("stack", a_stack(capability_inventory="yes"))
+        self.assertTrue(any("non-boolean" in problem for problem in problems), problems)
 
 
 class TheConfidenceLadder(unittest.TestCase):

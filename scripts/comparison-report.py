@@ -93,7 +93,10 @@ CONFIDENCE_HOLDER = {
 # claim can sit in the source, never reach the generated page, and tell nobody — the failure this
 # whole file exists to prevent, in miniature.
 DIMENSION_KEYS = ({"id", "title", "question", "why"}, set())
-STACK_KEYS = ({"id", "name", "language", "repository", "license"}, {"is_self"})
+STACK_KEYS = (
+    {"id", "name", "language", "repository", "license"},
+    {"is_self", "capability_inventory"},
+)
 FINDING_KEYS = (
     {"stack", "dimension", "confidence", "summary", "evidence", "version_evaluated",
      "evaluated_at"},
@@ -534,6 +537,10 @@ def capability_schema_problems(ledger) -> list[str]:
             value = capability.get(field)
             if not isinstance(value, str) or not value.strip():
                 problems.append(f"{leaf} has an empty {field}")
+        for field in ("confidence", "ownership", "status"):
+            value = capability.get(field)
+            if not isinstance(value, str) or not value.strip():
+                problems.append(f"{leaf} has an invalid {field}")
         for field in ("story", "rationale"):
             if field in capability:
                 value = capability.get(field)
@@ -639,6 +646,11 @@ def capability_problems(
 ) -> list[str]:
     """Ownership, disposition and discovery closure for leaf-level inventories."""
     known_stacks = {stack.get("id") for stack in stack_list}
+    required_subjects = {
+        stack.get("id")
+        for stack in stack_list
+        if stack.get("capability_inventory") is True
+    }
     external_stories = set(external_stories or ())
     expectations = expectations or {}
     problems = []
@@ -676,6 +688,7 @@ def capability_problems(
                 capability.get("id")
                 for capability in capabilities
                 if isinstance(capability, dict)
+                and isinstance(capability.get("id"), str)
             }
             if ledger.get("source_revision") != expected_revision:
                 problems.append(f"{where} and its exact-ID inventory pin different revisions")
@@ -701,24 +714,27 @@ def capability_problems(
                 continue
             leaf = capability_where(ledger, capability)
             cap_id = capability.get("id")
-            seen[cap_id] += 1
-            categories.add(capability.get("category"))
+            if isinstance(cap_id, str):
+                seen[cap_id] += 1
+            category = capability.get("category")
+            if isinstance(category, str):
+                categories.add(category)
             owner = capability.get("ownership")
             status = capability.get("status")
             confidence = capability.get("confidence")
-            if confidence not in CAPABILITY_CONFIDENCE:
+            if not isinstance(confidence, str) or confidence not in CAPABILITY_CONFIDENCE:
                 problems.append(
                     f"{leaf} has unknown confidence {confidence!r}; choose one of"
                     f" {', '.join(sorted(CAPABILITY_CONFIDENCE))}"
                 )
             elif confidence == "assessed" and not capability.get("rationale"):
                 problems.append(f"{leaf} is assessed without a rationale")
-            if owner not in CAPABILITY_OWNERS:
+            if not isinstance(owner, str) or owner not in CAPABILITY_OWNERS:
                 problems.append(
                     f"{leaf} has unknown ownership {owner!r}; choose one of"
                     f" {', '.join(CAPABILITY_OWNERS)}"
                 )
-            elif status not in CAPABILITY_STATUS[owner]:
+            elif not isinstance(status, str) or status not in CAPABILITY_STATUS[owner]:
                 problems.append(
                     f"{leaf} has status {status!r}, which is not valid for ownership {owner!r}"
                 )
@@ -776,6 +792,14 @@ def capability_problems(
     for subject, count in subjects.items():
         if count > 1:
             problems.append(f"capability subject {subject!r} has {count} ledgers")
+    if not required_subjects:
+        problems.append("no comparison stack requires a capability inventory")
+    for subject in sorted(required_subjects - set(subjects)):
+        problems.append(f"stack {subject!r} requires a capability ledger, but none exists")
+    for subject in sorted(required_subjects - set(expectations)):
+        problems.append(f"stack {subject!r} requires an exact-ID inventory, but none exists")
+    for subject in sorted(set(subjects) - required_subjects, key=str):
+        problems.append(f"capability ledger {subject!r} is not anchored by its comparison stack")
     for subject in sorted(set(expectations) - set(subjects)):
         problems.append(f"capability expectation {subject!r} has no corresponding ledger")
     return problems
@@ -829,6 +853,10 @@ def schema_problems(kind: str, record) -> list[str]:
                 " marker and file a finding, or drop the finding"
             )
         problems.append(f"{where} carries the unknown key {key!r}{hint}")
+
+    if kind == "stack" and "capability_inventory" in record:
+        if not isinstance(record.get("capability_inventory"), bool):
+            problems.append(f"{where} has a non-boolean capability_inventory marker")
 
     return problems
 
