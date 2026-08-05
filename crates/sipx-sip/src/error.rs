@@ -207,6 +207,10 @@ pub enum UriError {
     /// A `%` not followed by two hex digits.
     #[error("malformed percent escape")]
     PercentEscape,
+    /// A replacement SIP user part is empty or contains a byte outside RFC 3261's `user`
+    /// production.
+    #[error("invalid SIP URI user part")]
+    User,
     /// A parameter or header with an empty name.
     #[error("empty parameter name")]
     EmptyParameterName,

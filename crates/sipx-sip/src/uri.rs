@@ -212,6 +212,9 @@ impl fmt::Display for Host {
 #[derive(Debug, Clone)]
 struct SipParts {
     user: Option<Bytes>,
+    /// Exact span of `user` in [`Uri::raw`]. Absent for a URI without userinfo and cleared when
+    /// another structured mutation discards the verbatim form.
+    raw_user_span: Option<std::ops::Range<usize>>,
     password: Option<Bytes>,
     host: Host,
     port: Option<u16>,
@@ -224,6 +227,33 @@ enum Parts {
     Sip(Box<SipParts>),
     /// Everything after the scheme, for schemes sipx does not model.
     Opaque(Bytes),
+}
+
+/// Borrowed syntax parts of an RFC 3966 `tel:` URI.
+///
+/// The view is deliberately byte-oriented and lossless. It neither removes visual separators
+/// nor interprets parameters such as `phone-context`; those are policy decisions for the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TelUriParts<'a> {
+    subscriber: &'a [u8],
+    parameters: Option<&'a [u8]>,
+}
+
+impl<'a> TelUriParts<'a> {
+    /// The exact `telephone-subscriber` bytes before the first `;`.
+    #[must_use]
+    pub fn subscriber(&self) -> &'a [u8] {
+        self.subscriber
+    }
+
+    /// The exact parameter tail after the first `;`, without that delimiter.
+    ///
+    /// `None` means there was no delimiter. `Some(b"")` retains a trailing delimiter from an
+    /// opaque URI body, even though an empty parameter is not valid RFC 3966 syntax.
+    #[must_use]
+    pub fn parameters(&self) -> Option<&'a [u8]> {
+        self.parameters
+    }
 }
 
 /// A URI.
@@ -241,8 +271,9 @@ enum Parts {
 pub struct Uri {
     scheme: Scheme,
     parts: Parts,
-    /// The exact bytes this URI was parsed from, so a forwarded URI is re-emitted unchanged.
-    /// `None` for a URI this process constructed.
+    /// The exact wire form this URI last retained, so an untouched or span-rewritten URI is
+    /// emitted without disturbing unrelated spelling. `None` for a constructed URI or after a
+    /// general structured mutation.
     raw: Option<Bytes>,
 }
 
@@ -273,7 +304,7 @@ impl Uri {
         let rest = raw.slice(colon + 1..);
 
         let parts = if scheme.is_sip() {
-            Parts::Sip(Box::new(parse_sip_parts(&rest)?))
+            Parts::Sip(Box::new(parse_sip_parts(&rest, colon + 1)?))
         } else {
             Parts::Opaque(rest)
         };
@@ -292,6 +323,7 @@ impl Uri {
             scheme: Scheme::Sip,
             parts: Parts::Sip(Box::new(SipParts {
                 user: None,
+                raw_user_span: None,
                 password: None,
                 host,
                 port: None,
@@ -318,10 +350,15 @@ impl Uri {
 
     #[must_use]
     fn sip_parts_mut(&mut self) -> Option<&mut SipParts> {
-        // Any mutation invalidates the verbatim form.
-        self.raw = None;
         match &mut self.parts {
-            Parts::Sip(p) => Some(p),
+            Parts::Sip(p) => {
+                // Any general structured mutation invalidates the verbatim form and therefore
+                // its retained user span. `replace_user` is the one operation that can update
+                // both losslessly, so it does not enter through this helper.
+                self.raw = None;
+                p.raw_user_span = None;
+                Some(p)
+            }
             Parts::Opaque(_) => None,
         }
     }
@@ -352,6 +389,55 @@ impl Uri {
     #[must_use]
     pub fn decoded_user(&self) -> Option<Vec<u8>> {
         self.user().and_then(escape::decode)
+    }
+
+    /// Replace an existing, already percent-encoded user part of a SIP or SIPS URI.
+    ///
+    /// Returns `Ok(false)` without touching the URI when its scheme is not SIP or SIPS or it has
+    /// no user part. For a parsed URI, a valid replacement changes only the retained user span:
+    /// scheme spelling, password, host spelling, delimiters, port, parameters and URI headers stay
+    /// byte-identical. The old verbatim form is invalidated rather than replayed stale. A URI whose
+    /// verbatim form was already discarded serializes canonically from its structured parts.
+    ///
+    /// # Errors
+    ///
+    /// [`UriError::PercentEscape`] reports a malformed `% HEX HEX` sequence. [`UriError::User`]
+    /// reports an empty value or a byte outside RFC 3261 §25.1's `user` production. Either error
+    /// leaves the URI unchanged.
+    pub fn replace_user(&mut self, user: impl Into<Bytes>) -> Result<bool, UriError> {
+        if !self.scheme.is_sip() {
+            return Ok(false);
+        }
+
+        let (raw, parts) = (&mut self.raw, &mut self.parts);
+        let Parts::Sip(parts) = parts else {
+            return Ok(false);
+        };
+        if parts.user.is_none() {
+            return Ok(false);
+        }
+        let user = user.into();
+        validate_user(&user)?;
+
+        let rewritten = match (raw.as_ref(), parts.raw_user_span.as_ref()) {
+            (Some(verbatim), Some(span)) => {
+                let end = span.start.checked_add(user.len()).ok_or(UriError::User)?;
+                let value = replace_raw_span(verbatim, span, &user).ok_or(UriError::User)?;
+                Some((value, span.start..end))
+            }
+            (Some(_), None) => return Err(UriError::User),
+            (None, _) => None,
+        };
+
+        parts.user = Some(user);
+        if let Some((value, span)) = rewritten {
+            *raw = Some(value);
+            parts.raw_user_span = Some(span);
+        } else {
+            *raw = None;
+            parts.raw_user_span = None;
+        }
+        Ok(true)
     }
 
     /// The host.
@@ -387,6 +473,18 @@ impl Uri {
         match &self.parts {
             Parts::Opaque(body) => Some(body),
             Parts::Sip(_) => None,
+        }
+    }
+
+    /// Split an RFC 3966 `tel:` URI into exact subscriber and parameter-tail spans.
+    ///
+    /// Returns `None` for every other scheme. This is a syntax view only: it preserves visual
+    /// separators, parameter spelling and order and performs no normalization or validation.
+    #[must_use]
+    pub fn tel_parts(&self) -> Option<TelUriParts<'_>> {
+        match (&self.scheme, &self.parts) {
+            (Scheme::Tel, Parts::Opaque(body)) => Some(split_tel_body(body)),
+            _ => None,
         }
     }
 
@@ -618,28 +716,32 @@ fn header_multiset(headers: &Params) -> std::collections::BTreeMap<Vec<u8>, Vec<
 /// is a difference, and the whole comparison is case-insensitive.
 #[must_use]
 fn tel_equivalent(a: &[u8], b: &[u8]) -> bool {
-    let (number_a, params_a) = split_tel_body(a);
-    let (number_b, params_b) = split_tel_body(b);
+    let parts_a = split_tel_body(a);
+    let parts_b = split_tel_body(b);
 
     if !escape::eq_ignore_ascii_case(
-        &strip_visual_separators(number_a),
-        &strip_visual_separators(number_b),
+        &strip_visual_separators(parts_a.subscriber),
+        &strip_visual_separators(parts_b.subscriber),
     ) {
         return false;
     }
 
-    tel_param_multiset(params_a) == tel_param_multiset(params_b)
+    tel_param_multiset(parts_a.parameters.unwrap_or_default())
+        == tel_param_multiset(parts_b.parameters.unwrap_or_default())
 }
 
 /// Split a tel URI body into the telephone-subscriber part and the parameter tail.
 #[must_use]
-fn split_tel_body(body: &[u8]) -> (&[u8], &[u8]) {
+fn split_tel_body(body: &[u8]) -> TelUriParts<'_> {
     match body.iter().position(|&b| b == b';') {
-        Some(semi) => (
-            body.get(..semi).unwrap_or(&[]),
-            body.get(semi + 1..).unwrap_or(&[]),
-        ),
-        None => (body, &[]),
+        Some(semi) => TelUriParts {
+            subscriber: body.get(..semi).unwrap_or(&[]),
+            parameters: Some(body.get(semi + 1..).unwrap_or(&[])),
+        },
+        None => TelUriParts {
+            subscriber: body,
+            parameters: None,
+        },
     }
 }
 
@@ -711,6 +813,42 @@ fn is_scheme_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')
 }
 
+/// Validate RFC 3261 §25.1's already percent-encoded `user` production.
+fn validate_user(user: &[u8]) -> Result<(), UriError> {
+    if !escape::escapes_are_well_formed(user) {
+        return Err(UriError::PercentEscape);
+    }
+    if user.is_empty() || !user.iter().copied().all(is_user_char) {
+        return Err(UriError::User);
+    }
+    Ok(())
+}
+
+#[must_use]
+fn is_user_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+        || matches!(
+            b,
+            b'-' | b'_'
+                | b'.'
+                | b'!'
+                | b'~'
+                | b'*'
+                | b'\''
+                | b'('
+                | b')'
+                | b'&'
+                | b'='
+                | b'+'
+                | b'$'
+                | b','
+                | b';'
+                | b'?'
+                | b'/'
+                | b'%'
+        )
+}
+
 /// Hostname characters.
 ///
 /// The ABNF permits only alphanumerics, `-` and `.`. sipx also accepts `_`, which the grammar
@@ -721,7 +859,7 @@ fn is_host_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_')
 }
 
-fn parse_sip_parts(rest: &Bytes) -> Result<SipParts, UriError> {
+fn parse_sip_parts(rest: &Bytes, body_offset: usize) -> Result<SipParts, UriError> {
     // An unescaped '@' can only be the userinfo separator: it is absent from the character
     // sets for user, password, host, parameters and headers alike, so it must be escaped
     // anywhere else. That makes the first '@' unambiguous.
@@ -738,6 +876,10 @@ fn parse_sip_parts(rest: &Bytes) -> Result<SipParts, UriError> {
             None => (Some(info), None),
         },
     };
+    let raw_user_span = user
+        .as_ref()
+        .and_then(|value| body_offset.checked_add(value.len()))
+        .map(|end| body_offset..end);
 
     for field in [user.as_ref(), password.as_ref()].into_iter().flatten() {
         if !escape::escapes_are_well_formed(field) {
@@ -773,12 +915,32 @@ fn parse_sip_parts(rest: &Bytes) -> Result<SipParts, UriError> {
 
     Ok(SipParts {
         user,
+        raw_user_span,
         password,
         host,
         port,
         params,
         headers,
     })
+}
+
+/// Replace a parser-owned span without re-reading URI grammar.
+fn replace_raw_span(
+    raw: &Bytes,
+    span: &std::ops::Range<usize>,
+    replacement: &[u8],
+) -> Option<Bytes> {
+    let before = raw.get(..span.start)?;
+    let after = raw.get(span.end..)?;
+    let capacity = before
+        .len()
+        .checked_add(replacement.len())?
+        .checked_add(after.len())?;
+    let mut rewritten = Vec::with_capacity(capacity);
+    rewritten.extend_from_slice(before);
+    rewritten.extend_from_slice(replacement);
+    rewritten.extend_from_slice(after);
+    Some(Bytes::from(rewritten))
 }
 
 fn parse_hostport(hostport: &Bytes) -> Result<(Host, Option<u16>), UriError> {
