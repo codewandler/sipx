@@ -2478,11 +2478,16 @@ dependencies = [
 name = "sipx-testkit"
 version = "1.0.0-beta.4"
 dependencies = [
+ "base64",
  "bytes",
+ "futures-util",
  "rcgen",
+ "serde_json",
  "sipx-sip",
  "sipx-transport",
+ "thiserror 2.0.19",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
