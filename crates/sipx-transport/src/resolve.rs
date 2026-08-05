@@ -185,7 +185,8 @@ pub fn resolve<R: Resolver + ?Sized, G: Rng + ?Sized>(
     resolver: &R,
     rng: &mut G,
 ) -> Vec<Target> {
-    // Every secure candidate carries the name from the URI, and resolution is exactly why.
+    // Every secure or WebSocket candidate carries the name from the URI, and resolution is
+    // exactly why. Clear WS needs it for HTTP authority even though it verifies no certificate.
     //
     // Without this, a `sips:` URI resolved through NAPTR and SRV arrives at an address with
     // nothing attached, and the certificate ends up checked against whatever that address or
@@ -197,12 +198,14 @@ pub fn resolve<R: Resolver + ?Sized, G: Rng + ?Sized>(
         Some(Host::Ip(ip)) => ip.to_string(),
         None => String::new(),
     };
+    let named_authority = matches!(uri.host(), Some(Host::Name(_)));
     candidates(uri, resolver, rng)
         .into_iter()
         .map(|target| match target.transport {
             TransportKind::Tls | TransportKind::Wss | TransportKind::Quic => {
                 target.verifying(&identity)
             }
+            TransportKind::Ws if named_authority => target.verifying(&identity),
             _ => target,
         })
         .collect()

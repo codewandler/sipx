@@ -52,8 +52,9 @@ dialog, without embedding any event package's application policy in the transpor
   route-set's first hop as the transport target, byte-exact dialog tags, bounded terminal-reason
   retry eligibility, and an async shutdown barrier that joins every driver-owned task. Re-review
   then completed route-hop scheme/transport/port/authority derivation and made the driver registry
-  the atomic admission/shutdown boundary. The final full-gate item intentionally remains open for
-  the integration branch.
+  the atomic admission/shutdown boundary. A final handshake-boundary proof pins clear-WS hostname
+  authority and resource into both the HTTP upgrade and connection key. The final full-gate item
+  intentionally remains open for the integration branch.
 
 ## Required failing-first tests
 

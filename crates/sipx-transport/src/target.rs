@@ -85,18 +85,17 @@ impl TransportKind {
 /// A destination.
 ///
 /// Not `Copy`, because of `verify_as`. That field is the reason this type exists rather than a
-/// bare `(SocketAddr, TransportKind)`: under TLS the address says where to send and the name
-/// says who must be there, and the two are established by different means. Deriving the name
-/// from the address instead — a reverse lookup, or the SRV target — lets whoever controls DNS
-/// pick which certificate is acceptable.
+/// bare `(SocketAddr, TransportKind)`: the address says where to send, while the original URI host
+/// says which TLS identity to verify and which HTTP authority a WebSocket handshake must name.
+/// Deriving either from the resolved address loses authority information before the connection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Target {
     /// Where to send.
     pub addr: SocketAddr,
     /// How to send.
     pub transport: TransportKind,
-    /// The name a TLS certificate must be valid for: the host from the URI sipx set out to
-    /// reach, before any resolution. `None` outside TLS, where nothing is verified.
+    /// Original URI host before resolution: TLS/WSS verification name and WS/WSS HTTP authority.
+    /// For clear WS it is authority only; no certificate verification is implied.
     pub verify_as: Option<Arc<str>>,
     /// The resource the WebSocket handshake asks for. `None` means `/`, and `None` outside
     /// WebSocket, where there is no handshake to ask anything of.
@@ -121,7 +120,10 @@ impl Target {
         Self::new(addr, TransportKind::Udp)
     }
 
-    /// The same destination, with the name its certificate must be valid for.
+    /// The same destination, with its pre-resolution URI host.
+    ///
+    /// TLS/WSS verify certificates against it. WS/WSS also put it in the HTTP `Host` authority;
+    /// clear WS uses that authority without implying authentication.
     #[must_use]
     pub fn verifying(mut self, name: impl AsRef<str>) -> Self {
         self.verify_as = Some(Arc::from(name.as_ref()));
@@ -174,11 +176,10 @@ impl Target {
 /// request riding a cleartext socket has silently become what it asked not to be. With
 /// WebSocket in the mix the case stops being theoretical — WS and TCP can and do share a port.
 ///
-/// **The verified identity**, because `docs/specs/sip-tls.md` §5 says two names that resolve to
-/// one address are two connections. Reusing one for the other would send traffic for
-/// `a.example.com` over a connection authenticated as `b.example.com`, which throws away the
-/// verification that was just performed. `None` on a connection a peer opened: sipx verified
-/// nothing about it, so there is no identity to key on.
+/// **The URI authority/verified identity**, because two names resolving to one address are still
+/// distinct TLS identities and distinct WebSocket HTTP authorities. Reusing one for another either
+/// throws away certificate verification or sends traffic on an upgrade granted to a different
+/// virtual host. `None` on a connection a peer opened: sipx selected no outbound authority.
 ///
 /// **The WebSocket resource**, for the same reason one step down: a socket upgraded at `/ws` was
 /// accepted by whatever serves `/ws`, and handing it traffic that asked for `/other` ignores the
@@ -190,7 +191,7 @@ pub struct ConnectionKey {
     pub peer: SocketAddr,
     /// Which transport it speaks.
     pub transport: TransportKind,
-    /// The name whose certificate was verified, for connections sipx opened over TLS.
+    /// Original URI host: verified for TLS/WSS and used as authority for WS/WSS.
     pub identity: Option<Arc<str>>,
     /// The resource the upgrade asked for, for WebSocket connections sipx opened.
     pub path: Option<Arc<str>>,

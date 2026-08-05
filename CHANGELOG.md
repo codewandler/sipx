@@ -34,7 +34,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Record-Route hops now select their exact transport, default or explicit port, secure verification
   authority and connection generation without permitting a SIPS-to-UDP downgrade. Subscription and
   publication admission also share an atomic shutdown barrier, so no task can spawn after its owner
-  has drained the registry.
+  has drained the registry. Named clear-WebSocket routes retain their HTTP Host authority and path
+  in the connection key without implying TLS authentication.
 
 ## [1.0.0-beta.4] — 2026-08-04
 

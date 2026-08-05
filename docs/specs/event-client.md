@@ -576,7 +576,8 @@ Establish independent dialogs whose first Record-Route URI names `sip;transport=
 `sip;transport=ws`, `sips;transport=tcp`, `sips;transport=tls`, `sips;transport=ws` and
 `sips;transport=wss`, first without and then with an explicit port. Refresh targets use the mapping
 in §2.3, and every explicit port wins. Secure targets verify the route host. A
-`sips;transport=udp` route emits no refresh and terminates `UnsupportedRouteTransport`. After the
+`sips;transport=udp` route emits no refresh and terminates `UnsupportedRouteTransport`. A named
+clear-WS route carries its host as HTTP authority without claiming TLS authentication. After the
 driver records a selected connection generation, a matching next NOTIFY passes `SamePeer`; changing
 any route selector clears that generation. A dialog with no Record-Route retains V14's identity and
 WebSocket resource across a Contact-only refresh.

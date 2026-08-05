@@ -950,6 +950,12 @@ fn record_route_selects_transport_port_authority_and_generation() {
         ),
         ("sip:route@192.0.2.40;transport=ws", Transport::Ws, 80, None),
         (
+            "sip:route@edge.example.test;transport=ws",
+            Transport::Ws,
+            80,
+            Some("edge.example.test"),
+        ),
+        (
             "sips:route@192.0.2.40;transport=tcp",
             Transport::Tls,
             5061,

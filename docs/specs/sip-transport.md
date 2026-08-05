@@ -133,7 +133,7 @@ Why each field is in the key — which is an argument, not a list, and so is not
 |---|---|
 | `peer` | The far end. |
 | `transport` | Which transport it speaks. |
-| `identity` | The name whose certificate was verified, for connections sipx opened over TLS. |
+| `identity` | Original URI host: verified for TLS/WSS and used as authority for WS/WSS. |
 | `path` | The resource the upgrade asked for, for WebSocket connections sipx opened. |
 <!-- END generated:pool-key -->
 
@@ -172,6 +172,9 @@ Otherwise NAPTR → SRV → A/AAAA, with RFC 2782 weighted selection among equal
 **[sipx]** The pure `Uri::selected_transport` rule is the single mapping used both here and by
 dialog route-set consumers. It maps the URI scheme and transport parameter before resolution,
 supplies the transport's default port, rejects unknown transports and rejects `sips` over UDP.
+The pre-resolution URI host remains on every outbound WebSocket target: WSS verifies it and both WS
+and WSS use it as the HTTP `Host` authority. Connection pooling keys include that authority and the
+WebSocket resource, so virtual hosts and paths at one address never share an upgrade.
 **[sipx]** Resolution is behind a trait so tests use a fixture and never touch DNS. The
 weighted selection takes its randomness from an injectable source, so the distribution is
 testable with a fixed seed.

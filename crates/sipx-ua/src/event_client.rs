@@ -65,7 +65,7 @@ pub struct Peer {
     pub transport: Transport,
     /// Driver-defined stream generation; absent for UDP.
     pub connection: Option<u64>,
-    /// Certificate identity selected before address resolution for TLS/WSS.
+    /// URI authority selected before address resolution for TLS verification or WebSocket Host.
     pub identity: Option<Arc<str>>,
     /// WebSocket request resource; absent means `/` and is ignored outside WS/WSS.
     pub path: Option<Arc<str>>,
@@ -1637,7 +1637,12 @@ fn route_peer(uri: &Uri, fallback: &Peer) -> Result<Peer, ()> {
         Some(Host::Name(_)) => fallback.address.ip(),
         None => return Err(()),
     };
-    let identity = if matches!(transport, Transport::Tls | Transport::Wss | Transport::Quic) {
+    let carries_authority = matches!(transport, Transport::Tls | Transport::Wss | Transport::Quic)
+        || matches!(
+            (transport, uri.host()),
+            (Transport::Ws, Some(Host::Name(_)))
+        );
+    let identity = if carries_authority {
         uri.host()
             .map(|host| Arc::from(String::from_utf8_lossy(&host.to_bytes()).into_owned()))
     } else {
