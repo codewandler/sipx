@@ -10,8 +10,8 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.5` are published prereleases, and beta.6 is
-the authorized release candidate on `main`.** Beta.6 hardens the bounded endpoint responder,
+_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.6` are published prereleases, and beta.6 is
+current.** Beta.6 hardens the bounded endpoint responder,
 corrects validated-response accounting, and records the browser SDK plus later media/application
 work as explicit specifications and backlog rather than runtime claims. The retained load evidence
 covers the current endpoint direction only; no peer result or general ranking is claimed. Stable
