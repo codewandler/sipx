@@ -17,7 +17,11 @@ import importlib.util
 import json
 import os
 import pathlib
+import signal
 import sys
+import tempfile
+import threading
+import time
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -56,6 +60,27 @@ load_contract = load_comparative_module()
 FIXTURE_STACK = "zz-fixture-stack"
 FIXTURE_DIMENSION = "zz-fixture-dimension"
 TODAY = datetime.date(2026, 8, 4)
+
+
+def process_group_exists(pgid):
+    """Observe whether a POSIX process group still owns at least one process."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def force_group_cleanup(pgid, timeout_seconds=2.0):
+    """Keep adversarial supervision fixtures from leaving work behind when an assertion fails."""
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + timeout_seconds
+    pause = threading.Event()
+    while process_group_exists(pgid) and time.monotonic() < deadline:
+        pause.wait(min(0.01, max(0.0, deadline - time.monotonic())))
 
 
 def a_load_manifest():
@@ -780,6 +805,29 @@ class TheComparativeLoadContract(unittest.TestCase):
         result = a_load_result(manifest)
         self.assertIs(load_contract.validate_result(result, manifest), result)
 
+    def test_every_dialog_identifier_including_ack_and_to_is_deterministic(self) -> None:
+        self.assertEqual(
+            {
+                "call_id": "cl-0123456789abcdef0123456789abcdef-3@driver.invalid",
+                "from_tag": "f-dbcde7aba829a6d2",
+                "to_tag": "t-f8d0e81e93174798",
+                "invite_branch": "z9hG4bK-i-2a0029d75e3b140c398b",
+                "ack_branch": "z9hG4bK-a-9cf65817dc9741e3da13",
+                "bye_branch": "z9hG4bK-b-d211c0e00a0ac3affb69",
+            },
+            load_contract.dialog_identifiers(
+                7, "0123456789abcdef0123456789abcdef", 3
+            ),
+        )
+
+    def test_the_spec_carries_exact_ack_bye_and_bye_response_templates(self) -> None:
+        text = (ROOT / "docs" / "specs" / "comparative-load.md").read_text(encoding="utf-8")
+        self.assertIn("ACK sip:load@<responder-uri> SIP/2.0\\r\\n", text)
+        self.assertIn("Via: SIP/2.0/UDP <driver-via>;rport;branch=<ack-branch>\\r\\n", text)
+        self.assertIn("BYE sip:load@<responder-uri> SIP/2.0\\r\\n", text)
+        self.assertIn("CSeq: 2 BYE\\r\\n", text)
+        self.assertIn("To tag: t-<first-16-hex", text)
+
     def test_zero_missing_or_widened_phase_bounds_are_rejected(self) -> None:
         original = a_load_manifest()
         for name, value in (("drain_ms", 0), ("measurement_ms", 0), ("warmup_ms", 10_001)):
@@ -802,6 +850,29 @@ class TheComparativeLoadContract(unittest.TestCase):
         changed_result = self.changed(result)
         changed_result["build"]["argv_sha256"] = "0" * 64
         self.assert_result_refused(changed_result, manifest)
+
+    def test_invalid_utc_phase_totals_and_response_totals_are_rejected(self) -> None:
+        manifest = a_load_manifest()
+        result = a_load_result(manifest)
+
+        changed = self.changed(result)
+        changed["run"]["started_utc"] = "not-a-time"
+        self.assert_result_refused(changed, manifest)
+        changed["run"]["started_utc"] = "2026-08-05T12Z"
+        self.assert_result_refused(changed, manifest)
+
+        changed = self.changed(result)
+        changed["run"]["elapsed_ms"] = (
+            changed["run"]["warmup_ms"]
+            + changed["run"]["measurement_ms"]
+            + changed["run"]["drain_ms"]
+            - 1
+        )
+        self.assert_result_refused(changed, manifest)
+
+        changed = self.changed(result)
+        changed["responses"] = {"provisional": {}, "final": {}}
+        self.assert_result_refused(changed, manifest)
 
     def test_missing_cleanup_or_live_post_drain_state_cannot_pass(self) -> None:
         result = a_load_result()
@@ -865,6 +936,235 @@ signal.pause()
         self.assertEqual(old_sigint, load_contract.signal.getsignal(load_contract.signal.SIGINT))
 
     @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_cleanup_observes_group_exit_when_descendant_closed_its_pipes(self) -> None:
+        child = "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); signal.pause()"
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = pathlib.Path(directory) / "child.pid"
+            helper = f"""
+import json, os, pathlib, subprocess, sys
+child = subprocess.Popen(
+    [sys.executable, '-c', {child!r}],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+pathlib.Path({str(pid_file)!r}).write_text(str(child.pid), encoding='ascii')
+print(json.dumps({{
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {{'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096}},
+}}), flush=True)
+"""
+            supervised = load_contract.SupervisedProcess(
+                [sys.executable, "-c", helper],
+                "responder",
+                stdout_limit=4096,
+                stderr_limit=4096,
+            )
+            pgid = supervised.pgid
+            try:
+                supervised.wait_ready(timeout_ms=2_000)
+                self.assertTrue(pid_file.read_text(encoding="ascii"))
+                self.assertEqual("kill", supervised.close(timeout_seconds=0.25))
+                self.assertFalse(process_group_exists(pgid))
+            finally:
+                force_group_cleanup(pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_a_failed_graceful_callback_still_forces_complete_cleanup(self) -> None:
+        helper = """
+import json, os, signal
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        supervised = load_contract.SupervisedProcess(
+            [sys.executable, "-c", helper],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        pgid = supervised.pgid
+        try:
+            supervised.wait_ready(timeout_ms=2_000)
+
+            def fail_to_stop_orderly():
+                raise RuntimeError("orderly stop failed")
+
+            with self.assertRaisesRegex(RuntimeError, "orderly stop failed"):
+                supervised.close(graceful=fail_to_stop_orderly, timeout_seconds=0.25)
+            self.assertIsNotNone(supervised.process.returncode)
+            self.assertFalse(process_group_exists(pgid))
+            self.assertTrue(supervised.stdout.eof.is_set())
+            self.assertTrue(supervised.stderr.eof.is_set())
+        finally:
+            force_group_cleanup(pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_term_handler_cleans_the_group_before_reporting_signal_exit(self) -> None:
+        helper = """
+import json, os, signal, subprocess, sys
+subprocess.Popen([sys.executable, '-c', 'import signal; signal.pause()'])
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        old_handler = signal.getsignal(signal.SIGTERM)
+        owner = load_contract.ProcessSupervisor(cleanup_wait_seconds=0.25)
+        owner.__enter__()
+        supervised = owner.start(
+            [sys.executable, "-c", helper],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        pgid = supervised.pgid
+        try:
+            supervised.wait_ready(timeout_ms=2_000)
+            with self.assertRaises(SystemExit) as stopped:
+                owner._on_signal(signal.SIGTERM, None)
+            self.assertEqual(128 + signal.SIGTERM, stopped.exception.code)
+            self.assertFalse(process_group_exists(pgid))
+            self.assertEqual(old_handler, signal.getsignal(signal.SIGTERM))
+        finally:
+            try:
+                owner.close()
+            except load_contract.ContractError:
+                pass
+            force_group_cleanup(pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_signal_arriving_during_cleanup_is_deferred_until_group_exit(self) -> None:
+        helper = """
+import json, os, signal
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        owner = load_contract.ProcessSupervisor(cleanup_wait_seconds=0.25)
+        owner.__enter__()
+        supervised = owner.start(
+            [sys.executable, "-c", helper],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        pgid = supervised.pgid
+        sender = threading.Timer(0.05, os.kill, args=(os.getpid(), signal.SIGTERM))
+        try:
+            supervised.wait_ready(timeout_ms=2_000)
+            sender.start()
+            with self.assertRaises(SystemExit) as stopped:
+                owner.close()
+            sender.join(timeout=1)
+            self.assertEqual(128 + signal.SIGTERM, stopped.exception.code)
+            self.assertFalse(process_group_exists(pgid))
+            self.assertIsNotNone(supervised.process.returncode)
+        finally:
+            sender.cancel()
+            sender.join(timeout=1)
+            force_group_cleanup(pgid)
+            if supervised.process.poll() is None:
+                supervised.process.wait(timeout=2)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_oversized_readiness_is_rejected_without_retaining_the_line(self) -> None:
+        helper = (
+            "import os,signal; "
+            f"os.write(1, b'x' * {load_contract.MAX_READY_BYTES + 65_536}); "
+            "signal.pause()"
+        )
+        supervised = load_contract.SupervisedProcess(
+            [sys.executable, "-c", helper],
+            "responder",
+            stdout_limit=load_contract.MAX_LOG_BYTES,
+            stderr_limit=4096,
+        )
+        pgid = supervised.pgid
+        try:
+            with self.assertRaises(load_contract.ContractError):
+                supervised.wait_ready(timeout_ms=2_000)
+            self.assertLessEqual(
+                supervised.stdout.readiness_retained_high_water,
+                load_contract.MAX_READY_BYTES,
+            )
+            self.assertIsNotNone(supervised.process.returncode)
+        finally:
+            force_group_cleanup(pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_an_escaped_descendant_retaining_a_pipe_is_reported_and_bounded(self) -> None:
+        child = (
+            "import signal; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "signal.pause()"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = pathlib.Path(directory) / "escaped.pid"
+            helper = f"""
+import json, os, pathlib, subprocess, sys
+child = subprocess.Popen(
+    [sys.executable, '-c', {child!r}],
+    stdin=subprocess.DEVNULL,
+    start_new_session=True,
+)
+pathlib.Path({str(pid_file)!r}).write_text(str(child.pid), encoding='ascii')
+print(json.dumps({{
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {{'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096}},
+}}), flush=True)
+"""
+            supervised = load_contract.SupervisedProcess(
+                [sys.executable, "-c", helper],
+                "responder",
+                stdout_limit=4096,
+                stderr_limit=4096,
+            )
+            escaped_pid = None
+            try:
+                supervised.wait_ready(timeout_ms=2_000)
+                escaped_pid = int(pid_file.read_text(encoding="ascii"))
+                with self.assertRaisesRegex(load_contract.ContractError, "retained.*pipe"):
+                    supervised.close(timeout_seconds=0.1)
+            finally:
+                force_group_cleanup(supervised.pgid)
+                if escaped_pid is not None:
+                    try:
+                        os.kill(escaped_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        supervised.close(timeout_seconds=0.5)
+                    except load_contract.ContractError:
+                        pass
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
     def test_malformed_and_duplicate_readiness_fail_closed(self) -> None:
         malformed = load_contract.SupervisedProcess(
             [sys.executable, "-c", "print('{', flush=True); import signal; signal.pause()"],
@@ -899,6 +1199,30 @@ signal.pause()
         duplicate.wait_ready(timeout_ms=2_000)
         with self.assertRaises(load_contract.ContractError):
             duplicate.close(timeout_seconds=0.25)
+
+        unterminated = load_contract.SupervisedProcess(
+            [
+                sys.executable,
+                "-c",
+                "import json,os; print(json.dumps({'schema':'sipx.comparative-load.ready.v1','role':'responder','pid':os.getpid(),'address':'127.0.0.1:5060','transport':'udp','limits':{'active':1,'events':1,'stdout_bytes':4096,'stderr_bytes':4096}}),end='',flush=True)",
+            ],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        with self.assertRaisesRegex(load_contract.ContractError, "line terminator"):
+            unterminated.wait_ready(timeout_ms=2_000)
+
+        invalid_driver = {
+            "schema": load_contract.READY_SCHEMA,
+            "role": "driver",
+            "pid": 1,
+            "address": None,
+            "transport": "udp",
+            "limits": {"active": 1, "events": 1, "stdout_bytes": 4096, "stderr_bytes": 4096},
+        }
+        with self.assertRaises(load_contract.ContractError):
+            load_contract.validate_readiness(invalid_driver, "driver")
 
 
 class TheRealDataset(unittest.TestCase):

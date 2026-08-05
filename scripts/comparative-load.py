@@ -10,16 +10,19 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import datetime
 import hashlib
 import ipaddress
 import json
 import os
 import pathlib
 import queue
+import re
 import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import BinaryIO, NoReturn
 
@@ -62,6 +65,9 @@ RESOURCE_FIELDS = frozenset(
         "task_thread_high_water",
         "endpoint_active_high_water",
     )
+)
+RFC3339_UTC = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z"
 )
 
 
@@ -167,6 +173,19 @@ def _string_list(value: object, path: str, *, nonempty: bool = False) -> list[st
     return result
 
 
+def _utc_timestamp(value: object, path: str) -> str:
+    text = _text(value, path)
+    if RFC3339_UTC.fullmatch(text) is None:
+        _fail(path, "must be an RFC 3339 UTC timestamp ending in Z")
+    try:
+        parsed = datetime.datetime.fromisoformat(f"{text[:-1]}+00:00")
+    except ValueError:
+        _fail(path, "must be an RFC 3339 UTC timestamp ending in Z")
+    if parsed.utcoffset() != datetime.timedelta(0):
+        _fail(path, "must identify UTC")
+    return text
+
+
 def contract_hash(spec: pathlib.Path | None = None) -> str:
     """Hash the normative contract bytes carried in every result."""
 
@@ -184,6 +203,30 @@ def argv_hash(argv: Sequence[str]) -> str:
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
     return digest.hexdigest()
+
+
+def dialog_identifiers(seed: int, run_id: str, index: int) -> dict[str, str]:
+    """Derive the complete deterministic identifier set for one measured dialog."""
+
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= (1 << 64) - 1:
+        raise ContractError("seed must fit an unsigned 64-bit integer")
+    _run_id(run_id, "run_id")
+    if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index <= (1 << 64) - 1:
+        raise ContractError("dialog index must fit an unsigned 64-bit integer")
+
+    def digest(purpose: str, length: int) -> str:
+        fields = (str(seed), run_id, str(index), purpose)
+        material = b"\0".join(field.encode("utf-8") for field in fields)
+        return hashlib.sha256(material).hexdigest()[:length]
+
+    return {
+        "call_id": f"cl-{run_id}-{index}@driver.invalid",
+        "from_tag": f"f-{digest('from', 16)}",
+        "to_tag": f"t-{digest('to', 16)}",
+        "invite_branch": f"z9hG4bK-i-{digest('invite', 20)}",
+        "ack_branch": f"z9hG4bK-a-{digest('ack', 20)}",
+        "bye_branch": f"z9hG4bK-b-{digest('bye', 20)}",
+    }
 
 
 def ladder_rates(ceiling: int) -> tuple[int, ...]:
@@ -435,13 +478,19 @@ def validate_result(value: object, manifest_value: object) -> Mapping[str, objec
     )
     if run_seed != expected_seed:
         _fail("result.run.seed", f"must be the derived repetition seed {expected_seed}")
-    _text(run["started_utc"], "result.run.started_utc")
-    _positive_int(run["elapsed_ms"], "result.run.elapsed_ms")
+    _utc_timestamp(run["started_utc"], "result.run.started_utc")
+    elapsed_ms = _positive_int(run["elapsed_ms"], "result.run.elapsed_ms")
     if run["warmup_ms"] != WARMUP_MS or run["measurement_ms"] != MEASUREMENT_MS:
         _fail("result.run", "warmup and measurement durations must match the fixed profile")
     drain_ms = _nonnegative_int(run["drain_ms"], "result.run.drain_ms")
     if drain_ms > manifest["phases"]["drain_ms"]:
         _fail("result.run.drain_ms", "exceeds the manifest drain bound")
+    minimum_elapsed = WARMUP_MS + MEASUREMENT_MS + drain_ms
+    if elapsed_ms < minimum_elapsed:
+        _fail(
+            "result.run.elapsed_ms",
+            f"must cover warm-up, measurement and drain ({minimum_elapsed} ms)",
+        )
 
     build = _closed(
         result["build"],
@@ -524,6 +573,13 @@ def validate_result(value: object, manifest_value: object) -> Mapping[str, objec
     terminal = counts["completed"] + sum(errors[name] for name in TERMINAL_ERRORS)
     if terminal != counts["offered"]:
         _fail("result", "completed plus terminal error classes must equal offered")
+    successful_finals = responses["final"].get("200", 0)
+    required_successful_finals = counts["established"] + counts["completed"]
+    if successful_finals < required_successful_finals:
+        _fail(
+            "result.responses.final.200",
+            "must cover each established INVITE and completed BYE",
+        )
 
     latency = _closed(result["latency_ms"], "result.latency_ms", set(), {"setup", "teardown"})
     if counts["established"] > 0 and "setup" not in latency:
@@ -612,11 +668,7 @@ def validate_readiness(value: object, expected_role: str) -> Mapping[str, object
     if ready["role"] != expected_role or expected_role not in ROLES:
         _fail("readiness.role", f"must be {expected_role!r}")
     _positive_int(ready["pid"], "readiness.pid")
-    address = ready["address"]
-    if expected_role == "responder":
-        _socket_address(address, "readiness.address")
-    elif address is not None:
-        _socket_address(address, "readiness.address")
+    _socket_address(ready["address"], "readiness.address")
     if ready["transport"] != "udp":
         _fail("readiness.transport", "must be udp")
     limits = _closed(
@@ -641,7 +693,9 @@ class _BoundedReader:
         self.data = bytearray()
         self.overflow = threading.Event()
         self.eof = threading.Event()
+        self.incomplete_readiness = threading.Event()
         self.lines: queue.Queue[bytes] = queue.Queue(maxsize=1)
+        self.readiness_retained_high_water = 0
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -664,16 +718,30 @@ class _BoundedReader:
                 if len(chunk) > room:
                     self.overflow.set()
                 if self.readiness and not first_line_seen:
-                    pending.extend(chunk)
-                    if b"\n" in pending:
-                        line, _, _rest = pending.partition(b"\n")
+                    line_end = chunk.find(b"\n")
+                    line_part = chunk if line_end < 0 else chunk[:line_end]
+                    readiness_limit = min(self.limit, MAX_READY_BYTES)
+                    retained_room = max(0, readiness_limit - len(pending))
+                    pending.extend(line_part[:retained_room])
+                    self.readiness_retained_high_water = max(
+                        self.readiness_retained_high_water, len(pending)
+                    )
+                    if len(line_part) > retained_room:
+                        # Wake the readiness waiter immediately, but retain no bytes beyond the
+                        # declared ceiling. The pipe continues to drain so termination cannot
+                        # deadlock behind a child blocked in write(2).
+                        self.overflow.set()
+                        first_line_seen = True
+                        self.lines.put_nowait(bytes(pending))
+                        pending.clear()
+                    elif line_end >= 0:
+                        line = bytes(pending)
                         pending.clear()
                         first_line_seen = True
-                        self.lines.put_nowait(bytes(line))
-                    if len(pending) > MAX_READY_BYTES:
-                        self.overflow.set()
+                        self.lines.put_nowait(line)
         finally:
-            if self.readiness and not first_line_seen and pending:
+            if self.readiness and not first_line_seen:
+                self.incomplete_readiness.set()
                 try:
                     self.lines.put_nowait(bytes(pending))
                 except queue.Full:
@@ -737,6 +805,9 @@ class SupervisedProcess:
         if self.stdout.overflow.is_set() or len(line) > MAX_READY_BYTES:
             self._close_after_failure()
             raise ContractError("readiness or stdout exceeded its configured bound")
+        if self.stdout.incomplete_readiness.is_set():
+            self._close_after_failure()
+            raise ContractError("readiness ended at EOF before its line terminator")
         try:
             value = json.loads(line)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -766,6 +837,38 @@ class SupervisedProcess:
         except ProcessLookupError:
             pass
 
+    def _group_exists(self) -> bool:
+        try:
+            os.killpg(self.pgid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def _wait_for_group_exit(self, timeout_seconds: float) -> bool:
+        """Wait for both the reapable leader and every process in its group to disappear."""
+
+        deadline = time.monotonic() + timeout_seconds
+        if self.process.poll() is None:
+            try:
+                self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                return False
+        pause = threading.Event()
+        while self._group_exists():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            # This finite poll observes group disappearance; it does not substitute elapsed time
+            # for the event. POSIX exposes no wait primitive for grandchildren.
+            pause.wait(min(0.01, remaining))
+        return True
+
+    def _wait_for_pipe_eof(self, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        for reader in (self.stdout, self.stderr):
+            reader.thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        return not self.stdout.thread.is_alive() and not self.stderr.thread.is_alive()
+
     def close(
         self,
         graceful: Callable[[], None] | None = None,
@@ -779,32 +882,47 @@ class SupervisedProcess:
         if not 0 < timeout_seconds <= 5:
             raise ContractError("each cleanup wait bound must be in (0, 5] seconds")
         self._closed = True
+        graceful_error: BaseException | None = None
         if graceful is not None:
-            graceful()
+            try:
+                graceful()
+            except BaseException as error:
+                # An orderly-stop failure is evidence, never permission to abandon the process
+                # group. Preserve it for the caller after forced cleanup has completed.
+                graceful_error = error
         escalation = "none"
-        try:
-            self.process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
+        group_exited = self._wait_for_group_exit(timeout_seconds)
+        if not group_exited:
             escalation = "term"
             self._signal_group(signal.SIGTERM)
-            try:
-                self.process.wait(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
-                escalation = "kill"
-                self._signal_group(signal.SIGKILL)
-                self.process.wait(timeout=timeout_seconds)
-
-        # The leader may have exited while a child retained the group or an inherited pipe.
-        self._signal_group(signal.SIGTERM)
-        self.stdout.thread.join(timeout=timeout_seconds)
-        self.stderr.thread.join(timeout=timeout_seconds)
-        if self.stdout.thread.is_alive() or self.stderr.thread.is_alive():
+            group_exited = self._wait_for_group_exit(timeout_seconds)
+        if not group_exited:
             escalation = "kill"
             self._signal_group(signal.SIGKILL)
-            self.stdout.thread.join(timeout=timeout_seconds)
-            self.stderr.thread.join(timeout=timeout_seconds)
-        if self.stdout.thread.is_alive() or self.stderr.thread.is_alive():
-            raise ContractError("a descendant retained an inherited output pipe after group cleanup")
+            group_exited = self._wait_for_group_exit(timeout_seconds)
+
+        pipes_closed = self._wait_for_pipe_eof(timeout_seconds)
+        if not pipes_closed:
+            # A same-group holder should already be gone, but a process that violated the contract
+            # by changing session can retain a pipe. One last group KILL is safe; if it cannot
+            # reach the holder, the bounded second wait turns the escape into a typed failure.
+            escalation = "kill"
+            self._signal_group(signal.SIGKILL)
+            group_exited = self._wait_for_group_exit(timeout_seconds) and group_exited
+            pipes_closed = self._wait_for_pipe_eof(timeout_seconds)
+
+        problems: list[str] = []
+        if not group_exited:
+            problems.append("the supervised process group remained alive after KILL")
+        if not pipes_closed:
+            problems.append("a descendant retained an inherited output pipe after group cleanup")
+        if problems:
+            # The leader has still been reaped when possible. Pipes held by an escaped descendant
+            # cannot be closed safely under its reader thread, so leave this object retryable after
+            # the caller applies its out-of-band fixture/process policy.
+            self._closed = False
+            raise ContractError("; ".join(problems))
+
         self.process.stdout.close()
         self.process.stderr.close()
         if not self.stdout.eof.is_set() or not self.stderr.eof.is_set():
@@ -823,6 +941,8 @@ class SupervisedProcess:
             raise ContractError(
                 f"supervised process emitted {readiness_records} readiness records, expected exactly one"
             )
+        if graceful_error is not None:
+            raise graceful_error
         return escalation
 
     def __enter__(self) -> "SupervisedProcess":
@@ -843,6 +963,8 @@ class ProcessSupervisor:
         self._previous: dict[signal.Signals, object] = {}
         self._entered = False
         self._closed = False
+        self._closing = False
+        self._pending_signal: int | None = None
 
     def __enter__(self) -> "ProcessSupervisor":
         if self._entered:
@@ -871,19 +993,32 @@ class ProcessSupervisor:
     def close(self) -> None:
         if self._closed:
             return
+        if self._closing:
+            return
+        self._closing = True
         self._closed = True
         problems: list[str] = []
-        for process in reversed(self.processes):
-            try:
-                process.close(timeout_seconds=self.cleanup_wait_seconds)
-            except ContractError as error:
-                problems.append(str(error))
-        if self._entered:
-            for signum, previous in self._previous.items():
-                signal.signal(signum, previous)
-            atexit.unregister(self._on_exit)
+        try:
+            for process in reversed(self.processes):
+                try:
+                    process.close(timeout_seconds=self.cleanup_wait_seconds)
+                except ContractError as error:
+                    problems.append(str(error))
+        finally:
+            if self._entered:
+                for signum, previous in self._previous.items():
+                    signal.signal(signum, previous)
+                atexit.unregister(self._on_exit)
+            self._closing = False
+        pending_signal = self._pending_signal
+        self._pending_signal = None
         if problems:
+            if pending_signal is not None:
+                print(f"comparative-load cleanup: {'; '.join(problems)}", file=sys.stderr)
+                raise SystemExit(128 + pending_signal)
             raise ContractError("; ".join(problems))
+        if pending_signal is not None:
+            raise SystemExit(128 + pending_signal)
 
     def _on_exit(self) -> None:
         try:
@@ -891,10 +1026,16 @@ class ProcessSupervisor:
         except ContractError as error:
             print(f"comparative-load cleanup: {error}", file=sys.stderr)
 
-    def _on_signal(self, signum: int, frame: object) -> NoReturn:
+    def _on_signal(self, signum: int, frame: object) -> None:
         del frame
+        if self._closing:
+            if self._pending_signal is None:
+                self._pending_signal = signum
+            return
         try:
             self.close()
+        except ContractError as error:
+            print(f"comparative-load cleanup: {error}", file=sys.stderr)
         finally:
             raise SystemExit(128 + signum)
 

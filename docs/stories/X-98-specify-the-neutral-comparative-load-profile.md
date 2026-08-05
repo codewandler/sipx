@@ -44,5 +44,8 @@ comparison before implementing or running it.
   predicates, schema and supervision. `scripts/comparative-load.py` makes the closed manifest/result
   shape and process-group lifecycle executable; adversarial fixtures cover bounds, missing metadata,
   unsupported-resource honesty, duplicate readiness and a blocking descendant.
+- Review hardening makes group disappearance independent of pipe EOF, forces cleanup after an
+  orderly-stop callback fails, bounds unterminated readiness retention, rejects contradictory time
+  and response totals, and covers oversized readiness plus an escaped pipe holder.
 - The full gate is intentionally deferred until the reviewed M13 branches reach integration, so the
   final Acceptance item and story status remain open. The actual comparative measurement is M14.

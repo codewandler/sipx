@@ -50,21 +50,26 @@ For zero-based dialog index `n`, the driver derives these printable ASCII values
 ```text
 Call-ID: cl-<run_id>-<n>@driver.invalid
 From tag: f-<first-16-hex(H(seed || run_id || n || "from"))>
+To tag: t-<first-16-hex(H(seed || run_id || n || "to"))>
 INVITE branch: z9hG4bK-i-<first-20-hex(H(seed || run_id || n || "invite"))>
+ACK branch: z9hG4bK-a-<first-20-hex(H(seed || run_id || n || "ack"))>
 BYE branch: z9hG4bK-b-<first-20-hex(H(seed || run_id || n || "bye"))>
 ```
 
 `H` is SHA-256 over each UTF-8 field separated by one zero byte; integers are lowercase decimal.
-The responder creates a non-empty To tag from the same seed/run/index plus `"to"`. A branch, tag or
-Call-ID MUST NOT repeat within a run. The Request-URI and sent-by host/port come from the readiness
-record, never from a response body or display name.
+There is no trailing zero byte after the purpose field. A branch, tag or Call-ID MUST NOT repeat
+within a run. The responder verifies and uses the deterministic To tag rather than supplying local
+entropy. The Request-URI and sent-by host/port come from the readiness record, never from a response
+body or display name.
 
 ### 3.2 Byte-level flow
 
 Whitespace shown below is exact: one SP between tokens, CRLF line endings, no folded fields, and an
-empty body. `<driver-via>`, `<driver-uri>`, `<responder-uri>` and `<target>` are bounded values fixed
-before admission. Header order is stable for reproducibility but receivers MUST apply RFC 3261
-semantics rather than depend on it.
+empty body. `<driver-via>` and `<driver-uri>` are the driver's readiness IP socket address;
+`<responder-uri>` and `<target>` are the responder's readiness IP socket address. IPv6 addresses use
+brackets in both sent-by and URI hostport forms. These values are therefore fixed before admission
+and limited by the 4,096-byte readiness bound. Header order is stable for reproducibility but
+receivers MUST apply RFC 3261 semantics rather than depend on it.
 
 ```text
 INVITE sip:load@<target> SIP/2.0\r\n
@@ -95,11 +100,46 @@ Content-Length: 0\r\n
 ```
 
 The driver validates status, Via branch, Call-ID, both tags, CSeq and Contact before counting the
-dialog established. It then sends ACK with CSeq `1 ACK`, the dialog target and route rules learned
-from the response, and a fresh top Via branch. The responder must match that ACK to the accepted
-dialog. The driver immediately sends an in-dialog BYE with CSeq `2 BYE` and the deterministic BYE
-branch. The responder validates dialog identifiers and monotonically increasing remote CSeq, then
-answers `200 OK` with `CSeq: 2 BYE`. No body or media session is created at any point.
+dialog established. Because the profile response has no `Record-Route`, its `Contact` is the dialog
+target and the route set is empty. The driver then emits these exact ACK and BYE requests:
+
+```text
+ACK sip:load@<responder-uri> SIP/2.0\r\n
+Via: SIP/2.0/UDP <driver-via>;rport;branch=<ack-branch>\r\n
+Max-Forwards: 70\r\n
+From: <sip:driver@<driver-uri>>;tag=<from-tag>\r\n
+To: <sip:load@<target>>;tag=<to-tag>\r\n
+Call-ID: <call-id>\r\n
+CSeq: 1 ACK\r\n
+Content-Length: 0\r\n
+\r\n
+BYE sip:load@<responder-uri> SIP/2.0\r\n
+Via: SIP/2.0/UDP <driver-via>;rport;branch=<bye-branch>\r\n
+Max-Forwards: 70\r\n
+From: <sip:driver@<driver-uri>>;tag=<from-tag>\r\n
+To: <sip:load@<target>>;tag=<to-tag>\r\n
+Call-ID: <call-id>\r\n
+CSeq: 2 BYE\r\n
+Content-Length: 0\r\n
+\r\n
+```
+
+The ACK branch is stable for a retransmitted INVITE 2xx: the driver retransmits the identical ACK
+bytes and never sends a second BYE. The responder matches ACK to the accepted dialog, validates the
+BYE identifiers and monotonically increasing remote CSeq, and emits this exact successful response:
+
+```text
+SIP/2.0 200 OK\r\n
+Via: <copied BYE top Via with required received/rport processing>\r\n
+From: <copied From>\r\n
+To: <copied To>\r\n
+Call-ID: <copied Call-ID>\r\n
+CSeq: 2 BYE\r\n
+Content-Length: 0\r\n
+\r\n
+```
+
+No body or media session is created at any point.
 
 Setup latency begins when the first INVITE byte is handed to the transport and ends after the final
 2xx has been fully validated. Teardown latency begins when the BYE is handed to the transport and
@@ -173,9 +213,10 @@ Each process writes exactly one UTF-8 JSON line to stdout before accepting workl
 {"schema":"sipx.comparative-load.ready.v1","role":"driver|responder","pid":1234,"address":"127.0.0.1:5060","transport":"udp","limits":{"active":1024,"events":65536,"stdout_bytes":16777216,"stderr_bytes":16777216}}
 ```
 
-The driver address MAY be omitted; the responder address is required and must be an IP socket
-address. The readiness line is at most 4096 bytes and must arrive within 10 seconds. EOF, malformed
-JSON, duplicate readiness, a changed address, or traffic accepted before readiness fails the run.
+Both addresses are required IP socket addresses: they fix the request URI, Contact and Via sent-by
+bytes before admission. The readiness line is at most 4096 bytes and must arrive within 10 seconds.
+EOF, malformed JSON, duplicate readiness, a changed address, or traffic accepted before readiness
+fails the run.
 
 All queues and counters have positive finite manifest limits. Per-process stdout and stderr are each
 limited to 16 MiB; the structured event stream is at most 65,536 records and 64 MiB. Crossing a
