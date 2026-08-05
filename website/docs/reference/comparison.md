@@ -244,7 +244,21 @@ Capacity is at least **1024 calls/s**: the highest tested rate passed, so this l
 
 ### Responder capacity: sipgo
 
-_Not measured: no compatible retained run has been captured under the current profile contract_
+| Rate (calls/s) | Outcome | Median achieved (dialogs/s) | Spread [min, max] | Setup p99 (ms, median) |
+|---|---|---|---|---|
+| 32 | supported (5/5) | 32.0 | [32.0, 32.0] | 1 |
+| 64 | supported (5/5) | 64.0 | [64.0, 64.0] | 1 |
+| 128 | supported (5/5) | 128.0 | [128.0, 128.0] | 3 |
+| 256 | supported (5/5) | 256.0 | [256.0, 256.0] | 1 |
+| 512 | supported (5/5) | 512.0 | [512.0, 512.0] | 1 |
+| 1024 | supported (5/5) | 1024.0 | [1024.0, 1024.0] | 1 |
+
+Capacity is at least **1024 calls/s**: the highest tested rate passed, so this ladder established a lower bound rather than finding a failure ceiling. Achieved interval [1024.0, 1024.0] dialogs/s over five repetitions.
+
+- Caller (UAC) direction: not measured — the pinned library was adapted only as a neutral-profile responder; caller behavior is outside this endpoint comparison
+- Internal state visibility: `harness-observed` — the adapter reports active profile dialogs; transaction cleanup is evidenced by bounded process shutdown rather than subject-internal counters
+
+The achieved-throughput intervals overlap, so this comparison is **inconclusive** on this machine and profile.
 <!-- END generated:comparison -->
 
 </div>

@@ -2,7 +2,7 @@
 id: X-102
 title: Publish the peer endpoint load comparison
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 design: docs/designs/comparative-load.md
 epic: comparative-load
@@ -22,18 +22,18 @@ conflating endpoint signalling with proxy or registrar workloads.
 
 ## Acceptance
 
-- [ ] The public comparison explains the harness capabilities in plain language: fixed open-loop
+- [x] The public comparison explains the harness capabilities in plain language: fixed open-loop
       offered load, correctness qualification, driver headroom, six rates, five repetitions,
       latency, resources, cleanup and retained raw evidence.
-- [ ] One pinned peer endpoint is adapted to the same deterministic UDP dialog profile and passes
+- [x] One pinned peer endpoint is adapted to the same deterministic UDP dialog profile and passes
       the correctness preflight before any capacity result is admitted.
-- [ ] Both endpoint responder results were captured on the same host with the same driver artifact,
+- [x] Both endpoint responder results were captured on the same host with the same driver artifact,
       ceiling, seed, provisional-response policy and pass/fail predicates.
-- [ ] The generated report publishes each measured rate, the supported capacity point and the
+- [x] The generated report publishes each measured rate, the supported capacity point and the
       responder-only limitation without ranking the implementations.
-- [ ] The report explicitly excludes proxy, registrar, routing and cluster behavior and directs
+- [x] The report explicitly excludes proxy, registrar, routing and cluster behavior and directs
       those future benchmarks to sipx.clstr.
-- [ ] Raw manifests, environment inventories, artifact hashes, commands, cleanup evidence and
+- [x] Raw manifests, environment inventories, artifact hashes, commands, cleanup evidence and
       per-repetition records regenerate the internal and public reports.
 - [ ] Failing-first checker tests cover multi-endpoint rendering and reject incompatible runs;
       comparison checks, website sync, provenance and the full gate are green.
@@ -60,3 +60,12 @@ conflating endpoint signalling with proxy or registrar workloads.
 - 2026-08-05: returned to `ready` after beta.6 publication. The story remains valid, but no work is
   active until a new peer measurement is explicitly selected; the transport-unblock wave does not
   rerun comparative load.
+- 2026-08-05: immutable peer run `7727ebd39ccb7ab31c8ed8b82796fa1a` passed the 20-dialog preflight,
+  100-dialog qualification, driver-headroom proof and all six rates at 5/5 repetitions through the
+  1,024 calls/s ceiling. All 604,800 offered dialogs completed, setup p99 never exceeded 4 ms, and
+  every process exited without escalation or retained state. The cross-run checker accepted the
+  same-host, driver, seed, policy, limit and phase identities, and the generated report publishes
+  the overlapping ceiling-rate intervals as inconclusive rather than ranking them. The full gate
+  remains deliberately unrun under the wave instruction, so the final acceptance item stays open.
+  All 150 focused checker tests, comparison checking, website sync, provenance and the production
+  site build are green.

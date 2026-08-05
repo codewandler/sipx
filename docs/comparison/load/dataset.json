@@ -26,8 +26,8 @@
     "status": "not_measured"
    },
    "as_responder": {
-    "reason": "no compatible retained run has been captured under the current profile contract",
-    "status": "not_measured"
+    "run": "runs/7727ebd39ccb7ab31c8ed8b82796fa1a",
+    "status": "measured"
    },
    "id": "sipgo",
    "internal_state": {

@@ -1,0 +1,13 @@
+{
+ "completed": 100,
+ "dialogs": 100,
+ "elapsed_ms": 99116,
+ "five_steps_observed": true,
+ "offered": 100,
+ "passed": true,
+ "phase": "qualification",
+ "post_drain_zero": true,
+ "rate_per_second": 1,
+ "schema": "sipx.comparative-load.preflight.v1",
+ "started_utc": "2026-08-05T19:13:07Z"
+}

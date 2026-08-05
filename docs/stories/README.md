@@ -53,9 +53,9 @@ public demo.
 - [X-68 — Explain the layering on the public site](X-68-explain-the-layering-on-the-public-site.md) · Build · sans-IO is the central design property and the site never states it · one page, one diagram · beta-1
 - [S-36 — Verify the reported call-control and registration traps](S-36-verify-the-reported-call-control-and-registration-traps.md) · Signalling · six field-reported failure modes · each becomes a passing test or a defect · cheap, high information
 - [M-43 — Carry linear PCM in and out without format assumptions](M-43-carry-linear-pcm-in-and-out-without-format-assumptions.md) · Media · four reported use cases resolve to one unopinionated PCM boundary · not an AI feature
+- [X-102 — Publish the peer endpoint load comparison](X-102-publish-the-peer-endpoint-load-comparison.md) · Build · compare endpoint responder capacity under the neutral profile; leave proxy workloads to sipx.clstr
 
 ## Next (ready — take the top one unless the user named a story)
-- [X-102 — Publish the peer endpoint load comparison](X-102-publish-the-peer-endpoint-load-comparison.md) · Build · compare endpoint responder capacity under the neutral profile; leave proxy workloads to sipx.clstr
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
