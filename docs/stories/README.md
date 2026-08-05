@@ -47,6 +47,10 @@ public demo.
 ## Now (in progress)
 - [X-97 — Track capability parity as generated data](X-97-track-capability-parity-as-generated-data.md) · Build · M13 discovery gate · every public capability gets evidence, ownership and a disposition
 
+### comparative signalling load
+_The existing load scheduler, bounded CLI load command and soak checks measure sipx well, but they do_
+- [X-98 — Specify the neutral comparative load profile](X-98-specify-the-neutral-comparative-load-profile.md) · Build · late M13 dependency · signalling-only common workload, safe supervisor and stable result schema
+
 ### event reachability
 _sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.rs`: a subscription_
 - [S-37 — Specify endpoint event-client behavior](S-37-specify-endpoint-event-client-behavior.md) · Signalling · spec before code · generic RFC 6665 client contract consumed by S-24
@@ -106,7 +110,6 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 ### comparative signalling load
 _The existing load scheduler, bounded CLI load command and soak checks measure sipx well, but they do_
 - [P-15 — Run a bounded call-load responder](P-15-run-a-bounded-call-load-responder.md) · Phone · late M13 after X-98 and X-75 · machine-ready signalling UAS with finite admission and cleanup
-- [X-98 — Specify the neutral comparative load profile](X-98-specify-the-neutral-comparative-load-profile.md) · Build · late M13 dependency · signalling-only common workload, safe supervisor and stable result schema
 - [X-99 — Run and publish the comparative load result](X-99-run-and-publish-the-comparative-load-result.md) · Build · after M13, X-98 and P-15 · immutable builds, both directions, raw evidence before summary
 
 ### Conformance

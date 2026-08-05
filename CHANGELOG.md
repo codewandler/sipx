@@ -66,6 +66,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   publication admission also share an atomic shutdown barrier, so no task can spawn after its owner
   has drained the registry. Named clear-WebSocket routes retain their HTTP Host authority and path
   in the connection key without implying TLS authentication.
+- **A neutral, bounded signalling-load contract** (`X-98`) now fixes the exact SDP-free dialog flow,
+  six-rate/five-repetition protocol, result schema and process-group cleanup required before a
+  comparative run. Its checker rejects unbounded phases, incomplete metadata, false zero resource
+  measurements, live post-drain state, malformed or duplicate readiness and leaked descendants.
 
 ## [1.0.0-beta.4] — 2026-08-04
 
