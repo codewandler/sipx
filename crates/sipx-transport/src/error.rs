@@ -128,16 +128,32 @@ pub enum Error {
         /// Why it could not be.
         source: std::io::Error,
     },
+    /// An oversized UDP request selected the mandatory TCP fallback, but TCP could not be used.
+    ///
+    /// The concrete cause is retained so connection refusal, capacity and endpoint shutdown stay
+    /// distinguishable. There is deliberately no retry over UDP after this error.
+    #[error(
+        "the {size} byte request exceeds the {limit} byte datagram limit and TCP fallback failed: {source}"
+    )]
+    TcpFallbackUnavailable {
+        /// Serialized request size that required the switch.
+        size: usize,
+        /// RFC 3261 §18.1.1's derived limit for this path.
+        limit: usize,
+        /// Why the selected TCP send failed.
+        #[source]
+        source: Box<Error>,
+    },
     /// A datagram larger than the path MTU on an unreliable transport (RFC 3261 §18.1.1).
     ///
     /// Named rather than truncated: a truncated SIP message is a security problem, not a
     /// degraded one.
-    #[error("message of {size} bytes exceeds the {mtu} byte datagram limit")]
+    #[error("message of {size} bytes exceeds the {limit} byte datagram limit")]
     TooLarge {
         /// How big the message is.
         size: usize,
         /// The configured limit.
-        mtu: usize,
+        limit: usize,
     },
 }
 

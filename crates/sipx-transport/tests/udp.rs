@@ -493,48 +493,82 @@ async fn a_request_to_nowhere_times_out() {
     assert!(ended, "the transaction must end rather than hang");
 }
 
-/// RFC 3261 §18.1.1: a request approaching the path MTU must not go out as a datagram. sipx
-/// refuses it by name rather than sending something that will be fragmented or truncated — a
-/// truncated SIP message is a security problem, not a degraded one.
+/// T-28 / X47: RFC 3261 §18.1.1 sends a request above the unknown-path threshold over TCP,
+/// including the realistic case of an INVITE enlarged by its SDP offer.
 #[tokio::test]
-async fn an_oversized_datagram_is_refused_rather_than_truncated() {
-    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
-    config.mtu = 500;
-    let (client, _rx) = bind(config).await.expect("binds");
-
+async fn an_oversized_invite_falls_back_from_udp_to_tcp() {
+    let (client, _rx) = endpoint().await;
     let (server, mut server_rx) = endpoint().await;
-    let mut request = options_to(&client);
-    // A body that puts the message comfortably over the limit.
-    request.set_body(Bytes::from(vec![b'x'; 800]));
+    let mut request = request_to(&client, &Method::Invite, 1);
+    request
+        .headers
+        .push(sipx_sip::Header::build(HeaderName::ContentType, "application/sdp").expect("valid"));
+    let mut sdp = b"v=0\r\no=alice 1 1 IN IP4 192.0.2.1\r\ns=call\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n".to_vec();
+    sdp.extend(std::iter::repeat_n(b'a', 1_400));
+    request.set_body(Bytes::from(sdp));
 
+    let _responses = client
+        .send(request, Target::udp(server.local_addr()))
+        .await
+        .expect("oversized INVITE selects TCP");
+
+    let incoming = server_rx.recv().await.expect("INVITE arrives");
+    assert_eq!(incoming.transport, TransportKind::Tcp);
+    assert_eq!(incoming.request.method, Method::Invite);
+    let via = incoming
+        .request
+        .headers
+        .typed::<Via>()
+        .expect("Via exists")
+        .expect("Via parses");
+    assert_eq!(via.transport, b"TCP");
+    assert_eq!(
+        client.counters().oversized_request_tcp_fallbacks,
+        1,
+        "the transport switch is visible"
+    );
+}
+
+/// T-28 / X48: selecting TCP is irreversible for this attempt. If the peer has no TCP listener,
+/// the transaction gets a typed fallback error and no oversized datagram leaks out instead.
+#[tokio::test]
+async fn an_unavailable_tcp_fallback_is_typed_and_never_uses_udp() {
+    let (client, _rx) = endpoint().await;
+    let mut server_config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    server_config.cleartext = sipx_transport::CleartextTransports::Udp;
+    let (server, mut server_rx) = bind(server_config).await.expect("UDP binds");
+
+    let mut request = request_to(&client, &Method::Invite, 2);
+    request.set_body(Bytes::from(vec![b'x'; 1_600]));
     let mut responses = client
         .send(request, Target::udp(server.local_addr()))
         .await
-        .expect("the send is accepted; the failure surfaces on the transaction");
+        .expect("the transaction reports an asynchronous transport outcome");
 
-    let saw_error = tokio::time::timeout(Duration::from_secs(2), async {
-        while let Some(event) = responses.next().await {
-            if matches!(event, sipx_sip::transaction::TuEvent::TransportError) {
-                return true;
-            }
+    let event = responses.next().await.expect("transport result");
+    assert!(matches!(
+        event,
+        sipx_sip::transaction::TuEvent::TransportError
+    ));
+    let error = responses
+        .take_transport_error()
+        .expect("concrete fallback failure");
+    match error {
+        Error::TcpFallbackUnavailable {
+            size,
+            limit,
+            source,
+        } => {
+            assert!(size > limit);
+            assert_eq!(limit, 1_300);
+            assert!(matches!(*source, Error::ConnectionClosed));
         }
-        false
-    })
-    .await
-    .expect("no timeout");
-    assert!(
-        saw_error,
-        "the transaction must be told, not left to time out"
-    );
-
-    // And nothing reached the far end.
-    //
-    // A definition of silence: how long a hole has to be before "it was not sent at all" is true.
-    // Negative, so load lengthens the window and can only make it fail (`X-44`).
-    tokio::time::sleep(Duration::from_millis(100)).await;
+        other => panic!("expected typed TCP fallback failure, got {other}"),
+    }
+    assert_eq!(client.counters().oversized_request_tcp_fallbacks, 1);
     assert!(
         server_rx.try_recv().is_err(),
-        "an oversized message must not be sent at all"
+        "failed TCP fallback must not send UDP"
     );
 }
 
@@ -730,7 +764,7 @@ async fn respond_returns_only_once_the_response_has_been_sent() {
 #[tokio::test]
 async fn an_oversized_response_is_sent_rather_than_refused() {
     let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
-    config.mtu = 500;
+    config.path_mtu = Some(700);
     let (server, mut server_rx) = bind(config).await.expect("binds");
 
     let (client, _client_rx) = endpoint().await;

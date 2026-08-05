@@ -329,6 +329,11 @@ pub struct Counters {
     /// A rise with no matching growth in traffic is a peer that is not hearing us, which is the
     /// difference between a network problem and an application one.
     pub retransmissions_sent: u64,
+    /// Oversized UDP requests for which RFC 3261 §18.1.1 selected TCP instead.
+    ///
+    /// Counted at selection, including a selection whose connection attempt then fails. Consult
+    /// [`Self::unsent`] and [`Self::discards`] for whether the selected send reached the wire.
+    pub oversized_request_tcp_fallbacks: u64,
     /// Transactions a timer gave up on.
     pub timeouts: TimeoutCounts,
     /// Discards that are not backpressure (§12.1).
@@ -418,6 +423,7 @@ pub(crate) struct Meters {
     per_transport: [TransportMeter; TRANSPORTS],
     unmatched_responses: AtomicU64,
     retransmissions: AtomicU64,
+    oversized_request_tcp_fallbacks: AtomicU64,
     timeout_b: AtomicU64,
     timeout_f: AtomicU64,
     timeout_h: AtomicU64,
@@ -513,6 +519,11 @@ impl Meters {
         }
     }
 
+    /// An oversized UDP request selected TCP under RFC 3261 §18.1.1.
+    pub(crate) fn oversized_request_tcp_fallback(&self) {
+        bump(&self.oversized_request_tcp_fallbacks);
+    }
+
     /// An event for a client transaction could not be handed over.
     pub(crate) fn discard_transaction_event(&self) {
         bump(&self.discard_transaction_events);
@@ -605,6 +616,7 @@ impl Meters {
             overload_rejections: read(&self.overload_rejections),
             unmatched_responses: read(&self.unmatched_responses),
             retransmissions_sent: read(&self.retransmissions),
+            oversized_request_tcp_fallbacks: read(&self.oversized_request_tcp_fallbacks),
             timeouts: TimeoutCounts {
                 b: read(&self.timeout_b),
                 f: read(&self.timeout_f),

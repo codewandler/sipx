@@ -1,6 +1,6 @@
 # Spec: Transport layer
 
-**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4, T-25 … T-27, T-32, T-34, T-35 · **Design:**
+**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4, T-25 … T-28, T-32, T-34, T-35 · **Design:**
 [sip-transport](../designs/sip-transport.md)
 
 ## 1. Normative references
@@ -80,11 +80,26 @@ is a race the design permits, not an error.
 | Connection | none | pooled, reused | pooled, reused |
 | Max message | 64 KiB | 1 MiB | 1 MiB |
 
-**[RFC §18.1.1]** A request that would exceed the path MTU on UDP must be sent over a
-congestion-controlled transport instead. **[sipx]** sipx checks against a configured MTU
-(default 1300 bytes, the usual conservative value) and returns an error naming the size rather
-than silently truncating; automatic switching to TCP arrives with the story that implements
-`Route` handling, because switching transports changes the `Via` and therefore the transaction.
+**[RFC 3261 §18.1.1]** A request within 200 bytes of a known path MTU, or larger than 1300
+bytes when the path MTU is unknown, is sent over a congestion-controlled transport. `Config` holds
+the optional known path MTU, never a separately configurable copy of the derived limit. The one
+derivation is therefore `path_mtu - 200` when known and 1300 otherwise; subtraction saturates so an
+unusable claimed path cannot permit a datagram.
+
+**[sipx]** When that limit is exceeded for an outbound UDP request, sipx changes the target to TCP
+at the same address before creating the transaction. A transport-owned top `Via` is consequently
+built as TCP and the transaction uses reliable timers. Application-supplied `Via` identity is not
+reconstructed, but the request still uses TCP: replies return on the connection that carried it.
+The switch is counted in `Counters::oversized_request_tcp_fallbacks` and logged with the peer, size,
+and derived limit. If opening or using TCP fails, the transaction receives
+`TcpFallbackUnavailable`, which retains the size, limit, and concrete connection failure. The
+request is never retried as a datagram, truncated, or fragmented by policy.
+
+The rule is for requests. An oversized UDP response still follows §18.2.2 over the transport
+selected by the request's topmost `Via`; changing that transport would strand the transaction. The
+send-time UDP size refusal remains as a defensive invariant for a request that reaches the socket
+without passing through outbound request selection, and reports `TooLarge` rather than emitting an
+oversized datagram.
 
 ## 5. Receiving
 
@@ -441,6 +456,9 @@ saturated. After expiry, every response reports explicit control-off state.
 | X44 | UDP-only bind | UDP receives at `local_addr`; TCP can bind that exact address |
 | X45 | Combined UDP+TCP bind | both listener kinds occupy the same address and port |
 | X46 | No cleartext and no other server listener | typed pre-bind `InvalidConfig` naming `cleartext` |
+| X47 | INVITE with a large SDP body exceeds the unknown-path 1300-byte cutoff on a UDP target | It arrives at the same peer over TCP with a TCP top `Via`; UDP remains silent and `oversized_request_tcp_fallbacks` increments once |
+| X48 | The X47 peer has no TCP listener | Typed `TcpFallbackUnavailable` retains the message size, derived limit and connection cause; no UDP datagram is sent |
+| X49 | Known path MTUs of 1500 and 1200 bytes | The one derived request limits are 1300 and 1000 bytes respectively |
 
 ### 11.1 Live endpoint policy and observation
 
@@ -512,6 +530,9 @@ The snapshot covers, at minimum:
   which keeps every counter in the crate at one increment site;
 - retransmissions sent — a rising count with no matching traffic growth is a peer that is not
   hearing us, and the difference between a network problem and an application one;
+- oversized-request TCP fallbacks selected before transaction creation, including selections whose
+  connection attempt then fails — the counter answers whether the endpoint changed transport,
+  while `unsent` and `send_failures` answer whether that selected send reached the wire;
 - transactions timed out, per the timer that fired (B, F or H);
 - every place the stack discards something it was given: see §12.1.
 

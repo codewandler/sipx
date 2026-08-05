@@ -43,6 +43,18 @@ use crate::timers::TimerQueue;
 /// Most ready UDP datagrams copied off the socket before the reader yields to its bounded queue.
 const UDP_RECEIVE_BATCH: usize = 512;
 
+/// RFC 3261 §18.1.1's request limit when no path MTU is known.
+const UNKNOWN_PATH_MTU_REQUEST_LIMIT: usize = 1_300;
+/// Headroom §18.1.1 reserves below a known path MTU.
+const PATH_MTU_HEADROOM: usize = 200;
+
+const fn unreliable_request_limit(path_mtu: Option<usize>) -> usize {
+    match path_mtu {
+        Some(path_mtu) => path_mtu.saturating_sub(PATH_MTU_HEADROOM),
+        None => UNKNOWN_PATH_MTU_REQUEST_LIMIT,
+    }
+}
+
 /// Which cleartext signalling listeners an endpoint exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -94,13 +106,12 @@ pub struct Config {
     pub handshake_limit: usize,
     /// How long an inbound handshake may remain incomplete.
     pub handshake_timeout: std::time::Duration,
-    /// The largest datagram sipx will put on an unreliable transport.
+    /// The known path MTU for outbound SIP, if one is available.
     ///
-    /// RFC 3261 §18.1.1 says a request approaching the path MTU must go over a
-    /// congestion-controlled transport instead. Until sipx can switch transports mid-request —
-    /// which changes the `Via` and therefore the transaction — it refuses with a named error
-    /// rather than sending something that will be fragmented or silently truncated.
-    pub mtu: usize,
+    /// RFC 3261 §18.1.1 derives the unreliable-request limit as 200 bytes below this value.
+    /// `None` uses the RFC's 1300-byte unknown-path cutoff. This is a path property, not the
+    /// already-derived limit, so there is only one implementation of the subtraction.
+    pub path_mtu: Option<usize>,
     /// Which cleartext signalling listeners to expose.
     pub cleartext: CleartextTransports,
     /// How sipx behaves as a TLS client, if TLS is to be used at all.
@@ -180,7 +191,7 @@ impl Config {
             capacity: 1024,
             handshake_limit: 64,
             handshake_timeout: std::time::Duration::from_secs(10),
-            mtu: 1300,
+            path_mtu: None,
             cleartext: CleartextTransports::default(),
             #[cfg(feature = "tls")]
             tls_client: None,
@@ -475,6 +486,22 @@ struct InviteCancellationContext {
     target: Target,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TcpFallback {
+    size: usize,
+    limit: usize,
+}
+
+impl TcpFallback {
+    fn unavailable(self, source: Error) -> Error {
+        Error::TcpFallbackUnavailable {
+            size: self.size,
+            limit: self.limit,
+            source: Box::new(source),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct InviteCancellationState {
     key: TransactionKey,
@@ -683,6 +710,7 @@ enum Command {
     Request {
         request: Box<Request>,
         target: Target,
+        tcp_fallback: Option<TcpFallback>,
         events: mpsc::Sender<TuEvent>,
         failures: mpsc::Sender<Error>,
         reply: oneshot::Sender<Result<(TransactionKey, Option<u64>)>>,
@@ -698,6 +726,7 @@ enum Command {
     Direct {
         request: Box<Request>,
         target: Target,
+        tcp_fallback: Option<TcpFallback>,
         /// Fired once the driver has actually performed the send.
         sent: oneshot::Sender<Result<()>>,
     },
@@ -778,6 +807,7 @@ pub struct Handle {
     advertise_overload: bool,
     sent_by: Arc<String>,
     sent_by_port: u16,
+    unreliable_request_limit: usize,
 }
 
 impl Handle {
@@ -906,20 +936,30 @@ impl Handle {
     /// A `Via` is added if the request has none — the transport owns that header, since only
     /// it knows the branch and where responses should come back to.
     pub async fn send(&self, mut request: Request, target: Target) -> Result<Responses> {
+        let mut target = target;
         self.apply_request_policy(&mut request, &target)?;
-        if request.headers.get(&HeaderName::Via).is_none() {
+        let generated_branch = if request.headers.get(&HeaderName::Via).is_none() {
+            let branch = new_branch();
             let via = format!(
                 "SIP/2.0/{} {};rport;branch={}",
                 target.transport.as_str(),
                 self.sent_by_for(target.transport),
-                new_branch()
+                branch
             );
             let header = Header::build(HeaderName::Via, Bytes::from(via))?;
             request.headers.push_front(header);
-        }
+            Some(branch)
+        } else {
+            None
+        };
         if self.advertise_overload {
             crate::overload::advertise(&mut request);
         }
+        let tcp_fallback = self.select_tcp_for_oversized_request(
+            &mut request,
+            &mut target,
+            generated_branch.as_deref(),
+        )?;
         let invitation = (request.method == Method::Invite).then(|| InviteCancellationContext {
             request: request.clone(),
             target: target.clone(),
@@ -932,6 +972,7 @@ impl Handle {
             .send(Command::Request {
                 request: Box::new(request),
                 target,
+                tcp_fallback,
                 events: events_tx,
                 failures: failures_tx,
                 reply: reply_tx,
@@ -1039,20 +1080,63 @@ impl Handle {
     ///
     /// Returns once the bytes have been handed to the socket.
     pub async fn send_directly(&self, mut request: Request, target: Target) -> Result<()> {
+        let mut target = target;
         self.apply_request_policy(&mut request, &target)?;
         if self.advertise_overload {
             crate::overload::advertise(&mut request);
         }
+        let tcp_fallback =
+            self.select_tcp_for_oversized_request(&mut request, &mut target, None)?;
         let (sent_tx, sent_rx) = oneshot::channel();
         self.commands
             .send(Command::Direct {
                 request: Box::new(request),
                 target,
+                tcp_fallback,
                 sent: sent_tx,
             })
             .await
             .map_err(|_| Error::EndpointClosed)?;
         sent_rx.await.map_err(|_| Error::EndpointClosed)?
+    }
+
+    fn select_tcp_for_oversized_request(
+        &self,
+        request: &mut Request,
+        target: &mut Target,
+        generated_branch: Option<&str>,
+    ) -> Result<Option<TcpFallback>> {
+        if target.transport != TransportKind::Udp {
+            return Ok(None);
+        }
+        let size = Message::Request(request.clone()).to_bytes().len();
+        if size <= self.unreliable_request_limit {
+            return Ok(None);
+        }
+
+        let fallback = TcpFallback {
+            size,
+            limit: self.unreliable_request_limit,
+        };
+        target.transport = TransportKind::Tcp;
+        if let Some(branch) = generated_branch {
+            let _owned_via = request.headers.remove_first(&HeaderName::Via);
+            let via = format!(
+                "SIP/2.0/TCP {};rport;branch={branch}",
+                self.sent_by_for(TransportKind::Tcp)
+            );
+            request
+                .headers
+                .push_front(Header::build(HeaderName::Via, Bytes::from(via))?);
+        }
+        self.meters.oversized_request_tcp_fallback();
+        tracing::info!(
+            peer = %target.addr,
+            size,
+            limit = self.unreliable_request_limit,
+            "oversized UDP request switched to TCP"
+        );
+        Ok(Some(fallback))
     }
 
     /// Resolve a URI (RFC 3263) and send to the resulting candidates in order.
@@ -1535,6 +1619,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         advertise_overload: config.overload.advertise,
         sent_by: Arc::new(config.sent_by.clone()),
         sent_by_port,
+        unreliable_request_limit: unreliable_request_limit(config.path_mtu),
     };
 
     // Started before the driver, so a path that cannot be opened fails `bind` rather than leaving a
@@ -1580,6 +1665,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         transaction_generations: HashMap::new(),
         handed_over: HashMap::new(),
         reconnect: HashMap::new(),
+        tcp_fallbacks: HashMap::new(),
         unanswered_limit: config.unanswered_limit,
         overload: OverloadController::new(
             config.overload.rate_tolerance_intervals,
@@ -1612,7 +1698,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
             Arc::clone(&observations),
         ),
         limits: config.limits,
-        mtu: config.mtu,
+        unreliable_request_limit: unreliable_request_limit(config.path_mtu),
         meters,
         admission,
         observations,
@@ -1784,6 +1870,7 @@ fn in_process_handle(
         advertise_overload: false,
         sent_by,
         sent_by_port: local_addr.port(),
+        unreliable_request_limit: UNKNOWN_PATH_MTU_REQUEST_LIMIT,
     };
     (handle, command_rx, incoming.0, incoming.1)
 }
@@ -1805,6 +1892,7 @@ async fn run_in_process(
                 events,
                 failures,
                 reply,
+                ..
             } => {
                 let Some(client_key) = TransactionKey::from_sent_request(&request) else {
                     let _ = reply.send(Err(Error::NoVia));
@@ -1861,20 +1949,10 @@ async fn run_in_process(
                 request,
                 target,
                 sent,
+                ..
             } => {
-                let result = match TransactionKey::from_request(&request) {
-                    Some(key) => peer_incoming
-                        .send(Incoming {
-                            key,
-                            request: *request,
-                            source: local_addr,
-                            transport: target.transport,
-                            connection_generation: None,
-                        })
-                        .await
-                        .map_err(|_| Error::EndpointClosed),
-                    None => Err(Error::NoVia),
-                };
+                let result =
+                    send_in_process_direct(local_addr, &peer_incoming, request, target).await;
                 let _ = sent.send(result);
             }
             Command::Keepalive { answered, .. } => {
@@ -1895,6 +1973,27 @@ async fn run_in_process(
     }
     clear_in_process_routes(&routes);
     shutdown.complete();
+}
+
+async fn send_in_process_direct(
+    local_addr: SocketAddr,
+    peer_incoming: &mpsc::Sender<Incoming>,
+    request: Box<Request>,
+    target: Target,
+) -> Result<()> {
+    let Some(key) = TransactionKey::from_request(&request) else {
+        return Err(Error::NoVia);
+    };
+    peer_incoming
+        .send(Incoming {
+            key,
+            request: *request,
+            source: local_addr,
+            transport: target.transport,
+            connection_generation: None,
+        })
+        .await
+        .map_err(|_| Error::EndpointClosed)
 }
 
 /// Listen for TLS connections, handshaking each off the accept path.
@@ -2425,6 +2524,8 @@ struct Driver {
     /// from. Held only for server transactions on a connection-oriented transport, because it
     /// is the only case where the question arises.
     reconnect: HashMap<TransactionKey, Target>,
+    /// Requests whose UDP target was changed to TCP under RFC 3261 §18.1.1.
+    tcp_fallbacks: HashMap<TransactionKey, TcpFallback>,
     /// How long a request may sit unanswered before its transaction is abandoned.
     unanswered_limit: std::time::Duration,
     /// Per-next-hop RFC 7339/RFC 7415 state, serialized with sends and responses on this loop.
@@ -2453,7 +2554,7 @@ struct Driver {
     quic_endpoint: Option<quinn::Endpoint>,
     pool: Pool,
     limits: Limits,
-    mtu: usize,
+    unreliable_request_limit: usize,
     /// Every counter, shared with every [`Handle`]; see [`Counters`].
     meters: Arc<Meters>,
     admission: Arc<SourceAdmission>,
@@ -2853,6 +2954,16 @@ impl Driver {
             .map(|(key, _)| key.clone())
             .collect();
         for key in affected {
+            if let Some(fallback) = self.tcp_fallbacks.get(&key).copied()
+                && let Some(client) = self.clients.get(&key)
+            {
+                // Connection establishment is asynchronous: the pool accepts the generation,
+                // then `Closed` reports that the selected TCP path could not become usable.
+                // Preserve that this connection existed only because the UDP request was too
+                // large, rather than exposing an unqualified close to the transaction user.
+                let failure = fallback.unavailable(Error::ConnectionClosed);
+                let _ = client.failures.try_send(failure);
+            }
             #[cfg(feature = "tls")]
             if let Some(detail) = &tls_detail
                 && let Some(client) = self.clients.get(&key)
@@ -3119,6 +3230,7 @@ impl Driver {
             // abandoned transaction never reaches — so leaving it here would trade one
             // unbounded map for another.
             self.reconnect.remove(&key);
+            self.tcp_fallbacks.remove(&key);
         }
     }
 
@@ -3140,6 +3252,7 @@ impl Driver {
             Command::Request {
                 request,
                 target,
+                tcp_fallback,
                 events,
                 failures,
                 reply,
@@ -3164,6 +3277,9 @@ impl Driver {
                     return;
                 };
                 self.destinations.insert(key.clone(), target);
+                if let Some(fallback) = tcp_fallback {
+                    self.tcp_fallbacks.insert(key.clone(), fallback);
+                }
                 self.clients
                     .insert(key.clone(), ClientSink { events, failures });
                 // discard: the caller stopped waiting. A dropped receiver means nobody is listening
@@ -3180,40 +3296,11 @@ impl Driver {
             Command::Direct {
                 request,
                 target,
+                tcp_fallback,
                 sent,
             } => {
-                let now =
-                    tokio::time::Instant::now().saturating_duration_since(self.overload_epoch);
-                let category = (self.overload_config.categorize)(&request);
-                if !self.overload.admit(target.addr, category, now) {
-                    self.meters.overload_rejection();
-                    // discard: the caller dropped its wait; the rejection is already counted and
-                    // no network request was lost.
-                    let _ = sent.send(Err(Error::Overloaded { peer: target.addr }));
-                    return;
-                }
-                let method = request.method.clone();
-                let message = Message::Request(*request);
-                self.observe_message(
-                    message.clone(),
-                    target.addr,
-                    target.transport,
-                    MessageDirection::Outbound,
-                    TransactionClass::Direct,
-                );
-                let bytes = message.to_bytes();
-                self.observe_out(&bytes, &target, false);
-                let result = self.transmit(bytes, target, false, None).await.map(|_| ());
-                if result.is_err() {
-                    // The same fact as the transaction path's site above, on the one request that
-                    // has no transaction (§12.3). Deliberately *not* also
-                    // `discard_send_failure`: that field is the transaction path's aggregate, and
-                    // an ACK for a 2xx never had a transaction to fail.
-                    self.meters.unsent(&method);
-                }
-                // discard: the caller stopped waiting. A dropped receiver means nobody is listening
-                // for this answer, so nothing is lost and there is nothing worth counting.
-                let _ = sent.send(result);
+                self.on_direct_command(request, target, tcp_fallback, sent)
+                    .await;
             }
             Command::WatchUnmatched(sink) => {
                 // Replaces rather than fans out. Two watchers would each see some of the
@@ -3236,6 +3323,7 @@ impl Driver {
                         + servers
                         + self.destinations.len()
                         + self.transaction_generations.len()
+                        + self.tcp_fallbacks.len()
                         + {
                             #[cfg(feature = "quic")]
                             {
@@ -3252,6 +3340,52 @@ impl Driver {
             }
             Command::Shutdown => {}
         }
+    }
+
+    async fn on_direct_command(
+        &mut self,
+        request: Box<Request>,
+        target: Target,
+        tcp_fallback: Option<TcpFallback>,
+        sent: oneshot::Sender<Result<()>>,
+    ) {
+        let now = tokio::time::Instant::now().saturating_duration_since(self.overload_epoch);
+        let category = (self.overload_config.categorize)(&request);
+        if !self.overload.admit(target.addr, category, now) {
+            self.meters.overload_rejection();
+            // discard: the caller dropped its wait; the rejection is already counted and no
+            // network request was lost.
+            let _ = sent.send(Err(Error::Overloaded { peer: target.addr }));
+            return;
+        }
+        let method = request.method.clone();
+        let message = Message::Request(*request);
+        self.observe_message(
+            message.clone(),
+            target.addr,
+            target.transport,
+            MessageDirection::Outbound,
+            TransactionClass::Direct,
+        );
+        let bytes = message.to_bytes();
+        self.observe_out(&bytes, &target, false);
+        let result = self
+            .transmit(bytes, target, false, None)
+            .await
+            .map(|_| ())
+            .map_err(|error| match tcp_fallback {
+                Some(fallback) => fallback.unavailable(error),
+                None => error,
+            });
+        if result.is_err() {
+            // The same fact as the transaction path's site above, on the one request that has no
+            // transaction (§12.3). Deliberately not also `discard_send_failure`: that field is the
+            // transaction path's aggregate, and an ACK for a 2xx never had a transaction to fail.
+            self.meters.unsent(&method);
+        }
+        // discard: the caller stopped waiting. A dropped receiver means nobody is listening for
+        // this answer, so nothing is lost and there is nothing worth counting.
+        let _ = sent.send(result);
     }
 
     async fn on_respond_command(
@@ -3348,6 +3482,10 @@ impl Driver {
                             self.transaction_generations.remove(key);
                         }
                         Err(error) => {
+                            let error = match self.tcp_fallbacks.get(key).copied() {
+                                Some(fallback) => fallback.unavailable(error),
+                                None => error,
+                            };
                             self.meters.discard_send_failure();
                             // And by method, when it was a request (§12.3). This is where the
                             // wire is actually missed. Counting before this hand-off would miss
@@ -3384,6 +3522,7 @@ impl Driver {
                     self.quic_replies.remove(key);
                     self.handed_over.remove(key);
                     self.reconnect.remove(key);
+                    self.tcp_fallbacks.remove(key);
                     // Dropping the sender closes the application's response stream, which is
                     // how it learns the transaction is over.
                     self.clients.remove(key);
@@ -3533,19 +3672,19 @@ impl Driver {
     ) -> Result<Option<ConnectionGeneration>> {
         match target.transport {
             TransportKind::Udp => {
-                // RFC 3261 §18.1.1. Refusing by name beats sending something that will be
-                // fragmented or silently truncated — a truncated SIP message is a security
-                // problem, not a degraded one.
+                // RFC 3261 §18.1.1. Public request entry points switch to TCP before creating
+                // the transaction. This refusal remains as the final invariant: an internal path
+                // must not emit an oversized datagram if it bypasses that selection.
                 //
                 // Requests only. §18.1.1 offers a sender the alternative of switching to a
                 // congestion-controlled transport; §18.2.2 offers a *responder* nothing — the
                 // response goes back per the topmost `Via`, over the transport the request
                 // came in on. Refusing it here would answer a 200 with silence, leaving the
                 // caller to time out while the callee believes the call is up.
-                if !is_response && bytes.len() > self.mtu {
+                if !is_response && bytes.len() > self.unreliable_request_limit {
                     return Err(Error::TooLarge {
                         size: bytes.len(),
-                        mtu: self.mtu,
+                        limit: self.unreliable_request_limit,
                     });
                 }
                 let Some(socket) = &self.socket else {
@@ -3868,9 +4007,19 @@ mod tests {
 
     #[cfg(any(feature = "tls", feature = "ws"))]
     use super::{Adopt, HandshakeObservation, HandshakeRuntime};
-    use super::{Background, Driver, Message, ShutdownState, Target, TransportKind};
+    use super::{
+        Background, Driver, Message, ShutdownState, Target, TransportKind, unreliable_request_limit,
+    };
 
     const IDENTIFIER_SAMPLE_SIZE: u64 = 4096;
+
+    #[test]
+    fn unreliable_request_limit_is_derived_once_from_path_mtu() {
+        assert_eq!(unreliable_request_limit(None), 1_300);
+        assert_eq!(unreliable_request_limit(Some(1_500)), 1_300);
+        assert_eq!(unreliable_request_limit(Some(1_200)), 1_000);
+        assert_eq!(unreliable_request_limit(Some(100)), 0);
+    }
 
     fn in_process_request(call_id: &'static [u8]) -> sipx_sip::Request {
         let uri = Uri::sip(Host::Name(
@@ -4068,6 +4217,7 @@ mod tests {
             transaction_generations: std::collections::HashMap::new(),
             handed_over: std::collections::HashMap::new(),
             reconnect: std::collections::HashMap::new(),
+            tcp_fallbacks: std::collections::HashMap::new(),
             unanswered_limit: Duration::from_secs(60),
             overload: crate::overload::Controller::new(5, 10, 1024),
             overload_config: crate::OverloadConfig::default(),
@@ -4091,7 +4241,7 @@ mod tests {
             quic_endpoint: None,
             pool,
             limits: sipx_sip::Limits::stream(),
-            mtu: 1300,
+            unreliable_request_limit: unreliable_request_limit(None),
             meters,
             admission,
             observations,
@@ -4359,6 +4509,7 @@ mod tests {
             advertise_overload: false,
             sent_by: Arc::new("127.0.0.1".to_owned()),
             sent_by_port: 5060,
+            unreliable_request_limit: unreliable_request_limit(None),
         }
     }
 

@@ -7,6 +7,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Oversized UDP requests now follow RFC 3261's TCP fallback.** Requests above 1300 bytes when
+  the path MTU is unknown, or within 200 bytes of a configured known MTU, switch to TCP at the
+  same peer before transaction creation. The endpoint exposes a fallback counter and preserves a
+  typed cause when the selected TCP path is unavailable; oversized responses retain their
+  request-selected transport.
+
+### Changed
+
+- **Transport MTU configuration now names the path property rather than a precomputed cutoff.**
+  Replace `Config::mtu = limit` with `Config::path_mtu = Some(path_mtu)`; sipx derives the RFC's
+  200-byte headroom once, while `None` selects the 1300-byte unknown-path rule.
+
 ## [1.0.0-beta.7] — 2026-08-05
 
 This prerelease gives routing and forwarding consumers exact transaction, listener, identity and
