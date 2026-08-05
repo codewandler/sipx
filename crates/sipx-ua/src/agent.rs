@@ -11,7 +11,7 @@ use crate::auth::Credentials;
 use crate::error::{Error, Result};
 use crate::gruu;
 use crate::outbound::{self, InstanceId, RegId};
-use crate::registrar::{self, Lease, Outcome, Registration};
+use crate::registrar::{self, Lease, Outcome, Registration, RegistrationObservation};
 
 /// How a user agent is configured.
 #[derive(Debug, Clone)]
@@ -175,6 +175,10 @@ pub struct UserAgent {
     endpoint: Handle,
     config: Config,
     registration: Registration,
+    /// What the registrar reported as the source of the last successful REGISTER.
+    ///
+    /// Observation only: it is never copied into registration, routing or media policy.
+    registration_observation: RegistrationObservation,
     /// The last nonce answered, and how many requests have used it. RFC 7616 §3.4.3 defines
     /// `nc` per nonce, not per client, so the pair travels together.
     nonce_use: Option<(String, u32)>,
@@ -232,6 +236,7 @@ impl UserAgent {
             endpoint,
             config,
             registration,
+            registration_observation: RegistrationObservation::Absent,
             nonce_use: None,
             path: registrar::PathSet::default(),
             service_route: registrar::ServiceRoute::default(),
@@ -269,6 +274,24 @@ impl UserAgent {
     #[must_use]
     pub fn service_route(&self) -> &registrar::ServiceRoute {
         &self.service_route
+    }
+
+    /// What the registrar's top response `Via` reported for the last successful registration.
+    ///
+    /// This does not authorize rewriting `Contact`, routing, GRUU, Outbound, push, SDP or media
+    /// addresses. [`RegistrationObservation::Invalid`] still accompanies a successful lease.
+    #[must_use]
+    pub const fn registration_observation(&self) -> &RegistrationObservation {
+        &self.registration_observation
+    }
+
+    /// The registrar-observed address, when one was reported unambiguously.
+    ///
+    /// This convenience accessor deliberately returns no fallback for absent or invalid data. Use
+    /// [`Self::registration_observation`] when the distinction matters.
+    #[must_use]
+    pub const fn observed_registration_address(&self) -> Option<std::net::SocketAddr> {
+        self.registration_observation.address()
     }
 
     /// Whether the registrar reported performing an Outbound registration (RFC 5626 §6).
@@ -478,6 +501,7 @@ impl UserAgent {
             Outcome::Registered(registered) => {
                 let registrar::Registered {
                     lease,
+                    observation,
                     path,
                     service_route,
                     flow_accepted,
@@ -486,6 +510,7 @@ impl UserAgent {
                     push,
                 } = *registered;
                 self.flow_accepted = flow_accepted;
+                self.registration_observation = observation;
                 self.flow_timer = flow_timer;
                 self.path = path;
                 // Replaced, never merged — the same rule as the service route, and for a

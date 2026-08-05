@@ -46,8 +46,10 @@ evidence = [
   "crates/sipx-sip/src/transaction/mod.rs",
   "crates/sipx-call/src/dispatch.rs",
   "crates/sipx-call/tests/dispatch.rs",
+  "crates/sipx-ua/src/registrar.rs",
+  "crates/sipx-ua/tests/registration_observation.rs",
 ]
-note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2)."
+note = "Parser, all four transaction machines, dialogs, UAC and UAS. No proxy role: sipx does not fork, and Record-Route is read rather than written. The call dispatcher answers rather than drops what belongs to no live call: 481 for an orphaned in-dialog request (§12.2.2), 405 with Allow for an unsupported method (§8.2.1), 482 for a merged INVITE (§8.2.2.2), and 200 with the capability list for an in-dialog OPTIONS (§11.2). A registering UA retains the top response Via's received/rport pair as a typed, non-authoritative observation; missing or invalid observation data does not alter the successful binding."
 
 [[rfc]]
 number = 4475
@@ -122,8 +124,12 @@ title = "An Extension to SIP for Symmetric Response Routing"
 layer = "transport"
 status = "implemented"
 roles = ["uac", "uas"]
-evidence = ["crates/sipx-transport/src/nat.rs"]
-note = "`rport` observed and echoed, with quote-aware parameter surgery so the value replaces the flag rather than following it."
+evidence = [
+  "crates/sipx-transport/src/nat.rs",
+  "crates/sipx-ua/src/registrar.rs",
+  "crates/sipx-ua/tests/registration_observation.rs",
+]
+note = "`rport` is observed and echoed, with quote-aware parameter surgery so the value replaces the flag rather than following it. A registering UA also reports one unambiguous received/rport pair from the final successful response as informational state, without turning it into Contact, routing or media policy."
 
 [[rfc]]
 number = 5923

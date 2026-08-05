@@ -86,6 +86,16 @@ address in `Contact`, which is suitable for a controlled local setup. A deployed
 advertise an address the registrar can route back to. RFC 5626 Outbound can keep requests on a
 client-opened flow when direct inbound reachability is unavailable.
 
+**Keep path observation separate from reachability policy.** After a successful registration,
+`UserAgent::registration_observation` reports what the registrar put in the final response's top
+`Via`: `Observed(address)`, `Absent`, or `Invalid(reason)`. The convenience
+`observed_registration_address` returns an address only for the first case. This is useful for
+diagnostics and NAT visibility, but it is not proof that an inbound path exists. sipx never copies
+the value into a later `Contact`, route set, GRUU, Outbound or push state, SDP, ICE candidate, or
+media destination. Missing or malformed observation data also does not invalidate the registrar's
+lease. See the [registration observation specification](https://github.com/codewandler/sipx/blob/main/docs/specs/registration-observation.md)
+for the complete typed outcome table.
+
 ## From the command line
 
 ```bash

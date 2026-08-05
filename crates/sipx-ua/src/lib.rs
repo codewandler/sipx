@@ -93,4 +93,7 @@ pub use gruu::{Gruus, Kind as GruuKind};
 pub use history::{RetargetError, retarget};
 pub use outbound::{InstanceId, Keepalive, Power, RegId};
 pub use push::{Pending, PushService, Support};
-pub use registrar::{Lease, Outcome, PathSet, Registered, Registration, ServiceRoute};
+pub use registrar::{
+    Lease, Outcome, PathSet, Registered, Registration, RegistrationObservation,
+    RegistrationObservationError, ServiceRoute,
+};
