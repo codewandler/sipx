@@ -116,6 +116,18 @@ three defects were filed against predicate 3 in one session, none of them was ad
 report was one story away from calling the alpha complete (`X-42`). A `predicate:` naming a predicate
 the roadmap does not have fails the gate rather than being quietly dropped.
 
+`comparison-report.py` regenerates `docs/comparison.md` from the JSON registry in
+`docs/comparison/`, which is the one published table whose subject is mostly software this
+repository does not control. Its rules are in `docs/comparison/README.md`; the two that catch people
+are that **our own column is never typed** — a `generated` cell states its numbers as `{rule}`
+placeholders substituted at render time, and must name the workspace version it was computed from —
+and that **an observation expires**. Past `MAX_OBSERVATION_AGE_DAYS` the gate goes red with no code
+change behind it; from `STALE_WARNING_DAYS` out every run prints a `notice:` and still passes. That
+deadline is meant to be met, not silenced: refresh what the notice names with the
+`compare-stacks` skill, one subject at a time, and never edit `evaluated_at` to move a date.
+**A release bump makes our own rows stale** — the generated values follow the tree and the version
+attached to them does not, so run `./scripts/comparison-report.py --check` after one.
+
 `check-fixed-sleep.py` holds the workspace to the rule `docs/designs/media.md` states normatively:
 **a fixed wall-clock duration may bound a failure, or define silence. It may not stand in for a
 happens-before.** It reads the *shape* rather than the word `sleep` — `std::thread::sleep`, a
