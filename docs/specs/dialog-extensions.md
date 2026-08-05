@@ -34,7 +34,9 @@ Those fields are derived or maintained by the dialog and transaction layers.
 `INVITE`, `ACK`, `BYE`, `CANCEL`, `OPTIONS`, `PRACK`, `UPDATE`, `SUBSCRIBE`, `NOTIFY`, `REFER`,
 `PUBLISH`, and the known non-dialog methods are never application-owned through this API. INFO and
 MESSAGE are admitted intrinsically. An unknown token is admitted only after the application names
-that exact, case-sensitive `Method::Other` value on the call.
+that exact, case-sensitive `Method::Other` value on the call. Constructing `Method::Other` manually
+does not change ownership: a token such as `BYE` or `INVITE` that parses to a known `Method` is
+refused at admission and at dispatch.
 
 ## Inbound state table
 
@@ -46,14 +48,17 @@ that exact, case-sensitive `Method::Other` value on the call.
 | body exceeds 65,536 octets | none | `413 Content Too Large` and typed error |
 | non-empty body has no content type | none | `415 Unsupported Media Type` and typed error |
 | valid application-owned request | record remote CSeq | one `ApplicationRequest` event |
-| capability sends a final response | claim capability | exactly that response |
+| capability sends a final response | claim capability and hand its send to an owned task before the first cancellation point | exactly that response, even if the application future is then cancelled |
 | capability is dropped unclaimed | claim capability | `500 Server Internal Error` |
 | capability remains unclaimed for 32 seconds | claim capability | `504 Server Time-out` |
 | any second claimant | none | typed `ResponseAlreadySent` error or no-op fallback |
 
 The 32-second interval is a bound on failure, aligned with SIP's 64*T1 transaction horizon. It is
 not a delay used to establish ordering. Drop responds immediately when a runtime is available; the
-timer remains the bounded fallback for cancellation and abandoned tasks.
+timer remains the bounded fallback for abandoned tasks. Once `respond` claims the capability, the
+chosen final response remains the only possible final response. Its transport send continues if the
+application future is cancelled, while an ambiguous transport error keeps the capability spent so a
+contradictory final response cannot follow bytes that may already have left.
 
 ## Outbound state table
 
@@ -63,10 +68,14 @@ timer remains the bounded fallback for cancellation and abandoned tasks.
 | method is not application-owned/admitted | none | typed `StackOwnedDialogMethod` error |
 | protected header or invalid body | none | typed error; no transaction is created |
 | valid request | increment local CSeq | request built from remote target, route set and dialog IDs |
-| final 2xx | refresh remote target when supplied | response returned |
+| final 2xx | keep remote target unchanged; these are not target-refresh requests | response returned |
 | first supported 401/407 and credentials exist | increment local CSeq again | one authenticated retry |
 | second challenge or no credentials | none | typed authentication/rejection error |
 | other final response | none | typed rejection error |
+
+Only responses to target-refresh requests may replace the dialog's remote target. INFO, MESSAGE and
+private extension methods are not target-refresh requests, so a `Contact` in any of their responses
+is application data and never redirects later dialog traffic.
 
 ## Byte-level vectors
 

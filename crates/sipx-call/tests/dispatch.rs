@@ -775,7 +775,9 @@ async fn a_method_a_call_does_not_implement_is_refused_405_by_serve() {
         callee_addr,
         raw(
             &peer_endpoint,
-            &Method::Message,
+            // MESSAGE is now intrinsically application-owned by S-40. This unadmitted private
+            // method still exercises `serve`'s refusal for a request the call does not claim.
+            &Method::Other(bytes::Bytes::from_static(b"UNCLAIMED")),
             CALL_ID,
             "theirs",
             Some(&tag),

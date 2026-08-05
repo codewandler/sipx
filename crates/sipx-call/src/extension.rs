@@ -4,6 +4,7 @@
 //! owns only the bounded request snapshot and the exactly-once response capability described by
 //! `docs/specs/dialog-extensions.md`.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -152,12 +153,23 @@ impl ResponseCapability {
         // permit a contradictory second final response on the same server transaction. The
         // transport error is returned, but exactly-once ownership remains spent.
         self.state.completed.notify_one();
-        self.state
-            .endpoint
-            .respond(&self.state.key, response)
-            .await?;
-        Ok(())
+        let endpoint = self.state.endpoint.clone();
+        let key = self.state.key.clone();
+        await_committed_send(async move { endpoint.respond(&key, response).await }).await
     }
+}
+
+async fn await_committed_send<F>(send: F) -> Result<()>
+where
+    F: Future<Output = sipx_transport::Result<()>> + Send + 'static,
+{
+    // There is no await between claiming the capability and spawning this task. Once spawned, the
+    // transport operation owns the selected response and survives cancellation of the application
+    // future that is only waiting for its result.
+    tokio::spawn(send)
+        .await
+        .map_err(|_| sipx_transport::Error::EndpointClosed)??;
+    Ok(())
 }
 
 impl Clone for ResponseCapability {
@@ -217,14 +229,20 @@ async fn send_fallback(state: &ResponseState, status: u16, reason: &'static str)
 pub(crate) fn application_owned(method: &Method, admitted: &[Bytes]) -> bool {
     match method {
         Method::Info | Method::Message => true,
-        Method::Other(token) => admitted.iter().any(|known| known == token),
+        Method::Other(token) => {
+            matches!(Method::parse(token), Method::Other(_))
+                && admitted.iter().any(|known| known == token)
+        }
         _ => false,
     }
 }
 
 pub(crate) fn validate_method_for_admission(method: &Method) -> Result<Bytes> {
     match method {
-        Method::Other(token) => Ok(token.clone()),
+        Method::Other(token) => match Method::parse(token) {
+            Method::Other(_) => Ok(token.clone()),
+            known => Err(Error::StackOwnedDialogMethod(known)),
+        },
         _ => Err(Error::StackOwnedDialogMethod(method.clone())),
     }
 }
@@ -283,6 +301,10 @@ fn protected_header(name: &HeaderName) -> bool {
     clippy::indexing_slicing
 )]
 mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::{Notify, oneshot};
+
     use super::*;
 
     #[test]
@@ -306,6 +328,49 @@ mod tests {
         ] {
             assert!(!application_owned(&method, &admitted), "{method}");
         }
+    }
+
+    #[test]
+    fn canonical_known_tokens_cannot_be_admitted_as_other_methods() {
+        for (token, known) in [
+            (Bytes::from_static(b"BYE"), Method::Bye),
+            (Bytes::from_static(b"INVITE"), Method::Invite),
+        ] {
+            let alias = Method::Other(token.clone());
+            assert!(matches!(
+                validate_method_for_admission(&alias),
+                Err(Error::StackOwnedDialogMethod(method)) if method == known
+            ));
+            assert!(!application_owned(&alias, &[token]));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_committed_send_survives_cancellation_of_its_waiter() {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let (completed, completion) = oneshot::channel();
+        let send_started = Arc::clone(&started);
+        let send_release = Arc::clone(&release);
+
+        let waiter = tokio::spawn(await_committed_send(async move {
+            send_started.notify_one();
+            send_release.notified().await;
+            let _ = completed.send(());
+            Ok(())
+        }));
+        started.notified().await;
+        waiter.abort();
+        let cancelled = waiter
+            .await
+            .expect_err("the application waiter was cancelled");
+        assert!(cancelled.is_cancelled());
+
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), completion)
+            .await
+            .expect("a bound on failure waiting for the owned send")
+            .expect("the owned send completes after waiter cancellation");
     }
 
     #[test]

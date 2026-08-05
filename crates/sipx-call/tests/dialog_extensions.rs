@@ -194,6 +194,52 @@ async fn an_admitted_private_method_is_case_sensitive_and_uses_dialog_state() {
             .await,
         Err(sipx_call::Error::StackOwnedDialogMethod(Method::Bye))
     ));
+    for (alias, known) in [
+        (Method::Other(Bytes::from_static(b"BYE")), Method::Bye),
+        (Method::Other(Bytes::from_static(b"INVITE")), Method::Invite),
+    ] {
+        assert!(matches!(
+            caller.admit_dialog_method(&alias),
+            Err(sipx_call::Error::StackOwnedDialogMethod(method)) if method == known
+        ));
+    }
+}
+
+#[tokio::test]
+async fn application_owned_responses_cannot_refresh_the_remote_target() {
+    let options = DialOptions::new("<sip:caller@example.test>", loopback());
+    let (mut caller, _caller_incoming, mut callee, mut callee_incoming) = connected(options).await;
+    let private = Method::Other(Bytes::from_static(b"PRIVATE"));
+    caller
+        .admit_dialog_method(&private)
+        .expect("admits outbound private method");
+    callee
+        .admit_dialog_method(&private)
+        .expect("admits inbound private method");
+    let mut events = callee.events().expect("callee event stream");
+    let original_target = caller.dialog.remote_target.to_bytes();
+    let injected = Header::build(HeaderName::Contact, "<sip:redirected@192.0.2.200:65000>")
+        .expect("valid Contact");
+
+    for method in [Method::Info, Method::Message, private] {
+        let send = caller.send_dialog_request(method, &[], Bytes::new());
+        let answer = async {
+            let request =
+                next_application_request(&mut callee, &mut callee_incoming, &mut events).await;
+            request
+                .respond(
+                    StatusCode::new(200).expect("valid status"),
+                    "OK",
+                    std::slice::from_ref(&injected),
+                    Bytes::new(),
+                )
+                .await
+                .expect("responds with Contact");
+        };
+        let (response, ()) = tokio::join!(send, answer);
+        assert!(response.expect("request succeeds").status.is_success());
+        assert_eq!(caller.dialog.remote_target.to_bytes(), original_target);
+    }
 }
 
 #[tokio::test]

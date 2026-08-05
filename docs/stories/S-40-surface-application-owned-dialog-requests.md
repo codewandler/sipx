@@ -38,3 +38,6 @@ the stack's specialized handling of session, transfer and teardown methods.
 ## Progress
 
 - In progress on the independent `dialog-extensions` epic branch.
+- Review follow-up closed three ownership gaps: canonical known methods cannot be disguised as
+  `Method::Other`, a committed final response survives cancellation of its application waiter, and
+  `Contact` on INFO, MESSAGE or private-method responses cannot redirect the dialog's remote target.

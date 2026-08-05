@@ -596,8 +596,6 @@ impl Call {
             .send_application_attempt(&method, headers, body.clone(), None)
             .await?;
         if first.status.is_success() {
-            self.dialog.refresh_target(&first.headers);
-            self.target = in_dialog_target(&self.dialog, self.target.clone());
             return Ok(first);
         }
 
@@ -624,8 +622,6 @@ impl Call {
         if !response.status.is_success() {
             return Err(rejection(&response));
         }
-        self.dialog.refresh_target(&response.headers);
-        self.target = in_dialog_target(&self.dialog, self.target.clone());
         Ok(response)
     }
 
