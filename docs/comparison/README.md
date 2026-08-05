@@ -107,16 +107,18 @@ methods, lifecycle, media, examples and operations. They are a completeness floo
 applications must copy.
 
 Capability rows use the same visible confidence vocabulary with one narrower interpretation:
-`measured` means the leaf was read in the immutable source revision and every evidence URL contains
-that exact revision; `documented` relies on the subject's own prose; `assessed` requires a rationale. Capability
-rows cannot claim `generated`, because this repository cannot generate a fact from another
-repository's build.
+`measured` means the leaf was read in the immutable source revision and every evidence URL uses that
+exact revision as its `blob` or `tree` locator; a revision hidden in a query or fragment is still a
+mutable URL. `documented` relies on the subject's own prose; `assessed` requires a rationale.
+Capability rows cannot claim `generated`, because this repository cannot generate a fact from
+another repository's build.
 
 `capabilities/external/*.json` pins the repository revision, exact story paths and their Git blob
-identities for cluster-owned rows. The checker derives the only permitted URLs from that index, so a
-misspelled repository, moving `main` link, generic roadmap or unreviewed content identity cannot
-satisfy the ownership disposition offline. The blob IDs are captured from `git ls-tree` at the
-declared revision during refresh; the offline check validates and publishes that immutable evidence.
+identities for cluster-owned rows. The checker fetches the pinned commit and resolves each path's
+blob before deriving the only permitted URLs, so a misspelled repository, moving `main` link,
+generic roadmap or invented content identity cannot satisfy the ownership disposition. The blob IDs
+are captured from `git ls-tree` at the declared revision during refresh and verified again on every
+comparison check.
 
 `capabilities/expected/<stack-id>.json` is the separate completeness ratchet. It lists the exact
 capability IDs discovered from the pinned public surface. Removing a row and decrementing the

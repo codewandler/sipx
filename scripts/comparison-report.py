@@ -35,6 +35,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 from collections import Counter
 from urllib.parse import urlparse
@@ -265,7 +266,8 @@ def capability_ledgers() -> list[dict]:
     found = []
     for path in sorted(CAPABILITIES.glob("*.json")):
         loaded = json.loads(path.read_text(encoding="utf-8"))
-        loaded["_file"] = path.name
+        if isinstance(loaded, dict):
+            loaded["_file"] = path.name
         found.append(loaded)
     return found
 
@@ -287,10 +289,45 @@ def external_story_urls(directory=None) -> set[str]:
     return found
 
 
-def external_story_index_problems(directory=None) -> list[str]:
-    """The offline external-story evidence is closed and pins each Git blob identity."""
+def remote_git_blob_identities(
+    repository: str, revision: str, paths: list[str]
+) -> dict[str, str]:
+    """Resolve paths at one immutable commit without retaining the external checkout."""
+    with tempfile.TemporaryDirectory(prefix="sipx-story-index-") as raw:
+        git_dir = pathlib.Path(raw)
+        commands = (
+            ["git", "-C", str(git_dir), "init", "--bare", "--quiet"],
+            [
+                "git",
+                "-C",
+                str(git_dir),
+                "fetch",
+                "--quiet",
+                "--depth=1",
+                "--filter=blob:none",
+                repository,
+                revision,
+            ],
+        )
+        for command in commands:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        found = {}
+        for path in paths:
+            result = subprocess.run(
+                ["git", "-C", str(git_dir), "rev-parse", f"FETCH_HEAD:{path}"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            found[path] = result.stdout.strip()
+        return found
+
+
+def external_story_index_problems(directory=None, blob_resolver=None) -> list[str]:
+    """The external-story evidence is closed and verified at its pinned Git commit."""
     problems = []
     directory = pathlib.Path(directory) if directory is not None else EXTERNAL_STORIES
+    blob_resolver = blob_resolver or remote_git_blob_identities
     for path in sorted(directory.glob("*.json")):
         loaded = json.loads(path.read_text(encoding="utf-8"))
         where = f"external story index {path.name}"
@@ -304,20 +341,28 @@ def external_story_index_problems(directory=None) -> list[str]:
         for key in sorted(keys - required):
             problems.append(f"{where} carries the unknown key {key!r}")
         repository = loaded.get("repository")
+        repository_valid = False
         if not isinstance(repository, str):
             problems.append(f"{where} has no repository URL")
         else:
             parsed = urlparse(repository)
             if parsed.scheme != "https" or not parsed.netloc:
                 problems.append(f"{where} has an invalid repository URL")
+            else:
+                repository_valid = True
         revision = loaded.get("source_revision")
-        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        revision_valid = (
+            isinstance(revision, str)
+            and re.fullmatch(r"[0-9a-f]{40}", revision) is not None
+        )
+        if not revision_valid:
             problems.append(f"{where} has no full immutable source revision")
         stories = loaded.get("stories")
         if not isinstance(stories, list) or not stories:
             problems.append(f"{where} has no story paths")
         else:
             seen = Counter()
+            declared_blobs = {}
             for story in stories:
                 if not isinstance(story, dict):
                     problems.append(f"{where} has a story entry that is not an object")
@@ -339,9 +384,25 @@ def external_story_index_problems(directory=None) -> list[str]:
                 blob = story.get("blob_sha")
                 if not isinstance(blob, str) or re.fullmatch(r"[0-9a-f]{40}", blob) is None:
                     problems.append(f"{where} has no Git blob identity for {story_path!r}")
+                elif isinstance(story_path, str):
+                    declared_blobs[story_path] = blob
             for story_path, count in seen.items():
                 if count > 1:
                     problems.append(f"{where} repeats story path {story_path!r}")
+            can_resolve = repository_valid and revision_valid and bool(declared_blobs)
+            if can_resolve:
+                try:
+                    resolved = blob_resolver(repository, revision, sorted(declared_blobs))
+                except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+                    problems.append(f"{where} could not verify pinned story blobs: {error}")
+                else:
+                    for story_path, declared in declared_blobs.items():
+                        actual = resolved.get(story_path)
+                        if actual != declared:
+                            problems.append(
+                                f"{where} declares blob {declared!r} for {story_path!r},"
+                                f" but the pinned commit carries {actual!r}"
+                            )
     return problems
 
 
@@ -378,12 +439,18 @@ def capability_expectations(directory=None) -> tuple[dict[str, tuple[str, set[st
         ]
         if invalid:
             problems.append(f"{where} has invalid capability IDs: {invalid!r}")
-        if len(expected_ids) != len(set(expected_ids)):
+            continue
+        expected_id_set = set(expected_ids)
+        if len(expected_ids) != len(expected_id_set):
             problems.append(f"{where} repeats a capability ID")
-        if isinstance(subject, str) and isinstance(revision, str):
+        if (
+            isinstance(subject, str)
+            and isinstance(revision, str)
+            and re.fullmatch(r"[0-9a-f]{40}", revision) is not None
+        ):
             if subject in expectations:
                 problems.append(f"{where} repeats subject {subject!r}")
-            expectations[subject] = (revision, set(expected_ids))
+            expectations[subject] = (revision, expected_id_set)
     return expectations, problems
 
 
@@ -392,6 +459,19 @@ def capability_where(ledger, capability=None) -> str:
     if capability is None:
         return f"capability ledger {subject}"
     return f"{subject}/capability/{capability.get('id', '?')}"
+
+
+def canonical_workspace_rust_path(source) -> bool:
+    """Whether a path stays lexically and physically inside a workspace crate."""
+    if not isinstance(source, str):
+        return False
+    pure = pathlib.PurePosixPath(source)
+    if pure.is_absolute() or ".." in pure.parts or len(pure.parts) < 3:
+        return False
+    if pure.parts[0] != "crates" or pure.suffix != ".rs":
+        return False
+    crate_root = (ROOT / "crates").resolve()
+    return (ROOT / source).resolve().is_relative_to(crate_root)
 
 
 def capability_schema_problems(ledger) -> list[str]:
@@ -465,10 +545,7 @@ def capability_schema_problems(ledger) -> list[str]:
                 problems.append(f"{leaf} has an invalid implementation list")
             else:
                 for source in implementation:
-                    if (
-                        not isinstance(source, str)
-                        or re.fullmatch(r"crates/.+\.rs", source) is None
-                    ):
+                    if not canonical_workspace_rust_path(source):
                         problems.append(f"{leaf} has invalid implementation path {source!r}")
         entries = capability.get("evidence")
         if not isinstance(entries, list) or not entries:
@@ -538,10 +615,13 @@ def capability_evidence_problems(ledger, capability) -> list[str]:
             parsed = urlparse(url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 problems.append(f"{where} cites an invalid evidence URL")
-            if (
-                capability.get("confidence") == "measured"
-                and ledger.get("source_revision") not in url
-            ):
+            revision = ledger.get("source_revision")
+            path_parts = pathlib.PurePosixPath(parsed.path).parts
+            pins_revision = any(
+                marker in {"blob", "tree"} and pinned == revision
+                for marker, pinned in zip(path_parts, path_parts[1:])
+            )
+            if capability.get("confidence") == "measured" and not pins_revision:
                 problems.append(
                     f"{where} claims measured confidence without pinning its source revision"
                 )
@@ -564,6 +644,9 @@ def capability_problems(
     problems = []
     subjects = Counter()
     for ledger in ledger_list:
+        if not isinstance(ledger, dict):
+            problems.extend(capability_schema_problems(ledger))
+            continue
         subject = ledger.get("subject")
         where = capability_where(ledger)
         subjects[subject] += 1
@@ -662,11 +745,9 @@ def capability_problems(
                     problems.append(f"{leaf} claims implementation with no Rust source evidence")
                 else:
                     for source in implementation:
-                        path = ROOT / source if isinstance(source, str) else ROOT
+                        path = (ROOT / source).resolve() if isinstance(source, str) else ROOT
                         if (
-                            not isinstance(source, str)
-                            or not source.startswith("crates/")
-                            or path.suffix != ".rs"
+                            not canonical_workspace_rust_path(source)
                             or not path.is_file()
                         ):
                             problems.append(
@@ -695,6 +776,8 @@ def capability_problems(
     for subject, count in subjects.items():
         if count > 1:
             problems.append(f"capability subject {subject!r} has {count} ledgers")
+    for subject in sorted(set(expectations) - set(subjects)):
+        problems.append(f"capability expectation {subject!r} has no corresponding ledger")
     return problems
 
 

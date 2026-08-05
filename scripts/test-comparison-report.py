@@ -109,7 +109,7 @@ def a_capability(**overrides):
         "implementation": ["crates/sipx-sip/src/message.rs"],
         "evidence": [
             {
-                "url": f"https://example.invalid/source/{FIXTURE_REVISION}",
+                "url": f"https://example.invalid/source/blob/{FIXTURE_REVISION}/message.rs",
                 "note": "the exported API",
             }
         ],
@@ -234,6 +234,15 @@ class TheCapabilityLedger(unittest.TestCase):
             problems,
         )
 
+    def test_an_exact_id_inventory_without_its_ledger_is_rejected(self) -> None:
+        problems = report.capability_problems(
+            [],
+            [a_stack()],
+            TODAY,
+            expectations={FIXTURE_STACK: (FIXTURE_REVISION, {"zz-capability"})},
+        )
+        self.assertTrue(any("no corresponding ledger" in problem for problem in problems), problems)
+
     def test_an_unevidenced_leaf_is_rejected(self) -> None:
         problems = capability_problems_for(a_capability(evidence=[]))
         self.assertTrue(any("cites no evidence" in problem for problem in problems), problems)
@@ -244,6 +253,12 @@ class TheCapabilityLedger(unittest.TestCase):
 
     def test_implementation_evidence_must_be_workspace_rust_source(self) -> None:
         problems = capability_problems_for(a_capability(implementation=["README.md"]))
+        self.assertTrue(any("workspace crate" in problem for problem in problems), problems)
+
+    def test_implementation_evidence_cannot_escape_the_crates_directory(self) -> None:
+        problems = capability_problems_for(
+            a_capability(implementation=["crates/../fuzz/fuzz_targets/parse_stream.rs"])
+        )
         self.assertTrue(any("workspace crate" in problem for problem in problems), problems)
 
     def test_non_sipx_rows_cannot_carry_implementation_evidence(self) -> None:
@@ -325,6 +340,19 @@ class TheCapabilityLedger(unittest.TestCase):
         )
         self.assertTrue(any("without pinning" in problem for problem in problems), problems)
 
+    def test_measured_confidence_rejects_a_revision_hidden_in_a_mutable_url(self) -> None:
+        problems = capability_problems_for(
+            a_capability(
+                evidence=[
+                    {
+                        "url": f"https://example.invalid/main?claimed_revision={FIXTURE_REVISION}",
+                        "note": "a mutable branch with a decorative revision",
+                    }
+                ]
+            )
+        )
+        self.assertTrue(any("without pinning" in problem for problem in problems), problems)
+
     def test_documented_confidence_may_cite_versioned_prose(self) -> None:
         capability = a_capability(
             confidence="documented",
@@ -400,14 +428,25 @@ class TheExternalStoryIndex(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             directory = pathlib.Path(raw)
             (directory / "cluster.json").write_text(json.dumps(value), encoding="utf-8")
-            return report.external_story_index_problems(directory)
+            return report.external_story_index_problems(
+                directory,
+                lambda _repository, _revision, paths: {path: "b" * 40 for path in paths},
+            )
 
     def test_a_complete_pinned_index_is_accepted_and_derives_the_url(self) -> None:
         value = self.valid_index()
         with tempfile.TemporaryDirectory() as raw:
             directory = pathlib.Path(raw)
             (directory / "cluster.json").write_text(json.dumps(value), encoding="utf-8")
-            self.assertEqual([], report.external_story_index_problems(directory))
+            self.assertEqual(
+                [],
+                report.external_story_index_problems(
+                    directory,
+                    lambda _repository, _revision, paths: {
+                        path: "b" * 40 for path in paths
+                    },
+                ),
+            )
             self.assertEqual(
                 {
                     "https://example.invalid/cluster/blob/"
@@ -415,6 +454,12 @@ class TheExternalStoryIndex(unittest.TestCase):
                 },
                 report.external_story_urls(directory),
             )
+
+    def test_a_well_formed_but_wrong_blob_identity_is_rejected(self) -> None:
+        value = self.valid_index()
+        value["stories"][0]["blob_sha"] = "0" * 40
+        problems = self.problems_for(value)
+        self.assertTrue(any("pinned commit carries" in problem for problem in problems), problems)
 
     def test_each_external_index_refusal_has_a_mutated_fixture(self) -> None:
         mutations = []
@@ -498,6 +543,31 @@ class TheExactCapabilityInventory(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 _, problems = self.load(value, filename)
                 self.assertTrue(any(phrase in problem for problem in problems), problems)
+
+    def test_an_object_valued_capability_id_is_refused_without_a_crash(self) -> None:
+        value = self.valid_inventory()
+        value["expected_ids"] = [{"not": "hashable"}]
+        expectations, problems = self.load(value)
+        self.assertEqual({}, expectations)
+        self.assertTrue(any("invalid capability" in problem for problem in problems), problems)
+
+
+class MalformedCapabilityFiles(unittest.TestCase):
+    def test_an_array_ledger_is_loaded_for_a_typed_refusal_instead_of_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = pathlib.Path(raw)
+            (directory / "broken.json").write_text("[]", encoding="utf-8")
+            original = report.CAPABILITIES
+            try:
+                report.CAPABILITIES = directory
+                ledgers = report.capability_ledgers()
+            finally:
+                report.CAPABILITIES = original
+        self.assertEqual([[]], ledgers)
+        self.assertEqual(
+            ["capability ledger is not an object"],
+            report.capability_schema_problems(ledgers[0]),
+        )
 
 
 class TheClosedKeySet(unittest.TestCase):
