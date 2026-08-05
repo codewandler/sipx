@@ -7,8 +7,8 @@
 //! Time is a parameter, not a call to a clock, for the same reason it is in the timer queue: a
 //! notifier driven by a scheduler somebody else owns has to be able to say what "now" is, and a
 //! test that wants to watch a subscription expire should not have to wait an hour.
-//! **Experimental** (`A-8`): public and tested, with no caller above this crate — nothing in the
-//! workspace receives a SUBSCRIBE off a socket.
+//! **Experimental** (`A-8`): public and tested. `sipx-call::Notifier` now drives this exact store
+//! from the dispatcher; the pre-1.0 observation and runtime API may still change shape.
 //!
 
 use std::time::Duration;
@@ -99,6 +99,8 @@ pub enum Answer {
         /// The status to answer with — 489, and not 400 or 501.
         status: u16,
     },
+    /// A new subscription would exceed this notifier's configured peer-driven resource bound.
+    AtCapacity,
     /// The request could not be read as a SUBSCRIBE at all.
     Malformed,
 }
@@ -108,6 +110,7 @@ pub enum Answer {
 pub struct Subscriptions {
     packages: Packages,
     policy_maximum: Duration,
+    capacity: usize,
     held: Vec<Served>,
 }
 
@@ -118,8 +121,25 @@ impl Subscriptions {
         Self {
             packages,
             policy_maximum,
+            capacity: 1024,
             held: Vec::new(),
         }
+    }
+
+    /// Apply a finite concurrent-subscription bound.
+    ///
+    /// Zero is raised to one: a notifier configured with no capacity could advertise packages but
+    /// never serve one, which is almost certainly a configuration mistake rather than policy.
+    #[must_use]
+    pub fn with_capacity(mut self, capacity: usize) -> Self {
+        self.capacity = capacity.max(1);
+        self
+    }
+
+    /// The concurrent-subscription bound.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// The packages served, for an `Allow-Events` header.
@@ -183,6 +203,10 @@ impl Subscriptions {
             held.expires_at = expires_at;
             held.state = State::Active;
             return Answer::Refreshed { id, expires };
+        }
+
+        if self.active() >= self.capacity {
+            return Answer::AtCapacity;
         }
 
         self.held.push(Served {
@@ -291,6 +315,25 @@ mod tests {
             Packages::new().with("dialog").with("presence"),
             Duration::from_secs(3600),
         )
+    }
+
+    #[test]
+    fn a_new_subscription_is_refused_at_the_bound_but_a_refresh_is_not() {
+        let mut notifier = notifier().with_capacity(1);
+        let first = subscribe("dialog", Some(600), "w1");
+        assert!(matches!(
+            notifier.on_subscribe(&first, NOW),
+            Answer::Established { .. }
+        ));
+
+        let second = subscribe("presence", Some(600), "w2");
+        assert_eq!(notifier.on_subscribe(&second, NOW), Answer::AtCapacity);
+        assert_eq!(notifier.active(), 1);
+
+        assert!(matches!(
+            notifier.on_subscribe(&first, NOW + 1),
+            Answer::Refreshed { .. }
+        ));
     }
 
     /// The story's failing-first test.

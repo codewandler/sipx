@@ -51,10 +51,10 @@
 //! §8.2's answer read back, and §4.1.3's refresh through `UserAgent::woken`. Outbound is earned
 //! only as far as the registration goes, which is what the wording above says and no further.
 //!
-//! **Experimental**: `presence`, `subscribe` and `packages`. They are public, tested and reachable from
-//! nothing above this crate — no `sipx-cli` command subscribes or publishes, and nothing in the
-//! workspace receives a SUBSCRIBE or PUBLISH off a socket. Their shape has never been constrained by a
-//! caller, which is exactly when an API is still soft.
+//! **Experimental**: `presence`, `subscribe` and `packages`. They are public and tested, and
+//! `sipx-call::Notifier` now serves inbound SUBSCRIBE from a dispatcher through this crate's exact
+//! store. No `sipx-cli` command subscribes or publishes, the subscriber half is not built, and
+//! nothing receives PUBLISH off a socket. Their pre-1.0 API shape is still soft.
 //!
 //! By that same rule, and named here rather than left for a reader to discover: the rest of
 //! Outbound is experimental too. `Flows` and `Attempt` — one registration per outbound proxy,

@@ -69,6 +69,7 @@ use crate::error::{Error, Result};
 use crate::event::{CallEvents, EndCause, EventSink};
 use crate::identity::InboundIdentityPolicy;
 use crate::media_policy::{Codecs, MediaPolicy};
+use crate::notifier::Notifier;
 
 /// How many requests one call's inbox holds before the dispatcher sheds for it.
 ///
@@ -790,6 +791,7 @@ pub struct Dispatcher {
     incoming: mpsc::Receiver<Incoming>,
     calls: Calls,
     identity: Option<InboundIdentityPolicy>,
+    notifier: Option<Notifier>,
 }
 
 impl Dispatcher {
@@ -814,6 +816,7 @@ impl Dispatcher {
                 queue: queue.max(1),
             })),
             identity: None,
+            notifier: None,
         }
     }
 
@@ -825,6 +828,14 @@ impl Dispatcher {
     #[must_use]
     pub fn with_identity(mut self, identity: InboundIdentityPolicy) -> Self {
         self.identity = Some(identity);
+        self
+    }
+
+    /// Serve inbound RFC 6665 SUBSCRIBE requests through this bounded notifier.
+    #[must_use]
+    pub fn with_notifier(mut self, mut notifier: Notifier) -> Self {
+        notifier.attach(self.endpoint.clone());
+        self.notifier = Some(notifier);
         self
     }
 
@@ -916,6 +927,15 @@ impl Dispatcher {
         // would put it in an inbox where the two responses §9.2 owes could not be sent from.
         if incoming.request.method == Method::Cancel {
             self.cancel(&incoming).await;
+            return None;
+        }
+
+        // SUBSCRIBE owns a dialog of its own and therefore cannot be routed by the call table.
+        // A tagged refresh is matched inside the notifier against its subscription dialog.
+        if incoming.request.method == Method::Subscribe
+            && let Some(notifier) = self.notifier.as_mut()
+        {
+            notifier.receive(&incoming).await;
             return None;
         }
 
@@ -1164,7 +1184,7 @@ impl Dispatcher {
 /// a CANCEL and the `487` for the INVITE it withdraws are two responses about one invitation, and
 /// the section asks that they carry the same tag. Everything else is a one-off refusal with no
 /// second response to agree with, and takes a fresh token.
-fn with_to_tag(
+pub(crate) fn with_to_tag(
     builder: sipx_sip::build::ResponseBuilder,
     request: &Request,
     tag: Option<&str>,

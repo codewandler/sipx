@@ -168,6 +168,30 @@ authenticated full-duplex sessions. A granted session can originate calls. The R
 are Supported under the policy above; the `sipx.app.v1` wire line remains Experimental, and no
 embedded runtime or TypeScript SDK is shipped.
 
+## Serve inbound event subscriptions
+
+`sipx-call::Notifier` attaches to the same dispatcher that routes calls. Its handle observes the
+exact `sipx_ua::subscribe::Subscriptions` allocation used by the socket path and exposes task and
+shedding counters:
+
+```rust
+use std::time::Duration;
+use sipx_call::{Dispatcher, Notifier};
+
+let notifier = Notifier::new(Duration::from_secs(300), 128);
+let observations = notifier.handle();
+let dispatcher = Dispatcher::new(endpoint, incoming).with_notifier(notifier);
+
+assert_eq!(observations.subscriptions().lock()?.capacity(), 128);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Polling `Dispatcher::next` serves `dialog`, `reg`, and `presence` SUBSCRIBE requests, sends the
+required initial NOTIFY, and re-arms or terminates the one owned expiry task on refresh or
+unsubscribe. This notifier API is Experimental. It sends valid empty full snapshots initially;
+automatic projection of live calls, registrations and published presence into later documents is
+not part of this surface yet. The outbound subscriber half is a separate planned API.
+
 ## Runtime and feature boundaries
 
 - `sipx-sip` and `sipx-sdp` are sans-I/O and have no async runtime.

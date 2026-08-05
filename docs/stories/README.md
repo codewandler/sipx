@@ -50,16 +50,13 @@ WASM kernel, browser-native WebRTC adapter and public demo. Neither is silently 
 ### event reachability
 _sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.rs`: a subscription_
 - [S-37 — Specify endpoint event-client behavior](S-37-specify-endpoint-event-client-behavior.md) · Signalling · spec before code · generic RFC 6665 client contract consumed by S-24
+- [S-35 — Accept an inbound subscription from a socket](S-35-accept-an-inbound-subscription-from-a-socket.md) · Signalling · RFC 6665 notifier is implemented and unreachable · nothing in the workspace receives a SUBSCRIBE · unblocks S-24 · follow-up
 
 ## Next (ready — take the top one unless the user named a story)
 
 ### application-owned dialog extensions
 _Calls already specialize the methods whose semantics the stack owns: BYE, re-INVITE, UPDATE,_
 - [S-40 — Surface application-owned dialog requests](S-40-surface-application-owned-dialog-requests.md) · Signalling · authenticated INFO, MESSAGE and admitted extension methods without bypassing dialog invariants
-
-### event reachability
-_sipx implements the notifier half of RFC 6665 in `crates/sipx-ua/src/subscribe.rs`: a subscription_
-- [S-35 — Accept an inbound subscription from a socket](S-35-accept-an-inbound-subscription-from-a-socket.md) · Signalling · RFC 6665 notifier is implemented and unreachable · nothing in the workspace receives a SUBSCRIBE · unblocks S-24 · follow-up
 
 ### live endpoint policy
 _A long-running endpoint has two operational seams that currently require replacement or a fork:_
