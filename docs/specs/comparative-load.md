@@ -314,7 +314,12 @@ Call-ID and `n`; the command never reflects unbounded or invalid bytes into a he
 `--mode generated-media` accepts only an INVITE carrying a negotiable SDP offer, uses the ordinary
 call/media stack, and emits a finite deterministic audio fixture. A missing or unusable offer in
 that mode receives a typed final refusal. Media behavior and measurements never enter the v1
-signalling-load result.
+signalling-load result. After the initial ACK, its bounded request vocabulary is ACK and BYE: an
+unsupported in-dialog method receives 405, while a malformed, wrong-dialog or stale BYE receives
+400, 481 or 500 respectively. This narrower load profile keeps ordinary call/media ownership while
+making every response status observable without turning the responder into an application server.
+Call-ID, From, To and CSeq MUST each occur exactly once before dialog matching or typed-header
+parsing; a duplicate is malformed and cannot end or otherwise mutate the call.
 
 Before either mode applies policy or consumes admission, an initial INVITE must carry exactly one
 Call-ID, From, To, CSeq and Contact, a parseable CSeq whose method is INVITE, and enough dialog
@@ -343,8 +348,8 @@ against the dialog identifiers and the INVITE sequence; an arbitrary packet cann
 dialog. A BYE is validated against both tags, Call-ID, method-consistent CSeq and monotonically
 increasing remote sequence before its `200` is counted. A final response to a locally originated
 BYE must likewise match both dialog tags, Call-ID and that BYE's exact CSeq before it can complete
-the dialog. CANCEL remains transaction-matched by the dispatcher and never becomes an in-dialog
-BYE substitute.
+the dialog; each of Call-ID, From, To and CSeq occurs exactly once in that response. CANCEL remains
+transaction-matched by the dispatcher and never becomes an in-dialog BYE substitute.
 
 ### 9.4 Shutdown and result
 

@@ -903,10 +903,10 @@ async fn terminate_signalling(
 ) {
     let started = Instant::now();
     let outcome = call.hang_up(within).await;
-    apply_signalling_teardown(result, outcome, started.elapsed());
+    apply_observed_teardown(result, outcome, started.elapsed());
 }
 
-fn apply_signalling_teardown(
+fn apply_observed_teardown(
     result: &mut WorkerResult,
     outcome: sipx_call::Result<u16>,
     elapsed: Duration,
@@ -929,12 +929,42 @@ fn apply_signalling_teardown(
             result.response(status);
             result.teardown = Some(elapsed);
             result.error = Some(format!("dialog teardown failed: {error}"));
+            if result.terminal != Terminal::Cancelled {
+                result.terminal = Terminal::Failed;
+            }
         }
         Err(sipx_call::Error::InvalidDialogResponse) => {
             result.invalid = result.invalid.saturating_add(1);
             result.error = Some("dialog teardown received an invalid response".to_owned());
+            if result.terminal != Terminal::Cancelled {
+                result.terminal = Terminal::Failed;
+            }
         }
-        Err(error) => result.error = Some(format!("dialog teardown failed: {error}")),
+        Err(error) => {
+            result.error = Some(format!("dialog teardown failed: {error}"));
+            if result.terminal != Terminal::Cancelled {
+                result.terminal = Terminal::Failed;
+            }
+        }
+    }
+}
+
+fn apply_generated_refusal(
+    result: &mut WorkerResult,
+    outcome: sipx_call::Result<()>,
+    status: u16,
+    context: &str,
+) {
+    match outcome {
+        Ok(()) => {
+            result.response(status);
+            result.terminal = Terminal::Rejected;
+            result.error = Some(context.to_owned());
+        }
+        Err(sipx_call::Error::InvitationCancelled) => result.cancelled(),
+        Err(error) => {
+            result.error = Some(format!("{context}; refusal failed: {error}"));
+        }
     }
 }
 
@@ -967,17 +997,15 @@ async fn run_generated_media(
         Ok(true) => {}
     }
     if invitation.request().request.body().is_empty() {
-        match invitation
+        let outcome = invitation
             .refuse(&endpoint, 488, "Not Acceptable Here")
-            .await
-        {
-            Ok(()) => {
-                result.terminal = Terminal::Rejected;
-                result.response(488);
-            }
-            Err(sipx_call::Error::InvitationCancelled) => result.cancelled(),
-            Err(error) => result.error = Some(format!("media refusal failed: {error}")),
-        }
+            .await;
+        apply_generated_refusal(
+            &mut result,
+            outcome,
+            488,
+            "generated-media INVITE carried no offer",
+        );
         return result;
     }
     let invite_cseq = request_cseq(&invitation.request().request)
@@ -994,12 +1022,15 @@ async fn run_generated_media(
             return result;
         }
         Err(error) => {
-            let _ = invitation
+            let outcome = invitation
                 .refuse(&endpoint, 488, "Not Acceptable Here")
                 .await;
-            result.response(488);
-            result.terminal = Terminal::Rejected;
-            result.error = Some(format!("generated-media answer refused: {error}"));
+            apply_generated_refusal(
+                &mut result,
+                outcome,
+                488,
+                &format!("generated-media answer refused: {error}"),
+            );
             return result;
         }
     };
@@ -1020,17 +1051,24 @@ async fn run_generated_media(
         result.setup = Some(setup_started.elapsed());
         let frame = deterministic_frame(limits.seed, index);
         if call.media().play(&frame, frame.len()).await {
-            drive_generated_media(&mut call, &mut requests, deadline, stop, &mut result).await;
+            drive_generated_media(
+                &mut call,
+                &endpoint,
+                &mut requests,
+                invite_cseq,
+                deadline,
+                stop,
+                &mut result,
+            )
+            .await;
         } else {
             result.error = Some("generated-media playback failed".to_owned());
         }
     }
     if !call.is_ended() {
         let started = Instant::now();
-        match call.hang_up().await {
-            Ok(()) => result.teardown = Some(started.elapsed()),
-            Err(error) => result.error = Some(format!("generated-media teardown failed: {error}")),
-        }
+        let outcome = call.hang_up_observed(limits.cleanup).await;
+        apply_observed_teardown(&mut result, outcome, started.elapsed());
     }
     calls.forget(&call.dialog);
     result
@@ -1056,7 +1094,8 @@ async fn wait_for_generated_ack(
     };
     match action {
         AwaitAck::Request(Some(incoming)) => {
-            let valid = incoming.request.method == Method::Ack
+            let valid = unique_dialog_headers(&incoming.request)
+                && incoming.request.method == Method::Ack
                 && call.dialog.matches(&incoming.request)
                 && request_cseq(&incoming.request).is_some_and(|value| {
                     value.method == Method::Ack && Some(value.sequence) == invite_cseq
@@ -1080,7 +1119,9 @@ async fn wait_for_generated_ack(
 
 async fn drive_generated_media(
     call: &mut sipx_call::Call,
+    endpoint: &Handle,
     requests: &mut tokio::sync::mpsc::Receiver<Incoming>,
+    invite_cseq: Option<u32>,
     deadline: Option<Instant>,
     stop: CancellationToken,
     result: &mut WorkerResult,
@@ -1098,26 +1139,8 @@ async fn drive_generated_media(
         };
         match action {
             Drive::Request(Some(incoming)) => {
-                let remote_bye = incoming.request.method == Method::Bye;
-                let started = Instant::now();
-                match call.handle(&incoming).await {
-                    Ok(true) if remote_bye && call.is_ended() => {
-                        result.terminal = Terminal::Completed;
-                        result.response(200);
-                        result.teardown = Some(started.elapsed());
-                        return;
-                    }
-                    Ok(true) => {}
-                    Ok(false) => {
-                        result.invalid += 1;
-                        result.error =
-                            Some("unsupported generated-media dialog request".to_owned());
-                        return;
-                    }
-                    Err(error) => {
-                        result.error = Some(format!("generated-media request failed: {error}"));
-                        return;
-                    }
+                if !handle_generated_request(call, endpoint, &incoming, invite_cseq, result).await {
+                    return;
                 }
             }
             Drive::Request(None) => {
@@ -1134,6 +1157,136 @@ async fn drive_generated_media(
             }
         }
     }
+}
+
+async fn handle_generated_request(
+    call: &mut sipx_call::Call,
+    endpoint: &Handle,
+    incoming: &Incoming,
+    invite_cseq: Option<u32>,
+    result: &mut WorkerResult,
+) -> bool {
+    if !unique_dialog_headers(&incoming.request) {
+        result.invalid = result.invalid.saturating_add(1);
+        if incoming.request.method != Method::Ack {
+            match respond_generated_request(endpoint, incoming, 400, "Bad Request").await {
+                Ok(()) => result.response(400),
+                Err(error) => {
+                    result.error = Some(format!(
+                        "generated-media duplicate-header refusal failed: {error}"
+                    ));
+                    return false;
+                }
+            }
+        }
+        result.error =
+            Some("generated-media dialog request repeated an identity header".to_owned());
+        return false;
+    }
+    if incoming.request.method == Method::Ack {
+        let valid = call.dialog.matches(&incoming.request)
+            && request_cseq(&incoming.request).is_some_and(|value| {
+                value.method == Method::Ack && Some(value.sequence) == invite_cseq
+            });
+        if valid && call.handle(incoming).await.unwrap_or(false) {
+            return true;
+        }
+        result.invalid = result.invalid.saturating_add(1);
+        result.error = Some("generated-media ACK was invalid".to_owned());
+        return false;
+    }
+    if incoming.request.method != Method::Bye {
+        result.invalid = result.invalid.saturating_add(1);
+        match respond_generated_request(endpoint, incoming, 405, "Method Not Allowed").await {
+            Ok(()) => result.response(405),
+            Err(error) => {
+                result.error = Some(format!(
+                    "generated-media unsupported-method refusal failed: {error}"
+                ));
+                return false;
+            }
+        }
+        result.error = Some("unsupported generated-media dialog request".to_owned());
+        return false;
+    }
+
+    if let Some((status, reason)) = generated_bye_refusal(&call.dialog, incoming) {
+        result.invalid = result.invalid.saturating_add(1);
+        match respond_generated_request(endpoint, incoming, status, reason).await {
+            Ok(()) => result.response(status),
+            Err(error) => {
+                result.error = Some(format!(
+                    "generated-media invalid-BYE refusal failed: {error}"
+                ));
+                return false;
+            }
+        }
+        result.error = Some("generated-media BYE was invalid".to_owned());
+        return false;
+    }
+
+    let started = Instant::now();
+    match call.handle(incoming).await {
+        Ok(true) if call.is_ended() => {
+            result.terminal = Terminal::Completed;
+            result.response(200);
+            result.teardown = Some(started.elapsed());
+        }
+        Ok(true) => result.error = Some("generated-media BYE did not end the call".to_owned()),
+        Ok(false) => {
+            result.invalid = result.invalid.saturating_add(1);
+            result.error = Some("unsupported generated-media dialog request".to_owned());
+        }
+        Err(error) => result.error = Some(format!("generated-media request failed: {error}")),
+    }
+    false
+}
+
+fn unique_dialog_headers(request: &sipx_sip::Request) -> bool {
+    [
+        HeaderName::CallId,
+        HeaderName::From,
+        HeaderName::To,
+        HeaderName::CSeq,
+    ]
+    .iter()
+    .all(|name| request.headers.count(name) == 1)
+}
+
+fn generated_bye_refusal(
+    dialog: &sipx_call::Dialog,
+    incoming: &Incoming,
+) -> Option<(u16, &'static str)> {
+    if dialog.matches(&incoming.request) {
+        match request_cseq(&incoming.request) {
+            None => Some((400, "Bad Request")),
+            Some(value) if value.method != Method::Bye => Some((400, "Bad Request")),
+            Some(_) if dialog.is_out_of_order(&incoming.request) => {
+                Some((500, "Server Internal Error"))
+            }
+            Some(_) => None,
+        }
+    } else {
+        Some((481, "Call Does Not Exist"))
+    }
+}
+
+async fn respond_generated_request(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    status: u16,
+    reason: &'static str,
+) -> sipx_call::Result<()> {
+    let status = StatusCode::new(status).ok_or_else(|| sipx_call::Error::Rejected {
+        status,
+        reason: "invalid generated-media refusal status".to_owned(),
+    })?;
+    let mut builder = ResponseBuilder::to_request(&incoming.request, status, reason)?;
+    if status.code() == 405 {
+        builder = builder.header(HeaderName::Allow, Bytes::from_static(b"ACK, BYE"))?;
+    }
+    endpoint.respond(&incoming.key, builder.build()).await?;
+    Ok(())
 }
 
 fn deterministic_frame(seed: u64, index: usize) -> [i16; 160] {
@@ -1458,7 +1611,7 @@ mod tests {
     #[test]
     fn a_valid_non_success_bye_final_is_response_evidence() {
         let mut result = WorkerResult::new(Terminal::Failed);
-        apply_signalling_teardown(
+        apply_observed_teardown(
             &mut result,
             Err(sipx_call::Error::Rejected {
                 status: 481,
@@ -1471,5 +1624,64 @@ mod tests {
         assert_eq!(result.teardown, Some(Duration::from_millis(7)));
         assert!(result.error.is_some());
         assert_eq!(result.terminal, Terminal::Failed);
+    }
+
+    #[test]
+    fn a_failed_generated_refusal_is_not_response_evidence() {
+        let mut result = WorkerResult::new(Terminal::Failed);
+        apply_generated_refusal(
+            &mut result,
+            Err(sipx_call::Error::NoResponse),
+            488,
+            "generated-media answer refused",
+        );
+
+        assert!(result.responses.is_empty());
+        assert_eq!(result.terminal, Terminal::Failed);
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn every_generated_dialog_identity_header_must_be_unique() {
+        let uri = sipx_sip::Uri::parse(Bytes::from_static(b"sip:load@load.invalid"))
+            .expect("request URI");
+        let request = sipx_sip::build::RequestBuilder::new(Method::Bye, uri)
+            .header(
+                HeaderName::From,
+                Bytes::from_static(b"<sip:driver@driver.invalid>;tag=remote"),
+            )
+            .expect("From")
+            .header(
+                HeaderName::To,
+                Bytes::from_static(b"<sip:load@load.invalid>;tag=local"),
+            )
+            .expect("To")
+            .header(
+                HeaderName::CallId,
+                Bytes::from_static(b"identity@driver.invalid"),
+            )
+            .expect("Call-ID")
+            .cseq(2, &Method::Bye)
+            .expect("CSeq")
+            .build();
+        assert!(unique_dialog_headers(&request));
+
+        for name in [
+            HeaderName::CallId,
+            HeaderName::From,
+            HeaderName::To,
+            HeaderName::CSeq,
+        ] {
+            let mut duplicate = request.clone();
+            let value = duplicate
+                .headers
+                .value(&name)
+                .expect("required header")
+                .into_owned();
+            duplicate
+                .headers
+                .push(sipx_sip::Header::build(name, Bytes::from(value)).expect("duplicate header"));
+            assert!(!unique_dialog_headers(&duplicate));
+        }
     }
 }

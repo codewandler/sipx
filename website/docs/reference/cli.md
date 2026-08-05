@@ -232,6 +232,12 @@ originated. Protocol retransmissions do not inflate the map, and invalid respons
 invalid messages instead. UDP is the v1 baseline so connection setup and reuse costs cannot
 contaminate the SIP transaction measurement.
 
+Generated-media mode deliberately keeps the same small dialog vocabulary as signalling mode:
+after the initial ACK it accepts ACK and BYE, and refuses other in-dialog methods with a measured
+405. That keeps the load result about bounded call setup and teardown rather than application
+features such as transfer or renegotiation. Duplicate Call-ID, From, To or CSeq fields are rejected
+as malformed before they can match or mutate a dialog.
+
 ## `sipx register <AOR>`
 
 Register with a registrar: `sipx register sip:alice@example.com`
