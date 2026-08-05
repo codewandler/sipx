@@ -123,9 +123,31 @@ pub struct CallHarness {
 #[derive(Debug)]
 pub struct PendingCall<'a> {
     invitation: Incoming,
-    dial: JoinHandle<Result<sipx_call::Call, sipx_call::Error>>,
+    dial: DialTask,
     callee: &'a Handle,
     callee_incoming: &'a mut mpsc::Receiver<Incoming>,
+}
+
+#[derive(Debug)]
+struct DialTask(Option<JoinHandle<Result<sipx_call::Call, sipx_call::Error>>>);
+
+impl DialTask {
+    async fn finish(mut self) -> Result<sipx_call::Call, HarnessError> {
+        let Some(task) = self.0.take() else {
+            return Err(HarnessError::DialTask);
+        };
+        task.await
+            .map_err(|_| HarnessError::DialTask)?
+            .map_err(HarnessError::from)
+    }
+}
+
+impl Drop for DialTask {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.as_ref() {
+            task.abort();
+        }
+    }
 }
 
 /// Both application call objects after the 2xx and its ACK crossed the in-process path.
@@ -161,8 +183,9 @@ impl CallHarness {
     ) -> Result<PendingCall<'_>, HarnessError> {
         let endpoint = self.caller.clone();
         let target = Target::new(self.callee.local_addr(), TransportKind::Udp);
-        let dial =
-            tokio::spawn(async move { sipx_call::dial(&endpoint, target, &to, &options).await });
+        let dial = DialTask(Some(tokio::spawn(async move {
+            sipx_call::dial(&endpoint, target, &to, &options).await
+        })));
         let invitation = self
             .callee_incoming
             .recv()
@@ -202,9 +225,9 @@ impl PendingCall<'_> {
             callee_incoming,
         } = self;
         let answer = sipx_call::answer(callee, &invitation, media_address);
-        let (caller, callee_call) = tokio::join!(dial, answer);
-        let caller = caller.map_err(|_| HarnessError::DialTask)??;
-        let mut callee_call = callee_call?;
+        let (caller, mut callee_call) = tokio::try_join!(dial.finish(), async {
+            answer.await.map_err(HarnessError::from)
+        })?;
         let ack = callee_incoming
             .recv()
             .await
@@ -417,5 +440,45 @@ impl TransactionHarness {
                 self.send(delivery.to, wire);
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use tokio::sync::oneshot;
+
+    use super::DialTask;
+
+    struct OnDrop(Option<oneshot::Sender<()>>);
+
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_a_pending_dial_aborts_its_owned_task() {
+        let (started, running) = oneshot::channel();
+        let (dropped, cancelled) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _on_drop = OnDrop(Some(dropped));
+            let _ = started.send(());
+            std::future::pending::<Result<sipx_call::Call, sipx_call::Error>>().await
+        });
+        let dial = DialTask(Some(task));
+        running.await.expect("dial task started");
+
+        drop(dial);
+
+        cancelled.await.expect("dial task was cancelled");
     }
 }

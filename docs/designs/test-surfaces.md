@@ -32,6 +32,11 @@ the application API. Tests that need deterministic packet faults rather than an 
 use `TransactionHarness` below; network interoperability remains a separate bounded integration
 test.
 
+The signalling driver admits at most its configured number of live response routes. A final
+response removes its route before delivery; a later request prunes a route whose consumer was
+dropped; and excess requests receive a typed overload error. Dropping a pending call aborts its
+owned dial task, including when an answer fails before it can complete the exchange.
+
 `Link` is generic over its instant with the existing Tokio instant as its default, preserving its
 current callers while allowing `TransactionHarness` to use a zero-based virtual instant. `Virtual`
 stores nanoseconds, so adding a sub-millisecond `Duration` loses no precision. An advance visits

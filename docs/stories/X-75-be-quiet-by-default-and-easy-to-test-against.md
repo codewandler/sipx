@@ -65,6 +65,10 @@ call in their own tests.
   retransmission. `Virtual` stores nanoseconds, and the output ratchet now covers `print`/`eprint`,
   stdout/stderr `write` variants and subscriber initializer variants while its subprocess executes
   a complete call path.
+- 2026-08-05: review found that the in-process route table could retain completed exchanges and a
+  dropped pending call detached its dial task. The driver now caps routes, refuses excess work,
+  removes final and closed-consumer routes, and aborts a pending dial on drop; barrier-based tests
+  cover cancellation and cleanup without wall-clock waits.
 
 ## Notes
 - Two separate recurring themes in the demand survey collapse into this one story: users could not
