@@ -1,13 +1,12 @@
 //! `sipx load-responder` — a finite, machine-driven answering endpoint.
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
-use sipx_call::{Calls, Dispatched, Invitation, SignallingEvent};
+use sipx_call::{Calls, DispatchCounts, Dispatched, Invitation, SignallingEvent};
 use sipx_sip::build::ResponseBuilder;
 use sipx_sip::headers::CSeq;
 use sipx_sip::{HeaderName, Method, StatusCode};
@@ -46,6 +45,7 @@ ENDPOINT:
 
 const DEFAULT_DIALOG_DURATION: Duration = Duration::from_secs(40);
 const PER_DIALOG_QUEUE: usize = 8;
+const MAX_LATENCY_SAMPLES: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -248,9 +248,54 @@ impl WorkerResult {
     fn response(&mut self, status: u16) {
         *self.responses.entry(status).or_default() += 1;
     }
+
+    fn cancelled(&mut self) {
+        self.terminal = Terminal::Cancelled;
+        // A matched pre-final CANCEL is completed by the dispatcher as two transactions: 200 on
+        // CANCEL and 487 on the pending INVITE. The invitation observes the same atomic state.
+        self.response(200);
+        self.response(487);
+    }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
+struct LatencySamples {
+    seen: u64,
+    maximum: Option<Duration>,
+    samples: Vec<Duration>,
+    capacity: usize,
+    random: u64,
+}
+
+impl LatencySamples {
+    fn new(capacity: usize, seed: u64) -> Self {
+        Self {
+            seen: 0,
+            maximum: None,
+            samples: Vec::new(),
+            capacity: capacity.max(1),
+            random: seed,
+        }
+    }
+
+    fn observe(&mut self, value: Duration) {
+        self.seen = self.seen.saturating_add(1);
+        self.maximum = Some(self.maximum.map_or(value, |current| current.max(value)));
+        if self.samples.len() < self.capacity {
+            self.samples.push(value);
+            return;
+        }
+        let slot = splitmix64(&mut self.random) % self.seen;
+        if let Ok(slot) = usize::try_from(slot)
+            && slot < self.capacity
+            && let Some(sample) = self.samples.get_mut(slot)
+        {
+            *sample = value;
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Totals {
     invitations: u64,
     admitted: u64,
@@ -262,12 +307,34 @@ struct Totals {
     invalid: u64,
     active_high_water: usize,
     responses: BTreeMap<u16, u64>,
-    setup: Vec<Duration>,
-    teardown: Vec<Duration>,
+    setup: LatencySamples,
+    teardown: LatencySamples,
     first_error: Option<String>,
 }
 
 impl Totals {
+    fn new(limits: Limits) -> Self {
+        let capacity = limits
+            .max_active
+            .saturating_mul(PER_DIALOG_QUEUE)
+            .clamp(1, MAX_LATENCY_SAMPLES);
+        Self {
+            invitations: 0,
+            admitted: 0,
+            established: 0,
+            completed: 0,
+            cancelled: 0,
+            rejected: 0,
+            failed: 0,
+            invalid: 0,
+            active_high_water: 0,
+            responses: BTreeMap::new(),
+            setup: LatencySamples::new(capacity, limits.seed ^ 0x0073_6574_7570),
+            teardown: LatencySamples::new(capacity, limits.seed ^ 0x7465_6172_646f_776e),
+            first_error: None,
+        }
+    }
+
     fn apply(&mut self, result: WorkerResult) {
         self.established += u64::from(result.established);
         match result.terminal {
@@ -281,15 +348,43 @@ impl Totals {
             *self.responses.entry(status).or_default() += count;
         }
         if let Some(setup) = result.setup {
-            self.setup.push(setup);
+            self.setup.observe(setup);
         }
         if let Some(teardown) = result.teardown {
-            self.teardown.push(teardown);
+            self.teardown.observe(teardown);
         }
         if self.first_error.is_none() {
             self.first_error = result.error;
         }
     }
+
+    fn apply_dispatch(&mut self, counts: DispatchCounts) {
+        self.invalid = self.invalid.saturating_add(counts.total());
+        for (status, count) in [
+            (503, counts.shed),
+            (481, counts.unmatched),
+            (405, counts.unsupported),
+            (400, counts.malformed),
+            (482, counts.merged),
+        ] {
+            if count != 0 {
+                *self.responses.entry(status).or_default() += count;
+            }
+        }
+        if counts.identity != 0 {
+            self.failed = self.failed.saturating_add(counts.identity);
+            self.first_error
+                .get_or_insert_with(|| "identity-policy refusal was not classified".to_owned());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Leftovers {
+    active_dialogs: usize,
+    dispatcher_routes: usize,
+    endpoint_transactions: usize,
+    owned_tasks: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,7 +434,10 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Ok(endpoint) => endpoint,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
     };
-    if let Err(error) = emit_readiness(&endpoint, limits) {
+    let queued_events = limits.max_active.saturating_mul(PER_DIALOG_QUEUE);
+    if let Err(error) =
+        crate::load_responder_readiness::emit(&endpoint, limits.max_active, queued_events)
+    {
         endpoint.shutdown().await;
         return fail(
             format,
@@ -361,7 +459,8 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     let mut admission_open = true;
     let mut completion = Completion::Completed;
     let mut reason: Option<String> = None;
-    let mut totals = Totals::default();
+    let mut totals = Totals::new(limits);
+    let mut deadline_leftovers = None;
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
     let mut signal_open = true;
     loop {
@@ -413,6 +512,21 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
             LoopEvent::CleanupElapsed => {
                 completion = Completion::Failed;
                 reason.get_or_insert_with(|| "cleanup deadline expired".to_owned());
+                let transactions = match endpoint.outstanding().await {
+                    Ok(count) => count,
+                    Err(error) => {
+                        reason.get_or_insert_with(|| {
+                            format!("could not observe endpoint transactions: {error}")
+                        });
+                        usize::MAX
+                    }
+                };
+                deadline_leftovers = Some(Leftovers {
+                    active_dialogs: workers.len(),
+                    dispatcher_routes: calls.len(),
+                    endpoint_transactions: transactions,
+                    owned_tasks: workers.len(),
+                });
                 stop.cancel();
                 break;
             }
@@ -466,7 +580,11 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
                             totals.rejected += 1;
                             *totals.responses.entry(503).or_default() += 1;
                         }
-                        Err(sipx_call::Error::InvitationCancelled) => totals.cancelled += 1,
+                        Err(sipx_call::Error::InvitationCancelled) => {
+                            totals.cancelled += 1;
+                            *totals.responses.entry(200).or_default() += 1;
+                            *totals.responses.entry(487).or_default() += 1;
+                        }
                         Err(error) => {
                             totals.failed += 1;
                             completion = Completion::Failed;
@@ -519,18 +637,46 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         stop.cancel();
         workers.abort_all();
         while let Some(joined) = workers.join_next().await {
-            if let Ok(result) = joined {
-                totals.apply(result);
+            match joined {
+                Ok(result) => totals.apply(result),
+                Err(error) => {
+                    totals.failed = totals.failed.saturating_add(1);
+                    totals.first_error.get_or_insert_with(|| {
+                        format!("dialog worker did not complete before forced cleanup: {error}")
+                    });
+                }
             }
         }
     }
-    endpoint.shutdown().await;
+    totals.apply_dispatch(dispatcher.counts());
     let routes = calls.len();
+    let transactions_before_shutdown = match endpoint.outstanding().await {
+        Ok(count) => count,
+        Err(error) => {
+            completion = Completion::Failed;
+            reason
+                .get_or_insert_with(|| format!("could not observe endpoint transactions: {error}"));
+            usize::MAX
+        }
+    };
+    endpoint.shutdown().await;
     // `Handle::shutdown` is the durable endpoint-driver barrier: every transaction and timer has
     // been cancelled and joined when it returns.
-    let transactions = 0;
-    let owned_tasks = workers.len();
-    if routes != 0 || transactions != 0 || owned_tasks != 0 {
+    let leftovers = deadline_leftovers.unwrap_or(Leftovers {
+        active_dialogs: routes,
+        dispatcher_routes: routes,
+        endpoint_transactions: if transactions_before_shutdown == usize::MAX {
+            usize::MAX
+        } else {
+            0
+        },
+        owned_tasks: workers.len(),
+    });
+    if leftovers.active_dialogs != 0
+        || leftovers.dispatcher_routes != 0
+        || leftovers.endpoint_transactions != 0
+        || leftovers.owned_tasks != 0
+    {
         completion = Completion::Failed;
         reason.get_or_insert_with(|| "non-zero state remained after cleanup".to_owned());
     }
@@ -542,9 +688,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         completion,
         limits,
         &totals,
-        routes,
-        transactions,
-        owned_tasks,
+        leftovers,
         reason.as_deref(),
     );
     if completion == Completion::Failed {
@@ -578,26 +722,6 @@ async fn sleep_until(deadline: Option<Instant>) {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
     }
-}
-
-fn emit_readiness(endpoint: &Handle, limits: Limits) -> std::io::Result<()> {
-    let events = limits.max_active.saturating_mul(PER_DIALOG_QUEUE);
-    let ready = serde_json::json!({
-        "schema": "sipx.comparative-load.ready.v1",
-        "role": "responder",
-        "pid": std::process::id(),
-        "address": endpoint.local_addr().to_string(),
-        "transport": "udp",
-        "limits": {
-            "active": limits.max_active,
-            "events": events,
-            "stdout_bytes": 16 * 1024 * 1024,
-            "stderr_bytes": 16 * 1024 * 1024,
-        }
-    });
-    let mut stdout = std::io::stdout().lock();
-    writeln!(stdout, "{ready}")?;
-    stdout.flush()
 }
 
 async fn respond_out_of_dialog(endpoint: &Handle, incoming: &Incoming) -> sipx_call::Result<()> {
@@ -663,27 +787,24 @@ async fn run_signalling(
     stop: CancellationToken,
 ) -> WorkerResult {
     let mut result = WorkerResult::new(Terminal::Failed);
+    let tag = dialog_tag(invitation.request(), limits.seed, index);
+    if !valid_initial_invitation(&invitation, &tag) {
+        result.invalid = 1;
+        match invitation.refuse(&endpoint, 400, "Bad Request").await {
+            Ok(()) => result.response(400),
+            Err(sipx_call::Error::InvitationCancelled) => result.cancelled(),
+            Err(error) => result.error = Some(format!("malformed refusal failed: {error}")),
+        }
+        return result;
+    }
     match apply_initial_policy(&invitation, &endpoint, limits, index, &mut result).await {
         Ok(false) => return result,
         Err(sipx_call::Error::InvitationCancelled) => {
-            result.terminal = Terminal::Cancelled;
+            result.cancelled();
             return result;
         }
         Err(error) => return WorkerResult::failed(format!("initial policy failed: {error}")),
         Ok(true) => {}
-    }
-    let tag = dialog_tag(invitation.request(), limits.seed, index);
-    if sipx_call::Dialog::from_request(&invitation.request().request, &tag).is_none() {
-        result.invalid = 1;
-        match invitation.refuse(&endpoint, 400, "Bad Request").await {
-            Ok(()) => result.response(400),
-            Err(sipx_call::Error::InvitationCancelled) => {
-                result.terminal = Terminal::Cancelled;
-                return result;
-            }
-            Err(error) => result.error = Some(format!("malformed refusal failed: {error}")),
-        }
-        return result;
     }
     let contact = format!("<sip:load@{}>", endpoint.advertised());
     let setup_started = Instant::now();
@@ -693,7 +814,7 @@ async fn run_signalling(
     {
         Ok(call) => call,
         Err(sipx_call::Error::InvitationCancelled) => {
-            result.terminal = Terminal::Cancelled;
+            result.cancelled();
             return result;
         }
         Err(error) => return WorkerResult::failed(format!("signalling answer failed: {error}")),
@@ -775,6 +896,9 @@ async fn drive_signalling(
                 return;
             }
             Drive::Deadline => {
+                if !result.established {
+                    result.error = Some("dialog lifetime expired before a valid ACK".to_owned());
+                }
                 terminate_signalling(call, limits.cleanup, result).await;
                 return;
             }
@@ -792,9 +916,16 @@ async fn terminate_signalling(
         Ok(status) => {
             result.response(status);
             result.teardown = Some(started.elapsed());
-            if result.error.is_none() && result.terminal != Terminal::Cancelled {
+            if result.established
+                && result.error.is_none()
+                && result.terminal != Terminal::Cancelled
+            {
                 result.terminal = Terminal::Completed;
             }
+        }
+        Err(sipx_call::Error::InvalidDialogResponse) => {
+            result.invalid = result.invalid.saturating_add(1);
+            result.error = Some("dialog teardown received an invalid response".to_owned());
         }
         Err(error) => result.error = Some(format!("dialog teardown failed: {error}")),
     }
@@ -809,10 +940,20 @@ async fn run_generated_media(
     stop: CancellationToken,
 ) -> WorkerResult {
     let mut result = WorkerResult::new(Terminal::Failed);
+    let validation_tag = dialog_tag(invitation.request(), limits.seed, index);
+    if !valid_initial_invitation(&invitation, &validation_tag) {
+        result.invalid = 1;
+        match invitation.refuse(&endpoint, 400, "Bad Request").await {
+            Ok(()) => result.response(400),
+            Err(sipx_call::Error::InvitationCancelled) => result.cancelled(),
+            Err(error) => result.error = Some(format!("malformed refusal failed: {error}")),
+        }
+        return result;
+    }
     match apply_initial_policy(&invitation, &endpoint, limits, index, &mut result).await {
         Ok(false) => return result,
         Err(sipx_call::Error::InvitationCancelled) => {
-            result.terminal = Terminal::Cancelled;
+            result.cancelled();
             return result;
         }
         Err(error) => return WorkerResult::failed(format!("initial policy failed: {error}")),
@@ -827,7 +968,7 @@ async fn run_generated_media(
                 result.terminal = Terminal::Rejected;
                 result.response(488);
             }
-            Err(sipx_call::Error::InvitationCancelled) => result.terminal = Terminal::Cancelled,
+            Err(sipx_call::Error::InvitationCancelled) => result.cancelled(),
             Err(error) => result.error = Some(format!("media refusal failed: {error}")),
         }
         return result;
@@ -842,7 +983,7 @@ async fn run_generated_media(
     {
         Ok(call) => call,
         Err(sipx_call::Error::InvitationCancelled) => {
-            result.terminal = Terminal::Cancelled;
+            result.cancelled();
             return result;
         }
         Err(error) => {
@@ -1005,11 +1146,7 @@ fn dialog_tag(request: &Incoming, seed: u64, index: usize) -> String {
         .value(&HeaderName::CallId)
         .unwrap_or_default();
     let profile = String::from_utf8_lossy(&call_id);
-    let parsed = profile
-        .strip_prefix("cl-")
-        .and_then(|rest| rest.strip_suffix("@driver.invalid"))
-        .and_then(|rest| rest.rsplit_once('-'))
-        .and_then(|(run_id, number)| number.parse::<usize>().ok().map(|number| (run_id, number)));
+    let parsed = parse_profile_call_id(&profile);
     let seed_text = seed.to_string();
     let index_text;
     let fields: [&[u8]; 4] = if let Some((run_id, number)) = parsed {
@@ -1046,6 +1183,31 @@ fn dialog_tag(request: &Incoming, seed: u64, index: usize) -> String {
     hex
 }
 
+fn parse_profile_call_id(value: &str) -> Option<(&str, usize)> {
+    let (run_id, number) = value
+        .strip_prefix("cl-")?
+        .strip_suffix("@driver.invalid")?
+        .rsplit_once('-')?;
+    if run_id.len() != 32
+        || !run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || number.is_empty()
+        || (number.len() > 1 && number.starts_with('0'))
+        || !number.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    number.parse().ok().map(|number| (run_id, number))
+}
+
+fn valid_initial_invitation(invitation: &Invitation, tag: &str) -> bool {
+    let request = &invitation.request().request;
+    request.method == Method::Invite
+        && request_cseq(request).is_some_and(|value| value.method == Method::Invite)
+        && sipx_call::Dialog::from_request(request, tag).is_some()
+}
+
 fn request_cseq(request: &sipx_sip::Request) -> Option<CSeq> {
     request
         .headers
@@ -1065,16 +1227,16 @@ fn percentile(values: &[Duration], numerator: usize) -> Option<u64> {
         .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
 }
 
-fn latency(values: &[Duration]) -> serde_json::Value {
-    if values.is_empty() {
+fn latency(values: &LatencySamples) -> serde_json::Value {
+    if values.seen == 0 {
         return serde_json::Value::Null;
     }
     serde_json::json!({
-        "count": values.len(),
-        "p50": percentile(values, 50),
-        "p95": percentile(values, 95),
-        "p99": percentile(values, 99),
-        "maximum": values.iter().map(Duration::as_millis).max().and_then(|value| u64::try_from(value).ok()),
+        "count": values.seen,
+        "p50": percentile(&values.samples, 50),
+        "p95": percentile(&values.samples, 95),
+        "p99": percentile(&values.samples, 99),
+        "maximum": values.maximum.and_then(|value| u64::try_from(value.as_millis()).ok()),
     })
 }
 
@@ -1084,9 +1246,7 @@ fn emit_summary(
     completion: Completion,
     limits: Limits,
     totals: &Totals,
-    routes: usize,
-    transactions: usize,
-    owned_tasks: usize,
+    leftovers: Leftovers,
     reason: Option<&str>,
 ) {
     let responses: BTreeMap<String, u64> = totals
@@ -1123,10 +1283,10 @@ fn emit_summary(
             "teardown": latency(&totals.teardown),
         },
         "post_drain": {
-            "active_dialogs": 0,
-            "dispatcher_routes": routes,
-            "endpoint_transactions": transactions,
-            "owned_tasks": owned_tasks,
+            "active_dialogs": leftovers.active_dialogs,
+            "dispatcher_routes": leftovers.dispatcher_routes,
+            "endpoint_transactions": leftovers.endpoint_transactions,
+            "owned_tasks": leftovers.owned_tasks,
         },
         "reason": reason,
     });
@@ -1231,5 +1391,61 @@ mod tests {
             let parsed = crate::Args::new(&raw).expect("argument shape");
             assert!(Limits::parse(&parsed).is_err(), "{raw:?}");
         }
+    }
+
+    #[test]
+    fn profile_call_ids_are_canonical_before_they_affect_tags() {
+        let run = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            parse_profile_call_id(&format!("cl-{run}-0@driver.invalid")),
+            Some((run, 0))
+        );
+        assert_eq!(
+            parse_profile_call_id(&format!("cl-{run}-19@driver.invalid")),
+            Some((run, 19))
+        );
+        assert!(parse_profile_call_id(&format!("cl-{run}-00@driver.invalid")).is_none());
+        assert!(
+            parse_profile_call_id("cl-0123456789ABCDEF0123456789ABCDEF-0@driver.invalid").is_none()
+        );
+        assert!(parse_profile_call_id("cl-short-0@driver.invalid").is_none());
+    }
+
+    #[test]
+    fn latency_evidence_is_bounded_without_losing_count_or_maximum() {
+        let mut samples = LatencySamples::new(4, 41);
+        for millis in 0..100 {
+            samples.observe(Duration::from_millis(millis));
+        }
+        assert_eq!(samples.seen, 100);
+        assert_eq!(samples.samples.len(), 4);
+        assert_eq!(samples.maximum, Some(Duration::from_millis(99)));
+        let evidence = latency(&samples);
+        assert_eq!(evidence["count"], 100);
+        assert_eq!(evidence["maximum"], 99);
+    }
+
+    #[test]
+    fn matched_cancel_accounts_for_both_transactions_once() {
+        let limits = Limits {
+            calls: Some(1),
+            duration: None,
+            max_active: 1,
+            cleanup: Duration::from_secs(40),
+            dialog_duration: Duration::from_secs(40),
+            seed: 41,
+            provisional_percent: 0,
+            answer_percent: 100,
+            reject_status: 486,
+            mode: Mode::Signalling,
+        };
+        let mut worker = WorkerResult::new(Terminal::Failed);
+        worker.cancelled();
+        let mut totals = Totals::new(limits);
+        totals.apply(worker);
+        assert_eq!(totals.cancelled, 1);
+        assert_eq!(totals.failed, 0);
+        assert_eq!(totals.responses.get(&200), Some(&1));
+        assert_eq!(totals.responses.get(&487), Some(&1));
     }
 }

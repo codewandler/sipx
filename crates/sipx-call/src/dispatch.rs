@@ -58,6 +58,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bytes::Bytes;
 use sipx_sip::build::ResponseBuilder;
+use sipx_sip::headers::CSeq;
 use sipx_sip::transaction::TransactionKey;
 use sipx_sip::{HeaderName, Method, Request, StatusCode};
 use sipx_transport::{Handle, Incoming};
@@ -960,6 +961,17 @@ impl Dispatcher {
         // `Dialog::matches` would then reject it and leave nothing to answer it.
         if incoming.request.method == Method::Invite && to_tag(&incoming.request.headers).is_none()
         {
+            let invite_cseq = incoming
+                .request
+                .headers
+                .typed::<CSeq>()
+                .and_then(std::result::Result::ok)
+                .filter(|value| value.method == Method::Invite);
+            if invite_cseq.is_none() {
+                self.calls.counted(Kind::Malformed);
+                self.refuse(&incoming, 400, "Bad Request", None).await;
+                return None;
+            }
             let cseq = cseq_number(&incoming.request.headers);
             if self.calls.is_merged(&key, cseq) {
                 // RFC 3261 §8.2.2.2, all three of its terms: the same `Call-ID`, `From` tag *and*

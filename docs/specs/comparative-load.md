@@ -316,6 +316,10 @@ call/media stack, and emits a finite deterministic audio fixture. A missing or u
 that mode receives a typed final refusal. Media behavior and measurements never enter the v1
 signalling-load result.
 
+Before either mode applies policy, an initial INVITE must carry a parseable CSeq whose method is
+INVITE and enough dialog identity to construct the response. A malformed request receives `400 Bad
+Request`, is counted as invalid, and cannot consume an admission slot.
+
 ### 9.3 Per-dialog state machine
 
 The signalling-only state machine is:
@@ -335,8 +339,10 @@ The signalling-only state machine is:
 The 2xx retransmission owner is joined or cancelled on every terminal path. An ACK is validated
 against the dialog identifiers and the INVITE sequence; an arbitrary packet cannot establish a
 dialog. A BYE is validated against both tags, Call-ID, method-consistent CSeq and monotonically
-increasing remote sequence before its `200` is counted. CANCEL remains transaction-matched by the
-dispatcher and never becomes an in-dialog BYE substitute.
+increasing remote sequence before its `200` is counted. A final response to a locally originated
+BYE must likewise match both dialog tags, Call-ID and that BYE's exact CSeq before it can complete
+the dialog. CANCEL remains transaction-matched by the dispatcher and never becomes an in-dialog
+BYE substitute.
 
 ### 9.4 Shutdown and result
 
@@ -358,7 +364,9 @@ schema, status, seed, mode, limits, counts, responses, latency_ms, post_drain, r
 dialog duration and cleanup seconds. `counts` records surfaced INVITEs, admitted, established,
 completed, cancelled, rejected, failed, active high-water and invalid messages. `responses` maps
 decimal provisional and final status codes to counts. `latency_ms.setup` and `.teardown` each carry
-count, p50, p95, p99 and maximum, or are `null` with no samples. `post_drain` records active dialogs,
+the exact count and maximum plus p50, p95 and p99 from a seeded bounded reservoir, or are `null` with
+no samples. Its capacity is eight observations per active-dialog slot, capped at 65,536, so a
+duration-bounded run cannot turn latency evidence into unbounded memory use. `post_drain` records active dialogs,
 dispatcher routes, endpoint transactions and owned tasks. Every terminal INVITE belongs to exactly
 one completed/cancelled/rejected/failed class, and a completed/interrupted result has zero post-drain
 state. `reason` is null except for interruption/failure and never contains packet bodies or secrets.

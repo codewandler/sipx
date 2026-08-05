@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
-use sipx_sip::headers::CSeq;
+use sipx_sip::headers::{CSeq, From as FromHeader, To};
 use sipx_sip::{HeaderName, Method, Request, Response, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
 use tokio::sync::{mpsc, oneshot};
@@ -246,6 +246,9 @@ impl SignallingCall {
             .map_err(|_| Error::SignallingTeardownTimeout(within))?
             .ok_or(Error::SignallingTeardownTimeout(within))?;
         self.ended = true;
+        if !response_matches_dialog(&response, &self.dialog, cseq) {
+            return Err(Error::InvalidDialogResponse);
+        }
         let status = response.status.code();
         if !response.status.is_success() {
             return Err(Error::Rejected {
@@ -363,6 +366,31 @@ impl SignallingCall {
     }
 }
 
+fn response_matches_dialog(response: &Response, dialog: &Dialog, sequence: u32) -> bool {
+    let call_id_matches = response
+        .headers
+        .value(&HeaderName::CallId)
+        .is_some_and(|value| value.as_ref() == dialog.id.call_id.as_slice());
+    let from_matches = response
+        .headers
+        .typed::<FromHeader>()
+        .and_then(std::result::Result::ok)
+        .and_then(|value| value.tag().map(ToOwned::to_owned))
+        .is_some_and(|tag| tag == dialog.id.local_tag);
+    let to_matches = response
+        .headers
+        .typed::<To>()
+        .and_then(std::result::Result::ok)
+        .and_then(|value| value.tag().map(ToOwned::to_owned))
+        .is_some_and(|tag| tag == dialog.id.remote_tag);
+    let cseq_matches = response
+        .headers
+        .typed::<CSeq>()
+        .and_then(std::result::Result::ok)
+        .is_some_and(|value| value.method == Method::Bye && value.sequence == sequence);
+    call_id_matches && from_matches && to_matches && cseq_matches
+}
+
 impl Drop for SignallingCall {
     fn drop(&mut self) {
         self.cancellation.cancel();
@@ -401,7 +429,15 @@ async fn retransmit_final(
             () = tokio::time::sleep(interval) => {}
         }
         if endpoint.respond(&key, response.clone()).await.is_err() {
-            let _ = terminal.send(SignallingEvent::TransportFailed);
+            // The transport transaction's Timer L and this owner's Timer H have the same RFC
+            // deadline. If the transaction loop removes its Accepted state first at that exact
+            // instant, the missing transaction is still an ACK timeout, not a transport failure.
+            let event = if tokio::time::Instant::now() >= deadline {
+                SignallingEvent::AckTimedOut
+            } else {
+                SignallingEvent::TransportFailed
+            };
+            let _ = terminal.send(event);
             return;
         }
         interval = interval.saturating_mul(2).min(T2);

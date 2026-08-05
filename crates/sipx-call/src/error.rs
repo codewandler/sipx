@@ -107,6 +107,12 @@ pub enum Error {
     /// failure bound.
     #[error("no final response to the signalling dialog BYE within {0:?}")]
     SignallingTeardownTimeout(std::time::Duration),
+    /// A final response to an originated signalling-only BYE did not name that dialog and `CSeq`.
+    ///
+    /// The mismatching values are intentionally absent so an untrusted packet is not reflected
+    /// into logs by displaying this error.
+    #[error("the signalling dialog BYE response did not match its dialog and CSeq")]
+    InvalidDialogResponse,
     /// An INVITE asked to replace a dialog it did not name, or named one this is not.
     ///
     /// Deliberately one error for both. Telling a caller "the Call-ID matched but the tags did

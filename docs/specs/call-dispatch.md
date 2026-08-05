@@ -51,14 +51,15 @@ request, in this order:
 | # | Condition | Outcome |
 |---|---|---|
 | 1 | No `Call-ID`, or no `From` tag | `400 Bad Request` (RFC 3261 §8.1.1 makes both mandatory) |
-| 2 | INVITE with no `To` tag, **merged** (see below) | `482 Loop Detected` (§8.2.2.2) |
-| 3 | INVITE with no `To` tag, not merged | **surfaced** as `Dispatched::Invitation`, route and INVITE transaction reserved |
-| 4 | CANCEL | placed here, never routed and never surfaced — see §9 |
-| 5 | The key is routed | delivered to that call's inbox — see §5 |
-| 6 | ACK | counted, logged; **no response** (§17.1.1.3: there is none to send) |
-| 7 | Has a `To` tag, or the method exists only inside a dialog | `481 Call/Transaction Does Not Exist` (§12.2.2) |
-| 8 | The method is one `sipx_sip::update::ALLOW` advertises | **surfaced** as `Dispatched::OutOfDialog` |
-| 9 | Otherwise | `405 Method Not Allowed` with `Allow` (§8.2.1) |
+| 2 | INVITE with no `To` tag, missing/malformed CSeq or CSeq method other than INVITE | `400 Bad Request` (§8.1.1.5) |
+| 3 | INVITE with no `To` tag, **merged** (see below) | `482 Loop Detected` (§8.2.2.2) |
+| 4 | INVITE with no `To` tag, not merged | **surfaced** as `Dispatched::Invitation`, route and INVITE transaction reserved |
+| 5 | CANCEL | placed here, never routed and never surfaced — see §9 |
+| 6 | The key is routed | delivered to that call's inbox — see §5 |
+| 7 | ACK | counted, logged; **no response** (§17.1.1.3: there is none to send) |
+| 8 | Has a `To` tag, or the method exists only inside a dialog | `481 Call/Transaction Does Not Exist` (§12.2.2) |
+| 9 | The method is one `sipx_sip::update::ALLOW` advertises | **surfaced** as `Dispatched::OutOfDialog` |
+| 10 | Otherwise | `405 Method Not Allowed` with `Allow` (§8.2.1) |
 
 **Row 2 needs all three of §8.2.2.2's terms, and getting it wrong breaks every challenged call.**
 An INVITE is merged when its `Call-ID`, its `From` tag **and its `CSeq`** all match a request this
@@ -106,9 +107,9 @@ a `DispatchCounts` — the same shape and the same reasoning as `Handle::shed` (
 | `shed` | requests refused `503` because the call they belong to was not reading | §5 |
 | `acks` | ACKs that could not be delivered and cannot be refused | 6, §5 |
 | `unmatched` | requests answered `481`: in-dialog ones for no live call, and CANCELs for no live transaction | 4, 7 |
-| `unsupported` | out-of-dialog requests answered `405` | 9 |
-| `malformed` | requests answered `400` for naming no dialog at all | 1 |
-| `merged` | INVITEs answered `482` | 2 |
+| `unsupported` | out-of-dialog requests answered `405` | 10 |
+| `malformed` | requests answered `400` for naming no dialog or carrying an invalid initial INVITE CSeq | 1, 2 |
+| `merged` | INVITEs answered `482` | 3 |
 | `identity` | initial INVITEs refused by a selected RFC 8224 verification policy | `sip-identity` §7 |
 
 `DispatchCounts::total()` is every field, and **every refusal the table makes is on one of them**.
