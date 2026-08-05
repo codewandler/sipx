@@ -1,6 +1,6 @@
 # Spec: URI rewriting primitives
 
-**Status:** normative · **Stories:** S-44, S-48 · **Crate:** `sipx-sip` · **Design:**
+**Status:** normative · **Stories:** S-44, S-48, S-49 · **Crate:** `sipx-sip` · **Design:**
 [sip-core](../designs/sip-core.md)
 
 This contract defines byte-oriented URI seams for consumers that must inspect or change a number
@@ -12,13 +12,15 @@ without implementing SIP or `tel:` URI grammar themselves.
   delimiter sets that distinguish them from the host, parameters and headers. Section 25.1 defines
   `user = 1*( unreserved / escaped / user-unreserved )`.
 - RFC 3986 §2.1 defines percent encoding as `%` followed by exactly two hexadecimal digits.
-- RFC 3966 §3 defines a `telephone-subscriber` followed by zero or more `;`-introduced parameters;
-  §4 defines comparison and identifies visual separators as subscriber syntax rather than parameter
-  delimiters.
+- RFC 3966 §3 defines a `telephone-subscriber` followed by zero or more `;`-introduced parameters,
+  `pname` as one or more alphanumeric or `-` bytes, and a non-empty `pvalue` from its `paramchar`
+  production. Section 4 makes parameter-name comparison case-insensitive and identifies visual
+  separators as subscriber syntax rather than parameter delimiters.
 
 The API owns syntax, not routing policy. It never normalises digits, chooses a source identity or
-interprets `phone-context`. All input and output are bytes because valid percent escapes can decode
-to NUL or non-UTF-8.
+decides whether a `phone-context` value is suitable. It does expose each syntactically valid generic
+TEL parameter and owns the case-insensitive comparison of its name. All input and output are bytes
+because valid percent escapes can decode to NUL or non-UTF-8.
 
 ## 2. Public types
 
@@ -42,6 +44,35 @@ pub struct TelUriParts<'a> { /* borrowed exact spans */ }
 impl<'a> TelUriParts<'a> {
     pub fn subscriber(&self) -> &'a [u8];
     pub fn parameters(&self) -> Option<&'a [u8]>;
+    pub fn parsed_parameters(&self) -> TelParameters<'a>;
+}
+
+pub struct TelParameters<'a> { /* allocation-free iterator over the retained tail */ }
+
+impl<'a> Iterator for TelParameters<'a> {
+    type Item = Result<TelParameter<'a>, TelParameterError>;
+}
+
+pub struct TelParameter<'a> { /* borrowed exact name and optional value */ }
+
+impl<'a> TelParameter<'a> {
+    pub fn name(&self) -> &'a [u8];
+    pub fn value(&self) -> Option<&'a [u8]>;
+    pub fn name_eq(&self, expected: &[u8]) -> bool;
+}
+
+pub struct TelParameterError { /* offending tail-relative byte offset and kind */ }
+
+impl TelParameterError {
+    pub fn offset(&self) -> usize;
+    pub fn kind(&self) -> TelParameterErrorKind;
+}
+
+#[non_exhaustive]
+pub enum TelParameterErrorKind {
+    Empty,
+    Name,
+    Value,
 }
 ```
 
@@ -64,6 +95,21 @@ distinction makes the view lossless even though the latter is not a valid RFC 39
 `Uri::parse` validates the subscriber production but deliberately retains the parameter tail
 without interpreting or validating it. It also validates percent-escape shape in opaque URI bodies;
 the remainder of an unknown scheme stays opaque rather than acquiring scheme-specific semantics.
+
+`parsed_parameters` is an allocation-free iterator over the same retained tail. No tail produces
+no items. Each successful item borrows an exact `pname` and an optional exact `pvalue`; a missing
+`=` is distinct from `=` followed by an invalid empty value. `name_eq` compares a valid caller name
+to the parsed name with ASCII case folding, as RFC 3966 §4 requires. It does not decode or
+canonicalise either spelling.
+
+The iterator preserves input order and duplicates. It performs structural validation only: it does
+not classify `ext`, `isub` or `phone-context`, enforce their uniqueness or select a context for a
+local number. A consumer can therefore count every case-insensitive `phone-context` occurrence and
+inspect whether it carried a value without re-parsing delimiters. Empty segments, an empty or
+illegal `pname`, an empty `pvalue`, or a byte outside `pvalue` produces `TelParameterError` at the
+tail-relative start of the offending component. The iterator emits that error once and is then
+fused, so a malformed suffix cannot be mistaken for a complete parameter set. A percent-encoded
+`;` or `=` is part of the exact value and never becomes a delimiter.
 
 ## 3. Mutation contract
 
@@ -136,10 +182,19 @@ The vector IDs are test names' contract prefixes.
 | UR-T-6 | replace with empty, `+`, `+12A`, `12G`, `12:34`, whitespace, CRLF or byte `ff` on a parsed TEL URI | `UriError::TelephoneSubscriber`; original bytes remain exact |
 | UR-T-7 | replace with arbitrary invalid bytes on a SIP URI and an unknown opaque scheme | `Ok(false)` and both URIs remain byte-exact without validating a TEL subscriber |
 | UR-T-8 | parse `tel:` or `tel:+` | `UriError::TelephoneSubscriber`; no malformed TEL URI is constructed |
+| UR-P-1 | iterate `TEL:7042` | no items |
+| UR-P-2 | iterate `tel:7042;phone-context=example.com` | one exact `phone-context=example.com` item; `name_eq(b"PHONE-CONTEXT")` is true |
+| UR-P-3 | iterate `tel:7042;ext=9` | one exact `ext=9` item and no `phone-context` match |
+| UR-P-4 | iterate `tel:7042;foo=x;phone-context=example.com;ext=9` | three exact items in wire order |
+| UR-P-5 | iterate `tel:7042;PhOnE-CoNtExT=example.com` | the original name spelling is retained and `name_eq(b"phone-context")` is true |
+| UR-P-6 | iterate `tel:7042;foo=a%3Bb%3Dc` | one value `a%3Bb%3Dc`; escaped delimiters do not split it |
+| UR-P-7 | iterate `tel:7042;foo=one;FOO=two` | two separate items, both matching `foo`, in wire order |
+| UR-P-8 | iterate tails `;`, `;;ext=9`, `;=x`, `;foo=`, `;foo?=x` | one typed `Empty`, `Name` or `Value` error at the offending tail-relative offset, then end of iteration |
 | UR-O-1 | parse `mailto:%GG` and `mailto:alice%40example.com` | respectively `UriError::PercentEscape` and a byte-exact opaque URI |
 
 ## 6. Change rule
 
-Adding an accepted user or TEL subscriber byte, changing the atomicity, span or invalidation rules,
-collapsing the TEL tail's `None`/empty distinction, or interpreting TEL parameter semantics requires
-a spec and vector change before code.
+Adding an accepted user, TEL subscriber, parameter-name or parameter-value byte; changing the
+atomicity, span, parameter-error or invalidation rules; collapsing the TEL tail's `None`/empty
+distinction; coalescing duplicate parameters; or interpreting TEL parameter semantics requires a
+spec and vector change before code.

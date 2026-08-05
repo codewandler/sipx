@@ -59,6 +59,7 @@ public demo.
 
 ## Next (ready — take the top one unless the user named a story)
 - [T-36 — Refresh server-transaction liveness on provisional progress](T-36-refresh-server-transaction-liveness-on-provisional-progress.md) · Signalling · requested by sipx-clstr CX-19 · unanswered_limit currently measures from first handoff even while the application keeps reporting progress
+- [S-49 — Expose parsed TEL URI parameters](S-49-expose-parsed-tel-uri-parameters.md) · Signalling · requested by sipx-clstr CX-18 — routing consumers must not split the raw RFC 3966 parameter tail
 - [S-50 — Expose lossless address-presentation editing](S-50-expose-lossless-address-presentation-editing.md) · Signalling · requested by sipx-clstr CX-17 — one atomic display-name and URI splice retaining all header parameters
 - [S-51 — Expose lossless Warning-agent editing](S-51-expose-lossless-warning-agent-editing.md) · Signalling · requested by sipx-clstr CX-17 — parser-owned warn-agent replacement retaining code and text
 
