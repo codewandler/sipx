@@ -1,0 +1,63 @@
+---
+id: A-19
+title: Specify the OpenAI realtime bridge
+pillar: Application
+status: ready
+priority: 1
+design: docs/designs/openai.md
+epic: openai
+areas: [sipx-app, specs]
+predicate:
+announcement:
+note: spec before code — every later story in the epic derives its tests from this document's vectors
+---
+
+# Specify the OpenAI realtime bridge
+
+## Goal
+
+Write `docs/specs/openai-realtime.md`: the normative contract for bridging one sipx call leg
+to one OpenAI realtime session over a WebSocket, precise enough that the stand-in peer
+(A-21) and the bridge (A-22) can each be held to its vectors independently.
+
+## Acceptance
+
+- [ ] `docs/specs/openai-realtime.md` exists and states its stance: normative for this
+      workspace, observational toward the vendor, with the date the vendor's published
+      documentation was observed recorded in the spec.
+- [ ] Endpoint and authentication are pinned: the `wss` URL and model selection, bearer
+      authentication carried on the upgrade request, and the credential resolved from a
+      *named* secret per `docs/specs/host-config.md` N7 — the spec shows the name form, and
+      no secret value ever appears in configuration, logs or errors.
+- [ ] Audio is pinned to passthrough: the session is configured for G.711 μ-law or A-law in
+      both directions to match the call's negotiated wire format, frames travel as base64
+      payload inside events, and the spec states the packet-duration and framing rules with
+      byte-level vectors (at least: one append event from a known 20 ms μ-law frame, one
+      delta event decoded back to known bytes).
+- [ ] The event subset is exhaustive for the bridge: every client event the bridge may send
+      and every server event it consumes is named with a JSON vector; an event outside the
+      subset has a defined disposition (ignored with a counter, or session-fatal) — nothing
+      is left "whatever the implementation does".
+- [ ] The barge-in rule is normative: on the server's speech-started event the bridge cancels
+      the in-flight response and drops its locally queued agent audio; the spec states the
+      queue-depth bound so A-22's test asserts a number.
+- [ ] Buffering and backpressure are normative: every queue in both directions is bounded
+      with its size named, loss is counted per the session-binding discipline, and no rule
+      requires a fixed wall-clock wait to stand in for a happens-before.
+- [ ] Connection lifecycle and failure taxonomy: socket close or error ends the bridge with
+      a typed outcome (no silent reconnect); auth refusal, malformed event, oversize frame
+      and stalled peer each have a named outcome and a bound.
+- [ ] The vectors are machine-consumable (the way `webhook-binding.md` WB-1…WB-9 are), and
+      the spec names which later story owns each vector's enforcement.
+
+## Progress
+
+- (running log / checklist — a resuming agent reads this to know exactly where things stand)
+
+## Notes
+
+- Design: `docs/designs/openai.md`. Verify event names and session fields against the
+  vendor's published Realtime API documentation at writing time — the design doc's sketch is
+  a scoping aid, not a source of truth.
+- Precedent for shape: `docs/specs/webhook-binding.md` (vectors, failure knobs),
+  `docs/specs/session-binding.md` (bounded queues, counted loss).
