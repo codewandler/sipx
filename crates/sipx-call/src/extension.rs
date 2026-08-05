@@ -147,6 +147,10 @@ impl ResponseCapability {
         if !self.state.claim() {
             return Err(Error::ApplicationResponseAlreadySent);
         }
+        // The final response is committed before I/O. A stream write may fail after sending a
+        // prefix—or the complete response—so reopening the capability on transport error would
+        // permit a contradictory second final response on the same server transaction. The
+        // transport error is returned, but exactly-once ownership remains spent.
         self.state.completed.notify_one();
         self.state
             .endpoint

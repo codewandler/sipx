@@ -32,8 +32,25 @@ async fn endpoint() -> (Handle, Receiver<Incoming>) {
 }
 
 async fn connected(options: DialOptions) -> (Call, Receiver<Incoming>, Call, Receiver<Incoming>) {
+    let (caller, caller_incoming, callee, callee_incoming, _callee_endpoint) =
+        connected_with_server(options).await;
+    (caller, caller_incoming, callee, callee_incoming)
+}
+
+async fn connected_with_server(
+    options: DialOptions,
+) -> (Call, Receiver<Incoming>, Call, Receiver<Incoming>, Handle) {
+    connected_with_server_and_timers(options, sipx_sip::Timers::default()).await
+}
+
+async fn connected_with_server_and_timers(
+    options: DialOptions,
+    caller_timers: sipx_sip::Timers,
+) -> (Call, Receiver<Incoming>, Call, Receiver<Incoming>, Handle) {
     let (callee_endpoint, mut callee_incoming) = endpoint().await;
-    let (caller_endpoint, caller_incoming) = endpoint().await;
+    let mut caller_config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    caller_config.timers = caller_timers;
+    let (caller_endpoint, caller_incoming) = bind(caller_config).await.expect("caller binds");
     let target = Target::udp(callee_endpoint.local_addr());
     let uri = Uri::sip(Host::Name(
         HostName::new("callee.example").expect("valid host"),
@@ -52,6 +69,7 @@ async fn connected(options: DialOptions) -> (Call, Receiver<Incoming>, Call, Rec
         caller_incoming,
         callee,
         callee_incoming,
+        callee_endpoint,
     )
 }
 
@@ -294,10 +312,68 @@ async fn cloned_response_owners_still_share_exactly_one_answer() {
     let answer_from_clone = async {
         let request =
             next_application_request(&mut callee, &mut callee_incoming, &mut events).await;
-        let remaining_owner = request.clone();
-        drop(request);
-        ok(remaining_owner).await;
+        let duplicate = request.clone();
+        ok(request).await;
+        let error = duplicate
+            .respond(
+                StatusCode::new(200).expect("valid status"),
+                "OK again",
+                &[],
+                Bytes::new(),
+            )
+            .await
+            .expect_err("the shared capability was already spent");
+        assert!(matches!(
+            error,
+            sipx_call::Error::ApplicationResponseAlreadySent
+        ));
     };
     let (response, ()) = tokio::join!(send, answer_from_clone);
     assert!(response.expect("clone answers once").status.is_success());
+}
+
+#[tokio::test(start_paused = true)]
+async fn response_timeout_sends_504_and_releases_the_server_transaction() {
+    let options = DialOptions::new("<sip:caller@example.test>", loopback());
+    let caller_timers = sipx_sip::Timers {
+        // Keep the client transaction alive beyond the application response deadline so the test
+        // observes the 504 rather than racing the ordinary 64*T1 timeout at the same tick.
+        t1: Duration::from_secs(1),
+        ..sipx_sip::Timers::default()
+    };
+    let (mut caller, _caller_incoming, mut callee, mut callee_incoming, server) =
+        connected_with_server_and_timers(options, caller_timers).await;
+    let mut events = callee.events().expect("callee event stream");
+
+    // Let the completed INVITE transaction reach its normal cleanup horizon before measuring the
+    // application-owned server transaction in isolation.
+    tokio::time::advance(Duration::from_secs(33)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(server.outstanding().await.expect("diagnostics"), 0);
+
+    let send = caller.send_dialog_request(Method::Info, &[], Bytes::new());
+    let let_deadline_answer = async {
+        let request =
+            next_application_request(&mut callee, &mut callee_incoming, &mut events).await;
+        // Let the spawned deadline future register its timer before advancing virtual time.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(32)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(request.method(), &Method::Info, "the owner stays live");
+        drop(request);
+    };
+    let (response, ()) = tokio::join!(send, let_deadline_answer);
+    assert!(
+        matches!(
+            &response,
+            Err(sipx_call::Error::Rejected { status: 504, .. })
+        ),
+        "unexpected timeout result: {response:?}"
+    );
+
+    // A final UDP response retains its server transaction for Timer J so retransmissions receive
+    // the same answer. Advancing beyond that protocol lifetime must release every associated map.
+    tokio::time::advance(Duration::from_secs(33)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(server.outstanding().await.expect("diagnostics"), 0);
 }
