@@ -46,8 +46,9 @@ endpoint, interrupting established dialogs or exposing a partially updated ident
   an established pooled stream retains the TLS session it already owns. Successful and refused
   replacements use the endpoint's existing tracing diagnostics, and `Identity`'s debug form is now
   explicitly opaque.
-- Failing-first `tls_reload.rs` covers a mismatched private key leaving the old identity active, 32
-  concurrent handshakes observing only the old or new leaf, an established TLS connection surviving,
-  and the equivalent WSS connection surviving before a new WSS client selects the replacement. The
-  focused TLS/WSS suites, all-feature Clippy, TLS-only/WSS-only/no-feature checks and denied-warning
-  API docs are green. The full gate remains deliberately unrun for this independent frontier slice.
+- Failing-first `tls_reload.rs` covers a mismatched private key, malformed issuer and unrelated
+  issuer each leaving the old identity active; a complete valid chain is accepted; 32 concurrent
+  handshakes observe only the old or new leaf; and established TLS and WSS connections survive
+  before later clients select the replacement. The focused TLS/WSS suites, all-feature Clippy,
+  TLS-only/WSS-only/no-feature checks and denied-warning API docs are green. The full gate remains
+  deliberately unrun for this independent frontier slice.

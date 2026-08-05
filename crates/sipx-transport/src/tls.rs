@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use rustls_pki_types::pem::PemObject as _;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
@@ -253,6 +253,57 @@ impl Identity {
 
         Ok(Self { chain, key })
     }
+
+    /// Prove that every supplied issuer certificate belongs to the server chain.
+    ///
+    /// A server normally omits its trust root, so the last supplied certificate is the path's
+    /// provisional anchor. With a leaf alone there is no issuer material to validate here; the
+    /// peer still validates that leaf against its own anchors during the handshake. With two or
+    /// more certificates, every certificate after the leaf must be consumed, in the supplied
+    /// order, by one valid server-authentication path. That rejects both malformed certificates
+    /// and harmless-looking unrelated extras before a listener can publish them.
+    fn validate_server_chain(&self) -> Result<(), TlsError> {
+        let Some((leaf, issuers)) = self.chain.split_first() else {
+            return Err(TlsError::Config(
+                "server certificate chain has no leaf".to_owned(),
+            ));
+        };
+        let end_entity = webpki::EndEntityCert::try_from(leaf).map_err(|error| {
+            TlsError::Config(format!("invalid server certificate leaf: {error}"))
+        })?;
+        let Some((anchor_certificate, intermediates)) = issuers.split_last() else {
+            return Ok(());
+        };
+        let anchor = webpki::anchor_from_trusted_cert(anchor_certificate).map_err(|error| {
+            TlsError::Config(format!("invalid server certificate chain anchor: {error}"))
+        })?;
+        let provider = tokio_rustls::rustls::crypto::ring::default_provider();
+        let anchors = [anchor];
+        let verified = end_entity
+            .verify_for_usage(
+                provider.signature_verification_algorithms.all,
+                &anchors,
+                intermediates,
+                UnixTime::now(),
+                webpki::KeyUsage::server_auth(),
+                None,
+                None,
+            )
+            .map_err(|error| {
+                TlsError::Config(format!("invalid server certificate chain: {error}"))
+            })?;
+        let supplied_in_order = verified
+            .intermediate_certificates()
+            .map(webpki::Cert::der)
+            .eq(intermediates.iter().cloned());
+        if !supplied_in_order {
+            return Err(TlsError::Config(
+                "server certificate chain contains an unrelated or out-of-order certificate"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// How sipx behaves as a TLS server.
@@ -270,6 +321,7 @@ impl std::fmt::Debug for ServerTls {
 impl ServerTls {
     /// A server presenting this identity, not asking for a client certificate.
     pub fn new(identity: Identity) -> Result<Self, TlsError> {
+        identity.validate_server_chain()?;
         let config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(identity.chain, identity.key)

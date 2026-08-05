@@ -17,7 +17,7 @@ udp = []
 dns = ["dep:hickory-resolver"]
 tcp = []
 ## TLS over TCP (SIPS).
-tls = ["tcp", "dep:tokio-rustls", "dep:rustls-pki-types", "dep:rustls-native-certs"]
+tls = ["tcp", "dep:tokio-rustls", "dep:rustls-pki-types", "dep:rustls-native-certs", "dep:webpki"]
 ## SIP over WebSocket (RFC 7118).
 ws = ["tcp", "dep:tokio-tungstenite", "dep:futures-util"]
 wss = ["ws", "tls"]
@@ -34,6 +34,7 @@ rand.workspace = true
 rustls-native-certs = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
+webpki = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 hickory-resolver = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }

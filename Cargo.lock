@@ -2501,6 +2501,7 @@ dependencies = [
  "rcgen",
  "rustls-native-certs",
  "rustls-pki-types",
+ "rustls-webpki",
  "sipx-sip",
  "sipx-testkit",
  "thiserror 2.0.19",

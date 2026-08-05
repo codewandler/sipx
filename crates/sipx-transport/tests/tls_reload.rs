@@ -46,6 +46,10 @@ fn replacement(certificate: &str, key: &str) -> Identity {
     Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("parsed identity")
 }
 
+fn chain(leaf: &str, issuer: &str) -> String {
+    format!("{leaf}{issuer}")
+}
+
 fn options(call_id: &'static [u8], cseq: u32) -> sipx_sip::Request {
     RequestBuilder::new(
         Method::Options,
@@ -147,6 +151,153 @@ async fn an_invalid_replacement_leaves_the_previous_identity_active() {
         address,
         TransportKind::Tls,
         options(b"invalid-reload@localhost", 1),
+    )
+    .await;
+    responder.await.expect("responder finishes");
+}
+
+/// L11: parsing PEM and matching the leaf key are not chain validation. A DER-invalid
+/// certificate after a valid leaf must be refused before publication, and the prior identity must
+/// still answer the next handshake.
+#[tokio::test]
+async fn a_malformed_intermediate_leaves_the_previous_identity_active() {
+    const MALFORMED_CERTIFICATE: &str =
+        "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n";
+
+    let old_ca = Ca::new();
+    let replacement_ca = Ca::new();
+    let (old_server, _old_certificate, _old_key) = server_policy(&old_ca);
+    let (_replacement_server, replacement_certificate, replacement_key) =
+        server_policy(&replacement_ca);
+
+    let mut config = Config::new("127.0.0.1:0".parse().expect("address"));
+    config.tls_server = Some((old_server, 0));
+    let (server, mut incoming) = bind(config).await.expect("server binds");
+    let address = server.tls_addr().expect("TLS listener");
+
+    server
+        .reload_server_identity(replacement(
+            &chain(&replacement_certificate, MALFORMED_CERTIFICATE),
+            &replacement_key,
+        ))
+        .expect_err("a malformed intermediate is refused before publication");
+
+    let responder = tokio::spawn(async move {
+        let request = incoming.recv().await.expect("old identity still accepts");
+        let response = ResponseBuilder::to_request(
+            &request.request,
+            StatusCode::new(200).expect("status"),
+            "OK",
+        )
+        .expect("response")
+        .build();
+        server
+            .respond(&request.key, response)
+            .await
+            .expect("responds");
+    });
+    let old_client = client(&[&old_ca]).await;
+    exchange(
+        &old_client,
+        address,
+        TransportKind::Tls,
+        options(b"malformed-chain@localhost", 1),
+    )
+    .await;
+    responder.await.expect("responder finishes");
+}
+
+/// L11: every certificate after the leaf must participate in its issuer path. A valid but
+/// unrelated certificate is not harmless extra material: publishing it would make every new
+/// handshake advertise a chain no client can build.
+#[tokio::test]
+async fn an_unrelated_intermediate_leaves_the_previous_identity_active() {
+    let old_ca = Ca::new();
+    let replacement_ca = Ca::new();
+    let unrelated_ca = Ca::new();
+    let (old_server, _old_certificate, _old_key) = server_policy(&old_ca);
+    let (_replacement_server, replacement_certificate, replacement_key) =
+        server_policy(&replacement_ca);
+
+    let mut config = Config::new("127.0.0.1:0".parse().expect("address"));
+    config.tls_server = Some((old_server, 0));
+    let (server, mut incoming) = bind(config).await.expect("server binds");
+    let address = server.tls_addr().expect("TLS listener");
+
+    server
+        .reload_server_identity(replacement(
+            &chain(&replacement_certificate, &unrelated_ca.pem()),
+            &replacement_key,
+        ))
+        .expect_err("an unrelated intermediate is refused before publication");
+
+    let responder = tokio::spawn(async move {
+        let request = incoming.recv().await.expect("old identity still accepts");
+        let response = ResponseBuilder::to_request(
+            &request.request,
+            StatusCode::new(200).expect("status"),
+            "OK",
+        )
+        .expect("response")
+        .build();
+        server
+            .respond(&request.key, response)
+            .await
+            .expect("responds");
+    });
+    let old_client = client(&[&old_ca]).await;
+    exchange(
+        &old_client,
+        address,
+        TransportKind::Tls,
+        options(b"unrelated-chain@localhost", 1),
+    )
+    .await;
+    responder.await.expect("responder finishes");
+}
+
+/// L11: a direct issuer may be supplied after the leaf. Validation consumes that complete path
+/// before publication rather than rejecting every multi-certificate identity defensively.
+#[tokio::test]
+async fn a_valid_complete_chain_can_replace_the_server_identity() {
+    let old_ca = Ca::new();
+    let replacement_ca = Ca::new();
+    let (old_server, _old_certificate, _old_key) = server_policy(&old_ca);
+    let (_replacement_server, replacement_certificate, replacement_key) =
+        server_policy(&replacement_ca);
+
+    let mut config = Config::new("127.0.0.1:0".parse().expect("address"));
+    config.tls_server = Some((old_server, 0));
+    let (server, mut incoming) = bind(config).await.expect("server binds");
+    let address = server.tls_addr().expect("TLS listener");
+
+    server
+        .reload_server_identity(replacement(
+            &chain(&replacement_certificate, &replacement_ca.pem()),
+            &replacement_key,
+        ))
+        .expect("the leaf chains to the supplied issuer");
+
+    let responder = tokio::spawn(async move {
+        let request = incoming.recv().await.expect("replacement accepts");
+        let response = ResponseBuilder::to_request(
+            &request.request,
+            StatusCode::new(200).expect("status"),
+            "OK",
+        )
+        .expect("response")
+        .build();
+        server
+            .respond(&request.key, response)
+            .await
+            .expect("responds");
+    });
+    let replacement_client = client(&[&replacement_ca]).await;
+    exchange(
+        &replacement_client,
+        address,
+        TransportKind::Tls,
+        options(b"valid-chain@localhost", 1),
     )
     .await;
     responder.await.expect("responder finishes");

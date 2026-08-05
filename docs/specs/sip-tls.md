@@ -131,8 +131,12 @@ people pin are the reason deployments are still negotiating things nobody meant 
 **[sipx] A replacement is validated before it is published.** The public endpoint operation takes
 an [`Identity`](../../crates/sipx-transport/src/tls.rs), not certificate and key paths. It builds the
 complete server configuration first; a chain and private key that do not belong together therefore
-return a typed TLS configuration error while the active identity is still untouched. Errors and
-debug output never contain the private-key bytes.
+return a typed TLS configuration error while the active identity is still untouched. When issuer
+certificates are supplied after the leaf, every one must parse and participate, in order, in the
+server-authentication path to the last supplied certificate. A malformed, unrelated or out-of-order
+issuer is a refusal rather than extra material handed to later handshakes. A leaf alone remains
+valid: servers ordinarily omit the trust root and the peer supplies trust during its handshake.
+Errors and debug output never contain the private-key bytes.
 
 **[sipx] Publication is one atomic replacement.** A TLS or WSS listener selects one immutable
 server configuration after accepting a socket and before starting its TLS handshake. A reload
@@ -259,7 +263,7 @@ DNS deciding which certificate is acceptable.
 | L8 | `sips:` where only TCP is reachable | No candidate; the request fails, never downgrades |
 | L9 | TLS 1.1 offered | Refused |
 | L10 | Two hosts on one address | Two connections, not one reused |
-| L11 | Replace a server identity with a certificate and a different key | Typed refusal; old identity remains active |
+| L11 | Replace a server identity with a different key, a malformed issuer, or an unrelated issuer; then connect using the old trust | Typed refusal before publication; private bytes absent from the error; old identity remains active |
 | L12 | TLS handshakes race one valid identity replacement | Every peer observes the complete old or complete new identity |
 | L13 | Existing TLS connection sends again after rotation | Continues on the established connection; listener address unchanged |
 | W1 | WebSocket peer offering no `sip` subprotocol | Refused |
