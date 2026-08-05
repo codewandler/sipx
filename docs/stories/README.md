@@ -57,6 +57,9 @@ _The workspace has seeded links, virtual time and call fixtures, but downstream 
 - [X-75 — Be quiet by default and easy to test against](X-75-be-quiet-by-default-and-easy-to-test-against.md) · Build · recurring complaint against the surveyed stack · a library that spams logs and cannot be tested against
 - [M-53 — Ship a runnable RTP echo example](M-53-ship-a-runnable-rtp-echo-example.md) · Media · discovered by X-97 · exercise the public RTP receive/send seam without inventing a second media stack
 
+### registration observation
+- [S-42 — Report the address learned during registration](S-42-report-the-address-learned-during-registration.md) · Signalling · discovered by X-97 · preserve received/rport observation in the typed registration outcome
+
 ## Next (ready — take the top one unless the user named a story)
 
 ### application-owned dialog extensions

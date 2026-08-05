@@ -2,7 +2,7 @@
 id: S-42
 title: Report the address learned during registration
 pillar: Signalling
-status: backlog
+status: in-progress
 priority: 10
 design: docs/designs/stack-comparison.md
 epic: registration-observation
@@ -21,16 +21,21 @@ wire response again or confusing that observation with a routable Contact policy
 
 ## Acceptance
 
-- [ ] A spec cites RFC 3261 §18.2.1 and RFC 3581 and defines how `received` and `rport` on the top
+- [x] A spec cites RFC 3261 §18.2.1 and RFC 3581 and defines how `received` and `rport` on the top
       response Via become an optional typed address on a successful registration outcome.
-- [ ] Missing, malformed, contradictory and non-IP observations have explicit typed outcomes; none
+- [x] Missing, malformed, contradictory and non-IP observations have explicit typed outcomes; none
       can panic or replace the registrar-granted lease, routes, GRUU, Outbound or push state.
-- [ ] UDP and connection-oriented registration tests cover a learned address and the absent case,
+- [x] UDP and connection-oriented registration tests cover a learned address and the absent case,
       and authentication retry does not lose the final response's observation.
-- [ ] The API states that the learned value is an observation, not permission to rewrite future
+- [x] The API states that the learned value is an observation, not permission to rewrite future
       Contacts or media addresses automatically.
 - [ ] RFC registry evidence is updated and `./scripts/gate.py` is green.
 
 ## Progress
 
-- Discovered by the checked capability inventory. Not started.
+- The independent `registration-observation` branch carries the spec, typed registrar and
+  `UserAgent` surfaces, malformed-input vectors, UDP/TCP runtime coverage, final-auth-response
+  coverage, public guide, RFC evidence and generated maturity/compliance changes.
+- Focused `sipx-ua` check, clippy and test suites are green. The full workspace gate is intentionally
+  left to the integration branch after the parallel M13 branches merge, so the story remains
+  in-progress and the final acceptance item remains open.
