@@ -218,10 +218,16 @@ impl ClientTls {
 }
 
 /// A certificate and key sipx presents.
-#[derive(Debug)]
 pub struct Identity {
     chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
+}
+
+impl std::fmt::Debug for Identity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The key is deliberately opaque in every diagnostic, including a refused reload.
+        f.write_str("Identity { .. }")
+    }
 }
 
 impl Identity {
@@ -371,6 +377,12 @@ mod tests {
         let client = ClientTls::new(&TrustAnchors::system()).expect("builds");
         let printed = format!("{client:?}");
         assert_eq!(printed, "ClientTls { .. }");
+
+        let ca = sipx_testkit::certs::Ca::new();
+        let (certificate, key) = ca.issue_for("localhost");
+        let identity =
+            Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("identity");
+        assert_eq!(format!("{identity:?}"), "Identity { .. }");
     }
 
     #[cfg(feature = "quic")]

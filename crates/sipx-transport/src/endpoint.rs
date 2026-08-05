@@ -16,6 +16,8 @@ use sipx_sip::{Header, HeaderName, Limits, Message, Request, Response, Timers, p
 use tokio::net::{TcpListener, UdpSocket};
 #[cfg(any(feature = "tls", feature = "ws"))]
 use tokio::sync::Semaphore;
+#[cfg(feature = "tls")]
+use tokio::sync::watch;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -301,6 +303,40 @@ struct HandshakeRuntime {
     observations: Option<mpsc::UnboundedSender<HandshakeObservation>>,
 }
 
+/// The configured identity plus the endpoint-wide replacement selected by later handshakes.
+///
+/// Kept as one argument so TLS and WSS cannot accidentally read the publication channel and then
+/// construct an acceptor from a different configured policy.
+#[cfg(feature = "tls")]
+#[derive(Debug, Clone)]
+struct ServerHandshakePolicy {
+    configured: crate::tls::ServerTls,
+    replacement: watch::Receiver<Option<crate::tls::ServerTls>>,
+}
+
+#[cfg(feature = "tls")]
+impl ServerHandshakePolicy {
+    fn new(
+        configured: crate::tls::ServerTls,
+        replacement: watch::Receiver<Option<crate::tls::ServerTls>>,
+    ) -> Self {
+        Self {
+            configured,
+            replacement,
+        }
+    }
+
+    fn acceptor(&self) -> tokio_rustls::TlsAcceptor {
+        // One immutable configuration is selected by one watch-channel read. A concurrent reload
+        // may leave this handshake old or make it new, never split certificate chain from key.
+        self.replacement
+            .borrow()
+            .as_ref()
+            .unwrap_or(&self.configured)
+            .acceptor()
+    }
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HandshakeObservation {
@@ -469,6 +505,12 @@ pub struct Handle {
     meters: Arc<Meters>,
     #[cfg(feature = "tls")]
     tls_addr: Option<SocketAddr>,
+    /// Atomic publication point for the identity selected by later TLS and WSS handshakes.
+    ///
+    /// `None` when neither listener exists. QUIC deliberately does not subscribe: its live
+    /// configuration and connection lifetime are a separate contract (`sip-tls.md` §3.6).
+    #[cfg(feature = "tls")]
+    server_identity: Option<watch::Sender<Option<crate::tls::ServerTls>>>,
     #[cfg(feature = "ws")]
     ws_addr: Option<SocketAddr>,
     #[cfg(feature = "wss")]
@@ -501,6 +543,37 @@ impl Handle {
     #[must_use]
     pub fn tls_addr(&self) -> Option<SocketAddr> {
         self.tls_addr
+    }
+
+    /// Replace the identity selected by new TLS and WSS server handshakes (§3.6).
+    ///
+    /// Validation happens before publication: the complete certificate chain and private key are
+    /// first turned into one immutable [`crate::tls::ServerTls`] configuration. If they do not
+    /// belong together, this returns a typed TLS error and the active configuration is untouched.
+    ///
+    /// Existing connections are not renegotiated or closed. File watching and secret-store I/O
+    /// belong to the host, which supplies an already parsed [`crate::tls::Identity`] here.
+    #[cfg(feature = "tls")]
+    pub fn reload_server_identity(&self, identity: crate::tls::Identity) -> Result<()> {
+        let Some(publication) = &self.server_identity else {
+            return Err(Error::InvalidConfig {
+                field: "server_identity",
+                reason: "reload requires a configured TLS or WSS server listener",
+            });
+        };
+        let replacement = crate::tls::ServerTls::new(identity).map_err(|error| {
+            tracing::warn!(%error, "TLS server identity reload refused");
+            Error::Tls(error)
+        })?;
+        publication.send(Some(replacement)).map_err(|_| {
+            tracing::warn!("TLS server identity reload refused because no secure listener remains");
+            Error::InvalidConfig {
+                field: "server_identity",
+                reason: "no TLS or WSS server listener is running",
+            }
+        })?;
+        tracing::info!("TLS server identity reloaded for new TLS and WSS handshakes");
+        Ok(())
     }
 
     /// The address the WebSocket listener is bound to, if one was configured.
@@ -877,11 +950,36 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     // feature flag, so a branch per optional transport does not build with that feature off.
     let (adopt_tx, adopt_rx) = mpsc::channel::<Adopt>(64);
 
+    // A single publication point feeds both secure stream listeners. Their configured identities
+    // may differ before the first reload; afterwards both select the one complete replacement.
+    // QUIC does not receive this channel (`sip-tls.md` §3.6).
+    #[cfg(feature = "tls")]
+    let (server_identity_tx, server_identity_rx) =
+        watch::channel::<Option<crate::tls::ServerTls>>(None);
+    #[cfg(feature = "tls")]
+    let has_reloadable_server = config.tls_server.is_some() || {
+        #[cfg(feature = "wss")]
+        {
+            config.wss_server.is_some()
+        }
+        #[cfg(not(feature = "wss"))]
+        {
+            false
+        }
+    };
+
     #[cfg(feature = "tls")]
     let secure_addr = match config.tls_server.clone() {
-        Some((server, port)) => {
-            Some(listen_tls(config.bind.ip(), port, server, &adopt_tx, &handshakes).await?)
-        }
+        Some((server, port)) => Some(
+            listen_tls(
+                config.bind.ip(),
+                port,
+                ServerHandshakePolicy::new(server, server_identity_rx.clone()),
+                &adopt_tx,
+                &handshakes,
+            )
+            .await?,
+        ),
         None => None,
     };
     #[cfg(feature = "ws")]
@@ -905,7 +1003,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
             listen_wss(
                 config.bind.ip(),
                 port,
-                server,
+                ServerHandshakePolicy::new(server, server_identity_rx.clone()),
                 config.ws_keepalive,
                 config.limits,
                 &adopt_tx,
@@ -949,6 +1047,8 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         meters: Arc::clone(&meters),
         #[cfg(feature = "tls")]
         tls_addr: secure_addr,
+        #[cfg(feature = "tls")]
+        server_identity: has_reloadable_server.then_some(server_identity_tx),
         #[cfg(feature = "ws")]
         ws_addr: upgrade_addr,
         #[cfg(feature = "wss")]
@@ -1042,7 +1142,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
 async fn listen_tls(
     ip: std::net::IpAddr,
     port: u16,
-    server: crate::tls::ServerTls,
+    server: ServerHandshakePolicy,
     adopt: &mpsc::Sender<Adopt>,
     runtime: &HandshakeRuntime,
 ) -> Result<SocketAddr> {
@@ -1264,7 +1364,7 @@ async fn listen_ws(
 async fn listen_wss(
     ip: std::net::IpAddr,
     port: u16,
-    server: crate::tls::ServerTls,
+    server: ServerHandshakePolicy,
     keepalive: std::time::Duration,
     limits: Limits,
     adopt: &mpsc::Sender<Adopt>,
@@ -3067,6 +3167,8 @@ mod tests {
             meters: Arc::new(crate::counters::Meters::default()),
             #[cfg(feature = "tls")]
             tls_addr: None,
+            #[cfg(feature = "tls")]
+            server_identity: None,
             #[cfg(feature = "ws")]
             ws_addr: None,
             #[cfg(feature = "wss")]
@@ -3251,10 +3353,14 @@ mod tests {
             Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("an identity");
         let (owner, runtime, mut observed) = handshake_runtime(1);
         let (adopt, mut adopted) = mpsc::channel::<Adopt>(8);
+        let (_identity_tx, identity_rx) = tokio::sync::watch::channel(None);
         let tls_address = super::listen_tls(
             "127.0.0.1".parse().expect("loopback"),
             0,
-            ServerTls::new(identity).expect("a server"),
+            super::ServerHandshakePolicy::new(
+                ServerTls::new(identity).expect("a server"),
+                identity_rx,
+            ),
             &adopt,
             &runtime,
         )
@@ -3309,10 +3415,14 @@ mod tests {
             Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("an identity");
         let (owner, runtime, mut observed) = handshake_runtime(1);
         let (adopt, _adopted) = mpsc::channel::<Adopt>(8);
+        let (_identity_tx, identity_rx) = tokio::sync::watch::channel(None);
         let address = super::listen_wss(
             "127.0.0.1".parse().expect("loopback"),
             0,
-            ServerTls::new(identity).expect("a server"),
+            super::ServerHandshakePolicy::new(
+                ServerTls::new(identity).expect("a server"),
+                identity_rx,
+            ),
             Duration::from_secs(60),
             sipx_sip::Limits::stream(),
             &adopt,
