@@ -1140,6 +1140,61 @@ signal.pause()
             force_group_cleanup(pgid)
 
     @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_orderly_stop_worker_terminates_and_joins_its_descendant_group(self) -> None:
+        helper = """
+import json, os, signal
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = pathlib.Path(directory) / "orderly-descendant.pid"
+
+            def spawn_blocked_descendant():
+                ready_reader, ready_writer = os.pipe()
+                child_pid = os.fork()
+                if child_pid == 0:
+                    os.close(ready_reader)
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    pid_file.write_text(str(os.getpid()), encoding="ascii")
+                    os.write(ready_writer, b"ready")
+                    os.close(ready_writer)
+                    signal.pause()
+                    os._exit(0)
+                os.close(ready_writer)
+                ready = os.read(ready_reader, 5)
+                os.close(ready_reader)
+                if ready != b"ready":
+                    raise RuntimeError("orderly-stop descendant did not become ready")
+
+            supervised = load_contract.SupervisedProcess(
+                [sys.executable, "-c", helper],
+                "responder",
+                graceful=spawn_blocked_descendant,
+                stdout_limit=4096,
+                stderr_limit=4096,
+            )
+            endpoint_pgid = supervised.pgid
+            worker_pgid = supervised.orderly_stop_worker_pid
+            try:
+                supervised.wait_ready(timeout_ms=2_000)
+                supervised.close(timeout_seconds=0.1)
+                self.assertTrue(pid_file.read_text(encoding="ascii"))
+                self.assertIsNotNone(worker_pgid)
+                self.assertFalse(process_group_exists(worker_pgid))
+                self.assertFalse(process_group_exists(endpoint_pgid))
+            finally:
+                force_group_cleanup(endpoint_pgid)
+                if worker_pgid is not None:
+                    force_group_cleanup(worker_pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
     def test_term_handler_cleans_the_group_before_reporting_signal_exit(self) -> None:
         helper = """
 import json, os, signal, subprocess, sys

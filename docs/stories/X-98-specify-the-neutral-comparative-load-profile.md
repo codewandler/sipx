@@ -53,5 +53,7 @@ comparison before implementing or running it.
 - Final supervision review moves the arbitrary orderly-stop action into its own cancellable,
   joinable process group and proves a forever-blocked action leaves no worker. Passed evidence now
   requires a clean, unforced leader exit, with every non-zero status tied to one crash count.
+- Descendant cleanup review observes callback process-group disappearance independently of leader
+  exit and proves that a returned callback cannot strand a descendant that ignores `TERM`.
 - The full gate is intentionally deferred until the reviewed M13 branches reach integration, so the
   final Acceptance item and story status remain open. The actual comparative measurement is M14.

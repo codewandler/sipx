@@ -229,8 +229,10 @@ The supervisor starts every external command directly, never through a shell, in
 group. It owns that group until every descendant exits. An optional orderly-stop callback is
 registered before the endpoint starts and executes in its own supervisor-owned process group; it
 communicates with the endpoint only through external I/O and does not rely on mutations to the
-supervisor's memory. The supervisor terminates and joins that entire callback group on timeout, so a
-callback that blocks forever cannot leave a thread or process behind. Its outer runner installs
+supervisor's memory. The supervisor terminates and observes the disappearance of that entire
+callback group after every outcome, including a callback that returns after starting a descendant.
+It escalates from `TERM` to `KILL` on the same deadline used for a timeout, so neither a blocked
+callback nor a descendant that ignores `TERM` can remain behind. Its outer runner installs
 `EXIT`, `INT` and `TERM` cleanup before the first child starts. Cleanup performs these observable steps:
 
 1. stop admission and request orderly endpoint shutdown, bounding the orderly-stop callback itself

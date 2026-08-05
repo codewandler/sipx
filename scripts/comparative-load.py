@@ -147,19 +147,37 @@ class _OrderlyStopWorker:
         except ProcessLookupError:
             pass
 
-    def _join(self, timeout_seconds: float) -> bool:
-        self.process.join(timeout_seconds)
-        return not self.process.is_alive()
+    def _group_exists(self) -> bool:
+        try:
+            os.killpg(self.pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def _join_group(self, timeout_seconds: float) -> bool:
+        """Reap the leader and observe that no descendant remains in its process group."""
+
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            self.process.join(0)
+            if self.process.exitcode is not None and not self._group_exists():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            # Observation polling is bounded by the cleanup deadline; it is not synchronization
+            # with a state transition whose occurrence is assumed after a fixed duration.
+            threading.Event().wait(min(0.01, remaining))
 
     def _stop(self, timeout_seconds: float) -> None:
         if self._closed:
             return
-        if self.process.is_alive():
+        if self._group_exists():
             self._signal_group(signal.SIGTERM)
-        if not self._join(timeout_seconds):
+        if not self._join_group(timeout_seconds):
             self._signal_group(signal.SIGKILL)
-        if not self._join(timeout_seconds):
-            raise ContractError("orderly-stop worker remained alive after KILL")
+        if not self._join_group(timeout_seconds):
+            raise ContractError("orderly-stop worker process group remained alive after KILL")
         self.channel.close()
         self._closed = True
         atexit.unregister(self._on_exit)
