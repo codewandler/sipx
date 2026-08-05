@@ -1,0 +1,408 @@
+{
+  "subject": "rsipstack",
+  "version_evaluated": "v0.5.21",
+  "evaluated_at": "2026-08-04",
+  "source_revision": "5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5",
+  "expected_capabilities": 40,
+  "capabilities": [
+    {
+      "id": "sip-message-model",
+      "category": "core",
+      "title": "Parse, build and serialize SIP requests and responses",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-sip/src/message.rs", "crates/sipx-sip/src/parser.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/tree/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/sip", "note": "public SIP message, parser and serializer modules"}]
+    },
+    {
+      "id": "typed-and-editable-headers",
+      "category": "core",
+      "title": "Typed headers with editable unknown-header preservation",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-sip/src/headers/mod.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/tree/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/sip/headers", "note": "typed and untyped header APIs"}]
+    },
+    {
+      "id": "invite-and-noninvite-transactions",
+      "category": "transactions",
+      "title": "Client and server INVITE and non-INVITE transactions",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-sip/src/transaction/client.rs", "crates/sipx-sip/src/transaction/server.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transaction/transaction.rs", "note": "transaction role and state drivers"}]
+    },
+    {
+      "id": "transaction-timer-service",
+      "category": "lifecycle",
+      "title": "Cancelable transaction timers and endpoint shutdown",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-transport/src/timers.rs", "crates/sipx-transport/src/endpoint.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transaction/timer.rs", "note": "timer queue API"}]
+    },
+    {
+      "id": "udp-transport",
+      "category": "transports",
+      "title": "UDP signalling transport",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-transport/src/endpoint.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transport/udp.rs", "note": "UDP connection and listener"}]
+    },
+    {
+      "id": "tcp-transport",
+      "category": "transports",
+      "title": "TCP signalling transport and connection reuse",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-transport/src/tcp.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transport/tcp.rs", "note": "TCP connection implementation"}]
+    },
+    {
+      "id": "tls-transport",
+      "category": "transports",
+      "title": "TLS signalling transport",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-transport/src/tls.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transport/tls.rs", "note": "TLS listener and client transport"}]
+    },
+    {
+      "id": "websocket-transport",
+      "category": "transports",
+      "title": "WebSocket signalling transport",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-transport/src/ws.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transport/websocket.rs", "note": "WebSocket transport implementation"}]
+    },
+    {
+      "id": "sip-dns-resolution",
+      "category": "transports",
+      "title": "SIP target resolution with an injectable lookup source",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-transport/src/resolve.rs", "crates/sipx-transport/src/dns.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/resolver/sip_resolver.rs", "note": "SIP resolver and lookup-source trait"}]
+    },
+    {
+      "id": "tls-server-identity-reload",
+      "category": "operations",
+      "title": "Atomic live reload of the TLS server identity",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/T-31-reload-the-tls-server-identity-without-restarting.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transport/tls.rs#L111-L200", "note": "reloadable certificate resolver"}]
+    },
+    {
+      "id": "endpoint-message-inspection",
+      "category": "endpoint",
+      "title": "Endpoint message inspection and bounded policy hooks",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/T-32-expose-bounded-endpoint-observation-and-policy-hooks.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transaction/endpoint.rs", "note": "MessageInspector and TransportEventInspector traits"}]
+    },
+    {
+      "id": "endpoint-target-locator",
+      "category": "endpoint",
+      "title": "Injectable endpoint target selection",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-transport/src/resolve.rs", "crates/sipx-transport/src/target.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transaction/endpoint.rs", "note": "TargetLocator and domain resolver hooks"}]
+    },
+    {
+      "id": "endpoint-stats",
+      "category": "operations",
+      "title": "Endpoint counters and outstanding-transaction count",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-transport/src/counters.rs", "crates/sipx-transport/src/endpoint.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transaction/endpoint.rs", "note": "EndpointStats and running transaction access"}]
+    },
+    {
+      "id": "running-transaction-inspection",
+      "category": "operations",
+      "title": "Inspect stable identifiers for running transactions",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/T-32-expose-bounded-endpoint-observation-and-policy-hooks.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transaction/endpoint.rs", "note": "running transaction key access"}]
+    },
+    {
+      "id": "digest-client-and-verifier",
+      "category": "authentication",
+      "title": "Digest challenge response and verification",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-sip/src/auth.rs", "crates/sipx-ua/src/challenge.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/authenticate.rs", "note": "digest credential, calculation and verification APIs"}]
+    },
+    {
+      "id": "registration-client",
+      "category": "dialogs",
+      "title": "Authenticated registration with granted expiry",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-ua/src/registrar.rs", "crates/sipx-ua/src/agent.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/registration.rs", "note": "registration client API"}]
+    },
+    {
+      "id": "registration-learned-public-address",
+      "category": "dialogs",
+      "title": "Report the public address learned during registration",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/S-42-report-the-address-learned-during-registration.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/registration.rs", "note": "received and rport address extraction"}]
+    },
+    {
+      "id": "invite-dialogs",
+      "category": "dialogs",
+      "title": "Client and server INVITE dialogs",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-call/src/call.rs", "crates/sipx-call/src/dialog.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/tree/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog", "note": "invitation, client-dialog and server-dialog modules"}]
+    },
+    {
+      "id": "reliable-provisionals",
+      "category": "dialogs",
+      "title": "Reliable provisional responses and PRACK",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "documented",
+      "implementation": ["crates/sipx-call/src/rel.rs", "crates/sipx-sip/src/rel.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/README.md", "note": "public reliable-provisional capability"}]
+    },
+    {
+      "id": "cancel-bye-and-reinvite",
+      "category": "methods",
+      "title": "CANCEL, BYE and re-INVITE dialog operations",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-call/src/call.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/client_dialog.rs", "note": "cancel, hangup and reinvite methods"}]
+    },
+    {
+      "id": "update",
+      "category": "methods",
+      "title": "UPDATE requests on a dialog",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-call/src/update.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/client_dialog.rs", "note": "UPDATE operation"}]
+    },
+    {
+      "id": "options",
+      "category": "methods",
+      "title": "OPTIONS requests and endpoint responses",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-ua/src/agent.rs", "crates/sipx-call/src/call.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/client_dialog.rs", "note": "OPTIONS operation"}]
+    },
+    {
+      "id": "refer-and-notify",
+      "category": "methods",
+      "title": "REFER and transfer NOTIFY operations",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-call/src/transfer.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/client_dialog.rs", "note": "REFER and NOTIFY operations"}]
+    },
+    {
+      "id": "info",
+      "category": "methods",
+      "title": "Application-owned INFO in both directions",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/S-40-surface-application-owned-dialog-requests.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/client_dialog.rs", "note": "INFO dialog operation"}]
+    },
+    {
+      "id": "message",
+      "category": "methods",
+      "title": "Application-owned MESSAGE in both directions",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/S-40-surface-application-owned-dialog-requests.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/dialog.rs", "note": "generic dialog MESSAGE operation"}]
+    },
+    {
+      "id": "generic-dialog-request",
+      "category": "methods",
+      "title": "Authenticated generic in-dialog request operation",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/S-40-surface-application-owned-dialog-requests.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/dialog.rs", "note": "generic dialog request method"}]
+    },
+    {
+      "id": "subscription-client",
+      "category": "dialogs",
+      "title": "Create, refresh and terminate outbound subscriptions",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/S-38-place-and-maintain-event-subscriptions.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/subscription.rs", "note": "client subscription dialog"}]
+    },
+    {
+      "id": "subscription-server",
+      "category": "dialogs",
+      "title": "Accept subscriptions and originate NOTIFY",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/S-35-accept-an-inbound-subscription-from-a-socket.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/subscription.rs", "note": "server subscription dialog"}]
+    },
+    {
+      "id": "publication-client",
+      "category": "dialogs",
+      "title": "Create, refresh and remove publications with entity tags",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/S-39-send-and-receive-publications-through-an-endpoint.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/publication.rs", "note": "client publication dialog"}]
+    },
+    {
+      "id": "publication-server",
+      "category": "dialogs",
+      "title": "Accept inbound publications through the endpoint",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/S-39-send-and-receive-publications-through-an-endpoint.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/publication.rs", "note": "server publication dialog"}]
+    },
+    {
+      "id": "dialog-snapshot",
+      "category": "lifecycle",
+      "title": "Serializable dialog snapshot for external restoration policy",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/S-43-serialize-and-restore-dialog-state.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/dialog.rs", "note": "DialogSnapshot public type"}]
+    },
+    {
+      "id": "stateful-proxy-example",
+      "category": "examples",
+      "title": "Stateful proxy with request and response forwarding",
+      "ownership": "sipx-clstr",
+      "status": "tracked",
+      "confidence": "measured",
+      "story": "https://github.com/codewandler/sipx-clstr/blob/6b2a3f45869a0ca1c0796c5615826b23e1abfe17/docs/stories/PX-5-implement-stateful-forwarding-with-forking.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/examples/proxy.rs", "note": "stateful proxy example"}]
+    },
+    {
+      "id": "registrar-location-example",
+      "category": "examples",
+      "title": "Registrar and in-memory location service example",
+      "ownership": "sipx-clstr",
+      "status": "tracked",
+      "confidence": "measured",
+      "story": "https://github.com/codewandler/sipx-clstr/blob/6b2a3f45869a0ca1c0796c5615826b23e1abfe17/docs/stories/RG-3-implement-register-processing-on-the-in-memory-store.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/examples/proxy.rs", "note": "REGISTER handling and location table"}]
+    },
+    {
+      "id": "user-agent-example",
+      "category": "examples",
+      "title": "Registering caller and answerer example",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-call/src/call.rs", "crates/sipx-ua/src/agent.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/tree/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/examples/client", "note": "user-agent client example"}]
+    },
+    {
+      "id": "rtp-file-playback",
+      "category": "media",
+      "title": "RTP file playback",
+      "ownership": "sipx",
+      "status": "implemented",
+      "confidence": "measured",
+      "implementation": ["crates/sipx-media/src/session.rs"],
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/examples/client/play_file.rs", "note": "RTP playback and echo helper"}]
+    },
+    {
+      "id": "rtp-echo-example",
+      "category": "examples",
+      "title": "Runnable RTP echo endpoint example",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/M-53-ship-a-runnable-rtp-echo-example.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/examples/client/play_file.rs", "note": "RTP echo helper"}]
+    },
+    {
+      "id": "transport-source-whitelist",
+      "category": "endpoint",
+      "title": "Dynamically restrict accepted transport sources",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/T-32-expose-bounded-endpoint-observation-and-policy-hooks.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/transport/transport_layer.rs", "note": "TransportWhitelist and its update API"}]
+    },
+    {
+      "id": "bounded-load-responder",
+      "category": "operations",
+      "title": "Machine-driven call-load responder",
+      "ownership": "sipx",
+      "status": "open",
+      "confidence": "measured",
+      "story": "docs/stories/P-15-run-a-bounded-call-load-responder.md",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/bin/bench_ua.rs", "note": "benchmark user agent server mode"}]
+    },
+    {
+      "id": "wasm-target",
+      "category": "endpoint",
+      "title": "WebAssembly endpoint target",
+      "ownership": "not-shipped",
+      "status": "absent",
+      "confidence": "documented",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/README.md", "note": "WASM remains unchecked in the public TODO"}]
+    },
+    {
+      "id": "bundled-webrtc-engine",
+      "category": "media",
+      "title": "Bundled WebRTC media engine",
+      "ownership": "not-applicable",
+      "status": "excluded",
+      "confidence": "documented",
+      "rationale": "The subject describes WebRTC integration as a use case but ships no media engine; sipx likewise keeps browser-native WebRTC outside the Rust stack.",
+      "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/README.md", "note": "WebRTC is described as an integration use case"}]
+    }
+  ]
+}

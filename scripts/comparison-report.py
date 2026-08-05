@@ -35,14 +35,19 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 from collections import Counter
+from urllib.parse import urlparse
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 COMPARISON = ROOT / "docs" / "comparison"
 DIMENSIONS = COMPARISON / "dimensions.json"
 STACKS = COMPARISON / "stacks.json"
 OBSERVATIONS = COMPARISON / "observations"
+CAPABILITIES = COMPARISON / "capabilities"
+CAPABILITY_EXPECTED = CAPABILITIES / "expected"
+EXTERNAL_STORIES = CAPABILITIES / "external"
 REPORT = ROOT / "docs" / "comparison.md"
 
 # Live sources for the generated tier. Each is read by its own rule below.
@@ -88,7 +93,10 @@ CONFIDENCE_HOLDER = {
 # claim can sit in the source, never reach the generated page, and tell nobody — the failure this
 # whole file exists to prevent, in miniature.
 DIMENSION_KEYS = ({"id", "title", "question", "why"}, set())
-STACK_KEYS = ({"id", "name", "language", "repository", "license"}, {"is_self"})
+STACK_KEYS = (
+    {"id", "name", "language", "repository", "license"},
+    {"is_self", "capability_inventory"},
+)
 FINDING_KEYS = (
     {"stack", "dimension", "confidence", "summary", "evidence", "version_evaluated",
      "evaluated_at"},
@@ -98,6 +106,43 @@ FINDING_KEYS = (
 # two states at once, which is the ambiguity the marker exists to remove.
 MARKER_KEYS = ({"stack", "dimension", "not_evaluated"}, set())
 EVIDENCE_KEYS = ({"note"}, {"url", "path"})
+CAPABILITY_LEDGER_KEYS = (
+    {
+        "subject",
+        "version_evaluated",
+        "evaluated_at",
+        "source_revision",
+        "expected_capabilities",
+        "capabilities",
+    },
+    set(),
+)
+CAPABILITY_KEYS = (
+    {"id", "category", "title", "confidence", "ownership", "status", "evidence"},
+    {"story", "rationale", "implementation"},
+)
+
+CAPABILITY_OWNERS = ("sipx", "sipx-clstr", "not-shipped", "not-applicable")
+CAPABILITY_STATUS = {
+    "sipx": {"implemented", "open"},
+    "sipx-clstr": {"tracked"},
+    "not-shipped": {"absent"},
+    "not-applicable": {"excluded"},
+}
+CAPABILITY_CONFIDENCE = {"measured", "documented", "assessed"}
+REQUIRED_CAPABILITY_CATEGORIES = {
+    "authentication",
+    "core",
+    "dialogs",
+    "endpoint",
+    "examples",
+    "lifecycle",
+    "media",
+    "methods",
+    "operations",
+    "transactions",
+    "transports",
+}
 
 KEY_SETS = {
     "dimension": DIMENSION_KEYS,
@@ -219,6 +264,547 @@ def dataset() -> tuple[list[dict], list[dict], list[dict]]:
     return dimensions(), stacks(), observations()
 
 
+def capability_ledgers() -> list[dict]:
+    """Leaf-level public capability inventories, one immutable subject per file."""
+    found = []
+    for path in sorted(CAPABILITIES.glob("*.json")):
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            loaded["_file"] = path.name
+        found.append(loaded)
+    return found
+
+
+def external_story_urls(directory=None) -> set[str]:
+    """Story URLs whose commit, path and Git blob identity are pinned in comparison data."""
+    found = set()
+    directory = pathlib.Path(directory) if directory is not None else EXTERNAL_STORIES
+    for path in sorted(directory.glob("*.json")):
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        repository = loaded.get("repository")
+        revision = loaded.get("source_revision")
+        stories = loaded.get("stories", [])
+        if not isinstance(repository, str) or not isinstance(revision, str):
+            continue
+        for story in stories if isinstance(stories, list) else []:
+            if isinstance(story, dict) and isinstance(story.get("path"), str):
+                found.add(f"{repository}/blob/{revision}/{story['path']}")
+    return found
+
+
+def remote_git_blob_identities(
+    repository: str, revision: str, paths: list[str]
+) -> dict[str, str]:
+    """Resolve paths at one immutable commit without retaining the external checkout."""
+    with tempfile.TemporaryDirectory(prefix="sipx-story-index-") as raw:
+        git_dir = pathlib.Path(raw)
+        commands = (
+            ["git", "-C", str(git_dir), "init", "--bare", "--quiet"],
+            [
+                "git",
+                "-C",
+                str(git_dir),
+                "fetch",
+                "--quiet",
+                "--depth=1",
+                "--filter=blob:none",
+                repository,
+                revision,
+            ],
+        )
+        for command in commands:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        found = {}
+        for path in paths:
+            result = subprocess.run(
+                ["git", "-C", str(git_dir), "rev-parse", f"FETCH_HEAD:{path}"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            found[path] = result.stdout.strip()
+        return found
+
+
+def external_story_index_problems(directory=None, blob_resolver=None) -> list[str]:
+    """The external-story evidence is closed and verified at its pinned Git commit."""
+    problems = []
+    directory = pathlib.Path(directory) if directory is not None else EXTERNAL_STORIES
+    blob_resolver = blob_resolver or remote_git_blob_identities
+    for path in sorted(directory.glob("*.json")):
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        where = f"external story index {path.name}"
+        if not isinstance(loaded, dict):
+            problems.append(f"{where} is not an object")
+            continue
+        keys = set(loaded)
+        required = {"repository", "source_revision", "stories"}
+        for key in sorted(required - keys):
+            problems.append(f"{where} is missing the required key {key!r}")
+        for key in sorted(keys - required):
+            problems.append(f"{where} carries the unknown key {key!r}")
+        repository = loaded.get("repository")
+        repository_valid = False
+        if not isinstance(repository, str):
+            problems.append(f"{where} has no repository URL")
+        else:
+            parsed = urlparse(repository)
+            if parsed.scheme != "https" or not parsed.netloc:
+                problems.append(f"{where} has an invalid repository URL")
+            else:
+                repository_valid = True
+        revision = loaded.get("source_revision")
+        revision_valid = (
+            isinstance(revision, str)
+            and re.fullmatch(r"[0-9a-f]{40}", revision) is not None
+        )
+        if not revision_valid:
+            problems.append(f"{where} has no full immutable source revision")
+        stories = loaded.get("stories")
+        if not isinstance(stories, list) or not stories:
+            problems.append(f"{where} has no story paths")
+        else:
+            seen = Counter()
+            declared_blobs = {}
+            for story in stories:
+                if not isinstance(story, dict):
+                    problems.append(f"{where} has a story entry that is not an object")
+                    continue
+                story_keys = set(story)
+                if story_keys != {"path", "blob_sha"}:
+                    problems.append(
+                        f"{where} story entries require exactly 'path' and 'blob_sha'"
+                    )
+                story_path = story.get("path")
+                if (
+                    not isinstance(story_path, str)
+                    or re.fullmatch(r"docs/stories/[A-Za-z0-9-]+\.md", story_path)
+                    is None
+                ):
+                    problems.append(f"{where} has invalid story path {story_path!r}")
+                else:
+                    seen[story_path] += 1
+                blob = story.get("blob_sha")
+                if not isinstance(blob, str) or re.fullmatch(r"[0-9a-f]{40}", blob) is None:
+                    problems.append(f"{where} has no Git blob identity for {story_path!r}")
+                elif isinstance(story_path, str):
+                    declared_blobs[story_path] = blob
+            for story_path, count in seen.items():
+                if count > 1:
+                    problems.append(f"{where} repeats story path {story_path!r}")
+            can_resolve = repository_valid and revision_valid and bool(declared_blobs)
+            if can_resolve:
+                try:
+                    resolved = blob_resolver(repository, revision, sorted(declared_blobs))
+                except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+                    problems.append(f"{where} could not verify pinned story blobs: {error}")
+                else:
+                    for story_path, declared in declared_blobs.items():
+                        actual = resolved.get(story_path)
+                        if actual != declared:
+                            problems.append(
+                                f"{where} declares blob {declared!r} for {story_path!r},"
+                                f" but the pinned commit carries {actual!r}"
+                            )
+    return problems
+
+
+def capability_expectations(directory=None) -> tuple[dict[str, tuple[str, set[str]]], list[str]]:
+    """Load the separately reviewed exact-ID inventory for each pinned subject revision."""
+    directory = pathlib.Path(directory) if directory is not None else CAPABILITY_EXPECTED
+    expectations = {}
+    problems = []
+    for path in sorted(directory.glob("*.json")):
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        where = f"capability expectation {path.name}"
+        if not isinstance(loaded, dict):
+            problems.append(f"{where} is not an object")
+            continue
+        if set(loaded) != {"subject", "source_revision", "expected_ids"}:
+            problems.append(
+                f"{where} requires exactly 'subject', 'source_revision' and 'expected_ids'"
+            )
+        subject = loaded.get("subject")
+        revision = loaded.get("source_revision")
+        expected_ids = loaded.get("expected_ids")
+        if not isinstance(subject, str) or path.name != f"{subject}.json":
+            problems.append(f"{where} has an invalid subject or filename")
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            problems.append(f"{where} has no full immutable source revision")
+        if not isinstance(expected_ids, list) or not expected_ids:
+            problems.append(f"{where} has no expected capability IDs")
+            continue
+        invalid = [
+            cap_id
+            for cap_id in expected_ids
+            if not isinstance(cap_id, str)
+            or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", cap_id) is None
+        ]
+        if invalid:
+            problems.append(f"{where} has invalid capability IDs: {invalid!r}")
+            continue
+        expected_id_set = set(expected_ids)
+        if len(expected_ids) != len(expected_id_set):
+            problems.append(f"{where} repeats a capability ID")
+        if (
+            isinstance(subject, str)
+            and isinstance(revision, str)
+            and re.fullmatch(r"[0-9a-f]{40}", revision) is not None
+        ):
+            if subject in expectations:
+                problems.append(f"{where} repeats subject {subject!r}")
+            expectations[subject] = (revision, expected_id_set)
+    return expectations, problems
+
+
+def capability_where(ledger, capability=None) -> str:
+    subject = ledger.get("subject", "?")
+    if capability is None:
+        return f"capability ledger {subject}"
+    return f"{subject}/capability/{capability.get('id', '?')}"
+
+
+def canonical_workspace_rust_path(source) -> bool:
+    """Whether a path stays lexically and physically inside a workspace crate."""
+    if not isinstance(source, str):
+        return False
+    pure = pathlib.PurePosixPath(source)
+    if pure.is_absolute() or ".." in pure.parts or len(pure.parts) < 3:
+        return False
+    if pure.parts[0] != "crates" or pure.suffix != ".rs":
+        return False
+    crate_root = (ROOT / "crates").resolve()
+    return (ROOT / source).resolve().is_relative_to(crate_root)
+
+
+def capability_schema_problems(ledger) -> list[str]:
+    """Closed key sets and the scalar constraints declared by the JSON schema."""
+    if not isinstance(ledger, dict):
+        return ["capability ledger is not an object"]
+    problems = []
+    required, optional = CAPABILITY_LEDGER_KEYS
+    keys = {key for key in ledger if not key.startswith("_")}
+    where = capability_where(ledger)
+    problems.extend(
+        f"{where} is missing the required key {key!r}" for key in sorted(required - keys)
+    )
+    problems.extend(
+        f"{where} carries the unknown key {key!r}"
+        for key in sorted(keys - required - optional)
+    )
+    subject = ledger.get("subject")
+    if (
+        not isinstance(subject, str)
+        or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", subject) is None
+    ):
+        problems.append(f"{where} has an invalid subject key")
+    revision = ledger.get("source_revision")
+    if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        problems.append(f"{where} has an invalid source revision")
+    version = ledger.get("version_evaluated")
+    if not isinstance(version, str) or not version.strip():
+        problems.append(f"{where} has an empty evaluated version")
+    evaluated_at = ledger.get("evaluated_at")
+    if not isinstance(evaluated_at, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", evaluated_at) is None:
+        problems.append(f"{where} has an invalid evaluation date")
+    expected = ledger.get("expected_capabilities")
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected < 1:
+        problems.append(f"{where} has an invalid expected capability count")
+    capabilities = ledger.get("capabilities", [])
+    if not isinstance(capabilities, list) or not capabilities:
+        return problems + [f"{where} has 'capabilities', which must be a list"]
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            problems.append(f"{where} contains a capability that is not an object")
+            continue
+        required, optional = CAPABILITY_KEYS
+        keys = set(capability)
+        leaf = capability_where(ledger, capability)
+        problems.extend(
+            f"{leaf} is missing the required key {key!r}" for key in sorted(required - keys)
+        )
+        problems.extend(
+            f"{leaf} carries the unknown key {key!r}"
+            for key in sorted(keys - required - optional)
+        )
+        cap_id = capability.get("id")
+        if (
+            not isinstance(cap_id, str)
+            or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", cap_id) is None
+        ):
+            problems.append(f"{leaf} has an invalid stable capability key")
+        for field in ("category", "title"):
+            value = capability.get(field)
+            if not isinstance(value, str) or not value.strip():
+                problems.append(f"{leaf} has an empty {field}")
+        for field in ("confidence", "ownership", "status"):
+            value = capability.get(field)
+            if not isinstance(value, str) or not value.strip():
+                problems.append(f"{leaf} has an invalid {field}")
+        for field in ("story", "rationale"):
+            if field in capability:
+                value = capability.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    problems.append(f"{leaf} has an invalid {field}")
+        if "implementation" in capability:
+            implementation = capability.get("implementation")
+            if not isinstance(implementation, list) or not implementation:
+                problems.append(f"{leaf} has an invalid implementation list")
+            else:
+                for source in implementation:
+                    if not canonical_workspace_rust_path(source):
+                        problems.append(f"{leaf} has invalid implementation path {source!r}")
+        entries = capability.get("evidence")
+        if not isinstance(entries, list) or not entries:
+            problems.append(f"{leaf} has an invalid evidence list")
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                problems.append(f"{leaf} has evidence that is not an object")
+                continue
+            entry_keys = set(entry)
+            if "note" not in entry_keys or entry_keys - {"note", "url", "path"}:
+                problems.append(f"{leaf} has evidence with invalid keys")
+            note = entry.get("note")
+            if not isinstance(note, str) or not note.strip():
+                problems.append(f"{leaf} has evidence with an empty note")
+            has_url = "url" in entry
+            has_path = "path" in entry
+            if has_url == has_path:
+                problems.append(f"{leaf} evidence requires exactly one url or path")
+            if has_url and (not isinstance(entry.get("url"), str) or not entry.get("url")):
+                problems.append(f"{leaf} has an invalid evidence URL value")
+            if has_path and (
+                not isinstance(entry.get("path"), str) or not entry.get("path")
+            ):
+                problems.append(f"{leaf} has an invalid evidence path value")
+    return problems
+
+
+def capability_staleness_problems(ledger, today: datetime.date) -> list[str]:
+    """A leaf inventory ages as one pinned reading, not as unrelated rows."""
+    synthetic = {
+        "stack": ledger.get("subject", "?"),
+        "dimension": "capability-ledger",
+        "evaluated_at": ledger.get("evaluated_at"),
+    }
+    return staleness_problems(synthetic, today)
+
+
+def capability_evidence_problems(ledger, capability) -> list[str]:
+    """Every leaf points at subject evidence that can stop being true."""
+    where = capability_where(ledger, capability)
+    entries = capability.get("evidence", [])
+    if not isinstance(entries, list) or not entries:
+        return [f"{where} cites no evidence"]
+    problems = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            problems.append(f"{where} has an evidence entry that is not a citation")
+            continue
+        problems.extend(f"{where}: {problem}" for problem in schema_problems("evidence", entry))
+        pointers = {key for key in ("url", "path") if entry.get(key)}
+        if len(pointers) != 1:
+            problems.append(f"{where} must give exactly one evidence url or path")
+        path = entry.get("path")
+        if path is not None:
+            if not isinstance(path, str) or not path:
+                problems.append(f"{where} cites an invalid evidence path")
+            elif not (ROOT / path).exists():
+                problems.append(f"{where} cites {path}, which does not exist")
+        note = entry.get("note")
+        if not isinstance(note, str) or not note.strip():
+            problems.append(f"{where} has evidence with an empty note")
+        url = entry.get("url")
+        if url is not None and not isinstance(url, str):
+            problems.append(f"{where} cites a non-string evidence URL")
+        elif isinstance(url, str):
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                problems.append(f"{where} cites an invalid evidence URL")
+            revision = ledger.get("source_revision")
+            path_parts = pathlib.PurePosixPath(parsed.path).parts
+            pins_revision = any(
+                marker in {"blob", "tree"} and pinned == revision
+                for marker, pinned in zip(path_parts, path_parts[1:])
+            )
+            if capability.get("confidence") == "measured" and not pins_revision:
+                problems.append(
+                    f"{where} claims measured confidence without pinning its source revision"
+                )
+        if capability.get("confidence") == "measured" and not isinstance(url, str):
+            problems.append(f"{where} claims measured confidence without immutable source evidence")
+    return problems
+
+
+def capability_problems(
+    ledger_list,
+    stack_list,
+    today: datetime.date,
+    external_stories=None,
+    expectations=None,
+) -> list[str]:
+    """Ownership, disposition and discovery closure for leaf-level inventories."""
+    known_stacks = {stack.get("id") for stack in stack_list}
+    required_subjects = {
+        stack.get("id")
+        for stack in stack_list
+        if stack.get("capability_inventory") is True
+    }
+    external_stories = set(external_stories or ())
+    expectations = expectations or {}
+    problems = []
+    subjects = Counter()
+    for ledger in ledger_list:
+        if not isinstance(ledger, dict):
+            problems.extend(capability_schema_problems(ledger))
+            continue
+        subject = ledger.get("subject")
+        where = capability_where(ledger)
+        subjects[subject] += 1
+        if subject not in known_stacks:
+            problems.append(f"{where} names a subject stacks.json does not declare")
+        if ledger.get("_file") != f"{subject}.json":
+            problems.append(f"{where} is filed as {ledger.get('_file')!r}; filename must match")
+        if not ledger.get("version_evaluated") or not ledger.get("source_revision"):
+            problems.append(f"{where} has no immutable version and source revision")
+        problems.extend(capability_staleness_problems(ledger, today))
+        expected = ledger.get("expected_capabilities")
+        capabilities = ledger.get("capabilities", [])
+        if (
+            isinstance(expected, int)
+            and isinstance(capabilities, list)
+            and len(capabilities) != expected
+        ):
+            problems.append(
+                f"{where} declares {expected} expected capabilities but carries {len(capabilities)}"
+            )
+        expectation = expectations.get(subject)
+        if expectation is None:
+            problems.append(f"{where} has no separately reviewed exact-ID inventory")
+        elif isinstance(capabilities, list):
+            expected_revision, expected_ids = expectation
+            actual_ids = {
+                capability.get("id")
+                for capability in capabilities
+                if isinstance(capability, dict)
+                and isinstance(capability.get("id"), str)
+            }
+            if ledger.get("source_revision") != expected_revision:
+                problems.append(f"{where} and its exact-ID inventory pin different revisions")
+            missing_ids = expected_ids - actual_ids
+            extra_ids = actual_ids - expected_ids
+            if missing_ids:
+                problems.append(
+                    f"{where} omits expected capability IDs: {', '.join(sorted(missing_ids))}"
+                )
+            if extra_ids:
+                problems.append(
+                    f"{where} carries unreviewed capability IDs: {', '.join(sorted(extra_ids))}"
+                )
+            if isinstance(expected, int) and expected != len(expected_ids):
+                problems.append(
+                    f"{where} count ratchet disagrees with its exact-ID inventory"
+                )
+
+        seen = Counter()
+        categories = set()
+        for capability in ledger.get("capabilities", []):
+            if not isinstance(capability, dict):
+                continue
+            leaf = capability_where(ledger, capability)
+            cap_id = capability.get("id")
+            if isinstance(cap_id, str):
+                seen[cap_id] += 1
+            category = capability.get("category")
+            if isinstance(category, str):
+                categories.add(category)
+            owner = capability.get("ownership")
+            status = capability.get("status")
+            confidence = capability.get("confidence")
+            if not isinstance(confidence, str) or confidence not in CAPABILITY_CONFIDENCE:
+                problems.append(
+                    f"{leaf} has unknown confidence {confidence!r}; choose one of"
+                    f" {', '.join(sorted(CAPABILITY_CONFIDENCE))}"
+                )
+            elif confidence == "assessed" and not capability.get("rationale"):
+                problems.append(f"{leaf} is assessed without a rationale")
+            if not isinstance(owner, str) or owner not in CAPABILITY_OWNERS:
+                problems.append(
+                    f"{leaf} has unknown ownership {owner!r}; choose one of"
+                    f" {', '.join(CAPABILITY_OWNERS)}"
+                )
+            elif not isinstance(status, str) or status not in CAPABILITY_STATUS[owner]:
+                problems.append(
+                    f"{leaf} has status {status!r}, which is not valid for ownership {owner!r}"
+                )
+            problems.extend(capability_evidence_problems(ledger, capability))
+
+            story = capability.get("story")
+            if owner == "sipx" and status == "open":
+                if not isinstance(story, str) or not story:
+                    problems.append(f"{leaf} is an open sipx row with no story")
+                elif not (ROOT / story).is_file():
+                    problems.append(f"{leaf} cites missing story {story}")
+                else:
+                    story_text = (ROOT / story).read_text(encoding="utf-8")
+                    story_status = re.search(r"^status:\s*(\S+)", story_text, re.MULTILINE)
+                    if story_status is None:
+                        problems.append(f"{leaf} cites {story}, which has no status")
+                    elif story_status.group(1) == "done":
+                        problems.append(
+                            f"{leaf} is still open but {story} is done; update the disposition"
+                        )
+            implementation = capability.get("implementation")
+            if owner == "sipx" and status == "implemented":
+                if not isinstance(implementation, list) or not implementation:
+                    problems.append(f"{leaf} claims implementation with no Rust source evidence")
+                else:
+                    for source in implementation:
+                        path = (ROOT / source).resolve() if isinstance(source, str) else ROOT
+                        if (
+                            not canonical_workspace_rust_path(source)
+                            or not path.is_file()
+                        ):
+                            problems.append(
+                                f"{leaf} cites {source!r} as implementation; it must be existing"
+                                " Rust source in a workspace crate"
+                            )
+            elif implementation:
+                problems.append(
+                    f"{leaf} carries implementation evidence without implemented sipx ownership"
+                )
+            if owner == "sipx-clstr" and story not in external_stories:
+                problems.append(
+                    f"{leaf} is cluster-owned and has no story in the pinned external index"
+                )
+            if owner == "not-applicable" and not capability.get("rationale"):
+                problems.append(f"{leaf} is excluded without a rationale")
+
+        for cap_id, count in sorted(seen.items(), key=lambda item: str(item[0])):
+            if count > 1:
+                problems.append(f"{where} declares capability {cap_id!r} {count} times")
+        missing_categories = REQUIRED_CAPABILITY_CATEGORIES - categories
+        if missing_categories:
+            problems.append(
+                f"{where} omits required categories: {', '.join(sorted(missing_categories))}"
+            )
+    for subject, count in subjects.items():
+        if count > 1:
+            problems.append(f"capability subject {subject!r} has {count} ledgers")
+    if not required_subjects:
+        problems.append("no comparison stack requires a capability inventory")
+    for subject in sorted(required_subjects - set(subjects)):
+        problems.append(f"stack {subject!r} requires a capability ledger, but none exists")
+    for subject in sorted(required_subjects - set(expectations)):
+        problems.append(f"stack {subject!r} requires an exact-ID inventory, but none exists")
+    for subject in sorted(set(subjects) - required_subjects, key=str):
+        problems.append(f"capability ledger {subject!r} is not anchored by its comparison stack")
+    for subject in sorted(set(expectations) - set(subjects)):
+        problems.append(f"capability expectation {subject!r} has no corresponding ledger")
+    return problems
+
+
 def is_marker(observation) -> bool:
     return "not_evaluated" in observation
 
@@ -267,6 +853,10 @@ def schema_problems(kind: str, record) -> list[str]:
                 " marker and file a finding, or drop the finding"
             )
         problems.append(f"{where} carries the unknown key {key!r}{hint}")
+
+    if kind == "stack" and "capability_inventory" in record:
+        if not isinstance(record.get("capability_inventory"), bool):
+            problems.append(f"{where} has a non-boolean capability_inventory marker")
 
     return problems
 
@@ -588,7 +1178,47 @@ def evidence_cell(observation) -> str:
     return " · ".join(links) or "—"
 
 
-def render(dimension_list, stack_list, observation_list, values) -> str:
+def render_capability_ledgers(ledger_list, stack_list) -> list[str]:
+    """Render the finite parity target without collapsing leaves into a score."""
+    names = {stack.get("id"): stack.get("name", stack.get("id", "?")) for stack in stack_list}
+    out = []
+    for ledger in ledger_list:
+        subject = ledger.get("subject", "?")
+        out += [
+            f"## Endpoint capability ledger: {cell(str(names.get(subject, subject)))}",
+            "",
+            "This is the leaf-level ownership profile for one immutable subject release. It is a",
+            "finite discovery gate, not a score: an open sipx row names the story that closes it,",
+            "and a platform row is excluded or assigned to the cluster repository explicitly.",
+            "The immutable source revision is retained in the checked data and each row states the",
+            "subject version it was evaluated against.",
+            "",
+            "| Category | Capability | Subject version | Confidence | Ownership | Status | Evidence | Story or rationale |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for capability in ledger.get("capabilities", []):
+            story = capability.get("story")
+            if isinstance(story, str) and story.startswith("http"):
+                disposition = f"[tracking story]({story})"
+            elif isinstance(story, str) and story:
+                href = os.path.relpath(ROOT / story, REPORT.parent).replace(os.path.sep, "/")
+                disposition = f"[tracking story]({href})"
+            else:
+                disposition = cell(capability.get("rationale", "—"))
+            evidence = evidence_cell({"evidence": capability.get("evidence", [])})
+            out.append(
+                f"| {cell(str(capability.get('category', '—')))} |"
+                f" {cell(str(capability.get('title', capability.get('id', '—'))))} |"
+                f" `{cell(str(ledger.get('version_evaluated', '—')))}` |"
+                f" `{cell(str(capability.get('confidence', '—')))}` |"
+                f" `{cell(str(capability.get('ownership', '—')))}` |"
+                f" `{cell(str(capability.get('status', '—')))}` | {evidence} | {disposition} |"
+            )
+        out.append("")
+    return out
+
+
+def render(dimension_list, stack_list, observation_list, values, ledger_list=None) -> str:
     answers = {
         (o.get("stack"), o.get("dimension")): o for o in observation_list
     }
@@ -675,6 +1305,8 @@ def render(dimension_list, stack_list, observation_list, values) -> str:
             )
         out.append("")
 
+    out.extend(render_capability_ledgers(ledger_list or [], stack_list))
+
     return "\n".join(out) + "\n"
 
 
@@ -686,6 +1318,8 @@ def main() -> int:
     args = parser.parse_args()
 
     dimension_list, stack_list, observation_list = dataset()
+    ledger_list = capability_ledgers()
+    expectations, expectation_problems = capability_expectations()
 
     # Shape before substance. `render` reads records directly, so a malformed one would crash it —
     # and a traceback in place of "sipx/media carries the unknown key 'score'" tells whoever added
@@ -693,6 +1327,9 @@ def main() -> int:
     malformed = [p for d in dimension_list for p in schema_problems("dimension", d)]
     malformed += [p for s in stack_list for p in schema_problems("stack", s)]
     malformed += [p for o in observation_list for p in schema_problems(kind_of(o), o)]
+    malformed += [p for ledger in ledger_list for p in capability_schema_problems(ledger)]
+    malformed += external_story_index_problems()
+    malformed += expectation_problems
     if malformed:
         print("The comparison registry does not match its schema:", file=sys.stderr)
         for problem in malformed:
@@ -702,7 +1339,16 @@ def main() -> int:
     values = generated_values()
     today = datetime.date.today()
     problems = check(dimension_list, stack_list, observation_list, values, today)
-    rendered = render(dimension_list, stack_list, observation_list, values)
+    problems.extend(
+        capability_problems(
+            ledger_list,
+            stack_list,
+            today,
+            external_story_urls(),
+            expectations,
+        )
+    )
+    rendered = render(dimension_list, stack_list, observation_list, values, ledger_list)
 
     # Notice, not a result. Printed in both modes and before the verdict, so it is visible on the
     # run that still passes — which is the only run on which it is any use.
@@ -726,7 +1372,8 @@ def main() -> int:
         print(
             f"comparison: {plural(len(stack_list), 'stack')} over"
             f" {plural(len(dimension_list), 'dimension')}, every claim evidenced,"
-            f" none stale{countdown}"
+            f" {plural(sum(len(ledger.get('capabilities', [])) for ledger in ledger_list), 'capability row')}"
+            f" owned, none stale{countdown}"
         )
         return 0
 

@@ -3,13 +3,13 @@ id: X-98
 title: Specify the neutral comparative load profile
 pillar: Build
 status: backlog
-priority: 10
+priority: 12
 design: docs/designs/comparative-load.md
 epic: comparative-load
-areas: [load, testkit, docs, m14]
+areas: [load, testkit, docs, m13, parity-wave-1]
 predicate:
 announcement:
-note: M14 starts after M13 · signalling-only common workload, safe supervisor and stable result schema
+note: late M13 dependency · signalling-only common workload, safe supervisor and stable result schema
 ---
 
 # Specify the neutral comparative load profile
@@ -40,4 +40,5 @@ comparison before implementing or running it.
 
 ## Progress
 
-- Backlog. M14 begins only after X-97 reports no unclassified or open sipx-owned M13 row.
+- Backlog. Begins after the endpoint feature branches settle; P-15 consumes the contract before the
+  M14 comparison run.

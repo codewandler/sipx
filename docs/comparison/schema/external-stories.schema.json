@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Revision-pinned external story identities",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["repository", "source_revision", "stories"],
+  "properties": {
+    "repository": {"type": "string", "format": "uri", "pattern": "^https://"},
+    "source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "stories": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "blob_sha"],
+        "properties": {
+          "path": {"type": "string", "pattern": "^docs/stories/[A-Za-z0-9-]+\\.md$"},
+          "blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+        }
+      }
+    }
+  }
+}

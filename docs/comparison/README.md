@@ -27,7 +27,7 @@ deliberate rather than accidental, and stated here so it reads as a decision.
 
 ## Schema
 
-Three kinds of file, each with a JSON Schema 2020-12 document under
+Four kinds of file, each with a JSON Schema 2020-12 document under
 [`schema/`](schema). **These keys and no others.**
 
 ### `dimensions.json`
@@ -73,6 +73,60 @@ A marker carries `dimension` and `not_evaluated` — a non-empty reason — **an
 marker that also carried a summary would give the row two states at once, which is the ambiguity
 the marker exists to remove.
 
+### `capabilities/<stack-id>.json`
+
+A leaf-level inventory for one pinned subject release. This is deliberately separate from the six
+chooser-facing dimensions: a dimension is a concise answer, while a capability ledger is the finite
+discovery gate that prevents a broad answer such as "SIP dialogs" from hiding one missing method.
+
+The ledger names `subject`, `version_evaluated`, ISO `evaluated_at`, immutable `source_revision`, an
+`expected_capabilities` count ratchet and `capabilities`. Every capability carries a stable
+kebab-case `id`, `category`, reader-facing `title`, `confidence`, `ownership`, `status`, and at least
+one subject-evidence entry of the same shape observations use.
+An implemented sipx row additionally carries `implementation`: one or more existing Rust source
+paths below a workspace crate. Subject evidence proves the compared capability exists; implementation
+evidence proves the parity disposition is not merely asserted.
+
+Ownership and status are paired rather than freely combined:
+
+| Ownership | Allowed status | Meaning |
+|---|---|---|
+| `sipx` | `implemented`, `open` | Endpoint work belongs here; an open row must link an existing story |
+| `sipx-clstr` | `tracked` | Platform work belongs in the cluster repository and must link a story in the pinned external story index |
+| `not-shipped` | `absent` | The pinned subject itself does not ship the advertised or anticipated capability |
+| `not-applicable` | `excluded` | The capability contradicts the selected scope and must carry a rationale |
+
+The checker rejects duplicate leaves, any difference from the separately reviewed exact-ID inventory
+under `capabilities/expected/`, a count that disagrees with that inventory, missing subject or
+implementation evidence, unknown confidence or ownership, invalid
+owner/status pairs, an open sipx row without a real non-done local story, a cluster row whose link is
+not in the revision-pinned external story index, an unreasoned exclusion, a stale ledger, and an
+inventory that omits any required surface category.
+The required categories are core, transactions, transports, endpoint, authentication, dialogs,
+methods, lifecycle, media, examples and operations. They are a completeness floor, not a taxonomy
+applications must copy.
+
+Capability rows use the same visible confidence vocabulary with one narrower interpretation:
+`measured` means the leaf was read in the immutable source revision and every evidence URL uses that
+exact revision as its `blob` or `tree` locator; a revision hidden in a query or fragment is still a
+mutable URL. `documented` relies on the subject's own prose; `assessed` requires a rationale.
+Capability rows cannot claim `generated`, because this repository cannot generate a fact from
+another repository's build.
+
+`capabilities/external/*.json` pins the repository revision, exact story paths and their Git blob
+identities for cluster-owned rows. The checker fetches the pinned commit and resolves each path's
+blob before deriving the only permitted URLs, so a misspelled repository, moving `main` link,
+generic roadmap or invented content identity cannot satisfy the ownership disposition. The blob IDs
+are captured from `git ls-tree` at the declared revision during refresh and verified again on every
+comparison check.
+
+`capabilities/expected/<stack-id>.json` is the separate completeness ratchet. It lists the exact
+capability IDs discovered from the pinned public surface. Removing a row and decrementing the
+ledger's count still fails until this second artifact changes in the same reviewed diff; the checker
+also requires both files to pin the same source revision. The independent `stacks.json` subject row
+sets `capability_inventory: true`; that marker requires both files, and the checker refuses a dataset
+with no marked subject, so deleting the ledger and its ratchet together cannot erase the inventory.
+
 ### The confidence ladder
 
 | Tier | Means | Who may hold it |
@@ -112,6 +166,10 @@ page.
 - a stack and dimension pair with neither a finding nor a `not_evaluated` marker;
 - `stacks.json` marking anything other than exactly one stack `is_self`;
 - `docs/comparison.md` differing from what the script would generate.
+- a capability ledger with duplicate, unowned, unevidenced or stale rows, an invalid confidence or
+  disposition, a count/exact-ID mismatch, mutable evidence behind a measured claim, a missing open
+  story, a cluster story absent from the commit/path/blob index, malformed scalar evidence, or an
+  omitted required surface category.
 
 ### The generated column is never typed
 

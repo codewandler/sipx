@@ -2,7 +2,7 @@
 id: X-97
 title: Track capability parity as generated data
 pillar: Build
-status: ready
+status: in-progress
 priority: 1
 design: docs/designs/stack-comparison.md
 epic: stack-comparison
@@ -38,5 +38,10 @@ that can prove the selected endpoint target is complete and can identify work ow
 
 ## Progress
 
-- Not started. This is the M13 discovery gate; any newly discovered sipx-owned gap joins M13 before
-  the load milestone may start.
+- In progress. The pinned ledger now ratchets 40 leaves against a separately reviewed exact-ID
+  inventory, publishes per-row confidence, requires exact-revision evidence for measured rows,
+  validates the full scalar shape and accepts cluster ownership only through a commit/path/blob
+  index. Independent review split compound overclaims, added the omitted transport-source policy
+  leaf, expanded T-32 and filed S-42/M-53/S-43; X-98 and P-15 moved into late M13 to remove the
+  load-responder dependency cycle. The corrected branch awaits another re-review and the deferred
+  full gate.
