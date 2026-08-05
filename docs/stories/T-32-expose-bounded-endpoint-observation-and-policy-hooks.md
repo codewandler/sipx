@@ -34,7 +34,8 @@ letting callbacks stall the driver or corrupt transaction and authentication inv
 - [ ] A live IP/prefix source-admission set is checked before UDP parsing and before TLS/WebSocket
       handshaking or stream parsing. Replace and clear publish atomically; an accepted connection
       retains the generation that admitted it until close, and refusals are counted without
-      per-source tasks, futures or state.
+      per-source tasks, futures or state. A validated non-zero configured maximum bounds scan work;
+      oversized replacement is typed and preserves the old generation.
 - [ ] Capture and counters remain the zero-custom-code observation path and are not reimplemented by
       the hook.
 - [ ] Saturation, closed-consumer and protected-field mutation tests fail first, then pass; the full

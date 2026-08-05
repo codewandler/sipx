@@ -314,10 +314,11 @@ saturated. After expiry, every response reports explicit control-off state.
 | X35 | Queue saturation followed by an application response for an earlier request | The response still reports active feedback; a generated 100 Trying also carries a selected report |
 | X36 | Observation capacity one, followed by several parsed messages | The driver never waits; one event is retained and every overflow increments `observation_dropped` |
 | X37 | Observation receiver is closed while traffic continues | Traffic and timers continue; closure creates no driver failure |
-| X38 | Request policy returns `Call-ID`, `CSeq`, `Via`, route, authorization or `Content-Length` | Send is refused before transaction creation and no protected field changes |
+| X38 | Request policy returns a protected field directly, as mixed-case/compact `Other`, or appends a duplicate allowed standard field | Send is refused before transaction creation; only the application-field allowlist or a truly unknown extension may be appended |
 | X39 | Refused UDP source sends malformed bytes | `source_refusals` increments and `parse_failures` does not: admission ran before parsing |
-| X40 | Refused source connects to TLS or WebSocket | The socket closes before protocol handshake work and `source_refusals` increments |
+| X40 | Refused source reaches TCP, TLS, WebSocket, secure WebSocket or QUIC | The connection closes before framing or handshake work and that transport's `source_refusals` increments |
 | X41 | Source set changes from A to B while A has a pooled stream | New A connections are refused, B is admitted, and the existing A generation remains usable until close |
+| X42 | Replacement exceeds `source_admission_limit` | Typed capacity refusal; the previous complete generation and its number remain active |
 
 ### 11.1 Live endpoint policy and observation
 
@@ -329,6 +330,9 @@ refusal creates no task, future, per-source map entry or application event; it c
 the transport's `source_refusals`, and logs at debug level.
 
 Replacing or clearing the policy publishes one complete generation under one synchronization point.
+The configured `source_admission_limit` is non-zero and bounds both retained prefixes and the linear
+work of every admission decision. A replacement above it returns a typed capacity error before the
+publication point, leaving the old generation unchanged. The default maximum is 1024 prefixes.
 UDP has no connection and therefore reads the latest generation per datagram. A connection keeps the
 generation that admitted it; replacement governs later accepts and is deliberately not a revocation
 mechanism. That makes rotation atomic without letting policy work race every frame on an established
@@ -343,10 +347,15 @@ receiver is detached. Capture and counter snapshots remain the no-custom-consume
 
 **[sipx] Request policy is structurally narrow.** It receives an immutable request and target in the
 caller's task and returns allow, reject, or a list of headers to append. It cannot receive a mutable
-request. Returned `Call-ID`, `CSeq`, `Via`, route-set, identity/authentication or `Content-Length`
-headers are rejected before a command reaches the endpoint. The transport then adds its branch and
-`Via`, creates the transaction key, and serializes framing. The policy cannot replace target
-resolution and no policy runs after transaction creation.
+request. The standard-header allowlist is `Alert-Info`, `Call-Info`, `Organization`, `Priority`,
+`Subject` and `User-Agent`; an allowed standard field already present is refused rather than appended
+as a duplicate. A genuinely unknown extension field is also allowed. Before classification,
+`HeaderName::Other` is resolved case-insensitively and through SIP compact forms, so `Other("vIa")`
+and `Other("v")` are both protected `Via`. Every other standard field—including `Contact`, body
+metadata such as `Content-Type`, and dialog/event semantics such as `Event`—is refused before a
+command reaches the endpoint. The transport then adds its branch and `Via`, creates the transaction
+key, and serializes framing. The policy cannot replace target resolution and no policy runs after
+transaction creation.
 
 ## 12. Counters
 

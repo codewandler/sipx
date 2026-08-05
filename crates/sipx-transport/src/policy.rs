@@ -70,20 +70,25 @@ struct AdmissionGeneration {
 #[derive(Debug)]
 pub(crate) struct SourceAdmission {
     current: Mutex<AdmissionGeneration>,
+    limit: usize,
 }
 
 impl Default for SourceAdmission {
     fn default() -> Self {
+        Self::new(1024)
+    }
+}
+
+impl SourceAdmission {
+    pub(crate) fn new(limit: usize) -> Self {
         Self {
             current: Mutex::new(AdmissionGeneration {
                 number: 0,
                 prefixes: None,
             }),
+            limit,
         }
     }
-}
-
-impl SourceAdmission {
     /// Admit an address and return the immutable generation that made the decision.
     pub(crate) fn admit(&self, address: IpAddr) -> Option<u64> {
         let current = self
@@ -97,8 +102,14 @@ impl SourceAdmission {
         allowed.then_some(current.number)
     }
 
-    pub(crate) fn replace(&self, prefixes: Vec<SourcePrefix>) -> u64 {
-        self.publish(Some(prefixes.into()))
+    pub(crate) fn replace(&self, prefixes: Vec<SourcePrefix>) -> crate::Result<u64> {
+        if prefixes.len() > self.limit {
+            return Err(crate::Error::SourceAdmissionCapacity {
+                max: self.limit,
+                attempted: prefixes.len(),
+            });
+        }
+        Ok(self.publish(Some(prefixes.into())))
     }
 
     pub(crate) fn clear(&self) -> u64 {
@@ -300,30 +311,25 @@ pub(crate) fn connection_event(
     })
 }
 
-/// Return whether a policy-produced header belongs exclusively to the stack.
-pub(crate) fn protected_header(name: &sipx_sip::HeaderName) -> bool {
+/// Resolve deliberate `Other` construction before deciding whether policy may append the field.
+pub(crate) fn policy_header(name: &sipx_sip::HeaderName) -> (sipx_sip::HeaderName, bool) {
     use sipx_sip::HeaderName;
-    matches!(
-        name,
-        HeaderName::Authorization
-            | HeaderName::AuthenticationInfo
-            | HeaderName::CallId
-            | HeaderName::ContentLength
-            | HeaderName::CSeq
-            | HeaderName::From
-            | HeaderName::Identity
-            | HeaderName::IdentityInfo
-            | HeaderName::MaxForwards
-            | HeaderName::Path
-            | HeaderName::ProxyAuthenticate
-            | HeaderName::ProxyAuthorization
-            | HeaderName::RecordRoute
-            | HeaderName::Route
-            | HeaderName::ServiceRoute
-            | HeaderName::To
-            | HeaderName::Via
-            | HeaderName::WwwAuthenticate
-    )
+    let semantic = HeaderName::parse(&bytes::Bytes::copy_from_slice(name.canonical()));
+    let allowed = matches!(
+        semantic,
+        HeaderName::AlertInfo
+            | HeaderName::CallInfo
+            | HeaderName::Organization
+            | HeaderName::Priority
+            | HeaderName::Subject
+            | HeaderName::UserAgent
+            | HeaderName::Other(_)
+    );
+    (semantic, allowed)
+}
+
+pub(crate) fn duplicate_policy_header(request: &Request, semantic: &sipx_sip::HeaderName) -> bool {
+    !matches!(semantic, sipx_sip::HeaderName::Other(_)) && request.headers.get(semantic).is_some()
 }
 
 #[cfg(test)]
@@ -335,6 +341,8 @@ pub(crate) fn protected_header(name: &sipx_sip::HeaderName) -> bool {
 )]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use sipx_sip::HeaderName;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -349,7 +357,9 @@ mod tests {
     fn replacement_publishes_complete_generations() {
         let admission = SourceAdmission::default();
         assert_eq!(admission.admit(IpAddr::V4(Ipv4Addr::LOCALHOST)), Some(0));
-        let one = admission.replace(vec![SourcePrefix::address(IpAddr::V4(Ipv4Addr::LOCALHOST))]);
+        let one = admission
+            .replace(vec![SourcePrefix::address(IpAddr::V4(Ipv4Addr::LOCALHOST))])
+            .unwrap();
         assert_eq!(admission.admit(IpAddr::V4(Ipv4Addr::LOCALHOST)), Some(one));
         assert_eq!(admission.admit(IpAddr::V4(Ipv4Addr::UNSPECIFIED)), None);
         let two = admission.clear();
@@ -358,5 +368,49 @@ mod tests {
             admission.admit(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
             Some(two)
         );
+    }
+
+    #[test]
+    fn oversized_replacement_preserves_the_old_generation() {
+        let admission = SourceAdmission::new(1);
+        let first = admission
+            .replace(vec![SourcePrefix::address(IpAddr::V4(Ipv4Addr::LOCALHOST))])
+            .unwrap();
+        let error = admission
+            .replace(vec![
+                SourcePrefix::address(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                SourcePrefix::address(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            ])
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::Error::SourceAdmissionCapacity { .. }
+        ));
+        assert_eq!(
+            admission.admit(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            Some(first)
+        );
+        assert_eq!(admission.admit(IpAddr::V4(Ipv4Addr::UNSPECIFIED)), None);
+    }
+
+    #[test]
+    fn request_policy_allows_only_application_fields_and_unknown_extensions() {
+        for name in [HeaderName::Subject, HeaderName::Organization] {
+            assert!(policy_header(&name).1);
+        }
+        assert!(policy_header(&HeaderName::Other(Bytes::from_static(b"X-Trace"))).1);
+        for name in [
+            HeaderName::Contact,
+            HeaderName::ContentType,
+            HeaderName::Event,
+        ] {
+            assert!(!policy_header(&name).1);
+        }
+        for raw in [b"vIa".as_slice(), b"v".as_slice()] {
+            let (semantic, allowed) =
+                policy_header(&HeaderName::Other(Bytes::copy_from_slice(raw)));
+            assert_eq!(semantic, HeaderName::Via);
+            assert!(!allowed);
+        }
     }
 }

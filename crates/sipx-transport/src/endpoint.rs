@@ -30,7 +30,7 @@ use crate::overload::{Controller as OverloadController, OverloadConfig};
 use crate::policy::{
     ConnectionState, EndpointObservation, MessageDirection, MessageObservation, ObservationHub,
     RequestPolicyDecision, RequestPolicyRef, SourceAdmission, SourcePrefix, TransactionClass,
-    connection_event, protected_header,
+    connection_event, duplicate_policy_header, policy_header,
 };
 use crate::target::{ConnectionKey, Target, TransportKind, response_destination};
 use crate::tcp::{self, Pool, PoolConfig};
@@ -125,6 +125,10 @@ pub struct Config {
     pub overload: OverloadConfig,
     /// Optional immutable pre-transaction request policy.
     pub request_policy: Option<RequestPolicyRef>,
+    /// Maximum number of IP/CIDR entries in one live source-admission generation.
+    ///
+    /// Every admission check is a linear scan, so this is a work bound as well as a memory bound.
+    pub source_admission_limit: usize,
 }
 
 impl Config {
@@ -161,6 +165,7 @@ impl Config {
             capture: None,
             overload: OverloadConfig::default(),
             request_policy: None,
+            source_admission_limit: 1024,
             #[cfg(feature = "ws")]
             ws_keepalive: std::time::Duration::from_secs(25),
             unanswered_limit: std::time::Duration::from_secs(180),
@@ -184,6 +189,9 @@ impl Config {
         }
         if self.handshake_timeout.is_zero() {
             return Err(nonzero("handshake_timeout"));
+        }
+        if self.source_admission_limit == 0 {
+            return Err(nonzero("source_admission_limit"));
         }
         if self.overload.validity.is_zero() {
             return Err(nonzero("overload.validity"));
@@ -543,7 +551,12 @@ impl Handle {
     /// Replace the complete live source-admission set and return its generation.
     ///
     /// An empty set refuses every new source. Use [`Self::clear_source_admission`] to allow all.
-    pub fn replace_source_admission(&self, prefixes: Vec<SourcePrefix>) -> u64 {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::SourceAdmissionCapacity`] without changing the active generation when
+    /// `prefixes` exceeds [`Config::source_admission_limit`].
+    pub fn replace_source_admission(&self, prefixes: Vec<SourcePrefix>) -> Result<u64> {
         self.admission.replace(prefixes)
     }
 
@@ -570,9 +583,10 @@ impl Handle {
             RequestPolicyDecision::Reject(reason) => Err(Error::PolicyRejected { reason }),
             RequestPolicyDecision::AddHeaders(headers) => {
                 for header in headers {
-                    if protected_header(header.name()) {
+                    let (semantic, allowed) = policy_header(header.name());
+                    if !allowed || duplicate_policy_header(request, &semantic) {
                         return Err(Error::ProtectedPolicyHeader {
-                            name: String::from_utf8_lossy(header.name().canonical()).into_owned(),
+                            name: String::from_utf8_lossy(semantic.canonical()).into_owned(),
                         });
                     }
                     request.headers.push(header);
@@ -983,7 +997,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     let (socket, listener, local_addr) = bind_matching_ports(&config).await?;
     let background = Background::new();
     let meters = Arc::new(Meters::default());
-    let admission = Arc::new(SourceAdmission::default());
+    let admission = Arc::new(SourceAdmission::new(config.source_admission_limit));
     let observations = Arc::new(ObservationHub::new(Arc::clone(&meters)));
     #[cfg(any(feature = "tls", feature = "ws"))]
     let handshakes = HandshakeRuntime {

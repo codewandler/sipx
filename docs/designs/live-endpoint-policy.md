@@ -23,13 +23,16 @@ with. File watching, signals and secret-store clients remain host concerns.
   connection lifecycle, with loss counted. Observation never runs application code on the driver.
 - A pre-transaction request policy receives an immutable request and may approve, reject or return
   application-owned headers. It runs in the calling task, before the transport adds its branch and
-  `Via`; the returned shape cannot rewrite identity, routing, authentication or framing fields.
-- A live source-admission generation is read before UDP parsing and before an accepted stream enters
-  TLS/WebSocket handshaking or SIP framing. Replacement and clear publish one complete generation.
+  `Via`; a narrow standard-header allowlist and truly unknown extensions are accepted only after
+  canonicalizing names, so the returned shape cannot rewrite protocol semantics or framing.
+- A live, configured-size-bounded source-admission generation is read before UDP parsing and before
+  an accepted stream enters TLS/WebSocket handshaking or SIP framing. Replacement and clear publish
+  one complete generation.
   Connections admitted by an older generation remain admitted until they close; policy rotation is
   not retroactive connection revocation.
 
-Source admission is an address/prefix set, not a callback. That keeps the receive path bounded and
+Source admission is a non-zero-limit address/prefix set, not a callback. Oversized replacement is a
+typed refusal that preserves the current generation. That keeps the receive path bounded and
 prevents a hostile population from creating per-source tasks, futures or map entries. Refusal counts
 are shared atomics, like the existing endpoint counters. There is no arbitrary post-key mutator, no
 second target resolver and no observer callback on the endpoint loop.

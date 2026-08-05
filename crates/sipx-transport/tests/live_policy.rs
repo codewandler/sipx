@@ -57,9 +57,11 @@ async fn a_refused_udp_source_never_reaches_the_parser() {
     let (server, _incoming) = bind(Config::new("127.0.0.1:0".parse().expect("address")))
         .await
         .expect("binds");
-    server.replace_source_admission(vec![SourcePrefix::address(
-        "192.0.2.1".parse().expect("address"),
-    )]);
+    server
+        .replace_source_admission(vec![SourcePrefix::address(
+            "192.0.2.1".parse().expect("address"),
+        )])
+        .expect("policy fits configured bound");
 
     let sender = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
@@ -87,9 +89,11 @@ async fn a_refused_connection_closes_before_stream_parsing() {
     let (server, _incoming) = bind(Config::new("127.0.0.1:0".parse().expect("address")))
         .await
         .expect("binds");
-    server.replace_source_admission(vec![SourcePrefix::address(
-        "192.0.2.1".parse().expect("address"),
-    )]);
+    server
+        .replace_source_admission(vec![SourcePrefix::address(
+            "192.0.2.1".parse().expect("address"),
+        )])
+        .expect("policy fits configured bound");
 
     let mut stream = tokio::net::TcpStream::connect(server.local_addr())
         .await
@@ -122,9 +126,11 @@ async fn a_refused_tls_source_closes_before_handshake() {
     let mut config = Config::new("127.0.0.1:0".parse().expect("address"));
     config.tls_server = Some((ServerTls::new(identity).expect("server TLS"), 0));
     let (server, _incoming) = bind(config).await.expect("binds");
-    server.replace_source_admission(vec![SourcePrefix::address(
-        "192.0.2.1".parse().expect("address"),
-    )]);
+    server
+        .replace_source_admission(vec![SourcePrefix::address(
+            "192.0.2.1".parse().expect("address"),
+        )])
+        .expect("policy fits configured bound");
 
     let mut stream = tokio::net::TcpStream::connect(server.tls_addr().expect("TLS listener"))
         .await
@@ -146,6 +152,167 @@ async fn a_refused_tls_source_closes_before_handshake() {
     );
 }
 
+#[cfg(feature = "ws")]
+#[tokio::test]
+async fn a_refused_websocket_source_closes_before_http_upgrade() {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("address"));
+    config.ws_server = Some(0);
+    let (server, _incoming) = bind(config).await.expect("binds");
+    server
+        .replace_source_admission(vec![SourcePrefix::address(
+            "192.0.2.1".parse().expect("address"),
+        )])
+        .expect("policy fits configured bound");
+
+    assert_refused_stream(
+        &server,
+        server.ws_addr().expect("WS listener"),
+        TransportKind::Ws,
+    )
+    .await;
+}
+
+#[cfg(feature = "wss")]
+#[tokio::test]
+async fn a_refused_secure_websocket_source_closes_before_tls() {
+    use sipx_testkit::certs::Ca;
+    use sipx_transport::tls::{Identity, ServerTls};
+
+    let ca = Ca::new();
+    let (certificate, key) = ca.issue_for("localhost");
+    let identity = Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("identity");
+    let mut config = Config::new("127.0.0.1:0".parse().expect("address"));
+    config.wss_server = Some((ServerTls::new(identity).expect("server TLS"), 0));
+    let (server, _incoming) = bind(config).await.expect("binds");
+    server
+        .replace_source_admission(vec![SourcePrefix::address(
+            "192.0.2.1".parse().expect("address"),
+        )])
+        .expect("policy fits configured bound");
+
+    assert_refused_stream(
+        &server,
+        server.wss_addr().expect("WSS listener"),
+        TransportKind::Wss,
+    )
+    .await;
+}
+
+async fn assert_refused_stream(
+    server: &Handle,
+    address: std::net::SocketAddr,
+    kind: TransportKind,
+) {
+    let mut stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("TCP accept occurs below source policy");
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        tokio::time::timeout(EVENT_BOUND, stream.read(&mut byte))
+            .await
+            .expect("refusal is bounded")
+            .expect("read reports EOF"),
+        0
+    );
+    assert_eq!(server.counters().transport(kind).source_refusals, 1);
+}
+
+#[cfg(feature = "quic")]
+#[tokio::test]
+async fn a_refused_quic_source_closes_before_handshake() {
+    use rustls_pki_types::CertificateDer;
+    use rustls_pki_types::pem::PemObject as _;
+    use sipx_testkit::certs::{Ca, dns};
+    use sipx_transport::tls::{Identity, ServerTls};
+
+    let ca = Ca::new();
+    let (certificate, key) = ca.issue(&[dns("localhost")], "localhost");
+    let identity = Identity::from_pem(certificate.as_bytes(), key.as_bytes()).expect("identity");
+    let mut config = Config::new("127.0.0.1:0".parse().expect("address"));
+    config.quic_server = Some((ServerTls::new(identity).expect("server TLS"), 0));
+    let (server, _incoming) = bind(config).await.expect("binds");
+    server
+        .replace_source_admission(vec![SourcePrefix::address(
+            "192.0.2.1".parse().expect("address"),
+        )])
+        .expect("policy fits configured bound");
+
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    for certificate in CertificateDer::pem_slice_iter(ca.pem().as_bytes()) {
+        roots.add(certificate.expect("certificate")).expect("root");
+    }
+    let mut tls = tokio_rustls::rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![b"sip/2".to_vec()];
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC TLS");
+    let mut endpoint =
+        quinn::Endpoint::client("127.0.0.1:0".parse().expect("address")).expect("client");
+    endpoint.set_default_client_config(quinn::ClientConfig::new(std::sync::Arc::new(crypto)));
+    let connecting = endpoint
+        .connect(server.quic_addr().expect("QUIC listener"), "localhost")
+        .expect("connect starts");
+    let result = tokio::time::timeout(EVENT_BOUND, connecting)
+        .await
+        .expect("refusal is bounded");
+    assert!(result.is_err(), "refused QUIC handshake succeeded");
+    assert_eq!(
+        server
+            .counters()
+            .transport(TransportKind::Quic)
+            .source_refusals,
+        1
+    );
+}
+
+#[tokio::test]
+async fn oversized_source_replacement_refuses_without_publishing() {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("address"));
+    config.source_admission_limit = 1;
+    let (server, mut incoming) = bind(config).await.expect("binds");
+    let generation = server
+        .replace_source_admission(vec![SourcePrefix::address(IpAddr::V4(Ipv4Addr::LOCALHOST))])
+        .expect("first generation");
+    let error = server
+        .replace_source_admission(vec![
+            SourcePrefix::address("192.0.2.1".parse().expect("address")),
+            SourcePrefix::address("198.51.100.1".parse().expect("address")),
+        ])
+        .expect_err("oversized replacement");
+    assert!(matches!(
+        error,
+        sipx_transport::Error::SourceAdmissionCapacity {
+            max: 1,
+            attempted: 2
+        }
+    ));
+
+    let (sender, _sender_incoming) = bind(Config::new("127.0.0.1:0".parse().expect("address")))
+        .await
+        .expect("sender binds");
+    send_direct(&sender, server.local_addr(), "old-generation@example.net").await;
+    let request = incoming
+        .recv()
+        .await
+        .expect("old allow generation remains live");
+    assert_eq!(request.transport, TransportKind::Udp);
+    assert_eq!(generation, 1);
+}
+
+#[tokio::test]
+async fn source_admission_bound_must_be_nonzero() {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("address"));
+    config.source_admission_limit = 0;
+    let error = bind(config).await.expect_err("zero work bound");
+    assert!(matches!(
+        error,
+        sipx_transport::Error::InvalidConfig {
+            field: "source_admission_limit",
+            ..
+        }
+    ));
+}
+
 /// X41: replacement governs later accepts, not frames on a connection already admitted.
 #[tokio::test]
 async fn an_existing_connection_retains_its_admission_generation() {
@@ -153,7 +320,8 @@ async fn an_existing_connection_retains_its_admission_generation() {
         .await
         .expect("server binds");
     let first_generation = server
-        .replace_source_admission(vec![SourcePrefix::address(IpAddr::V4(Ipv4Addr::LOCALHOST))]);
+        .replace_source_admission(vec![SourcePrefix::address(IpAddr::V4(Ipv4Addr::LOCALHOST))])
+        .expect("policy fits configured bound");
     let (client, _client_incoming) = bind(Config::new("127.0.0.1:0".parse().expect("address")))
         .await
         .expect("client binds");
@@ -170,9 +338,11 @@ async fn an_existing_connection_retains_its_admission_generation() {
         .expect("first response");
     first.final_response().await.expect("first final response");
 
-    let second_generation = server.replace_source_admission(vec![SourcePrefix::address(
-        "192.0.2.1".parse().expect("address"),
-    )]);
+    let second_generation = server
+        .replace_source_admission(vec![SourcePrefix::address(
+            "192.0.2.1".parse().expect("address"),
+        )])
+        .expect("policy fits configured bound");
     assert!(second_generation > first_generation);
 
     let mut second = client
@@ -233,6 +403,17 @@ impl RequestPolicy for SubjectPolicy {
     }
 }
 
+#[derive(Clone)]
+struct OneHeaderPolicy(HeaderName);
+
+impl RequestPolicy for OneHeaderPolicy {
+    fn decide(&self, _request: &sipx_sip::Request, _target: &Target) -> RequestPolicyDecision {
+        RequestPolicyDecision::AddHeaders(vec![
+            Header::build(self.0.clone(), Bytes::from_static(b"policy-value")).expect("header"),
+        ])
+    }
+}
+
 /// X38: policy gets no mutable message and stack-owned fields cannot return through its only output.
 #[tokio::test]
 async fn protected_policy_headers_are_refused_before_transaction_creation() {
@@ -250,6 +431,54 @@ async fn protected_policy_headers_are_refused_before_transaction_creation() {
         matches!(error, sipx_transport::Error::ProtectedPolicyHeader { .. }),
         "{error:?}"
     );
+    assert_eq!(sender.outstanding().await.expect("driver live"), 0);
+}
+
+#[tokio::test]
+async fn policy_cannot_disguise_standard_or_protocol_semantic_headers() {
+    let refused = [
+        HeaderName::Other(Bytes::from_static(b"vIa")),
+        HeaderName::Other(Bytes::from_static(b"v")),
+        HeaderName::Contact,
+        HeaderName::ContentType,
+        HeaderName::Event,
+    ];
+    for name in refused {
+        let mut config = Config::new("127.0.0.1:0".parse().expect("address"));
+        config.request_policy = Some(RequestPolicyRef::new(OneHeaderPolicy(name.clone())));
+        let (sender, _incoming) = bind(config).await.expect("binds");
+        let error = sender
+            .send(
+                options("protected-spelling@example.net"),
+                Target::udp("127.0.0.1:9".parse().expect("target")),
+            )
+            .await
+            .expect_err("policy field must be refused");
+        assert!(
+            matches!(error, sipx_transport::Error::ProtectedPolicyHeader { .. }),
+            "{name:?}: {error:?}"
+        );
+        assert_eq!(sender.outstanding().await.expect("driver live"), 0);
+    }
+}
+
+#[tokio::test]
+async fn policy_cannot_append_a_duplicate_allowed_standard_header() {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("address"));
+    config.request_policy = Some(RequestPolicyRef::new(SubjectPolicy));
+    let (sender, _incoming) = bind(config).await.expect("binds");
+    let mut request = options("duplicate-subject@example.net");
+    request.headers.push(
+        Header::build(HeaderName::Subject, Bytes::from_static(b"original")).expect("subject"),
+    );
+    let error = sender
+        .send(request, Target::udp("127.0.0.1:9".parse().expect("target")))
+        .await
+        .expect_err("a second single-value field must be refused");
+    assert!(matches!(
+        error,
+        sipx_transport::Error::ProtectedPolicyHeader { .. }
+    ));
     assert_eq!(sender.outstanding().await.expect("driver live"), 0);
 }
 
