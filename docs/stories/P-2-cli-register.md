@@ -4,7 +4,7 @@ title: Implement `sipx register`
 pillar: Phone
 status: done
 priority: 2
-design: docs/designs/cli.md
+design: docs/designs/phone.md
 epic: cli
 areas: [sipx-cli]
 note:
