@@ -1,6 +1,6 @@
 [package]
 name = "sipx-testkit"
-description = "Test harnesses for sipx: loopback transports, RFC 4475 torture corpus, interop fixtures"
+description = "Deterministic SIP call tests with virtual time, seeded in-process links, and RFC corpora"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,6 @@ repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
-publish = false
 
 [dependencies]
 sipx-sip.workspace = true
@@ -20,14 +19,13 @@ sipx-transport.workspace = true
 rcgen.workspace = true
 bytes.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
-tokio-util.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 # `test-util` gives the paused clock the pacing test needs: it asserts on *when* calls start,
 # which would otherwise mean sleeping for real.
 tokio = { workspace = true, features = ["full", "test-util"] }
+tracing.workspace = true
 
 [lints]
 workspace = true

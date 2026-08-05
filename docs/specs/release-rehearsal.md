@@ -132,7 +132,8 @@ Every workspace member must have the workspace version. Every public-to-workspac
 Any Git dependency in a public package is refused. A path dependency outside the workspace, a path
 dependency without a registry version, or a normal dependency on an unpublished workspace package is
 also refused: Cargo could otherwise build locally and produce a package no registry consumer can
-resolve. `sipx-testkit` stays outside the public graph.
+resolve. The supported downstream call harness makes `sipx-testkit` part of the public graph; its
+development-only uses by other workspace crates do not create publication-order edges.
 
 ## 3. Package metadata and bytes
 

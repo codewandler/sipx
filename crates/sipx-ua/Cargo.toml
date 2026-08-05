@@ -33,7 +33,7 @@ subtle.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"], optional = true }
 
 [dev-dependencies]
-# Path-only so Cargo omits unpublished test support from the normalized registry manifest.
+# Path-only so Cargo omits workspace-only fixture support from the normalized registry manifest.
 sipx-testkit = { path = "../sipx-testkit" }
 sipx-transport.workspace = true
 tokio = { workspace = true, features = ["full"] }

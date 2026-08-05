@@ -415,8 +415,8 @@ def inspect_contents(
 
     # Workspace packaging makes Cargo stage its own temporary registry in dependency order. That
     # proves a dependent archive without requiring this prerelease version to exist on crates.io.
-    # The unpublished testkit is excluded, and path-only dev dependencies disappear during Cargo's
-    # normalization before any public archive is written.
+    # Path-only workspace fixture dependencies disappear during Cargo's normalization before any
+    # public archive is written, so package consumers do not inherit the repository's test graph.
     with tempfile.TemporaryDirectory(prefix="sipx-package-workspace-") as directory:
         target = pathlib.Path(directory)
         command = [

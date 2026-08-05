@@ -86,7 +86,7 @@ class GeneratedFactsTests(unittest.TestCase):
         rendered = SYNC.render_generated("crate-map", None)
         self.assertIn("| `sipx-call` | Call framework:", rendered)
         self.assertIn("| `sipx-cli` | sipx — a command line SIP softphone |", rendered)
-        self.assertNotIn("`sipx-testkit`", rendered)
+        self.assertIn("| `sipx-testkit` | Deterministic SIP call tests", rendered)
 
     def test_public_compliance_contains_every_rfc_without_internal_tracking(self) -> None:
         rendered = SYNC.render_generated("compliance", None)

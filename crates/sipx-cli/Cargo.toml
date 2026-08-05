@@ -41,7 +41,7 @@ cpal = { workspace = true, optional = true }
 
 [dev-dependencies]
 sipx-audio.workspace = true
-# Path-only so Cargo omits unpublished test support from the normalized registry manifest.
+# Path-only so Cargo omits workspace-only fixture support from the normalized registry manifest.
 sipx-testkit = { path = "../sipx-testkit" }
 tokio = { workspace = true, features = ["full"] }
 

@@ -195,7 +195,7 @@ class ThePublicPackageGraph(unittest.TestCase):
 
 
 class TheManifestBoundary(unittest.TestCase):
-    def test_real_public_manifests_keep_unpublished_testkit_path_only(self) -> None:
+    def test_real_public_manifests_keep_workspace_testkit_path_only(self) -> None:
         for manifest_path in sorted((ROOT / "crates").glob("*/Cargo.toml")):
             manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
             if manifest["package"].get("publish", True) is False:
