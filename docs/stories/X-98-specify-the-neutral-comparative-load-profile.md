@@ -47,5 +47,8 @@ comparison before implementing or running it.
 - Review hardening makes group disappearance independent of pipe EOF, forces cleanup after an
   orderly-stop callback fails, bounds unterminated readiness retention, rejects contradictory time
   and response totals, and covers oversized readiness plus an escaped pipe holder.
+- Re-review hardening bounds even a blocking orderly-stop callback before group escalation, makes
+  the manifest's `none`/`trying_100` provisional policy executable, and ties exact 200/non-2xx
+  response totals to established, completed, rejected and admission-refused dialogs.
 - The full gate is intentionally deferred until the reviewed M13 branches reach integration, so the
   final Acceptance item and story status remain open. The actual comparative measurement is M14.

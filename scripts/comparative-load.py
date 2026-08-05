@@ -46,6 +46,7 @@ MAX_EVENT_BYTES = 64 * 1024 * 1024
 HEX_32 = frozenset("0123456789abcdef")
 ROLES = frozenset(("driver", "responder"))
 STATUSES = frozenset(("passed", "failed", "environment_failed"))
+PROVISIONAL_POLICIES = frozenset(("none", "trying_100"))
 TERMINAL_ERRORS = (
     "rejected",
     "transaction_timeout",
@@ -261,6 +262,7 @@ def validate_manifest(value: object) -> Mapping[str, object]:
             "builds",
             "machine",
             "ceiling",
+            "provisional_policy",
             "limits",
             "phases",
             "ladder",
@@ -334,6 +336,15 @@ def validate_manifest(value: object) -> Mapping[str, object]:
         _fail("manifest.ceiling", "must produce six distinct rounded-up ladder rates")
     if rates[0] * (MEASUREMENT_MS // 1_000) < 1_000:
         _fail("manifest.ceiling", "lowest ladder rate must offer at least 1,000 measured dialogs")
+
+    provisional_policy = _text(
+        manifest["provisional_policy"], "manifest.provisional_policy"
+    )
+    if provisional_policy not in PROVISIONAL_POLICIES:
+        _fail(
+            "manifest.provisional_policy",
+            f"must be one of {sorted(PROVISIONAL_POLICIES)}",
+        )
 
     limits = _closed(
         manifest["limits"],
@@ -520,6 +531,7 @@ def validate_result(value: object, manifest_value: object) -> Mapping[str, objec
             "t1_ms",
             "t2_ms",
             "t4_ms",
+            "provisional_policy",
             "maximum_active",
             "events",
             "event_bytes",
@@ -533,6 +545,7 @@ def validate_result(value: object, manifest_value: object) -> Mapping[str, objec
         "t1_ms": 500,
         "t2_ms": 4_000,
         "t4_ms": 5_000,
+        "provisional_policy": manifest["provisional_policy"],
         "maximum_active": manifest["limits"]["active"],
         "events": manifest["limits"]["events"],
         "event_bytes": manifest["limits"]["event_bytes"],
@@ -573,12 +586,48 @@ def validate_result(value: object, manifest_value: object) -> Mapping[str, objec
     terminal = counts["completed"] + sum(errors[name] for name in TERMINAL_ERRORS)
     if terminal != counts["offered"]:
         _fail("result", "completed plus terminal error classes must equal offered")
-    successful_finals = responses["final"].get("200", 0)
+    offered = int(counts["offered"])
+    trying = int(responses["provisional"].get("100", 0))
+    other_provisionals = sum(
+        int(amount) for code, amount in responses["provisional"].items() if code != "100"
+    )
+    if other_provisionals != 0:
+        _fail(
+            "result.responses.provisional",
+            "the fixed profile admits only the configured 100 Trying response",
+        )
+    if manifest["provisional_policy"] == "none" and trying != 0:
+        _fail("result.responses.provisional.100", "must be zero under policy none")
+    if trying > offered:
+        _fail("result.responses.provisional.100", "cannot exceed offered dialogs")
+    if status == "passed" and manifest["provisional_policy"] == "trying_100" and trying != offered:
+        _fail(
+            "result.responses.provisional.100",
+            "must equal offered dialogs for a passed trying_100 run",
+        )
+
+    successful_finals = int(responses["final"].get("200", 0))
     required_successful_finals = counts["established"] + counts["completed"]
-    if successful_finals < required_successful_finals:
+    if successful_finals != required_successful_finals:
         _fail(
             "result.responses.final.200",
-            "must cover each established INVITE and completed BYE",
+            "must equal established INVITEs plus completed BYEs",
+        )
+    other_successful_finals = sum(
+        int(amount)
+        for code, amount in responses["final"].items()
+        if 200 <= int(code) < 300 and code != "200"
+    )
+    if other_successful_finals != 0:
+        _fail("result.responses.final", "the fixed successful response is exactly 200")
+    non_successful_finals = sum(
+        int(amount) for code, amount in responses["final"].items() if int(code) >= 300
+    )
+    required_rejections = errors["rejected"] + errors["admission_refused"]
+    if non_successful_finals != required_rejections:
+        _fail(
+            "result.responses.final",
+            "non-2xx finals must equal rejected plus admission-refused dialogs",
         )
 
     latency = _closed(result["latency_ms"], "result.latency_ms", set(), {"setup", "teardown"})
@@ -884,12 +933,31 @@ class SupervisedProcess:
         self._closed = True
         graceful_error: BaseException | None = None
         if graceful is not None:
-            try:
-                graceful()
-            except BaseException as error:
+            completed = threading.Event()
+            errors: list[BaseException] = []
+
+            def request_orderly_stop() -> None:
+                try:
+                    graceful()
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    completed.set()
+
+            callback = threading.Thread(
+                target=request_orderly_stop,
+                name=f"comparative-load-graceful-{self.process.pid}",
+                daemon=True,
+            )
+            callback.start()
+            if not completed.wait(timeout_seconds):
+                graceful_error = ContractError(
+                    f"orderly-stop callback exceeded its {timeout_seconds:g}s failure bound"
+                )
+            elif errors:
                 # An orderly-stop failure is evidence, never permission to abandon the process
                 # group. Preserve it for the caller after forced cleanup has completed.
-                graceful_error = error
+                graceful_error = errors[0]
         escalation = "none"
         group_exited = self._wait_for_group_exit(timeout_seconds)
         if not group_exited:

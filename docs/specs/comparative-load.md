@@ -36,6 +36,7 @@ Before a process starts, the run manifest MUST fix:
 | command | argument vector, working directory and non-secret environment key names |
 | machine | OS, architecture, logical CPUs, memory bytes and clock source |
 | ceiling | positive integer calls/second used to derive the six fixed rates |
+| `provisional_policy` | exactly `none` or `trying_100`; fixed for the whole execution |
 | limits | positive maximum active dialogs and descriptor/task/log/event bounds |
 
 Credentials are not part of this profile. Commands, identifiers, pins and evidence for a particular
@@ -84,8 +85,9 @@ Content-Length: 0\r\n
 \r\n
 ```
 
-The responder MAY send exactly one `100 Trying`. The run manifest fixes this to on or off before
-startup. The successful final response is:
+The responder MAY send exactly one `100 Trying` per offered INVITE. The run manifest fixes this
+before startup: `provisional_policy: trying_100` requires it and `provisional_policy: none` forbids
+it. The successful final response is:
 
 ```text
 SIP/2.0 200 OK\r\n
@@ -227,7 +229,8 @@ The supervisor starts every external command directly, never through a shell, in
 group. It owns that group until every descendant exits. Its outer runner installs `EXIT`, `INT` and
 `TERM` cleanup before the first child starts. Cleanup performs these observable steps:
 
-1. stop admission and request orderly endpoint shutdown;
+1. stop admission and request orderly endpoint shutdown, bounding the orderly-stop callback itself
+   by 5 seconds; a callback failure or timeout is retained as evidence but cannot prevent escalation;
 2. wait for endpoint zero-state and process exit for at most 5 seconds;
 3. send `TERM` to the whole process group, never only the leader;
 4. wait at most 5 seconds for group exit and inherited output pipes to close;
@@ -257,9 +260,14 @@ Required result members are:
   monotonic elapsed milliseconds, and phase durations;
 - `build`: endpoint ID, role, immutable revision, artifact SHA-256 and command-argument SHA-256;
 - `machine`: OS, architecture, logical CPUs, memory bytes and monotonic clock name;
-- `profile`: transport, T1/T2/T4 milliseconds, maximum active, log/event limits and contract hash;
+- `profile`: transport, T1/T2/T4 milliseconds, provisional policy, maximum active, log/event limits
+  and contract hash;
 - `counts`: offered, established, completed, active high-water and retransmitted requests/responses;
-- `responses`: maps decimal provisional and final status codes to measured counts;
+- `responses`: maps decimal provisional and final status codes to first validated transaction
+  responses; retransmissions appear only in the separate response-retransmission count. A valid
+  final non-2xx is counted exactly once as `rejected`, or as `admission_refused` when it enforces the
+  configured active-dialog limit. Consequently, final `200` equals established plus completed,
+  and all non-2xx final counts sum to rejected plus admission-refused dialogs;
 - `errors`: every failure class from §3.4 plus `evidence_overflow` and `process_crash`, including
   explicit zeroes so an absent class cannot be mistaken for an omitted measurement;
 - `latency_ms`: setup and teardown each carry count, p50, p95, p99 and maximum, or are absent when

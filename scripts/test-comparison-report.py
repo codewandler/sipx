@@ -118,6 +118,7 @@ def a_load_manifest():
             "clock": "monotonic",
         },
         "ceiling": 1024,
+        "provisional_policy": "trying_100",
         "limits": {
             "active": 2048,
             "events": load_contract.MAX_EVENTS,
@@ -176,6 +177,7 @@ def a_load_result(manifest=None):
             "t1_ms": 500,
             "t2_ms": 4000,
             "t4_ms": 5000,
+            "provisional_policy": manifest["provisional_policy"],
             "maximum_active": manifest["limits"]["active"],
             "events": manifest["limits"]["events"],
             "event_bytes": manifest["limits"]["event_bytes"],
@@ -838,6 +840,21 @@ class TheComparativeLoadContract(unittest.TestCase):
         del changed["phases"]["readiness_ms"]
         self.assert_manifest_refused(changed)
 
+    def test_the_manifest_fixes_one_closed_provisional_response_policy(self) -> None:
+        manifest = a_load_manifest()
+        for invalid in (None, True, "sometimes", "180_ringing"):
+            changed = self.changed(manifest)
+            changed["provisional_policy"] = invalid
+            self.assert_manifest_refused(changed)
+
+        changed = self.changed(manifest)
+        changed["provisional_policy"] = "none"
+        load_contract.validate_manifest(changed)
+
+        missing = self.changed(manifest)
+        del missing["provisional_policy"]
+        self.assert_manifest_refused(missing)
+
     def test_incomplete_identity_machine_and_hash_metadata_are_rejected(self) -> None:
         manifest = a_load_manifest()
         changed = self.changed(manifest)
@@ -873,6 +890,41 @@ class TheComparativeLoadContract(unittest.TestCase):
         changed = self.changed(result)
         changed["responses"] = {"provisional": {}, "final": {}}
         self.assert_result_refused(changed, manifest)
+
+        changed = self.changed(result)
+        changed["responses"]["final"]["200"] += 1
+        self.assert_result_refused(changed, manifest)
+
+        changed = self.changed(result)
+        changed["responses"]["final"]["486"] = 1
+        self.assert_result_refused(changed, manifest)
+
+        changed = self.changed(result)
+        changed["responses"]["final"]["201"] = 1
+        changed["responses"]["final"]["200"] -= 1
+        self.assert_result_refused(changed, manifest)
+
+    def test_exact_rejection_and_provisional_response_accounting_is_accepted(self) -> None:
+        manifest = a_load_manifest()
+        result = a_load_result(manifest)
+        result["status"] = "failed"
+        result["counts"]["completed"] -= 2
+        result["errors"]["rejected"] = 1
+        result["errors"]["admission_refused"] = 1
+        result["latency_ms"]["teardown"]["count"] -= 2
+        result["responses"]["final"]["200"] -= 2
+        result["responses"]["final"].update({"486": 1, "503": 1})
+        load_contract.validate_result(result, manifest)
+
+        no_trying = self.changed(manifest)
+        no_trying["provisional_policy"] = "none"
+        no_trying_result = a_load_result(no_trying)
+        no_trying_result["responses"]["provisional"] = {}
+        load_contract.validate_result(no_trying_result, no_trying)
+
+        contradictory = a_load_result(manifest)
+        contradictory["responses"]["provisional"]["100"] -= 1
+        self.assert_result_refused(contradictory, manifest)
 
     def test_missing_cleanup_or_live_post_drain_state_cannot_pass(self) -> None:
         result = a_load_result()
@@ -1002,6 +1054,46 @@ signal.pause()
 
             with self.assertRaisesRegex(RuntimeError, "orderly stop failed"):
                 supervised.close(graceful=fail_to_stop_orderly, timeout_seconds=0.25)
+            self.assertIsNotNone(supervised.process.returncode)
+            self.assertFalse(process_group_exists(pgid))
+            self.assertTrue(supervised.stdout.eof.is_set())
+            self.assertTrue(supervised.stderr.eof.is_set())
+        finally:
+            force_group_cleanup(pgid)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_a_blocking_graceful_callback_is_bounded_before_group_escalation(self) -> None:
+        helper = """
+import json, os, signal
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        supervised = load_contract.SupervisedProcess(
+            [sys.executable, "-c", helper],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        pgid = supervised.pgid
+        try:
+            supervised.wait_ready(timeout_ms=2_000)
+
+            def block_orderly_stop():
+                time.sleep(0.75)
+
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                load_contract.ContractError, "orderly-stop callback exceeded"
+            ):
+                supervised.close(graceful=block_orderly_stop, timeout_seconds=0.1)
+            self.assertLess(time.monotonic() - started, 0.7)
             self.assertIsNotNone(supervised.process.returncode)
             self.assertFalse(process_group_exists(pgid))
             self.assertTrue(supervised.stdout.eof.is_set())
