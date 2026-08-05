@@ -7,6 +7,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A normative spec for bridging a call to an OpenAI realtime session** (`A-19`).
+  `docs/specs/openai-realtime.md` pins the contract the rest of the `openai` epic is built and
+  tested against: the `wss` endpoint and bearer credential resolved from a *named* secret
+  (`host-config.md` N7, no value in configuration, logs or errors); G.711 μ-law/A-law
+  passthrough in both directions, so the call's own 20 ms payload travels as base64 without a
+  transcode, with byte-level vectors for two known frames; the exhaustive event subset — three
+  client events, seven server events, an unknown *event* ignored with a counter and an
+  uninterpretable *member* fatal; the barge-in rule with a stated queue bound and two counters,
+  one bounded and one explicitly not; bounded queues with counted loss in both directions; and
+  ten typed ways the bridge can end, each with the bound that produces it. Eighteen vectors
+  (`ORB-1`…`ORB-18`), each naming the story that enforces it; all but the live-endpoint vector
+  run with no credentials. The document is normative for this workspace and observational
+  toward the vendor, carrying the date its published contract was read.
+
 ## [1.0.0-beta.4] — 2026-08-04
 
 This prerelease ships the beta.4 feature-and-security wave: explicit non-ICE deployment
