@@ -122,7 +122,7 @@ async fn constructing_the_public_harness_does_not_install_output() {
         !tracing::dispatcher::has_been_set(),
         "the test process begins without a global tracing subscriber"
     );
-    let _call = CallHarness::new();
+    let _call = CallHarness::new().expect("runtime is entered");
     assert!(
         !tracing::dispatcher::has_been_set(),
         "using the library must leave output ownership with the host"
@@ -139,7 +139,7 @@ async fn quiet_library_child() {
     use sipx_call::DialOptions;
     use sipx_sip::{Host, HostName, Uri};
 
-    let mut harness = CallHarness::new();
+    let mut harness = CallHarness::new().expect("runtime is entered");
     let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let to = Uri::sip(Host::Name(
         HostName::new("callee.example").expect("valid host"),

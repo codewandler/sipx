@@ -56,7 +56,8 @@ pub use counters::{
     UnsentCounts,
 };
 pub use endpoint::{
-    Config, Handle, Incoming, Responses, Unmatched, bind, in_process_pair, new_branch,
+    Config, Handle, InProcessEndpoint, InProcessPair, Incoming, Responses, Unmatched, bind,
+    in_process_pair, new_branch,
 };
 pub use error::{Error, Result};
 pub use overload::{OverloadConfig, OverloadFeedback, RequestCategory};

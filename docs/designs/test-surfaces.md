@@ -35,7 +35,9 @@ test.
 The signalling driver admits at most its configured number of live response routes. A final
 response removes its route before delivery; a later request prunes a route whose consumer was
 dropped; and excess requests receive a typed overload error. Dropping a pending call aborts its
-owned dial task, including when an answer fails before it can complete the exchange.
+owned dial task, including when an answer fails before it can complete the exchange. Construction
+without an entered Tokio runtime and dial failures before an INVITE exists are typed errors; neither
+is allowed to panic or wait on an event that can no longer arrive.
 
 `Link` is generic over its instant with the existing Tokio instant as its default, preserving its
 current callers while allowing `TransactionHarness` to use a zero-based virtual instant. `Virtual`

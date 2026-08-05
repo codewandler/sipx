@@ -14,7 +14,7 @@ use bytes::Bytes;
 use sipx_call::{CallEvent, DialOptions};
 use sipx_sip::build::RequestBuilder;
 use sipx_sip::{HeaderName, Host, HostName, Method, Uri};
-use sipx_testkit::call::{CallHarness, TransactionHarness};
+use sipx_testkit::call::{CallHarness, HarnessError, TransactionHarness};
 use sipx_testkit::link::{Faults, Link, Side};
 use sipx_testkit::time::Virtual;
 
@@ -50,7 +50,7 @@ fn request(method: &Method, branch: &str, call_id: &str) -> sipx_sip::Request {
 
 #[tokio::test]
 async fn the_public_harness_establishes_real_calls_and_delivers_the_ack() {
-    let mut harness = CallHarness::new();
+    let mut harness = CallHarness::new().expect("runtime is entered");
     let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let options = DialOptions::new("sip:caller@example.net", loopback);
 
@@ -78,7 +78,7 @@ async fn the_public_harness_establishes_real_calls_and_delivers_the_ack() {
 
 #[tokio::test]
 async fn each_pending_call_owns_only_its_own_invitation_and_response_stream() {
-    let mut harness = CallHarness::new();
+    let mut harness = CallHarness::new().expect("runtime is entered");
     let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
     for callee in ["first.example", "second.example"] {
@@ -98,6 +98,35 @@ async fn each_pending_call_owns_only_its_own_invitation_and_response_stream() {
             .await
             .expect("this call established independently");
     }
+}
+
+#[test]
+fn construction_without_a_runtime_is_a_typed_error() {
+    let error = CallHarness::new().expect_err("no Tokio runtime is entered");
+    assert!(matches!(
+        error,
+        HarnessError::Transport(sipx_transport::Error::RuntimeUnavailable)
+    ));
+}
+
+#[tokio::test]
+async fn a_pre_signalling_dial_error_is_returned_without_waiting_for_an_invitation() {
+    let mut harness = CallHarness::new().expect("runtime is entered");
+    let unspecified = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    let result = tokio::time::timeout(
+        Duration::from_secs(1), // failure bound: how long a broken dial may hold the test
+        harness.dial(
+            uri("callee.example"),
+            DialOptions::new("sip:caller@example.net", unspecified),
+        ),
+    )
+    .await
+    .expect("pre-signalling failure stayed inside its bound")
+    .expect_err("an unspecified media address is refused");
+    assert!(matches!(
+        result,
+        HarnessError::Call(sipx_call::Error::UnspecifiedMediaAddress)
+    ));
 }
 
 fn seed_that_drops_only_the_first_send() -> u64 {

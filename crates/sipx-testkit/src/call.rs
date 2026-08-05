@@ -48,9 +48,15 @@ pub enum HarnessError {
     /// The dial task ended without returning its call result.
     #[error("the dial task stopped before returning a call")]
     DialTask,
+    /// The dial completed without ever delivering its invitation to the peer.
+    #[error("the dial completed before its invitation reached the peer")]
+    DialBeforeInvitation,
     /// The request following the answer was not the dialog's ACK.
     #[error("the established dialog did not deliver its ACK")]
     MissingAck,
+    /// The signalling harness could not construct its transport boundary.
+    #[error(transparent)]
+    Transport(#[from] sipx_transport::Error),
 }
 
 #[derive(Debug)]
@@ -132,13 +138,16 @@ pub struct PendingCall<'a> {
 struct DialTask(Option<JoinHandle<Result<sipx_call::Call, sipx_call::Error>>>);
 
 impl DialTask {
-    async fn finish(mut self) -> Result<sipx_call::Call, HarnessError> {
-        let Some(task) = self.0.take() else {
+    async fn finish(&mut self) -> Result<sipx_call::Call, HarnessError> {
+        let Some(task) = self.0.as_mut() else {
             return Err(HarnessError::DialTask);
         };
-        task.await
+        let result = task
+            .await
             .map_err(|_| HarnessError::DialTask)?
-            .map_err(HarnessError::from)
+            .map_err(HarnessError::from);
+        self.0.take();
+        result
     }
 }
 
@@ -164,15 +173,14 @@ impl CallHarness {
     ///
     /// Call establishment still opens the RTP/RTCP ports owned by `sipx-call`; the in-process
     /// boundary applies to SIP signalling, not media.
-    #[must_use]
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, HarnessError> {
         let ((originating, _originating_incoming), (answering, answering_incoming)) =
-            sipx_transport::in_process_pair(32);
-        Self {
+            sipx_transport::in_process_pair(32)?;
+        Ok(Self {
             caller: originating,
             callee: answering,
             callee_incoming: answering_incoming,
-        }
+        })
     }
 
     /// Begin a real [`sipx_call::dial`] and return only this exchange's invitation.
@@ -183,14 +191,20 @@ impl CallHarness {
     ) -> Result<PendingCall<'_>, HarnessError> {
         let endpoint = self.caller.clone();
         let target = Target::new(self.callee.local_addr(), TransportKind::Udp);
-        let dial = DialTask(Some(tokio::spawn(async move {
+        let mut dial = DialTask(Some(tokio::spawn(async move {
             sipx_call::dial(&endpoint, target, &to, &options).await
         })));
-        let invitation = self
-            .callee_incoming
-            .recv()
-            .await
-            .ok_or(HarnessError::EndpointClosed)?;
+        let invitation = tokio::select! {
+            result = dial.finish() => {
+                return match result {
+                    Ok(_) => Err(HarnessError::DialBeforeInvitation),
+                    Err(error) => Err(error),
+                };
+            }
+            incoming = self.callee_incoming.recv() => {
+                incoming.ok_or(HarnessError::EndpointClosed)?
+            }
+        };
         if invitation.request.method != sipx_sip::Method::Invite {
             return Err(HarnessError::NoInvitation);
         }
@@ -200,12 +214,6 @@ impl CallHarness {
             callee: &self.callee,
             callee_incoming: &mut self.callee_incoming,
         })
-    }
-}
-
-impl Default for CallHarness {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -220,7 +228,7 @@ impl PendingCall<'_> {
     pub async fn answer(self, media_address: IpAddr) -> Result<EstablishedCall, HarnessError> {
         let PendingCall {
             invitation,
-            dial,
+            mut dial,
             callee,
             callee_incoming,
         } = self;
@@ -451,6 +459,9 @@ impl TransactionHarness {
     clippy::indexing_slicing
 )]
 mod tests {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
     use tokio::sync::oneshot;
 
     use super::DialTask;
@@ -480,5 +491,29 @@ mod tests {
         drop(dial);
 
         cancelled.await.expect("dial task was cancelled");
+    }
+
+    #[tokio::test]
+    async fn cancelling_finish_after_it_was_polled_still_aborts_the_dial() {
+        let (started, running) = oneshot::channel();
+        let (dropped, cancelled) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _on_drop = OnDrop(Some(dropped));
+            let _ = started.send(());
+            std::future::pending::<Result<sipx_call::Call, sipx_call::Error>>().await
+        });
+        let mut dial = DialTask(Some(task));
+        running.await.expect("dial task started");
+        let mut finish = Box::pin(dial.finish());
+        poll_fn(|context| {
+            assert!(matches!(finish.as_mut().poll(context), Poll::Pending));
+            Poll::Ready(())
+        })
+        .await;
+
+        drop(finish);
+        drop(dial);
+
+        cancelled.await.expect("polled dial task was cancelled");
     }
 }

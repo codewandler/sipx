@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let to = Uri::sip(Host::Name(HostName::new("callee.example")?));
     let options = DialOptions::new("sip:caller@example.net", loopback);
-    let mut harness = CallHarness::new();
+    let mut harness = CallHarness::new()?;
 
     let pending = harness.dial(to, options).await?;
     let mut established = pending.answer(loopback).await?;

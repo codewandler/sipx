@@ -69,6 +69,11 @@ call in their own tests.
   dropped pending call detached its dial task. The driver now caps routes, refuses excess work,
   removes final and closed-consumer routes, and aborts a pending dial on drop; barrier-based tests
   cover cancellation and cleanup without wall-clock waits.
+- 2026-08-05: independent re-review found cancellation was disarmed once the dial join had been
+  polled, a pre-signalling error could wait forever for an invitation, and construction panicked
+  outside Tokio. The join handle now remains in its abort guard until completion, invitation receipt
+  races typed dial failure, and construction returns a typed runtime error. Regressions poll the
+  cancellation future before dropping it and bound the pre-signalling failure path.
 
 ## Notes
 - Two separate recurring themes in the demand survey collapse into this one story: users could not

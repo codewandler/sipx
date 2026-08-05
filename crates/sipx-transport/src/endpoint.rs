@@ -1033,6 +1033,14 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     Ok((handle, incoming_rx))
 }
 
+/// One side of the hidden in-process construction seam.
+#[doc(hidden)]
+pub type InProcessEndpoint = (Handle, mpsc::Receiver<Incoming>);
+
+/// The two sides returned by the hidden in-process construction seam.
+#[doc(hidden)]
+pub type InProcessPair = (InProcessEndpoint, InProcessEndpoint);
+
 /// Build two endpoints joined by a bounded in-process signalling path.
 ///
 /// This is a construction seam for `sipx-testkit`, not a second production transport. It drives
@@ -1042,14 +1050,10 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
 ///
 /// Hidden from the rendered API because downstream tests should use the higher-level testkit
 /// harness, whose call-scoped ownership prevents one exchange from observing another's events.
+/// Construction returns a typed error unless called inside an entered Tokio runtime.
 #[doc(hidden)]
-#[must_use]
-pub fn in_process_pair(
-    capacity: usize,
-) -> (
-    (Handle, mpsc::Receiver<Incoming>),
-    (Handle, mpsc::Receiver<Incoming>),
-) {
+pub fn in_process_pair(capacity: usize) -> Result<InProcessPair> {
+    let runtime = tokio::runtime::Handle::try_current().map_err(|_| Error::RuntimeUnavailable)?;
     let capacity = capacity.max(1);
     let routes = Arc::new(Mutex::new(HashMap::<
         (InProcessSide, TransactionKey),
@@ -1062,7 +1066,7 @@ pub fn in_process_pair(
     let (right, right_commands, right_incoming_tx, right_incoming_rx) =
         in_process_handle(right_addr, capacity);
 
-    tokio::spawn(run_in_process(
+    runtime.spawn(run_in_process(
         InProcessSide::Left,
         left_addr,
         capacity,
@@ -1071,7 +1075,7 @@ pub fn in_process_pair(
         Arc::clone(&routes),
         Arc::clone(&left.shutdown),
     ));
-    tokio::spawn(run_in_process(
+    runtime.spawn(run_in_process(
         InProcessSide::Right,
         right_addr,
         capacity,
@@ -1081,7 +1085,7 @@ pub fn in_process_pair(
         Arc::clone(&right.shutdown),
     ));
 
-    ((left, left_incoming_rx), (right, right_incoming_rx))
+    Ok(((left, left_incoming_rx), (right, right_incoming_rx)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2988,7 +2992,8 @@ mod tests {
 
     #[tokio::test]
     async fn in_process_routes_are_bounded_and_closed_consumers_release_capacity() {
-        let ((originating, _), (answering, mut incoming)) = super::in_process_pair(1);
+        let ((originating, _), (answering, mut incoming)) =
+            super::in_process_pair(1).expect("runtime is entered");
         let target = Target::new(answering.local_addr(), TransportKind::Udp);
         let first = originating
             .send(in_process_request(b"first@example"), target.clone())
@@ -3011,7 +3016,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_final_in_process_response_releases_its_route() {
-        let ((originating, _), (answering, mut incoming)) = super::in_process_pair(1);
+        let ((originating, _), (answering, mut incoming)) =
+            super::in_process_pair(1).expect("runtime is entered");
         let target = Target::new(answering.local_addr(), TransportKind::Udp);
         let mut responses = originating
             .send(in_process_request(b"final@example"), target)
