@@ -118,6 +118,7 @@ layer = "transport"
 status = "implemented"
 roles = ["uac"]
 evidence = ["crates/sipx-transport/src/resolve.rs", "crates/sipx-transport/src/dns.rs"]
+spec = "docs/specs/sip-target-resolution.md"
 note = "NAPTR, SRV and A/AAAA, with the candidate list tried in order. The verification name survives resolution."
 
 [[rfc]]
@@ -126,6 +127,7 @@ title = "A DNS RR for specifying the location of services (SRV)"
 layer = "transport"
 status = "implemented"
 evidence = ["crates/sipx-transport/src/resolve.rs"]
+spec = "docs/specs/sip-target-resolution.md"
 note = "Priority then the weighted shuffle, asserted against a seeded distribution rather than eyeballed."
 
 [[rfc]]
