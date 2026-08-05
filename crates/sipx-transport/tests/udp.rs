@@ -865,6 +865,7 @@ async fn a_request_the_application_never_answers_is_eventually_abandoned() {
         after, 0,
         "a transaction nobody answered must not be held for the life of the process"
     );
+    assert_eq!(server.counters().discards.unanswered, 1);
 
     // And answering it now is refused rather than silently discarded: the application would
     // otherwise believe its response went out while the caller heard nothing at all.
@@ -875,10 +876,29 @@ async fn a_request_the_application_never_answers_is_eventually_abandoned() {
     )
     .expect("builds")
     .build();
-    let outcome = server.respond(&request.key, response).await;
     assert!(
-        outcome.is_err(),
+        matches!(
+            server.respond(&request.key, response).await,
+            Err(Error::NoTransaction)
+        ),
         "responding on an abandoned transaction must report that it is gone"
+    );
+    let provisional = ResponseBuilder::to_request(
+        &request.request,
+        StatusCode::new(183).expect("valid"),
+        "Session Progress",
+    )
+    .expect("builds")
+    .build();
+    assert!(matches!(
+        server.respond(&request.key, provisional).await,
+        Err(Error::NoTransaction)
+    ));
+    assert_eq!(server.outstanding().await.expect("readable"), 0);
+    assert_eq!(
+        server.counters().discards.unanswered,
+        1,
+        "stale responses change neither the guard nor its counter"
     );
 }
 
@@ -905,6 +925,8 @@ async fn a_transaction_that_only_ever_rang_is_still_abandoned() {
         .expect("no timeout")
         .expect("a request arrives");
 
+    tokio::time::advance(Duration::from_secs(20)).await;
+
     let ringing = sipx_sip::build::ResponseBuilder::to_request(
         &request.request,
         sipx_sip::StatusCode::new(180).expect("valid"),
@@ -922,7 +944,13 @@ async fn a_transaction_that_only_ever_rang_is_still_abandoned() {
         "it is still waiting on the application"
     );
 
-    tokio::time::advance(Duration::from_secs(150)).await;
+    tokio::time::advance(Duration::from_secs(50)).await;
+    assert!(
+        server.outstanding().await.expect("readable") > 0,
+        "one provisional starts a fresh finite interval"
+    );
+
+    tokio::time::advance(Duration::from_secs(70)).await;
     let mut after = server.outstanding().await.expect("readable");
     for _ in 0..20 {
         if after == 0 {
@@ -936,4 +964,121 @@ async fn a_transaction_that_only_ever_rang_is_still_abandoned() {
         after, 0,
         "a 180 is not an answer; the transaction must still be abandoned"
     );
+    assert_eq!(server.counters().discards.unanswered, 1);
+    let final_response =
+        ResponseBuilder::to_request(&request.request, StatusCode::new(200).expect("valid"), "OK")
+            .expect("builds")
+            .build();
+    assert!(matches!(
+        server.respond(&request.key, final_response).await,
+        Err(Error::NoTransaction)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_response_stops_the_guard_before_the_transaction_terminates() {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.unanswered_limit = Duration::from_secs(5);
+    let (server, mut incoming) = bind(config).await.expect("binds");
+    let (client, _client_rx) = endpoint().await;
+    let mut responses = client
+        .send(options_to(&server), Target::udp(server.local_addr()))
+        .await
+        .expect("sends");
+    tokio::spawn(async move { while responses.next().await.is_some() {} });
+    let request = incoming.recv().await.expect("request arrives");
+    let guarded = server.outstanding().await.expect("readable");
+
+    let response =
+        ResponseBuilder::to_request(&request.request, StatusCode::new(200).expect("valid"), "OK")
+            .expect("builds")
+            .build();
+    server
+        .respond(&request.key, response)
+        .await
+        .expect("final response is sent");
+    let final_absorption = server.outstanding().await.expect("readable");
+    assert_eq!(
+        final_absorption.saturating_add(1),
+        guarded,
+        "only the application guard leaves immediately"
+    );
+
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        server.outstanding().await.expect("readable") > 0,
+        "the RFC transaction remains during Timer J"
+    );
+    assert_eq!(server.counters().discards.unanswered, 0);
+
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(server.outstanding().await.expect("readable"), 0);
+    let counters = server.counters();
+    for status in [180, 200] {
+        let stale = ResponseBuilder::to_request(
+            &request.request,
+            StatusCode::new(status).expect("valid"),
+            if status == 180 { "Ringing" } else { "OK" },
+        )
+        .expect("builds")
+        .build();
+        assert!(matches!(
+            server.respond(&request.key, stale).await,
+            Err(Error::NoTransaction)
+        ));
+    }
+    assert_eq!(server.outstanding().await.expect("readable"), 0);
+    assert_eq!(server.counters(), counters);
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_provisional_progress_refreshes_the_unanswered_backstop() {
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.unanswered_limit = Duration::from_secs(60);
+    let (server, mut incoming) = bind(config).await.expect("binds");
+    let server_addr = server.local_addr();
+    let (client, _client_rx) = endpoint().await;
+    let mut responses = client
+        .send(
+            request_to(&client, &Method::Invite, 72),
+            Target::udp(server_addr),
+        )
+        .await
+        .expect("sends INVITE");
+    tokio::spawn(async move { while responses.next().await.is_some() {} });
+    let request = incoming.recv().await.expect("INVITE arrives");
+
+    for (elapsed, code, reason) in [
+        (Duration::from_secs(20), 180, "Ringing"),
+        (Duration::from_secs(30), 183, "Session Progress"),
+    ] {
+        tokio::time::advance(elapsed).await;
+        let progress = ResponseBuilder::to_request(
+            &request.request,
+            StatusCode::new(code).expect("valid"),
+            reason,
+        )
+        .expect("builds")
+        .build();
+        server
+            .respond(&request.key, progress)
+            .await
+            .expect("provisional progress is accepted");
+    }
+
+    tokio::time::advance(Duration::from_secs(40)).await;
+    tokio::task::yield_now().await;
+    let final_response = ResponseBuilder::to_request(
+        &request.request,
+        StatusCode::new(487).expect("valid"),
+        "Request Terminated",
+    )
+    .expect("builds")
+    .build();
+    server
+        .respond(&request.key, final_response)
+        .await
+        .expect("recent progress keeps the server transaction answerable");
 }

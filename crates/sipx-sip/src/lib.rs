@@ -59,7 +59,7 @@ pub mod uri;
 pub mod validate;
 
 pub use build::{RequestBuilder, ResponseBuilder};
-pub use error::{AddressEditError, BuildError, HeaderError, UriError};
+pub use error::{AddressEditError, BuildError, HeaderError, UriError, WarningEditError};
 pub use headers::{
     Address, CSeq, CallId, HistoryEntry, HistoryIndex, HistoryInfo, IgnoredIdentity,
     IgnoredIdentityReason, PAssertedIdentity, PAssertedIdentityList, PPreferredIdentity,
@@ -76,5 +76,8 @@ pub use transaction::{
     ClientTransaction, Output, Reliability, ServerTransaction, Timer, Timers, TransactionKey,
     TransactionLayer, TuEvent,
 };
-pub use uri::{Host, HostName, Scheme, TelUriParts, Uri, UriTransport, UriTransportError};
+pub use uri::{
+    Host, HostName, Scheme, TelParameter, TelParameterError, TelParameterErrorKind, TelParameters,
+    TelUriParts, Uri, UriTransport, UriTransportError,
+};
 pub use validate::{Finding, validate, validate_request, validate_response};

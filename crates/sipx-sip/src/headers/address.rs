@@ -69,6 +69,7 @@ impl Address {
 #[derive(Debug)]
 struct ParsedAddress {
     address: Address,
+    presentation: Range<usize>,
     uri: Range<usize>,
 }
 
@@ -76,6 +77,7 @@ fn parse_spanned(value: &[u8], header: &'static str) -> Result<ParsedAddress, He
     let outer = trimmed_range(value);
     let value = value.get(outer.clone()).unwrap_or(&[]);
     let mut i = skip_ws(value, 0);
+    let presentation_start = i;
 
     // A display name is either a quoted string or a run of tokens; either way it ends at
     // the '<' that opens the URI.
@@ -106,9 +108,13 @@ fn parse_spanned(value: &[u8], header: &'static str) -> Result<ParsedAddress, He
         i = angle;
     }
 
-    let (uri_span, params_tail) = if value.get(i) == Some(&b'<') {
+    let (uri_span, presentation_span, params_tail) = if value.get(i) == Some(&b'<') {
         let close = find_closing_angle(value, i).ok_or(HeaderError::Syntax { header })?;
-        (i + 1..close, value.get(close + 1..).unwrap_or(&[]))
+        (
+            i + 1..close,
+            presentation_start..close.saturating_add(1),
+            value.get(close + 1..).unwrap_or(&[]),
+        )
     } else {
         // Bare addr-spec: the URI runs to the first header-parameter semicolon.
         let rest = value.get(i..).unwrap_or(&[]);
@@ -130,7 +136,7 @@ fn parse_spanned(value: &[u8], header: &'static str) -> Result<ParsedAddress, He
         } else {
             &[][..]
         };
-        (uri_span, params_tail)
+        (uri_span.clone(), uri_span, params_tail)
     };
 
     let uri_bytes = value.get(uri_span.clone()).unwrap_or(&[]);
@@ -149,6 +155,7 @@ fn parse_spanned(value: &[u8], header: &'static str) -> Result<ParsedAddress, He
 
     let params = grammar::parse_params(trim(params_tail), header)?;
     let uri_span = add_offset(uri_span, outer.start, header)?;
+    let presentation_span = add_offset(presentation_span, outer.start, header)?;
 
     Ok(ParsedAddress {
         address: Address {
@@ -156,6 +163,7 @@ fn parse_spanned(value: &[u8], header: &'static str) -> Result<ParsedAddress, He
             uri: parsed_uri,
             params,
         },
+        presentation: presentation_span,
         uri: uri_span,
     })
 }
@@ -167,6 +175,8 @@ pub(crate) struct AddressValueSpan {
     pub(crate) part: Range<usize>,
     /// The address itself, excluding surrounding linear whitespace.
     pub(crate) item: Range<usize>,
+    /// Display name, brackets and URI for name-address, or the URI for bare addr-spec.
+    pub(crate) presentation: Range<usize>,
     /// The nested URI.
     pub(crate) uri: Range<usize>,
 }
@@ -195,6 +205,7 @@ pub(crate) fn value_spans(
             Ok(AddressValueSpan {
                 part: part.clone(),
                 item: add_offset(item, part.start, header)?,
+                presentation: add_offset(parsed.presentation, part.start, header)?,
                 uri: add_offset(parsed.uri, part.start, header)?,
             })
         })

@@ -2,7 +2,7 @@
 id: S-50
 title: Expose lossless address-presentation editing
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 3
 design: docs/specs/lossless-presentation-editing.md
 epic: sip-core
@@ -21,16 +21,16 @@ or normalising the parser-owned header-parameter tail or any surrounding field b
 
 ## Acceptance
 
-- [ ] The common address parser retains the complete presentation span for name-address and bare
+- [x] The common address parser retains the complete presentation span for name-address and bare
       addr-spec forms; editing never searches bytes or serializes `Address::params`.
-- [ ] One public flattened-index operation replaces display name, brackets and URI atomically in
+- [x] One public flattened-index operation replaces display name, brackets and URI atomically in
       every address field already supported by `replace_address_uri`, while retaining every byte
       outside that span.
-- [ ] Display-name quoting and escaping are kernel-owned; malformed UTF-8, controls, line breaks and
+- [x] Display-name quoting and escaping are kernel-owned; malformed UTF-8, controls, line breaks and
       invalid candidate syntax return typed errors without mutation.
-- [ ] Repeated rows, comma lists and a malformed later row preserve the collection-level atomicity
+- [x] Repeated rows, comma lists and a malformed later row preserve the collection-level atomicity
       of the existing address edits.
-- [ ] Public failing-first integration tests derive from all `LP-A` vectors in
+- [x] Public failing-first integration tests derive from all `LP-A` vectors in
       [`docs/specs/lossless-presentation-editing.md`](../specs/lossless-presentation-editing.md), and
       focused formatting, clippy, unit, feature-off and documentation checks pass.
 
@@ -55,7 +55,14 @@ or normalising the parser-owned header-parameter tail or any surrounding field b
 - `malformed_later_row_makes_collection_edit_atomic` — `LP-A-5`.
 - `unterminated_old_display_name_is_typed_and_atomic` — `LP-A-6`.
 - `hostile_replacement_display_names_are_refused_atomically` — `LP-A-7`.
-- `candidate_reparse_rejects_invalid_enclosing_syntax` — `LP-A-8`.
+- `delimiter_rich_uri_reparses_inside_name_address` — `LP-A-8`.
+
+The eight tests first failed to compile on the absent operation. The shared parser now retains one
+presentation span from the same pass that validates each address; the editor quotes valid UTF-8
+`&str` input, rejects every ASCII control and DEL, splices the parser-owned span, then reparses the
+candidate before assignment. The complete all-feature `sipx-sip` suite, strict Clippy,
+no-default-feature targets and warning-denied rustdoc pass. Status remains in progress only until
+the integrated full gate is run once.
 
 ## Notes
 

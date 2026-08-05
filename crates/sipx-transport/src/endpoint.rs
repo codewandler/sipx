@@ -145,16 +145,16 @@ pub struct Config {
     /// connection died silently is a phone that rings nowhere.
     #[cfg(feature = "ws")]
     pub ws_keepalive: std::time::Duration,
-    /// How long a request may sit unanswered by the application before the transaction is
+    /// How long a server transaction may receive no new application response before it is
     /// abandoned.
     ///
     /// RFC 3261 §17.2 gives a server transaction in `Trying` or `Proceeding` no timer at all,
     /// because its model is that the transaction user always responds. Real applications do
     /// not, and a transaction nobody ever answers is held for the life of the process.
     ///
-    /// Configurable because three minutes is not long for a telephone. A hunt group that rings
-    /// for five before an agent picks up is ordinary, and an endpoint that abandoned the
-    /// transaction at three would simply stop being able to answer such calls.
+    /// Configurable because three minutes is not long for a telephone. Each successfully sent
+    /// provisional response starts a fresh interval; a final response removes the guard while the
+    /// RFC transaction completes its own absorption lifetime.
     pub unanswered_limit: std::time::Duration,
     /// How the connection pool behaves.
     pub pool: PoolConfig,
@@ -1725,7 +1725,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         timers: TimerQueue::new(),
         destinations: HashMap::new(),
         transaction_generations: HashMap::new(),
-        handed_over: HashMap::new(),
+        unanswered_since: HashMap::new(),
         reconnect: HashMap::new(),
         tcp_fallbacks: HashMap::new(),
         unanswered_limit: config.unanswered_limit,
@@ -2601,9 +2601,9 @@ struct Driver {
     destinations: HashMap<TransactionKey, Target>,
     /// Exact stream incarnation carrying each transaction; UDP transactions have no entry.
     transaction_generations: HashMap<TransactionKey, ConnectionGeneration>,
-    /// When each server transaction was handed to the application, so one it never answers can
-    /// be abandoned rather than held for the life of the process.
-    handed_over: HashMap<TransactionKey, tokio::time::Instant>,
+    /// When each server transaction was handed over or last received application progress, so
+    /// silence remains bounded without imposing an absolute deadline on a live transaction.
+    unanswered_since: HashMap<TransactionKey, tokio::time::Instant>,
     /// Where a response goes if the connection its request arrived on has closed.
     ///
     /// RFC 3261 §18.2.2: the address from `received` at the `sent-by` port, which is a port the
@@ -2613,7 +2613,7 @@ struct Driver {
     reconnect: HashMap<TransactionKey, Target>,
     /// Requests whose UDP target was changed to TCP under RFC 3261 §18.1.1.
     tcp_fallbacks: HashMap<TransactionKey, TcpFallback>,
-    /// How long a request may sit unanswered before its transaction is abandoned.
+    /// How long a server transaction may receive no new application response before abandonment.
     unanswered_limit: std::time::Duration,
     /// Per-next-hop RFC 7339/RFC 7415 state, serialized with sends and responses on this loop.
     overload: OverloadController,
@@ -2706,9 +2706,18 @@ struct ConnectionGeneration {
 /// `perform` completed before the waiting task was ever polled — the datagram was always out by
 /// the time anyone could look, whichever order the two lines were in. A test cannot observe the
 /// difference, so the guarantee is made structural instead.
-struct Performed;
+struct Performed {
+    /// At least one transaction output reached its configured transport boundary.
+    sent_message: bool,
+}
 
 impl Performed {
+    /// Whether a message output reached its configured transport boundary.
+    #[must_use]
+    fn sent_message(&self) -> bool {
+        self.sent_message
+    }
+
     /// The success `respond` reports, obtainable only from proof that the send happened.
     ///
     /// Clippy objects to both halves of this signature, and both are the point. `unused_self`: taking
@@ -3177,7 +3186,7 @@ impl Driver {
                 }
                 #[cfg(feature = "quic")]
                 self.remember_quic_reply(&key, quic_reply);
-                self.handed_over
+                self.unanswered_since
                     .insert(key.clone(), tokio::time::Instant::now());
                 // §18.2.2's fallback only arises on a transport that has a connection to lose.
                 if transport.reliability().is_reliable()
@@ -3287,7 +3296,7 @@ impl Driver {
         }
     }
 
-    /// Drop server transactions the application never answered.
+    /// Drop server transactions whose application owner stopped making progress.
     ///
     /// RFC 3261 §17.2 gives a server transaction in `Trying` no timer at all, because its model
     /// is that the transaction user always responds. Real applications do not: one that ignores
@@ -3295,20 +3304,20 @@ impl Driver {
     /// there — and nothing ever collects it, so the store grows for as long as traffic arrives.
     /// A soak run found exactly this: 300 of them for 300 calls, still present two minutes on.
     ///
-    /// The bound is generous on purpose. A request may legitimately take a long time to answer
-    /// — a call that rings for a minute is an unanswered INVITE the whole time — so this is a
-    /// backstop against *never*, not a deadline.
+    /// The bound is generous on purpose and refreshes after every performed provisional response.
+    /// A long-ringing call can therefore remain live while an application that wedges after one
+    /// response is still collected. This is a backstop against silence, not an absolute deadline.
     fn abandon_unanswered(&mut self) {
         let now = tokio::time::Instant::now();
         let stale: Vec<TransactionKey> = self
-            .handed_over
+            .unanswered_since
             .iter()
             .filter(|(_, at)| now.saturating_duration_since(**at) > self.unanswered_limit)
             .map(|(key, _)| key.clone())
             .collect();
 
         for key in stale {
-            self.handed_over.remove(&key);
+            self.unanswered_since.remove(&key);
 
             // What is being abandoned, named. A warning that blames the application and then
             // says nothing about which request, which method or which peer leaves an operator
@@ -3461,7 +3470,7 @@ impl Driver {
                             }
                         }
                         + self.reconnect.len()
-                        + self.handed_over.len(),
+                        + self.unanswered_since.len(),
                 );
             }
             Command::Settled(reply) => {
@@ -3523,9 +3532,6 @@ impl Driver {
         response: Box<Response>,
         sent: oneshot::Sender<Result<()>>,
     ) {
-        // Nothing is removed from `handed_over` here, and that is the point. A provisional
-        // response is not an answer: an application that sends 180 Ringing and then wedges has a
-        // transaction sitting in `Proceeding`, which RFC 3261 §17.2.1 gives no timer either.
         if self.layer.server_request(&key).is_none() {
             // No transaction to answer on. Reporting success here would tell an application its
             // 200 OK went out while the caller heard nothing.
@@ -3533,10 +3539,26 @@ impl Driver {
             let _ = sent.send(Err(Error::NoTransaction));
             return;
         }
+        let provisional = response.status.is_provisional();
         let outputs = self.layer.send_response(&key, *response);
+        let sent_response = outputs.iter().any(|output| {
+            matches!(
+                output,
+                Output::Send(message) if matches!(message.as_ref(), Message::Response(_))
+            )
+        });
         // The success reported here is produced by the send: consuming `Performed` is the only
         // way to obtain the `Ok`, so reversing these statements does not compile (`X-36`).
         let performed = self.perform(&key, outputs, None).await;
+        if sent_response && performed.sent_message() {
+            if provisional && self.layer.server_request(&key).is_some() {
+                if let Some(since) = self.unanswered_since.get_mut(&key) {
+                    *since = tokio::time::Instant::now();
+                }
+            } else if !provisional {
+                self.unanswered_since.remove(&key);
+            }
+        }
         // discard: the caller stopped waiting, so nothing is lost or worth counting.
         let _ = sent.send(performed.into_result());
     }
@@ -3548,6 +3570,7 @@ impl Driver {
         outputs: Vec<Output>,
         origin: Option<(SocketAddr, TransportKind)>,
     ) -> Performed {
+        let mut sent_message = false;
         for output in outputs {
             match output {
                 Output::Send(message) => {
@@ -3606,9 +3629,11 @@ impl Driver {
                     match transmitted {
                         Ok(Some(generation)) => {
                             self.transaction_generations.insert(key.clone(), generation);
+                            sent_message = true;
                         }
                         Ok(None) => {
                             self.transaction_generations.remove(key);
+                            sent_message = true;
                         }
                         Err(error) => {
                             let error = match self.tcp_fallbacks.get(key).copied() {
@@ -3631,7 +3656,10 @@ impl Driver {
                                 let _ = client.failures.try_send(error);
                             }
                             let outputs = self.layer.on_transport_error(key);
-                            return Box::pin(self.perform(key, outputs, origin)).await;
+                            let remainder = Box::pin(self.perform(key, outputs, origin)).await;
+                            return Performed {
+                                sent_message: sent_message || remainder.sent_message,
+                            };
                         }
                     }
                 }
@@ -3643,22 +3671,24 @@ impl Driver {
                 }
                 Output::ClearTimer(timer) => self.timers.clear(&(key.clone(), timer)),
                 Output::ToTu(event) => self.deliver(key, *event, origin).await,
-                Output::Terminated(_) => {
-                    forget_transaction_timers(&mut self.timers, key);
-                    self.destinations.remove(key);
-                    self.transaction_generations.remove(key);
-                    #[cfg(feature = "quic")]
-                    self.quic_replies.remove(key);
-                    self.handed_over.remove(key);
-                    self.reconnect.remove(key);
-                    self.tcp_fallbacks.remove(key);
-                    // Dropping the sender closes the application's response stream, which is
-                    // how it learns the transaction is over.
-                    self.clients.remove(key);
-                }
+                Output::Terminated(_) => self.finish_transaction(key),
             }
         }
-        Performed
+        Performed { sent_message }
+    }
+
+    fn finish_transaction(&mut self, key: &TransactionKey) {
+        forget_transaction_timers(&mut self.timers, key);
+        self.destinations.remove(key);
+        self.transaction_generations.remove(key);
+        #[cfg(feature = "quic")]
+        self.quic_replies.remove(key);
+        self.unanswered_since.remove(key);
+        self.reconnect.remove(key);
+        self.tcp_fallbacks.remove(key);
+        // Dropping the sender closes the application's response stream, which is how it learns
+        // the transaction is over.
+        self.clients.remove(key);
     }
 
     /// Hand one observed message to the capture, if one is running (§13).
@@ -4344,7 +4374,7 @@ mod tests {
             timers: crate::timers::TimerQueue::new(),
             destinations: std::collections::HashMap::new(),
             transaction_generations: std::collections::HashMap::new(),
-            handed_over: std::collections::HashMap::new(),
+            unanswered_since: std::collections::HashMap::new(),
             reconnect: std::collections::HashMap::new(),
             tcp_fallbacks: std::collections::HashMap::new(),
             unanswered_limit: Duration::from_secs(60),
@@ -4385,6 +4415,57 @@ mod tests {
             shutdown: Arc::new(ShutdownState::default()),
             settled: Vec::new(),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_response_with_no_destination_does_not_refresh_application_liveness() {
+        let (events, net_rx) = mpsc::channel(8);
+        let pool = crate::tcp::Pool::new(
+            crate::tcp::PoolConfig::default(),
+            sipx_sip::Limits::stream(),
+            events,
+        );
+        let mut driver = driver_with_pool(pool, net_rx).await;
+        let parsed = sipx_sip::parse_datagram(
+            Bytes::from_static(
+                b"OPTIONS sip:a@example.com SIP/2.0\r\n\
+                  Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKno-destination\r\n\
+                  To: <sip:a@example.com>\r\n\
+                  From: <sip:b@example.net>;tag=1\r\n\
+                  Call-ID: no-destination@example.net\r\n\
+                  CSeq: 1 OPTIONS\r\n\
+                  Max-Forwards: 70\r\n\
+                  Content-Length: 0\r\n\r\n",
+            ),
+            &sipx_sip::Limits::datagram(),
+        )
+        .expect("request parses");
+        let Message::Request(request) = parsed else {
+            panic!("expected a request");
+        };
+        let response =
+            ResponseBuilder::to_request(&request, StatusCode::new(180).expect("valid"), "Ringing")
+                .expect("response builds")
+                .build();
+        let sipx_sip::transaction::Dispatch::Created { key, .. } = driver
+            .layer
+            .receive(Message::Request(request), sipx_sip::Reliability::Unreliable)
+        else {
+            panic!("server transaction is created");
+        };
+        let handed_over = tokio::time::Instant::now();
+        driver.unanswered_since.insert(key.clone(), handed_over);
+
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let (sent, result) = tokio::sync::oneshot::channel();
+        driver
+            .on_respond_command(key.clone(), Box::new(response), sent)
+            .await;
+
+        assert!(matches!(result.await, Ok(Ok(()))));
+        assert_eq!(driver.unanswered_since.get(&key), Some(&handed_over));
+        assert_eq!(driver.meters.snapshot().discards.no_destination, 1);
+        driver.pool.shutdown().await;
     }
 
     #[tokio::test]

@@ -375,7 +375,7 @@ altogether fails three: `a_cancel_after_the_answer_does_not_tear_the_dialog_down
 
 `Dispatcher::begin_drain` is the admission barrier for one call-routing endpoint. It atomically
 marks the dispatcher draining before returning and invokes the transport barrier in
-`sip-transport.md` §10.2. `Dispatcher::drain(within)` establishes that barrier, continues driving
+`sip-transport.md` §10.3. `Dispatcher::drain(within)` establishes that barrier, continues driving
 the one inbound receiver, awaits every live route and transaction, and then performs endpoint
 shutdown. `within` is a positive bound on failure; zero is treated as an immediate deadline.
 Once call routes have closed, optional notifier, event-subscription and publication runtimes enter

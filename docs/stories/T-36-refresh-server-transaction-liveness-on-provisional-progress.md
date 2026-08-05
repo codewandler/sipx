@@ -2,7 +2,7 @@
 id: T-36
 title: Refresh server-transaction liveness on provisional progress
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 1
 design: docs/designs/sip-transport.md
 epic: sip-transport
@@ -46,24 +46,24 @@ operational snapshot, not an inference surface for per-transaction lifecycle.
 
 ## Acceptance
 
-- [ ] `docs/specs/sip-transport.md` defines the unanswered-guard state table above before driver
+- [x] `docs/specs/sip-transport.md` defines the unanswered-guard state table above before driver
       implementation, including which automatic and retransmitted responses do not count.
-- [ ] Failing-first deterministic test
+- [x] Failing-first deterministic test
       `repeated_provisional_progress_refreshes_the_unanswered_backstop` pauses time with a 60-second
       limit, hands an INVITE to the application, successfully sends `180` at 20 seconds and `183`
       at 50 seconds, runs the 90-second sweep, and proves a later final response still succeeds.
       The last progress is only 40 seconds old although the original absolute deadline has passed.
-- [ ] No-progress coverage proves a request with no application response is still abandoned after
+- [x] No-progress coverage proves a request with no application response is still abandoned after
       the finite limit, increments `discard.unanswered`, and rejects a later response with
       `Error::NoTransaction`.
-- [ ] One-provisional-then-silence coverage proves a successful 1xx starts a fresh finite interval
+- [x] One-provisional-then-silence coverage proves a successful 1xx starts a fresh finite interval
       rather than exempting the transaction from collection.
-- [ ] Final-response coverage proves the unanswered guard stops counting a transaction immediately
+- [x] Final-response coverage proves the unanswered guard stops counting a transaction immediately
       after the successful final response while the RFC transaction remains available for its
       normal retransmission/ACK absorption lifetime.
-- [ ] Stale-key coverage proves provisional and final responses after abandonment or full
+- [x] Stale-key coverage proves provisional and final responses after abandonment or full
       termination return `Error::NoTransaction` and do not alter counters, timers or maps.
-- [ ] The implementation refreshes only the endpoint driver's existing exact-key guard. It exposes
+- [x] The implementation refreshes only the endpoint driver's existing exact-key guard. It exposes
       no transaction internals, adds no shadow lifecycle table, and preserves the finite warning
       and counter backstop.
 - [ ] The full repository gate is green.
@@ -79,6 +79,23 @@ operational snapshot, not an inference surface for per-transaction lifecycle.
 - The cause is local to `sipx-transport`: `Endpoint::on_message` inserts one timestamp when the
   request is handed over, `on_respond_command` retains but never refreshes it for a provisional
   response, and `abandon_unanswered` compares every entry with that original timestamp.
+
+## Progress
+
+- 2026-08-05: The guard now records handoff or last successfully transmitted application
+  provisional progress under the existing exact transaction key. Transaction-generated output
+  does not enter that path; final response and transaction termination remove the guard. The
+  output executor reports whether a message reached its configured transport boundary, so an
+  output with no destination cannot refresh the timestamp merely because the transaction layer
+  produced `Output::Send`.
+- 2026-08-05: The failing-first paused-time test initially lost the transaction at the old absolute
+  deadline and returned `NoTransaction`. The complete UDP target now passes 18 tests, including
+  repeated progress at 20 and 50 seconds, one-progress-then-silence, final-response absorption,
+  no-progress collection and stale provisional/final keys. A driver-level test also removes the
+  destination and proves an untransmitted provisional cannot move the guard timestamp. Strict
+  all-feature Clippy and the no-default-feature library check pass. The story remains in progress
+  only because the one full repository gate is deliberately deferred until the integrated tree is
+  frozen.
 
 ## Notes
 

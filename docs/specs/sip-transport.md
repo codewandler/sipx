@@ -345,7 +345,30 @@ shutdown command loses a race with command-receiver closure: command closure mea
 started, not that it has finished. The barrier becomes complete only after listeners, handshake
 tasks, pooled connections and endpoint sockets have been released.
 
-## 10.2 Graceful drain
+## 10.2 Application-response liveness guard
+
+RFC 3261 §17.2.1 permits an INVITE server transaction to remain in `Proceeding` while the
+application sends provisional responses and gives that state no expiration timer. The endpoint's
+`unanswered_limit` is therefore an application-leak backstop, not an RFC transaction timer and not
+an absolute request deadline. It measures silence since the most recent successful application
+response.
+
+| Guard state | Input | Result |
+|---|---|---|
+| absent | a new server request is handed to the application | insert the exact transaction key at the handoff time |
+| present | the application successfully performs a 100–199 response through `Handle::respond` | refresh that exact key after the response is performed |
+| present | the transaction layer generates 100 Trying or retransmits a stored response | do not refresh; no new application progress occurred |
+| present | the application successfully performs a final response | remove the key immediately; the RFC server transaction continues its own absorption/termination lifetime |
+| present | silence exceeds `unanswered_limit` | abandon the server transaction, warn, increment `discard.unanswered`, and remove its endpoint-owned state |
+| absent | the application attempts a response for a missing, abandoned or terminated key | return `Error::NoTransaction`; create no state and change no counter |
+
+The refresh happens only after the output has been performed. A failed send is not progress visible
+to the peer and cannot extend the guard. There is no separate keepalive or `progress(key)` command:
+the application must produce a valid SIP provisional response to demonstrate continued ownership.
+Repeated provisionals may keep a live transaction answerable indefinitely, but silence after the
+last one remains finitely bounded.
+
+## 10.3 Graceful drain
 
 `Handle::begin_drain` is the transport half of a graceful endpoint drain. It closes admission for
 outbound requests which can establish a dialog: an `INVITE`, `SUBSCRIBE`, or `REFER` without a
@@ -386,7 +409,7 @@ Transport behavior at that boundary is fixed:
 The deadline is a bound on failure, not evidence that work finished. Natural completion is always
 the route-closure and transaction-terminal events described above.
 
-## 10.3 Hop-by-hop overload control (RFC 7339 and RFC 7415)
+## 10.4 Hop-by-hop overload control (RFC 7339 and RFC 7415)
 
 **[RFC 7339 §2, §4]** Overload control is an explicit endpoint capability and is disabled by
 default. Setting `Config::overload.advertise` makes the endpoint a supporting client for this

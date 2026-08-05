@@ -13,8 +13,10 @@ use std::ops::Range;
 
 use bytes::Bytes;
 
-use crate::error::{AddressEditError, HeaderError};
+use crate::error::{AddressEditError, HeaderError, WarningEditError};
 use crate::headers::address::{AddressValueSpan, value_spans};
+use crate::headers::grammar::is_token_char;
+use crate::headers::warning::{WarningValueSpan, value_spans as warning_value_spans};
 use crate::name::HeaderName;
 use crate::uri::Uri;
 
@@ -220,6 +222,13 @@ struct AddressLayout {
     raw_len: usize,
 }
 
+#[derive(Debug)]
+struct WarningLayout {
+    spans: Vec<WarningValueSpan>,
+    source_map: Vec<Range<usize>>,
+    raw_len: usize,
+}
+
 impl Header {
     /// Build a header without checking the value.
     ///
@@ -334,6 +343,94 @@ impl Header {
         Ok(())
     }
 
+    /// Replace one address's display name, brackets and URI as one parser-owned span.
+    ///
+    /// The replacement always uses unambiguous name-address form. A present display name is
+    /// quoted and escaped here; every byte outside the retained presentation span stays exact.
+    /// Failures leave the header unchanged.
+    pub fn replace_address_presentation(
+        &mut self,
+        value_index: usize,
+        display_name: Option<&str>,
+        uri: &Uri,
+    ) -> Result<(), AddressEditError> {
+        let encoded = encode_address_presentation(display_name, uri)?;
+        let layout = self.address_layout()?;
+        let span = layout
+            .spans
+            .get(value_index)
+            .ok_or(AddressEditError::IndexOutOfRange { index: value_index })?;
+        let raw_span = project_range(&layout, &span.presentation)
+            .ok_or_else(|| malformed_address(self.name()))?;
+        let rewritten = self
+            .with_value_span_replaced(&raw_span, &encoded)
+            .ok_or_else(|| malformed_address(self.name()))?;
+        let candidate = rewritten.address_layout()?;
+        if candidate.spans.len() != layout.spans.len() {
+            return Err(malformed_address(self.name()));
+        }
+        let candidate_span = candidate
+            .spans
+            .get(value_index)
+            .ok_or_else(|| malformed_address(self.name()))?;
+        let candidate_raw_span = project_range(&candidate, &candidate_span.presentation)
+            .ok_or_else(|| malformed_address(self.name()))?;
+        if rewritten.raw_value().get(candidate_raw_span) != Some(encoded.as_ref()) {
+            return Err(malformed_address(self.name()));
+        }
+        *self = rewritten;
+        Ok(())
+    }
+
+    /// How many complete Warning values this row carries.
+    ///
+    /// The count uses the field's shared Warning grammar and therefore rejects an incomplete
+    /// code, missing agent or malformed quoted text instead of counting delimiters locally.
+    pub fn warning_value_count(&self) -> Result<usize, WarningEditError> {
+        self.warning_layout().map(|layout| layout.spans.len())
+    }
+
+    /// Replace one Warning agent with an RFC 3261 token pseudonym.
+    ///
+    /// Only the parser-retained agent range changes. The code, separator spaces, quoted text,
+    /// folding and list layout stay byte-identical. Failures leave the header unchanged.
+    pub fn replace_warning_agent_with_pseudonym(
+        &mut self,
+        value_index: usize,
+        pseudonym: &[u8],
+    ) -> Result<(), WarningEditError> {
+        validate_warning_pseudonym(pseudonym)?;
+        let layout = self.warning_layout()?;
+        let span = layout
+            .spans
+            .get(value_index)
+            .ok_or(WarningEditError::IndexOutOfRange { index: value_index })?;
+        let raw_span = project_source_range(&layout.source_map, layout.raw_len, &span.agent)
+            .ok_or_else(malformed_warning)?;
+        let rewritten = self
+            .with_value_span_replaced(&raw_span, pseudonym)
+            .ok_or_else(malformed_warning)?;
+        let candidate = rewritten.warning_layout()?;
+        if candidate.spans.len() != layout.spans.len() {
+            return Err(malformed_warning());
+        }
+        let candidate_span = candidate
+            .spans
+            .get(value_index)
+            .ok_or_else(malformed_warning)?;
+        let candidate_raw_span = project_source_range(
+            &candidate.source_map,
+            candidate.raw_len,
+            &candidate_span.agent,
+        )
+        .ok_or_else(malformed_warning)?;
+        if rewritten.raw_value().get(candidate_raw_span) != Some(pseudonym) {
+            return Err(malformed_warning());
+        }
+        *self = rewritten;
+        Ok(())
+    }
+
     /// Return this row with one address value removed.
     ///
     /// `Ok(None)` means the selected address was the row's sole value, so the containing header
@@ -374,6 +471,20 @@ impl Header {
         let (unfolded, source_map) = unfold_with_source_map(raw);
         let spans = value_spans(&unfolded, header, list).map_err(AddressEditError::Malformed)?;
         Ok(AddressLayout {
+            spans,
+            source_map,
+            raw_len: raw.len(),
+        })
+    }
+
+    fn warning_layout(&self) -> Result<WarningLayout, WarningEditError> {
+        if self.name() != &HeaderName::Warning {
+            return Err(malformed_warning());
+        }
+        let raw = self.raw_value();
+        let (unfolded, source_map) = unfold_with_source_map(raw);
+        let spans = warning_value_spans(&unfolded).map_err(WarningEditError::Malformed)?;
+        Ok(WarningLayout {
             spans,
             source_map,
             raw_len: raw.len(),
@@ -551,6 +662,48 @@ impl Headers {
         header.replace_address_uri(row_index, uri)
     }
 
+    /// Replace one address presentation by its flattened wire-order value index.
+    ///
+    /// Repeated rows and comma-joined values share one zero-based index space. Every matching row
+    /// is parsed before mutation, so a malformed later row cannot leave a partial edit behind.
+    pub fn replace_address_presentation(
+        &mut self,
+        name: &HeaderName,
+        value_index: usize,
+        display_name: Option<&str>,
+        uri: &Uri,
+    ) -> Result<(), AddressEditError> {
+        address_grammar(name)?;
+        encode_address_presentation(display_name, uri)?;
+        let rows = self.address_rows(name)?;
+        let (entry_index, row_index) = locate_address_value(&rows, value_index)?;
+        let header = self
+            .entries
+            .get_mut(entry_index)
+            .ok_or(AddressEditError::IndexOutOfRange { index: value_index })?;
+        header.replace_address_presentation(row_index, display_name, uri)
+    }
+
+    /// Replace one Warning agent by its flattened wire-order value index.
+    ///
+    /// Repeated rows and comma-joined values share one zero-based index space. Every Warning row
+    /// is parsed before mutation, so a malformed later row cannot leave a partial edit behind.
+    pub fn replace_warning_agent_with_pseudonym(
+        &mut self,
+        value_index: usize,
+        pseudonym: &[u8],
+    ) -> Result<(), WarningEditError> {
+        validate_warning_pseudonym(pseudonym)?;
+        let rows = self.warning_rows()?;
+        let (entry_index, row_index) = locate_flattened_value(&rows, value_index)
+            .map_err(|()| WarningEditError::IndexOutOfRange { index: value_index })?;
+        let header = self
+            .entries
+            .get_mut(entry_index)
+            .ok_or(WarningEditError::IndexOutOfRange { index: value_index })?;
+        header.replace_warning_agent_with_pseudonym(row_index, pseudonym)
+    }
+
     /// Remove one address value by its flattened wire-order index.
     ///
     /// If it was a row's sole value, that exact field line is removed. Otherwise only the value
@@ -589,6 +742,15 @@ impl Headers {
             .collect()
     }
 
+    fn warning_rows(&self) -> Result<Vec<(usize, usize)>, WarningEditError> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, header)| header.name() == &HeaderName::Warning)
+            .map(|(index, header)| header.warning_value_count().map(|count| (index, count)))
+            .collect()
+    }
+
     /// The first value with this name, unfolded.
     #[must_use]
     pub fn value(&self, name: &HeaderName) -> Option<Cow<'_, [u8]>> {
@@ -624,27 +786,73 @@ fn malformed_address(name: &HeaderName) -> AddressEditError {
     AddressEditError::Malformed(HeaderError::Syntax { header })
 }
 
+fn malformed_warning() -> WarningEditError {
+    WarningEditError::Malformed(HeaderError::Syntax { header: "Warning" })
+}
+
+fn validate_warning_pseudonym(pseudonym: &[u8]) -> Result<(), WarningEditError> {
+    if pseudonym.is_empty() || !pseudonym.iter().copied().all(is_token_char) {
+        return Err(WarningEditError::InvalidPseudonym);
+    }
+    Ok(())
+}
+
 fn validate_replacement_uri(uri: &Uri) -> Result<Bytes, AddressEditError> {
     let encoded = uri.to_bytes();
     Uri::parse(encoded.clone()).map_err(AddressEditError::InvalidUri)?;
     Ok(encoded)
 }
 
+fn encode_address_presentation(
+    display_name: Option<&str>,
+    uri: &Uri,
+) -> Result<Bytes, AddressEditError> {
+    let uri = validate_replacement_uri(uri)?;
+    let mut encoded = Vec::new();
+    if let Some(display_name) = display_name {
+        if display_name
+            .as_bytes()
+            .iter()
+            .any(|byte| *byte < 0x20 || *byte == 0x7f)
+        {
+            return Err(AddressEditError::InvalidDisplayName);
+        }
+        encoded.push(b'"');
+        for byte in display_name.as_bytes() {
+            if matches!(byte, b'"' | b'\\') {
+                encoded.push(b'\\');
+            }
+            encoded.push(*byte);
+        }
+        encoded.extend_from_slice(b"\" ");
+    }
+    encoded.push(b'<');
+    encoded.extend_from_slice(&uri);
+    encoded.push(b'>');
+    Ok(Bytes::from(encoded))
+}
+
 fn locate_address_value(
     rows: &[(usize, usize)],
     value_index: usize,
 ) -> Result<(usize, usize), AddressEditError> {
+    locate_flattened_value(rows, value_index)
+        .map_err(|()| AddressEditError::IndexOutOfRange { index: value_index })
+}
+
+fn locate_flattened_value(
+    rows: &[(usize, usize)],
+    value_index: usize,
+) -> Result<(usize, usize), ()> {
     let mut first = 0usize;
     for &(entry_index, count) in rows {
-        let end = first
-            .checked_add(count)
-            .ok_or(AddressEditError::IndexOutOfRange { index: value_index })?;
+        let end = first.checked_add(count).ok_or(())?;
         if value_index < end {
             return Ok((entry_index, value_index - first));
         }
         first = end;
     }
-    Err(AddressEditError::IndexOutOfRange { index: value_index })
+    Err(())
 }
 
 fn unfold_with_source_map(raw: &[u8]) -> (Vec<u8>, Vec<Range<usize>>) {
@@ -673,19 +881,27 @@ fn unfold_with_source_map(raw: &[u8]) -> (Vec<u8>, Vec<Range<usize>>) {
 }
 
 fn project_range(layout: &AddressLayout, span: &Range<usize>) -> Option<Range<usize>> {
-    if span.start > span.end || span.end > layout.source_map.len() {
+    project_source_range(&layout.source_map, layout.raw_len, span)
+}
+
+fn project_source_range(
+    source_map: &[Range<usize>],
+    raw_len: usize,
+    span: &Range<usize>,
+) -> Option<Range<usize>> {
+    if span.start > span.end || span.end > source_map.len() {
         return None;
     }
-    let start = source_boundary(layout, span.start)?;
-    let end = source_boundary(layout, span.end)?;
+    let start = source_boundary(source_map, raw_len, span.start)?;
+    let end = source_boundary(source_map, raw_len, span.end)?;
     (start <= end).then_some(start..end)
 }
 
-fn source_boundary(layout: &AddressLayout, position: usize) -> Option<usize> {
-    if position == layout.source_map.len() {
-        Some(layout.raw_len)
+fn source_boundary(source_map: &[Range<usize>], raw_len: usize, position: usize) -> Option<usize> {
+    if position == source_map.len() {
+        Some(raw_len)
     } else {
-        layout.source_map.get(position).map(|source| source.start)
+        source_map.get(position).map(|source| source.start)
     }
 }
 

@@ -2,7 +2,7 @@
 id: S-51
 title: Expose lossless Warning-agent editing
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 3
 design: docs/specs/lossless-presentation-editing.md
 epic: sip-core
@@ -21,14 +21,14 @@ without parsing the list locally or changing its warning code, quoted text or su
 
 ## Acceptance
 
-- [ ] A shared Warning parser validates comma-joined and repeated `warning-value` rows, hostport or
+- [x] A shared Warning parser validates comma-joined and repeated `warning-value` rows, hostport or
       pseudonym agents and escaped quoted text, retaining the complete agent span from that pass.
-- [ ] One public flattened-index operation replaces only the selected agent with a validated token
+- [x] One public flattened-index operation replaces only the selected agent with a validated token
       pseudonym. It cannot emit the agent-less shape forbidden by RFC 3261 §25.1.
-- [ ] Code, text, separator spaces, folding, list delimiters, other values and other rows remain
+- [x] Code, text, separator spaces, folding, list delimiters, other values and other rows remain
       byte-identical; malformed syntax, bad replacement and out-of-range index are typed, atomic
       failures.
-- [ ] Public failing-first integration tests derive from all `LP-W` vectors in
+- [x] Public failing-first integration tests derive from all `LP-W` vectors in
       [`docs/specs/lossless-presentation-editing.md`](../specs/lossless-presentation-editing.md), and
       focused formatting, clippy, unit, feature-off and documentation checks pass.
 
@@ -55,6 +55,14 @@ without parsing the list locally or changing its warning code, quoted text or su
 - `bad_code_text_or_later_row_makes_edit_atomic` — `LP-W-6`.
 - `hostile_pseudonyms_are_refused_atomically` — `LP-W-7`.
 - `warning_index_past_complete_field_is_typed` — `LP-W-8`.
+
+The eight tests first failed to compile on the absent error type and operations. The shared parser
+now validates every repeated/list row, retains each complete agent span through folding, accepts
+hostport or token pseudonym syntax, and understands escaped quotes and commas in warning text. The
+editor preflights all rows, splices only a validated non-empty token and reparses before assignment;
+all 17 combined presentation/Warning vectors pass. The complete all-feature `sipx-sip` suite,
+strict Clippy, no-default-feature targets and warning-denied rustdoc pass. Status remains in progress
+only until the integrated full gate is run once.
 
 ## Notes
 

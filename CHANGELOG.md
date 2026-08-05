@@ -9,6 +9,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Routing and privacy consumers can inspect and edit parser-owned signalling syntax without
+  rebuilding fields.** TEL URI parameters are available as an allocation-free, fused iterator over
+  exact names and optional values with case-insensitive name matching and typed byte offsets.
+  Address presentation can be replaced as one display-name/brackets/URI span, and one flattened
+  Warning agent can be replaced by a validated token pseudonym; both edits retain every surrounding
+  wire byte and preflight repeated rows before mutation.
+
 - **Release tags can produce portable, byte-verified CLI artifacts.** The protected workflow builds
   native x86-64 and Arm64 musl Linux, Intel and Arm64 macOS, and x86-64 Windows executables with no
   optional native features; each runs a bounded loopback call before deterministic packaging. The
@@ -50,6 +57,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   200-byte headroom once, while `None` selects the 1300-byte unknown-path rule.
 
 ### Fixed
+
+- **Long-ringing server transactions remain answerable while the application reports progress.**
+  Each successfully transmitted application provisional response refreshes the endpoint's finite
+  unanswered guard under the exact transaction key. Silence is still collected and counted, final
+  responses leave the guard immediately, and automatic responses, retransmissions, missing
+  destinations and stale keys cannot extend or recreate it.
 
 - **Confirmed calls handle delayed offers and directional dynamic payload assignments.** A
   bodyless re-INVITE now carries the local offer in its successful response and settles the ACK's

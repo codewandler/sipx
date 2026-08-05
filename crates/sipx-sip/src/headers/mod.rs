@@ -28,6 +28,7 @@ pub mod identity;
 pub mod misc;
 pub mod privacy;
 pub mod via;
+pub(crate) mod warning;
 
 pub use address::{Address, Contact, ContactValue, From, RecordRoute, Route, To};
 pub use grammar::HeaderParam;

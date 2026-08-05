@@ -284,4 +284,25 @@ pub enum AddressEditError {
     /// The replacement URI did not survive serialization as a valid URI.
     #[error("invalid replacement URI: {0}")]
     InvalidUri(#[source] UriError),
+    /// A replacement display name contains a header-delimiting control byte.
+    #[error("replacement display name contains a control byte")]
+    InvalidDisplayName,
+}
+
+/// Why a parser-owned Warning agent could not be edited losslessly.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum WarningEditError {
+    /// At least one row did not match the complete Warning field grammar.
+    #[error("malformed Warning field: {0}")]
+    Malformed(#[source] HeaderError),
+    /// The flattened, zero-based Warning value index does not exist.
+    #[error("Warning value index {index} is out of range")]
+    IndexOutOfRange {
+        /// The requested flattened value index.
+        index: usize,
+    },
+    /// The replacement is empty or is not one RFC 3261 token.
+    #[error("replacement Warning pseudonym is not a token")]
+    InvalidPseudonym,
 }

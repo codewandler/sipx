@@ -254,7 +254,120 @@ impl<'a> TelUriParts<'a> {
     pub fn parameters(&self) -> Option<&'a [u8]> {
         self.parameters
     }
+
+    /// Iterate the exact generic RFC 3966 parameters with structural validation.
+    ///
+    /// Names compare case-insensitively through [`TelParameter::name_eq`]. Order, duplicates,
+    /// percent escapes and original spelling are retained; parameter-specific policy is not
+    /// applied. A malformed item is yielded once and fuses the iterator.
+    #[must_use]
+    pub fn parsed_parameters(&self) -> TelParameters<'a> {
+        TelParameters {
+            remaining: self.parameters,
+            tail_len: self.parameters.map_or(0, <[u8]>::len),
+        }
+    }
 }
+
+/// Allocation-free iterator over one TEL URI's retained parameter tail.
+#[derive(Debug, Clone)]
+pub struct TelParameters<'a> {
+    remaining: Option<&'a [u8]>,
+    tail_len: usize,
+}
+
+/// One structurally valid generic RFC 3966 parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TelParameter<'a> {
+    name: &'a [u8],
+    value: Option<&'a [u8]>,
+}
+
+impl<'a> TelParameter<'a> {
+    /// The exact parameter-name bytes.
+    #[must_use]
+    pub fn name(&self) -> &'a [u8] {
+        self.name
+    }
+
+    /// The exact parameter value, or `None` when the wire parameter had no `=` delimiter.
+    #[must_use]
+    pub fn value(&self) -> Option<&'a [u8]> {
+        self.value
+    }
+
+    /// Compare a valid RFC 3966 parameter name with ASCII case folding.
+    ///
+    /// An empty or syntactically invalid candidate is never equal.
+    #[must_use]
+    pub fn name_eq(&self, expected: &[u8]) -> bool {
+        valid_tel_parameter_name(expected) && escape::eq_ignore_ascii_case(self.name, expected)
+    }
+}
+
+/// Why one retained TEL parameter tail is not structurally valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("invalid TEL parameter at tail byte {offset}: {kind}")]
+pub struct TelParameterError {
+    offset: usize,
+    kind: TelParameterErrorKind,
+}
+
+impl TelParameterError {
+    /// Tail-relative byte offset of the offending component or byte.
+    #[must_use]
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// The rejected grammar component.
+    #[must_use]
+    pub fn kind(&self) -> TelParameterErrorKind {
+        self.kind
+    }
+}
+
+/// The malformed part of a generic RFC 3966 parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum TelParameterErrorKind {
+    /// An empty segment, including a trailing or repeated `;` delimiter.
+    #[error("empty parameter")]
+    Empty,
+    /// An empty or syntactically invalid `pname`.
+    #[error("invalid parameter name")]
+    Name,
+    /// An empty or syntactically invalid `pvalue`.
+    #[error("invalid parameter value")]
+    Value,
+}
+
+impl<'a> Iterator for TelParameters<'a> {
+    type Item = Result<TelParameter<'a>, TelParameterError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let remaining = self.remaining.take()?;
+        let offset = self.tail_len.saturating_sub(remaining.len());
+        let (segment, rest) = match remaining.iter().position(|&byte| byte == b';') {
+            Some(separator) => (
+                remaining.get(..separator).unwrap_or(&[]),
+                remaining.get(separator.saturating_add(1)..),
+            ),
+            None => (remaining, None),
+        };
+        self.remaining = rest;
+
+        match parse_tel_parameter(segment, offset) {
+            Ok(parameter) => Some(Ok(parameter)),
+            Err(error) => {
+                self.remaining = None;
+                Some(Err(error))
+            }
+        }
+    }
+}
+
+impl std::iter::FusedIterator for TelParameters<'_> {}
 
 /// A URI.
 ///
@@ -816,6 +929,109 @@ fn split_tel_body(body: &[u8]) -> TelUriParts<'_> {
             parameters: None,
         },
     }
+}
+
+fn parse_tel_parameter(
+    segment: &[u8],
+    offset: usize,
+) -> Result<TelParameter<'_>, TelParameterError> {
+    if segment.is_empty() {
+        return Err(TelParameterError {
+            offset,
+            kind: TelParameterErrorKind::Empty,
+        });
+    }
+    let (name, value, value_offset) = match segment.iter().position(|&byte| byte == b'=') {
+        Some(equals) => (
+            segment.get(..equals).unwrap_or(&[]),
+            Some(segment.get(equals.saturating_add(1)..).unwrap_or(&[])),
+            equals.saturating_add(1),
+        ),
+        None => (segment, None, segment.len()),
+    };
+    if name.is_empty() {
+        return Err(TelParameterError {
+            offset,
+            kind: TelParameterErrorKind::Name,
+        });
+    }
+    if let Some(invalid) = name
+        .iter()
+        .position(|&byte| !is_tel_parameter_name_char(byte))
+    {
+        return Err(TelParameterError {
+            offset: offset.checked_add(invalid).unwrap_or(offset),
+            kind: TelParameterErrorKind::Name,
+        });
+    }
+    if let Some(value) = value {
+        if value.is_empty() {
+            return Err(TelParameterError {
+                offset: offset.checked_add(value_offset).unwrap_or(offset),
+                kind: TelParameterErrorKind::Value,
+            });
+        }
+        if let Some(invalid) = invalid_tel_parameter_value_byte(value) {
+            let value_start = offset.checked_add(value_offset).unwrap_or(offset);
+            return Err(TelParameterError {
+                offset: value_start.checked_add(invalid).unwrap_or(value_start),
+                kind: TelParameterErrorKind::Value,
+            });
+        }
+    }
+    Ok(TelParameter { name, value })
+}
+
+#[must_use]
+fn valid_tel_parameter_name(name: &[u8]) -> bool {
+    !name.is_empty() && name.iter().copied().all(is_tel_parameter_name_char)
+}
+
+#[must_use]
+fn is_tel_parameter_name_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-'
+}
+
+#[must_use]
+fn invalid_tel_parameter_value_byte(value: &[u8]) -> Option<usize> {
+    let mut index = 0;
+    while let Some(&byte) = value.get(index) {
+        if byte == b'%' {
+            let first = value.get(index.saturating_add(1));
+            let second = value.get(index.saturating_add(2));
+            if !first.is_some_and(u8::is_ascii_hexdigit)
+                || !second.is_some_and(u8::is_ascii_hexdigit)
+            {
+                return Some(index);
+            }
+            index = index.saturating_add(3);
+            continue;
+        }
+        if !(byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'!'
+                    | b'~'
+                    | b'*'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'['
+                    | b']'
+                    | b'/'
+                    | b':'
+                    | b'&'
+                    | b'+'
+                    | b'$'
+            ))
+        {
+            return Some(index);
+        }
+        index = index.saturating_add(1);
+    }
+    None
 }
 
 /// Remove the RFC 3966 `visual-separator` characters: `-`, `.`, `(` and `)`.

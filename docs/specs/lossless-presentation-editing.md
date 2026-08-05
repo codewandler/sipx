@@ -107,7 +107,7 @@ The public integration tests use those bytes rather than the labels.
 | LP-A-5 | valid first `From` row followed by a malformed repeated `From` row | replace index 0 | `Malformed`; both rows unchanged |
 | LP-A-6 | `From: "unterminated <sip:a@h>;tag=x` | replace index 0 | `Malformed`; field unchanged |
 | LP-A-7 | valid `From` | display name containing CRLF, NUL or DEL | typed refusal; field unchanged |
-| LP-A-8 | valid `From` | URI whose serialized form makes the enclosing candidate invalid | `Malformed` or the existing typed URI refusal; field unchanged |
+| LP-A-8 | valid bare `From` | URI `sip:new,part@h;transport=tcp?subject=x` | exact name-address replacement; delimiter-rich URI reparses inside `<…>` without changing the parameter tail |
 
 ### Warning agent
 
