@@ -773,6 +773,20 @@ deny-by-default capabilities. Four phases, each shell-demonstrable: one call one
 call placed by the CLI and the absent-app case does what its declaration says.
 See [design](designs/app-host.md).
 
+### OpenAI realtime bridge — `openai`
+
+The first proof whose far end is a *service*: one sipx call leg held together with one OpenAI
+realtime session over a WebSocket, caller audio up as G.711 passthrough, the agent's voice back
+into the call's RTP — so "dial in, an agent answers" is demonstrable with one command. The seam
+is application-side and the epic builds only what the workspace lacks: a spec with vectors
+(`A-19`), a general WSS client over the one TLS policy (`A-20`), a deterministic loopback peer
+so the loop runs in the default CI matrix with no account (`A-21`), the bridge and its product
+path (`A-22`), and the repo's first credentialed opt-in live proof under disclaim-don't-skip
+(`A-23`). Deliberately not here: the vendor's SIP connector (sipx stays the SIP endpoint),
+transcoding, reconnection, and any claim the stand-in peer could satisfy vacuously. Done when
+the stand-in-backed loop is green in CI and one live bridged call's evidence is recorded.
+See [design](designs/openai.md).
+
 ### ICE — `ice`
 
 The media path where symmetric RTP cannot reach: candidate gathering, connectivity checks and

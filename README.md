@@ -125,7 +125,7 @@ workspace, parsers are fuzzed, and unknown headers survive a parse/serialize rou
 <!-- BEGIN generated:crate-map -->
 | Crate | What it does |
 |---|---|
-| `sipx-app` | SIP application host with webhook and full-duplex session bindings |
+| `sipx-app` | SIP application host with webhook, session, and realtime audio bindings |
 | `sipx-app-protocol` | The sipx.app.v1 application contract: its types, JSON wire format, and sans-IO instruction interpreter |
 | `sipx-audio` | Telephony audio: G.711 µ-law and A-law, PCM mixing, WAV I/O, and Opus behind the `opus` feature |
 | `sipx-call` | Call framework: dial, answer, couple dialogs, play, record, send DTMF, and transfer |
@@ -134,7 +134,7 @@ workspace, parsers are fuzzed, and unknown headers survive a parse/serialize rou
 | `sipx-rtp` | RTP and RTCP packet handling, sequencing, jitter buffering, quality statistics and SRTP (RFC 3550) |
 | `sipx-sdp` | SDP session descriptions (RFC 8866) and offer/answer negotiation (RFC 3264) |
 | `sipx-sip` | Sans-IO SIP core: messages, parser and transactions (RFC 3261) |
-| `sipx-testkit` | Deterministic SIP and RTP tests with bounded peers, virtual time, and RFC corpora |
+| `sipx-testkit` | Deterministic SIP and RTP tests with bounded realtime peers, virtual time, and RFC corpora |
 | `sipx-transport` | Async SIP transports: UDP, TCP, TLS, WebSocket, experimental QUIC, and RFC 3263 resolution |
 | `sipx-ua` | SIP user agent: registration, digest authentication, event subscriptions, and presence |
 <!-- END generated:crate-map -->

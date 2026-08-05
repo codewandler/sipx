@@ -162,12 +162,12 @@ Those properties make the core deterministic to drive from another runtime or a 
 | Socket-free call signalling tests with seeded faults and virtual time | `sipx-testkit` |
 | A phone to run rather than embed — the `sipx` binary | `sipx-cli` |
 | The `sipx.app.v1` contract: its types, wire format and interpreter | `sipx-app-protocol` |
-| The application host, webhook/session bindings, and deterministic contract harness | `sipx-app` |
+| The application host, webhook/session/realtime bindings, and deterministic contract harness | `sipx-app` |
 
-`sipx-app` includes a `sipx-host` process that serves real calls to document-mode webhooks or
-authenticated full-duplex sessions. A granted session can originate calls. The Rust host surfaces
-are Supported under the policy above; the `sipx.app.v1` wire line remains Experimental, and no
-embedded runtime or TypeScript SDK is shipped.
+`sipx-app` includes a `sipx-host` process that serves real calls to document-mode webhooks,
+authenticated full-duplex sessions, or a configured realtime audio bridge. A granted session can
+originate calls. The Rust host surfaces are Supported under the policy above; the `sipx.app.v1`
+wire line remains Experimental, and no embedded runtime or TypeScript SDK is shipped.
 
 ## Serve inbound event subscriptions
 
@@ -298,7 +298,8 @@ presence NOTIFY documents remain application responsibilities.
 - `sipx-sip` and `sipx-sdp` are sans-I/O and have no async runtime.
 - `sipx-testkit::call::CallHarness` asynchronously drives the real call API over socket-free SIP
   signalling; `TransactionHarness` is the seeded, nanosecond virtual-time surface whose clock
-  advances only when a test asks.
+  advances only when a test asks. Its Experimental `RealtimePeer` supplies a bounded loopback
+  WebSocket counterparty for the realtime bridge's deterministic protocol and failure vectors.
 - `sipx-transport`, `sipx-ua`, `sipx-media`, and `sipx-call` use Tokio for I/O-facing work.
 - `sipx-transport` enables UDP, TCP, DNS, TLS, WebSocket, secure WebSocket, and the Experimental
   SIP-over-QUIC mapping by default. Use `default-features = false` with an explicit feature list
@@ -328,7 +329,7 @@ docs.rs so that it always matches the guides next to it. Start points:
 | `sipx-rtp` | [`srtp`](https://codewandler.github.io/sipx/api/sipx_rtp/srtp/index.html) · [`rtcp`](https://codewandler.github.io/sipx/api/sipx_rtp/rtcp/index.html) |
 | `sipx-media` | [`MediaSession`](https://codewandler.github.io/sipx/api/sipx_media/session/struct.MediaSession.html) |
 | `sipx-call` | [`dial`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.dial.html) · [`answer`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.answer.html) · [`Call`](https://codewandler.github.io/sipx/api/sipx_call/call/struct.Call.html) · [`EventSubscriptions`](https://codewandler.github.io/sipx/api/sipx_call/subscriber/struct.EventSubscriptions.html) · [`Publications`](https://codewandler.github.io/sipx/api/sipx_call/publication/struct.Publications.html) |
-| `sipx-testkit` | [`CallHarness`](https://codewandler.github.io/sipx/api/sipx_testkit/call/struct.CallHarness.html) · [`TransactionHarness`](https://codewandler.github.io/sipx/api/sipx_testkit/call/struct.TransactionHarness.html) · [`Faults`](https://codewandler.github.io/sipx/api/sipx_testkit/link/struct.Faults.html) |
+| `sipx-testkit` | [`CallHarness`](https://codewandler.github.io/sipx/api/sipx_testkit/call/struct.CallHarness.html) · [`TransactionHarness`](https://codewandler.github.io/sipx/api/sipx_testkit/call/struct.TransactionHarness.html) · [`RealtimePeer`](https://codewandler.github.io/sipx/api/sipx_testkit/realtime_peer/struct.RealtimePeer.html) · [`Faults`](https://codewandler.github.io/sipx/api/sipx_testkit/link/struct.Faults.html) |
 
 The API reference is generated from the same `main` branch as this site. When using the tagged
 release, consult the checked-out source documentation if an API has changed on `main`.

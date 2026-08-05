@@ -85,6 +85,65 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   six-rate/five-repetition protocol, result schema and process-group cleanup required before a
   comparative run. Its checker rejects unbounded phases, incomplete metadata, false zero resource
   measurements, live post-drain state, malformed or duplicate readiness and leaked descendants.
+- **A routed SIP call can now terminate on a realtime audio agent** (`A-22`). `sipx-app` adds a
+  supported one-call/one-session bridge whose PCMU or PCMA RTP payloads remain encoded and
+  byte-identical across base64 event framing. Both directions have bounded non-blocking queues with
+  counted loss; partial downlink frames receive the negotiated G.711 silence byte; barge-in sends
+  one cancel, atomically flushes queued and accumulated audio, and bounds locally committed residue
+  to one 20 ms frame. Every socket, setup, protocol, liveness and call ending is a typed outcome,
+  and all media tasks are joined before it is reported.
+  Host configuration gains `binding = "realtime"` with endpoint, model, instructions and only the
+  API key's secret name; unknown keys are refused and grants remain denied by default. The shipped
+  `sipx-host <document>` command answers routed calls through that binding and writes one JSON line
+  naming the codec, 20 ms packet duration, terminal session outcome and drop counters. A loopback
+  suite holds all A-22-owned `ORB-*` vectors independently, while a real SIP/RTP product test
+  correlates distinct encoded tones in both directions, proves wrong credentials bridge no audio,
+  and runs the binary path itself. This use graduates the general non-SIP WSS client and realtime
+  bridge modules to Supported under the pre-1.0 policy.
+- **A deterministic stand-in for the realtime peer** (`A-21`). `sipx-testkit` gains a loopback
+  WebSocket server that speaks `docs/specs/openai-realtime.md` from the vendor's side, so the
+  whole bridge loop is provable in the default `cargo test` matrix with no account, no
+  credential, no network, no Docker and no certificate material. It accepts a configured bearer
+  and refuses any other before the upgrade completes, acknowledges the session, consumes append
+  events, and streams deltas carrying the spec's own §4.2 tone vectors as literals. Its negative
+  modes are first-class configuration rather than afterthoughts — malformed and unreadable
+  events, an oversize frame, withheld session acknowledgements, a genuine mid-call stall, a
+  clean close and an abrupt reset, cancel-honouring and cancel-ignoring responses — and **every
+  one has a test proving the peer actually misbehaves**, asserted from the client's side of the
+  socket, several with a control arm so the negative cannot pass vacuously. Cleartext on
+  loopback by design: no vector asks the peer for TLS, and the client refuses cleartext
+  anywhere else.
+- **A general-purpose secure WebSocket client for non-SIP peers** (`A-20`). `sipx-app` gains
+  `WssClient`/`WssRequest`/`WssConnection`: an RFC 6455 client composed over the workspace's one
+  TLS policy — `tokio-tungstenite`'s handshake over `sipx-transport`'s `ClientTls`, so a
+  wrong-name or unknown-issuer certificate is refused by the same check every SIP transport
+  verifies with, and the dependency keeps its no-TLS-features stance. The SIP WebSocket client is
+  untouched and still refuses any peer that does not negotiate the `sip` subprotocol. Caller-supplied
+  request headers (an `Authorization` bearer being the case it exists for), no subprotocol offered
+  unless named, message and frame bounds installed at the handshake so an oversize message is a
+  typed refusal rather than an allocation, and Ping/Pong liveness on the session-binding cadence.
+  **Credentials never travel in a URL**: userinfo is a typed refusal, the authority that reaches
+  the wire is rebuilt from the parsed host and port, and every printed URL is redacted from the
+  raw string, so a URL too malformed — or too scheme-less — to parse still cannot leak into a log.
+  Cleartext `ws` reaches loopback only, decided by the *name* so resolution never gets a vote on
+  whether encryption happens. Liveness is strict about Pongs in both directions that matters: a
+  Pong that arrived while the caller was away still counts, and a peer streaming data while
+  withholding Pongs is still declared gone at the grace. Experimental (`A-8`): the module
+  graduates when a caller constrains its shape.
+
+- **A normative spec for bridging a call to an OpenAI realtime session** (`A-19`).
+  `docs/specs/openai-realtime.md` pins the contract the rest of the `openai` epic is built and
+  tested against: the `wss` endpoint and bearer credential resolved from a *named* secret
+  (`host-config.md` N7, no value in configuration, logs or errors); G.711 μ-law/A-law
+  passthrough in both directions, so the call's own 20 ms payload travels as base64 without a
+  transcode, with byte-level vectors for two known frames; the exhaustive event subset — three
+  client events, seven server events, an unknown *event* ignored with a counter and an
+  uninterpretable *member* fatal; the barge-in rule with a stated queue bound and two counters,
+  one bounded and one explicitly not; bounded queues with counted loss in both directions; and
+  ten typed ways the bridge can end, each with the bound that produces it. Eighteen vectors
+  (`ORB-1`…`ORB-18`), each naming the story that enforces it; all but the live-endpoint vector
+  run with no credentials. The document is normative for this workspace and observational
+  toward the vendor, carrying the date its published contract was read.
 
 ## [1.0.0-beta.4] — 2026-08-04
 

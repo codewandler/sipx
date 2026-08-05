@@ -1,6 +1,6 @@
 # Spec: Host configuration
 
-**Status:** normative · **Epic:** `app-host` · **Story:** `A-1` ·
+**Status:** normative · **Epics:** `app-host`, `openai` · **Stories:** `A-1`, `A-22` ·
 **Design:** [app-host](../designs/app-host.md) ·
 **Vectors:** [`crates/sipx-app/src/config/vectors.rs`](../../crates/sipx-app/src/config/vectors.rs),
 run by [`crates/sipx-app/tests/config_vectors.rs`](../../crates/sipx-app/tests/config_vectors.rs)
@@ -21,6 +21,8 @@ referenced here.
   inverts.
 - [`webhook-binding.md`](webhook-binding.md) §3, [`session-binding.md`](session-binding.md) §1,
   [`engine-binding.md`](engine-binding.md) §2 — what each binding needs named here.
+- [`openai-realtime.md`](openai-realtime.md) §2–§3 — what a realtime bridge binding needs named
+  here, and why its credential is a name rather than a value.
 - [`sip-transport.md`](sip-transport.md) §4 — the transports a `sip` listener may name.
 - RFC 3986 §3 — the `url` of a webhook app is an absolute URI.
 - RFC 3261 §21 — the status codes a refusal may carry.
@@ -64,7 +66,7 @@ is one an operator would have to be able to read in someone else's document duri
   versions of a peer interoperate. In this file, ignoring `on_5xxx` means an operator who
   declared `hangup` silently gets `continue`, and finds out during an incident. A key that is
   known but not permitted where it appears — `app` on a `session` listener — is refused the same
-  way. *(HC-4, HC-5, HC-30)*
+  way. *(HC-4, HC-5, HC-30, HC-32)*
 - **N3 — A key or table declared twice is refused.** Last-wins is a merge, and a merge is the
   other way a document can mean something other than what it says. *(HC-6, HC-7)*
 - **N4 — The failure knobs are the contract's §9.2 knobs.** Same names, same values, same
@@ -73,17 +75,17 @@ is one an operator would have to be able to read in someone else's document duri
   HC-9, HC-10, HC-11)*
 - **N5 — Grants are deny-by-default.** An absent `grants` table denies everything grantable:
   `play` may use inline audio only, `dial` may set no extra header, and the app may not
-  `originate`. *(HC-1, HC-12, HC-13)*
+  `originate`. *(HC-1, HC-12, HC-13, HC-31)*
 - **N6 — Routing is total.** Before the first packet, every listener resolves either to a
   declared app or to a refusal status. Silence is not an option, and neither is a route to an
   app that does not exist. *(HC-1, HC-14, HC-15, HC-16, HC-17)*
 - **N7 — Secrets are named, never carried.** No key in this schema takes secret material; the
   keys that concern secrets take a **name**, resolved outside this file. The name grammar (§4.4)
   is narrow enough that a pasted key does not fit through it. The document is committable.
-  *(HC-1, HC-18, HC-19)*
+  *(HC-1, HC-18, HC-19, HC-31, HC-37)*
 - **N8 — A binding's fields are required at load, not at first call.** An app whose binding
   cannot be used is a document error, discovered before a call arrives rather than by one.
-  *(HC-20, HC-21, HC-22, HC-23)*
+  *(HC-20, HC-21, HC-22, HC-23, HC-31, HC-33, HC-34, HC-35, HC-36)*
 - **N9 — A reload applies wholly or is refused wholly, with the reason.** A refused reload
   leaves the running configuration byte-for-byte as it was; there is no partial application and
   no state in between. *(HC-24, HC-25)*
@@ -180,11 +182,15 @@ proxy or on a loopback address, which is what the example shows.
 
 | Key | Type | Required | Meaning |
 |---|---|---|---|
-| `binding` | `"webhook"` · `"session"` · `"embedded"` | yes | which transport of the contract |
+| `binding` | `"webhook"` · `"session"` · `"embedded"` · `"realtime"` | yes | which application seam owns the call |
 | `url` | absolute `http`/`https` URI | `webhook` only, yes | where events are `POST`ed |
 | `signing_secrets` | 1–2 secret names | `webhook` only, yes | the `Sipx-Signature` key, head first |
 | `bearer_secret` | secret name | `session` only, yes | what the app presents at upgrade |
 | `handler` | non-empty path | `embedded` only, yes | the handler file, relative to the host's handler root |
+| `endpoint` | absolute `ws`/`wss` URI without query or fragment | `realtime` only, yes | the realtime WebSocket endpoint before model selection |
+| `model` | non-empty string | `realtime` only, yes | the model selected in the endpoint query |
+| `instructions` | non-empty string | `realtime` only, yes | the instructions sent in the session update |
+| `api_key_secret` | secret name | `realtime` only, yes | the bearer resolved at startup per [`openai-realtime.md`](openai-realtime.md) §2 |
 
 `signing_secrets` is a list because [`webhook-binding.md`](webhook-binding.md) §3 requires key
 rotation to be expressible: the head is the key the host signs with, and a second entry is the
@@ -195,6 +201,22 @@ reload rather than a restart.
 **Open until `A-6`:** what an `embedded` app's `handler` path is resolved against, and whether
 a handler may name more than one file. The key exists so the binding is expressible in v1's
 schema; its resolution is the engine binding's.
+
+A `realtime` binding is a terminal call application rather than a transport for the
+`sipx.app.v1` document contract: the host answers the routed SIP call, enables encoded relay on
+its negotiated PCMU or PCMA media session, and gives that call leg to the bridge specified by
+[`openai-realtime.md`](openai-realtime.md). The endpoint carries no query because this schema gives
+model selection one owner, `model`; the bridge appends it exactly once. `ws` remains useful only
+for a loopback stand-in because the WSS client refuses cleartext elsewhere.
+
+```toml
+[app.agent]
+binding        = "realtime"
+endpoint       = "wss://api.openai.com/v1/realtime"
+model          = "gpt-realtime-2.1"
+instructions   = "answer briefly"
+api_key_secret = "openai-api-key"
+```
 
 ### 4.4 Secrets (N7)
 
@@ -367,6 +389,13 @@ and HC-9 run under the `A-7` harness, because what they assert is what happens t
 | HC-28 | a live call, then a reload to `on_5xx = "hangup"` | the live call keeps `continue` (its call survives a 5xx under the harness); the next call hangs up | N11 |
 | HC-29 | a one-app document and a many-app document | both accepted; the shared app and listener are identical in each | N12 |
 | HC-30 | `app` on a `session` listener | `key-not-allowed` | N2 |
+| HC-31 | a complete `realtime` app with no grants table | accepted; endpoint, model and instructions retained, nothing granted, and only `agent-api-key` inventoried | N5 N7 N8 |
+| HC-32 | `temperature` under a `realtime` app | `unknown-key` | N2 |
+| HC-33 | a `realtime` app with no `endpoint` | `missing-key` | N8 |
+| HC-34 | a `realtime` app with no `model` | `missing-key` | N8 |
+| HC-35 | a `realtime` app with no `instructions` | `missing-key` | N8 |
+| HC-36 | a `realtime` app with no `api_key_secret` | `missing-key` | N8 |
+| HC-37 | credential material in `api_key_secret` | `not-a-secret-name` | N7 |
 
 Two properties are checked over the *set* rather than by a row, because they are what stops the
 set from silently shrinking: every normative point of §3 is named by at least one vector, and

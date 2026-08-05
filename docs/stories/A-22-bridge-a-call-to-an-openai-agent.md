@@ -1,0 +1,99 @@
+---
+id: A-22
+title: Bridge a call to an OpenAI agent
+pillar: Application
+status: done
+priority: 3
+design: docs/designs/openai.md
+epic: openai
+areas: [sipx-app, sipx-cli, sipx-media]
+predicate:
+announcement:
+note: integrates A-19–A-21 — the bridge component, its host configuration, and the one-command product path
+---
+
+# Bridge a call to an OpenAI agent
+
+## Goal
+
+An application component in `sipx-app` that holds one call leg and one realtime session
+together under the host's discipline, plus the configuration and CLI path that make "dial
+in, an agent answers" demonstrable with one command — proven end to end against A-21's
+stand-in peer.
+
+## Acceptance
+
+- [x] The bridge owns one `Call` and one realtime session: caller audio leaves
+      `recv_encoded` (relay mode) and arrives at the peer as the spec's append events;
+      agent deltas queue in a bounded local buffer and leave through `send_encoded`; both
+      queues carry the spec's named sizes and counted drops. G.711 passthrough — no
+      transcode on the path, asserted by byte identity in a test.
+- [x] Barge-in holds to the spec: on speech-started the bridge cancels the response and
+      drops its queued agent audio; the test asserts the spec's queue-depth bound as a
+      number, against the stand-in's cancel-honouring mode.
+- [x] Configuration follows host-config discipline: endpoint URL, model, instructions and
+      the credential's secret *name* under `[app.<name>]`, unknown keys refused (N2),
+      deny-by-default grants (N5), secret values never in config, logs or errors (N7) —
+      with config vectors in the existing `HC-*` style for the new table.
+- [x] A CLI path answers (or originates) a call and hands it to the bridge, so one command
+      against the stand-in peer demonstrates the loop; its JSON output names the negotiated
+      facts (codec, packet duration, session outcome).
+- [x] End-to-end against the stand-in, M-39 evidence pattern: a distinct tone up-path
+      arrives in the peer's appends; the peer's distinct tone down-path arrives in the
+      call's RTP; correlation asserted both directions; non-vacuity negatives that must
+      fail — wrong bearer never bridges, a stalled peer ends the bridge within its bound
+      with the typed outcome, a malformed event follows the spec's disposition.
+- [x] A dropped socket ends the bridge with its typed outcome and the call is released the
+      way the spec says — no silent reconnect, no orphaned media tasks
+      (cancellation-safety asserted).
+- [x] Gate green, including `check-app-surface.py` (deliberate surface growth named in
+      Progress) and `check-fixed-sleep.py`.
+
+## Progress
+
+- The bridge engine is held to all A-22-owned ORB vectors plus queue-overflow, non-G.711,
+  mid-call-stall and task-ownership cases. The tests use event acknowledgements rather than sleeps
+  for queue and barge-in causality.
+- HC-31…HC-37 add the `realtime` binding under the host schema's existing N2/N5/N7/N8 discipline:
+  endpoint, model, instructions and `api_key_secret`; unknown keys refused, grants denied, and only
+  the secret name retained.
+- `sipx-host <document>` is the one-command answer path. Its direct binary test proves distinct
+  tones across real SIP/RTP in both directions and reads a JSON terminal record naming `codec`,
+  `packet_duration_ms` and `session_outcome`. The wrong-bearer arm carries zero audio and leaks no
+  credential value.
+- Surface review is deliberate: the host now calls the non-SIP WSS and realtime modules, so both
+  graduate to Supported with a CHANGELOG migration boundary. `check-app-surface.py --check`
+  reports 10 of 11 published crates reached, seven modules experimental, and none selected from a
+  call.
+
+## Notes
+
+- Design: `docs/designs/openai.md` component 4. Blocked on A-19 (spec), A-20 (WSS client),
+  A-21 (the peer its proof runs against).
+- `MediaSession::set_relay(true)` + `recv_encoded`/`send_encoded` are the passthrough
+  primitives (`crates/sipx-media/src/session.rs`); `Call::media()` exposes them.
+- **Contracts inherited from `A-20`'s client, surfaced by its review and not yet constrained
+  by any caller — this story is that caller.** `WssError::Stalled` is *not* sticky: after it
+  returns, the connection's liveness state and its held-message queue persist, so a `next`
+  called again yields each held message before `Stalled` recurs. Treat the first one as
+  terminal. On that same path the drain's buffered backlog is discarded, which the field's
+  own doc contradicts ("owed to the caller … never dropped") — the behaviour is defensible
+  for a connection just declared dead, the sentence is what is wrong, and whichever this
+  story depends on should be made true in one place. The held queue has no aggregate cap
+  (bounded only by what one liveness pass finds already buffered), which matters here because
+  the downlink is exactly a burst source. Liveness is **strict about Pongs**: a peer streaming
+  deltas at full rate while never answering a probe is declared `Stalled` mid-burst, by
+  design and matching `session-binding.md`.
+- **Gaps in `A-21`'s fixture that land on this story's vectors**, from its review. ORB-16 is
+  yours to enforce and the peer's reset arm is currently asserted only as "not a Close
+  frame", which an ordinary EOF or a timeout also satisfies — removing the zero-linger left
+  that test green, so assert the reset as a reset (the client sees a `ConnectionReset` I/O
+  error). ORB-3 is yours too, and the peer retains only *decoded* append bytes, so assert
+  `encode(appended_audio) == F_SILENCE_BASE64` rather than the member as it travelled. Also
+  worth knowing while scripting: a directive issued to a stalled session never resolves
+  (`direct()` is the one unbounded wait), a directive before the client has read
+  `session.created` returns `NoSession`, and directives route to the most recently
+  registered connection, so a two-session script can only drive the newer one.
+- Whether the product path is a new CLI verb or an app-host binding mode is the
+  implementor's call within the design's constraint: one command, host discipline, no
+  second config language.

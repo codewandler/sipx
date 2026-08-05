@@ -1,6 +1,6 @@
 ---
 title: Application host overview
-description: Application hosting through webhooks and full-duplex sessions, plus the language-neutral contract's experimental boundary.
+description: Application hosting through webhooks, full-duplex sessions, and realtime audio, plus the language-neutral contract's experimental boundary.
 ---
 
 # Application host overview
@@ -28,6 +28,7 @@ The surrounding implementation includes:
 - a deterministic harness for contract events, instructions, timing, retries, and failure policy;
 - an HMAC-signed, bounded document-mode webhook client;
 - a bearer-authenticated, bounded full-duplex session server with call pinning and origination;
+- a bounded G.711 realtime bridge with named-secret authentication and barge-in;
 - a host binary whose real SIP and application paths are exercised by tests.
 
 Webhook and session controllers can drive real calls. Both feed the same interpreter, so callback
@@ -40,6 +41,7 @@ transport.
 |---|---|---|
 | Webhook | The host sends an event document to an HTTP endpoint and applies its returned program | Implemented |
 | Session | An authenticated controller exchanges events and instructions over a full-duplex connection and may originate calls when granted | Implemented |
+| Realtime | The host answers one routed call and passes its negotiated PCMU/PCMA bytes to one configured realtime WebSocket session | Implemented |
 | Embedded handler | The host runs a handler in-process | Not implemented |
 
 Document mode permits one outstanding callback per call. A successful response replaces the
@@ -51,6 +53,11 @@ connection limits are finite; a dead or overloaded session applies each pinned c
 The session listener accepts cleartext WebSocket on a loopback or protected private network; put a
 TLS terminator in front of it for a public network. There is no TypeScript package, subprocess
 binding, embedded runtime, or embedded TypeScript engine in this repository today.
+
+A realtime app is declared under `[app.<name>]` with `binding = "realtime"`, `endpoint`, `model`,
+`instructions`, and `api_key_secret`. The document contains only the secret's name. Running
+`sipx-host host.toml` is the one command that answers routed calls; each completed bridge writes a
+JSON line naming `codec`, `packet_duration_ms`, and `session_outcome`.
 
 ## The intended model
 

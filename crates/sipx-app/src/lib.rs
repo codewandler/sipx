@@ -1,4 +1,4 @@
-//! SIP application host with webhook and full-duplex session bindings.
+//! SIP application host with webhook, full-duplex session, and realtime audio bindings.
 //!
 //! Calls terminated on the sipx stack are driven by customer code over the `sipx.app.v1` contract.
 //! [`host`] and [`webhook`] implement document mode end to end, while [`session`] implements the
@@ -38,11 +38,12 @@
 //! would be a freeze rather than a measurement (`X-38`).
 //!
 //! **Supported:** the document-mode path through [`host`] and [`webhook`], the authenticated
-//! full-duplex path through [`session`], and the configuration they consume. A webhook or pinned
-//! session in another process can drive a real call through `sipx.app.v1`; changes to these
-//! host-facing Rust APIs receive a changelog entry and migration guidance. The `sipx.app.v1` wire
-//! name remains Experimental under `sipx-app-protocol`'s stricter criterion. The embedded binding
-//! remains unimplemented rather than implied by its configuration vocabulary.
+//! full-duplex path through [`session`], the G.711 realtime path through [`realtime`] and [`wss`],
+//! and the configuration they consume. A webhook or pinned session in another process can drive a
+//! real call through `sipx.app.v1`; a realtime binding terminates one call directly. Changes to
+//! these host-facing Rust APIs receive a changelog entry and migration guidance. The `sipx.app.v1`
+//! wire name remains Experimental under `sipx-app-protocol`'s stricter criterion. The embedded
+//! binding remains unimplemented rather than implied by its configuration vocabulary.
 //!
 //! **[`host`] is also the definition of the stack's reachable-from-a-call surface** (`X-38`, alpha
 //! predicate 1). What this application uses is *Supported*; what no path from it reaches is
@@ -62,5 +63,7 @@
 pub mod config;
 pub mod harness;
 pub mod host;
+pub mod realtime;
 pub mod session;
 pub mod webhook;
+pub mod wss;

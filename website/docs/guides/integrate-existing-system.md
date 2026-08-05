@@ -108,10 +108,10 @@ a proxy or registrar replacement around those endpoint APIs. Public early and co
 owns two dialogs and can attach the bounded media bridge. It does not yet provide the truly
 off-media relay role, and routing policy remains application work.
 
-`sipx-host` can bind a SIP listener and serve calls to document-mode webhooks or authenticated
-full-duplex sessions; a granted session can also originate a call. Those Rust host surfaces are
-Supported under the pre-1.0 policy. The language-neutral wire contract remains Experimental, and
-there is no embedded runtime or TypeScript SDK. Its precise status is on the
+`sipx-host` can bind a SIP listener and serve calls to document-mode webhooks, authenticated
+full-duplex sessions, or a configured realtime audio bridge; a granted session can also originate
+a call. Those Rust host surfaces are Supported under the pre-1.0 policy. The language-neutral wire
+contract remains Experimental, and there is no embedded runtime or TypeScript SDK. Its precise status is on the
 [application host overview](../sdk/overview.md).
 
 ## Validate before expanding
