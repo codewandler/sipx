@@ -151,6 +151,84 @@ async fn udp_and_tcp_report_learned_and_absent_observations() {
 }
 
 #[tokio::test]
+async fn success_replaces_and_failure_preserves_the_last_registration_observation() {
+    let (handle, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("valid address"),
+    ))
+    .await
+    .expect("server binds");
+    let target = Target::udp(handle.local_addr());
+    let served = tokio::spawn(async move {
+        let first = incoming.recv().await.expect("initial REGISTER");
+        handle
+            .respond(
+                &first.key,
+                ok(
+                    &first,
+                    ReplyObservation::Learned(OBSERVED.parse().expect("address")),
+                ),
+            )
+            .await
+            .expect("initial success is sent");
+
+        let refresh = incoming.recv().await.expect("refresh REGISTER");
+        handle
+            .respond(&refresh.key, ok(&refresh, ReplyObservation::Absent))
+            .await
+            .expect("refresh success is sent");
+
+        let failed = incoming.recv().await.expect("failed REGISTER");
+        let rejection = ResponseBuilder::to_request(
+            &failed.request,
+            StatusCode::new(403).expect("valid"),
+            "Forbidden",
+        )
+        .expect("rejection builds")
+        .build();
+        let rejection = with_observation(
+            &failed.request,
+            rejection,
+            ReplyObservation::Learned(CHALLENGE_OBSERVED.parse().expect("address")),
+        );
+        handle
+            .respond(&failed.key, rejection)
+            .await
+            .expect("rejection is sent");
+    });
+
+    let mut ua = agent(target, None).await;
+    assert_eq!(
+        ua.registration_observation(),
+        &RegistrationObservation::NotRegistered,
+        "an agent with no successful REGISTER has no response Via to report"
+    );
+
+    ua.register().await.expect("initial registration succeeds");
+    assert_eq!(
+        ua.registration_observation(),
+        &RegistrationObservation::Observed(OBSERVED.parse().expect("address"))
+    );
+
+    ua.register().await.expect("refresh succeeds");
+    assert_eq!(
+        ua.registration_observation(),
+        &RegistrationObservation::Absent,
+        "every successful refresh replaces the previous observation"
+    );
+
+    assert!(
+        ua.register().await.is_err(),
+        "the registrar rejects the attempt"
+    );
+    assert_eq!(
+        ua.registration_observation(),
+        &RegistrationObservation::Absent,
+        "a failed attempt cannot replace the last successful observation"
+    );
+    served.await.expect("server task completes");
+}
+
+#[tokio::test]
 async fn authentication_retains_only_the_final_success_observation() {
     let (handle, mut incoming) = bind(TransportConfig::new(
         "127.0.0.1:0".parse().expect("valid address"),

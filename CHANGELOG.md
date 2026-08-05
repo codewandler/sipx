@@ -10,8 +10,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **Registration now reports the address a registrar observed without turning it into policy**
-  (`S-42`). The final successful response's top `Via` becomes a typed `Observed`, `Absent` or
-  `Invalid` outcome on `registrar::Registered` and `UserAgent`; UDP, connection-oriented and
+  (`S-42`). Before the first success, `UserAgent` reports `NotRegistered`; the final successful
+  response's top `Via` then becomes a typed `Observed`, `Absent` or `Invalid` outcome on
+  `registrar::Registered` and `UserAgent`; UDP, connection-oriented and
   authenticated retry paths preserve it. Missing, malformed, duplicate and non-IP observations
   remain diagnostic state and cannot change the granted lease, routes, GRUU, Outbound, push,
   Contact or media configuration.

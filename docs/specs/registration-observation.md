@@ -19,17 +19,20 @@ Service-Route, GRUU, Outbound flow state, push state, SDP or RTP.
 
 ## Types
 
-`RegistrationObservation` is stored in `registrar::Registered` and on `UserAgent` after success:
+`RegistrationObservation` is stored in `registrar::Registered` and on `UserAgent`. Before the first
+successful REGISTER, the agent has no response from which an observation could have been read:
 
 | Variant | Meaning |
 |---|---|
+| `NotRegistered` | No REGISTER has completed successfully, so there is no response `Via` to inspect |
 | `Absent` | A valid top `Via` carries neither `received` nor `rport` |
 | `Observed(SocketAddr)` | Exactly one IP-valued `received` and one decimal, non-zero `rport` form an address |
 | `Invalid(RegistrationObservationError)` | Observation parameters were present but cannot state one unambiguous socket address, or the top `Via` itself is missing/malformed |
 
 `RegistrationObservation::address()` returns `Some(SocketAddr)` only for `Observed`. The enum is the
-primary API because `Option<SocketAddr>` alone would collapse absent, malformed and contradictory
-registrar behavior into the same value.
+primary API because `Option<SocketAddr>` alone would collapse not-yet-registered, absent, malformed
+and contradictory registrar behavior into the same value. `registrar::interpret` never produces
+`NotRegistered`; that variant exists for `UserAgent`'s lifecycle before its first success.
 
 `RegistrationObservationError` has these closed meanings:
 
@@ -70,6 +73,10 @@ final response's outcome, including `Absent` or `Invalid`. A challenge never upd
 attempt does not describe a new successful binding and therefore does not replace the observation
 of the last success.
 
+Before the first successful registration, `UserAgent` reports `NotRegistered`, never `Absent`.
+`Absent` asserts something about a real successful response and therefore cannot be an initial
+placeholder.
+
 ## Invariants and limits
 
 - The observation is informational. sipx does not copy it into a future REGISTER `Contact`, dialog
@@ -101,6 +108,11 @@ Given a syntactically valid top hop before the shown parameters:
 | `;rport=41234` | `Invalid(MissingReceived)` |
 | `;received=203.0.113.9;received=203.0.113.10;rport=41234` | `Invalid(ContradictoryReceived)` |
 | `;received=203.0.113.9;rport=41234;rport=41235` | `Invalid(ContradictoryRport)` |
+
+Parameter names compare case-insensitively, so differently cased duplicates have the same
+contradictory outcomes. When the row contains comma-separated hops, only the first is parsed for
+this observation: even malformed or contradictory parameters on a lower hop do not change the top
+hop's outcome. The same rule applies when lower hops occupy separate `Via` rows.
 
 The end-to-end matrix sends REGISTER over UDP and TCP with learned and absent final observations.
 The authenticated case puts a different observation on the 401 and the final 200 and asserts that

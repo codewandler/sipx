@@ -236,7 +236,7 @@ impl UserAgent {
             endpoint,
             config,
             registration,
-            registration_observation: RegistrationObservation::Absent,
+            registration_observation: RegistrationObservation::NotRegistered,
             nonce_use: None,
             path: registrar::PathSet::default(),
             service_route: registrar::ServiceRoute::default(),
@@ -277,6 +277,10 @@ impl UserAgent {
     }
 
     /// What the registrar's top response `Via` reported for the last successful registration.
+    ///
+    /// [`RegistrationObservation::NotRegistered`] means no registration has succeeded yet;
+    /// [`RegistrationObservation::Absent`] is different: a success carried a valid top `Via` but
+    /// no observation parameters.
     ///
     /// This does not authorize rewriting `Contact`, routing, GRUU, Outbound, push, SDP or media
     /// addresses. [`RegistrationObservation::Invalid`] still accompanies a successful lease.
