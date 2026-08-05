@@ -161,6 +161,7 @@ async fn restored_dialog_drives_the_next_monotonic_in_dialog_exchange() {
         callee.media().local_addr(),
         MediaPolicy::default().with_keying(sipx_call::Keying::Plain),
         decoded.direction(),
+        Duration::ZERO,
         Instant::now(),
     );
     let mut restored = Call::restore_dialog(&decoded, &context).expect("restores on fresh drivers");
@@ -261,6 +262,7 @@ async fn a_secure_snapshot_refuses_clear_restoration_without_runtime_side_effect
         callee.media().local_addr(),
         MediaPolicy::default().with_keying(sipx_call::Keying::Plain),
         protected.direction(),
+        Duration::ZERO,
         Instant::now(),
     );
     assert_eq!(fresh_endpoint.outstanding().await.expect("counts"), 0);
@@ -310,6 +312,7 @@ async fn a_mismatched_injected_direction_is_refused_before_context_claim() {
         callee.media().local_addr(),
         MediaPolicy::default().with_keying(sipx_call::Keying::Plain),
         Direction::RecvOnly,
+        Duration::ZERO,
         Instant::now(),
     );
     for _ in 0..2 {
@@ -352,6 +355,8 @@ async fn session_time_is_rebased_from_explicit_now_and_never_silently_renewed() 
     let (fresh_endpoint, _fresh_incoming) = endpoint().await;
     let media = fresh_media(callee.media().local_addr()).await;
     let now = Instant::now();
+    let elapsed_since_capture = Duration::from_secs(30);
+    assert!(elapsed_since_capture < remaining);
     let context = DialogRestoreContext::new(
         fresh_endpoint.clone(),
         Target::udp(callee_endpoint.local_addr()),
@@ -360,12 +365,45 @@ async fn session_time_is_rebased_from_explicit_now_and_never_silently_renewed() 
         callee.media().local_addr(),
         MediaPolicy::default().with_keying(sipx_call::Keying::Plain),
         snapshot.direction(),
+        elapsed_since_capture,
         now,
     );
     let restored = Call::restore_dialog(&snapshot, &context).expect("positive remainder restores");
     assert_eq!(restored.session_interval(), Some((interval, we_refresh)));
-    assert_eq!(restored.session_deadline(), Some(now + remaining));
+    assert_eq!(
+        restored.session_deadline(),
+        Some(
+            now + remaining
+                .checked_sub(elapsed_since_capture)
+                .expect("elapsed time is below the remainder"),
+        )
+    );
     drop(restored);
+
+    for elapsed in [
+        remaining,
+        remaining
+            .checked_add(Duration::from_nanos(1))
+            .expect("test duration fits"),
+    ] {
+        let expired_context = DialogRestoreContext::new(
+            fresh_endpoint.clone(),
+            Target::udp(callee_endpoint.local_addr()),
+            fresh_media(callee.media().local_addr()).await,
+            MediaAddress::new(loopback()),
+            callee.media().local_addr(),
+            MediaPolicy::default().with_keying(sipx_call::Keying::Plain),
+            snapshot.direction(),
+            elapsed,
+            Instant::now(),
+        );
+        for _ in 0..2 {
+            assert!(matches!(
+                Call::restore_dialog(&snapshot, &expired_context),
+                Err(DialogPersistenceError::SessionActionDue(_))
+            ));
+        }
+    }
 
     let mut due_bytes = snapshot.encode();
     let remaining_at = due_bytes.len() - 8;

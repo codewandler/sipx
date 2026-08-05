@@ -49,3 +49,6 @@ data.
 - 2026-08-05: review hardening rejects RTP payload values outside the seven-bit wire range and makes
   the fresh media direction an explicit, pre-claim restore invariant. Adversarial tests prove both
   refusals are typed and leave the context reusable.
+- 2026-08-05: final persistence review makes downtime an injected restore fact and subtracts it from
+  session lifetime before attachment; due timers remain typed and do not consume the context. Context
+  diagnostics now omit the complete signalling target so WSS paths and queries cannot leak.

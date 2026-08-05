@@ -23,8 +23,9 @@ The public surface has three operations:
 2. `DialogSnapshot::encode()` produces the canonical bytes in §4; `DialogSnapshot::decode(bytes)`
    applies the total and per-field bounds before returning a value.
 3. `Call::restore_dialog(snapshot, context)` validates the complete snapshot and fresh context before
-   returning a call. It starts no signalling transaction. Any media runtime in `context` remains
-   caller-owned until success, and a failed restore does not stop or mutate it.
+   returning a call. The context includes the host-measured elapsed time since capture. Restoration
+   starts no signalling transaction. Any media runtime in `context` remains caller-owned until
+   success, and a failed restore does not stop or mutate it.
 
 Validation precedes publication. No public collection, dispatcher route or task sees a partially
 decoded or partially restored dialog. After validation, restore atomically claims the context;
@@ -95,7 +96,8 @@ The host supplies one `DialogRestoreContext` containing:
 - a fresh endpoint handle and explicit resolved `Target` for the current first hop;
 - an already-created call-owned media session plus the media policy and negotiated non-secret wire
   facts it implements, including the negotiated media direction;
-- explicit `now`, media bind/advertised addresses and session-expiry policy; and
+- explicit `now`, elapsed time since capture, media bind/advertised addresses and session-expiry
+  policy; and
 - observed signalling protection plus the injected media keying class.
 
 The context is validated against the snapshot before attachment. A protected snapshot requires TLS,
@@ -109,7 +111,9 @@ bound address are compared with the declarations; policy text alone is not treat
 
 Security declarations are facts about resources the host already created; they do not contain or
 derive keys. Debug output for snapshot, context and every error omits party values and secret-bearing
-runtime internals.
+runtime internals. In particular, context diagnostics include only the target socket address,
+transport and whether a WebSocket path exists; the complete target, certificate name and path are
+not formatted because a path or query can contain credentials.
 
 ## 6. Time and session restoration
 
@@ -117,11 +121,15 @@ Capture never serializes an `Instant`. Given caller-supplied `now`, it stores th
 which side refreshes, and the remaining duration until the live action deadline. If the deadline is
 at or before `now`, capture returns `SessionActionDue` instead of moving the deadline into the future.
 
-Restore also receives `now`. A positive remaining duration becomes `now + remaining` only after
-checked duration arithmetic. Zero returns a typed `SessionActionDue` containing whether the next
-action is refresh or expiry; the host must feed that action through the normal call timer path. It
-MUST NOT produce a live call with a silently renewed interval. Values above the negotiated interval,
-below the RFC 4028 floor, or overflowing the runtime clock are contradictory and refused.
+Restore receives both fresh monotonic `now` and a host-measured `elapsed_since_capture`. The core
+does not read a wall clock or infer downtime: the host derives elapsed time from its durable envelope
+or orchestration state. Restore subtracts that elapsed duration from the captured remainder with
+checked arithmetic before adding the residual to `now`. An elapsed duration equal to or greater
+than the remainder returns a typed `SessionActionDue` containing whether the next action is refresh
+or expiry, before the context is claimed; the host must feed that action through the normal call
+timer path. It MUST NOT produce a live call with a silently renewed interval. Values above the
+negotiated interval, below the RFC 4028 floor, or overflowing the runtime clock are contradictory
+and refused.
 
 ## 7. Required vectors
 
@@ -133,7 +141,7 @@ below the RFC 4028 floor, or overflowing the runtime clock are contradictory and
 | DP-4 | duplicate/empty tag, malformed target, 65 routes, payload type 128 or 255, non-zero reserved flag or trailing byte | named invariant error; no restore side effect |
 | DP-5 | protected/SIPS snapshot with clear UDP context | `SecurityDowngrade`; endpoint counters and task/transaction counts unchanged |
 | DP-6 | SDES or DTLS snapshot with plain/mismatched injected media policy, or a mismatched injected direction | typed security/contract mismatch; no serialized key bytes, runtime mutation or consumed context claim |
-| DP-7 | remaining session lifetime zero, greater than interval, and valid positive lifetime | immediate `SessionActionDue`, contradiction refusal, and checked `now + remaining`, respectively |
+| DP-7 | elapsed time below, equal to and greater than the captured remainder; separately, a remainder greater than the interval | checked `now + (remaining - elapsed)`, reusable pre-claim `SessionActionDue`, and contradiction refusal |
 | DP-8 | snapshot/capture while offer, ACK, transfer or ICE work is pending | typed `NotQuiescent`; no bytes produced |
 | DP-9 | restored loopback dialog sends one re-INVITE, receives its response, then shuts down the fresh endpoint | dialog identifiers, route order, target and CSeq are preserved; the endpoint shutdown barrier completes without orphaned work |
 

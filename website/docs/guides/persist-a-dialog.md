@@ -37,7 +37,9 @@ Even without credentials or keys, the parties and routing data are sensitive cal
 
 ## Rebuild drivers, then attach
 
-After a restart, first create a new transport endpoint and a new media session. Build the media
+After a restart, first create a new transport endpoint and a new media session. Separately recover
+or calculate `elapsed_since_capture` from your durable envelope or orchestration state; sipx does
+not read a wall clock or assume that a process restart was instantaneous. Build the media
 configuration from the snapshot's codec, payload, DTMF, RTCP, profile, direction and keying getters;
 key material is supplied through your normal protected configuration path, never recovered from
 the snapshot. Then describe the already-created resources in a `DialogRestoreContext`:
@@ -53,6 +55,7 @@ let context = sipx_call::DialogRestoreContext::new(
     negotiated_remote_media_address,
     explicit_media_policy,
     snapshot.direction(),
+    elapsed_since_capture,
     tokio::time::Instant::now(),
 );
 
@@ -66,9 +69,10 @@ session. The fresh driver's direction is explicit too and must match the retaine
 direction. A context can successfully attach only once, so concurrent duplicate attempts produce
 one call and one typed refusal.
 
-If the retained session duration is zero, restoration returns the exact refresh-or-expire action
-that is due. It never turns the old interval into a new lease. A positive remainder is added to the
-explicit fresh `now` with checked arithmetic.
+The elapsed duration is deducted from the retained session remainder. If no lifetime remains,
+restoration returns the exact refresh-or-expire action that is due before claiming the context. It
+never turns downtime into a new lease. Only the residual lifetime is added to the explicit fresh
+`now`, with checked arithmetic.
 
 The restored event stream begins empty. It reports transitions that happen after attachment rather
 than replaying historical `Answered` events. Snapshot distribution and authorization stay with the

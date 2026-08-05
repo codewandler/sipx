@@ -613,9 +613,14 @@ impl DialogSnapshot {
                 Err(DialogPersistenceError::SessionActionDue(session.action()))
             }
             Some(session) => {
+                let remaining = session
+                    .remaining
+                    .checked_sub(context.elapsed_since_capture)
+                    .filter(|remaining| !remaining.is_zero())
+                    .ok_or_else(|| DialogPersistenceError::SessionActionDue(session.action()))?;
                 let deadline = context
                     .now
-                    .checked_add(session.remaining)
+                    .checked_add(remaining)
                     .ok_or(DialogPersistenceError::ClockOverflow)?;
                 Ok(Some((session.interval, session.we_refresh, deadline)))
             }
@@ -798,8 +803,9 @@ pub(crate) struct SnapshotParts {
 /// Fresh runtime resources and policy required to attach a decoded dialog.
 ///
 /// The context is borrowed during restoration. A refusal therefore does not consume or stop its
-/// media session, mutate its endpoint, or create a transaction. The `now` value is explicit so no
-/// persisted process-local instant is ever interpreted in a new process.
+/// media session, mutate its endpoint, or create a transaction. `elapsed_since_capture` and `now`
+/// are explicit so no persisted process-local instant is ever interpreted in a new process and
+/// downtime cannot silently renew a retained session timer.
 pub struct DialogRestoreContext {
     pub(crate) endpoint: Handle,
     pub(crate) target: Target,
@@ -808,6 +814,7 @@ pub struct DialogRestoreContext {
     pub(crate) remote_media: SocketAddr,
     pub(crate) policy: MediaPolicy,
     pub(crate) direction: Direction,
+    pub(crate) elapsed_since_capture: Duration,
     pub(crate) now: Instant,
     claimed: AtomicBool,
 }
@@ -824,6 +831,7 @@ impl DialogRestoreContext {
         remote_media: SocketAddr,
         policy: MediaPolicy,
         direction: Direction,
+        elapsed_since_capture: Duration,
         now: Instant,
     ) -> Self {
         Self {
@@ -834,6 +842,7 @@ impl DialogRestoreContext {
             remote_media,
             policy,
             direction,
+            elapsed_since_capture,
             now,
             claimed: AtomicBool::new(false),
         }
@@ -852,13 +861,16 @@ impl fmt::Debug for DialogRestoreContext {
         formatter
             .debug_struct("DialogRestoreContext")
             .field("endpoint_local", &self.endpoint.local_addr())
-            .field("target", &self.target)
+            .field("target_addr", &self.target.addr)
+            .field("target_transport", &self.target.transport)
+            .field("target_has_path", &self.target.path.is_some())
             .field("media_local", &self.media.local_addr())
             .field("media_advertised", &self.media_address.advertised())
             .field("media_bind", &self.media_address.bind())
             .field("remote_media", &self.remote_media)
             .field("policy", &self.policy)
             .field("direction", &self.direction)
+            .field("elapsed_since_capture", &self.elapsed_since_capture)
             .field("now", &self.now)
             .finish_non_exhaustive()
     }
@@ -1628,6 +1640,7 @@ mod tests {
             remote,
             MediaPolicy::default().with_keying(Keying::Sdes),
             snapshot.direction(),
+            Duration::ZERO,
             Instant::now(),
         );
         assert_eq!(endpoint.outstanding().await.expect("outstanding"), 0);
@@ -1637,6 +1650,48 @@ mod tests {
         );
         assert_eq!(endpoint.outstanding().await.expect("outstanding"), 0);
         assert_eq!(Arc::strong_count(&media), 2);
+
+        drop(context);
+        drop(media);
+        endpoint.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn restore_context_debug_omits_a_secret_bearing_websocket_target_path() {
+        let (endpoint, _incoming) = sipx_transport::bind(sipx_transport::Config::new(
+            "127.0.0.1:0".parse().expect("endpoint address"),
+        ))
+        .await
+        .expect("endpoint binds");
+        let remote: SocketAddr = "127.0.0.1:40000".parse().expect("media remote");
+        let mut media_config = sipx_media::Config::new(remote, Codec::Pcmu);
+        media_config.rtcp_mode = RtcpMode::Mux;
+        let media = Arc::new(
+            MediaSession::start("127.0.0.1:0".parse().expect("media bind"), media_config)
+                .await
+                .expect("media starts"),
+        );
+        let secret = "never-print-this-restore-token";
+        let context = DialogRestoreContext::new(
+            endpoint.clone(),
+            Target::new(endpoint.local_addr(), sipx_transport::TransportKind::Wss)
+                .verifying("internal-signalling.example")
+                .at_path(format!("/calls?access_token={secret}")),
+            Arc::clone(&media),
+            MediaAddress::new("127.0.0.1".parse().expect("media address")),
+            remote,
+            MediaPolicy::default(),
+            Direction::SendRecv,
+            Duration::ZERO,
+            Instant::now(),
+        );
+
+        let context_debug = format!("{context:?}");
+        assert!(!context_debug.contains(secret));
+        assert!(!context_debug.contains("/calls"));
+        assert!(!context_debug.contains("internal-signalling.example"));
+        assert!(context_debug.contains("Wss"));
+        assert!(context_debug.contains("target_has_path: true"));
 
         drop(context);
         drop(media);
