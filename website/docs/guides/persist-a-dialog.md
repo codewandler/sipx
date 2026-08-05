@@ -52,6 +52,7 @@ let context = sipx_call::DialogRestoreContext::new(
     fresh_media_address,
     negotiated_remote_media_address,
     explicit_media_policy,
+    snapshot.direction(),
     tokio::time::Instant::now(),
 );
 
@@ -61,8 +62,9 @@ let call = sipx_call::Call::restore_dialog(&snapshot, &context)?;
 Restoration is synchronous and performs no I/O. It validates all snapshot and context facts before
 claiming the context. A secure dialog cannot attach to clear signalling; plain, SDES-SRTP and
 DTLS-SRTP do not substitute for one another; codec and payload facts must match the running media
-session. A context can successfully attach only once, so concurrent duplicate attempts produce one
-call and one typed refusal.
+session. The fresh driver's direction is explicit too and must match the retained negotiated
+direction. A context can successfully attach only once, so concurrent duplicate attempts produce
+one call and one typed refusal.
 
 If the retained session duration is zero, restoration returns the exact refresh-or-expire action
 that is due. It never turns the old interval into a new lease. A positive remainder is added to the

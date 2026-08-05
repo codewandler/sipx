@@ -46,3 +46,6 @@ data.
 - 2026-08-05: the `SXD1` codec, atomic fresh-driver attachment, security/timer guards, hostile-byte
   matrix and a live post-restore re-INVITE proof are implemented. Focused verification is green;
   status remains in progress until the integration branch runs the deferred full gate.
+- 2026-08-05: review hardening rejects RTP payload values outside the seven-bit wire range and makes
+  the fresh media direction an explicit, pre-claim restore invariant. Adversarial tests prove both
+  refusals are typed and leave the context reusable.

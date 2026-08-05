@@ -160,6 +160,7 @@ async fn restored_dialog_drives_the_next_monotonic_in_dialog_exchange() {
         MediaAddress::new(loopback()),
         callee.media().local_addr(),
         MediaPolicy::default().with_keying(sipx_call::Keying::Plain),
+        decoded.direction(),
         Instant::now(),
     );
     let mut restored = Call::restore_dialog(&decoded, &context).expect("restores on fresh drivers");
@@ -259,6 +260,7 @@ async fn a_secure_snapshot_refuses_clear_restoration_without_runtime_side_effect
         MediaAddress::new(loopback()),
         callee.media().local_addr(),
         MediaPolicy::default().with_keying(sipx_call::Keying::Plain),
+        protected.direction(),
         Instant::now(),
     );
     assert_eq!(fresh_endpoint.outstanding().await.expect("counts"), 0);
@@ -275,6 +277,49 @@ async fn a_secure_snapshot_refuses_clear_restoration_without_runtime_side_effect
 
     drop(context);
     drop(media);
+    drop(caller);
+    drop(callee);
+    fresh_endpoint.shutdown().await;
+    caller_endpoint.shutdown().await;
+    callee_endpoint.shutdown().await;
+}
+
+/// DP-6: a fresh host cannot attach a runtime direction that contradicts the durable media
+/// contract, and the refusal happens before the one-owner claim.
+#[tokio::test]
+async fn a_mismatched_injected_direction_is_refused_before_context_claim() {
+    let Connected {
+        caller,
+        callee,
+        caller_endpoint,
+        callee_endpoint,
+        ..
+    } = connected().await;
+    let snapshot = caller
+        .dialog_snapshot(Instant::now())
+        .expect("quiescent call snapshots");
+    assert_eq!(snapshot.direction(), Direction::SendRecv);
+
+    let (fresh_endpoint, _fresh_incoming) = endpoint().await;
+    let media = fresh_media(callee.media().local_addr()).await;
+    let context = DialogRestoreContext::new(
+        fresh_endpoint.clone(),
+        Target::udp(callee_endpoint.local_addr()),
+        media,
+        MediaAddress::new(loopback()),
+        callee.media().local_addr(),
+        MediaPolicy::default().with_keying(sipx_call::Keying::Plain),
+        Direction::RecvOnly,
+        Instant::now(),
+    );
+    for _ in 0..2 {
+        assert!(matches!(
+            Call::restore_dialog(&snapshot, &context),
+            Err(DialogPersistenceError::MediaContractMismatch { field: "direction" })
+        ));
+    }
+
+    drop(context);
     drop(caller);
     drop(callee);
     fresh_endpoint.shutdown().await;
@@ -314,6 +359,7 @@ async fn session_time_is_rebased_from_explicit_now_and_never_silently_renewed() 
         MediaAddress::new(loopback()),
         callee.media().local_addr(),
         MediaPolicy::default().with_keying(sipx_call::Keying::Plain),
+        snapshot.direction(),
         now,
     );
     let restored = Call::restore_dialog(&snapshot, &context).expect("positive remainder restores");

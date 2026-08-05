@@ -169,6 +169,14 @@ pub enum DialogPersistenceError {
         /// The mismatching fact.
         field: &'static str,
     },
+    /// An RTP payload type cannot be represented by the seven-bit wire field.
+    #[error("dialog snapshot {field} {value} exceeds the RTP payload type range 0..=127")]
+    PayloadTypeOutOfRange {
+        /// The audio or DTMF payload field.
+        field: &'static str,
+        /// The refused unmasked value.
+        value: u8,
+    },
     /// This fresh runtime attachment was already consumed by a successful restore.
     #[error("dialog restore context is already attached to a call")]
     ContextAlreadyAttached,
@@ -645,10 +653,6 @@ impl DialogSnapshot {
         }
     }
 
-    pub(crate) const fn hold_value(&self) -> Direction {
-        self.hold
-    }
-
     pub(crate) const fn peer_allows_update_value(&self) -> bool {
         self.peer_allows_update
     }
@@ -718,6 +722,10 @@ impl DialogSnapshot {
             return Err(DialogPersistenceError::InvalidValue {
                 field: "negotiated codec selection",
             });
+        }
+        validate_payload_type("payload type", self.payload_type)?;
+        if let Some(payload_type) = self.dtmf_payload_type {
+            validate_payload_type("DTMF payload type", payload_type)?;
         }
         if self.dtmf_payload_type == Some(self.payload_type) {
             return Err(DialogPersistenceError::InvalidValue {
@@ -799,6 +807,7 @@ pub struct DialogRestoreContext {
     pub(crate) media_address: MediaAddress,
     pub(crate) remote_media: SocketAddr,
     pub(crate) policy: MediaPolicy,
+    pub(crate) direction: Direction,
     pub(crate) now: Instant,
     claimed: AtomicBool,
 }
@@ -814,6 +823,7 @@ impl DialogRestoreContext {
         media_address: MediaAddress,
         remote_media: SocketAddr,
         policy: MediaPolicy,
+        direction: Direction,
         now: Instant,
     ) -> Self {
         Self {
@@ -823,6 +833,7 @@ impl DialogRestoreContext {
             media_address,
             remote_media,
             policy,
+            direction,
             now,
             claimed: AtomicBool::new(false),
         }
@@ -847,6 +858,7 @@ impl fmt::Debug for DialogRestoreContext {
             .field("media_bind", &self.media_address.bind())
             .field("remote_media", &self.remote_media)
             .field("policy", &self.policy)
+            .field("direction", &self.direction)
             .field("now", &self.now)
             .finish_non_exhaustive()
     }
@@ -882,6 +894,9 @@ fn validate_media(
             field: "codec policy",
         });
     }
+    if context.direction != snapshot.hold {
+        return Err(DialogPersistenceError::MediaContractMismatch { field: "direction" });
+    }
     let expected_keying = match context.policy.keying {
         Keying::Plain => NegotiatedKeying::Plain,
         Keying::Sdes => NegotiatedKeying::Sdes,
@@ -911,6 +926,13 @@ fn validate_media(
     }
     if context.media.rtcp_mode() != snapshot.rtcp_mode {
         return Err(DialogPersistenceError::MediaContractMismatch { field: "RTCP mode" });
+    }
+    Ok(())
+}
+
+fn validate_payload_type(field: &'static str, value: u8) -> Result<(), DialogPersistenceError> {
+    if value > 0x7f {
+        return Err(DialogPersistenceError::PayloadTypeOutOfRange { field, value });
     }
     Ok(())
 }
@@ -1338,6 +1360,20 @@ mod tests {
         at
     }
 
+    fn payload_offsets(bytes: &[u8]) -> (usize, usize) {
+        let mut at = after_routes(bytes) + 4;
+        let remote_cseq_present = bytes[at];
+        at += 1 + if remote_cseq_present == 1 { 4 } else { 0 };
+        at += 2;
+        let preference_count = usize::from(bytes[at]);
+        at += 1 + preference_count;
+        at += 1;
+        let payload_type = at;
+        let dtmf_marker = payload_type + 1;
+        assert_eq!(bytes[dtmf_marker], 1, "fixture carries a DTMF payload");
+        (payload_type, dtmf_marker + 1)
+    }
+
     #[test]
     fn dp1_is_canonical_and_preserves_the_complete_dialog_order() {
         let snapshot = fixture();
@@ -1495,6 +1531,25 @@ mod tests {
     }
 
     #[test]
+    fn hostile_payload_types_outside_the_rtp_header_range_are_typed_refusals() {
+        let canonical = fixture().encode();
+        let (payload_type, dtmf_payload_type) = payload_offsets(&canonical);
+        for (offset, field) in [
+            (payload_type, "payload type"),
+            (dtmf_payload_type, "DTMF payload type"),
+        ] {
+            for value in [128, u8::MAX] {
+                let mut hostile = canonical.clone();
+                hostile[offset] = value;
+                assert_eq!(
+                    DialogSnapshot::decode(&hostile).unwrap_err(),
+                    DialogPersistenceError::PayloadTypeOutOfRange { field, value }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_hostile_prefix_is_a_value_and_never_a_panic() {
         let canonical = fixture().encode();
         for length in 0..canonical.len() {
@@ -1572,6 +1627,7 @@ mod tests {
             MediaAddress::new("127.0.0.1".parse().expect("media address")),
             remote,
             MediaPolicy::default().with_keying(Keying::Sdes),
+            snapshot.direction(),
             Instant::now(),
         );
         assert_eq!(endpoint.outstanding().await.expect("outstanding"), 0);

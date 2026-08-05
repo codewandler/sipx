@@ -84,7 +84,9 @@ are limited to 1,024 octets; each party, target and route value to 8,192; the ro
 the sum of all variable fields to 131,072. It checks a length against remaining input and the field
 limit before allocating. Unknown versions return `UnsupportedVersion`; truncation, oversized values,
 invalid UTF-8 where text is required, invalid URI/address syntax, repeated or contradictory state,
-and trailing bytes have distinct typed errors.
+and trailing bytes have distinct typed errors. Audio and DTMF payload values are limited to the RTP
+header's seven-bit payload type field (`0..=127`); values `128..=255` are typed refusals rather than
+values that can later alias after masking.
 
 ## 5. Restore context and security
 
@@ -92,7 +94,7 @@ The host supplies one `DialogRestoreContext` containing:
 
 - a fresh endpoint handle and explicit resolved `Target` for the current first hop;
 - an already-created call-owned media session plus the media policy and negotiated non-secret wire
-  facts it implements;
+  facts it implements, including the negotiated media direction;
 - explicit `now`, media bind/advertised addresses and session-expiry policy; and
 - observed signalling protection plus the injected media keying class.
 
@@ -100,7 +102,8 @@ The context is validated against the snapshot before attachment. A protected sna
 WSS or QUIC target protection. SDES/DTLS state requires a context declaring the same keying class and
 an encrypted media session; plain state refuses an implicitly encrypted/different policy rather than
 silently changing the negotiated contract. Codec, wire payload, DTMF payload, RTCP mode, profile and
-direction must agree. A SIPS remote target or route can never be restored through clear signalling.
+direction must agree before the context's one-owner claim. A SIPS remote target or route can never
+be restored through clear signalling.
 The media session's own codec, wire payload, DTMF payload, RTCP mode, encryption fact, ICE fact and
 bound address are compared with the declarations; policy text alone is not treated as runtime proof.
 
@@ -127,9 +130,9 @@ below the RFC 4028 floor, or overflowing the runtime clock are contradictory and
 | DP-1 | caller dialog, two routes, refreshed remote target, local CSeq 41, remote 9 | canonical encode/decode/encode bytes identical; next local request is 42; route order and target unchanged |
 | DP-2 | valid DP-1 with version 2 | `UnsupportedVersion(2)` before any variable-field allocation |
 | DP-3 | declared field length one beyond its limit and separately beyond remaining bytes | typed `FieldTooLarge` / `Truncated`; no partial value |
-| DP-4 | duplicate/empty tag, malformed target, 65 routes, non-zero reserved flag or trailing byte | named invariant error; no restore side effect |
+| DP-4 | duplicate/empty tag, malformed target, 65 routes, payload type 128 or 255, non-zero reserved flag or trailing byte | named invariant error; no restore side effect |
 | DP-5 | protected/SIPS snapshot with clear UDP context | `SecurityDowngrade`; endpoint counters and task/transaction counts unchanged |
-| DP-6 | SDES or DTLS snapshot with plain/mismatched injected media policy | `MediaSecurityMismatch`; no serialized key bytes and no runtime mutation |
+| DP-6 | SDES or DTLS snapshot with plain/mismatched injected media policy, or a mismatched injected direction | typed security/contract mismatch; no serialized key bytes, runtime mutation or consumed context claim |
 | DP-7 | remaining session lifetime zero, greater than interval, and valid positive lifetime | immediate `SessionActionDue`, contradiction refusal, and checked `now + remaining`, respectively |
 | DP-8 | snapshot/capture while offer, ACK, transfer or ICE work is pending | typed `NotQuiescent`; no bytes produced |
 | DP-9 | restored loopback dialog sends one re-INVITE, receives its response, then shuts down the fresh endpoint | dialog identifiers, route order, target and CSeq are preserved; the endpoint shutdown barrier completes without orphaned work |

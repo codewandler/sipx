@@ -386,7 +386,9 @@ impl Call {
             profile: snapshot.media_profile_value(),
             current: snapshot.negotiated(context.remote_media),
             peer_ice: None,
-            hold: snapshot.hold_value(),
+            // Validation proved the freshly built media driver carries the durable direction.
+            // Install the injected runtime fact so restoration never trusts snapshot state alone.
+            hold: context.direction,
             encrypted: context.media.is_encrypted(),
             keying: context.policy.keying,
             referral: None,
