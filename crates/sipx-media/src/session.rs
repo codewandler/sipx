@@ -616,6 +616,9 @@ pub struct MediaSession {
     /// Every asynchronous worker this session started. A handle remains registered while
     /// `shutdown` awaits it, which makes a cancelled shutdown retryable instead of detached.
     owners: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Stopped generations replaced in place but not yet completely joined. The replacement owns
+    /// them before its first await, so cancellation cannot turn reconfiguration into detachment.
+    retired: Mutex<Vec<MediaSession>>,
     #[cfg(all(test, feature = "dtls"))]
     browser_profile_tasks: Option<Arc<crate::browser::ProfileTasks>>,
     #[cfg(all(test, feature = "dtls"))]
@@ -1427,6 +1430,7 @@ impl MediaSession {
             feedback: shared.feedback,
             browser_ingress: None,
             owners: Mutex::new(owners),
+            retired: Mutex::new(Vec::new()),
             #[cfg(all(test, feature = "dtls"))]
             browser_profile_tasks: None,
             #[cfg(all(test, feature = "dtls"))]
@@ -1548,6 +1552,7 @@ impl MediaSession {
             ice,
             browser_ingress: Some(ingress),
             owners: Mutex::new(owners),
+            retired: Mutex::new(Vec::new()),
             #[cfg(all(test, feature = "dtls"))]
             browser_profile_tasks: Some(profile_tasks),
             #[cfg(all(test, feature = "dtls"))]
@@ -1636,9 +1641,10 @@ impl MediaSession {
     ///
     /// Used when a later SDP exchange changes the remote address, codec, payload type, or keys.
     /// The local RTP/RTCP addresses do not change: they are already published to the peer, and a
-    /// replacement that rebound an ephemeral port would make the new description false. The old
-    /// workers are stopped before their replacements are installed, while mute and encoded-relay
-    /// policy survive the transition.
+    /// replacement that rebound an ephemeral port would make the new description false. Mute and
+    /// encoded-relay policy survive the transition. The stopped generation remains owned until
+    /// all of its workers have joined; if this future is cancelled during that join, the next
+    /// reconfiguration or shutdown resumes the cleanup.
     ///
     /// Returns `false` without changing the session when ICE owns the destinations. Rebuilding an
     /// ICE-backed session requires the agent and its selected pair to move with the workers; a
@@ -1648,11 +1654,12 @@ impl MediaSession {
     ///
     /// Returns [`SetupError`] before stopping the current workers if the new timing or codec
     /// cannot be constructed.
-    pub fn reconfigure(&mut self, config: Config) -> Result<bool, SetupError> {
+    pub async fn reconfigure(&mut self, config: Config) -> Result<bool, SetupError> {
         if self.ice.is_some() {
             return Ok(false);
         }
         let prepared = Prepared::new(&config)?;
+        self.reap_retired().await;
         let muted = self.is_muted();
         let relay = self.relay.load(Ordering::SeqCst);
         let socket = Arc::clone(&self.socket);
@@ -1672,7 +1679,8 @@ impl MediaSession {
         replacement.set_muted(muted);
         replacement.set_relay(relay);
         let previous = std::mem::replace(self, replacement);
-        previous.stop();
+        self.retired.get_mut().push(previous);
+        self.reap_retired().await;
         Ok(true)
     }
 
@@ -2219,11 +2227,21 @@ impl MediaSession {
             let _ = owner.await;
             owners.pop();
         }
+        drop(owners);
+        self.reap_retired().await;
+    }
+
+    async fn reap_retired(&self) {
+        let mut retired = self.retired.lock().await;
+        while let Some(previous) = retired.last() {
+            Box::pin(previous.shutdown()).await;
+            retired.pop();
+        }
     }
 
     #[cfg(test)]
     async fn owned_task_count(&self) -> usize {
-        self.owners.lock().await.len()
+        self.owners.lock().await.len() + self.retired.lock().await.len()
     }
 
     /// Whether the session has been stopped.
@@ -3879,6 +3897,69 @@ mod tests {
         release_tx.send(()).expect("test worker remains owned");
         session.shutdown().await;
         assert_eq!(session.owned_task_count().await, 0);
+    }
+
+    /// Reconfiguration installs a new generation before joining the old one. Cancellation in
+    /// that join must leave the old generation attached to the replacement so retry can finish
+    /// the same drain and release the shared socket deterministically.
+    #[tokio::test]
+    async fn cancelled_reconfigure_retains_the_old_generation_for_retry() {
+        let placeholder: SocketAddr = "127.0.0.1:1".parse().expect("valid");
+        let config = Config::new(placeholder, Codec::Pcmu);
+        let session = Arc::new(Mutex::new(
+            MediaSession::start(any(), config.clone())
+                .await
+                .expect("session starts"),
+        ));
+        let (stop_seen_tx, stop_seen_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut session = session.lock().await;
+            let old_stop = Arc::clone(&session.stop);
+            session.owners.get_mut().push(tokio::spawn(async move {
+                old_stop.wait().await;
+                let _ = stop_seen_tx.send(());
+                let _ = release_rx.await;
+            }));
+        }
+
+        let reconfiguring_session = Arc::clone(&session);
+        let retry_config = config.clone();
+        let reconfiguring = tokio::spawn(async move {
+            reconfiguring_session
+                .lock()
+                .await
+                .reconfigure(retry_config)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), stop_seen_rx)
+            .await // bound on failure: the old generation's stop signal has no timing semantics.
+            .expect("old generation observes stop")
+            .expect("stop observer remains alive");
+        reconfiguring.abort();
+        let _ = reconfiguring.await;
+
+        let local_addr = {
+            let mut session = session.lock().await;
+            assert_eq!(
+                session.retired.get_mut().len(),
+                1,
+                "the cancelled join retained its old generation"
+            );
+            release_tx.send(()).expect("old generation remains owned");
+            assert!(session.reconfigure(config).await.expect("retry succeeds"));
+            assert_eq!(session.retired.get_mut().len(), 0);
+            session.shutdown().await;
+            session.local_addr()
+        };
+        let session = Arc::try_unwrap(session)
+            .expect("the test owns the replacement")
+            .into_inner();
+        drop(session);
+        let rebound = UdpSocket::bind(local_addr)
+            .await
+            .expect("retry joined every old socket worker");
+        drop(rebound);
     }
 
     /// The failing-first test for this story.

@@ -48,17 +48,23 @@ construction may discard its handle.
 browser ingress when one exists, and joins every handle before it returns. A handle remains in the
 owner set while its join is pending, so cancellation of `shutdown()` cannot detach it: a later call
 resumes the same drain. `Drop` signals cancellation and aborts handles that were not explicitly
-joined; it makes no synchronous-join claim.
+joined; it makes no synchronous-join claim. The same retention rule applies across reconfiguration:
+the replacement session owns the stopped generation until every old handle joins, and a cancelled
+`reconfigure()` is resumed by the next reconfiguration or shutdown.
 
 An answering `Call` likewise owns the handle for its RFC 3261 §13.3.1.4 successful-final-response
-retransmitter. ACK, remote BYE and local teardown signal and join that handle. A terminal call path
-then joins its `MediaSession` before returning. Therefore a load responder's joined per-dialog task
-is a complete barrier for the generated-media call beneath it; zero outer tasks cannot be reported
-while an RTP, RTCP, ICE, playback or final-response retransmission worker remains live.
+retransmitter. Its stop signal is latched: stopping before the task's first poll, while it waits for
+T1, or while a response handoff is pending all select the same durable cancellation state. ACK,
+remote BYE, local teardown and answer-setup failure cancel and join that handle. A terminal call
+path then joins its active and retired `MediaSession` generations before returning. Therefore a
+load responder's joined per-dialog task is a complete barrier for the generated-media call beneath
+it; zero outer tasks cannot be reported while an RTP, RTCP, ICE, playback or final-response
+retransmission worker remains live.
 
 Replacing a media session during renegotiation performs the same explicit shutdown on the old
-session. Merely swapping the `Arc` and relying on its destructor would make the renegotiation return
-before the old socket workers were reaped.
+session. The confirmed `Call` retains the old `Arc`, and in-place `MediaSession::reconfigure`
+retains the old generation, before either begins an await. Merely swapping and relying on a local
+destructor would let cancellation abort the shutdown future and lose the only retry handle.
 
 ## 3. Conference construction and shutdown
 
@@ -155,6 +161,9 @@ is honest under load.
 | S1 | start an ordinary separate-RTCP session, then call `shutdown()` | every retained RTP, playback and RTCP handle is joined; the owner set is empty |
 | S2 | cancel one `shutdown()` while it is joining, then call it again | the in-flight handle remains owned and the second call drains it |
 | S3 | answer a call, ACK it, then end it | the successful-response retransmitter and every media worker are joined before the terminal call operation returns |
+| S4 | cancel `reconfigure()` while the old generation is joining, then retry | the replacement retains the old generation; retry drains it and no old socket worker remains |
+| S5 | stop a successful-response retransmitter before its first poll and during a pending handoff | both stops are observed and joined without waiting for T1 or another response |
+| S6 | media setup fails after a successful final response was sent | the latched stop is set and the retransmitter is joined before setup returns the typed error |
 | C1 | drop a conference whose collector is blocked in `recv()` | collector is cancelled and its session `Arc` is released within a bounded deadline |
 | C2 | leave, close twice, then drop | no retained participant and no panic |
 | C3 | race `join` against `close` while the participant is quiet | either join is refused or its registered collector is drained; no retained session |

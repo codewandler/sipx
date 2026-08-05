@@ -250,7 +250,7 @@ pub(crate) async fn receive(early: EarlyDialog<'_>, incoming: &Incoming) -> Resu
     if has_offer {
         let answer = match sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body())) {
             Ok(offer) => match early.early {
-                Some(session) => session.reanswer(&offer),
+                Some(session) => session.reanswer(&offer).await,
                 None => None,
             },
             Err(_) => None,
@@ -341,7 +341,7 @@ pub(crate) async fn offer(early: EarlyDialog<'_>, direction: Direction) -> Resul
     if let Ok(answered) = sipx_sdp::parse(&String::from_utf8_lossy(response.body())) {
         // An answer, not an offer: it says where the far end now wants media, and nothing is
         // owed back for it. Our own port does not move — the peer already has it.
-        session.adopt_answer(&answered);
+        session.adopt_answer(&answered).await;
     }
     Ok(())
 }

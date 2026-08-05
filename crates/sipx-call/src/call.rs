@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use bytes::Bytes;
 use sipx_media::ice::{LocalDescription, Negotiation as IceNegotiation};
@@ -144,11 +145,14 @@ pub struct Call {
     /// inventing `200` for a peer that answered with a different successful status.
     initial_status: u16,
     media: Arc<MediaSession>,
+    /// Replaced sessions whose workers have been stopped but not yet completely joined. A
+    /// cancelled renegotiation leaves this ownership in the call for retry or terminal cleanup.
+    retired_media: Vec<Arc<MediaSession>>,
     endpoint: Handle,
     /// Where in-dialog requests go: the peer's `Contact`, not where the INVITE was sent.
     target: Target,
     /// Set while a 2xx is still being retransmitted; cleared when the ACK arrives.
-    awaiting_ack: Option<Arc<tokio::sync::Notify>>,
+    ack_stop: Option<CancellationToken>,
     /// Completion of the successful-final-response retransmitter. Retained separately from its
     /// stop signal so an ACK or terminal call path proves that the worker has actually exited.
     ack_retransmission: Option<OwnedTask>,
@@ -228,6 +232,36 @@ impl Drop for OwnedTask {
     }
 }
 
+async fn cancel_and_join(stop: &CancellationToken, owner: &mut OwnedTask) {
+    stop.cancel();
+    owner.joined().await;
+}
+
+async fn until_cancelled<F: Future>(stop: &CancellationToken, operation: F) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => None,
+        output = operation => Some(output),
+    }
+}
+
+trait Retirable {
+    async fn finish(&self);
+}
+
+impl Retirable for Arc<MediaSession> {
+    async fn finish(&self) {
+        self.shutdown().await;
+    }
+}
+
+async fn drain_retired<T: Retirable>(retired: &mut Vec<T>) {
+    while let Some(previous) = retired.last() {
+        previous.finish().await;
+        retired.pop();
+    }
+}
+
 /// The pure half of accepting a peer's in-dialog offer.
 ///
 /// Kept as one value so [`Call::can_accept_offer`] and [`Call::renegotiate`] cannot drift: the
@@ -301,13 +335,20 @@ impl Call {
     /// The handle stays in `self` while it is awaited. Cancelling the caller therefore leaves the
     /// ownership intact for the next ACK or terminal path instead of detaching the retransmitter.
     async fn stop_ack_retransmission(&mut self) {
-        if let Some(notify) = self.awaiting_ack.take() {
-            notify.notify_waiters();
-        }
-        if let Some(owner) = self.ack_retransmission.as_mut() {
+        if let Some(stop) = self.ack_stop.take() {
+            if let Some(owner) = self.ack_retransmission.as_mut() {
+                cancel_and_join(&stop, owner).await;
+            } else {
+                stop.cancel();
+            }
+        } else if let Some(owner) = self.ack_retransmission.as_mut() {
             owner.joined().await;
         }
         self.ack_retransmission = None;
+    }
+
+    async fn reap_retired_media(&mut self) {
+        drain_retired(&mut self.retired_media).await;
     }
 
     /// The successful final response that established this call.
@@ -667,6 +708,7 @@ impl Call {
                 }
                 .await;
                 self.media.shutdown().await;
+                self.reap_retired_media().await;
                 responded?;
                 Ok(true)
             }
@@ -827,14 +869,14 @@ impl Call {
         // resend, one lost 200 deadlocks the renegotiation until the peer's Timer B — a single
         // dropped packet breaking hold and resume for half a minute.
         self.stop_ack_retransmission().await;
-        let acked = Arc::new(tokio::sync::Notify::new());
+        let ack_stop = CancellationToken::new();
         let ack_retransmission = tokio::spawn(retransmit_until_acked(
             self.endpoint.clone(),
             incoming.key.clone(),
             response,
-            Arc::clone(&acked),
+            ack_stop.clone(),
         ));
-        self.awaiting_ack = Some(acked);
+        self.ack_stop = Some(ack_stop);
         self.ack_retransmission = Some(OwnedTask::new(ack_retransmission));
         Ok(())
     }
@@ -1381,6 +1423,7 @@ impl Call {
     /// Restarting an unchanged session would drop packets for no reason on every re-INVITE, and
     /// some peers send one every thirty seconds as a keep-alive.
     async fn move_media_if_changed(&mut self, to: Negotiated) -> Result<()> {
+        self.reap_retired_media().await;
         // The payload type is the codec's number on the wire: a re-offer can move Opus from
         // 111 to 96 and leave the codec unchanged, and a session not rebuilt for that goes on
         // sending on the number the far end just reassigned.
@@ -1404,7 +1447,8 @@ impl Call {
             // call behind the application's back.
             replacement.set_muted(self.media.is_muted());
             let previous = std::mem::replace(&mut self.media, Arc::new(replacement));
-            previous.shutdown().await;
+            self.retired_media.push(previous);
+            self.reap_retired_media().await;
         }
         self.current = to;
         Ok(())
@@ -2011,6 +2055,7 @@ impl Call {
         if self.ended {
             self.stop_ack_retransmission().await;
             self.media.shutdown().await;
+            self.reap_retired_media().await;
             return Ok(());
         }
         self.media.flush(Duration::from_secs(5)).await;
@@ -2037,6 +2082,7 @@ impl Call {
         }
         .await;
         self.media.shutdown().await;
+        self.reap_retired_media().await;
         sent
     }
 
@@ -3377,9 +3423,10 @@ async fn dial_with(
                 dialog,
                 initial_status: response.status.code(),
                 media: Arc::new(media),
+                retired_media: Vec::new(),
                 endpoint: endpoint.clone(),
                 target: in_dialog,
-                awaiting_ack: None,
+                ack_stop: None,
                 ack_retransmission: None,
                 ended: false,
                 media_address,
@@ -4897,9 +4944,10 @@ impl Dialing {
                     dialog,
                     initial_status: response.status.code(),
                     media: Arc::new(media),
+                    retired_media: Vec::new(),
                     endpoint: self.endpoint.clone(),
                     target: self.in_dialog.clone(),
-                    awaiting_ack: None,
+                    ack_stop: None,
                     ack_retransmission: None,
                     ended: false,
                     media_address: self.options.media_address,
@@ -5365,7 +5413,7 @@ impl Early {
     /// description. An answer that cannot be read leaves the session where it was: the far end
     /// accepted something, and guessing which of our formats it meant is worse than keeping
     /// what the last completed exchange settled.
-    pub(crate) fn adopt_answer(&mut self, answer: &SessionDescription) {
+    pub(crate) async fn adopt_answer(&mut self, answer: &SessionDescription) {
         if let Ok(negotiated) = negotiated(answer, self.codecs) {
             let settled = Settled {
                 negotiated,
@@ -5376,7 +5424,7 @@ impl Early {
             // the wrong fault; the eventual call still confirms the last session that ran.
             // discard: the peer has already answered our UPDATE, so there is no signalling
             // response left to change; the still-running media session is the safe fallback.
-            let _ = self.replace_media(settled);
+            let _ = self.replace_media(settled).await;
         }
     }
 
@@ -5388,7 +5436,10 @@ impl Early {
     /// The port does not move. Our own receive address was published in the answer the peer
     /// already has, and changing it because *their* description changed would ask them to
     /// renegotiate again to learn where we went.
-    pub(crate) fn reanswer(&mut self, offer: &SessionDescription) -> Option<SessionDescription> {
+    pub(crate) async fn reanswer(
+        &mut self,
+        offer: &SessionDescription,
+    ) -> Option<SessionDescription> {
         let negotiated = negotiated(offer, self.codecs).ok()?;
         let answer = sipx_sdp::answer(offer, &self.capabilities);
         if answer
@@ -5402,7 +5453,7 @@ impl Early {
             negotiated,
             srtp: srtp_keys_answering(self.capabilities.crypto.as_ref(), offer_crypto(offer)),
         };
-        self.replace_media(settled).ok()?;
+        self.replace_media(settled).await.ok()?;
         Some(answer)
     }
 
@@ -5412,13 +5463,13 @@ impl Early {
     /// dialog, but it happens at UPDATE time rather than being deferred to the INVITE's 2xx. The
     /// resulting session is then the one confirmation moves into `Call`, so answer time itself
     /// still neither rebinds nor leaves a gap.
-    fn replace_media(&mut self, settled: Settled) -> Result<()> {
+    async fn replace_media(&mut self, settled: Settled) -> Result<()> {
         let to = settled.negotiated;
         let changed = to.remote != self.settled.negotiated.remote
             || to.codec != self.settled.negotiated.codec
             || to.wire_payload_type() != self.settled.negotiated.wire_payload_type()
             || settled.is_encrypted() != self.settled.is_encrypted();
-        if changed && !self.media.reconfigure(settled.media_config())? {
+        if changed && !self.media.reconfigure(settled.media_config()).await? {
             return Err(Error::Sdp(
                 "an ICE-backed early session cannot change its media format in place".to_owned(),
             ));
@@ -5605,12 +5656,12 @@ pub async fn answer_early(
     let media = early.media;
     endpoint.respond(&incoming.key, response.clone()).await?;
 
-    let acked = Arc::new(tokio::sync::Notify::new());
+    let ack_stop = CancellationToken::new();
     let ack_retransmission = OwnedTask::new(tokio::spawn(retransmit_until_acked(
         endpoint.clone(),
         incoming.key.clone(),
         response,
-        Arc::clone(&acked),
+        ack_stop.clone(),
     )));
 
     let (events, events_rx) = EventSink::new();
@@ -5620,9 +5671,10 @@ pub async fn answer_early(
         dialog,
         initial_status: OK,
         media: Arc::new(media),
+        retired_media: Vec::new(),
         endpoint: endpoint.clone(),
         target,
-        awaiting_ack: Some(acked),
+        ack_stop: Some(ack_stop),
         ack_retransmission: Some(ack_retransmission),
         ended: false,
         media_address: early.media_address,
@@ -5874,12 +5926,12 @@ async fn answer_negotiated(
 
     endpoint.respond(&incoming.key, response.clone()).await?;
 
-    let acked = Arc::new(tokio::sync::Notify::new());
+    let ack_stop = CancellationToken::new();
     let mut ack_retransmission = OwnedTask::new(tokio::spawn(retransmit_until_acked(
         endpoint.clone(),
         incoming.key.clone(),
         response,
-        Arc::clone(&acked),
+        ack_stop.clone(),
     )));
 
     // The answer must leave before an active answerer sends ClientHello. A caller is permitted to
@@ -5897,8 +5949,7 @@ async fn answer_negotiated(
     let (media, settled) = match started {
         Ok(started) => started,
         Err(error) => {
-            acked.notify_waiters();
-            ack_retransmission.joined().await;
+            cancel_and_join(&ack_stop, &mut ack_retransmission).await;
             return Err(error);
         }
     };
@@ -5912,9 +5963,10 @@ async fn answer_negotiated(
         dialog,
         initial_status: OK,
         media: Arc::new(media),
+        retired_media: Vec::new(),
         endpoint: endpoint.clone(),
         target,
-        awaiting_ack: Some(acked),
+        ack_stop: Some(ack_stop),
         ack_retransmission: Some(ack_retransmission),
         ended: false,
         media_address: media_address.advertised(),
@@ -5949,7 +6001,7 @@ async fn retransmit_until_acked(
     endpoint: Handle,
     key: sipx_sip::transaction::TransactionKey,
     response: Response,
-    acked: Arc<tokio::sync::Notify>,
+    stop: CancellationToken,
 ) {
     let t1 = Duration::from_millis(500);
     let mut interval = t1;
@@ -5957,16 +6009,22 @@ async fn retransmit_until_acked(
     let give_up = t1 * 64;
 
     loop {
-        tokio::select! {
-            () = acked.notified() => return,
-            () = tokio::time::sleep(interval) => {}
+        if until_cancelled(&stop, tokio::time::sleep(interval))
+            .await
+            .is_none()
+        {
+            return;
         }
         elapsed += interval;
         if elapsed >= give_up {
             tracing::warn!("no ACK for our 2xx after 64*T1; giving up");
             return;
         }
-        if endpoint.respond(&key, response.clone()).await.is_err() {
+        let Some(sent) = until_cancelled(&stop, endpoint.respond(&key, response.clone())).await
+        else {
+            return;
+        };
+        if sent.is_err() {
             return;
         }
         // Doubling capped at T2, exactly as the INVITE client transaction retransmits.
@@ -6728,8 +6786,103 @@ async fn refuse_request(
 )]
 mod tests {
     use std::fmt::Write as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::Poll;
 
     use super::*;
+
+    #[tokio::test]
+    async fn successful_response_stop_before_first_poll_is_latched() {
+        let stop = CancellationToken::new();
+        stop.cancel();
+        let operation_polled = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&operation_polled);
+        let operation = std::future::poll_fn(move |_context| {
+            observed.store(true, Ordering::SeqCst);
+            Poll::<()>::Pending
+        });
+
+        assert!(until_cancelled(&stop, operation).await.is_none());
+        assert!(
+            !operation_polled.load(Ordering::SeqCst),
+            "latched cancellation wins before the handoff is first polled"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_response_stop_interrupts_a_pending_handoff() {
+        let stop = CancellationToken::new();
+        let worker_stop = stop.clone();
+        let (polled_tx, polled_rx) = tokio::sync::oneshot::channel();
+        let mut polled_tx = Some(polled_tx);
+        let worker = tokio::spawn(async move {
+            until_cancelled(
+                &worker_stop,
+                std::future::poll_fn(move |_context| {
+                    if let Some(polled) = polled_tx.take() {
+                        let _ = polled.send(());
+                    }
+                    Poll::<()>::Pending
+                }),
+            )
+            .await
+        });
+        polled_rx.await.expect("the handoff is pending");
+
+        stop.cancel();
+        assert_eq!(worker.await.expect("worker joins"), None);
+    }
+
+    #[tokio::test]
+    async fn answer_setup_failure_cancels_and_joins_its_retransmitter() {
+        let stop = CancellationToken::new();
+        let worker_stop = stop.clone();
+        let finished = CancellationToken::new();
+        let worker_finished = finished.clone();
+        let mut owner = OwnedTask::new(tokio::spawn(async move {
+            let _ = until_cancelled(&worker_stop, std::future::pending::<()>()).await;
+            worker_finished.cancel();
+        }));
+
+        cancel_and_join(&stop, &mut owner).await;
+        assert!(
+            finished.is_cancelled(),
+            "setup failure returns only after the retransmitter exits"
+        );
+    }
+
+    struct TestRetired {
+        entered: CancellationToken,
+        release: CancellationToken,
+    }
+
+    impl Retirable for TestRetired {
+        async fn finish(&self) {
+            self.entered.cancel();
+            self.release.cancelled().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_confirmed_replacement_retains_the_old_owner_for_retry() {
+        let entered = CancellationToken::new();
+        let release = CancellationToken::new();
+        let mut retired = vec![TestRetired {
+            entered: entered.clone(),
+            release: release.clone(),
+        }];
+        let mut draining = Box::pin(drain_retired(&mut retired));
+        tokio::select! {
+            () = entered.cancelled() => {}
+            () = &mut draining => panic!("retired generation completed before release"),
+        }
+        drop(draining);
+        assert_eq!(retired.len(), 1, "cancellation preserved the old owner");
+
+        release.cancel();
+        drain_retired(&mut retired).await;
+        assert!(retired.is_empty(), "retry joined and removed the old owner");
+    }
 
     /// M-49's pre-I/O boundary is pure: failure cannot have bound or gathered a socket.
     #[cfg(all(feature = "opus", feature = "dtls"))]
