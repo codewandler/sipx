@@ -46,6 +46,14 @@ without reparsing delimiters, while retaining future extension tokens.
 - 2026-08-05: focused format, all-target/all-feature clippy, all SIP tests, no-default-features
   checking, RFC/maturity/comparison/website consistency, internal links and the public site build
   pass. The story remains in progress for integration review and the repository-wide gate.
+- 2026-08-05: Integration review found that a malformed repeated row could leave neighboring
+  values visible even though the message-wide list had never passed validation. P17 now requires
+  every constrained typed field to collapse a per-row decode failure to one error before yielding
+  any value; unconstrained typed fields remain streaming.
+
+- 2026-08-05: Integration's single full-gate invocation passed repository checks, workspace clippy
+  and the complete workspace test suite, then stopped itself before `examples` because the cold
+  build exhausted the disk floor. It was an infrastructure non-result and was not rerun.
 
 ## Notes
 

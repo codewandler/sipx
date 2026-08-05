@@ -34,7 +34,10 @@ pub use grammar::HeaderParam;
 pub use history::{
     HistoryEntry, HistoryIndex, HistoryInfo, Reason, ReasonValue, TargetChange, TargetChangeKind,
 };
-pub use identity::{PAssertedIdentity, PPreferredIdentity};
+pub use identity::{
+    IgnoredIdentity, IgnoredIdentityReason, PAssertedIdentity, PAssertedIdentityList,
+    PPreferredIdentity, PPreferredIdentityList,
+};
 pub use misc::{
     Allow, CSeq, CallId, ContentLength, ContentType, Date, Expires, MaxForwards, ProxyRequire,
     Require, Supported, TokenList, Unsupported,

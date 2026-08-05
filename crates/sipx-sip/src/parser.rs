@@ -264,6 +264,7 @@ enum StartLine {
     Request {
         method: Method,
         uri: Box<Uri>,
+        uri_span: std::ops::Range<usize>,
         version: Version,
         raw: Bytes,
     },
@@ -280,10 +281,11 @@ fn assemble(start: StartLine, headers: Headers, body: Bytes) -> Message {
         StartLine::Request {
             method,
             uri,
+            uri_span,
             version,
             raw,
         } => Message::Request(Request::from_wire(
-            method, *uri, version, raw, headers, body,
+            method, *uri, version, raw, uri_span, headers, body,
         )),
         StartLine::Response {
             version,
@@ -467,6 +469,7 @@ fn parse_start_line(line: Bytes) -> Result<StartLine, ParseError> {
     Ok(StartLine::Request {
         method: Method::parse(&method_raw),
         uri: Box::new(uri),
+        uri_span: u0..u1,
         version: Version::parse(&line.slice(v0..v1)),
         raw: line,
     })

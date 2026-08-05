@@ -1,12 +1,13 @@
 # Spec: Transport layer
 
-**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4, T-25 … T-27, T-32 · **Design:**
+**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4, T-25 … T-27, T-32, T-34, T-35 · **Design:**
 [sip-transport](../designs/sip-transport.md)
 
 ## 1. Normative references
 
-- RFC 3261 §18 (transport), §18.1 (clients), §18.2 (servers), §18.2.1 (`received`),
-  §18.2.2 (sending responses), §19.1.1 (`maddr`), §20.42 (`Via`).
+- RFC 3261 §9.1 (constructing and sending CANCEL), §17.1 (client transactions), §18
+  (transport), §18.1 (clients), §18.2 (servers), §18.2.1 (`received`), §18.2.2 (sending
+  responses), §19.1.1 (`maddr`), §20.42 (`Via`).
 - RFC 3581 — `rport`.
 - RFC 3263 — locating SIP servers.
 - RFC 2782 — SRV weighting.
@@ -124,6 +125,73 @@ socket's view is the wrong one.
 cookie is required (RFC 3261 §8.1.1.7); the width is ours, because a guessable branch lets an
 off-path attacker inject responses into a transaction.
 
+### 7.1 Cancelling one outgoing INVITE
+
+**[RFC 3261 §9.1] A CANCEL is derived from one existing INVITE client transaction, never from
+caller-reconstructed identity.** `Handle::cancel_invite` therefore accepts the mutable `Responses`
+returned by the exact `Handle::send` call. `Responses` retains the request after transport policy
+and `Via` construction, its selected `Target`, and its `TransactionKey`; no public operation accepts
+a branch string or replacement key.
+
+The operation returns `CancelInviteOutcome`:
+
+- `Sent(InviteCancellation)` identifies both the INVITE and the newly created CANCEL transaction.
+  `InviteCancellation::outcome` reports the CANCEL transaction's final response, timeout, or
+  transport failure as `CancelTransactionOutcome`.
+- `FinalResponse` carries the final INVITE response that won the race before a CANCEL transaction
+  existed. No CANCEL is sent.
+- `InviteTimeout` and `InviteTransportError` name how the INVITE ended before the §9.1 precondition
+  was met. A concrete driver error accompanies the transport outcome when one was recorded.
+
+`Reason` is the one optional policy input. When supplied, it is appended to the derived request;
+it cannot alter transaction identity. The operation rejects a non-INVITE response stream, an
+INVITE missing a required identity header, and a second cancellation request with typed transport
+errors before creating a CANCEL transaction.
+
+| INVITE observation when cancellation is requested | Action | Result |
+|---|---|---|
+| No response observed | Wait on that INVITE's response stream; send nothing | pending |
+| One or more provisional responses observed | Derive and create exactly one CANCEL transaction | `Sent` |
+| Final response observed before CANCEL creation | Send nothing | `FinalResponse` |
+| INVITE timeout before CANCEL creation | Send nothing | `InviteTimeout` |
+| INVITE transport failure before CANCEL creation | Send nothing | `InviteTransportError` |
+| A CANCEL transaction was already created | Send nothing | `Error::InvalidCancellation` |
+
+Events read while enforcing the provisional-response precondition remain buffered on the original
+`Responses`. Cancellation cannot make a provisional or crossing final response disappear from the
+application's ordinary INVITE stream.
+
+The derived CANCEL has the INVITE's Request-URI; top `Via` value including branch; every `Route` in
+wire order; first `To`, `From`, and `Call-ID`; and CSeq number. Its method and CSeq method are
+`CANCEL`, its `Max-Forwards` is 70, and its body is empty. Vector C1 fixes the byte-level result:
+
+```text
+INVITE sip:bob@203.0.113.9 SIP/2.0
+Via: SIP/2.0/UDP 192.0.2.10:5060;rport;branch=z9hG4bKcancel-vector
+Route: <sip:edge.example;lr>
+To: <sip:bob@example.com>
+From: <sip:alice@example.net>;tag=from-1
+Call-ID: cancel-1@example.net
+CSeq: 42 INVITE
+Max-Forwards: 69
+Content-Length: 0
+
+
+=>
+
+CANCEL sip:bob@203.0.113.9 SIP/2.0
+Via: SIP/2.0/UDP 192.0.2.10:5060;rport;branch=z9hG4bKcancel-vector
+Route: <sip:edge.example;lr>
+To: <sip:bob@example.com>
+From: <sip:alice@example.net>;tag=from-1
+Call-ID: cancel-1@example.net
+CSeq: 42 CANCEL
+Max-Forwards: 70
+Content-Length: 0
+
+
+```
+
 ## 8. Connection reuse (RFC 5923)
 
 **[sipx] An inbound connection is reused for responses on that transaction, always.**
@@ -217,6 +285,35 @@ field requires at least one millisecond. Invalid values return a typed configura
 the field. Values are never silently clamped. RFC 7415's protected-request threshold `TAU2` must be
 greater than the ordinary threshold `TAU1`; equal thresholds erase the policy hook and are rejected
 at bind.
+
+`Config::cleartext` selects listener kinds exactly; selecting TCP never implies UDP and selecting
+UDP never implies TCP. The default preserves the historical combined listener.
+
+| `CleartextTransports` | UDP socket | TCP listener | `Handle::local_addr()` |
+|---|---:|---:|---|
+| `None` | no | no | first configured non-cleartext signalling listener |
+| `Udp` | yes | no | UDP bound address |
+| `Tcp` | no | yes | TCP bound address |
+| `UdpAndTcp` (default) | yes | yes | their shared bound address |
+
+`None` without a configured TLS, WebSocket, secure-WebSocket, or QUIC server listener is a typed
+`InvalidConfig` error naming `cleartext`, before any bind. Client credentials or a client-only QUIC
+endpoint do not count as a listener. When no cleartext listener exists, the primary local address is
+selected in the stable order TLS, WebSocket, secure WebSocket, then QUIC. An absent or zero
+`sent_by_port` uses that primary listener's actual port.
+
+| Cleartext selection | Configured port | Bind state |
+|---|---:|---|
+| `Udp` | exact or `0` | bind UDP once; report its actual address |
+| `Tcp` | exact or `0` | bind TCP once; report its actual address; create no UDP socket |
+| `UdpAndTcp` | exact | bind UDP, then TCP on the same address; any conflict is returned |
+| `UdpAndTcp` | `0` | bind UDP, then TCP at UDP's chosen port; on `AddrInUse`, drop UDP and retry, at most 16 attempts |
+| `None` | any | perform no cleartext bind |
+
+The driver stores the UDP socket as optional state. Its receive branch is disabled when the socket
+is absent, and an outbound UDP target on such an endpoint returns
+`Error::TransportNotConfigured` rather than using a placeholder datagram socket. TCP pooling and
+accepted streams are independent of UDP state.
 
 The default inbound handshake budget is 64 live handshakes per endpoint and the default deadline is
 10 seconds. The budget is shared across TLS, WebSocket and secure WebSocket listeners. An accepted
@@ -340,6 +437,10 @@ saturated. After expiry, every response reports explicit control-off state.
 | X40 | Refused source reaches TCP, TLS, WebSocket, secure WebSocket or QUIC | The connection closes before framing or handshake work and that transport's `source_refusals` increments |
 | X41 | Source set changes from A to B while A has a pooled stream | New A connections are refused, B is admitted, and the existing A generation remains usable until close |
 | X42 | Replacement exceeds `source_admission_limit` | Typed capacity refusal; the previous complete generation and its number remain active |
+| X43 | TCP-only bind to port `0` | TCP connects at `local_addr`; UDP can bind that exact address; implicit sent-by uses the TCP port |
+| X44 | UDP-only bind | UDP receives at `local_addr`; TCP can bind that exact address |
+| X45 | Combined UDP+TCP bind | both listener kinds occupy the same address and port |
+| X46 | No cleartext and no other server listener | typed pre-bind `InvalidConfig` naming `cleartext` |
 
 ### 11.1 Live endpoint policy and observation
 

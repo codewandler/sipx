@@ -139,6 +139,7 @@ impl PrivacyList {
 
 impl TypedHeader for Privacy {
     const NAME: HeaderName = HeaderName::Privacy;
+    const VALIDATE_LIST: bool = true;
 
     fn decode(value: &[u8]) -> Result<Self, HeaderError> {
         PrivacyValue::decode(trim(value)).map(Self)

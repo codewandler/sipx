@@ -154,7 +154,14 @@ impl Selection {
             );
         }
         if self.report {
-            config.tcp = self.kind == TransportKind::Tcp;
+            config.cleartext = match self.kind {
+                TransportKind::Udp => sipx_transport::CleartextTransports::Udp,
+                TransportKind::Tcp => sipx_transport::CleartextTransports::Tcp,
+                TransportKind::Tls
+                | TransportKind::Ws
+                | TransportKind::Wss
+                | TransportKind::Quic => sipx_transport::CleartextTransports::None,
+            };
         }
         match self.kind {
             TransportKind::Udp | TransportKind::Tcp => Ok(()),

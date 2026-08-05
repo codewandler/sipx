@@ -1,6 +1,6 @@
 # Spec: URI rewriting primitives
 
-**Status:** normative · **Story:** S-44 · **Crate:** `sipx-sip` · **Design:**
+**Status:** normative · **Stories:** S-44, S-48 · **Crate:** `sipx-sip` · **Design:**
 [sip-core](../designs/sip-core.md)
 
 This contract defines byte-oriented URI seams for consumers that must inspect or change a number
@@ -61,6 +61,9 @@ local number's `phone-context` is suitable.
 first `;`. `parameters` is the exact suffix after that delimiter, without the delimiter itself.
 It is `None` when there is no delimiter and `Some(b"")` when the body ends in `;`; retaining that
 distinction makes the view lossless even though the latter is not a valid RFC 3966 parameter.
+`Uri::parse` validates the subscriber production but deliberately retains the parameter tail
+without interpreting or validating it. It also validates percent-escape shape in opaque URI bodies;
+the remainder of an unknown scheme stays opaque rather than acquiring scheme-specific semantics.
 
 ## 3. Mutation contract
 
@@ -87,10 +90,10 @@ operation's lossless contract.
 
 A TEL replacement accepts either `+` followed by digits and RFC 3966 visual separators, with at
 least one digit, or a local subscriber made from hexadecimal digits, `*`, `#` and visual separators,
-with at least one hexadecimal digit. It splices only the parser-retained subscriber span, updates
-that span across repeated length changes, and retains the original scheme spelling plus the entire
-optional `;` parameter tail byte-for-byte. The parameter delimiter is never reconstructed by the
-caller or rescanned in the mutation path.
+with at least one hexadecimal digit, `*` or `#`. It splices only the parser-retained subscriber
+span, updates that span across repeated length changes, and retains the original scheme spelling
+plus the entire optional `;` parameter tail byte-for-byte. The parameter delimiter is never
+reconstructed by the caller or rescanned in the mutation path.
 
 ## 4. State table
 
@@ -129,9 +132,11 @@ The vector IDs are test names' contract prefixes.
 | UR-T-2 | split `TEL:7042` | subscriber `7042`; parameters `None` |
 | UR-T-3 | split `tel:7042;` | subscriber `7042`; parameters `Some(b"")` |
 | UR-T-4 | split `sip:7042@example.com;user=phone` and `urn:7042;ext=9` | `None` for both |
-| UR-T-5 | replace twice on `TeL:+1-(201)-555-0123;Ext=9;Phone-Context=+1-201`, first with longer `+49-30-123456`, then shorter `7042` | only the subscriber changes each time; mixed-case scheme and the complete parameter tail remain byte-identical |
+| UR-T-5 | replace three times on `TeL:+1-(201)-555-0123;Ext=9;Phone-Context=+1-201`, with longer global `+49-30-123456`, shorter local `7042`, then the dial-symbol-only local subscriber `*#` | only the subscriber changes each time; mixed-case scheme and the complete parameter tail remain byte-identical |
 | UR-T-6 | replace with empty, `+`, `+12A`, `12G`, `12:34`, whitespace, CRLF or byte `ff` on a parsed TEL URI | `UriError::TelephoneSubscriber`; original bytes remain exact |
 | UR-T-7 | replace with arbitrary invalid bytes on a SIP URI and an unknown opaque scheme | `Ok(false)` and both URIs remain byte-exact without validating a TEL subscriber |
+| UR-T-8 | parse `tel:` or `tel:+` | `UriError::TelephoneSubscriber`; no malformed TEL URI is constructed |
+| UR-O-1 | parse `mailto:%GG` and `mailto:alice%40example.com` | respectively `UriError::PercentEscape` and a byte-exact opaque URI |
 
 ## 6. Change rule
 

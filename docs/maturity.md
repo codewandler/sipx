@@ -47,14 +47,14 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Layer | RFCs | implemented | partial | none | other | Reachability basis |
 |---|---|---|---|---|---|---|
-| core | 9 | 5 | 3 | 0 | 1 | application |
+| core | 12 | 5 | 4 | 0 | 3 | application |
 | media | 22 | 5 | 16 | 0 | 1 | application + path check |
 | security | 11 | 10 | 0 | 0 | 1 | application + path check |
 | services | 16 | 5 | 9 | 2 | 0 | application + path check |
 | transport | 14 | 8 | 6 | 0 | 0 | application |
-| wire | 6 | 3 | 2 | 0 | 1 | application |
+| wire | 7 | 3 | 2 | 0 | 2 | application |
 
-78 RFCs tracked. `implemented` means what [`docs/rfc/README.md`](rfc/README.md) says it means — *Behaviour present and tested for the roles listed* — and `rfc-report.py` is what enforces that. **`X-38` did not change the status words. It changed the basis of the last column**: every layer now has a shipped application under it, in place of the caveat this table carried for `core`, `services`, `transport` and `wire`, which said no caller had been found. `scripts/check-app-surface.py` fails the gate when a crate claims supported surface no declared reachability class proves. The layers that also say *path check* carry `rfc-report.py`'s per-row check on top; the others are entered per crate, so a single row of them is not individually attested. The column is about reachability, not about which crate holds the code: what a row must cite is `docs/rfc/README.md`'s business, and `X-43` is where the one row citing no code is being weighed.
+82 RFCs tracked. `implemented` means what [`docs/rfc/README.md`](rfc/README.md) says it means — *Behaviour present and tested for the roles listed* — and `rfc-report.py` is what enforces that. **`X-38` did not change the status words. It changed the basis of the last column**: every layer now has a shipped application under it, in place of the caveat this table carried for `core`, `services`, `transport` and `wire`, which said no caller had been found. `scripts/check-app-surface.py` fails the gate when a crate claims supported surface no declared reachability class proves. The layers that also say *path check* carry `rfc-report.py`'s per-row check on top; the others are entered per crate, so a single row of them is not individually attested. The column is about reachability, not about which crate holds the code: what a row must cite is `docs/rfc/README.md`'s business, and `X-43` is where the one row citing no code is being weighed.
 
 ## Open work, per pillar
 
@@ -62,17 +62,17 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 |---|---|
 | Media | 22 |
 | Application | 18 |
-| Build | 14 |
-| Signalling | 7 |
+| Build | 13 |
+| Signalling | 12 |
 | Transport | 5 |
 | Phone | 2 |
-| **total** | **68** |
+| **total** | **72** |
 
-229 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+230 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:a4b56d2d2168c6f4c85df50ce6368018d4454747767ca452d9521b46dde288d8","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":26},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":62}} -->
+<!-- maturity-event-days: {"basis":"sha256:4a576d1f6831a7066c8ef27ebd72fa4f8a3fd497d97271cac689b512939e75c5","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":27},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":67}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -85,7 +85,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-01 | 0 | 1 | +1 |
 | 2026-08-03 | 1 | 12 | +11 |
 | 2026-08-04 | 51 | 39 | -12 |
-| 2026-08-05 | 62 | 26 | -36 |
+| 2026-08-05 | 67 | 27 | -40 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

@@ -1540,7 +1540,11 @@ async fn register_selects_every_released_transport() {
     ] {
         let local: std::net::SocketAddr = "127.0.0.1:0".parse().expect("an address");
         let mut config = sipx_transport::Config::new(local);
-        config.tcp = kind == sipx_transport::TransportKind::Tcp;
+        config.cleartext = match kind {
+            sipx_transport::TransportKind::Udp => sipx_transport::CleartextTransports::Udp,
+            sipx_transport::TransportKind::Tcp => sipx_transport::CleartextTransports::Tcp,
+            _ => sipx_transport::CleartextTransports::None,
+        };
         if kind == sipx_transport::TransportKind::Tls {
             let identity = sipx_transport::tls::Identity::from_pem(&cert, &key).expect("identity");
             config.tls_server = Some((

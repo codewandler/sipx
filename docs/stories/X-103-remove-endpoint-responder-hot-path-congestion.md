@@ -2,7 +2,7 @@
 id: X-103
 title: Remove endpoint responder hot-path congestion
 pillar: Build
-status: in-progress
+status: done
 priority: 1
 design: docs/designs/comparative-load.md
 epic: comparative-load
@@ -21,21 +21,21 @@ the sans-I/O boundary, protocol behavior, bounded ownership and correctness pred
 
 ## Acceptance
 
-- [ ] Reproducible profiling at the first unstable rates identifies CPU time, allocation/memory
+- [x] Reproducible profiling at the first unstable rates identifies CPU time, allocation/memory
       growth, queue pressure, retransmission amplification and the responsible hot paths before an
       optimization is selected.
-- [ ] Focused benchmarks cover the hot path at the narrowest useful layers: parsing, transaction
+- [x] Focused benchmarks cover the hot path at the narrowest useful layers: parsing, transaction
       ingress/egress, dialog dispatch and responder orchestration as applicable to the profile.
-- [ ] Peak RSS, CPU, descriptors/tasks and loopback I/O bytes/packets are measured; process I/O or
+- [x] Peak RSS, CPU, descriptors/tasks and loopback I/O bytes/packets are measured; process I/O or
       syscall counts are included when the host exposes them without changing the capacity run.
-- [ ] A failing-first regression benchmark or deterministic structural assertion protects the
+- [x] A failing-first regression benchmark or deterministic structural assertion protects the
       chosen optimization from accidental reversal.
-- [ ] The optimized endpoint supports every rate through the current peer endpoint capacity point
+- [x] The optimized endpoint supports every rate through the current peer endpoint capacity point
       at 5/5 repetitions under the same machine, driver, seed, policy and profile, or the remaining
       gap is retained as measured evidence with a newly scoped follow-up story.
-- [ ] No optimization introduces `unsafe`, network-input panics, an unbounded queue/task, a fixed
+- [x] No optimization introduces `unsafe`, network-input panics, an unbounded queue/task, a fixed
       sleep standing in for ordering, or I/O in a sans-I/O core crate.
-- [ ] The full gate and the refreshed comparative-load evidence are green.
+- [x] The full gate and the refreshed comparative-load evidence are green.
 
 ## Progress
 
@@ -75,3 +75,6 @@ the sans-I/O boundary, protocol behavior, bounded ownership and correctness pred
   successful-coded packet was added to validated response totals before being classified as
   `invalid_message`. A failing-first regression now keeps malformed or out-of-order packets solely
   in the error evidence; the incomplete generated directory was discarded.
+- 2026-08-05: beta.6 retained the immutable optimized full-ladder result and published the responder
+  changes. Protected tagged workflow run `31018659658` passed the complete gate on the exact release
+  tree. This closes the story from existing evidence; no measurement or gate was rerun.

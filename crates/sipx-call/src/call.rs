@@ -3411,7 +3411,6 @@ async fn open_invitation(
     Capabilities,
     Option<LocalDescription>,
     PendingKeying,
-    String,
     Request,
 )> {
     validate_profile_preflight(options.media, target.transport)?;
@@ -3458,7 +3457,7 @@ async fn open_invitation(
     if let Some(identity) = &options.identity {
         identity.sign(&mut invite)?;
     }
-    Ok((port, capabilities, ice, keying, via, invite))
+    Ok((port, capabilities, ice, keying, invite))
 }
 
 /// Build the RFC 3262 delayed-offer form of an INVITE.
@@ -3472,7 +3471,7 @@ fn open_offerless_invitation(
     to: &Uri,
     options: &DialOptions,
     identity: &Identity,
-) -> Result<(String, Request)> {
+) -> Result<Request> {
     MediaAddress::new(options.media_address)
         .with_bind(options.media_bind_address)
         .validate()?;
@@ -3499,7 +3498,7 @@ fn open_offerless_invitation(
     if let Some(identity) = &options.identity {
         identity.sign(&mut invite)?;
     }
-    Ok((via, invite))
+    Ok(invite)
 }
 
 /// Take back an invitation the caller has stopped waiting for.
@@ -3509,53 +3508,45 @@ fn open_offerless_invitation(
 async fn withdraw(
     endpoint: &Handle,
     invite: &Request,
-    via: &str,
     target: Target,
     responses: &mut sipx_transport::Responses,
-    provisional: bool,
     reason: &ReasonValue,
 ) {
     // Giving up is not just ceasing to wait. The far end is ringing and has been told
     // nothing; without a CANCEL it goes on ringing, and someone answering afterwards
     // ends up in a call with a party that has left.
     //
-    // Only once it has answered provisionally, though. RFC 3261 §9.1: with nothing
-    // received, "the client MUST wait for the arrival of a provisional response before
-    // sending" the CANCEL — one sent first can overtake the INVITE it refers to, match
-    // nothing at the far end, and leave the invitation it was meant to withdraw
-    // running. So this waits rather than giving up on cancelling, bounded because a
-    // peer that never answers at all would otherwise hold the call attempt open.
-    if provisional {
-        // discard: counted, not ignored. A CANCEL that does not reach the wire leaves the far end
-        // ringing, which is exactly the loss §12.1 exists to make visible — so the driver counts it
-        // as `sipx_transport::UnsentCounts::cancel` where the socket is actually written. What is
-        // discarded *here* is the `Result`, and there is nothing this path can do with it: it is
-        // already the giving-up path, and the only remedy for a failed CANCEL is the ACK-then-BYE
-        // below, which runs regardless. Note that this `Result` being `Ok` does not mean the
-        // CANCEL went out — `Handle::send` returns once the transaction exists — which is exactly
-        // why the count is taken below rather than from what is dropped here.
-        let _ = send_cancel(endpoint, invite, via, target.clone(), reason).await;
+    // The transport operation owns §9.1's race: it waits until the exact INVITE has a provisional,
+    // or returns the final/timeout/transport event that won instead. Events it observes remain on
+    // `responses`, so the crossing-2xx safeguard below sees the same transaction history.
+    let grace = tokio::time::Instant::now() + Duration::from_secs(2);
+    match tokio::time::timeout_at(
+        grace,
+        Box::pin(endpoint.cancel_invite(responses, Some(Reason::from(reason.clone())))),
+    )
+    .await
+    {
+        Ok(Ok(sipx_transport::CancelInviteOutcome::Sent(_cancellation))) => {}
+        Ok(Ok(sipx_transport::CancelInviteOutcome::FinalResponse { response, .. })) => {
+            if response.status.is_success() {
+                ack_then_bye(endpoint, invite, &response, target).await;
+            }
+            return;
+        }
+        Ok(Ok(_)) | Err(_) => return,
+        // The loss is counted where transport output is attempted. This is already the giving-up
+        // path; its remaining remedy is still to catch a crossing 2xx and ACK-then-BYE it.
+        Ok(Err(error)) => tracing::debug!(%error, "could not create CANCEL transaction"),
     }
 
     // CANCEL cannot close the race it exists to manage: a 200 already in flight
     // arrives anyway, and RFC 3261 §15 says a UAC that will not proceed must
     // acknowledge it and then hang up rather than leave it unanswered.
-    let mut cancelled = provisional;
-    let grace = tokio::time::Instant::now() + Duration::from_secs(2);
     while let Ok(Some(event)) = tokio::time::timeout_at(grace, responses.next()).await {
         let sipx_sip::transaction::TuEvent::Response(late) = event else {
             continue;
         };
         if !late.status.is_final() {
-            if !cancelled {
-                cancelled = true;
-                // discard: the same loss and the same counter as above —
-                // `sipx_transport::UnsentCounts::cancel`, taken at the transmit. This is the
-                // CANCEL that could not be sent before a provisional arrived, sent now that one
-                // has; the `Result` is discarded for the same reason, and `cancelled` is set
-                // either way so a second provisional does not produce a second CANCEL.
-                let _ = send_cancel(endpoint, invite, via, target.clone(), reason).await;
-            }
             continue;
         }
         if late.status.is_success() {
@@ -3654,7 +3645,7 @@ async fn dial_with(
     cancelled: &mut Option<Cancelled<'_>>,
 ) -> Result<Call> {
     let media_address = options.media_address;
-    let (port, capabilities, ice, keying, via, invite) =
+    let (port, capabilities, ice, keying, invite) =
         open_invitation(endpoint, &target, to, options, identity, authorization).await?;
 
     let mut responses = endpoint.send(invite.clone(), target.clone()).await?;
@@ -3677,27 +3668,23 @@ async fn dial_with(
         Waited::Final { response, ringing } => (response, ringing),
         Waited::Gone => return Err(Error::NoResponse),
         Waited::Transport(error) => return Err(Error::Transport(error)),
-        Waited::GaveUp { provisional } => {
+        Waited::GaveUp => {
             withdraw(
                 endpoint,
                 &invite,
-                &via,
                 target.clone(),
                 &mut responses,
-                provisional,
                 &request_timeout_reason(),
             )
             .await;
             return Err(Error::Cancelled(options.timeout.unwrap_or(Duration::ZERO)));
         }
-        Waited::Cancelled { provisional } => {
+        Waited::Cancelled => {
             withdraw(
                 endpoint,
                 &invite,
-                &via,
                 target.clone(),
                 &mut responses,
-                provisional,
                 &normal_clearing_reason(),
             )
             .await;
@@ -4271,8 +4258,6 @@ pub struct Dialing {
     endpoint: Handle,
     /// The INVITE itself. A CANCEL must repeat its identity, and a PRACK its sequence number.
     invite: Request,
-    /// The `Via` the INVITE went out with, which a CANCEL carries verbatim (RFC 3261 §9.1).
-    via: String,
     /// Where the INVITE was sent, and the fallback for in-dialog requests.
     target: Target,
     /// Where in-dialog requests go, once a `Contact` has said somewhere better.
@@ -4303,9 +4288,6 @@ pub struct Dialing {
     /// Whether anything past a bare `100 Trying` arrived, and whether it was reliable — the
     /// same thing [`Waited::Final`] carries, and for the same reason.
     ringing: Option<bool>,
-    /// Whether the far end has answered provisionally at all, which RFC 3261 §9.1 makes the
-    /// precondition for cancelling.
-    provisional: bool,
     /// When to stop waiting, counted from when the INVITE went out rather than from each call
     /// to [`Self::answered`] — the far end is ringing against one deadline, not a fresh one per
     /// method call.
@@ -4441,7 +4423,7 @@ async fn begin_dial_early(
     if options.media.keying == Keying::DtlsSrtp {
         return Err(Error::DtlsEarlyMedia);
     }
-    let (port, capabilities, ice, _keying, via, invite) =
+    let (port, capabilities, ice, _keying, invite) =
         open_invitation(endpoint, &target, to, options, &Identity::fresh(), None).await?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
 
@@ -4450,7 +4432,6 @@ async fn begin_dial_early(
         endpoint: endpoint.clone(),
         in_dialog: target.clone(),
         invite,
-        via,
         target,
         responses: Some(responses),
         dialog: None,
@@ -4466,7 +4447,6 @@ async fn begin_dial_early(
         peer_allows_update: false,
         hold: Direction::SendRecv,
         ringing: None,
-        provisional: false,
         deadline: options
             .timeout
             .map(|limit| tokio::time::Instant::now() + limit),
@@ -4499,14 +4479,13 @@ pub async fn dial_early_without_offer(
         return Err(Error::DtlsEarlyMedia);
     }
     let identity = Identity::fresh();
-    let (via, invite) = open_offerless_invitation(endpoint, &target, to, options, &identity)?;
+    let invite = open_offerless_invitation(endpoint, &target, to, options, &identity)?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
     let (events, events_rx) = EventSink::new();
     let mut dialing = Dialing {
         endpoint: endpoint.clone(),
         in_dialog: target.clone(),
         invite,
-        via,
         target,
         responses: Some(responses),
         dialog: None,
@@ -4520,7 +4499,6 @@ pub async fn dial_early_without_offer(
         peer_allows_update: false,
         hold: Direction::SendRecv,
         ringing: None,
-        provisional: false,
         deadline: options
             .timeout
             .map(|limit| tokio::time::Instant::now() + limit),
@@ -4543,14 +4521,13 @@ pub(crate) async fn dial_early_without_offer_for_coupling(
         return Err(Error::DtlsEarlyMedia);
     }
     let identity = Identity::fresh();
-    let (via, invite) = open_offerless_invitation(endpoint, &target, to, options, &identity)?;
+    let invite = open_offerless_invitation(endpoint, &target, to, options, &identity)?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
     let (events, events_rx) = EventSink::new();
     let mut dialing = Dialing {
         endpoint: endpoint.clone(),
         in_dialog: target.clone(),
         invite,
-        via,
         target,
         responses: Some(responses),
         dialog: None,
@@ -4564,7 +4541,6 @@ pub(crate) async fn dial_early_without_offer_for_coupling(
         peer_allows_update: false,
         hold: Direction::SendRecv,
         ringing: None,
-        provisional: false,
         deadline: options
             .timeout
             .map(|limit| tokio::time::Instant::now() + limit),
@@ -5073,7 +5049,6 @@ impl Dialing {
     fn observe_metadata(&mut self, response: &Response) -> bool {
         const TRYING: u16 = 100;
 
-        self.provisional = true;
         let reliable = crate::rel::reliable_sequence(response);
         if response.status.code() > TRYING && self.ringing.is_none() {
             let is_reliable = reliable.is_some();
@@ -5471,10 +5446,8 @@ impl Dialing {
         withdraw(
             &self.endpoint,
             &self.invite,
-            &self.via,
             self.target.clone(),
             responses,
-            self.provisional,
             reason,
         )
         .await;
@@ -6408,29 +6381,20 @@ enum Waited {
         /// belongs on the eventual call's event stream.
         ringing: Option<bool>,
     },
-    /// The deadline passed. Whether a provisional had arrived decides what may be done about
-    /// it, so it is carried out rather than discarded.
-    GaveUp {
-        /// Whether the far end had answered provisionally.
-        provisional: bool,
-    },
-    /// The owner asked this attempt to stop. A provisional decides whether CANCEL may be sent
-    /// immediately or must wait for the peer to acknowledge the INVITE first.
-    Cancelled {
-        /// Whether the far end had answered provisionally.
-        provisional: bool,
-    },
+    /// The deadline passed.
+    GaveUp,
+    /// The owner asked this attempt to stop.
+    Cancelled,
     /// The transaction ended without a final response.
     Gone,
     /// The selected transport could not be established or used.
     Transport(sipx_transport::Error),
 }
 
-/// Wait for the final response to an INVITE, remembering whether a provisional arrived.
+/// Wait for the final response to an INVITE.
 ///
-/// The provisional is not incidental bookkeeping: RFC 3261 §9.1 forbids cancelling an
-/// invitation the far end has not answered provisionally, so the deadline alone does not
-/// decide what to do when the wait runs out — what came back matters too.
+/// The transport response stream retains the provisional observation that RFC 3261 §9.1 needs
+/// if this wait ends in local cancellation.
 /// What a UAC needs in order to acknowledge a reliable provisional while it waits.
 struct Acknowledging<'a> {
     endpoint: &'a Handle,
@@ -6447,7 +6411,6 @@ async fn await_final(
     cancelled: &mut Option<Cancelled<'_>>,
 ) -> Waited {
     let deadline = limit.map(|limit| tokio::time::Instant::now() + limit);
-    let mut provisional = false;
     let mut ringing = None;
     loop {
         let event = match (deadline, cancelled.as_mut()) {
@@ -6455,21 +6418,21 @@ async fn await_final(
             (Some(deadline), None) => {
                 match tokio::time::timeout_at(deadline, responses.next()).await {
                     Ok(event) => event,
-                    Err(_elapsed) => return Waited::GaveUp { provisional },
+                    Err(_elapsed) => return Waited::GaveUp,
                 }
             }
             (None, Some(cancelled)) => {
                 tokio::select! {
                     biased;
-                    () = cancelled.as_mut() => return Waited::Cancelled { provisional },
+                    () = cancelled.as_mut() => return Waited::Cancelled,
                     event = responses.next() => event,
                 }
             }
             (Some(deadline), Some(cancelled)) => {
                 tokio::select! {
                     biased;
-                    () = cancelled.as_mut() => return Waited::Cancelled { provisional },
-                    () = tokio::time::sleep_until(deadline) => return Waited::GaveUp { provisional },
+                    () = cancelled.as_mut() => return Waited::Cancelled,
+                    () = tokio::time::sleep_until(deadline) => return Waited::GaveUp,
                     event = responses.next() => event,
                 }
             }
@@ -6482,7 +6445,6 @@ async fn await_final(
                         ringing,
                     };
                 }
-                provisional = true;
                 // A bare `100 Trying` only acknowledges that the request arrived (RFC 3261
                 // §17.2.1); it is not the far end's phone ringing, and 100rel does not apply
                 // to it either (RFC 3262 §3), so it is excluded from what `ringing` tracks.
@@ -6544,49 +6506,6 @@ async fn acknowledge(response: &Response, ctx: &mut Acknowledging<'_>) -> Result
         ctx.capabilities,
     );
     crate::rel::send_prack(ctx.endpoint, &mut dialog, &target, rseq, invite_cseq, body).await
-}
-
-/// Cancel an INVITE that has not been answered (RFC 3261 §9.1).
-///
-/// A CANCEL is not a new request in its own right: it carries the INVITE's `Via` verbatim —
-/// branch and all — its `Call-ID`, `To`, `From` and sequence *number*, differing only in the
-/// method. That is what identifies which invitation it is cancelling.
-async fn send_cancel(
-    endpoint: &Handle,
-    invite: &Request,
-    via: &str,
-    target: Target,
-    reason: &ReasonValue,
-) -> Result<()> {
-    let copy = |name: &HeaderName| {
-        invite
-            .headers
-            .value(name)
-            .map(|value| Bytes::from(value.into_owned()))
-    };
-
-    let mut builder = RequestBuilder::new(Method::Cancel, invite.uri.clone())
-        .header(HeaderName::Via, Bytes::from(via.to_owned()))?;
-    for name in [HeaderName::To, HeaderName::From, HeaderName::CallId] {
-        if let Some(value) = copy(&name) {
-            builder = builder.header(name, value)?;
-        }
-    }
-    // The same sequence number as the INVITE, with the method changed. A fresh number would
-    // make it a new request rather than a cancellation of that one.
-    let sequence = invite
-        .headers
-        .typed::<sipx_sip::headers::CSeq>()
-        .and_then(std::result::Result::ok)
-        .map_or(1, |cseq| cseq.sequence);
-
-    let request = builder
-        .header(HeaderName::Reason, Reason::from(reason.clone()).to_bytes())?
-        .cseq(sequence, &Method::Cancel)?
-        .max_forwards(70)
-        .build();
-    endpoint.send(request, target).await?;
-    Ok(())
 }
 
 fn normal_clearing_reason() -> ReasonValue {

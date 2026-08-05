@@ -14,6 +14,18 @@ pub enum Error {
         /// Its required range.
         reason: &'static str,
     },
+    /// An outgoing transaction cannot be cancelled as requested.
+    #[error("invalid INVITE cancellation: {reason}")]
+    InvalidCancellation {
+        /// Which invariant the request did not satisfy.
+        reason: &'static str,
+    },
+    /// An outbound request selected a listener kind this endpoint did not configure.
+    #[error("the {transport} transport is not configured")]
+    TransportNotConfigured {
+        /// Stable upper-case transport spelling.
+        transport: &'static str,
+    },
     /// A socket operation failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),

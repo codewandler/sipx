@@ -9,10 +9,12 @@
 //! makes every packet capture an exercise in doubt.
 
 use std::borrow::Cow;
+use std::ops::Range;
 
 use bytes::Bytes;
 
-use crate::error::HeaderError;
+use crate::error::{AddressEditError, HeaderError};
+use crate::headers::address::{AddressValueSpan, value_spans};
 use crate::name::HeaderName;
 use crate::uri::Uri;
 
@@ -211,6 +213,13 @@ enum HeaderRepr {
     Built { value: Bytes },
 }
 
+#[derive(Debug)]
+struct AddressLayout {
+    spans: Vec<AddressValueSpan>,
+    source_map: Vec<Range<usize>>,
+    raw_len: usize,
+}
+
 impl Header {
     /// Build a header without checking the value.
     ///
@@ -277,6 +286,118 @@ impl Header {
         } else {
             Cow::Borrowed(trim(raw))
         }
+    }
+
+    /// How many address values this row carries.
+    ///
+    /// The count uses the field's shared address grammar. It is useful for projecting a stable
+    /// wire-order index across repeated rows without decoding or searching for value bytes.
+    pub fn address_value_count(&self) -> Result<usize, AddressEditError> {
+        self.address_layout().map(|layout| layout.spans.len())
+    }
+
+    /// Replace the URI in one address value, indexed within this header row.
+    ///
+    /// Only the parser-owned URI span changes. The display name may contain identical URI bytes;
+    /// it is never considered because this operation consumes grammar ranges rather than searching
+    /// the field. Failures leave the header unchanged.
+    pub fn replace_address_uri(
+        &mut self,
+        value_index: usize,
+        uri: &Uri,
+    ) -> Result<(), AddressEditError> {
+        let encoded = validate_replacement_uri(uri)?;
+        let layout = self.address_layout()?;
+        let span = layout
+            .spans
+            .get(value_index)
+            .ok_or(AddressEditError::IndexOutOfRange { index: value_index })?;
+        let raw_span =
+            project_range(&layout, &span.uri).ok_or_else(|| malformed_address(self.name()))?;
+        let rewritten = self
+            .with_value_span_replaced(&raw_span, &encoded)
+            .ok_or_else(|| malformed_address(self.name()))?;
+        let candidate = rewritten.address_layout()?;
+        if candidate.spans.len() != layout.spans.len() {
+            return Err(malformed_address(self.name()));
+        }
+        let candidate_span = candidate
+            .spans
+            .get(value_index)
+            .ok_or_else(|| malformed_address(self.name()))?;
+        let candidate_raw_span = project_range(&candidate, &candidate_span.uri)
+            .ok_or_else(|| malformed_address(self.name()))?;
+        if rewritten.raw_value().get(candidate_raw_span) != Some(encoded.as_ref()) {
+            return Err(malformed_address(self.name()));
+        }
+        *self = rewritten;
+        Ok(())
+    }
+
+    /// Return this row with one address value removed.
+    ///
+    /// `Ok(None)` means the selected address was the row's sole value, so the containing header
+    /// collection must remove the field line. Returning a new row keeps this operation atomic and
+    /// gives standalone [`Header`] users an honest representation of row absence.
+    pub fn without_address_value(
+        &self,
+        value_index: usize,
+    ) -> Result<Option<Self>, AddressEditError> {
+        let layout = self.address_layout()?;
+        let selected = layout
+            .spans
+            .get(value_index)
+            .ok_or(AddressEditError::IndexOutOfRange { index: value_index })?;
+        if layout.spans.len() == 1 {
+            return Ok(None);
+        }
+
+        let unfolded = if let Some(next) = layout.spans.get(value_index.saturating_add(1)) {
+            selected.item.start..next.item.start
+        } else {
+            let previous = value_index
+                .checked_sub(1)
+                .and_then(|index| layout.spans.get(index))
+                .ok_or_else(|| malformed_address(self.name()))?;
+            previous.part.end..selected.item.end
+        };
+        let raw_span =
+            project_range(&layout, &unfolded).ok_or_else(|| malformed_address(self.name()))?;
+        self.with_value_span_replaced(&raw_span, &[])
+            .map(Some)
+            .ok_or_else(|| malformed_address(self.name()))
+    }
+
+    fn address_layout(&self) -> Result<AddressLayout, AddressEditError> {
+        let (header, list) = address_grammar(self.name())?;
+        let raw = self.raw_value();
+        let (unfolded, source_map) = unfold_with_source_map(raw);
+        let spans = value_spans(&unfolded, header, list).map_err(AddressEditError::Malformed)?;
+        Ok(AddressLayout {
+            spans,
+            source_map,
+            raw_len: raw.len(),
+        })
+    }
+
+    fn with_value_span_replaced(&self, span: &Range<usize>, replacement: &[u8]) -> Option<Self> {
+        let repr = match &self.repr {
+            HeaderRepr::Wire { line, value_offset } => {
+                let start = value_offset.checked_add(span.start)?;
+                let end = value_offset.checked_add(span.end)?;
+                HeaderRepr::Wire {
+                    line: replace_byte_span(line, &(start..end), replacement)?,
+                    value_offset: *value_offset,
+                }
+            }
+            HeaderRepr::Built { value } => HeaderRepr::Built {
+                value: replace_byte_span(value, span, replacement)?,
+            },
+        };
+        Some(Self {
+            name: self.name.clone(),
+            repr,
+        })
     }
 
     /// Write this header as a field line, without the terminating CRLF.
@@ -409,6 +530,65 @@ impl Headers {
         self.entries.retain(f);
     }
 
+    /// Replace one address URI by its flattened wire-order value index.
+    ///
+    /// Repeated rows and comma-joined values share one zero-based index space. Every matching row
+    /// is parsed before mutation, so a malformed later row cannot leave a partial edit behind.
+    pub fn replace_address_uri(
+        &mut self,
+        name: &HeaderName,
+        value_index: usize,
+        uri: &Uri,
+    ) -> Result<(), AddressEditError> {
+        address_grammar(name)?;
+        validate_replacement_uri(uri)?;
+        let rows = self.address_rows(name)?;
+        let (entry_index, row_index) = locate_address_value(&rows, value_index)?;
+        let header = self
+            .entries
+            .get_mut(entry_index)
+            .ok_or(AddressEditError::IndexOutOfRange { index: value_index })?;
+        header.replace_address_uri(row_index, uri)
+    }
+
+    /// Remove one address value by its flattened wire-order index.
+    ///
+    /// If it was a row's sole value, that exact field line is removed. Otherwise only the value
+    /// and one adjacent list delimiter are removed; all surviving wire bytes retain their order.
+    pub fn remove_address_value(
+        &mut self,
+        name: &HeaderName,
+        value_index: usize,
+    ) -> Result<(), AddressEditError> {
+        address_grammar(name)?;
+        let rows = self.address_rows(name)?;
+        let (entry_index, row_index) = locate_address_value(&rows, value_index)?;
+        let replacement = self
+            .entries
+            .get(entry_index)
+            .ok_or(AddressEditError::IndexOutOfRange { index: value_index })?
+            .without_address_value(row_index)?;
+        if let Some(header) = replacement {
+            let slot = self
+                .entries
+                .get_mut(entry_index)
+                .ok_or(AddressEditError::IndexOutOfRange { index: value_index })?;
+            *slot = header;
+        } else {
+            self.entries.remove(entry_index);
+        }
+        Ok(())
+    }
+
+    fn address_rows(&self, name: &HeaderName) -> Result<Vec<(usize, usize)>, AddressEditError> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, header)| header.name() == name)
+            .map(|(index, header)| header.address_value_count().map(|count| (index, count)))
+            .collect()
+    }
+
     /// The first value with this name, unfolded.
     #[must_use]
     pub fn value(&self, name: &HeaderName) -> Option<Cow<'_, [u8]>> {
@@ -424,12 +604,100 @@ impl Headers {
     }
 }
 
+fn address_grammar(name: &HeaderName) -> Result<(&'static str, bool), AddressEditError> {
+    match name {
+        HeaderName::From => Ok(("From", false)),
+        HeaderName::To => Ok(("To", false)),
+        HeaderName::Contact => Ok(("Contact", true)),
+        HeaderName::Route => Ok(("Route", true)),
+        HeaderName::RecordRoute => Ok(("Record-Route", true)),
+        HeaderName::Path => Ok(("Path", true)),
+        HeaderName::ServiceRoute => Ok(("Service-Route", true)),
+        HeaderName::PAssertedIdentity => Ok(("P-Asserted-Identity", true)),
+        HeaderName::PPreferredIdentity => Ok(("P-Preferred-Identity", true)),
+        _ => Err(AddressEditError::UnsupportedHeader),
+    }
+}
+
+fn malformed_address(name: &HeaderName) -> AddressEditError {
+    let header = address_grammar(name).map_or("address", |(header, _)| header);
+    AddressEditError::Malformed(HeaderError::Syntax { header })
+}
+
+fn validate_replacement_uri(uri: &Uri) -> Result<Bytes, AddressEditError> {
+    let encoded = uri.to_bytes();
+    Uri::parse(encoded.clone()).map_err(AddressEditError::InvalidUri)?;
+    Ok(encoded)
+}
+
+fn locate_address_value(
+    rows: &[(usize, usize)],
+    value_index: usize,
+) -> Result<(usize, usize), AddressEditError> {
+    let mut first = 0usize;
+    for &(entry_index, count) in rows {
+        let end = first
+            .checked_add(count)
+            .ok_or(AddressEditError::IndexOutOfRange { index: value_index })?;
+        if value_index < end {
+            return Ok((entry_index, value_index - first));
+        }
+        first = end;
+    }
+    Err(AddressEditError::IndexOutOfRange { index: value_index })
+}
+
+fn unfold_with_source_map(raw: &[u8]) -> (Vec<u8>, Vec<Range<usize>>) {
+    let mut unfolded = Vec::with_capacity(raw.len());
+    let mut source_map = Vec::with_capacity(raw.len());
+    let mut i = 0usize;
+    while let Some(&byte) = raw.get(i) {
+        if byte == b'\r'
+            && raw.get(i + 1) == Some(&b'\n')
+            && matches!(raw.get(i + 2), Some(b' ' | b'\t'))
+        {
+            let mut end = i + 2;
+            while matches!(raw.get(end), Some(b' ' | b'\t')) {
+                end += 1;
+            }
+            unfolded.push(b' ');
+            source_map.push(i..end);
+            i = end;
+        } else {
+            unfolded.push(byte);
+            source_map.push(i..i + 1);
+            i += 1;
+        }
+    }
+    (unfolded, source_map)
+}
+
+fn project_range(layout: &AddressLayout, span: &Range<usize>) -> Option<Range<usize>> {
+    if span.start > span.end || span.end > layout.source_map.len() {
+        return None;
+    }
+    let start = source_boundary(layout, span.start)?;
+    let end = source_boundary(layout, span.end)?;
+    (start <= end).then_some(start..end)
+}
+
+fn source_boundary(layout: &AddressLayout, position: usize) -> Option<usize> {
+    if position == layout.source_map.len() {
+        Some(layout.raw_len)
+    } else {
+        layout.source_map.get(position).map(|source| source.start)
+    }
+}
+
 /// A parsed request.
 #[derive(Debug, Clone)]
 pub struct Request {
     /// The method.
     pub method: Method,
     /// The Request-URI.
+    ///
+    /// Use [`Request::set_uri`] to mutate this value. Assigning the field directly cannot update
+    /// the parser-retained start-line span and would replay stale wire bytes.
     pub uri: Uri,
     /// The protocol version.
     pub version: Version,
@@ -437,6 +705,7 @@ pub struct Request {
     pub headers: Headers,
     body: Bytes,
     raw_start_line: Option<Bytes>,
+    raw_uri_span: Option<Range<usize>>,
 }
 
 /// A parsed response.
@@ -469,6 +738,7 @@ impl Request {
         uri: Uri,
         version: Version,
         raw_start_line: Bytes,
+        raw_uri_span: Range<usize>,
         headers: Headers,
         body: Bytes,
     ) -> Self {
@@ -479,17 +749,47 @@ impl Request {
             headers,
             body,
             raw_start_line: Some(raw_start_line),
+            raw_uri_span: Some(raw_uri_span),
         }
     }
 
-    /// Replace the Request-URI and invalidate the parsed start line.
+    /// Replace the Request-URI without rebuilding a parsed start line.
     ///
-    /// Retargeting logic must use this rather than assigning the public field directly: a
-    /// parsed request retains its original start-line bytes for exact forwarding, and those
-    /// bytes cease to be truthful after the target changes.
-    pub fn set_uri(&mut self, uri: Uri) {
+    /// Retargeting logic must use this rather than assigning the public field directly. For a
+    /// parsed request, only the parser-owned URI span changes; method spelling, separators and
+    /// SIP-version bytes stay exact. Constructed requests retain deterministic serialization.
+    /// The replacement is validated from its serialized bytes before either representation is
+    /// changed, so a failure is atomic.
+    pub fn set_uri(&mut self, uri: Uri) -> Result<(), crate::error::UriError> {
+        let encoded = uri.to_bytes();
+        Uri::parse(encoded.clone())?;
+
+        let rewritten = match (&self.raw_start_line, &self.raw_uri_span) {
+            (Some(raw), Some(span)) => Some(
+                replace_byte_span(raw, span, &encoded)
+                    .ok_or(crate::error::UriError::RetainedSpan)?,
+            ),
+            (None, None) => None,
+            _ => return Err(crate::error::UriError::RetainedSpan),
+        };
+
+        if let Some(raw) = rewritten {
+            let start = self
+                .raw_uri_span
+                .as_ref()
+                .map(|span| span.start)
+                .ok_or(crate::error::UriError::RetainedSpan)?;
+            let end = start
+                .checked_add(encoded.len())
+                .ok_or(crate::error::UriError::RetainedSpan)?;
+            self.raw_start_line = Some(raw);
+            self.raw_uri_span = Some(start..end);
+        } else {
+            self.raw_start_line = None;
+            self.raw_uri_span = None;
+        }
         self.uri = uri;
-        self.raw_start_line = None;
+        Ok(())
     }
 
     /// Build a request.
@@ -502,6 +802,7 @@ impl Request {
             headers: Headers::new(),
             body: Bytes::new(),
             raw_start_line: None,
+            raw_uri_span: None,
         }
     }
 
@@ -532,6 +833,20 @@ impl Request {
         out.extend_from_slice(b"\r\n");
         out.extend_from_slice(&self.body);
     }
+}
+
+fn replace_byte_span(source: &Bytes, span: &Range<usize>, replacement: &[u8]) -> Option<Bytes> {
+    let prefix = source.get(..span.start)?;
+    let suffix = source.get(span.end..)?;
+    let capacity = prefix
+        .len()
+        .checked_add(replacement.len())?
+        .checked_add(suffix.len())?;
+    let mut out = Vec::with_capacity(capacity);
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(replacement);
+    out.extend_from_slice(suffix);
+    Some(Bytes::from(out))
 }
 
 impl Response {
@@ -664,6 +979,12 @@ pub trait TypedHeader: Sized {
     /// The header this type reads.
     const NAME: HeaderName;
 
+    /// Whether [`Headers::typed_all`] must collect and validate the complete field before yielding.
+    ///
+    /// The default keeps ordinary headers streaming and allocation-free across rows. A field with
+    /// message-wide constraints opts in and implements [`Self::validate_list`].
+    const VALIDATE_LIST: bool = false;
+
     /// Parse one header value. The value arrives unfolded and trimmed.
     fn decode(value: &[u8]) -> Result<Self, HeaderError>;
 
@@ -687,6 +1008,76 @@ pub trait TypedHeader: Sized {
     }
 }
 
+struct TypedAll<'a, H: TypedHeader> {
+    entries: std::slice::Iter<'a, Header>,
+    row: std::vec::IntoIter<H>,
+    validated: Option<std::vec::IntoIter<Result<H, HeaderError>>>,
+}
+
+impl<'a, H: TypedHeader> TypedAll<'a, H> {
+    fn new(headers: &'a Headers) -> Self {
+        let validated = H::VALIDATE_LIST.then(|| {
+            let mut decoded: Vec<Result<H, HeaderError>> = headers
+                .entries
+                .iter()
+                .filter(|header| header.name() == &H::NAME)
+                .flat_map(|header| match H::decode_list(&header.value()) {
+                    Ok(values) => values.into_iter().map(Ok).collect::<Vec<_>>(),
+                    Err(error) => vec![Err(error)],
+                })
+                .collect();
+
+            // A constrained field is useful only as one complete validated value. Collapse any
+            // row-level failure before yielding so a caller cannot observe neighboring elements
+            // that never passed the field-wide relationship. An empty iterator still means
+            // absence rather than an empty field value.
+            let decode_error = decoded.iter().find_map(|result| match result {
+                Ok(_) => None,
+                Err(error) => Some(error.clone()),
+            });
+            if let Some(error) = decode_error {
+                decoded = vec![Err(error)];
+            } else if !decoded.is_empty() {
+                let values: Vec<&H> = decoded
+                    .iter()
+                    .filter_map(|result| result.as_ref().ok())
+                    .collect();
+                if let Err(error) = H::validate_list(&values) {
+                    decoded = vec![Err(error)];
+                }
+            }
+            decoded.into_iter()
+        });
+
+        Self {
+            entries: headers.entries.iter(),
+            row: Vec::new().into_iter(),
+            validated,
+        }
+    }
+}
+
+impl<H: TypedHeader> Iterator for TypedAll<'_, H> {
+    type Item = Result<H, HeaderError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(validated) = &mut self.validated {
+            return validated.next();
+        }
+
+        loop {
+            if let Some(value) = self.row.next() {
+                return Some(Ok(value));
+            }
+            let header = self.entries.find(|header| header.name() == &H::NAME)?;
+            match H::decode_list(&header.value()) {
+                Ok(values) => self.row = values.into_iter(),
+                Err(error) => return Some(Err(error)),
+            }
+        }
+    }
+}
+
 impl Headers {
     /// Parse the first header of this type.
     ///
@@ -704,30 +1095,7 @@ impl Headers {
     pub fn typed_all<'a, H: TypedHeader + 'a>(
         &'a self,
     ) -> impl Iterator<Item = Result<H, HeaderError>> + 'a {
-        let mut decoded: Vec<Result<H, HeaderError>> = self
-            .entries
-            .iter()
-            .filter(|h| h.name() == &H::NAME)
-            .flat_map(|h| match H::decode_list(&h.value()) {
-                Ok(values) => values.into_iter().map(Ok).collect::<Vec<_>>(),
-                Err(e) => vec![Err(e)],
-            })
-            .collect();
-
-        // A row-level decoder failure is already the most precise typed result. Validate the
-        // field-wide relationship only when every element parsed, and only when the field was
-        // present: an empty iterator means absence rather than an empty field value.
-        if !decoded.is_empty() && decoded.iter().all(Result::is_ok) {
-            let values: Vec<&H> = decoded
-                .iter()
-                .filter_map(|result| result.as_ref().ok())
-                .collect();
-            if let Err(error) = H::validate_list(&values) {
-                decoded = vec![Err(error)];
-            }
-        }
-
-        decoded.into_iter()
+        TypedAll::new(self)
     }
 }
 
@@ -957,6 +1325,42 @@ mod tests {
                 Bytes::from_static(b"sip:e@f.org"),
             ]
         );
+    }
+
+    #[test]
+    fn typed_all_keeps_unconstrained_headers_lazy() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DECODES: AtomicUsize = AtomicUsize::new(0);
+
+        struct CountingSubject;
+
+        impl TypedHeader for CountingSubject {
+            const NAME: HeaderName = HeaderName::Subject;
+
+            fn decode(_value: &[u8]) -> Result<Self, HeaderError> {
+                DECODES.fetch_add(1, Ordering::SeqCst);
+                Ok(Self)
+            }
+        }
+
+        DECODES.store(0, Ordering::SeqCst);
+        let mut headers = Headers::new();
+        headers.push(Header::new_unchecked(
+            HeaderName::Subject,
+            Bytes::from_static(b"first"),
+        ));
+        headers.push(Header::new_unchecked(
+            HeaderName::Subject,
+            Bytes::from_static(b"second"),
+        ));
+
+        let mut values = headers.typed_all::<CountingSubject>();
+        assert_eq!(DECODES.load(Ordering::SeqCst), 0);
+        assert!(values.next().is_some_and(|value| value.is_ok()));
+        assert_eq!(DECODES.load(Ordering::SeqCst), 1);
+        drop(values);
+        assert_eq!(DECODES.load(Ordering::SeqCst), 1);
     }
 
     #[test]

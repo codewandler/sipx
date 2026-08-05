@@ -10,13 +10,18 @@
 )]
 
 use sipx_transport::resolve::{Naptr, Resolver, Srv};
+use std::future::Future;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
 use sipx_sip::headers::Via;
-use sipx_sip::{HeaderName, Host, HostName, Method, StatusCode, Uri};
-use sipx_transport::{Config, Handle, Incoming, Target, TransportKind, bind};
+use sipx_sip::{CSeq, HeaderName, Host, HostName, Method, Reason, ReasonValue, StatusCode, Uri};
+use sipx_transport::{
+    CancelInviteOutcome, CancelTransactionOutcome, Config, Error, Handle, Incoming, Target,
+    TransportKind, bind,
+};
 use tokio::sync::mpsc::Receiver;
 
 async fn endpoint() -> (Handle, Receiver<Incoming>) {
@@ -44,6 +49,166 @@ fn request_to(handle: &Handle, method: &Method, cseq: u32) -> sipx_sip::Request 
         .expect("valid")
         .max_forwards(70)
         .build()
+}
+
+/// T-34 / vector C1: cancellation is one operation on the exact outgoing INVITE transaction.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_forwarding_element_can_cancel_one_outgoing_invite_branch() {
+    let (server, mut server_rx) = endpoint().await;
+    let (client, _client_rx) = endpoint().await;
+
+    let mut invite = request_to(&client, &Method::Invite, 42);
+    invite
+        .headers
+        .push(sipx_sip::Header::build(HeaderName::Route, "<sip:edge.example;lr>").expect("route"));
+    let mut responses = client
+        .send(invite, Target::udp(server.local_addr()))
+        .await
+        .expect("sends INVITE");
+    let received_invite = server_rx.recv().await.expect("INVITE arrives");
+    assert_eq!(received_invite.request.method, Method::Invite);
+
+    let mut cancellation = {
+        let cancel = client.cancel_invite(
+            &mut responses,
+            Some(Reason::from(ReasonValue::q850(
+                16,
+                Some(b"Normal call clearing".to_vec()),
+            ))),
+        );
+        tokio::pin!(cancel);
+
+        // Poll exactly once: the operation has reached §9.1's provisional-response wait. There is
+        // no duration standing in for ordering, and no CANCEL has reached the peer before its 180.
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Future::poll(cancel.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        assert!(
+            server_rx.try_recv().is_err(),
+            "CANCEL must not precede the provisional response"
+        );
+
+        let ringing = ResponseBuilder::to_request(
+            &received_invite.request,
+            StatusCode::new(180).expect("valid"),
+            "Ringing",
+        )
+        .expect("builds")
+        .build();
+        server
+            .respond(&received_invite.key, ringing)
+            .await
+            .expect("180 goes out");
+
+        let CancelInviteOutcome::Sent(cancellation) = cancel.await.expect("CANCEL is created")
+        else {
+            panic!("the provisional response must admit cancellation");
+        };
+        cancellation
+    };
+    assert_eq!(Some(cancellation.invite_key()), responses.transaction_key());
+
+    let received_cancel = server_rx.recv().await.expect("CANCEL arrives");
+    assert_eq!(received_cancel.request.method, Method::Cancel);
+    assert_eq!(
+        received_cancel.request.uri.to_bytes(),
+        received_invite.request.uri.to_bytes()
+    );
+    for name in [
+        HeaderName::Via,
+        HeaderName::To,
+        HeaderName::From,
+        HeaderName::CallId,
+        HeaderName::Route,
+    ] {
+        let invite_values = received_invite
+            .request
+            .headers
+            .get_all(&name)
+            .map(|header| header.value().into_owned())
+            .collect::<Vec<_>>();
+        let cancel_values = received_cancel
+            .request
+            .headers
+            .get_all(&name)
+            .map(|header| header.value().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(cancel_values, invite_values, "{name} differs");
+    }
+    let cseq = received_cancel
+        .request
+        .headers
+        .typed::<CSeq>()
+        .expect("CSeq exists")
+        .expect("CSeq parses");
+    assert_eq!(cseq.sequence, 42);
+    assert_eq!(cseq.method, Method::Cancel);
+    assert_eq!(
+        sipx_sip::transaction::TransactionKey::for_cancelled_invite(&received_cancel.request),
+        Some(received_invite.key.clone()),
+        "the CANCEL must name the exact INVITE branch"
+    );
+    assert_eq!(cancellation.transaction_key(), &received_cancel.key);
+
+    let duplicate = client
+        .cancel_invite(&mut responses, None)
+        .await
+        .expect_err("one INVITE admits only one CANCEL transaction");
+    assert!(matches!(duplicate, Error::InvalidCancellation { .. }));
+
+    let accepted = ResponseBuilder::to_request(
+        &received_cancel.request,
+        StatusCode::new(200).expect("valid"),
+        "OK",
+    )
+    .expect("builds")
+    .build();
+    server
+        .respond(&received_cancel.key, accepted)
+        .await
+        .expect("CANCEL response goes out");
+    assert!(matches!(
+        cancellation.outcome().await,
+        CancelTransactionOutcome::FinalResponse(response) if response.status.code() == 200
+    ));
+}
+
+#[tokio::test]
+async fn a_final_invite_response_wins_the_cancel_race_without_a_late_cancel() {
+    let (server, mut server_rx) = endpoint().await;
+    let (client, _client_rx) = endpoint().await;
+    let mut responses = client
+        .send(
+            request_to(&client, &Method::Invite, 43),
+            Target::udp(server.local_addr()),
+        )
+        .await
+        .expect("sends INVITE");
+    let invite = server_rx.recv().await.expect("INVITE arrives");
+    let declined = ResponseBuilder::to_request(
+        &invite.request,
+        StatusCode::new(486).expect("valid"),
+        "Busy Here",
+    )
+    .expect("builds")
+    .build();
+    server
+        .respond(&invite.key, declined)
+        .await
+        .expect("final response goes out");
+    responses.peek().await.expect("final response is observed");
+
+    assert!(matches!(
+        client.cancel_invite(&mut responses, None).await,
+        Ok(CancelInviteOutcome::FinalResponse { response, .. }) if response.status.code() == 486
+    ));
+    assert!(
+        server_rx.try_recv().is_err(),
+        "a final INVITE response forbids a late CANCEL"
+    );
 }
 
 /// The registration path is one explicit RFC 3581 witness. The call-layer deployment-address
@@ -471,7 +636,7 @@ async fn binding_finds_a_port_free_for_both_transports() {
     // Binding to that exact port must fail honestly: the caller named it, so the conflict is
     // real and not something to paper over by choosing another.
     let mut exact = Config::new(format!("127.0.0.1:{taken}").parse().expect("valid"));
-    exact.tcp = true;
+    exact.cleartext = sipx_transport::CleartextTransports::UdpAndTcp;
     assert!(
         bind(exact).await.is_err(),
         "a named port that is taken is a real conflict"

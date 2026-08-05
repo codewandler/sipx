@@ -5,14 +5,18 @@
 //! signalling path and no way to observe a half-applied transition. Applications talk to the
 //! loop over channels.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use sipx_sip::build::RequestBuilder;
 use sipx_sip::transaction::{Dispatch, Output, Timer, TransactionKey, TransactionLayer, TuEvent};
-use sipx_sip::{Header, HeaderName, Limits, Message, Request, Response, Timers, parse_datagram};
+use sipx_sip::{
+    CSeq, Header, HeaderName, Limits, Message, Method, Reason, Request, Response, Timers,
+    parse_datagram,
+};
 use tokio::net::{TcpListener, UdpSocket};
 #[cfg(any(feature = "tls", feature = "ws"))]
 use tokio::sync::Semaphore;
@@ -38,6 +42,31 @@ use crate::timers::TimerQueue;
 
 /// Most ready UDP datagrams copied off the socket before the reader yields to its bounded queue.
 const UDP_RECEIVE_BATCH: usize = 512;
+
+/// Which cleartext signalling listeners an endpoint exposes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum CleartextTransports {
+    /// No cleartext listener. A TLS, WebSocket, secure-WebSocket, or QUIC server is required.
+    None,
+    /// UDP only.
+    Udp,
+    /// TCP only.
+    Tcp,
+    /// UDP and TCP on one address and port.
+    #[default]
+    UdpAndTcp,
+}
+
+impl CleartextTransports {
+    const fn udp(self) -> bool {
+        matches!(self, Self::Udp | Self::UdpAndTcp)
+    }
+
+    const fn tcp(self) -> bool {
+        matches!(self, Self::Tcp | Self::UdpAndTcp)
+    }
+}
 
 /// How an endpoint is configured.
 #[derive(Debug, Clone)]
@@ -72,8 +101,8 @@ pub struct Config {
     /// which changes the `Via` and therefore the transaction — it refuses with a named error
     /// rather than sending something that will be fragmented or silently truncated.
     pub mtu: usize,
-    /// Whether to listen for TCP connections on the same port.
-    pub tcp: bool,
+    /// Which cleartext signalling listeners to expose.
+    pub cleartext: CleartextTransports,
     /// How sipx behaves as a TLS client, if TLS is to be used at all.
     #[cfg(feature = "tls")]
     pub tls_client: Option<crate::tls::ClientTls>,
@@ -152,7 +181,7 @@ impl Config {
             handshake_limit: 64,
             handshake_timeout: std::time::Duration::from_secs(10),
             mtu: 1300,
-            tcp: true,
+            cleartext: CleartextTransports::default(),
             #[cfg(feature = "tls")]
             tls_client: None,
             #[cfg(feature = "tls")]
@@ -227,11 +256,39 @@ impl Config {
                 reason: "must be greater than overload.rate_tolerance_intervals",
             });
         }
+        if self.cleartext == CleartextTransports::None && !self.has_other_signalling_listener() {
+            return Err(Error::InvalidConfig {
+                field: "cleartext",
+                reason: "at least one signalling listener must be configured",
+            });
+        }
         #[cfg(feature = "ws")]
         if self.ws_keepalive.is_zero() {
             return Err(nonzero("ws_keepalive"));
         }
         Ok(())
+    }
+
+    fn has_other_signalling_listener(&self) -> bool {
+        #[allow(unused_mut)]
+        let mut configured = false;
+        #[cfg(feature = "tls")]
+        {
+            configured |= self.tls_server.is_some();
+        }
+        #[cfg(feature = "ws")]
+        {
+            configured |= self.ws_server.is_some();
+        }
+        #[cfg(feature = "wss")]
+        {
+            configured |= self.wss_server.is_some();
+        }
+        #[cfg(feature = "quic")]
+        {
+            configured |= self.quic_server.is_some();
+        }
+        configured
     }
 }
 
@@ -407,11 +464,126 @@ pub struct Incoming {
 pub struct Responses {
     rx: mpsc::Receiver<TuEvent>,
     failures: mpsc::Receiver<Error>,
-    peeked: Option<TuEvent>,
+    buffered: VecDeque<TuEvent>,
     connection_generation: Option<u64>,
+    invitation: Option<Box<InviteCancellationState>>,
+}
+
+#[derive(Debug, Clone)]
+struct InviteCancellationContext {
+    request: Request,
+    target: Target,
+}
+
+#[derive(Debug, Clone)]
+struct InviteCancellationState {
+    key: TransactionKey,
+    context: InviteCancellationContext,
+    observation: InviteObservation,
+    cancel_created: bool,
+}
+
+#[derive(Debug, Clone)]
+enum InviteObservation {
+    Awaiting,
+    Provisional,
+    Final(Box<Response>),
+    Timeout,
+    TransportError,
+}
+
+/// The result of asking to cancel one exact outgoing INVITE transaction.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum CancelInviteOutcome {
+    /// The provisional-response precondition was met and one CANCEL transaction was created.
+    Sent(Box<InviteCancellation>),
+    /// A final INVITE response arrived before a CANCEL transaction was created.
+    FinalResponse {
+        /// The INVITE transaction that produced the response.
+        invite: TransactionKey,
+        /// The final response that won the race.
+        response: Response,
+    },
+    /// The INVITE timed out before a provisional response admitted CANCEL.
+    InviteTimeout {
+        /// The INVITE transaction that timed out.
+        invite: TransactionKey,
+    },
+    /// The INVITE transport failed before a provisional response admitted CANCEL.
+    InviteTransportError {
+        /// The INVITE transaction whose transport failed.
+        invite: TransactionKey,
+        /// Concrete driver cause when the transport recorded one.
+        error: Option<Error>,
+    },
+}
+
+/// One created CANCEL transaction, anchored to the INVITE it names.
+#[derive(Debug)]
+pub struct InviteCancellation {
+    invite: TransactionKey,
+    transaction: TransactionKey,
+    responses: Responses,
+}
+
+/// How a created CANCEL transaction terminated.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum CancelTransactionOutcome {
+    /// A final response arrived on the CANCEL transaction.
+    FinalResponse(Response),
+    /// The CANCEL transaction received no answer within its transaction timeout.
+    Timeout,
+    /// The selected transport failed.
+    TransportError {
+        /// Concrete driver cause when the transport recorded one.
+        error: Option<Error>,
+    },
+}
+
+impl InviteCancellation {
+    /// The INVITE transaction this CANCEL names.
+    #[must_use]
+    pub fn invite_key(&self) -> &TransactionKey {
+        &self.invite
+    }
+
+    /// The CANCEL transaction's own key.
+    #[must_use]
+    pub fn transaction_key(&self) -> &TransactionKey {
+        &self.transaction
+    }
+
+    /// Wait for the CANCEL transaction's terminal outcome.
+    pub async fn outcome(&mut self) -> CancelTransactionOutcome {
+        while let Some(event) = self.responses.next().await {
+            match event {
+                TuEvent::Response(response) if response.status.is_final() => {
+                    return CancelTransactionOutcome::FinalResponse(*response);
+                }
+                TuEvent::Timeout => return CancelTransactionOutcome::Timeout,
+                TuEvent::TransportError => {
+                    return CancelTransactionOutcome::TransportError {
+                        error: self.responses.take_transport_error(),
+                    };
+                }
+                _ => {}
+            }
+        }
+        CancelTransactionOutcome::TransportError {
+            error: Some(Error::EndpointClosed),
+        }
+    }
 }
 
 impl Responses {
+    /// The exact INVITE transaction these responses belong to, when they belong to an INVITE.
+    #[must_use]
+    pub fn transaction_key(&self) -> Option<&TransactionKey> {
+        self.invitation.as_ref().map(|state| &state.key)
+    }
+
     /// Exact stream generation selected for the outbound request; absent for UDP.
     #[must_use]
     pub fn connection_generation(&self) -> Option<u64> {
@@ -420,10 +592,14 @@ impl Responses {
 
     /// The next event, or `None` once the transaction has finished.
     pub async fn next(&mut self) -> Option<TuEvent> {
-        if let Some(event) = self.peeked.take() {
-            return Some(event);
+        let event = match self.buffered.pop_front() {
+            Some(event) => Some(event),
+            None => self.rx.recv().await,
+        };
+        if let Some(event) = &event {
+            self.observe_invite(event);
         }
-        self.rx.recv().await
+        event
     }
 
     /// Take the concrete driver failure associated with a `TransportError` event.
@@ -440,10 +616,13 @@ impl Responses {
     /// Used to decide whether a resolved candidate is viable before handing the stream to the
     /// caller, who must still see whatever was peeked at.
     pub async fn peek(&mut self) -> Option<&TuEvent> {
-        if self.peeked.is_none() {
-            self.peeked = self.rx.recv().await;
+        if self.buffered.is_empty()
+            && let Some(event) = self.rx.recv().await
+        {
+            self.observe_invite(&event);
+            self.buffered.push_back(event);
         }
-        self.peeked.as_ref()
+        self.buffered.front()
     }
 
     /// Wait for the first final response.
@@ -460,6 +639,42 @@ impl Responses {
             }
         }
         None
+    }
+
+    fn observe_invite(&mut self, event: &TuEvent) {
+        let Some(invitation) = self.invitation.as_mut() else {
+            return;
+        };
+        invitation.observation = match event {
+            TuEvent::Response(response) if response.status.is_final() => {
+                InviteObservation::Final(Box::new((**response).clone()))
+            }
+            TuEvent::Response(_) => InviteObservation::Provisional,
+            TuEvent::Timeout => InviteObservation::Timeout,
+            TuEvent::TransportError => InviteObservation::TransportError,
+            TuEvent::Request(_) | TuEvent::Ack(_) => return,
+        };
+    }
+
+    async fn cancellation_precondition(&mut self) -> Result<InviteObservation> {
+        loop {
+            let observation = &self
+                .invitation
+                .as_ref()
+                .ok_or(Error::InvalidCancellation {
+                    reason: "the response stream does not belong to an INVITE",
+                })?
+                .observation;
+            match observation {
+                InviteObservation::Awaiting => {}
+                observed => return Ok(observed.clone()),
+            }
+            let Some(event) = self.rx.recv().await else {
+                return Err(Error::EndpointClosed);
+            };
+            self.observe_invite(&event);
+            self.buffered.push_back(event);
+        }
     }
 }
 
@@ -705,6 +920,10 @@ impl Handle {
         if self.advertise_overload {
             crate::overload::advertise(&mut request);
         }
+        let invitation = (request.method == Method::Invite).then(|| InviteCancellationContext {
+            request: request.clone(),
+            target: target.clone(),
+        });
 
         let (events_tx, events_rx) = mpsc::channel(32);
         let (failures_tx, failures_rx) = mpsc::channel(1);
@@ -719,13 +938,91 @@ impl Handle {
             })
             .await
             .map_err(|_| Error::EndpointClosed)?;
-        let (_, connection_generation) = reply_rx.await.map_err(|_| Error::EndpointClosed)??;
+        let (key, connection_generation) = reply_rx.await.map_err(|_| Error::EndpointClosed)??;
+        let invitation = invitation.map(|context| {
+            Box::new(InviteCancellationState {
+                key,
+                context,
+                observation: InviteObservation::Awaiting,
+                cancel_created: false,
+            })
+        });
         Ok(Responses {
             rx: events_rx,
             failures: failures_rx,
-            peeked: None,
+            buffered: VecDeque::new(),
             connection_generation,
+            invitation,
         })
+    }
+
+    /// Cancel the exact outgoing INVITE transaction represented by `invitation` (RFC 3261 §9.1).
+    ///
+    /// The operation waits for a provisional response before creating CANCEL. A final response,
+    /// timeout or transport failure that wins that race is returned without sending a late CANCEL.
+    /// Events observed while waiting remain available from `invitation`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidCancellation`] when `invitation` belongs to another method, lacks
+    /// mandatory CANCEL identity, or already created a CANCEL transaction. Other errors are the
+    /// ordinary request-policy, endpoint and build failures from creating the CANCEL transaction.
+    pub async fn cancel_invite(
+        &self,
+        invitation: &mut Responses,
+        reason: Option<Reason>,
+    ) -> Result<CancelInviteOutcome> {
+        let state = invitation
+            .invitation
+            .as_ref()
+            .ok_or(Error::InvalidCancellation {
+                reason: "the response stream does not belong to an INVITE",
+            })?;
+        if state.cancel_created {
+            return Err(Error::InvalidCancellation {
+                reason: "a CANCEL transaction was already created for this INVITE",
+            });
+        }
+        let context = state.context.clone();
+
+        let invite = state.key.clone();
+        match invitation.cancellation_precondition().await? {
+            InviteObservation::Provisional => {}
+            InviteObservation::Final(response) => {
+                return Ok(CancelInviteOutcome::FinalResponse {
+                    invite,
+                    response: *response,
+                });
+            }
+            InviteObservation::Timeout => {
+                return Ok(CancelInviteOutcome::InviteTimeout { invite });
+            }
+            InviteObservation::TransportError => {
+                return Ok(CancelInviteOutcome::InviteTransportError {
+                    invite,
+                    error: invitation.take_transport_error(),
+                });
+            }
+            InviteObservation::Awaiting => {
+                return Err(Error::InvalidCancellation {
+                    reason: "the INVITE cancellation precondition did not resolve",
+                });
+            }
+        }
+
+        let request = cancel_request(&context.request, reason)?;
+        let transaction = TransactionKey::from_sent_request(&request).ok_or(Error::NoVia)?;
+        // Reserve the one permitted attempt before the first cancellation point in `send`.
+        // Dropping this future may abandon the result, but it can never create a second CANCEL.
+        if let Some(state) = invitation.invitation.as_mut() {
+            state.cancel_created = true;
+        }
+        let responses = self.send(request, context.target).await?;
+        Ok(CancelInviteOutcome::Sent(Box::new(InviteCancellation {
+            invite,
+            transaction,
+            responses,
+        })))
     }
 
     /// Send a request straight to the transport, with no transaction behind it.
@@ -1004,6 +1301,53 @@ pub fn new_branch() -> String {
     branch_with_rng(&mut rand::rng())
 }
 
+fn cancellation_header(invite: &Request, name: &HeaderName, reason: &'static str) -> Result<Bytes> {
+    invite
+        .headers
+        .value(name)
+        .map(|value| Bytes::from(value.into_owned()))
+        .ok_or(Error::InvalidCancellation { reason })
+}
+
+/// Derive CANCEL from the exact post-policy INVITE that created the transaction.
+fn cancel_request(invite: &Request, reason: Option<Reason>) -> Result<Request> {
+    if invite.method != Method::Invite {
+        return Err(Error::InvalidCancellation {
+            reason: "the stored request is not an INVITE",
+        });
+    }
+
+    let mut builder = RequestBuilder::new(Method::Cancel, invite.uri.clone()).header(
+        HeaderName::Via,
+        cancellation_header(invite, &HeaderName::Via, "the INVITE has no Via")?,
+    )?;
+    for route in invite.headers.get_all(&HeaderName::Route) {
+        builder = builder.header(HeaderName::Route, Bytes::from(route.value().into_owned()))?;
+    }
+    for (name, missing) in [
+        (HeaderName::To, "the INVITE has no To header"),
+        (HeaderName::From, "the INVITE has no From header"),
+        (HeaderName::CallId, "the INVITE has no Call-ID header"),
+    ] {
+        let value = cancellation_header(invite, &name, missing)?;
+        builder = builder.header(name, value)?;
+    }
+    let sequence = invite
+        .headers
+        .typed::<CSeq>()
+        .and_then(std::result::Result::ok)
+        .filter(|cseq| cseq.method == Method::Invite)
+        .map(|cseq| cseq.sequence)
+        .ok_or(Error::InvalidCancellation {
+            reason: "the INVITE has no valid INVITE CSeq",
+        })?;
+    builder = builder.cseq(sequence, &Method::Cancel)?.max_forwards(70);
+    if let Some(reason) = reason {
+        builder = builder.header(HeaderName::Reason, reason.to_bytes())?;
+    }
+    Ok(builder.build())
+}
+
 /// Bind an endpoint and start its loop.
 ///
 /// Returns a handle for sending, and a receiver of the requests that arrive.
@@ -1013,7 +1357,11 @@ pub fn new_branch() -> String {
 )]
 pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> {
     config.validate()?;
-    let (socket, listener, local_addr) = bind_matching_ports(&config).await?;
+    let CleartextBindings {
+        udp: socket,
+        tcp: listener,
+        local_addr: cleartext_addr,
+    } = bind_cleartext(&config).await?;
     let background = Background::new();
     let meters = Arc::new(Meters::default());
     let admission = Arc::new(SourceAdmission::new(config.source_admission_limit));
@@ -1026,13 +1374,6 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         #[cfg(test)]
         observations: None,
     };
-    // Port 0 in the configuration means the same as absent: it is a request for any port,
-    // not an advertisement of port zero.
-    let sent_by_port = match config.sent_by_port {
-        Some(port) if port != 0 => port,
-        _ => local_addr.port(),
-    };
-
     // One channel for every handshaked connection, whatever kind it is. The driver owns the
     // pool, so adoption has to happen on its loop; what joins is a closure rather than a stream
     // because TCP-over-TLS, WebSocket and WebSocket-over-TLS are three unrelated types and the
@@ -1138,6 +1479,35 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         _ => None,
     };
 
+    #[allow(unused_mut)]
+    let mut primary_addr = cleartext_addr;
+    #[cfg(feature = "tls")]
+    if primary_addr.is_none() {
+        primary_addr = secure_addr;
+    }
+    #[cfg(feature = "ws")]
+    if primary_addr.is_none() {
+        primary_addr = upgrade_addr;
+    }
+    #[cfg(feature = "wss")]
+    if primary_addr.is_none() {
+        primary_addr = secure_upgrade_addr;
+    }
+    #[cfg(feature = "quic")]
+    if primary_addr.is_none() {
+        primary_addr = quic_addr;
+    }
+    let local_addr = primary_addr.ok_or(Error::InvalidConfig {
+        field: "cleartext",
+        reason: "at least one signalling listener must be configured",
+    })?;
+    // Port 0 in the configuration means the same as absent: it is a request for any port,
+    // not an advertisement of port zero.
+    let sent_by_port = match config.sent_by_port {
+        Some(port) if port != 0 => port,
+        _ => local_addr.port(),
+    };
+
     let (commands_tx, commands_rx) = mpsc::channel(config.capacity);
     let (incoming_tx, incoming_rx) = mpsc::channel(config.capacity);
     let shutdown = Arc::new(ShutdownState::default());
@@ -1181,12 +1551,14 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
 
     let (net_tx, net_rx) = mpsc::channel(config.capacity);
     let (udp_tx, udp_rx) = mpsc::channel(config.capacity);
-    let socket = Arc::new(socket);
-    background.spawn(receive_udp_until(
-        Arc::clone(&socket),
-        udp_tx,
-        background.cancel.clone(),
-    ));
+    let socket = socket.map(Arc::new);
+    if let Some(socket) = &socket {
+        background.spawn(receive_udp_until(
+            Arc::clone(socket),
+            udp_tx,
+            background.cancel.clone(),
+        ));
+    }
     let (accept_tx, accept_rx) = mpsc::channel(64);
     if let Some(listener) = listener {
         let cancel = background.cancel.clone();
@@ -1956,20 +2328,40 @@ async fn accept_tcp_until(
     }
 }
 
-/// Bind UDP and TCP to the *same* port.
+struct CleartextBindings {
+    udp: Option<UdpSocket>,
+    tcp: Option<TcpListener>,
+    local_addr: Option<SocketAddr>,
+}
+
+/// Bind exactly the selected cleartext listeners.
 ///
-/// Peers assume they are the same: a `Via` naming `SIP/2.0/TCP host:port` and one naming UDP
-/// refer to one port number, and an endpoint whose two transports live on different ports is
-/// unreachable over one of them.
+/// When both are selected, peers assume they share one port: a `Via` naming
+/// `SIP/2.0/TCP host:port` and one naming UDP refer to one port number.
 ///
 /// The awkward part is that UDP and TCP have independent port spaces, so a port the OS hands
 /// out for UDP may already be held by someone else for TCP. When the caller asked for port 0 —
 /// "any port" — that is not an error, it is a port to not use: try again. When the caller named
 /// a port, it is a real conflict and is reported as one.
-async fn bind_matching_ports(
-    config: &Config,
-) -> Result<(UdpSocket, Option<TcpListener>, SocketAddr)> {
+async fn bind_cleartext(config: &Config) -> Result<CleartextBindings> {
     const ATTEMPTS: usize = 16;
+
+    if !config.cleartext.udp() {
+        if config.cleartext.tcp() {
+            let listener = TcpListener::bind(config.bind).await?;
+            let local_addr = listener.local_addr()?;
+            return Ok(CleartextBindings {
+                udp: None,
+                tcp: Some(listener),
+                local_addr: Some(local_addr),
+            });
+        }
+        return Ok(CleartextBindings {
+            udp: None,
+            tcp: None,
+            local_addr: None,
+        });
+    }
 
     let wants_any_port = config.bind.port() == 0;
     let mut last_error = None;
@@ -1978,12 +2370,22 @@ async fn bind_matching_ports(
         let socket = UdpSocket::bind(config.bind).await?;
         let local_addr = socket.local_addr()?;
 
-        if !config.tcp {
-            return Ok((socket, None, local_addr));
+        if !config.cleartext.tcp() {
+            return Ok(CleartextBindings {
+                udp: Some(socket),
+                tcp: None,
+                local_addr: Some(local_addr),
+            });
         }
 
         match TcpListener::bind(local_addr).await {
-            Ok(listener) => return Ok((socket, Some(listener), local_addr)),
+            Ok(listener) => {
+                return Ok(CleartextBindings {
+                    udp: Some(socket),
+                    tcp: Some(listener),
+                    local_addr: Some(local_addr),
+                });
+            }
             Err(error) if wants_any_port && error.kind() == std::io::ErrorKind::AddrInUse => {
                 // Someone else holds this port for TCP. Drop the UDP socket so the OS may
                 // hand the port out again, and ask for another.
@@ -2005,7 +2407,7 @@ async fn bind_matching_ports(
 }
 
 struct Driver {
-    socket: Arc<UdpSocket>,
+    socket: Option<Arc<UdpSocket>>,
     /// Ordered datagrams copied off the socket by the bounded, state-free reader task.
     udp: mpsc::Receiver<(Bytes, SocketAddr)>,
     layer: TransactionLayer,
@@ -2141,8 +2543,11 @@ impl Driver {
         idle_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let deadline = self.timers.next_deadline();
+            let receives_udp = self.socket.is_some();
             tokio::select! {
-                Some((datagram, source)) = self.udp.recv() => self.on_datagram(datagram, source).await,
+                Some((datagram, source)) = self.udp.recv(), if receives_udp => {
+                    self.on_datagram(datagram, source).await;
+                }
                 () = sleep_until(deadline), if deadline.is_some() => {
                     self.on_timers().await;
                 }
@@ -3143,7 +3548,10 @@ impl Driver {
                         mtu: self.mtu,
                     });
                 }
-                self.socket.send_to(&bytes, target.addr).await?;
+                let Some(socket) = &self.socket else {
+                    return Err(Error::TransportNotConfigured { transport: "UDP" });
+                };
+                socket.send_to(&bytes, target.addr).await?;
                 Ok(None)
             }
             TransportKind::Tcp => {
@@ -3554,10 +3962,10 @@ mod tests {
     #[tokio::test]
     async fn stream_generation_is_reported_on_both_transaction_boundaries() {
         let mut server_config = crate::Config::new("127.0.0.1:0".parse().expect("address"));
-        server_config.tcp = true;
+        server_config.cleartext = crate::CleartextTransports::UdpAndTcp;
         let (server, mut incoming) = super::bind(server_config).await.expect("server");
         let mut client_config = crate::Config::new("127.0.0.1:0".parse().expect("address"));
-        client_config.tcp = true;
+        client_config.cleartext = crate::CleartextTransports::UdpAndTcp;
         let (client, _) = super::bind(client_config).await.expect("client");
         let uri = Uri::parse(Bytes::from(format!("sip:{}", server.local_addr()))).expect("URI");
         let request = RequestBuilder::new(Method::Options, uri)
@@ -3652,7 +4060,7 @@ mod tests {
         let admission = Arc::new(crate::policy::SourceAdmission::default());
         let observations = Arc::new(crate::policy::ObservationHub::new(Arc::clone(&meters)));
         Driver {
-            socket,
+            socket: Some(socket),
             udp,
             layer: sipx_sip::transaction::TransactionLayer::new(sipx_sip::Timers::default()),
             timers: crate::timers::TimerQueue::new(),

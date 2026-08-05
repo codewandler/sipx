@@ -112,7 +112,7 @@ fn p13_and_p14_enforce_none_and_duplicates_across_repeated_rows() {
 fn p15_allows_critical_after_a_service_in_an_earlier_row() {
     let values = privacy(&[b"id", b"critical"]).expect("the rows form one ordered list");
     assert_eq!(
-        values.iter().map(|value| value.value()).collect::<Vec<_>>(),
+        values.iter().map(Privacy::value).collect::<Vec<_>>(),
         vec![&PrivacyValue::Id, &PrivacyValue::Critical]
     );
     assert_eq!(serialize(&values).as_ref(), b"id,critical");
@@ -182,6 +182,18 @@ fn p16_history_info_consumes_the_validated_message_wide_list() {
         history.0[0].target.to_bytes().as_ref(),
         b"sip:anonymous@anonymous.invalid"
     );
+}
+
+#[test]
+fn p17_a_malformed_row_suppresses_unvalidated_neighboring_values() {
+    let headers = headers(&[b"none", b"bad=value", b"history"]);
+    let mut values = headers.typed_all::<Privacy>();
+
+    assert!(matches!(
+        values.next(),
+        Some(Err(HeaderError::Syntax { header: "Privacy" }))
+    ));
+    assert!(values.next().is_none());
 }
 
 #[test]

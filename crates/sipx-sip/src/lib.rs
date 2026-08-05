@@ -59,10 +59,11 @@ pub mod uri;
 pub mod validate;
 
 pub use build::{RequestBuilder, ResponseBuilder};
-pub use error::{BuildError, HeaderError, UriError};
+pub use error::{AddressEditError, BuildError, HeaderError, UriError};
 pub use headers::{
-    Address, CSeq, CallId, HistoryEntry, HistoryIndex, HistoryInfo, PAssertedIdentity,
-    PPreferredIdentity, Privacy, PrivacyList, PrivacyValue, Reason, ReasonValue, TargetChange,
+    Address, CSeq, CallId, HistoryEntry, HistoryIndex, HistoryInfo, IgnoredIdentity,
+    IgnoredIdentityReason, PAssertedIdentity, PAssertedIdentityList, PPreferredIdentity,
+    PPreferredIdentityList, Privacy, PrivacyList, PrivacyValue, Reason, ReasonValue, TargetChange,
     TargetChangeKind, Via,
 };
 pub use message::{

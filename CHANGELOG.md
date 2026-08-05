@@ -7,6 +7,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Forwarding code can cancel one exact outgoing INVITE transaction.** The transport handle owns
+  RFC 3261 cancellation construction and the provisional/final-response race, preserves events
+  observed while waiting, and reports distinct INVITE and CANCEL terminal outcomes. The call layer
+  now uses this public operation instead of maintaining a second CANCEL builder.
+- **SIP messages and URIs expose parser-owned, lossless editing seams.** Consumers can replace SIP
+  users, TEL subscribers, Request-URIs, and URIs inside typed address fields, or remove one
+  flattened address-list value, without byte searching or rebuilding surviving wire syntax.
+- **Privacy and asserted-identity fields have typed list APIs.** Privacy requests receive checked
+  construction and message-wide validation, while asserted and preferred identity lists separate
+  strict sending rules from tolerant receive filtering with indexed diagnostics.
+
+### Changed
+
+- **Cleartext listener selection is now exact.** `sipx_transport::Config::tcp` is replaced by
+  `Config::cleartext: CleartextTransports`; choose `Udp`, `Tcp`, `UdpAndTcp`, or `None`. TCP-only
+  endpoints no longer open a UDP socket, and `None` requires another configured signalling
+  listener before any bind occurs.
+
 ## [1.0.0-beta.6] — 2026-08-05
 
 This prerelease hardens the bounded signalling responder used for endpoint measurements, corrects

@@ -12,6 +12,8 @@
 //! parameter — while `<sip:a@b;tag=1>` is one URI with a URI parameter and no header
 //! parameters. The two mean entirely different things and differ by two characters.
 
+use std::ops::Range;
+
 use bytes::Bytes;
 
 use crate::error::HeaderError;
@@ -36,105 +38,7 @@ pub struct Address {
 impl Address {
     /// Parse one address.
     pub fn parse(value: &[u8], header: &'static str) -> Result<Self, HeaderError> {
-        let value = trim(value);
-        let mut i = skip_ws(value, 0);
-
-        // A display name is either a quoted string or a run of tokens; either way it ends at
-        // the '<' that opens the URI.
-        let mut display_name = None;
-        if value.get(i) == Some(&b'"') {
-            let end = quoted_string_end(value, i)
-                .ok_or(HeaderError::UnterminatedQuotedString { header })?;
-            let raw = value.get(i + 1..end.saturating_sub(1)).unwrap_or(&[]);
-            display_name = Some(unescape(raw));
-            i = skip_ws(value, end);
-            if value.get(i) != Some(&b'<') {
-                return Err(HeaderError::Syntax { header });
-            }
-        } else if let Some(angle) = find_angle(value, i) {
-            let raw = trim(value.get(i..angle).unwrap_or(&[]));
-            if !raw.is_empty() {
-                // An unquoted display name is a sequence of tokens separated by whitespace.
-                // A comma here is not a token character, which is what makes
-                // `From: Bell, Alexander <sip:…>` invalid (RFC 4475 §3.1.2.15).
-                if !raw
-                    .iter()
-                    .all(|&b| is_token_char(b) || matches!(b, b' ' | b'\t'))
-                {
-                    return Err(HeaderError::Syntax { header });
-                }
-                display_name = Some(raw.to_vec());
-            }
-            i = angle;
-        }
-
-        let (uri_bytes, params_tail) = if value.get(i) == Some(&b'<') {
-            let close = find_closing_angle(value, i).ok_or(HeaderError::Syntax { header })?;
-            let uri = value.get(i + 1..close).unwrap_or(&[]);
-            (uri, value.get(close + 1..).unwrap_or(&[]))
-        } else {
-            // Bare addr-spec: the URI runs to the first header-parameter semicolon.
-            let rest = value.get(i..).unwrap_or(&[]);
-            match find_param_start(rest) {
-                Some(semi) => (
-                    trim(rest.get(..semi).unwrap_or(&[])),
-                    rest.get(semi..).unwrap_or(&[]),
-                ),
-                None => (trim(rest), &[][..]),
-            }
-        };
-
-        if uri_bytes.is_empty() {
-            return Err(HeaderError::Syntax { header });
-        }
-        let uri = Uri::parse(Bytes::copy_from_slice(uri_bytes))
-            .map_err(|source| HeaderError::Uri { header, source })?;
-
-        // RFC 3261 §20: a URI carrying headers, or parameters, must be enclosed in angle
-        // brackets, because otherwise there is no way to tell where the URI stops and the
-        // header's own parameters start. RFC 4475 §3.1.2.13 is exactly this mistake.
-        if value.get(i) != Some(&b'<') && uri.has_headers() {
-            return Err(HeaderError::Syntax { header });
-        }
-
-        let params = grammar::parse_params(trim(params_tail), header)?;
-
-        Ok(Self {
-            display_name,
-            uri,
-            params,
-        })
-    }
-
-    /// Parse a `name-addr / addr-spec` field that has no header-parameter tail.
-    ///
-    /// In an ordinary address header, a semicolon after a bare URI begins a header parameter.
-    /// Some extension fields use `addr-spec` directly and define no such parameters, so the same
-    /// semicolon remains part of the URI. The angle-bracket form still goes through the complete
-    /// shared address grammar; only the bare-form delimiter rule differs.
-    pub(crate) fn parse_without_header_params(
-        value: &[u8],
-        header: &'static str,
-    ) -> Result<Self, HeaderError> {
-        let value = trim(value);
-        if value.first() == Some(&b'"') || find_angle(value, 0).is_some() {
-            let address = Self::parse(value, header)?;
-            if !address.params.is_empty() {
-                return Err(HeaderError::Syntax { header });
-            }
-            return Ok(address);
-        }
-
-        if value.is_empty() {
-            return Err(HeaderError::Syntax { header });
-        }
-        let uri = Uri::parse(Bytes::copy_from_slice(value))
-            .map_err(|source| HeaderError::Uri { header, source })?;
-        Ok(Self {
-            display_name: None,
-            uri,
-            params: Vec::new(),
-        })
+        parse_spanned(value, header).map(|parsed| parsed.address)
     }
 
     /// Parse a header value carrying one or more comma-separated addresses.
@@ -160,6 +64,165 @@ impl Address {
     pub fn tag(&self) -> Option<&[u8]> {
         self.param("tag")
     }
+}
+
+#[derive(Debug)]
+struct ParsedAddress {
+    address: Address,
+    uri: Range<usize>,
+}
+
+fn parse_spanned(value: &[u8], header: &'static str) -> Result<ParsedAddress, HeaderError> {
+    let outer = trimmed_range(value);
+    let value = value.get(outer.clone()).unwrap_or(&[]);
+    let mut i = skip_ws(value, 0);
+
+    // A display name is either a quoted string or a run of tokens; either way it ends at
+    // the '<' that opens the URI.
+    let mut display_name = None;
+    if value.get(i) == Some(&b'"') {
+        let end =
+            quoted_string_end(value, i).ok_or(HeaderError::UnterminatedQuotedString { header })?;
+        let raw = value.get(i + 1..end.saturating_sub(1)).unwrap_or(&[]);
+        display_name = Some(unescape(raw));
+        i = skip_ws(value, end);
+        if value.get(i) != Some(&b'<') {
+            return Err(HeaderError::Syntax { header });
+        }
+    } else if let Some(angle) = find_angle(value, i) {
+        let raw = trim(value.get(i..angle).unwrap_or(&[]));
+        if !raw.is_empty() {
+            // An unquoted display name is a sequence of tokens separated by whitespace.
+            // A comma here is not a token character, which is what makes
+            // `From: Bell, Alexander <sip:…>` invalid (RFC 4475 §3.1.2.15).
+            if !raw
+                .iter()
+                .all(|&b| is_token_char(b) || matches!(b, b' ' | b'\t'))
+            {
+                return Err(HeaderError::Syntax { header });
+            }
+            display_name = Some(raw.to_vec());
+        }
+        i = angle;
+    }
+
+    let (uri_span, params_tail) = if value.get(i) == Some(&b'<') {
+        let close = find_closing_angle(value, i).ok_or(HeaderError::Syntax { header })?;
+        (i + 1..close, value.get(close + 1..).unwrap_or(&[]))
+    } else {
+        // Bare addr-spec: the URI runs to the first header-parameter semicolon.
+        let rest = value.get(i..).unwrap_or(&[]);
+        let param_start = find_param_start(rest);
+        let candidate = match param_start {
+            Some(semi) => i..i.checked_add(semi).ok_or(HeaderError::Syntax { header })?,
+            None => i..value.len(),
+        };
+        let candidate_bytes = value.get(candidate.clone()).unwrap_or(&[]);
+        let trimmed = trimmed_range(candidate_bytes);
+        let uri_span = candidate
+            .start
+            .checked_add(trimmed.start)
+            .zip(candidate.start.checked_add(trimmed.end))
+            .map(|(start, end)| start..end)
+            .ok_or(HeaderError::Syntax { header })?;
+        let params_tail = if let Some(semi) = param_start {
+            rest.get(semi..).unwrap_or(&[])
+        } else {
+            &[][..]
+        };
+        (uri_span, params_tail)
+    };
+
+    let uri_bytes = value.get(uri_span.clone()).unwrap_or(&[]);
+    if uri_bytes.is_empty() {
+        return Err(HeaderError::Syntax { header });
+    }
+    let parsed_uri = Uri::parse(Bytes::copy_from_slice(uri_bytes))
+        .map_err(|source| HeaderError::Uri { header, source })?;
+
+    // RFC 3261 §20: a URI carrying headers must be enclosed in angle brackets, because
+    // otherwise there is no way to tell where the URI stops and the header's own parameters
+    // start. RFC 4475 §3.1.2.13 is exactly this mistake.
+    if value.get(i) != Some(&b'<') && parsed_uri.has_headers() {
+        return Err(HeaderError::Syntax { header });
+    }
+
+    let params = grammar::parse_params(trim(params_tail), header)?;
+    let uri_span = add_offset(uri_span, outer.start, header)?;
+
+    Ok(ParsedAddress {
+        address: Address {
+            display_name,
+            uri: parsed_uri,
+            params,
+        },
+        uri: uri_span,
+    })
+}
+
+/// Parser-owned ranges for one address-list value in an unfolded field value.
+#[derive(Debug, Clone)]
+pub(crate) struct AddressValueSpan {
+    /// The complete comma-delimited segment, including surrounding linear whitespace.
+    pub(crate) part: Range<usize>,
+    /// The address itself, excluding surrounding linear whitespace.
+    pub(crate) item: Range<usize>,
+    /// The nested URI.
+    pub(crate) uri: Range<usize>,
+}
+
+/// Parse address values and retain their grammatical byte ranges.
+///
+/// The ordinary parser returns these ranges from the same pass that constructs [`Address`], so the
+/// editor cannot drift into a second permissive delimiter implementation.
+pub(crate) fn value_spans(
+    value: &[u8],
+    header: &'static str,
+    is_list: bool,
+) -> Result<Vec<AddressValueSpan>, HeaderError> {
+    let parts = if is_list {
+        grammar::split_list_spans(value, header)?
+    } else {
+        std::iter::once(0..value.len()).collect()
+    };
+
+    parts
+        .into_iter()
+        .map(|part| {
+            let bytes = value.get(part.clone()).unwrap_or(&[]);
+            let parsed = parse_spanned(bytes, header)?;
+            let item = trimmed_range(bytes);
+            Ok(AddressValueSpan {
+                part: part.clone(),
+                item: add_offset(item, part.start, header)?,
+                uri: add_offset(parsed.uri, part.start, header)?,
+            })
+        })
+        .collect()
+}
+
+fn trimmed_range(value: &[u8]) -> Range<usize> {
+    let mut start = 0usize;
+    while matches!(value.get(start), Some(b' ' | b'\t')) {
+        start += 1;
+    }
+    let mut end = value.len();
+    while end > start && matches!(value.get(end - 1), Some(b' ' | b'\t')) {
+        end -= 1;
+    }
+    start..end
+}
+
+fn add_offset(
+    range: Range<usize>,
+    offset: usize,
+    header: &'static str,
+) -> Result<Range<usize>, HeaderError> {
+    offset
+        .checked_add(range.start)
+        .zip(offset.checked_add(range.end))
+        .map(|(start, end)| start..end)
+        .ok_or(HeaderError::Syntax { header })
 }
 
 /// The index of the `<` that opens a URI, if the value uses the `name-addr` form.

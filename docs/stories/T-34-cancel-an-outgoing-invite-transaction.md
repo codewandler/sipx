@@ -2,7 +2,7 @@
 id: T-34
 title: Cancel an outgoing INVITE transaction from a forwarding element
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 1
 design: docs/designs/sip-transport.md
 epic: sip-transport
@@ -46,6 +46,13 @@ without reconstructing CANCEL or transaction association outside the kernel.
   to unrelated path-MTU work. Re-verified against `1.0.0-beta.5`: `Responses` still exposes only
   observation of the outgoing transaction, while the complete CANCEL builder remains private to
   `sipx-call`.
+- 2026-08-05: selected first in the post-beta.6 transport-unblock wave. Specification and
+  failing-first branch/precondition coverage precede the public operation.
+
+- 2026-08-05: The transaction-anchored operation, call-layer migration and focused race tests are
+  green. Integration's single full-gate invocation passed repository checks, workspace clippy and
+  the complete workspace test suite, then stopped itself before `examples` at the disk floor. That
+  infrastructure non-result was not rerun, so the story remains in progress.
 
 ## Notes
 

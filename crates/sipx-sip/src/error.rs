@@ -207,10 +207,16 @@ pub enum UriError {
     /// A `%` not followed by two hex digits.
     #[error("malformed percent escape")]
     PercentEscape,
-    /// A replacement SIP user part is empty or contains a byte outside RFC 3261's `user`
-    /// production.
+    /// A SIP user part is empty or contains a byte outside RFC 3261's `user` production.
     #[error("invalid SIP URI user part")]
     User,
+    /// A replacement `tel:` subscriber is empty or falls outside RFC 3966's global and local
+    /// telephone-subscriber productions.
+    #[error("invalid tel URI telephone-subscriber")]
+    TelephoneSubscriber,
+    /// A parsed message's retained URI span no longer points inside its retained wire bytes.
+    #[error("retained URI span is inconsistent with its wire representation")]
+    RetainedSpan,
     /// A parameter or header with an empty name.
     #[error("empty parameter name")]
     EmptyParameterName,
@@ -257,4 +263,25 @@ pub enum HeaderError {
         /// The header carrying the unterminated string.
         header: &'static str,
     },
+}
+
+/// Why a parser-owned address value could not be edited losslessly.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum AddressEditError {
+    /// The field does not use one of the address grammars exposed by this operation.
+    #[error("header does not have a supported address grammar")]
+    UnsupportedHeader,
+    /// At least one row did not match the field's shared address grammar.
+    #[error("malformed address field: {0}")]
+    Malformed(#[source] HeaderError),
+    /// The flattened, zero-based value index does not exist.
+    #[error("address value index {index} is out of range")]
+    IndexOutOfRange {
+        /// The requested flattened value index.
+        index: usize,
+    },
+    /// The replacement URI did not survive serialization as a valid URI.
+    #[error("invalid replacement URI: {0}")]
+    InvalidUri(#[source] UriError),
 }

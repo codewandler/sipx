@@ -2,7 +2,7 @@
 id: T-35
 title: Bind only the selected cleartext transports
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 2
 design: docs/designs/sip-transport.md
 epic: sip-transport
@@ -43,6 +43,14 @@ does not silently widen its network exposure to UDP.
   to unrelated graceful-drain work. Re-verified against `1.0.0-beta.5`: `Config` still carries a
   mandatory cleartext `bind` plus `tcp: bool`, and `bind_matching_ports` still opens UDP before its
   optional TCP listener, leaving TCP-only inexpressible.
+- 2026-08-05: selected for the post-beta.6 transport-unblock wave. The configuration and bind-state
+  tables now define exact UDP-only, TCP-only, combined, and no-cleartext behavior before the driver
+  changes.
+
+- 2026-08-05: Exact listener binding, no-cleartext validation, CLI migration and the seven focused
+  listener tests are green. Integration's single full-gate invocation passed repository checks,
+  workspace clippy and the complete workspace test suite, then stopped itself before `examples` at
+  the disk floor. That infrastructure non-result was not rerun, so the story remains in progress.
 
 ## Notes
 

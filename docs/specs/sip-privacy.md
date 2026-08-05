@@ -100,6 +100,7 @@ means `HeaderError::Syntax { header: "Privacy" }`.
 | P14 | `user` then `User` | error: duplicate across repeated rows |
 | P15 | `id` then `critical` | ok `[Id, Critical]` → `id,critical`; list order spans rows |
 | P16 | request rows `id` then `history,critical` | `HistoryInfo::apply_message_privacy` anonymizes every entry after consuming the validated typed list |
+| P17 | `none` then `bad=value` then `history` | the complete constrained field yields one error and no unvalidated neighboring value |
 
 Construction vectors repeat P2, P3, P4 and P5 using `PrivacyList::new` with typed `PrivacyValue`
 inputs. P3 additionally proves that an extension's spelling survives construction and

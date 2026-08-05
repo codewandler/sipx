@@ -148,10 +148,7 @@ fn ur_u_8_replacement_after_general_mutation_uses_structured_serialization() {
 
 #[test]
 fn ur_u_9_empty_userinfo_is_rejected_before_it_can_become_a_span() {
-    for raw in [
-        b"sip:@example.com".as_slice(),
-        b"sip::password@example.com",
-    ] {
+    for raw in [b"sip:@example.com".as_slice(), b"sip::password@example.com"] {
         let parsed = Uri::parse(Bytes::copy_from_slice(raw));
         assert_eq!(
             parsed.as_ref().err(),
@@ -227,6 +224,15 @@ fn ur_t_5_tel_replacement_splices_only_the_parser_owned_subscriber_span() {
     let parts = value.tel_parts().expect("TEL parts after replacement");
     assert_eq!(parts.subscriber(), b"7042");
     assert_eq!(parts.parameters(), Some(&b"Ext=9;Phone-Context=+1-201"[..]));
+
+    assert_eq!(
+        value.replace_tel_subscriber(Bytes::from_static(b"*#")),
+        Ok(true)
+    );
+    assert_eq!(
+        value.to_bytes(),
+        Bytes::from_static(b"TeL:*#;Ext=9;Phone-Context=+1-201")
+    );
 }
 
 #[test]

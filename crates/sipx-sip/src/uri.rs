@@ -275,6 +275,9 @@ pub struct Uri {
     /// emitted without disturbing unrelated spelling. `None` for a constructed URI or after a
     /// general structured mutation.
     raw: Option<Bytes>,
+    /// Exact span of an RFC 3966 telephone-subscriber in [`Self::raw`]. Present only for a
+    /// parsed `tel:` URI, whose opaque body otherwise deliberately stays unmodelled.
+    raw_tel_subscriber_span: Option<std::ops::Range<usize>>,
 }
 
 impl Uri {
@@ -303,6 +306,17 @@ impl Uri {
         let scheme = Scheme::parse(&scheme_raw);
         let rest = raw.slice(colon + 1..);
 
+        let raw_tel_subscriber_span = if matches!(scheme, Scheme::Tel) {
+            let body_offset = colon.checked_add(1).ok_or(UriError::TelephoneSubscriber)?;
+            let subscriber_len = split_tel_body(&rest).subscriber.len();
+            let end = body_offset
+                .checked_add(subscriber_len)
+                .ok_or(UriError::TelephoneSubscriber)?;
+            Some(body_offset..end)
+        } else {
+            None
+        };
+
         let parts = if scheme.is_sip() {
             Parts::Sip(Box::new(parse_sip_parts(&rest, colon + 1)?))
         } else {
@@ -313,6 +327,7 @@ impl Uri {
             scheme,
             parts,
             raw: Some(raw),
+            raw_tel_subscriber_span,
         })
     }
 
@@ -331,6 +346,7 @@ impl Uri {
                 headers: Params::new(),
             })),
             raw: None,
+            raw_tel_subscriber_span: None,
         }
     }
 
@@ -437,6 +453,58 @@ impl Uri {
             *raw = None;
             parts.raw_user_span = None;
         }
+        Ok(true)
+    }
+
+    /// Replace the telephone-subscriber of a parsed RFC 3966 `tel:` URI.
+    ///
+    /// Returns `Ok(false)` without touching the URI for every other scheme. A successful
+    /// replacement splices only the parser-retained subscriber span, so mixed-case scheme
+    /// spelling and the complete optional parameter tail stay byte-identical. This validates
+    /// the global/local subscriber production but deliberately does not interpret parameters
+    /// such as `phone-context`.
+    ///
+    /// # Errors
+    ///
+    /// [`UriError::TelephoneSubscriber`] reports an empty value or one outside RFC 3966's
+    /// `global-number-digits` and `local-number-digits` productions. The error is atomic.
+    pub fn replace_tel_subscriber(
+        &mut self,
+        subscriber: impl Into<Bytes>,
+    ) -> Result<bool, UriError> {
+        if !matches!(self.scheme, Scheme::Tel) {
+            return Ok(false);
+        }
+
+        let subscriber = subscriber.into();
+        validate_tel_subscriber(&subscriber)?;
+
+        let (raw, parts, span) = (
+            &mut self.raw,
+            &mut self.parts,
+            &mut self.raw_tel_subscriber_span,
+        );
+        let Parts::Opaque(body) = parts else {
+            return Err(UriError::TelephoneSubscriber);
+        };
+        let (Some(verbatim), Some(current_span)) = (raw.as_ref(), span.as_ref()) else {
+            return Err(UriError::TelephoneSubscriber);
+        };
+        let start = current_span.start;
+        let end = start
+            .checked_add(subscriber.len())
+            .ok_or(UriError::TelephoneSubscriber)?;
+        let rewritten = replace_raw_span(verbatim, current_span, &subscriber)
+            .ok_or(UriError::TelephoneSubscriber)?;
+        if rewritten.get(start..).is_none() {
+            return Err(UriError::TelephoneSubscriber);
+        }
+        let mut rewritten_body = rewritten.clone();
+        let rewritten_body = rewritten_body.split_off(start);
+
+        *body = rewritten_body;
+        *raw = Some(rewritten);
+        *span = Some(start..end);
         Ok(true)
     }
 
@@ -824,6 +892,41 @@ fn validate_user(user: &[u8]) -> Result<(), UriError> {
     Ok(())
 }
 
+/// Validate RFC 3966 §3's `global-number-digits / local-number-digits` production.
+fn validate_tel_subscriber(subscriber: &[u8]) -> Result<(), UriError> {
+    let valid = if let Some(rest) = subscriber.strip_prefix(b"+") {
+        rest.iter().copied().all(is_global_phone_digit) && rest.iter().any(u8::is_ascii_digit)
+    } else {
+        subscriber.iter().copied().all(is_local_phone_digit)
+            && subscriber.iter().copied().any(is_local_phone_symbol)
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(UriError::TelephoneSubscriber)
+    }
+}
+
+#[must_use]
+fn is_global_phone_digit(byte: u8) -> bool {
+    byte.is_ascii_digit() || is_visual_separator(byte)
+}
+
+#[must_use]
+fn is_local_phone_digit(byte: u8) -> bool {
+    is_local_phone_symbol(byte) || is_visual_separator(byte)
+}
+
+#[must_use]
+fn is_local_phone_symbol(byte: u8) -> bool {
+    byte.is_ascii_hexdigit() || matches!(byte, b'*' | b'#')
+}
+
+#[must_use]
+fn is_visual_separator(byte: u8) -> bool {
+    matches!(byte, b'-' | b'.' | b'(' | b')')
+}
+
 #[must_use]
 fn is_user_char(b: u8) -> bool {
     b.is_ascii_alphanumeric()
@@ -876,6 +979,9 @@ fn parse_sip_parts(rest: &Bytes, body_offset: usize) -> Result<SipParts, UriErro
             None => (Some(info), None),
         },
     };
+    if let Some(user) = &user {
+        validate_user(user)?;
+    }
     let raw_user_span = user
         .as_ref()
         .and_then(|value| body_offset.checked_add(value.len()))

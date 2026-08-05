@@ -1,7 +1,7 @@
 # Design: Transport layer
 
 **Status:** active · **Pillar:** Signalling · **Epic:** `sip-transport` ·
-**Stories:** T-1 … T-4, T-22
+**Stories:** T-1 … T-4, T-22, T-34
 
 ## Why
 
@@ -88,6 +88,21 @@ Rate priority is arithmetic rather than a bypass. Ordinary and protected request
 bucket and therefore one long-term rate, but compare its content with `TAU1` and `TAU2`
 respectively. The higher protected threshold permits important traffic after ordinary traffic is
 blocked without creating a second bucket that could double the server's allowed rate.
+
+## CANCEL belongs to the outgoing transaction handle
+
+The public cancellation operation lives in `sipx-transport`, not in a forwarding application and
+not as a second builder in `sipx-call`. RFC 3261 §9.1 defines CANCEL almost entirely by identity
+copied from the INVITE transaction it stops. An API accepting a branch, request and target as loose
+arguments would let a caller pair the right branch with the wrong route or create two CANCEL client
+transactions for one branch. `Responses` is already the capability returned by `Handle::send`, so
+it retains the post-policy INVITE and selected target and is the only accepted cancellation anchor.
+
+The driver does not synthesize CANCEL inside the transaction layer. The core correctly treats it as
+a separate non-INVITE transaction; the public operation waits for §9.1's provisional precondition,
+derives one request, then sends it through the same transaction path as every other request. Events
+observed while waiting are buffered back onto the INVITE response stream so enforcing the rule does
+not steal the crossing final response that the call layer may need to ACK and end with BYE.
 
 ## Alternatives considered
 

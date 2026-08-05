@@ -5,6 +5,8 @@
 //! in a comment. Every split in this module is aware of that, which is why none of them is a
 //! call to `split`.
 
+use std::ops::Range;
+
 use crate::error::HeaderError;
 
 /// RFC 3261 §25.1 `token`.
@@ -76,6 +78,22 @@ pub(crate) fn split_list<'a>(
     value: &'a [u8],
     header: &'static str,
 ) -> Result<Vec<&'a [u8]>, HeaderError> {
+    split_list_spans(value, header).map(|spans| {
+        spans
+            .into_iter()
+            .map(|span| value.get(span).unwrap_or(&[]))
+            .collect()
+    })
+}
+
+/// Split a list while retaining each value's half-open range in the grammar input.
+///
+/// Range ownership is needed by lossless editors: returning only decoded values would force a
+/// caller to search for their bytes, which is ambiguous when display text repeats a URI.
+pub(crate) fn split_list_spans(
+    value: &[u8],
+    header: &'static str,
+) -> Result<Vec<Range<usize>>, HeaderError> {
     let mut parts = Vec::new();
     let mut start = 0usize;
     let mut i = 0usize;
@@ -105,7 +123,7 @@ pub(crate) fn split_list<'a>(
                 i += 1;
             }
             Some(b',') if angle == 0 && paren == 0 => {
-                parts.push(value.get(start..i).unwrap_or(&[]));
+                parts.push(start..i);
                 i += 1;
                 start = i;
             }
@@ -113,7 +131,7 @@ pub(crate) fn split_list<'a>(
             None => break,
         }
     }
-    parts.push(value.get(start..).unwrap_or(&[]));
+    parts.push(start..value.len());
     Ok(parts)
 }
 

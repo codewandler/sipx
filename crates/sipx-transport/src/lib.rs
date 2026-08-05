@@ -57,7 +57,8 @@ pub use counters::{
     UnsentCounts,
 };
 pub use endpoint::{
-    Config, Handle, InProcessEndpoint, InProcessPair, Incoming, Responses, Unmatched, bind,
+    CancelInviteOutcome, CancelTransactionOutcome, CleartextTransports, Config, Handle,
+    InProcessEndpoint, InProcessPair, Incoming, InviteCancellation, Responses, Unmatched, bind,
     in_process_pair, new_branch,
 };
 pub use error::{Error, Result};

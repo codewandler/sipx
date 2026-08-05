@@ -2,7 +2,7 @@
 id: X-102
 title: Publish the peer endpoint load comparison
 pillar: Build
-status: in-progress
+status: ready
 priority: 3
 design: docs/designs/comparative-load.md
 epic: comparative-load
@@ -57,3 +57,6 @@ conflating endpoint signalling with proxy or registrar workloads.
   `056391cbff0d7d2345a61a11c93e15b3`. The incompatible prior runs were removed rather than edited
   forward. A compatible peer refresh is deliberately deferred; the generated comparison therefore
   says `not measured` for that direction instead of presenting old or partial evidence.
+- 2026-08-05: returned to `ready` after beta.6 publication. The story remains valid, but no work is
+  active until a new peer measurement is explicitly selected; the transport-unblock wave does not
+  rerun comparative load.

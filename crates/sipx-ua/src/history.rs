@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use sipx_sip::{
     BuildError, Header, HeaderError, HeaderName, HistoryInfo, ReasonValue, Request,
-    TargetChangeKind, Uri,
+    TargetChangeKind, Uri, UriError,
 };
 use thiserror::Error;
 
@@ -17,6 +17,9 @@ pub enum RetargetError {
     /// A generated header could not be represented safely.
     #[error("cannot build retargeted request: {0}")]
     Build(#[from] BuildError),
+    /// A replacement target could not be represented as a URI.
+    #[error("cannot replace request target: {0}")]
+    Uri(#[from] UriError),
 }
 
 /// Retarget a request and extend its diversion history.
@@ -38,7 +41,7 @@ pub fn retarget(
     history.apply_message_privacy(&request.headers)?;
 
     let mut retargeted = request.clone();
-    retargeted.set_uri(next);
+    retargeted.set_uri(next)?;
     retargeted.headers.remove_all(&HeaderName::HistoryInfo);
     retargeted
         .headers
