@@ -384,6 +384,75 @@ readme = "README.md"
         )
 
 
+class TheLocalPackageSetProof(unittest.TestCase):
+    def test_consumer_uses_exact_staged_testkit_and_transport_sources(self) -> None:
+        manifest = tomllib.loads(
+            release.local_package_consumer_manifest(
+                "1.0.0-beta.4",
+                pathlib.Path("/staged/sipx-testkit-1.0.0-beta.4"),
+                pathlib.Path("/staged/sipx-transport-1.0.0-beta.4"),
+            )
+        )
+        self.assertEqual(
+            {
+                "version": "=1.0.0-beta.4",
+                "path": "/staged/sipx-testkit-1.0.0-beta.4",
+            },
+            manifest["dependencies"]["sipx-testkit"],
+        )
+        self.assertEqual(
+            {
+                "version": "=1.0.0-beta.4",
+                "path": "/staged/sipx-transport-1.0.0-beta.4",
+            },
+            manifest["patch"]["crates-io"]["sipx-transport"],
+        )
+
+    def test_lock_must_resolve_both_package_set_members_from_staged_paths(self) -> None:
+        good = {
+            "package": [
+                {"name": "sipx-testkit", "version": "1.0.0-beta.4"},
+                {"name": "sipx-transport", "version": "1.0.0-beta.4"},
+            ]
+        }
+        self.assertEqual([], release.local_package_lock_problems(good, "1.0.0-beta.4"))
+        registry = {
+            "package": [
+                {
+                    "name": "sipx-testkit",
+                    "version": "1.0.0-beta.4",
+                    "source": release.CRATES_IO_LOCK_SOURCE,
+                },
+                {"name": "sipx-transport", "version": "1.0.0-beta.4"},
+            ]
+        }
+        self.assertTrue(
+            any(
+                "registry instead of staged bytes" in problem
+                for problem in release.local_package_lock_problems(registry, "1.0.0-beta.4")
+            )
+        )
+
+    def test_staged_archive_extraction_refuses_escape_and_links(self) -> None:
+        for name, member in (
+            ("escape", tarfile.TarInfo("sipx-testkit-1.0.0-beta.4/../secret")),
+            ("link", tarfile.TarInfo("sipx-testkit-1.0.0-beta.4/link")),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                archive = root / "sipx-testkit-1.0.0-beta.4.crate"
+                payload = b"secret"
+                if name == "link":
+                    member.type = tarfile.SYMTYPE
+                    member.linkname = "/outside"
+                else:
+                    member.size = len(payload)
+                with tarfile.open(archive, mode="w:gz") as bundle:
+                    bundle.addfile(member, None if name == "link" else io.BytesIO(payload))
+                with self.assertRaisesRegex(release.ReleaseError, "escapes|regular file"):
+                    release._extract_package_source(archive, root / "staged")
+
+
 class ThePackagedVcsEvidence(unittest.TestCase):
     def package(self) -> release.Package:
         return release.Package(

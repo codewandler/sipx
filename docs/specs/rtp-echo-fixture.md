@@ -70,3 +70,18 @@ For three 160-byte PCMU inputs with arbitrary input identities, the reply header
 The integration proof injects recognizable non-silent frames, parses every reply with
 `sipx_rtp::Packet`, compares decoded samples, asserts the table's relative progression, and then
 rebinds the released address while the runtime task count equals its baseline.
+
+## 6. Package-set proof
+
+`python3 scripts/release.py --verify-local-package-set` is the pre-publication consumer proof for
+this example. One bounded Cargo invocation stages `sipx-transport` and `sipx-testkit` archives
+together, so Cargo verifies the unreleased dependency edge through its temporary registry rather
+than substituting the older registry release. The verifier then extracts those exact archives into a
+temporary directory, copies `examples/rtp_echo.rs` from the testkit archive into a clean consumer,
+and resolves both package-set members from the staged bytes before compiling every consumer target.
+
+The package and consumer commands have separate finite deadlines and owned process groups. Archive
+paths and links are refused before extraction, temporary state is removed on every outcome, and the
+lockfile MUST show both package-set members as staged path sources. This is pre-publication evidence;
+it does not claim the same version is already visible on the registry and does not replace the
+tagged release rehearsal or post-publication registry-consumer proof.

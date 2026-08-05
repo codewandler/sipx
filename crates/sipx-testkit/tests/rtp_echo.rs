@@ -17,7 +17,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use sipx_audio::g711;
 use sipx_rtp::Packet;
-use sipx_testkit::rtp_echo::{EchoConfig, EchoError, RtpEcho};
+use sipx_testkit::rtp_echo::{EchoConfig, EchoError, MAX_DATAGRAM_BYTES, RtpEcho};
 use sipx_testkit::soak::alive_tasks;
 use tokio::net::UdpSocket;
 
@@ -39,6 +39,17 @@ fn recognizable(frame: usize) -> Vec<i16> {
             i16::try_from(phase * 300).unwrap_or(0)
         })
         .collect()
+}
+
+async fn assert_terminal_cleanup(echo_addr: SocketAddr, baseline_tasks: usize) {
+    UdpSocket::bind(echo_addr)
+        .await
+        .expect("terminal error released the socket");
+    assert_eq!(
+        alive_tasks(),
+        baseline_tasks,
+        "terminal error left no owned runtime work"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -142,6 +153,7 @@ async fn cancelling_a_polled_run_releases_the_only_socket_without_a_task() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn malformed_rtp_is_a_typed_terminal_error_and_releases_the_socket() {
+    let baseline_tasks = alive_tasks();
     let peer = UdpSocket::bind(loopback(0)).await.expect("peer binds");
     let config = EchoConfig::new(
         loopback(0),
@@ -158,9 +170,84 @@ async fn malformed_rtp_is_a_typed_terminal_error_and_releases_the_socket() {
         .expect("malformed datagram reaches fixture");
     let error = echo.run().await.expect_err("malformed RTP is refused");
     assert!(matches!(error, EchoError::Rtp(_)));
-    UdpSocket::bind(echo_addr)
+    assert_terminal_cleanup(echo_addr, baseline_tasks).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_foreign_source_is_a_typed_terminal_error_and_releases_everything() {
+    let baseline_tasks = alive_tasks();
+    let peer = UdpSocket::bind(loopback(0)).await.expect("peer binds");
+    let foreign = UdpSocket::bind(loopback(0))
         .await
-        .expect("error released the socket");
+        .expect("foreign source binds");
+    let peer_addr = peer.local_addr().expect("peer address");
+    let config = EchoConfig::new(loopback(0), peer_addr, packets(1), RUN_BOUND)
+        .expect("bounded configuration");
+    let echo = RtpEcho::bind(config).await.expect("echo binds");
+    let echo_addr = echo.local_addr();
+    let request = Packet::new(0, 1, 160, 0x1234_5678, Bytes::from_static(&[0xff]));
+
+    foreign
+        .send_to(&request.encode(), echo_addr)
+        .await
+        .expect("foreign datagram reaches fixture");
+    let error = echo.run().await.expect_err("foreign source is refused");
+    assert!(matches!(
+        error,
+        EchoError::UnexpectedPeer {
+            expected,
+            actual,
+        } if expected == peer_addr && actual == foreign.local_addr().expect("foreign address")
+    ));
+    assert_terminal_cleanup(echo_addr, baseline_tasks).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_oversized_datagram_is_a_typed_terminal_error_and_releases_everything() {
+    let baseline_tasks = alive_tasks();
+    let peer = UdpSocket::bind(loopback(0)).await.expect("peer binds");
+    let config = EchoConfig::new(
+        loopback(0),
+        peer.local_addr().expect("peer address"),
+        packets(1),
+        RUN_BOUND,
+    )
+    .expect("bounded configuration");
+    let echo = RtpEcho::bind(config).await.expect("echo binds");
+    let echo_addr = echo.local_addr();
+
+    peer.send_to(&vec![0_u8; MAX_DATAGRAM_BYTES + 1], echo_addr)
+        .await
+        .expect("oversized datagram reaches fixture");
+    let error = echo.run().await.expect_err("oversized datagram is refused");
+    assert!(matches!(
+        error,
+        EchoError::DatagramTooLarge { limit } if limit == MAX_DATAGRAM_BYTES
+    ));
+    assert_terminal_cleanup(echo_addr, baseline_tasks).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_non_pcmu_packet_is_a_typed_terminal_error_and_releases_everything() {
+    let baseline_tasks = alive_tasks();
+    let peer = UdpSocket::bind(loopback(0)).await.expect("peer binds");
+    let config = EchoConfig::new(
+        loopback(0),
+        peer.local_addr().expect("peer address"),
+        packets(1),
+        RUN_BOUND,
+    )
+    .expect("bounded configuration");
+    let echo = RtpEcho::bind(config).await.expect("echo binds");
+    let echo_addr = echo.local_addr();
+    let request = Packet::new(8, 1, 160, 0x1234_5678, Bytes::from_static(&[0xd5]));
+
+    peer.send_to(&request.encode(), echo_addr)
+        .await
+        .expect("non-PCMU datagram reaches fixture");
+    let error = echo.run().await.expect_err("non-PCMU packet is refused");
+    assert!(matches!(error, EchoError::UnsupportedPayloadType(8)));
+    assert_terminal_cleanup(echo_addr, baseline_tasks).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

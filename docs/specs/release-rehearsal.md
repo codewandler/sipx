@@ -152,6 +152,13 @@ not turn an unpublished workspace package into a registry dependency. Local arch
 after inspection. This diagnostic does not waive the clean-checkout rule in any release mode and is
 not a substitute for `cargo publish --dry-run --locked` compiling the archive.
 
+`--verify-local-package-set` covers a dependency-ordered pre-publication case that a single-package
+verification cannot: `sipx-testkit` may consume an unreleased `sipx-transport` API at the same
+workspace version. Cargo packages and verifies both together through its temporary registry. A
+second clean consumer compiles the RTP echo example copied from the exact staged testkit archive and
+its lockfile must resolve both testkit and transport from the staged archive sources. This mode is
+bounded, temporary and explicitly diagnostic; it says nothing about registry visibility.
+
 ## 4. Partial registry availability
 
 Publishing is restartable. Before a write, the helper asks Cargo whether each public
@@ -205,3 +212,4 @@ the unavailable dependencies. It never guesses that a successful upload is alrea
 | R17 | GitHub tag push or tag-selected manual dispatch, exact annotated tag/HEAD/workflow SHA, both confirmations and token | retain the ordinary frontier/checksum rules and permit at most one ready frontier |
 | R18 | protected recovery names a failed same-tag release whose gate/rehearsal passed and publication failed, with matching visible bytes | fixed controller may advance one missing frontier; wrong run/workflow/step/commit/controller or byte mismatch dispatches no upload |
 | R19 | Cargo VCS record omits `git.dirty`, sets a boolean, or gives a non-boolean value | omitted/false is clean; true is dirty; malformed is refused |
+| R20 | local package-set verification stages transport and testkit, then compiles the archived RTP echo example | both exact packages resolve from staged bytes; never substitute the older registry transport or claim publication |

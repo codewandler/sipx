@@ -43,8 +43,10 @@ surface and sends the same decoded samples back, making the bidirectional seam v
   count unchanged. A poll-then-cancel regression proves cancellation uses the same cleanup path.
 - 2026-08-05: the public guide inlines the compiled source and fixes the diagnostic scope. Focused
   all-target/all-feature tests, strict clippy, a live three-packet shell run, public-doc sync,
-  provenance, fixed-sleep, maturity and package-archive construction passed. Standalone package
-  verification correctly awaits the coordinated release of X-75's new `sipx-transport`
-  `in_process_pair`; the published beta.4 transport cannot satisfy that newer symbol yet. The full
-  gate remains an integration responsibility, so the story and its final acceptance item remain
-  open.
+  provenance, fixed-sleep and maturity passed. Adversarial wire tests now prove typed terminal errors,
+  socket reuse and zero owned work for foreign-source, oversized and non-PCMU input. The bounded
+  local package-set verifier stages X-75's current `sipx-transport` and `sipx-testkit` archives in
+  dependency order, then compiles the archived RTP echo example in a clean consumer whose lockfile
+  proves both came from staged bytes; it makes no claim about the older registry beta.4 transport.
+  The full gate remains an integration responsibility, so the story and its final acceptance item
+  remain open.
