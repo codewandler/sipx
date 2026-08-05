@@ -2,7 +2,7 @@
 id: T-29
 title: Drain in-flight work on a graceful shutdown
 pillar: Transport
-status: backlog
+status: in-progress
 priority: 16
 design: docs/designs/demand.md
 epic: demand
@@ -38,7 +38,8 @@ does not drop established calls and in-flight transactions.
 - [ ] `./scripts/gate.py` green, including `check-fixed-sleep.py`.
 
 ## Progress
-- (not started)
+- 2026-08-05: selected in the post-beta.7 transport operations wave. The drain state table and a
+  completion proof driven by terminal transaction state precede runtime changes.
 
 ## Notes
 - Requested against a comparable stack, labelled critical by its maintainer, still undelivered. It

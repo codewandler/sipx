@@ -2,7 +2,7 @@
 id: T-30
 title: Export signalling capture and media quality to a collector
 pillar: Transport
-status: backlog
+status: in-progress
 priority: 17
 design: docs/designs/demand.md
 epic: demand
@@ -38,7 +38,8 @@ hooks they can wire up rather than an exporter sipx chooses for them.
 - [ ] `./scripts/gate.py` green.
 
 ## Progress
-- (not started)
+- 2026-08-05: selected in the post-beta.7 transport operations wave. Redaction, bounded failure
+  isolation and renegotiation-survival tests precede exporter and callback implementation.
 
 ## Notes
 - Small demand by count but unusually high quality: every requester in the survey arrived with a

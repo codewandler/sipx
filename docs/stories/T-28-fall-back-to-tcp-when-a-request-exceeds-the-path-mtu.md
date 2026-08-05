@@ -2,7 +2,7 @@
 id: T-28
 title: Fall back to TCP when a request exceeds the path MTU
 pillar: Transport
-status: backlog
+status: in-progress
 priority: 15
 design: docs/designs/demand.md
 epic: demand
@@ -40,7 +40,8 @@ requires.
 - [ ] `./scripts/gate.py` green.
 
 ## Progress
-- (not started)
+- 2026-08-05: selected as the first story in the post-beta.7 transport operations wave. The RFC
+  threshold and failing-first oversized-INVITE transport proof precede the endpoint change.
 
 ## Notes
 - Two independent, still-open requests against a comparable stack, and a straightforward conformance
