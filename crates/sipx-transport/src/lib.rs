@@ -51,7 +51,7 @@ pub mod tls;
 #[cfg(feature = "ws")]
 pub mod ws;
 
-pub use capture::{CaptureConfig, Direction};
+pub use capture::{CaptureConfig, Direction, HepConfig};
 pub use counters::{
     CaptureCounts, Counters, DiscardCounts, ShedCounts, TimeoutCounts, TransportCounts,
     UnsentCounts,

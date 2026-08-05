@@ -37,6 +37,26 @@ use bytes::Bytes;
 use crate::counters::Meters;
 use crate::target::TransportKind;
 
+/// Best-effort export of the existing signalling capture as HEP3 datagrams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HepConfig {
+    /// UDP collector receiving one HEP3 datagram per captured SIP message.
+    pub collector: SocketAddr,
+    /// Capture-agent identifier carried in HEP chunk `0x000c`.
+    pub capture_id: u32,
+}
+
+impl HepConfig {
+    /// A collector and the stable capture-agent id assigned to this endpoint.
+    #[must_use]
+    pub const fn new(collector: SocketAddr, capture_id: u32) -> Self {
+        Self {
+            collector,
+            capture_id,
+        }
+    }
+}
+
 /// How a capture is configured (`Config::capture`).
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
@@ -53,6 +73,12 @@ pub struct CaptureConfig {
     /// Dropped rather than blocking the driver: see the module note. A dropped record is counted in
     /// [`crate::CaptureCounts::dropped`], never silent.
     pub queue: usize,
+    /// Optional HEP3 export of the same redacted records written to the pcapng file.
+    ///
+    /// HEP is always best effort: the collector socket is non-blocking and failures increment
+    /// [`crate::CaptureCounts::hep_dropped`] without failing the endpoint or the call. A HEP
+    /// export may not be combined with [`Self::without_redaction`].
+    pub hep: Option<HepConfig>,
 }
 
 impl CaptureConfig {
@@ -63,7 +89,15 @@ impl CaptureConfig {
             path: path.into(),
             redact: true,
             queue: 1024,
+            hep: None,
         }
+    }
+
+    /// Send each redacted capture record to a HEP3 collector as well as the pcapng file.
+    #[must_use]
+    pub fn with_hep(mut self, hep: HepConfig) -> Self {
+        self.hep = Some(hep);
+        self
     }
 
     /// Keep credentials in the file.
@@ -145,10 +179,13 @@ impl Capture {
         let failed = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&failed);
         let path = config.path.clone();
+        let hep = config.hep;
 
         std::thread::Builder::new()
             .name("sipx-capture".to_owned())
-            .spawn(move || write_loop(&mut writer, &incoming, &meters, &flag, &path))?;
+            .spawn(move || {
+                write_loop(&mut writer, &incoming, &meters, &flag, &path, hep);
+            })?;
 
         Ok(Self {
             records,
@@ -172,7 +209,9 @@ fn write_loop(
     meters: &Meters,
     failed: &AtomicBool,
     path: &Path,
+    hep: Option<HepConfig>,
 ) {
+    let mut hep = hep.map(HepExporter::new);
     while let Ok(record) = incoming.recv() {
         if let Err(error) = write_packet(writer, &record).and_then(|()| writer.flush()) {
             // Once, and then stop. A capture that cannot be written is over; continuing would log
@@ -186,6 +225,9 @@ fn write_loop(
             );
             return;
         }
+        if let Some(exporter) = hep.as_mut() {
+            exporter.export(&record, meters);
+        }
     }
     // The driver dropped the sender: an ordinary shutdown. Flush what is buffered so the last
     // messages before the shutdown are in the file, which is usually the interesting part.
@@ -193,6 +235,147 @@ fn write_loop(
         meters.capture_error();
         tracing::warn!(%error, path = %path.display(), "capture could not be flushed at shutdown");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// HEP3 (`docs/specs/observability-export.md` §3)
+// ---------------------------------------------------------------------------------------------
+
+/// One non-blocking UDP HEP sink owned by the existing capture writer thread.
+struct HepExporter {
+    socket: Option<std::net::UdpSocket>,
+    config: HepConfig,
+    /// A collector outage can affect every message. Warn once, then retain per-message counts and
+    /// debug lines rather than flooding the application's logs.
+    warned: bool,
+}
+
+impl HepExporter {
+    fn new(config: HepConfig) -> Self {
+        let bind = if config.collector.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let socket = std::net::UdpSocket::bind(bind)
+            .and_then(|socket| {
+                socket.connect(config.collector)?;
+                socket.set_nonblocking(true)?;
+                Ok(socket)
+            })
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    collector = %config.collector,
+                    "HEP collector is unavailable; signalling capture will continue locally"
+                );
+            })
+            .ok();
+        let warned = socket.is_none();
+        Self {
+            socket,
+            config,
+            warned,
+        }
+    }
+
+    fn export(&mut self, record: &Record, meters: &Meters) {
+        let sent = encode_hep(record, self.config.capture_id).and_then(|datagram| {
+            let socket = self.socket.as_ref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "HEP collector socket is unavailable",
+                )
+            })?;
+            let written = socket.send(&datagram)?;
+            if written == datagram.len() {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "HEP datagram was not sent in full",
+                ))
+            }
+        });
+        match sent {
+            Ok(()) => meters.capture_hep_record(),
+            Err(error) => {
+                meters.capture_hep_drop();
+                if self.warned {
+                    tracing::debug!(
+                        %error,
+                        collector = %self.config.collector,
+                        "dropping HEP signalling export"
+                    );
+                } else {
+                    self.warned = true;
+                    tracing::warn!(
+                        %error,
+                        collector = %self.config.collector,
+                        "dropping HEP signalling export; calls and local capture continue"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn hep_chunk(out: &mut Vec<u8>, kind: u16, value: &[u8]) -> std::io::Result<()> {
+    let length = u16::try_from(6usize.saturating_add(value.len()))
+        .map_err(|_| std::io::Error::other("HEP chunk is too large"))?;
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&kind.to_be_bytes());
+    out.extend_from_slice(&length.to_be_bytes());
+    out.extend_from_slice(value);
+    Ok(())
+}
+
+fn encode_hep(record: &Record, capture_id: u32) -> std::io::Result<Vec<u8>> {
+    let (source, destination) = match record.direction {
+        Direction::In => (record.peer, record.local),
+        Direction::Out => (record.local, record.peer),
+    };
+    let protocol = match record.transport {
+        TransportKind::Udp | TransportKind::Quic => 17,
+        TransportKind::Tcp | TransportKind::Tls | TransportKind::Ws | TransportKind::Wss => 6,
+    };
+    let mut ordered = Vec::with_capacity(record.bytes.len().saturating_add(128));
+    match (source.ip(), destination.ip()) {
+        (IpAddr::V4(from), IpAddr::V4(to)) => {
+            hep_chunk(&mut ordered, 0x0001, &[2])?;
+            hep_chunk(&mut ordered, 0x0002, &[protocol])?;
+            hep_chunk(&mut ordered, 0x0003, &from.octets())?;
+            hep_chunk(&mut ordered, 0x0004, &to.octets())?;
+        }
+        (IpAddr::V6(from), IpAddr::V6(to)) => {
+            hep_chunk(&mut ordered, 0x0001, &[10])?;
+            hep_chunk(&mut ordered, 0x0002, &[protocol])?;
+            hep_chunk(&mut ordered, 0x0005, &from.octets())?;
+            hep_chunk(&mut ordered, 0x0006, &to.octets())?;
+        }
+        _ => {
+            return Err(std::io::Error::other(
+                "HEP endpoints use different IP families",
+            ));
+        }
+    }
+    hep_chunk(&mut ordered, 0x0007, &source.port().to_be_bytes())?;
+    hep_chunk(&mut ordered, 0x0008, &destination.port().to_be_bytes())?;
+    let since = record.at.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let seconds = u32::try_from(since.as_secs() & u64::from(u32::MAX)).unwrap_or(0);
+    hep_chunk(&mut ordered, 0x0009, &seconds.to_be_bytes())?;
+    hep_chunk(&mut ordered, 0x000a, &since.subsec_micros().to_be_bytes())?;
+    hep_chunk(&mut ordered, 0x000b, &[1])?;
+    hep_chunk(&mut ordered, 0x000c, &capture_id.to_be_bytes())?;
+    hep_chunk(&mut ordered, 0x000f, &record.bytes)?;
+
+    let total = u16::try_from(6usize.saturating_add(ordered.len()))
+        .map_err(|_| std::io::Error::other("HEP datagram is too large"))?;
+    let mut datagram = Vec::with_capacity(usize::from(total));
+    datagram.extend_from_slice(b"HEP3");
+    datagram.extend_from_slice(&total.to_be_bytes());
+    datagram.extend_from_slice(&ordered);
+    Ok(datagram)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1471,5 +1654,68 @@ mod tests {
         assert_eq!(packet[0] >> 4, 6, "version 6");
         assert_eq!(packet[6], IP_PROTO_UDP, "next header");
         assert_eq!(packet.len(), 40 + 8 + 1);
+    }
+
+    /// OE-H-1: byte-exact because chunk order, byte order and inclusive chunk lengths are the
+    /// interoperability contract. Each address and number is recognisable in the literal.
+    #[test]
+    fn hep_ipv4_udp_vector_is_byte_exact() {
+        let record = Record {
+            seq: 1,
+            at: UNIX_EPOCH + std::time::Duration::new(1, 2_000),
+            local: "192.0.2.10:5060".parse().unwrap(),
+            peer: "198.51.100.20:5080".parse().unwrap(),
+            transport: TransportKind::Udp,
+            direction: Direction::Out,
+            bytes: Bytes::from_static(b"SIP"),
+            redacted: true,
+        };
+        let encoded = encode_hep(&record, 0x0102_0304).expect("encodes");
+        let expected = [
+            b'H', b'E', b'P', b'3', 0x00, 0x66, // total length 102
+            0, 0, 0, 1, 0, 7, 2, // IPv4
+            0, 0, 0, 2, 0, 7, 17, // UDP
+            0, 0, 0, 3, 0, 10, 192, 0, 2, 10, // source address
+            0, 0, 0, 4, 0, 10, 198, 51, 100, 20, // destination address
+            0, 0, 0, 7, 0, 8, 0x13, 0xc4, // source port 5060
+            0, 0, 0, 8, 0, 8, 0x13, 0xd8, // destination port 5080
+            0, 0, 0, 9, 0, 10, 0, 0, 0, 1, // seconds
+            0, 0, 0, 10, 0, 10, 0, 0, 0, 2, // microseconds
+            0, 0, 0, 11, 0, 7, 1, // SIP protocol
+            0, 0, 0, 12, 0, 10, 1, 2, 3, 4, // capture id
+            0, 0, 0, 15, 0, 9, b'S', b'I', b'P', // payload
+        ];
+        assert_eq!(encoded, expected);
+    }
+
+    /// OE-H-3. A collector that could not even open is the deterministic form of an unreachable
+    /// collector: the record is counted as a HEP drop and remains writable to pcapng.
+    #[test]
+    fn an_unavailable_hep_sink_drops_without_disabling_local_capture() {
+        let record = Record {
+            seq: 1,
+            at: UNIX_EPOCH,
+            local: "192.0.2.10:5060".parse().unwrap(),
+            peer: "198.51.100.20:5080".parse().unwrap(),
+            transport: TransportKind::Udp,
+            direction: Direction::Out,
+            bytes: Bytes::from_static(b"OPTIONS sip:x SIP/2.0\r\n\r\n"),
+            redacted: true,
+        };
+        let meters = Meters::default();
+        let mut exporter = HepExporter {
+            socket: None,
+            config: HepConfig::new("127.0.0.1:9060".parse().unwrap(), 7),
+            warned: true,
+        };
+        exporter.export(&record, &meters);
+        let capture = meters.snapshot().capture;
+        assert_eq!(capture.hep_records, 0);
+        assert_eq!(capture.hep_dropped, 1);
+        assert_eq!(capture.errors, 0, "HEP failure does not disable pcapng");
+
+        let mut pcapng = Vec::new();
+        write_packet(&mut pcapng, &record).expect("local capture remains writable");
+        assert!(!pcapng.is_empty());
     }
 }

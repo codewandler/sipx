@@ -878,3 +878,12 @@ length is declared in `Content-Length`, so a bare LF inside an SDP body stays a 
 
 A `quoted-pair` does not end a quoted value (§25.1), so an escaped quote inside a digest response does
 not leave its tail behind.
+
+### 13.4 HEP3 export
+
+An endpoint may send the same redacted records to a HEP3 collector from the existing bounded
+capture writer. The collector never receives bytes from a second observation point and HEP cannot
+be combined with the lab-only redaction opt-out. The collector socket is non-blocking; failure is a
+counted and logged HEP drop and does not disable the local pcapng file or fail a call. The exact
+chunk subset, byte vectors and ownership rules are in
+[`observability-export.md`](observability-export.md).

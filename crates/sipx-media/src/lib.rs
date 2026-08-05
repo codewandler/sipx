@@ -53,5 +53,5 @@ pub use ice::IcePath;
 pub use session::DtlsStartError;
 pub use session::{
     Codec, CodecDirection, Config, Encoded, Interrupt, MediaPort, MediaSession, Playback,
-    PlaybackEnd, PlaybackId, SetupError, SrtpKeys, StartError,
+    PlaybackEnd, PlaybackId, RtcpQualityHook, RtcpQualitySample, SetupError, SrtpKeys, StartError,
 };

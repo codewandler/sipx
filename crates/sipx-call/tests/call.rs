@@ -22,6 +22,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use sipx_audio::{Wav, g711, read_wav, write_wav};
 use sipx_call::{Call, Credentials, answer, dial};
+use sipx_media::RtcpQualityHook;
 use sipx_sip::{CSeq, HeaderName, Host, HostName, Method, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use sipx_ua::{Authenticator, Presented, Verdict};
@@ -752,6 +753,13 @@ async fn connected_with_routing() -> (
 async fn a_reinvite_moves_the_media_without_dropping_the_call() {
     let (caller, mut callee, pump, _) = connected_with_routing().await;
 
+    let (quality_tx, mut quality_rx) = tokio::sync::mpsc::channel(1);
+    caller
+        .lock()
+        .await
+        .set_rtcp_quality_hook(Some(RtcpQualityHook::new(move |sample| {
+            let _ = quality_tx.try_send(sample);
+        })));
     let port_before = caller.lock().await.media().local_addr().port();
 
     // The callee re-offers, moving its own media port.
@@ -767,14 +775,46 @@ async fn a_reinvite_moves_the_media_without_dropping_the_call() {
     // exist otherwise. A sleep was never what made this true, only what hid that it already was.
     let caller = caller.lock().await;
     assert!(!caller.is_ended(), "the call must still be running");
+    assert!(
+        caller.rtcp_quality_hook().is_some(),
+        "an ordinary re-INVITE must not silently detach the application quality hook"
+    );
     assert_eq!(
         caller.media().local_addr().port(),
         port_before,
         "our own receive port does not move just because theirs did"
     );
 
-    // And audio still flows after the renegotiation.
+    // Prove the retained hook is live, not only present: a peer report after the re-INVITE must
+    // reach the same application channel. The report names the current generation's own SSRC.
+    let media_addr = caller.media().local_addr();
+    let report = sipx_rtp::Rtcp::Receiver(sipx_rtp::ReceiverReport {
+        ssrc: 0x5566_7788,
+        reports: vec![sipx_rtp::ReportBlock {
+            ssrc: caller.media().local_ssrc(),
+            ..sipx_rtp::ReportBlock::default()
+        }],
+    });
+    let rtcp_mode = caller.media().rtcp_mode();
     drop(caller);
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("RTCP peer binds");
+    let control = match rtcp_mode {
+        sipx_sdp::RtcpMode::Separate => {
+            std::net::SocketAddr::new(media_addr.ip(), media_addr.port() + 1)
+        }
+        sipx_sdp::RtcpMode::Mux => media_addr,
+    };
+    peer.send_to(&sipx_rtp::Rtcp::encode_compound(&[report]), control)
+        .await
+        .expect("post-re-INVITE report reaches the control port");
+    tokio::time::timeout(SIGNALLING_BOUND, quality_rx.recv())
+        .await
+        .expect("the post-re-INVITE callback is a bounded wait")
+        .expect("the callback stays attached");
+
+    // And audio still flows after the renegotiation.
     pump.abort();
 }
 

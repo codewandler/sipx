@@ -527,6 +527,21 @@ impl Call {
         Arc::clone(&self.media)
     }
 
+    /// Install or clear the application callback for peer RTCP quality reports.
+    ///
+    /// This is call-owned policy: it remains installed across an ordinary re-INVITE, a media
+    /// session replacement, and an ICE restart. The callback itself must return promptly; see
+    /// [`sipx_media::RtcpQualityHook`].
+    pub fn set_rtcp_quality_hook(&self, hook: Option<sipx_media::RtcpQualityHook>) {
+        self.media.set_rtcp_quality_hook(hook);
+    }
+
+    /// The peer RTCP quality callback currently attached to this call.
+    #[must_use]
+    pub fn rtcp_quality_hook(&self) -> Option<sipx_media::RtcpQualityHook> {
+        self.media.rtcp_quality_hook()
+    }
+
     /// A response handle for a coupling that must answer glare while an outgoing request borrows
     /// this call's dialog state.
     pub(crate) fn responder(&self) -> Handle {
@@ -1722,6 +1737,7 @@ impl Call {
             // address or codec, which this side did not ask for and cannot refuse — unmutes the
             // call behind the application's back.
             replacement.set_muted(self.media.is_muted());
+            replacement.set_rtcp_quality_hook(self.media.rtcp_quality_hook());
             let previous = std::mem::replace(&mut self.media, Arc::new(replacement));
             self.retired_media.push(previous);
             self.reap_retired_media().await;

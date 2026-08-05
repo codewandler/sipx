@@ -175,6 +175,12 @@ pub struct CaptureCounts {
     /// A full disk is the usual reason. Counted rather than only logged because a capture that is
     /// silently not happening is the same failure as a silent discard, one level up.
     pub errors: u64,
+    /// Records sent to the configured HEP3 collector.
+    pub hep_records: u64,
+    /// HEP3 records rejected by encoding or the non-blocking collector socket.
+    ///
+    /// A drop never disables the local pcapng capture or fails a call.
+    pub hep_dropped: u64,
 }
 
 /// Places the endpoint throws something away that are not backpressure (§12.1).
@@ -404,6 +410,7 @@ impl Counters {
             || self.overload_rejections > 0
             || self.discards.total() > 0
             || self.capture.dropped > 0
+            || self.capture.hep_dropped > 0
             || self.observation_dropped > 0
             || self.unsent.total() > 0
     }
@@ -435,6 +442,8 @@ pub(crate) struct Meters {
     capture_records: AtomicU64,
     capture_dropped: AtomicU64,
     capture_errors: AtomicU64,
+    capture_hep_records: AtomicU64,
+    capture_hep_dropped: AtomicU64,
     observation_dropped: AtomicU64,
     unsent: Unsent,
 }
@@ -564,6 +573,16 @@ impl Meters {
         bump(&self.capture_errors);
     }
 
+    /// A redacted HEP3 datagram reached the collector socket.
+    pub(crate) fn capture_hep_record(&self) {
+        bump(&self.capture_hep_records);
+    }
+
+    /// A HEP3 datagram could not be encoded or sent without blocking.
+    pub(crate) fn capture_hep_drop(&self) {
+        bump(&self.capture_hep_dropped);
+    }
+
     /// A request the endpoint tried to put on the wire and could not.
     ///
     /// Called from the driver, at the two places the socket is written — never from a `Handle`
@@ -633,6 +652,8 @@ impl Meters {
                 records: read(&self.capture_records),
                 dropped: read(&self.capture_dropped),
                 errors: read(&self.capture_errors),
+                hep_records: read(&self.capture_hep_records),
+                hep_dropped: read(&self.capture_hep_dropped),
             },
             observation_dropped: read(&self.observation_dropped),
             unsent: UnsentCounts {

@@ -20,8 +20,9 @@ use sipx_sip::build::RequestBuilder;
 use sipx_sip::build::ResponseBuilder;
 use sipx_sip::{HeaderName, Host, HostName, Method, StatusCode, Uri};
 use sipx_transport::{
-    CaptureConfig, Config, Handle, Incoming, Target, TransportKind, bind, new_branch,
+    CaptureConfig, Config, Handle, HepConfig, Incoming, Target, TransportKind, bind, new_branch,
 };
+use tokio::net::UdpSocket;
 use tokio::sync::mpsc::Receiver;
 
 /// A bound on failure, not a window to measure in (`X-29`). The writer is on its own thread, so the
@@ -663,4 +664,106 @@ async fn an_overrun_capture_drops_records_and_says_so() {
         );
         previous = seq;
     }
+}
+
+/// OE-H-2. HEP is a sink on the existing capture path, so its payload must be the same redacted
+/// message as the pcapng record. A second serializer that receives the raw bytes would pass all
+/// file-capture tests while leaking the credential over the network.
+#[tokio::test]
+async fn hep_export_uses_the_redacted_capture_record() {
+    let path = capture_path("hep-redacted");
+    let collector = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("collector binds");
+    let collector_addr = collector.local_addr().expect("collector address");
+
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.capture =
+        Some(CaptureConfig::new(&path).with_hep(HepConfig::new(collector_addr, 0x0102_0304)));
+    let (endpoint, _incoming) = bind(config).await.expect("binds with HEP export");
+
+    let secret = "feedfacecafebeef";
+    let message = format!(
+        "REGISTER sip:example.net SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-hep\r\n\
+         From: <sip:alice@example.net>;tag=hep\r\n\
+         To: <sip:alice@example.net>\r\n\
+         Call-ID: hep-redaction@example.net\r\n\
+         CSeq: 1 REGISTER\r\n\
+         Authorization: Digest realm=\"example.net\", nonce=\"still-useful\", response=\"{secret}\"\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    let sender = UdpSocket::bind("127.0.0.1:0").await.expect("sender binds");
+    sender
+        .send_to(message.as_bytes(), endpoint.local_addr())
+        .await
+        .expect("message reaches endpoint");
+
+    let mut datagram = vec![0u8; 65_535];
+    let (len, _) =
+        tokio::time::timeout(Duration::from_secs(10), collector.recv_from(&mut datagram))
+            .await
+            .expect("HEP export is a bounded wait")
+            .expect("collector receives");
+    let payload = hep_payload(&datagram[..len]);
+    let text = String::from_utf8_lossy(payload);
+    assert!(text.contains("REGISTER sip:example.net SIP/2.0"), "{text}");
+    assert!(text.contains("nonce=\"still-useful\""), "{text}");
+    assert!(
+        !text.contains(secret),
+        "HEP payload leaked {secret}: {text}"
+    );
+    assert!(text.contains("response=\"REDACTED\""), "{text}");
+
+    until(
+        Duration::from_secs(10),
+        "HEP success was never counted",
+        async || endpoint.counters().capture.hep_records == 1,
+    )
+    .await;
+    assert_eq!(endpoint.counters().capture.hep_dropped, 0);
+    endpoint.shutdown().await;
+    let _ = std::fs::remove_file(path);
+}
+
+/// A network export cannot inherit the lab-only redaction opt-out. Refuse the endpoint before it
+/// binds rather than let one builder call turn a collector into a credential leak.
+#[tokio::test]
+async fn hep_export_cannot_disable_redaction() {
+    let path = capture_path("hep-without-redaction");
+    let collector = "127.0.0.1:9060".parse().expect("collector address");
+    let mut config = Config::new("127.0.0.1:0".parse().expect("valid"));
+    config.capture = Some(
+        CaptureConfig::new(&path)
+            .with_hep(HepConfig::new(collector, 1))
+            .without_redaction(),
+    );
+    let error = bind(config).await.expect_err("unsafe export is refused");
+    assert!(error.to_string().contains("capture.redact"), "{error}");
+    assert!(!path.exists(), "validation precedes capture file creation");
+}
+
+/// Return the type-15 payload from the deliberately small HEP3 subset in the observability spec.
+fn hep_payload(datagram: &[u8]) -> &[u8] {
+    assert_eq!(datagram.get(..4), Some(b"HEP3".as_slice()));
+    let declared = u16::from_be_bytes(
+        datagram
+            .get(4..6)
+            .expect("HEP length")
+            .try_into()
+            .expect("two bytes"),
+    );
+    assert_eq!(usize::from(declared), datagram.len());
+    let mut at = 6usize;
+    while let Some(header) = datagram.get(at..at + 6) {
+        let kind = u16::from_be_bytes(header[2..4].try_into().expect("type"));
+        let len = usize::from(u16::from_be_bytes(header[4..6].try_into().expect("length")));
+        assert!(len >= 6, "a HEP chunk includes its header");
+        let value = datagram.get(at + 6..at + len).expect("complete chunk");
+        if kind == 0x000f {
+            return value;
+        }
+        at += len;
+    }
+    panic!("HEP datagram has no SIP payload chunk")
 }

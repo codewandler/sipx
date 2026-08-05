@@ -19,7 +19,7 @@ selects a call path that provides both.
 | SDES-keyed SRTP | Yes. A CLI call over TLS or WSS selects the call layer's protected-signalling path | Yes. `sipx-call` negotiates SDES-keyed SRTP when the selected signalling transport is secure |
 | DTLS-SRTP | Yes, with `--media-security dtls-srtp` when the off-by-default `dtls` feature is enabled | Yes, through explicit `sipx-call::Keying::DtlsSrtp` policy with the same feature |
 | ICE | Host candidates or a configured STUN server with `--ice`; disabled by default | Host and server-reflexive candidates through `sipx-call::IcePolicy`; no TURN relay |
-| Signalling capture | `--capture <FILE>` writes a redacted pcapng file | `sipx-transport::CaptureConfig` enables capture; redaction is on by default |
+| Signalling capture | `--capture <FILE>` writes a redacted pcapng file | `sipx-transport::CaptureConfig` enables capture; redaction is on by default, and the same redacted records can be exported to a HEP3 collector |
 
 For a protected command-line call, select TLS or WSS and provide any private trust root explicitly;
 the result reports both requested and negotiated transport. Media remains SDES-keyed SRTP until the
@@ -91,6 +91,11 @@ Redaction does not anonymize a call. Names, SIP addresses, network addresses, ti
 other call metadata remain. Treat every capture as sensitive data: store it with restricted
 permissions, share it only with intended recipients, and delete it when the investigation ends.
 The library can disable capture redaction for tightly controlled diagnostics; the CLI deliberately
-does not expose that option.
+does not expose that option. HEP3 network export cannot disable redaction: an endpoint combining
+the collector with the lab-only opt-out is refused before binding. HEP transport is best-effort UDP,
+so use a trusted network path and collector access controls; redacted signalling still identifies
+participants and addresses.
 
 For operational symptoms and capture commands, see [Troubleshooting](../guides/troubleshooting.md).
+Library applications can configure the collector and application-owned RTCP quality hook through
+[Export signalling and call quality](../guides/export-observability.md).

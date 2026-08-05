@@ -15,7 +15,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use sipx_call::{DialOptions, IcePolicy, MediaPolicy, answer_with_policy, dial};
-use sipx_media::Interrupt;
+use sipx_media::{Interrupt, RtcpQualityHook};
 use sipx_sip::{Host, HostName, Uri};
 use sipx_transport::{Config, Target, bind};
 use tokio::net::UdpSocket;
@@ -243,6 +243,10 @@ async fn a_reoffer_that_changes_both_ufrag_and_pwd_restarts_ice_without_dropping
     )
     .await
     .expect("the ICE call connects");
+    let (quality_seen, mut quality_events) = tokio::sync::watch::channel(0u64);
+    caller.set_rtcp_quality_hook(Some(RtcpQualityHook::new(move |_| {
+        quality_seen.send_modify(|count| *count = count.saturating_add(1));
+    })));
     let (mut callee, mut callee_incoming, invite) = answering.await.expect("answer task");
     let before = credentials_in(&invite);
 
@@ -259,6 +263,18 @@ async fn a_reoffer_that_changes_both_ufrag_and_pwd_restarts_ice_without_dropping
     let ((reoffer, answered), restarted) = tokio::join!(serving, caller.restart_ice());
     answered.expect("the callee answers the restart");
     restarted.expect("the restart is accepted");
+    assert!(
+        caller.rtcp_quality_hook().is_some(),
+        "an ICE restart must retain the logical call's RTCP quality hook"
+    );
+    // Ignore any report that raced the restart itself, then require one produced afterwards. This
+    // proves the hook still receives through the restarted ICE path rather than only remaining in
+    // the public slot.
+    quality_events.borrow_and_update();
+    tokio::time::timeout(DELIVERY_BOUND, quality_events.changed())
+        .await
+        .expect("a post-restart RTCP report is a bounded wait")
+        .expect("the quality callback remains owned by the call");
 
     let after = credentials_in(&reoffer);
     assert_ne!(before.0, after.0, "ice-ufrag changed:\n{reoffer}");

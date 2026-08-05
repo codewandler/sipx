@@ -7,6 +7,8 @@ conferencing.
 
 The asynchronous media driver: paced RTP sending, buffered receiving, RTCP, symmetric RTP, secure
 media contexts, ICE, and workers that bridge or mix sessions an application owns.
+Parsed peer RTCP reports can be delivered through an application-owned quality hook; sipx does not
+choose or bundle a metrics backend.
 
 ## Stability
 
@@ -22,4 +24,6 @@ multi-party workers are lower-level mechanisms until the call layer selects or o
 ## See also
 
 - [`docs/designs/media.md`](../../docs/designs/media.md) — ownership, timing, and wait rules.
+- [`docs/specs/observability-export.md`](../../docs/specs/observability-export.md) — per-stream RTCP
+  quality samples and renegotiation ownership.
 - [`sipx-rtp`](../sipx-rtp/README.md) — the sans-I/O packet layer below sessions.

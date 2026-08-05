@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use sipx_media::{Codec, Config, MediaPort, MediaSession};
+use sipx_media::{Codec, Config, MediaPort, MediaSession, RtcpQualityHook};
 use sipx_rtp::Packet;
 use sipx_rtp::rtcp::{ReportBlock, Rtcp};
 use tokio::net::UdpSocket;
@@ -166,6 +166,91 @@ async fn the_round_trip_is_absent_until_a_report_comes_back() {
         quality.round_trip.is_none(),
         "nothing has been heard back from a peer that does not do RTCP: {quality:?}"
     );
+    session.stop();
+}
+
+/// OE-Q-1. The hook exposes the peer's report block in application units rather than asking an
+/// application to reinterpret 256ths, RTP timestamp units and the truncated NTP arithmetic.
+#[tokio::test]
+async fn a_receiver_report_emits_one_per_stream_quality_sample() {
+    let (session, peer, session_addr) = session_and_peer().await;
+    let local_ssrc = session.local_ssrc();
+    let (samples, mut received) = tokio::sync::mpsc::channel(2);
+    session.set_rtcp_quality_hook(Some(RtcpQualityHook::new(move |sample| {
+        let _ = samples.try_send(sample);
+    })));
+
+    let now = sipx_rtp::quality::middle_32(sipx_rtp::quality::ntp_now());
+    let block = ReportBlock {
+        ssrc: local_ssrc,
+        fraction_lost: 64,
+        cumulative_lost: 7,
+        extended_highest_sequence: 123,
+        jitter: 800,
+        last_sender_report: now.wrapping_sub(32_768),
+        delay_since_last_sender_report: 16_384,
+    };
+    let report = Rtcp::Receiver(sipx_rtp::ReceiverReport {
+        ssrc: 0x5566_7788,
+        reports: vec![block],
+    });
+    let control: SocketAddr = SocketAddr::new(session_addr.ip(), session_addr.port() + 1);
+    peer.send_to(&Rtcp::encode_compound(&[report]), control)
+        .await
+        .expect("report reaches control port");
+
+    let sample = tokio::time::timeout(Duration::from_secs(10), received.recv())
+        .await
+        .expect("callback is a bounded wait")
+        .expect("callback remains installed");
+    assert_eq!(sample.reporter_ssrc, 0x5566_7788);
+    assert_eq!(sample.stream_ssrc, local_ssrc);
+    assert!((sample.loss - 0.25).abs() < f64::EPSILON, "{sample:?}");
+    assert_eq!(sample.cumulative_lost, 7);
+    assert_eq!(sample.jitter, Duration::from_millis(100));
+    let round_trip = sample.round_trip.expect("valid LSR and DLSR");
+    assert!(
+        (Duration::from_millis(200)..Duration::from_millis(400)).contains(&round_trip),
+        "quarter-second round trip plus bounded scheduling delay: {sample:?}"
+    );
+    session.stop();
+}
+
+/// OE-Q-3. Application code is not trusted to preserve the media worker. Catching the panic is
+/// what lets the second report reach the same callback slot rather than dying with the first.
+#[tokio::test]
+async fn a_panicking_quality_callback_does_not_stop_rtcp_processing() {
+    let (session, peer, session_addr) = session_and_peer().await;
+    let local_ssrc = session.local_ssrc();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = std::sync::Arc::clone(&calls);
+    session.set_rtcp_quality_hook(Some(RtcpQualityHook::new(move |_| {
+        observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        panic!("application callback failure");
+    })));
+
+    let report = Rtcp::Receiver(sipx_rtp::ReceiverReport {
+        ssrc: 0x5566_7788,
+        reports: vec![ReportBlock {
+            ssrc: local_ssrc,
+            ..ReportBlock::default()
+        }],
+    });
+    let control = SocketAddr::new(session_addr.ip(), session_addr.port() + 1);
+    for _ in 0..2 {
+        peer.send_to(
+            &Rtcp::encode_compound(std::slice::from_ref(&report)),
+            control,
+        )
+        .await
+        .expect("report reaches control port");
+    }
+    until(
+        ARRIVAL_BOUND,
+        "the RTCP worker stopped after the callback panic",
+        async || calls.load(std::sync::atomic::Ordering::Relaxed) == 2,
+    )
+    .await;
     session.stop();
 }
 

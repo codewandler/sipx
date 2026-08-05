@@ -20,6 +20,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   causal route/transaction completion, and report plus log any work explicitly terminated at the
   deadline. The finite CLI responder uses the same barrier before its existing owned-task cleanup.
 
+- **Applications can export redacted signalling and peer-reported media quality without adopting a
+  bundled metrics backend.** The existing bounded capture writer can emit its redacted records as
+  non-blocking HEP3 UDP datagrams with separate success/drop counters; collector failure leaves
+  calls and local pcapng capture running. RTCP sender/receiver report blocks reach an
+  application-owned per-stream quality callback in duration/fraction units, and the hook remains
+  attached across re-INVITEs, media replacement and ICE restart.
+
 ### Changed
 
 - **Transport MTU configuration now names the path property rather than a precomputed cutoff.**

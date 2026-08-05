@@ -224,6 +224,16 @@ impl Config {
         if self.capacity == 0 {
             return Err(nonzero("capacity"));
         }
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|capture| capture.hep.is_some() && !capture.redact)
+        {
+            return Err(Error::InvalidConfig {
+                field: "capture.redact",
+                reason: "must be enabled when HEP export leaves the process",
+            });
+        }
         if self.capacity > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(Error::InvalidConfig {
                 field: "capacity",

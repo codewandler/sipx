@@ -564,6 +564,64 @@ pub struct Encoded {
     pub payload: Bytes,
 }
 
+/// One peer RTCP report block describing this session's outbound RTP stream.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RtcpQualitySample {
+    /// SSRC of the peer that sent the sender or receiver report.
+    pub reporter_ssrc: u32,
+    /// Local stream SSRC named by the report block.
+    pub stream_ssrc: u32,
+    /// Loss in this report interval, between zero and one.
+    pub loss: f64,
+    /// Packets lost since the peer began observing the stream.
+    pub cumulative_lost: i32,
+    /// Peer-observed interarrival jitter in time rather than RTP timestamp units.
+    pub jitter: Duration,
+    /// Round-trip time derived from `LSR` and `DLSR`, when the report carries a usable echo.
+    pub round_trip: Option<Duration>,
+}
+
+/// Application-owned handling for peer RTCP quality reports.
+///
+/// The callback runs on the RTCP receive worker after parsing and outside sipx locks. It must
+/// return promptly; applications that do blocking export put a bounded queue behind it. sipx
+/// catches a callback panic so application code cannot terminate the media worker.
+#[derive(Clone)]
+pub struct RtcpQualityHook(Arc<dyn Fn(RtcpQualitySample) + Send + Sync + 'static>);
+
+impl RtcpQualityHook {
+    /// Wrap an application callback.
+    pub fn new(callback: impl Fn(RtcpQualitySample) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(callback))
+    }
+
+    fn observe(&self, sample: RtcpQualitySample) {
+        (self.0)(sample);
+    }
+}
+
+impl std::fmt::Debug for RtcpQualityHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RtcpQualityHook { .. }")
+    }
+}
+
+type QualityHookSlot = Arc<std::sync::RwLock<Option<RtcpQualityHook>>>;
+
+fn current_quality_hook(slot: &QualityHookSlot) -> Option<RtcpQualityHook> {
+    match slot.read() {
+        Ok(held) => held.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+fn replace_quality_hook(slot: &QualityHookSlot, hook: Option<RtcpQualityHook>) {
+    match slot.write() {
+        Ok(mut held) => *held = hook,
+        Err(poisoned) => *poisoned.into_inner() = hook,
+    }
+}
+
 /// A running media session.
 #[derive(Debug)]
 pub struct MediaSession {
@@ -601,6 +659,10 @@ pub struct MediaSession {
     samples_per_packet: usize,
     packet_duration: Duration,
     clock_rate: u32,
+    /// The local SSRC carried by both RTP and RTCP for this generation.
+    ssrc: u32,
+    /// Application observation follows the logical session across worker replacement.
+    quality_hook: QualityHookSlot,
     sent: Arc<AtomicU64>,
     received: Arc<AtomicU64>,
     /// Losses owned by this session, including candidate gathering on the port it consumed.
@@ -653,6 +715,14 @@ struct Feedback {
     /// Echoed back in our own reports so the far end can measure the round trip too.
     last_sender_report: u32,
     received_at: Option<tokio::time::Instant>,
+}
+
+/// Application-visible state updated by either RTCP receive shape.
+#[derive(Clone)]
+struct RtcpObservation {
+    feedback: Arc<Mutex<Feedback>>,
+    quality_hook: QualityHookSlot,
+    clock_rate: u32,
 }
 
 /// A stop signal: for a session's tasks, and — the same shape, one scope down — for one
@@ -713,6 +783,7 @@ struct Shared {
     muted: Arc<AtomicBool>,
     /// A counter of full keypresses received, for an `Interrupt::OnDigit` playback to watch.
     keypresses: Arc<watch::Sender<u64>>,
+    quality_hook: QualityHookSlot,
 }
 
 impl Shared {
@@ -737,6 +808,15 @@ impl Shared {
             relay: Arc::new(AtomicBool::new(false)),
             muted: Arc::new(AtomicBool::new(false)),
             keypresses: Arc::new(watch::Sender::new(0u64)),
+            quality_hook: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    fn rtcp_observation(&self, clock_rate: u32) -> RtcpObservation {
+        RtcpObservation {
+            feedback: Arc::clone(&self.feedback),
+            quality_hook: Arc::clone(&self.quality_hook),
+            clock_rate,
         }
     }
 }
@@ -1372,7 +1452,7 @@ impl MediaSession {
                 config,
                 received: Arc::clone(&shared.received),
                 stats: Arc::clone(&shared.stats),
-                feedback: Arc::clone(&shared.feedback),
+                rtcp_observation: shared.rtcp_observation(clock_rate),
                 ssrc: shared.ssrc,
                 symmetric: ice.is_none(),
                 ice: ice.clone(),
@@ -1393,10 +1473,10 @@ impl MediaSession {
             interval: rtcp_interval,
             mode: rtcp_mode,
             ssrc: shared.ssrc,
-            cname: shared.cname,
+            cname: shared.cname.clone(),
             stats: Arc::clone(&shared.stats),
-            outbound: shared.outbound,
-            feedback: Arc::clone(&shared.feedback),
+            outbound: Arc::clone(&shared.outbound),
+            rtcp_observation: shared.rtcp_observation(clock_rate),
             srtp: srtp_keys,
             ice: ice.clone(),
             stop: Arc::clone(&shared.stop),
@@ -1432,6 +1512,8 @@ impl MediaSession {
             samples_per_packet,
             packet_duration,
             clock_rate,
+            ssrc: shared.ssrc,
+            quality_hook: shared.quality_hook,
             sent: shared.sent,
             received: shared.received,
             discards: shared.discards,
@@ -1525,7 +1607,7 @@ impl MediaSession {
                     config,
                     received: Arc::clone(&shared.received),
                     stats: Arc::clone(&shared.stats),
-                    feedback: Arc::clone(&shared.feedback),
+                    rtcp_observation: shared.rtcp_observation(clock_rate),
                     ssrc: shared.ssrc,
                     symmetric: false,
                     ice: ice.clone(),
@@ -1546,10 +1628,10 @@ impl MediaSession {
             interval: rtcp_interval,
             mode: sipx_sdp::RtcpMode::Mux,
             ssrc: shared.ssrc,
-            cname: shared.cname,
+            cname: shared.cname.clone(),
             stats: Arc::clone(&shared.stats),
-            outbound: shared.outbound,
-            feedback: Arc::clone(&shared.feedback),
+            outbound: Arc::clone(&shared.outbound),
+            rtcp_observation: shared.rtcp_observation(clock_rate),
             srtp: srtp_keys,
             ice: ice.clone(),
             stop: Arc::clone(&shared.stop),
@@ -1589,6 +1671,8 @@ impl MediaSession {
             samples_per_packet,
             packet_duration,
             clock_rate,
+            ssrc: shared.ssrc,
+            quality_hook: shared.quality_hook,
             sent: shared.sent,
             received: shared.received,
             discards: shared.discards,
@@ -1602,6 +1686,26 @@ impl MediaSession {
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// This session generation's local RTP synchronisation source.
+    #[must_use]
+    pub fn local_ssrc(&self) -> u32 {
+        self.ssrc
+    }
+
+    /// Install or clear the application callback for peer RTCP quality reports.
+    ///
+    /// The slot is shared by this session's RTP/RTCP workers. Registering a callback does not
+    /// enable RTCP when [`Config::rtcp_interval`] is `None`.
+    pub fn set_rtcp_quality_hook(&self, hook: Option<RtcpQualityHook>) {
+        replace_quality_hook(&self.quality_hook, hook);
+    }
+
+    /// The callback currently installed for peer RTCP quality reports.
+    #[must_use]
+    pub fn rtcp_quality_hook(&self) -> Option<RtcpQualityHook> {
+        current_quality_hook(&self.quality_hook)
     }
 
     /// Whether ICE is driving this stream's path.
@@ -1677,6 +1781,7 @@ impl MediaSession {
         self.reap_retired().await;
         let muted = self.is_muted();
         let relay = self.relay.load(Ordering::SeqCst);
+        let quality_hook = self.rtcp_quality_hook();
         let socket = Arc::clone(&self.socket);
         let rtcp = self.rtcp_socket.clone();
         let local_addr = self.local_addr;
@@ -1693,6 +1798,7 @@ impl MediaSession {
         );
         replacement.set_muted(muted);
         replacement.set_relay(relay);
+        replacement.set_rtcp_quality_hook(quality_hook);
         let previous = std::mem::replace(self, replacement);
         self.retired.get_mut().push(previous);
         self.reap_retired().await;
@@ -2901,7 +3007,7 @@ struct Inbound {
     config: Config,
     received: Arc<AtomicU64>,
     stats: Arc<Mutex<StreamStats>>,
-    feedback: Arc<Mutex<Feedback>>,
+    rtcp_observation: RtcpObservation,
     ssrc: u32,
     /// Whether the first packet's source replaces the advertised address (symmetric RTP).
     ///
@@ -2974,7 +3080,7 @@ struct Control {
     cname: String,
     stats: Arc<Mutex<StreamStats>>,
     outbound: Arc<Outbound>,
-    feedback: Arc<Mutex<Feedback>>,
+    rtcp_observation: RtcpObservation,
     srtp: Option<SrtpKeys>,
     ice: Option<ice::driver::Handle>,
     stop: Arc<Stop>,
@@ -3002,7 +3108,7 @@ fn spawn_control(control: Control) -> Vec<tokio::task::JoinHandle<()>> {
             control.cname,
             control.stats,
             control.outbound,
-            Arc::clone(&control.feedback),
+            Arc::clone(&control.rtcp_observation.feedback),
             control.srtp.clone(),
             Arc::clone(&control.stop),
         );
@@ -3022,7 +3128,7 @@ fn spawn_control(control: Control) -> Vec<tokio::task::JoinHandle<()>> {
         let receiver = rtcp_receive_loop(
             port,
             control.ssrc,
-            control.feedback,
+            control.rtcp_observation,
             control.srtp,
             control.ice,
             control.stop,
@@ -3232,7 +3338,7 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
         config,
         received,
         stats,
-        feedback,
+        rtcp_observation,
         ssrc,
         symmetric,
         ice,
@@ -3271,7 +3377,7 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
                 process_rtcp(
                     &bytes,
                     ssrc,
-                    &feedback,
+                    &rtcp_observation,
                     &mut unprotect_rtcp,
                     &discards,
                     browser_ingress.as_ref(),
@@ -3558,7 +3664,7 @@ async fn rtcp_loop(
 async fn rtcp_receive_loop(
     socket: Arc<UdpSocket>,
     ssrc: u32,
-    feedback: Arc<Mutex<Feedback>>,
+    rtcp_observation: RtcpObservation,
     srtp: Option<SrtpKeys>,
     ice: Option<crate::ice::driver::Handle>,
     stop: Arc<Stop>,
@@ -3585,7 +3691,15 @@ async fn rtcp_receive_loop(
             continue;
         };
 
-        process_rtcp(control, ssrc, &feedback, &mut unprotect, &discards, None).await;
+        process_rtcp(
+            control,
+            ssrc,
+            &rtcp_observation,
+            &mut unprotect,
+            &discards,
+            None,
+        )
+        .await;
     }
 }
 
@@ -3596,7 +3710,7 @@ async fn rtcp_receive_loop(
 async fn process_rtcp(
     control: &[u8],
     ssrc: u32,
-    feedback: &Arc<Mutex<Feedback>>,
+    rtcp_observation: &RtcpObservation,
     unprotect: &mut Option<sipx_rtp::SrtpContext>,
     discards: &DiscardMeters,
     browser_ingress: Option<&Arc<std::sync::Mutex<crate::browser::ComponentIngress>>>,
@@ -3649,14 +3763,28 @@ async fn process_rtcp(
         match packet {
             Rtcp::Sender(report) => {
                 {
-                    let mut held = feedback.lock().await;
+                    let mut held = rtcp_observation.feedback.lock().await;
                     held.last_sender_report = sipx_rtp::quality::middle_32(report.ntp_timestamp);
                     held.received_at = Some(arrival);
                 }
-                note_round_trip(feedback_of(&report.reports, ssrc), feedback).await;
+                note_quality(
+                    report.ssrc,
+                    feedback_of(&report.reports, ssrc),
+                    &rtcp_observation.feedback,
+                    &rtcp_observation.quality_hook,
+                    rtcp_observation.clock_rate,
+                )
+                .await;
             }
             Rtcp::Receiver(report) => {
-                note_round_trip(feedback_of(&report.reports, ssrc), feedback).await;
+                note_quality(
+                    report.ssrc,
+                    feedback_of(&report.reports, ssrc),
+                    &rtcp_observation.feedback,
+                    &rtcp_observation.quality_hook,
+                    rtcp_observation.clock_rate,
+                )
+                .await;
             }
             Rtcp::Sdes(_) | Rtcp::Other { .. } => {}
         }
@@ -3671,17 +3799,47 @@ fn feedback_of(blocks: &[sipx_rtp::ReportBlock], ssrc: u32) -> Option<sipx_rtp::
     blocks.iter().find(|block| block.ssrc == ssrc).copied()
 }
 
-async fn note_round_trip(block: Option<sipx_rtp::ReportBlock>, feedback: &Arc<Mutex<Feedback>>) {
+async fn note_quality(
+    reporter_ssrc: u32,
+    block: Option<sipx_rtp::ReportBlock>,
+    feedback: &Arc<Mutex<Feedback>>,
+    quality_hook: &QualityHookSlot,
+    clock_rate: u32,
+) {
     let Some(block) = block else {
         return;
     };
     let now = sipx_rtp::quality::middle_32(sipx_rtp::quality::ntp_now());
-    if let Some(trip) = sipx_rtp::quality::round_trip(
+    let round_trip = sipx_rtp::quality::round_trip(
         now,
         block.last_sender_report,
         block.delay_since_last_sender_report,
-    ) {
+    );
+    if let Some(trip) = round_trip {
         feedback.lock().await.round_trip = Some(trip);
+    }
+    let Some(hook) = current_quality_hook(quality_hook) else {
+        return;
+    };
+    let jitter = if clock_rate == 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_secs_f64(f64::from(block.jitter) / f64::from(clock_rate))
+    };
+    let sample = RtcpQualitySample {
+        reporter_ssrc,
+        stream_ssrc: block.ssrc,
+        loss: f64::from(block.fraction_lost) / 256.0,
+        cumulative_lost: block.cumulative_lost,
+        jitter,
+        round_trip,
+    };
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.observe(sample))).is_err() {
+        tracing::warn!(
+            reporter_ssrc,
+            stream_ssrc = block.ssrc,
+            "RTCP quality callback panicked; media reporting continues"
+        );
     }
 }
 

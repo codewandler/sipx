@@ -34,6 +34,7 @@ const sidebars = {
         'guides/answer-a-call',
         'guides/persist-a-dialog',
         'guides/register',
+        'guides/export-observability',
       ],
     },
     {
