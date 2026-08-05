@@ -26,17 +26,32 @@
 //! the protocol layer, sends its own on a cadence, and a peer silent past the grace surfaces
 //! as [`WssError::Stalled`] rather than a hang — the session-binding discipline
 //! (`docs/specs/session-binding.md`), client side.
+//!
+//! That liveness rule is **strict about Pongs, deliberately**, and a caller should know what it
+//! buys: only a Pong stands a probe down, so a peer streaming data at full rate while dropping
+//! Pongs is declared [`Stalled`](WssError::Stalled) mid-burst. That is the same reading
+//! `docs/specs/session-binding.md` §"Liveness" states and `sipx-transport`'s server side already
+//! applies — a path that has stopped carrying control frames has stopped being a path this side
+//! can steer, whatever is still arriving on it — and it is inherited knowingly rather than by
+//! accident.
+//!
+//! **Credentials never travel in the URL.** A `wss://user:secret@host/` URL is refused
+//! ([`WssError::Url`]): RFC 3986 §3.2.1 deprecates userinfo for exactly this reason, no `Host`
+//! header may carry it (RFC 9110 §7.2), and a URL is the one field an application logs without
+//! thinking. Authenticate with [`WssRequest::header`], whose values this module keeps out of
+//! `Debug` on purpose.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::net::IpAddr;
 
 use bytes::Bytes;
-use futures_util::{SinkExt as _, StreamExt as _};
+use futures_util::{FutureExt as _, SinkExt as _, StreamExt as _};
 use sipx_transport::tls::{ClientTls, TlsError};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, Instant};
-use tokio_tungstenite::tungstenite::error::CapacityError;
+use tokio_tungstenite::tungstenite::error::{CapacityError, ProtocolError, SubProtocolError};
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue, Uri};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{Error as FrameError, Message};
@@ -64,7 +79,11 @@ pub const DEFAULT_PING_GRACE: Duration = Duration::from_secs(10);
 pub enum WssError {
     /// The URL is not one this client can dial.
     Url {
-        /// What the caller asked for.
+        /// What the caller asked for, with any RFC 3986 userinfo replaced by `***`.
+        ///
+        /// Redacted rather than echoed: one of the ways a URL is unusable here is that it
+        /// carries credentials, and an error naming them would put them in the caller's log —
+        /// which is the leak the refusal exists to prevent.
         url: String,
         /// What was wrong with it.
         detail: String,
@@ -100,10 +119,13 @@ pub enum WssError {
         /// What went wrong.
         detail: String,
     },
-    /// The peer upgraded without agreeing to the subprotocol the caller named.
+    /// The peer did not agree to the subprotocol the caller named.
     ///
     /// An upgrade that names nothing back is not an agreement (RFC 6455 §4.1), and taking the
-    /// connection on that basis would be a guess about what the frames mean.
+    /// connection on that basis would be a guess about what the frames mean. The check itself
+    /// is the handshake's — it refuses the response before this module sees it — and this
+    /// variant is that refusal given the workspace's own name, so a caller can tell "we do not
+    /// speak the same protocol" from "the upgrade broke" without reading an error string.
     Subprotocol {
         /// Who we were talking to.
         peer: String,
@@ -235,9 +257,11 @@ impl fmt::Debug for WssRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Header names are shape; header values are secrets — `Authorization` carries a bearer
         // token, and a `Debug` that printed it would put it in whatever log the caller writes.
+        // The URL is the same hazard by another route: `connect` refuses userinfo, but a caller
+        // may print the request without ever dialing, so the redaction has to live here too.
         formatter
             .debug_struct("WssRequest")
-            .field("url", &self.url)
+            .field("url", &redacted(&self.url))
             .field(
                 "headers",
                 &self
@@ -352,24 +376,27 @@ impl WssClient {
         let bounds = WebSocketConfig::default()
             .max_message_size(Some(self.config.max_message_bytes))
             .max_frame_size(Some(self.config.max_message_bytes));
-        let (socket, response) = client_async_with_config(upgrade, io, Some(bounds))
+        let (socket, _response) = client_async_with_config(upgrade, io, Some(bounds))
             .await
-            .map_err(|error| WssError::Handshake {
-                peer: target.authority.clone(),
-                detail: error.to_string(),
+            .map_err(|error| {
+                // RFC 6455 §4.1 step 6 is the handshake's own: it refuses a response that
+                // echoes no subprotocol, or one nobody offered, before this module is handed
+                // anything. Re-typed rather than re-checked, because a second check here could
+                // only ever disagree with the one that already ran — and a disagreement in
+                // favour of *accepting* would be this module deciding what frames mean.
+                match error {
+                    FrameError::Protocol(ProtocolError::SecWebSocketSubProtocolError(
+                        SubProtocolError::NoSubProtocol | SubProtocolError::InvalidSubProtocol,
+                    )) => WssError::Subprotocol {
+                        peer: target.authority.clone(),
+                        offered: request.subprotocol.clone().unwrap_or_default(),
+                    },
+                    other => WssError::Handshake {
+                        peer: target.authority.clone(),
+                        detail: other.to_string(),
+                    },
+                }
             })?;
-
-        // The handshake already refuses a response that does not echo a subprotocol we asked
-        // for; this stays because that is a *dependency's* behaviour, and a guarantee sipx
-        // makes should not quietly become one sipx hopes someone else still makes.
-        if let Some(offered) = &request.subprotocol
-            && !agrees(response.headers(), offered)
-        {
-            return Err(WssError::Subprotocol {
-                peer: target.authority.clone(),
-                offered: offered.clone(),
-            });
-        }
 
         Ok(WssConnection {
             socket,
@@ -471,10 +498,21 @@ impl WssConnection {
                 // bound on failure, never a stand-in for the peer's next frame.
                 () = tokio::time::sleep_until(self.probe) => {
                     if self.awaiting_pong {
-                        return Err(WssError::Stalled {
-                            peer: self.peer.clone(),
-                            bound: self.ping_grace,
-                        });
+                        match self.answered_while_away()? {
+                            Buffered::Pong => {
+                                self.awaiting_pong = false;
+                                self.probe = Instant::now() + self.ping_interval;
+                                continue;
+                            }
+                            Buffered::Message(message) => return Ok(Some(message)),
+                            Buffered::Closed => return Ok(None),
+                            Buffered::Nothing => {
+                                return Err(WssError::Stalled {
+                                    peer: self.peer.clone(),
+                                    bound: self.ping_grace,
+                                });
+                            }
+                        }
                     }
                     self.socket
                         .send(Message::Ping(Bytes::new()))
@@ -492,6 +530,43 @@ impl WssConnection {
         match self.socket.close(None).await {
             Ok(()) | Err(FrameError::ConnectionClosed | FrameError::AlreadyClosed) => Ok(()),
             Err(error) => Err(self.fault(error)),
+        }
+    }
+
+    /// What the socket already holds, without waiting for anything to arrive.
+    ///
+    /// A grace that expires means only that this side has not *read* a Pong, and between calls
+    /// to [`next`](Self::next) nobody is reading: a Pong that arrived while the caller was away
+    /// is sitting in the socket, and on re-entry both `select!` branches are ready at once — an
+    /// unbiased choice would announce [`Stalled`](WssError::Stalled) with the answer in hand.
+    /// So the verdict consults what is buffered first. `sipx-transport`'s server side needs no
+    /// equivalent because its loop is always parked on the socket; a caller-driven `next` is
+    /// away exactly as often as its caller is busy.
+    fn answered_while_away(&mut self) -> Result<Buffered, WssError> {
+        loop {
+            // Polls once and takes only what is ready. Nothing here waits, so a peer that has
+            // genuinely stopped still reaches its verdict on this pass rather than the next.
+            let Some(frame) = self.socket.next().now_or_never() else {
+                return Ok(Buffered::Nothing);
+            };
+            match frame {
+                Some(Ok(Message::Pong(_))) => return Ok(Buffered::Pong),
+                // A data message is not liveness — only a Pong stands a probe down — so this
+                // hands the caller its message with the probe still outstanding and the clock
+                // still expired. The verdict is deferred by the frames actually buffered, never
+                // cancelled by them, and nothing the peer sent is dropped to reach it.
+                Some(Ok(Message::Text(text))) => {
+                    return Ok(Buffered::Message(WssMessage::Text(
+                        text.as_str().to_owned(),
+                    )));
+                }
+                Some(Ok(Message::Binary(data))) => {
+                    return Ok(Buffered::Message(WssMessage::Binary(data)));
+                }
+                Some(Ok(Message::Ping(_) | Message::Frame(_))) => {}
+                Some(Ok(Message::Close(_))) | None => return Ok(Buffered::Closed),
+                Some(Err(error)) => return Err(self.fault(error)),
+            }
         }
     }
 
@@ -513,6 +588,18 @@ impl WssConnection {
     }
 }
 
+/// What a socket already held when a liveness grace expired.
+enum Buffered {
+    /// Nothing had arrived: the peer really has gone quiet.
+    Nothing,
+    /// The peer answered the probe while nobody was reading.
+    Pong,
+    /// A message for the caller, taken from the buffer rather than dropped.
+    Message(WssMessage),
+    /// The peer closed.
+    Closed,
+}
+
 /// The stream under the WebSocket: loopback cleartext or the TLS policy's verified stream.
 ///
 /// A trait object rather than an enum, deliberately: naming the TLS stream's concrete type
@@ -520,6 +607,29 @@ impl WssConnection {
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Io for S {}
+
+/// One URL with any RFC 3986 §3.2.1 userinfo replaced by `***`, safe to print.
+///
+/// Read off the raw string rather than a parsed URL on purpose: a URL too malformed to parse
+/// still carries whatever secret was written into it, and that is exactly the URL an error
+/// message wants to quote back.
+fn redacted(url: &str) -> Cow<'_, str> {
+    let Some(mark) = url.find("://") else {
+        return Cow::Borrowed(url);
+    };
+    let start = mark + "://".len();
+    // The authority ends where the path, query or fragment begins (RFC 3986 §3.2); anything
+    // after that is not credentials however many `@` it contains.
+    let end = url[start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |offset| start + offset);
+    // The *last* `@` in the authority: a userinfo may percent-encode one, and the host is what
+    // follows the final separator.
+    match url[start..end].rfind('@') {
+        Some(at) => Cow::Owned(format!("{}***@{}", &url[..start], &url[start + at + 1..])),
+        None => Cow::Borrowed(url),
+    }
+}
 
 /// Where one URL says to go, in the pieces the dial needs.
 #[derive(Debug)]
@@ -537,7 +647,7 @@ struct Target {
 impl Target {
     fn of(url: &str) -> Result<Self, WssError> {
         let refused = |detail: &str| WssError::Url {
-            url: url.to_owned(),
+            url: redacted(url).into_owned(),
             detail: detail.to_owned(),
         };
         let uri: Uri = url.parse().map_err(|_| refused("not a parseable URL"))?;
@@ -551,6 +661,16 @@ impl Target {
         if host.is_empty() {
             return Err(refused("no host to dial"));
         }
+        // Credentials in the URL are refused rather than stripped. Stripping would dial on
+        // unauthenticated and leave the caller reading the peer's 401 for the reason; refusing
+        // says it here. RFC 3986 §3.2.1 deprecates the form, and there is nowhere for it to go
+        // anyway — RFC 9110 §7.2's `Host` admits no userinfo.
+        if authority.as_str().contains('@') {
+            return Err(refused(
+                "it carries userinfo (RFC 3986 §3.2.1); authenticate with a request header, \
+                 which this client keeps out of Debug, rather than in the URL",
+            ));
+        }
         // `Authority::host` keeps an IPv6 literal's brackets; the address inside them is what
         // connects, verifies, and answers the loopback question.
         let bare = host
@@ -560,6 +680,14 @@ impl Target {
         let port = authority
             .port_u16()
             .unwrap_or(if secure { 443 } else { 80 });
+        // Rebuilt from the parsed host and any explicit port rather than copied off the URL:
+        // `Authority::as_str` includes userinfo, and this string becomes the `Host` header and
+        // the peer named in every error. Built this way there is no byte to leak even if the
+        // refusal above is one day relaxed.
+        let travels = match authority.port_u16() {
+            Some(explicit) => format!("{host}:{explicit}"),
+            None => host.to_owned(),
+        };
         let resource = uri
             .path_and_query()
             .map_or("/", |path| path.as_str())
@@ -567,7 +695,7 @@ impl Target {
         Ok(Self {
             secure,
             host: bare.to_owned(),
-            authority: authority.as_str().to_owned(),
+            authority: travels,
             port,
             resource,
         })
@@ -618,16 +746,6 @@ fn upgrade_request(
         peer: target.authority.clone(),
         detail: error.to_string(),
     })
-}
-
-/// Whether these response headers name the agreed subprotocol (RFC 6455 §4.1 allows a list).
-fn agrees(headers: &tokio_tungstenite::tungstenite::http::HeaderMap, offered: &str) -> bool {
-    headers
-        .get_all("sec-websocket-protocol")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .any(|token| token.trim().eq_ignore_ascii_case(offered))
 }
 
 #[cfg(test)]
@@ -741,29 +859,65 @@ mod tests {
         assert!(matches!(error, WssError::Header { .. }), "{error}");
     }
 
+    /// RFC 3986 §3.2.1 userinfo is refused, and the refusal does not repeat the secret it
+    /// refused — an error that quoted the URL back would be the leak in a different file.
     #[test]
-    fn agreement_is_found_however_the_peer_lists_it() {
-        let mut headers = tokio_tungstenite::tungstenite::http::HeaderMap::new();
-        headers.append(
-            "sec-websocket-protocol",
-            HeaderValue::from_static("chat.v1"),
-        );
-        assert!(agrees(&headers, "chat.v1"));
-        assert!(!agrees(&headers, "chat"));
+    fn a_url_carrying_credentials_is_refused_without_repeating_them() {
+        for url in [
+            "wss://user:sekret@example.com:8443/v1",
+            "wss://sekret@example.com/v1",
+            "ws://user:sekret@localhost:9000/",
+        ] {
+            let error = Target::of(url).expect_err("refused");
+            let WssError::Url { url: named, detail } = &error else {
+                panic!("{url} must be refused as a URL, got: {error}")
+            };
+            assert!(detail.contains("userinfo"), "{detail}");
+            assert!(!named.contains("sekret"), "the refusal named it: {named}");
+            assert!(
+                !format!("{error}").contains("sekret") && !format!("{error:?}").contains("sekret"),
+                "neither Display nor Debug may carry it: {error} / {error:?}"
+            );
+        }
+    }
 
-        let mut listed = tokio_tungstenite::tungstenite::http::HeaderMap::new();
-        listed.append(
-            "sec-websocket-protocol",
-            HeaderValue::from_static("audio, CHAT.V1"),
+    /// The authority that travels is rebuilt from the parsed host and port, so the `Host` header
+    /// (RFC 9110 §7.2, which admits no userinfo) cannot inherit one from the URL.
+    #[test]
+    fn the_host_header_carries_the_authority_and_nothing_else() {
+        let target = Target::of("wss://example.com:8443/v1").expect("parses");
+        let upgrade =
+            upgrade_request(&target, &WssRequest::new("wss://example.com:8443/v1")).expect("built");
+        assert_eq!(
+            upgrade.headers().get("host").expect("a Host"),
+            "example.com:8443"
         );
-        assert!(
-            agrees(&listed, "chat.v1"),
-            "a list, and case is not part of it"
-        );
+        assert_eq!(upgrade.uri().to_string(), "wss://example.com:8443/v1");
+    }
 
-        assert!(!agrees(
-            &tokio_tungstenite::tungstenite::http::HeaderMap::new(),
-            "chat.v1"
-        ));
+    /// Redaction is a property of the string, not of a successful parse: the URL an error most
+    /// wants to quote is the malformed one, and it carries the secret just the same.
+    #[test]
+    fn redaction_replaces_userinfo_wherever_it_appears() {
+        assert_eq!(
+            redacted("wss://user:sekret@example.com/v1?k=v"),
+            "wss://***@example.com/v1?k=v"
+        );
+        assert_eq!(
+            redacted("wss://sekret@[::1]:9000/"),
+            "wss://***@[::1]:9000/"
+        );
+        // Malformed enough that `Uri` refuses it, and still carrying the credential.
+        assert_eq!(
+            redacted("wss://user:sekret@ex ample/"),
+            "wss://***@ex ample/"
+        );
+        // An `@` in the path is not userinfo and must survive untouched.
+        assert_eq!(
+            redacted("wss://example.com/mail/user@example.com"),
+            "wss://example.com/mail/user@example.com"
+        );
+        assert_eq!(redacted("wss://example.com/v1"), "wss://example.com/v1");
+        assert_eq!(redacted("not a url"), "not a url");
     }
 }

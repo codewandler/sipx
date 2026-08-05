@@ -392,13 +392,15 @@ async fn a_named_subprotocol_is_offered_and_its_echo_required() {
         );
     }
 
-    // A peer that upgrades without agreeing has agreed to nothing (RFC 6455 §4.1).
+    // A peer that upgrades without agreeing has agreed to nothing (RFC 6455 §4.1). The refusal
+    // is the handshake's own; asserting the *variant* is what pins it — were the dependency to
+    // stop refusing, the connect would succeed here rather than change its error string.
     let (silent, _) = ws_echo_server(false).await;
     let request = WssRequest::new(format!("ws://{silent}/")).subprotocol("chat.v1");
-    plain_client()
-        .connect(request)
-        .await
-        .expect_err("an upgrade that names no subprotocol back is not an agreement");
+    match plain_client().connect(request).await {
+        Err(WssError::Subprotocol { offered, .. }) => assert_eq!(offered, "chat.v1"),
+        other => panic!("a peer that names nothing back must be the typed refusal, got: {other:?}"),
+    }
 }
 
 /// RFC 6455 §5.2: the handshake installs the configured bound in the decoder, so an oversize
@@ -568,6 +570,175 @@ fn a_requests_debug_does_not_leak_header_values() {
         printed.contains("authorization"),
         "the header name is not the secret and should be visible: {printed}"
     );
+}
+
+/// RFC 3986 §3.2.1 userinfo is refused before anything is dialed, and no byte of it reaches the
+/// error — a credential in a URL is a credential in whatever log the caller writes.
+#[tokio::test]
+async fn a_url_carrying_credentials_is_refused_before_it_can_reach_the_wire() {
+    for url in [
+        "wss://user:sekret@example.com/v1",
+        "ws://user:sekret@localhost:9000/v1",
+    ] {
+        // The bound on failure: a correct refusal returns without touching the network, so a
+        // client that dialed anyway is declared broken here instead of hanging the suite.
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            plain_client().connect(WssRequest::new(url)),
+        )
+        .await
+        .expect("the refusal must not reach for the network");
+        match outcome {
+            Err(error @ WssError::Url { .. }) => {
+                assert!(
+                    !format!("{error}").contains("sekret"),
+                    "Display carried it: {error}"
+                );
+                assert!(
+                    !format!("{error:?}").contains("sekret"),
+                    "Debug carried it: {error:?}"
+                );
+            }
+            other => panic!("{url} must be refused as a URL, got: {other:?}"),
+        }
+    }
+}
+
+/// The same hazard by the other route: a request that is printed but never dialed.
+#[test]
+fn a_requests_debug_redacts_credentials_written_into_the_url() {
+    let printed = format!("{:?}", WssRequest::new("wss://user:sekret@example.com/v1"));
+    assert!(
+        !printed.contains("sekret"),
+        "the URL's credential leaked: {printed}"
+    );
+    assert!(
+        printed.contains("***@example.com"),
+        "the host it names is not the secret and should stay readable: {printed}"
+    );
+}
+
+/// The other half of the liveness rule: an answering peer is *not* declared gone. A probe that
+/// was never stood down would stall this connection one grace after the first Ping, so surviving
+/// several cadences is what proves the Pong is being acted on.
+#[tokio::test]
+async fn a_responsive_peer_survives_past_a_full_ping_cycle() {
+    const ROUNDS: u32 = 3;
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("an address");
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("a connection");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("upgrades");
+        let mut probes = 0;
+        while let Some(Ok(frame)) = socket.next().await {
+            if let Message::Ping(payload) = frame {
+                probes += 1;
+                // Answered explicitly rather than left to the queued automatic Pong, so the
+                // reply is flushed when it is owed and this peer's liveness is the test's own.
+                socket
+                    .send(Message::Pong(payload))
+                    .await
+                    .expect("an answer");
+                if probes == ROUNDS {
+                    socket
+                        .send(Message::Text("still here".into()))
+                        .await
+                        .expect("the marker");
+                    return;
+                }
+            }
+        }
+        panic!("the connection ended after {probes} probes");
+    });
+
+    let config = WssClientConfig {
+        ping_interval: Duration::from_millis(40),
+        // Generous against the cadence on purpose: this is the duration a broken stand-down
+        // would fire on, and it must be long enough that load cannot fire it on its own.
+        ping_grace: Duration::from_millis(750),
+        ..WssClientConfig::default()
+    };
+    let mut connection = WssClient::with_config(
+        ClientTls::new(&TrustAnchors::system()).expect("a client policy"),
+        config,
+    )
+    .connect(WssRequest::new(format!("ws://{addr}/")))
+    .await
+    .expect("the handshake");
+
+    // The bound on failure: the marker is due after three cadences, and this only decides when
+    // a connection that stalled instead is declared broken.
+    match tokio::time::timeout(Duration::from_secs(10), connection.next()).await {
+        Ok(Ok(Some(WssMessage::Text(text)))) => assert_eq!(text, "still here"),
+        other => panic!("a peer answering every probe must not be declared gone, got: {other:?}"),
+    }
+    peer.await.expect("the peer's assertions hold");
+}
+
+/// A Pong that arrived while the caller was away from `next` is still an answer. Both `select!`
+/// branches are ready on re-entry, so an implementation that only ever consults the clock reports
+/// a stall with the answer sitting in the socket — a lie a caller cannot tell from a dead peer.
+#[tokio::test]
+async fn a_pong_that_arrived_while_the_caller_was_away_is_not_a_stall() {
+    const ROUNDS: u32 = 6;
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("an address");
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("a connection");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("upgrades");
+        while let Some(Ok(frame)) = socket.next().await {
+            if let Message::Ping(payload) = frame {
+                // Ordering two stimuli: the caller's departure from `next` and this answer's
+                // arrival. The wait puts the Pong on the wire after the caller has gone, which
+                // is the whole window under test, and a longer wait preserves that order.
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                socket
+                    .send(Message::Pong(payload))
+                    .await
+                    .expect("an answer");
+                socket
+                    .send(Message::Text("still here".into()))
+                    .await
+                    .expect("the marker");
+            }
+        }
+    });
+
+    let config = WssClientConfig {
+        ping_interval: Duration::from_millis(40),
+        ping_grace: Duration::from_millis(60),
+        ..WssClientConfig::default()
+    };
+    let mut connection = WssClient::with_config(
+        ClientTls::new(&TrustAnchors::system()).expect("a client policy"),
+        config,
+    )
+    .connect(WssRequest::new(format!("ws://{addr}/")))
+    .await
+    .expect("the handshake");
+
+    // Once would catch a client that always consults the clock; an unbiased choice between two
+    // ready branches has to be caught repeatedly, and six rounds leave it under two percent.
+    for round in 1..=ROUNDS {
+        // The bound on the caller's presence: it leaves `next` after the probe goes out at
+        // ~40 ms and long before the answer can arrive at ~100 ms.
+        let _ = tokio::time::timeout(Duration::from_millis(60), connection.next()).await;
+        // Ordering two stimuli: the answer's arrival and the caller's return. The wait puts the
+        // return after both the Pong and the expiry of the 60 ms grace — the state the window
+        // needs — and a longer wait preserves that order rather than breaking it.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        // The bound on failure: the marker is already buffered, so this only decides when a
+        // client that stalled on it instead is declared broken.
+        match tokio::time::timeout(Duration::from_secs(5), connection.next()).await {
+            Ok(Ok(Some(WssMessage::Text(text)))) => assert_eq!(text, "still here"),
+            other => panic!("round {round}: an answered probe must not stall, got: {other:?}"),
+        }
+    }
+    peer.abort();
 }
 
 /// One TLS policy, not two: the workspace's WebSocket dependency is built without TLS features,

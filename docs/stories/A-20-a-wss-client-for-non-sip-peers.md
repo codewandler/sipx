@@ -56,6 +56,16 @@ by contract, and must stay that way.
   `crates/sipx-app/tests/wss_client.rs` (13 tests, failing-first on the wrong-name vector) plus
   10 unit vectors in the module; fixture certificates come from
   `cargo run -p sipx-testkit --example issue-certs` into the system temp dir per run.
+- 2026-08-05 (`impl/A-20`, review rework): a URL's RFC 3986 §3.2.1 userinfo was reaching the
+  `Host` header, every error's `peer`, and `WssRequest`'s `Debug` — `Authority::as_str()` keeps
+  it. Now refused (not stripped: stripping would dial on unauthenticated and leave the peer's
+  401 to explain why), the authority that travels is rebuilt from the parsed host and port, and
+  every printed URL goes through `redacted`, which reads the raw string so a URL too malformed
+  to parse still cannot leak. Also: `WssError::Subprotocol` was unreachable — the dependency's
+  handshake refuses first — so it is now that refusal re-typed and the test asserts the variant;
+  the buffered-Pong drain closes a false-`Stalled` window a caller-driven `next` has and a
+  server's parked loop does not; and the strict-Pong consequence (a data-streaming, Pong-dropping
+  peer is `Stalled` mid-burst) is stated in the module docs so `A-22` inherits it knowingly.
 - `scripts/check-app-surface.py` reviewed: before, "10 of 11 published crates; 7 modules and 0
   crates experimental"; after, the same closure with **8** modules experimental — the new `wss`
   module itself, marked **Experimental** (`A-8`) deliberately. No crate joins the dependency
