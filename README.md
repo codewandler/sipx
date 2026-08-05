@@ -30,7 +30,7 @@ PBX, browser media engine, or video stack.
 
 | Need | Today |
 |---|---|
-| Calls | Place and answer, hold and resume, blind and attended transfer, session timers |
+| Calls | Place and answer, hold and resume, blind and attended transfer, session timers, bounded confirmed-dialog snapshots |
 | Audio | G.711, DTMF, WAV playback and recording; optional Opus and explicitly selected live devices behind Cargo features |
 | Security | TLS and secure WebSocket; selectable plain RTP, SDES-keyed SRTP, optional DTLS-SRTP, and a fail-closed browser-audio composition profile |
 | Reachability | `rport`, symmetric RTP, Path, Service-Route, Outbound, GRUU and push refresh; host and STUN-derived ICE candidates, but no TURN relay |

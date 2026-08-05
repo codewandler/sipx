@@ -174,7 +174,7 @@ are not milestones because they are not RFC gaps.
 
 *Close every currently known capability owned by a sipx endpoint before measuring it under load.*
 
-The `parity-wave-1` area tag is the machine-queryable selection: **nine stories across five epics**.
+The `parity-wave-1` area tag is the machine-queryable selection: **ten stories across six epics**.
 This is the next implementation wave, not a release name and not a stable-1.0 promise.
 
 | Order | Epic | Stories | Outcome | Starts when |
@@ -182,17 +182,18 @@ This is the next implementation wave, not a release name and not a stable-1.0 pr
 | 1 | [Stack comparison](designs/stack-comparison.md) | **X-97** | Leaf-level, generated capability ownership; newly found sipx gaps join M13 | now |
 | 2 | [Event reachability](designs/event-reachability.md) | **S-35, S-37, S-38, S-39** | Inbound notifier, reusable subscriber and live publication paths | S-35/S-37 now; S-38/S-39 after S-37 |
 | 3 | [Dialog extensions](designs/dialog-extensions.md) | **S-40** | Authenticated application-owned INFO, MESSAGE and extension requests | now |
-| 4 | [Live endpoint policy](designs/live-endpoint-policy.md) | **T-31, T-32** | Atomic TLS identity rotation, then bounded typed observation and policy | T-31 now; T-32 after it |
-| 5 | [Supported test surfaces](designs/test-surfaces.md) | **X-75** | A quiet library and public deterministic in-process call harness | now |
+| 4 | [Dialog persistence](designs/dialog-persistence.md) | **S-43** | Bounded versioned confirmed-dialog facts attach only to explicit fresh drivers | now |
+| 5 | [Live endpoint policy](designs/live-endpoint-policy.md) | **T-31, T-32** | Atomic TLS identity rotation, then bounded typed observation and policy | T-31 now; T-32 after it |
+| 6 | [Supported test surfaces](designs/test-surfaces.md) | **X-75** | A quiet library and public deterministic in-process call harness | now |
 
 **Done when** the pinned capability ledger has no unclassified row and no open sipx-owned row; all
-nine selected stories plus any sipx story discovered by X-97 are done; every cluster-owned row links
+ten selected stories plus any sipx story discovered by X-97 are done; every cluster-owned row links
 to that repository's roadmap; every new live path is bounded, cancellation-safe and represented in
 the RFC registry; and the full gate is green. Proxying, registrar/location service, routing, trunks,
 allowlists, deployment and cluster failover do not become sipx work merely because the comparison
 subject packages them beside its endpoint.
 
-The dependency-closed order is X-97 and S-37 first; S-35, S-40, T-31 and X-75 can run beside them;
+The dependency-closed order is X-97 and S-37 first; S-35, S-40, S-43, T-31 and X-75 can run beside them;
 S-38 and S-39 follow the event-client contract; T-32 follows the live-update review. X-97 is a
 discovery gate: the wave expands if it finds another real sipx-owned leaf, rather than declaring
 parity by keeping the original list fixed.

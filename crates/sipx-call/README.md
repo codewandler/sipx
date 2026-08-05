@@ -8,6 +8,12 @@ The layer where SIP dialogs, SDP negotiation, and media sessions become a call. 
 single-call lifecycle, can couple two dialogs with optional bridged media, and exposes the
 operations and typed events an application uses.
 
+Confirmed, quiescent dialogs can be captured as bounded versioned bytes and attached to a fresh
+endpoint and an already-created matching media session. This is protocol-state persistence, not a
+serialized runtime: sockets, transactions, tasks, clocks, credentials and media keys are excluded.
+The host owns durable storage, authorization, encryption at rest, distribution and single-owner
+selection.
+
 ## Stability
 
 The supported and experimental surfaces are maintained in the
@@ -25,4 +31,5 @@ can mix sessions an application owns, but a `Call` keeps its media session priva
 - [`docs/specs/call-dispatch.md`](../../docs/specs/call-dispatch.md) — routing one endpoint to many calls.
 - [`docs/specs/call-coupling.md`](../../docs/specs/call-coupling.md) — driving two dialogs as one call.
 - [`docs/specs/sip-auth.md`](../../docs/specs/sip-auth.md) — bounded 401/407 retries for outbound calls.
+- [`docs/specs/dialog-persistence.md`](../../docs/specs/dialog-persistence.md) — bounded confirmed-dialog capture and runtime attachment.
 - [`sipx-media`](../sipx-media/README.md) — the media sessions owned by calls.

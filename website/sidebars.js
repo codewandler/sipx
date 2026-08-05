@@ -30,6 +30,7 @@ const sidebars = {
         'guides/as-a-library',
         'guides/place-a-call',
         'guides/answer-a-call',
+        'guides/persist-a-dialog',
         'guides/register',
       ],
     },

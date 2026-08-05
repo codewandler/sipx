@@ -7,6 +7,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Confirmed dialogs now have a bounded, versioned persistence boundary** (`S-43`).
+  `Call::dialog_snapshot` captures dialog identifiers, parties, routes, remote target, independent
+  sequence numbers, negotiated non-secret media facts and remaining session duration only when the
+  call is quiescent. `DialogSnapshot::decode` rejects hostile lengths, unknown versions,
+  contradictions and non-canonical bytes before partial restoration. `Call::restore_dialog`
+  requires an explicit fresh endpoint, resolved target, matching already-created media session,
+  media policy and current time; it cannot downgrade signalling or media security, silently renew
+  an elapsed session, serialize keys, or attach one context twice. Storage, encryption,
+  distribution and failover ownership remain host responsibilities.
+
 ## [1.0.0-beta.4] — 2026-08-04
 
 This prerelease ships the beta.4 feature-and-security wave: explicit non-ICE deployment
