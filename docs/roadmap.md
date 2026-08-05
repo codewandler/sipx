@@ -174,7 +174,7 @@ are not milestones because they are not RFC gaps.
 
 *Close every currently known capability owned by a sipx endpoint before measuring it under load.*
 
-The `parity-wave-1` area tag is the machine-queryable selection: **nine stories across five epics**.
+The `parity-wave-1` area tag is the machine-queryable selection: **eleven stories across six epics**.
 This is the next implementation wave, not a release name and not a stable-1.0 promise.
 
 | Order | Epic | Stories | Outcome | Starts when |
@@ -184,16 +184,18 @@ This is the next implementation wave, not a release name and not a stable-1.0 pr
 | 3 | [Dialog extensions](designs/dialog-extensions.md) | **S-40** | Authenticated application-owned INFO, MESSAGE and extension requests | now |
 | 4 | [Live endpoint policy](designs/live-endpoint-policy.md) | **T-31, T-32** | Atomic TLS identity rotation, then bounded typed observation and policy | T-31 now; T-32 after it |
 | 5 | [Supported test surfaces](designs/test-surfaces.md) | **X-75** | A quiet library and public deterministic in-process call harness | now |
+| 6 | [Comparative load](designs/comparative-load.md) | **X-98, P-15** | Freeze the bounded workload and ship its finite answering endpoint | after endpoint feature branches; P-15 after X-98/X-75 |
 
 **Done when** the pinned capability ledger has no unclassified row and no open sipx-owned row; all
-nine selected stories plus any sipx story discovered by X-97 are done; every cluster-owned row links
+eleven selected stories plus any sipx story discovered by X-97 are done; every cluster-owned row links
 to that repository's roadmap; every new live path is bounded, cancellation-safe and represented in
 the RFC registry; and the full gate is green. Proxying, registrar/location service, routing, trunks,
 allowlists, deployment and cluster failover do not become sipx work merely because the comparison
 subject packages them beside its endpoint.
 
 The dependency-closed order is X-97 and S-37 first; S-35, S-40, T-31 and X-75 can run beside them;
-S-38 and S-39 follow the event-client contract; T-32 follows the live-update review. X-97 is a
+S-38 and S-39 follow the event-client contract; T-32 follows the live-update review; X-98 freezes
+the load contract before P-15 implements its responder. X-97 is a
 discovery gate: the wave expands if it finds another real sipx-owned leaf, rather than declaring
 parity by keeping the original list fixed.
 
@@ -203,9 +205,7 @@ parity by keeping the original list fixed.
 
 | Order | Story | Outcome | Starts when |
 |---:|---|---|---|
-| 1 | [**X-98 — Specify the neutral comparative load profile**](stories/X-98-specify-the-neutral-comparative-load-profile.md) | Exact signalling-only workload, safe process supervision and stable result schema | M13 complete |
-| 2 | [**P-15 — Run a bounded call-load responder**](stories/P-15-run-a-bounded-call-load-responder.md) | Machine-ready UAS with finite admission, deterministic policy and complete cleanup | X-98 and X-75 |
-| 3 | [**X-99 — Run and publish the comparative load result**](stories/X-99-run-and-publish-the-comparative-load-result.md) | Both directions, immutable builds, raw evidence and a generated, non-ranking summary | X-98, P-15 and M13 |
+| 1 | [**X-99 — Run and publish the comparative load result**](stories/X-99-run-and-publish-the-comparative-load-result.md) | Both directions, immutable builds, raw evidence and a generated, non-ranking summary | X-98, P-15 and M13 |
 
 **Done when** low-rate correctness qualifies each supported direction, the neutral driver proves
 headroom, five bounded repetitions identify sustainable UDP dialog-signalling capacity under the

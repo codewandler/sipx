@@ -3,13 +3,13 @@ id: P-15
 title: Run a bounded call-load responder
 pillar: Phone
 status: backlog
-priority: 11
+priority: 13
 design: docs/designs/comparative-load.md
 epic: comparative-load
-areas: [sipx-cli, load, m14]
+areas: [sipx-cli, load, m13, parity-wave-1]
 predicate:
 announcement:
-note: after X-98 and X-75 · machine-ready signalling UAS with finite admission and cleanup
+note: late M13 after X-98 and X-75 · machine-ready signalling UAS with finite admission and cleanup
 ---
 
 # Run a bounded call-load responder

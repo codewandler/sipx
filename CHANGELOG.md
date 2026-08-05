@@ -7,6 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A neutral, bounded signalling-load contract** (`X-98`) now fixes the exact SDP-free dialog flow,
+  six-rate/five-repetition protocol, result schema and process-group cleanup required before a
+  comparative run. Its checker rejects unbounded phases, incomplete metadata, false zero resource
+  measurements, live post-drain state, malformed or duplicate readiness and leaked descendants.
+
 ## [1.0.0-beta.4] — 2026-08-04
 
 This prerelease ships the beta.4 feature-and-security wave: explicit non-ICE deployment

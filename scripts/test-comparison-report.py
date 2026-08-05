@@ -14,6 +14,8 @@ into a fixture here would be caught by the provenance check — the same reason
 
 import datetime
 import importlib.util
+import json
+import os
 import pathlib
 import sys
 import unittest
@@ -36,11 +38,167 @@ def load_report_module():
 
 report = load_report_module()
 
+
+def load_comparative_module():
+    """Import the neutral load contract kept beside the comparison checker."""
+    spec = importlib.util.spec_from_file_location(
+        "comparative_load", ROOT / "scripts" / "comparative-load.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+load_contract = load_comparative_module()
+
 #: The reserved fixture identity. Assertions filter on it so a fixture's problem can never be
 #: confused with a problem the real dataset has.
 FIXTURE_STACK = "zz-fixture-stack"
 FIXTURE_DIMENSION = "zz-fixture-dimension"
 TODAY = datetime.date(2026, 8, 4)
+
+
+def a_load_manifest():
+    """One complete immutable v1 execution manifest."""
+    return {
+        "schema": load_contract.MANIFEST_SCHEMA,
+        "run_id": "0123456789abcdef0123456789abcdef",
+        "seed": 7,
+        "direction": {"index": 0, "driver": "endpoint-a", "responder": "endpoint-b"},
+        "builds": [
+            {
+                "endpoint_id": "endpoint-a",
+                "role": "driver",
+                "revision": "revision-a",
+                "artifact_sha256": "a" * 64,
+                "argv": ["/opt/endpoint-a", "drive"],
+                "cwd": "/opt",
+                "env_keys": ["PATH"],
+            },
+            {
+                "endpoint_id": "endpoint-b",
+                "role": "responder",
+                "revision": "revision-b",
+                "artifact_sha256": "b" * 64,
+                "argv": ["/opt/endpoint-b", "respond"],
+                "cwd": "/opt",
+                "env_keys": ["PATH"],
+            },
+        ],
+        "machine": {
+            "os": "fixture-os",
+            "architecture": "fixture-arch",
+            "logical_cpus": 8,
+            "memory_bytes": 8 * 1024 * 1024 * 1024,
+            "clock": "monotonic",
+        },
+        "ceiling": 1024,
+        "limits": {
+            "active": 2048,
+            "events": load_contract.MAX_EVENTS,
+            "event_bytes": load_contract.MAX_EVENT_BYTES,
+            "stdout_bytes": load_contract.MAX_LOG_BYTES,
+            "stderr_bytes": load_contract.MAX_LOG_BYTES,
+        },
+        "phases": {
+            "readiness_ms": load_contract.READINESS_MS,
+            "correctness_rate": 1,
+            "correctness_dialogs": 20,
+            "headroom_multiplier": 2,
+            "warmup_ms": load_contract.WARMUP_MS,
+            "measurement_ms": load_contract.MEASUREMENT_MS,
+            "drain_ms": load_contract.MAX_DRAIN_MS,
+        },
+        "ladder": {
+            "divisors": list(load_contract.LADDER_DIVISORS),
+            "repetitions": load_contract.REPETITIONS,
+            "stop_after_failed_rates": load_contract.STOP_AFTER_FAILED_RATES,
+        },
+    }
+
+
+def a_load_result(manifest=None):
+    """A passed result with complete post-cleanup and resource evidence."""
+    manifest = manifest or a_load_manifest()
+    build = manifest["builds"][0]
+    offered = 1920
+    return {
+        "schema": load_contract.RESULT_SCHEMA,
+        "status": "passed",
+        "run": {
+            "run_id": manifest["run_id"],
+            "seed": manifest["seed"],
+            "direction": manifest["direction"],
+            "rate_index": 0,
+            "rate_per_second": 32,
+            "repetition": 0,
+            "started_utc": "2026-08-05T12:00:00Z",
+            "elapsed_ms": 70_100,
+            "warmup_ms": load_contract.WARMUP_MS,
+            "measurement_ms": load_contract.MEASUREMENT_MS,
+            "drain_ms": 100,
+        },
+        "build": {
+            "endpoint_id": build["endpoint_id"],
+            "role": build["role"],
+            "revision": build["revision"],
+            "artifact_sha256": build["artifact_sha256"],
+            "argv_sha256": load_contract.argv_hash(build["argv"]),
+        },
+        "machine": manifest["machine"],
+        "profile": {
+            "transport": "udp",
+            "t1_ms": 500,
+            "t2_ms": 4000,
+            "t4_ms": 5000,
+            "maximum_active": manifest["limits"]["active"],
+            "events": manifest["limits"]["events"],
+            "event_bytes": manifest["limits"]["event_bytes"],
+            "stdout_bytes": manifest["limits"]["stdout_bytes"],
+            "stderr_bytes": manifest["limits"]["stderr_bytes"],
+            "contract_sha256": load_contract.contract_hash(),
+        },
+        "counts": {
+            "offered": offered,
+            "established": offered,
+            "completed": offered,
+            "active_high_water": 64,
+            "request_retransmissions": 0,
+            "response_retransmissions": 0,
+        },
+        "responses": {"provisional": {"100": offered}, "final": {"200": offered * 2}},
+        "errors": {name: 0 for name in load_contract.TERMINAL_ERRORS + load_contract.RUN_ERRORS},
+        "latency_ms": {
+            "setup": {"count": offered, "p50": 2, "p95": 4, "p99": 6, "max": 8},
+            "teardown": {"count": offered, "p50": 1, "p95": 2, "p99": 3, "max": 5},
+        },
+        "resources": {
+            "sample_interval_ms": 100,
+            "unsupported_resources": [],
+            "cpu_user_ms": 10_000,
+            "cpu_system_ms": 2_000,
+            "peak_rss_bytes": 64 * 1024 * 1024,
+            "descriptor_high_water": 32,
+            "task_thread_high_water": 16,
+            "endpoint_active_high_water": 64,
+        },
+        "post_drain": {
+            "active_dialogs": 0,
+            "transactions": 0,
+            "timers": 0,
+            "endpoint_tasks": 0,
+            "retained_events": 0,
+        },
+        "cleanup": {
+            "admission_stopped": True,
+            "zero_state_observed": True,
+            "process_group_exited": True,
+            "leader_status": 0,
+            "descendant_pipe_eof": True,
+            "escalation": "none",
+            "elapsed_ms": 100,
+        },
+    }
 
 
 def a_dimension(**overrides):
@@ -599,6 +757,148 @@ class TheGenerationRules(unittest.TestCase):
         self.assertIn("enum TransportKind", source)
         for token in report.generated_values()["transports"].split(", "):
             self.assertIn(f'"{token}"', source, f"{token} is not a spelling the enum emits")
+
+
+class TheComparativeLoadContract(unittest.TestCase):
+    """X-98's fixed profile, evidence schema and process-group cleanup are executable rules."""
+
+    def assert_manifest_refused(self, manifest) -> None:
+        with self.assertRaises(load_contract.ContractError):
+            load_contract.validate_manifest(manifest)
+
+    def assert_result_refused(self, result, manifest=None) -> None:
+        with self.assertRaises(load_contract.ContractError):
+            load_contract.validate_result(result, manifest or a_load_manifest())
+
+    @staticmethod
+    def changed(value):
+        return json.loads(json.dumps(value))
+
+    def test_the_exact_profile_and_complete_post_cleanup_result_are_accepted(self) -> None:
+        manifest = a_load_manifest()
+        self.assertIs(load_contract.validate_manifest(manifest), manifest)
+        result = a_load_result(manifest)
+        self.assertIs(load_contract.validate_result(result, manifest), result)
+
+    def test_zero_missing_or_widened_phase_bounds_are_rejected(self) -> None:
+        original = a_load_manifest()
+        for name, value in (("drain_ms", 0), ("measurement_ms", 0), ("warmup_ms", 10_001)):
+            changed = self.changed(original)
+            changed["phases"][name] = value
+            self.assert_manifest_refused(changed)
+        changed = self.changed(original)
+        del changed["phases"]["readiness_ms"]
+        self.assert_manifest_refused(changed)
+
+    def test_incomplete_identity_machine_and_hash_metadata_are_rejected(self) -> None:
+        manifest = a_load_manifest()
+        changed = self.changed(manifest)
+        del changed["machine"]["architecture"]
+        self.assert_manifest_refused(changed)
+        result = a_load_result(manifest)
+        changed_result = self.changed(result)
+        changed_result["build"]["artifact_sha256"] = "0" * 64
+        self.assert_result_refused(changed_result, manifest)
+        changed_result = self.changed(result)
+        changed_result["build"]["argv_sha256"] = "0" * 64
+        self.assert_result_refused(changed_result, manifest)
+
+    def test_missing_cleanup_or_live_post_drain_state_cannot_pass(self) -> None:
+        result = a_load_result()
+        changed = self.changed(result)
+        del changed["cleanup"]
+        self.assert_result_refused(changed)
+        changed = self.changed(result)
+        changed["post_drain"]["endpoint_tasks"] = 1
+        self.assert_result_refused(changed)
+        changed = self.changed(result)
+        changed["cleanup"]["descendant_pipe_eof"] = False
+        self.assert_result_refused(changed)
+
+    def test_unsupported_resources_are_absent_not_zero(self) -> None:
+        result = a_load_result()
+        changed = self.changed(result)
+        changed["resources"]["unsupported_resources"] = ["cpu_user_ms"]
+        changed["resources"]["cpu_user_ms"] = 0
+        self.assert_result_refused(changed)
+        del changed["resources"]["cpu_user_ms"]
+        load_contract.validate_result(changed, a_load_manifest())
+
+    def test_two_consecutive_failed_rates_omit_only_the_higher_rates(self) -> None:
+        self.assertEqual((), load_contract.omitted_after([True, False]))
+        self.assertEqual((3, 4, 5), load_contract.omitted_after([True, False, False]))
+        self.assertEqual((), load_contract.omitted_after([False, True, False]))
+        with self.assertRaises(load_contract.ContractError):
+            load_contract.omitted_after([True] * 7)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_cleanup_terminates_a_blocking_descendant_and_observes_pipe_eof(self) -> None:
+        helper = """
+import json, os, signal, subprocess, sys
+subprocess.Popen([sys.executable, '-c', 'import signal; signal.pause()'])
+print(json.dumps({
+    'schema': 'sipx.comparative-load.ready.v1',
+    'role': 'responder',
+    'pid': os.getpid(),
+    'address': '127.0.0.1:5060',
+    'transport': 'udp',
+    'limits': {'active': 1, 'events': 1, 'stdout_bytes': 4096, 'stderr_bytes': 4096},
+}), flush=True)
+signal.pause()
+"""
+        old_sigint = load_contract.signal.getsignal(load_contract.signal.SIGINT)
+        with load_contract.ProcessSupervisor(cleanup_wait_seconds=0.25) as owner:
+            supervised = owner.start(
+                [sys.executable, "-c", helper],
+                "responder",
+                stdout_limit=4096,
+                stderr_limit=4096,
+            )
+            ready = supervised.wait_ready(timeout_ms=2_000)
+            self.assertEqual(supervised.process.pid, ready["pid"])
+            self.assertNotEqual(
+                old_sigint, load_contract.signal.getsignal(load_contract.signal.SIGINT)
+            )
+        self.assertTrue(supervised.stdout.eof.is_set())
+        self.assertTrue(supervised.stderr.eof.is_set())
+        self.assertIsNotNone(supervised.process.returncode)
+        self.assertEqual(old_sigint, load_contract.signal.getsignal(load_contract.signal.SIGINT))
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_malformed_and_duplicate_readiness_fail_closed(self) -> None:
+        malformed = load_contract.SupervisedProcess(
+            [sys.executable, "-c", "print('{', flush=True); import signal; signal.pause()"],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        with self.assertRaises(load_contract.ContractError):
+            malformed.wait_ready(timeout_ms=2_000)
+        self.assertIsNotNone(malformed.process.returncode)
+
+        record = {
+            "schema": load_contract.READY_SCHEMA,
+            "role": "responder",
+            "pid": 0,
+            "address": "127.0.0.1:5060",
+            "transport": "udp",
+            "limits": {"active": 1, "events": 1, "stdout_bytes": 4096, "stderr_bytes": 4096},
+        }
+        helper = (
+            "import json,os,signal; r="
+            + repr(record)
+            + "; r['pid']=os.getpid(); print(json.dumps(r),flush=True); "
+              "print(json.dumps(r),flush=True); signal.pause()"
+        )
+        duplicate = load_contract.SupervisedProcess(
+            [sys.executable, "-c", helper],
+            "responder",
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        duplicate.wait_ready(timeout_ms=2_000)
+        with self.assertRaises(load_contract.ContractError):
+            duplicate.close(timeout_seconds=0.25)
 
 
 class TheRealDataset(unittest.TestCase):
