@@ -10,8 +10,8 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.4` are published prereleases, and beta.5 is
-the authorized release candidate on `main`.** Beta.5 carries the endpoint-complete service wave,
+_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.5` are published prereleases, and beta.5 is
+the current prerelease.** Beta.5 carries the endpoint-complete service wave,
 deterministic downstream test surfaces, the bounded comparative signalling result and the routed
 realtime-agent bridge. Its credentialed live-endpoint proof remains pending, and the result does
 not rank general performance. The beta.4 browser-audio limits remain: no TURN-required networks,
