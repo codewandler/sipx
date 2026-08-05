@@ -2377,6 +2377,7 @@ version = "1.0.0-beta.7"
 dependencies = [
  "base64",
  "bytes",
+ "futures-util",
  "openssl",
  "pretty_assertions",
  "rand 0.9.5",

@@ -390,6 +390,20 @@ impl Notifier {
             },
         );
     }
+
+    /// Terminate every service dialog and join its notification task.
+    pub(crate) async fn shutdown(&mut self) {
+        let running: Vec<_> = self.tasks.drain().map(|(_, running)| running).collect();
+        for task in &running {
+            // discard: an already-finished task has already released its subscription.
+            let _ = task.command.send(Command::Terminate(Reason::Deactivated));
+        }
+        for task in running {
+            if let Err(error) = task.join.await {
+                tracing::warn!(%error, "notifier task did not join cleanly during shutdown");
+            }
+        }
+    }
 }
 
 impl Drop for Notifier {

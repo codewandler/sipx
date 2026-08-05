@@ -1,6 +1,6 @@
 # Spec: Transport layer
 
-**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4, T-25 … T-28, T-32, T-34, T-35 · **Design:**
+**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4, T-25 … T-29, T-32, T-34, T-35 · **Design:**
 [sip-transport](../designs/sip-transport.md)
 
 ## 1. Normative references
@@ -345,7 +345,48 @@ shutdown command loses a race with command-receiver closure: command closure mea
 started, not that it has finished. The barrier becomes complete only after listeners, handshake
 tasks, pooled connections and endpoint sockets have been released.
 
-## 10.2 Hop-by-hop overload control (RFC 7339 and RFC 7415)
+## 10.2 Graceful drain
+
+`Handle::begin_drain` is the transport half of a graceful endpoint drain. It closes admission for
+outbound requests which can establish a dialog: an `INVITE`, `SUBSCRIBE`, or `REFER` without a
+`To` tag returns `Error::EndpointDraining` before a command or transaction is created. Responses,
+ACKs and requests carrying a `To` tag remain legal, so a live dialog can finish. The call dispatcher
+owns the inbound half because only it knows whether an initial request belongs to a live route; see
+[`call-dispatch.md` §10](call-dispatch.md).
+
+The state transition is monotonic and idempotent:
+
+| State | New dialog request | Existing transaction | `shutdown` |
+|---|---|---|---|
+| `Running` | admitted | driven normally | enter `Stopping` |
+| `Draining` | typed refusal before transaction creation | driven normally | enter `Stopping` |
+| `Stopping` / `Stopped` | endpoint closed | cancelled and released | wait on the durable completion barrier |
+
+`Handle::settled` is an event-driven transaction barrier. A waiter is registered on the endpoint
+driver and released only after the transaction layer reports zero client and server transactions.
+It is not a polling interval and does not infer completion from elapsed time. A racing transaction
+therefore either precedes the serialized waiter and is included, or follows the zero observation
+and loses the race with final shutdown.
+
+The call layer's bounded drain ends by calling the existing `Handle::shutdown` path. It does not own
+listeners, connection tasks, handshake tasks or sockets separately: the endpoint's existing
+`CancellationToken` closes their admission, its `TaskTracker` joins them, and the durable shutdown
+barrier reports their release. Deadline expiry explicitly counts live dialog routes and endpoint
+transactions before taking this same path.
+
+Transport behavior at that boundary is fixed:
+
+| Transport | During drain | At natural completion or deadline |
+|---|---|---|
+| UDP | the socket remains readable so existing transactions and in-dialog requests progress | socket closes through endpoint shutdown |
+| TCP / TLS | pooled generations remain reusable by existing transactions and dialogs; no new dialog request may create a transaction | every pooled generation is cancelled, joined and closed |
+| WS / WSS | the same pool rule applies; control frames and in-dialog messages continue | WebSocket tasks are cancelled and joined before completion |
+| QUIC | an already admitted stream continues through its transaction; a new dialog stream is refused before creation | endpoint close terminates every remaining connection and mid-stream transaction, which is included in the forced count |
+
+The deadline is a bound on failure, not evidence that work finished. Natural completion is always
+the route-closure and transaction-terminal events described above.
+
+## 10.3 Hop-by-hop overload control (RFC 7339 and RFC 7415)
 
 **[RFC 7339 §2, §4]** Overload control is an explicit endpoint capability and is disabled by
 default. Setting `Config::overload.advertise` makes the endpoint a supporting client for this
@@ -521,7 +562,7 @@ The snapshot covers, at minimum:
 - requests and responses, in and out, **per transport** — which transport is the first
   question a support case asks;
 - requests shed for backpressure (§10), embedded as the existing `ShedCounts`;
-- outbound requests rejected under overload control (§10.2);
+- outbound requests rejected under overload control (§10.3);
 - responses that matched no client transaction (RFC 3261 §16.7), counted whether or not an
   application is watching for them;
 - parse failures, per transport — a malformed datagram and a stream whose framing is lost are

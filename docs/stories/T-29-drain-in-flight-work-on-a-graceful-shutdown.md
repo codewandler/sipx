@@ -21,25 +21,34 @@ does not drop established calls and in-flight transactions.
 
 ## Acceptance
 
-- [ ] A public drain operation stops accepting new dialogs and new inbound requests that would start
+- [x] A public drain operation stops accepting new dialogs and new inbound requests that would start
       one, while existing transactions and dialogs continue.
-- [ ] Draining is observable: a caller can await completion, and the endpoint reports how much work
+- [x] Draining is observable: a caller can await completion, and the endpoint reports how much work
       remains. A test asserts the awaited completion happens **after** the last transaction settles,
       driven by the transaction reaching its terminal state rather than by a wall-clock wait.
-- [ ] A bounded deadline is supported; on expiry the remaining work is terminated explicitly and the
+- [x] A bounded deadline is supported; on expiry the remaining work is terminated explicitly and the
       termination is counted and logged, never silent.
-- [ ] New in-dialog requests on an existing dialog are still served during the drain — a drain that
+- [x] New in-dialog requests on an existing dialog are still served during the drain — a drain that
       breaks live calls is the failure it exists to prevent.
-- [ ] Behaviour is stated for each transport, including what happens to pooled connections and to a
+- [x] Behaviour is stated for each transport, including what happens to pooled connections and to a
       QUIC connection mid-stream.
-- [ ] Drain composes with the existing `CancellationToken` and `TaskTracker` shutdown path rather
+- [x] Drain composes with the existing `CancellationToken` and `TaskTracker` shutdown path rather
       than adding a parallel mechanism.
-- [ ] Reachable from the CLI so it is testable from a shell, per vision principle 6.
+- [x] Reachable from the CLI so it is testable from a shell, per vision principle 6.
 - [ ] `./scripts/gate.py` green, including `check-fixed-sleep.py`.
 
 ## Progress
 - 2026-08-05: selected in the post-beta.7 transport operations wave. The drain state table and a
   completion proof driven by terminal transaction state precede runtime changes.
+- 2026-08-05: specified and implemented `Handle::begin_drain`/`settled` plus
+  `Dispatcher::begin_drain`/`drain`. Failing-first tests initially did not compile because those
+  public barriers and `EndpointDraining` did not exist. The implemented vectors prove terminal
+  transaction release, existing-dialog BYE service, counted 503 refusal for new calls, and forced
+  deadline accounting. `sipx load-responder` now enters the same public admission barrier before
+  its existing cancellation and owned-worker join. Focused transport/call/CLI tests, targeted
+  all-feature clippy, formatting, provenance and `check-fixed-sleep.py` are green. The full gate was
+  intentionally not run in this worktree, so the story remains in progress and its gate acceptance
+  item remains open.
 
 ## Notes
 - Requested against a comparable stack, labelled critical by its maintainer, still undelivered. It

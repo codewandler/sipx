@@ -1,6 +1,6 @@
 # Call dispatch — one endpoint, many calls
 
-**Status:** implemented (`C-4`, `S-23`) · **Crate:** `sipx-call` (`crate::dispatch`) ·
+**Status:** implemented (`C-4`, `S-23`, `T-29`) · **Crate:** `sipx-call` (`crate::dispatch`) ·
 **Design:** [app-sdk](../designs/app-sdk.md)
 
 Normative references: RFC 3261 §8.2 (UAS behaviour and the 405), §8.2.2.2 (merged requests),
@@ -370,3 +370,55 @@ answered at all (`the INVITE is answered rather than left to time out: Elapsed((
 altogether fails three: `a_cancel_after_the_answer_does_not_tear_the_dialog_down`,
 `a_caller_that_gives_up_before_the_answer_ends_the_invitation` and
 `a_ringing_host_is_told_the_caller_gave_up_and_why`.
+
+## 10. Graceful drain
+
+`Dispatcher::begin_drain` is the admission barrier for one call-routing endpoint. It atomically
+marks the dispatcher draining before returning and invokes the transport barrier in
+`sip-transport.md` §10.2. `Dispatcher::drain(within)` establishes that barrier, continues driving
+the one inbound receiver, awaits every live route and transaction, and then performs endpoint
+shutdown. `within` is a positive bound on failure; zero is treated as an immediate deadline.
+Once call routes have closed, optional notifier, event-subscription and publication runtimes enter
+their existing shutdown transitions and join their owned tasks before the endpoint completion
+barrier returns; they do not detach a second cleanup path.
+
+### 10.1 State and request decisions
+
+| Dispatcher state | Initial INVITE | Existing route | Out-of-dialog request | Completion |
+|---|---|---|---|---|
+| `Running` | validate, reserve and surface | deliver | ordinary §3 decision | not applicable |
+| `Draining` | validate, then `503 Service Unavailable` with `Retry-After`; increment `draining` | deliver with the ordinary queue/backpressure rule | while `drain` owns the receiver, refuse `503` and count it | every route receiver closed and endpoint transaction barrier reached |
+| `Expired` | no admission | close every remaining route | no admission | count forced routes and transactions, log them, then await endpoint shutdown |
+| `Stopped` | endpoint closed | inbox closed | endpoint closed | durable endpoint barrier complete |
+
+An INVITE carrying a `To` tag is an in-dialog re-INVITE and takes the existing-route row. ACK, BYE,
+UPDATE, INFO and every other request which matches a live route take the same row. Draining must not
+move the initial-INVITE test below route lookup: an untagged INVITE sharing a `Call-ID` with a live
+dialog is still a new dialog attempt, not in-dialog traffic.
+
+The route wait is causal. It snapshots the current route senders while holding the routing lock,
+then waits for either a receiver to close or the routing generation to change. It resnapshots after
+that event. There is no wall-clock poll, and a registration racing the drain barrier either enters
+the snapshot or changes the generation that wakes it.
+
+### 10.2 Bounded expiry and observation
+
+`DrainProgress` reports live dialog routes and endpoint transactions. `DrainReport` preserves the
+last progress and carries `completed` plus the numbers explicitly terminated at the deadline.
+Natural completion has zero forced counts. Deadline expiry first snapshots both counts, logs one
+warning containing both, closes every route sender, and then calls `Handle::shutdown`; termination
+therefore cannot be silent even when the caller discards the returned report.
+
+`DispatchCounts::draining` counts valid new invitations and other surfaced out-of-dialog work
+refused because admission was intentionally closed. It is separate from `shed`, which means an
+existing call stopped reading, and from transport overload, which means resource pressure rather
+than operator intent.
+
+### 10.3 Test vectors
+
+| Vector | Scenario | Expected |
+|---|---|---|
+| D1 | begin drain with a confirmed route, then send an in-dialog request | request reaches the existing inbox and receives its ordinary answer |
+| D2 | send a fresh initial INVITE after D1's barrier | `503` with `Retry-After`, no invitation surfaced, `draining` increments |
+| D3 | await drain with one transaction held nonterminal, then send its final response | drain is pending before the terminal response and completes after it, with no clock wait standing in for the transition |
+| D4 | expire with a live route and transaction | report and warning name both forced counts; route closes; endpoint durable shutdown completes |

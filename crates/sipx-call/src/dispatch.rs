@@ -55,14 +55,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use bytes::Bytes;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use sipx_sip::build::ResponseBuilder;
 use sipx_sip::headers::CSeq;
 use sipx_sip::transaction::TransactionKey;
 use sipx_sip::{HeaderName, Method, Request, StatusCode};
 use sipx_transport::{Handle, Incoming};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::call::{Call, token};
 use crate::dialog::{Dialog, cseq_number, from_tag, to_tag};
@@ -563,6 +565,8 @@ pub struct DispatchCounts {
     pub merged: u64,
     /// Initial INVITEs refused by the caller-selected authenticated-identity policy.
     pub identity: u64,
+    /// Valid new work refused because graceful drain intentionally closed admission.
+    pub draining: u64,
 }
 
 impl DispatchCounts {
@@ -581,7 +585,34 @@ impl DispatchCounts {
             .saturating_add(self.malformed)
             .saturating_add(self.merged)
             .saturating_add(self.identity)
+            .saturating_add(self.draining)
     }
+}
+
+/// Work observed while a dispatcher is draining.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DrainProgress {
+    /// Live per-dialog routes whose receivers have not closed.
+    pub dialogs: usize,
+    /// Transaction and transaction-owned entries still held by the endpoint.
+    pub transactions: usize,
+}
+
+/// Terminal result of [`Dispatcher::drain`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DrainReport {
+    /// True when every route and transaction ended before the deadline.
+    pub completed: bool,
+    /// Last state observed before natural completion or forced cleanup.
+    pub remaining: DrainProgress,
+    /// Dialog routes explicitly closed at deadline expiry.
+    pub terminated_dialogs: usize,
+    /// Endpoint transaction state explicitly terminated at deadline expiry.
+    pub terminated_transactions: usize,
+    /// Dispatcher decisions accumulated through the drain.
+    pub counts: DispatchCounts,
 }
 
 /// What identifies a route: a `Call-ID` and the tag of the party at the other end.
@@ -638,6 +669,8 @@ struct Table {
     counts: Counters,
     responses: Mutex<BTreeMap<u16, u64>>,
     queue: usize,
+    /// Changes to route identity; receiver closure is awaited from each snapshot directly.
+    route_generation: watch::Sender<u64>,
 }
 
 /// Two indexes over the same set of calls, under one lock.
@@ -682,6 +715,7 @@ struct Counters {
     malformed: AtomicU64,
     merged: AtomicU64,
     identity: AtomicU64,
+    draining: AtomicU64,
 }
 
 /// Which counter a request that was not delivered belongs on.
@@ -694,6 +728,7 @@ enum Kind {
     Malformed,
     Merged,
     Identity,
+    Draining,
 }
 
 /// The set of calls a dispatcher routes to: a cheap, cloneable handle to its routing table.
@@ -727,7 +762,10 @@ impl Calls {
     /// Rarely needed — dropping the inbox does the same thing lazily — but explicit when an
     /// application tears a call down without dropping the receiver it was serving from.
     pub fn forget(&self, dialog: &Dialog) {
-        self.lock().by_dialog.remove(&RouteKey::of_dialog(dialog));
+        let removed = self.lock().by_dialog.remove(&RouteKey::of_dialog(dialog));
+        if removed.is_some() {
+            self.route_changed();
+        }
     }
 
     /// How many calls are currently routed.
@@ -756,6 +794,7 @@ impl Calls {
             malformed: counts.malformed.load(Ordering::Relaxed),
             merged: counts.merged.load(Ordering::Relaxed),
             identity: counts.identity.load(Ordering::Relaxed),
+            draining: counts.draining.load(Ordering::Relaxed),
         }
     }
 
@@ -796,6 +835,7 @@ impl Calls {
             Kind::Malformed => &counts.malformed,
             Kind::Merged => &counts.merged,
             Kind::Identity => &counts.identity,
+            Kind::Draining => &counts.draining,
         }
         .fetch_add(1, Ordering::Relaxed);
     }
@@ -881,11 +921,62 @@ impl Calls {
                 invite_cseq,
             },
         );
+        drop(routing);
+        self.route_changed();
         (tx, rx)
     }
 
     fn remove(&self, key: &RouteKey) {
-        self.lock().by_dialog.remove(key);
+        let removed = self.lock().by_dialog.remove(key);
+        if removed.is_some() {
+            self.route_changed();
+        }
+    }
+
+    fn route_changed(&self) {
+        self.0
+            .route_generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    async fn wait_for_route_change(&self) {
+        let mut generation = self.0.route_generation.subscribe();
+        let senders: Vec<_> = {
+            let mut routing = self.lock();
+            routing.sweep_dead();
+            routing
+                .by_dialog
+                .values()
+                .map(|route| route.tx.clone())
+                .collect()
+        };
+        if senders.is_empty() {
+            return;
+        }
+        let closed = FuturesUnordered::new();
+        for sender in senders {
+            closed.push(async move { sender.closed().await });
+        }
+        tokio::pin!(closed);
+        tokio::select! {
+            _ = closed.next() => {}
+            _ = generation.changed() => {}
+        }
+    }
+
+    fn terminate_routes(&self) -> usize {
+        let count = {
+            let mut routing = self.lock();
+            routing.sweep_dead();
+            let count = routing.by_dialog.len();
+            routing.by_dialog.clear();
+            routing.invites.clear();
+            count
+        };
+        if count != 0 {
+            self.route_changed();
+        }
+        count
     }
 
     /// Whether this INVITE is a merged copy of one already accepted (RFC 3261 §8.2.2.2).
@@ -923,6 +1014,7 @@ pub struct Dispatcher {
     notifier: Option<Notifier>,
     event_subscriptions: Option<EventSubscriptions>,
     publications: Option<Publications>,
+    draining: bool,
 }
 
 impl Dispatcher {
@@ -938,6 +1030,7 @@ impl Dispatcher {
     /// arrived while the call was between `recv` calls, which is most of them.
     #[must_use]
     pub fn with_queue(endpoint: Handle, incoming: mpsc::Receiver<Incoming>, queue: usize) -> Self {
+        let (route_generation, _) = watch::channel(0);
         Self {
             endpoint,
             incoming,
@@ -946,11 +1039,13 @@ impl Dispatcher {
                 counts: Counters::default(),
                 responses: Mutex::new(BTreeMap::new()),
                 queue: queue.max(1),
+                route_generation,
             })),
             identity: None,
             notifier: None,
             event_subscriptions: None,
             publications: None,
+            draining: false,
         }
     }
 
@@ -1007,6 +1102,124 @@ impl Dispatcher {
         self.calls.counts()
     }
 
+    /// Atomically close new-dialog admission for this dispatcher and its transport endpoint.
+    ///
+    /// Existing routes and transactions remain live. Calling this more than once is harmless.
+    pub fn begin_drain(&mut self) {
+        self.draining = true;
+        self.endpoint.begin_drain();
+    }
+
+    /// Whether new-dialog admission has been closed.
+    #[must_use]
+    pub const fn is_draining(&self) -> bool {
+        self.draining
+    }
+
+    /// Observe the two completion dimensions used by [`Self::drain`].
+    pub async fn drain_progress(&self) -> Result<DrainProgress> {
+        Ok(DrainProgress {
+            dialogs: self.calls.len(),
+            transactions: self.endpoint.outstanding().await?,
+        })
+    }
+
+    /// Close admission, drive existing dialogs and transactions, and stop the endpoint.
+    ///
+    /// Completion is event-driven: route receiver closure and the endpoint's transaction-terminal
+    /// barrier. `within` only bounds failure. At expiry every remaining route is closed, the live
+    /// counts are logged and returned, and the ordinary endpoint shutdown path cancels and joins
+    /// transport-owned tasks.
+    pub async fn drain(&mut self, within: Duration) -> Result<DrainReport> {
+        self.begin_drain();
+        let deadline = tokio::time::Instant::now().checked_add(within);
+
+        loop {
+            if self.calls.is_empty() {
+                let endpoint = self.endpoint.clone();
+                let settled = async move { endpoint.settled().await };
+                tokio::pin!(settled);
+                tokio::select! {
+                    result = &mut settled => {
+                        result?;
+                        self.shutdown_services().await;
+                        self.endpoint.shutdown().await;
+                        return Ok(DrainReport {
+                            completed: true,
+                            counts: self.counts(),
+                            ..DrainReport::default()
+                        });
+                    }
+                    incoming = self.incoming.recv() => {
+                        let Some(incoming) = incoming else {
+                            return Err(sipx_transport::Error::EndpointClosed.into());
+                        };
+                        self.route_while_draining(incoming).await;
+                    }
+                    () = wait_for_drain_deadline(deadline) => break,
+                }
+            } else {
+                let calls = self.calls.clone();
+                let route_changed = async move { calls.wait_for_route_change().await };
+                tokio::pin!(route_changed);
+                tokio::select! {
+                    () = &mut route_changed => {}
+                    incoming = self.incoming.recv() => {
+                        let Some(incoming) = incoming else {
+                            return Err(sipx_transport::Error::EndpointClosed.into());
+                        };
+                        self.route_while_draining(incoming).await;
+                    }
+                    () = wait_for_drain_deadline(deadline) => break,
+                }
+            }
+        }
+
+        let remaining = self.drain_progress().await?;
+        let terminated_dialogs = self.calls.terminate_routes();
+        let terminated_transactions = remaining.transactions;
+        tracing::warn!(
+            terminated_dialogs,
+            terminated_transactions,
+            "graceful drain deadline expired; terminating remaining work"
+        );
+        self.endpoint.shutdown().await;
+        self.shutdown_services().await;
+        Ok(DrainReport {
+            completed: false,
+            remaining,
+            terminated_dialogs,
+            terminated_transactions,
+            counts: self.counts(),
+        })
+    }
+
+    async fn route_while_draining(&mut self, incoming: Incoming) {
+        if let Some(dispatched) = self.route(incoming).await {
+            match dispatched {
+                Dispatched::OutOfDialog(incoming) => self.refuse_draining(&incoming).await,
+                Dispatched::Invitation(invitation) => {
+                    // The draining check in `route_new_invite` makes this unreachable without a
+                    // future new `Dispatched` variant changing the decision table. Keep the safe
+                    // response here so that such a change cannot silently reopen admission.
+                    self.refuse_draining(invitation.request()).await;
+                }
+            }
+        }
+    }
+
+    async fn shutdown_services(&mut self) {
+        if let Some(notifier) = self.notifier.as_mut() {
+            notifier.shutdown().await;
+        }
+        if let Some(subscriptions) = self.event_subscriptions.as_mut() {
+            subscriptions.shutdown().await;
+        }
+        if let Some(publications) = self.publications.as_mut() {
+            publications.shutdown().await;
+        }
+    }
+
     /// The next thing the dispatcher cannot place itself.
     ///
     /// Routes everything else on the way, so this must be called in a loop for a dispatcher to
@@ -1054,6 +1267,18 @@ impl Dispatcher {
         // would put it in an inbox where the two responses §9.2 owes could not be sent from.
         if incoming.request.method == Method::Cancel {
             self.cancel(&incoming).await;
+            return None;
+        }
+
+        // These methods can create a dialog without an INVITE. A tagged request belongs to an
+        // existing service dialog and remains legal; an untagged one is new admission just as an
+        // initial INVITE is. Keep this before the optional notifier so the service cannot reopen
+        // admission behind the dispatcher's drain barrier.
+        if self.draining
+            && to_tag(&incoming.request.headers).is_none()
+            && matches!(incoming.request.method, Method::Subscribe | Method::Refer)
+        {
+            self.refuse_draining(&incoming).await;
             return None;
         }
 
@@ -1164,6 +1389,10 @@ impl Dispatcher {
             // those — so a match here is always a different branch.
             self.calls.counted(Kind::Merged);
             self.refuse(&incoming, 482, "Loop Detected", None).await;
+            return None;
+        }
+        if self.draining {
+            self.refuse_draining(&incoming).await;
             return None;
         }
         let verification = self
@@ -1332,6 +1561,22 @@ impl Dispatcher {
         .await;
     }
 
+    async fn refuse_draining(&self, incoming: &Incoming) {
+        self.calls.counted(Kind::Draining);
+        tracing::info!(
+            source = %incoming.source,
+            method = %incoming.request.method,
+            "refusing new work because graceful drain closed admission"
+        );
+        self.refuse(
+            incoming,
+            503,
+            "Service Unavailable",
+            Some((HeaderName::RetryAfter, Bytes::from_static(RETRY_AFTER))),
+        )
+        .await;
+    }
+
     /// Answer a request on a named transaction, with a named `To` tag.
     ///
     /// Separate from [`Self::refuse`] because RFC 3261 §9.2 needs both of the things that method
@@ -1378,6 +1623,13 @@ impl Dispatcher {
                 tracing::warn!(%error, status, "could not send the response for a request");
             }
         }
+    }
+}
+
+async fn wait_for_drain_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1451,11 +1703,13 @@ mod tests {
     use sipx_sip::{Limits, Message, parse_datagram};
 
     fn calls_for_test() -> Calls {
+        let (route_generation, _) = watch::channel(0);
         Calls(Arc::new(Table {
             routes: Mutex::new(Routing::default()),
             counts: Counters::default(),
             responses: Mutex::new(BTreeMap::new()),
             queue: 1,
+            route_generation,
         }))
     }
 

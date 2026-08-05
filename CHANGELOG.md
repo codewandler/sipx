@@ -15,6 +15,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   typed cause when the selected TCP path is unavailable; oversized responses retain their
   request-selected transport.
 
+- **Endpoints can drain boundedly without dropping established calls.** Public transport and call
+  dispatcher barriers refuse new dialog admission, continue routing in-dialog requests, expose
+  causal route/transaction completion, and report plus log any work explicitly terminated at the
+  deadline. The finite CLI responder uses the same barrier before its existing owned-task cleanup.
+
 ### Changed
 
 - **Transport MTU configuration now names the path property rather than a precomputed cutoff.**

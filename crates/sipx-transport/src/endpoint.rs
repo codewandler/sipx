@@ -742,6 +742,8 @@ enum Command {
     WatchUnmatched(mpsc::Sender<Unmatched>),
     /// How much state the driver is holding, for a soak test to assert on.
     Outstanding(oneshot::Sender<usize>),
+    /// Resolve when the transaction layer next has no client or server transaction.
+    Settled(oneshot::Sender<()>),
     /// Stop the driver after every listener, handshake and pooled connection has terminated.
     Shutdown,
 }
@@ -777,6 +779,8 @@ pub struct Unmatched {
 pub struct Handle {
     commands: mpsc::Sender<Command>,
     shutdown: Arc<ShutdownState>,
+    /// Monotonic outbound dialog-admission barrier shared by every handle clone.
+    draining: Arc<AtomicBool>,
     local_addr: SocketAddr,
     /// Every counter, shared with the driver so they can be read while the driver is busy —
     /// which is the only time they are interesting (§12).
@@ -811,6 +815,21 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// Close admission for outbound requests which can establish a dialog.
+    ///
+    /// Existing transactions and requests carrying a `To` tag remain legal. The call dispatcher
+    /// supplies the inbound half of this barrier; [`Self::shutdown`] remains the final ownership
+    /// and task-join path.
+    pub fn begin_drain(&self) {
+        self.draining.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether graceful drain has closed new-dialog admission.
+    #[must_use]
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
+    }
+
     /// Replace the complete live source-admission set and return its generation.
     ///
     /// An empty set refuses every new source. Use [`Self::clear_source_admission`] to allow all.
@@ -936,6 +955,9 @@ impl Handle {
     /// A `Via` is added if the request has none — the transport owns that header, since only
     /// it knows the branch and where responses should come back to.
     pub async fn send(&self, mut request: Request, target: Target) -> Result<Responses> {
+        if self.is_draining() && starts_dialog(&request) {
+            return Err(Error::EndpointDraining);
+        }
         let mut target = target;
         self.apply_request_policy(&mut request, &target)?;
         let generated_branch = if request.headers.get(&HeaderName::Via).is_none() {
@@ -1080,6 +1102,9 @@ impl Handle {
     ///
     /// Returns once the bytes have been handed to the socket.
     pub async fn send_directly(&self, mut request: Request, target: Target) -> Result<()> {
+        if self.is_draining() && starts_dialog(&request) {
+            return Err(Error::EndpointDraining);
+        }
         let mut target = target;
         self.apply_request_policy(&mut request, &target)?;
         if self.advertise_overload {
@@ -1357,6 +1382,20 @@ impl Handle {
         rx.await.map_err(|_| Error::EndpointClosed)
     }
 
+    /// Wait until the endpoint transaction layer has no client or server transaction.
+    ///
+    /// This is a driver event, not a polling loop. The command is serialized with transaction
+    /// creation and terminal outputs, so a caller can use it as the transaction half of a
+    /// graceful-drain completion barrier.
+    pub async fn settled(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.commands
+            .send(Command::Settled(tx))
+            .await
+            .map_err(|_| Error::EndpointClosed)?;
+        rx.await.map_err(|_| Error::EndpointClosed)
+    }
+
     /// Stop the endpoint.
     pub async fn shutdown(&self) {
         if !self.shutdown.complete.load(Ordering::SeqCst) {
@@ -1366,6 +1405,18 @@ impl Handle {
             self.shutdown.wait().await;
         }
     }
+}
+
+fn starts_dialog(request: &Request) -> bool {
+    matches!(
+        request.method,
+        Method::Invite | Method::Subscribe | Method::Refer
+    ) && request
+        .headers
+        .typed::<sipx_sip::headers::To>()
+        .and_then(std::result::Result::ok)
+        .and_then(|to| to.tag().map(<[u8]>::to_vec))
+        .is_none()
 }
 
 fn branch_with_rng<R>(rng: &mut R) -> String
@@ -1599,6 +1650,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     let handle = Handle {
         commands: commands_tx,
         shutdown: Arc::clone(&shutdown),
+        draining: Arc::new(AtomicBool::new(false)),
         local_addr,
         meters: Arc::clone(&meters),
         admission: Arc::clone(&admission),
@@ -1711,6 +1763,7 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
         quic_replies: HashMap::new(),
         background,
         shutdown,
+        settled: Vec::new(),
     };
     tokio::spawn(driver.run());
 
@@ -1833,6 +1886,32 @@ fn clear_in_process_routes(routes: &InProcessRoutes) {
         .clear();
 }
 
+fn wake_in_process_settled(
+    routes: &InProcessRoutes,
+    side: InProcessSide,
+    settled: &mut Vec<oneshot::Sender<()>>,
+) {
+    let has_transaction = routes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .keys()
+        .any(|(owner, _)| *owner == side);
+    if !has_transaction {
+        for answered in settled.drain(..) {
+            let _ = answered.send(());
+        }
+    }
+}
+
+fn in_process_outstanding(routes: &InProcessRoutes, side: InProcessSide) -> usize {
+    routes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .keys()
+        .filter(|(owner, _)| *owner == side)
+        .count()
+}
+
 fn in_process_handle(
     local_addr: SocketAddr,
     capacity: usize,
@@ -1850,6 +1929,7 @@ fn in_process_handle(
     let handle = Handle {
         commands,
         shutdown,
+        draining: Arc::new(AtomicBool::new(false)),
         local_addr,
         meters: Arc::clone(&meters),
         admission: Arc::new(SourceAdmission::default()),
@@ -1884,6 +1964,7 @@ async fn run_in_process(
     routes: InProcessRoutes,
     shutdown: Arc<ShutdownState>,
 ) {
+    let mut settled = Vec::<oneshot::Sender<()>>::new();
     while let Some(command) = commands.recv().await {
         match command {
             Command::Request {
@@ -1960,16 +2041,12 @@ async fn run_in_process(
             }
             Command::WatchUnmatched(_) => {}
             Command::Outstanding(answered) => {
-                let count = routes
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .keys()
-                    .filter(|(owner, _)| *owner == side)
-                    .count();
-                let _ = answered.send(count);
+                let _ = answered.send(in_process_outstanding(&routes, side));
             }
+            Command::Settled(answered) => settled.push(answered),
             Command::Shutdown => break,
         }
+        wake_in_process_settled(&routes, side, &mut settled);
     }
     clear_in_process_routes(&routes);
     shutdown.complete();
@@ -2588,6 +2665,8 @@ struct Driver {
     background: Background,
     /// Durable completion barrier shared with callers that arrive after command closure.
     shutdown: Arc<ShutdownState>,
+    /// Transaction-terminal waiters registered by [`Handle::settled`].
+    settled: Vec<oneshot::Sender<()>>,
 }
 
 fn forget_transaction_timers(
@@ -2668,6 +2747,7 @@ impl Driver {
                     self.abandon_unanswered();
                 }
             }
+            self.wake_settled();
         }
         self.commands.close();
         self.background.shutdown().await;
@@ -2717,6 +2797,14 @@ impl Driver {
                 // which it would have been is exactly what could not be determined (§12.2).
                 self.meters.parse_failure(TransportKind::Udp);
                 tracing::debug!(%error, %source, "dropping malformed datagram");
+            }
+        }
+    }
+
+    fn wake_settled(&mut self) {
+        if self.layer.len() == (0, 0) {
+            for answered in self.settled.drain(..) {
+                let _ = answered.send(());
             }
         }
     }
@@ -3337,6 +3425,9 @@ impl Driver {
                         + self.reconnect.len()
                         + self.handed_over.len(),
                 );
+            }
+            Command::Settled(reply) => {
+                self.settled.push(reply);
             }
             Command::Shutdown => {}
         }
@@ -4254,6 +4345,7 @@ mod tests {
             quic_replies: std::collections::HashMap::new(),
             background: Background::new(),
             shutdown: Arc::new(ShutdownState::default()),
+            settled: Vec::new(),
         }
     }
 
@@ -4489,6 +4581,7 @@ mod tests {
         super::Handle {
             commands,
             shutdown,
+            draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             local_addr: "127.0.0.1:5060".parse().expect("address"),
             meters: Arc::clone(&meters),
             admission: Arc::new(crate::policy::SourceAdmission::default()),

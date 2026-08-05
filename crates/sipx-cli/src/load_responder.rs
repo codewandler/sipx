@@ -368,7 +368,11 @@ impl Totals {
     }
 
     fn apply_dispatch(&mut self, counts: DispatchCounts, responses: BTreeMap<u16, u64>) {
-        self.invalid = self.invalid.saturating_add(counts.total());
+        self.invalid = self
+            .invalid
+            .saturating_add(counts.total().saturating_sub(counts.draining));
+        self.invitations = self.invitations.saturating_add(counts.draining);
+        self.rejected = self.rejected.saturating_add(counts.draining);
         for (status, count) in responses {
             *self.responses.entry(status).or_default() += count;
         }
@@ -471,6 +475,11 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     let mut signal_open = true;
     let mut data_priority = DataPriority::Dispatch;
     loop {
+        if !admission_open {
+            // The public dispatcher barrier preserves existing routes while refusing new dialogs;
+            // the command's TaskTracker/JoinSet loop below remains the owner of admitted workers.
+            dispatcher.begin_drain();
+        }
         if !admission_open && workers.is_empty() {
             let routes = calls.len();
             if routes == 0 {
