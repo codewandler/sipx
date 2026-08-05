@@ -57,8 +57,9 @@ claim and the places sipx loses stated plainly — see [How sipx compares](../re
   configuration, routing policy, a location service, and dial plans belong to the application.
 - **Automatic event documents from live stack state.** The socket notifier sends valid initial
   `dialog`, `reg`, and PIDF documents, but live calls, registrations and published presence are not
-  yet projected into later NOTIFY bodies. The subscriber half that originates SUBSCRIBE is also not
-  shipped yet.
+  yet projected into later NOTIFY bodies. A bounded generic subscriber does originate authenticated
+  SUBSCRIBE and consume NOTIFY through an injected package parser and origin policy; no built-in
+  `reg` consumer or CLI peer-list workflow is shipped yet.
 - **SIP instant messaging.** `MESSAGE` can be parsed but has no user-agent behavior.
 
 ## Security boundary

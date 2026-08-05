@@ -7,6 +7,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Applications can now place and maintain generic SIP event subscriptions** (`S-38`). A bounded
+  sans-I/O state machine and live endpoint driver cover authenticated SUBSCRIBE, mandatory NOTIFY,
+  refresh, unsubscribe and shutdown while keeping package parsing behind an application-supplied
+  consumer. Dialog targets and route sets, remote and local CSeq, exact expiry rules, peer trust,
+  delivery backpressure and owned timer/transaction cleanup are enforced and tested from the public
+  API.
+
 ## [1.0.0-beta.4] — 2026-08-04
 
 This prerelease ships the beta.4 feature-and-security wave: explicit non-ICE deployment

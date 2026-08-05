@@ -369,17 +369,21 @@ number = 6665
 title = "SIP-Specific Event Notification"
 layer = "core"
 status = "partial"
-roles = ["uas"]
+roles = ["uac", "uas"]
 headers = ["Event", "SubscriptionState", "AllowEvents"]
 evidence = [
   "crates/sipx-sip/src/event.rs",
   "crates/sipx-ua/src/subscribe.rs",
   "crates/sipx-call/src/notifier.rs",
   "crates/sipx-call/tests/notifier.rs",
+  "crates/sipx-ua/src/event_client.rs",
+  "crates/sipx-ua/tests/event_client.rs",
+  "crates/sipx-call/src/subscriber.rs",
+  "crates/sipx-call/tests/subscriber.rs",
   "crates/sipx-call/src/transfer.rs",
 ]
 spec = "docs/specs/event-notifier.md"
-note = "The notifier side is socket-reachable through the call dispatcher: one shared store keyed on dialog and package (§4.4.1), immediate initial NOTIFY, tagged-dialog 481, 489 for an unserved package, shorten-never-lengthen expiry negotiation, refresh/unsubscribe, expiry, final termination and a finite peer-driven capacity with visible shedding. Owned timer-task counters make termination observable. `Subscription-State` and its reasons are typed, and REFER's implicit subscription uses the same vocabulary. Not implemented: the subscriber side, so sipx serves subscriptions and does not place them. The three served packages have separate rows."
+note = "Both generic roles are socket-reachable through the call dispatcher. The notifier uses one bounded store keyed on dialog/package (§4.4.1), sends the mandatory initial NOTIFY, negotiates expiry and owns observable termination. The subscriber issues authenticated SUBSCRIBE, accepts the initial-NOTIFY race through an explicit origin policy, rejects forks, tracks target/route/CSeq and refreshes or unsubscribes under finite timer generations. Package bodies are injected bounded consumers; the shipped `dialog`, `reg` and `presence` renderers have separate rows, while their application-facing subscriber consumers remain later package stories. REFER's implicit subscription uses the same typed `Subscription-State` vocabulary."
 
 [[rfc]]
 number = 3841

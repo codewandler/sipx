@@ -190,7 +190,49 @@ Polling `Dispatcher::next` serves `dialog`, `reg`, and `presence` SUBSCRIBE requ
 required initial NOTIFY, and re-arms or terminates the one owned expiry task on refresh or
 unsubscribe. This notifier API is Experimental. It sends valid empty full snapshots initially;
 automatic projection of live calls, registrations and published presence into later documents is
-not part of this surface yet. The outbound subscriber half is a separate planned API.
+not part of this surface yet.
+
+## Place outbound event subscriptions
+
+The matching Experimental subscriber is split at the same I/O boundary as the rest of sipx.
+`sipx_ua::event_client::EventClient` is the deterministic state machine; it receives responses,
+NOTIFY requests and fired timer generations as values. `sipx_call::EventSubscriptions` applies
+those outputs through the dispatcher and a real endpoint:
+
+```rust
+use sipx_call::{Dispatcher, EventSubscriptions};
+use sipx_ua::event_client::{Config as EventConfig, PackageConsumer, Start};
+# async fn run<C: PackageConsumer>(endpoint: sipx_transport::Handle,
+#     incoming: tokio::sync::mpsc::Receiver<sipx_transport::Incoming>,
+#     start: Start<C>) -> Result<(), Box<dyn std::error::Error>> {
+let endpoint_shutdown = endpoint.clone();
+let events = EventSubscriptions::new(EventConfig::default())?;
+let event_handle = events.handle();
+let mut dispatcher = Dispatcher::new(endpoint, incoming).with_event_subscriptions(events);
+let dispatch = tokio::spawn(async move { while dispatcher.next().await.is_some() {} });
+let mut subscription = event_handle.subscribe(start)?;
+if let Some(notification) = subscription.recv().await {
+    let _package_value = notification.value;
+}
+subscription.unsubscribe().await?;
+drop(subscription);
+endpoint_shutdown.shutdown().await;
+dispatch.await?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+# }
+```
+
+`Start`'s consumer implements `PackageConsumer`; it declares the Event token, accepted media types,
+neutral value and bounded synchronous body parser. The initializer also carries the selected target,
+local Contact, fresh Call-ID/tag/CSeq, optional digest credentials and NOTIFY trust policy.
+
+The full initializer is intentionally explicit: matching Call-ID/tags is correlation, not
+authorization. The default `SamePeer` policy accepts NOTIFY only from the exact selected peer and
+transport; proxy deployments inject a finite allow-list or authenticated policy. Every usage has a
+provisional expiry before the first response, Timer N, one refresh timer, one in-flight SUBSCRIBE,
+a bounded delivery queue, non-wrapping CSeq and observable task/timer/transaction counts. The
+generic path does not imply a built-in application model: registration discovery remains the
+separate `reg` package consumer story.
 
 ## Runtime and feature boundaries
 
@@ -215,11 +257,11 @@ docs.rs so that it always matches the guides next to it. Start points:
 |---|---|
 | `sipx-sip` | [`parser`](https://codewandler.github.io/sipx/api/sipx_sip/parser/index.html) · [`transaction`](https://codewandler.github.io/sipx/api/sipx_sip/transaction/index.html) |
 | `sipx-transport` | [`bind`](https://codewandler.github.io/sipx/api/sipx_transport/endpoint/fn.bind.html) · [`Target`](https://codewandler.github.io/sipx/api/sipx_transport/target/struct.Target.html) |
-| `sipx-ua` | [`UserAgent`](https://codewandler.github.io/sipx/api/sipx_ua/agent/struct.UserAgent.html) |
+| `sipx-ua` | [`UserAgent`](https://codewandler.github.io/sipx/api/sipx_ua/agent/struct.UserAgent.html) · [`event_client`](https://codewandler.github.io/sipx/api/sipx_ua/event_client/index.html) |
 | `sipx-sdp` | [`answer`](https://codewandler.github.io/sipx/api/sipx_sdp/answer/fn.answer.html) |
 | `sipx-rtp` | [`srtp`](https://codewandler.github.io/sipx/api/sipx_rtp/srtp/index.html) · [`rtcp`](https://codewandler.github.io/sipx/api/sipx_rtp/rtcp/index.html) |
 | `sipx-media` | [`MediaSession`](https://codewandler.github.io/sipx/api/sipx_media/session/struct.MediaSession.html) |
-| `sipx-call` | [`dial`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.dial.html) · [`answer`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.answer.html) · [`Call`](https://codewandler.github.io/sipx/api/sipx_call/call/struct.Call.html) |
+| `sipx-call` | [`dial`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.dial.html) · [`answer`](https://codewandler.github.io/sipx/api/sipx_call/call/fn.answer.html) · [`Call`](https://codewandler.github.io/sipx/api/sipx_call/call/struct.Call.html) · [`EventSubscriptions`](https://codewandler.github.io/sipx/api/sipx_call/subscriber/struct.EventSubscriptions.html) |
 
 The API reference is generated from the same `main` branch as this site. When using the tagged
 release, consult the checked-out source documentation if an API has changed on `main`.

@@ -78,3 +78,11 @@ logic, but no endpoint can receive or originate PUBLISH.
 - RFC 6665 permits package-specific fork handling. The generic client deliberately accepts the
   first dialog and refuses competing NOTIFY dialogs with 481, keeping one refresh/timer budget per
   application request.
+
+## Delivered boundary
+
+`S-35` made the three existing notifier packages socket-reachable. `S-38` adds the other generic
+role: a public sans-I/O subscriber plus a dispatcher-owned runtime for authenticated SUBSCRIBE,
+NOTIFY validation, refresh, unsubscribe and observable cleanup. The runtime deliberately supplies
+no package-specific application model. `S-24` still owns turning `reginfo` into discovered peers,
+and `S-39` still owns live PUBLISH reachability; neither is hidden inside the generic lifecycle.

@@ -70,6 +70,7 @@ use crate::event::{CallEvents, EndCause, EventSink};
 use crate::identity::InboundIdentityPolicy;
 use crate::media_policy::{Codecs, MediaPolicy};
 use crate::notifier::Notifier;
+use crate::subscriber::EventSubscriptions;
 
 /// How many requests one call's inbox holds before the dispatcher sheds for it.
 ///
@@ -792,6 +793,7 @@ pub struct Dispatcher {
     calls: Calls,
     identity: Option<InboundIdentityPolicy>,
     notifier: Option<Notifier>,
+    event_subscriptions: Option<EventSubscriptions>,
 }
 
 impl Dispatcher {
@@ -817,6 +819,7 @@ impl Dispatcher {
             })),
             identity: None,
             notifier: None,
+            event_subscriptions: None,
         }
     }
 
@@ -836,6 +839,14 @@ impl Dispatcher {
     pub fn with_notifier(mut self, mut notifier: Notifier) -> Self {
         notifier.attach(self.endpoint.clone());
         self.notifier = Some(notifier);
+        self
+    }
+
+    /// Route inbound NOTIFY requests to a bounded outbound event-subscription client.
+    #[must_use]
+    pub fn with_event_subscriptions(mut self, subscriptions: EventSubscriptions) -> Self {
+        subscriptions.attach(self.endpoint.clone());
+        self.event_subscriptions = Some(subscriptions);
         self
     }
 
@@ -936,6 +947,15 @@ impl Dispatcher {
             && let Some(notifier) = self.notifier.as_mut()
         {
             notifier.receive(&incoming).await;
+            return None;
+        }
+
+        // NOTIFY owns the subscription dialog established by an outbound SUBSCRIBE, not an INVITE
+        // dialog in the call table. The event client validates its exact tags, Event and CSeq.
+        if incoming.request.method == Method::Notify
+            && let Some(subscriptions) = &self.event_subscriptions
+            && subscriptions.receive(&incoming).await
+        {
             return None;
         }
 

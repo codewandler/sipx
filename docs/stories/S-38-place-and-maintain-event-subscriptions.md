@@ -2,7 +2,7 @@
 id: S-38
 title: Place and maintain event subscriptions
 pillar: Signalling
-status: backlog
+status: in-progress
 priority: 7
 design: docs/designs/event-reachability.md
 epic: event-reachability
@@ -21,19 +21,19 @@ dialog, without embedding any event package's application policy in the transpor
 
 ## Acceptance
 
-- [ ] The public API establishes, refreshes and terminates a subscription through the state machine
+- [x] The public API establishes, refreshes and terminates a subscription through the state machine
       and byte vectors in [`docs/specs/event-client.md`](../specs/event-client.md), specifically
       `S37-V1` through `S37-V13`.
-- [ ] 401 and 407 challenges reuse endpoint credentials; refreshes use the granted expiry; initial
+- [x] 401 and 407 challenges reuse endpoint credentials; refreshes use the granted expiry; initial
       and subsequent NOTIFY requests are ordered and surfaced with typed subscription state.
-- [ ] The dialog remote target, route set and CSeq rules are honored for every request, and a
+- [x] The dialog remote target, route set and CSeq rules are honored for every request, and a
       terminated or rejected subscription cannot be silently resurrected. Local CSeq exhaustion is
       typed and never wraps or emits a repeated request.
-- [ ] Every initial and target-refresh NOTIFY passes the configured trust policy and carries exactly
+- [x] Every initial and target-refresh NOTIFY passes the configured trust policy and carries exactly
       one parseable Contact before it can select a dialog, change a remote target or deliver state.
-- [ ] Response Expires and 423 Min-Expires are fail-closed for initial, refresh and unsubscribe
+- [x] Response Expires and 423 Min-Expires are fail-closed for initial, refresh and unsubscribe
       operations; an expiry-less initial NOTIFY retains a finite provisional bound.
-- [ ] Live subscriptions, pending notification delivery and refresh timers are bounded. Cancellation
+- [x] Live subscriptions, pending notification delivery and refresh timers are bounded. Cancellation
       waits for owned work and a test observes zero residual transactions and timers.
 - [ ] A synthetic package proves the generic API; `S-24` consumes it for `reg` without copying the
       subscriber state machine.
@@ -41,8 +41,13 @@ dialog, without embedding any event package's application policy in the transpor
 
 ## Progress
 
-- Not started. Depends on S-37's integration gate; the implementation contract and test mapping are
-  now fixed in `docs/specs/event-client.md` and may be implemented beside S-35 after that gate.
+- The generic sans-I/O client and endpoint driver implement all thirteen contract vectors. The live
+  endpoint proof covers authentication, refresh, ordered delivery, unsubscribe, joined shutdown and
+  zero residual transactions/timers; focused route-set and operation-serialization tests cover the
+  dialog edge cases found during review.
+- The synthetic package proves the package seam. `S-24` remains the separately tracked `reg` package
+  consumer, so that acceptance item and the final full-gate item intentionally remain open for the
+  integration branch.
 
 ## Required failing-first tests
 

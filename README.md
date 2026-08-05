@@ -34,6 +34,7 @@ PBX, browser media engine, or video stack.
 | Audio | G.711, DTMF, WAV playback and recording; optional Opus and explicitly selected live devices behind Cargo features |
 | Security | TLS and secure WebSocket; selectable plain RTP, SDES-keyed SRTP, optional DTLS-SRTP, and a fail-closed browser-audio composition profile |
 | Reachability | `rport`, symmetric RTP, Path, Service-Route, Outbound, GRUU and push refresh; host and STUN-derived ICE candidates, but no TURN relay |
+| SIP events | Bounded inbound notifier plus a package-generic authenticated subscriber with explicit NOTIFY-origin policy |
 | Automation | Single-line JSON reports, distinct outcome exit codes, interactive scenarios, bounded load, quality statistics and signalling capture |
 | Two-leg calls | Public early and confirmed coupling of two dialogs, with optional media bridging; the off-media relay role remains unfinished |
 

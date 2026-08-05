@@ -51,10 +51,12 @@
 //! §8.2's answer read back, and §4.1.3's refresh through `UserAgent::woken`. Outbound is earned
 //! only as far as the registration goes, which is what the wording above says and no further.
 //!
-//! **Experimental**: `presence`, `subscribe` and `packages`. They are public and tested, and
-//! `sipx-call::Notifier` now serves inbound SUBSCRIBE from a dispatcher through this crate's exact
-//! store. No `sipx-cli` command subscribes or publishes, the subscriber half is not built, and
-//! nothing receives PUBLISH off a socket. Their pre-1.0 API shape is still soft.
+//! **Experimental**: `presence`, `subscribe`, `event_client` and `packages`. They are public and
+//! tested. `sipx-call::Notifier` serves inbound SUBSCRIBE through this crate's exact store, while
+//! `event_client` is the bounded sans-I/O subscriber driven by
+//! `sipx-call::EventSubscriptions`. No `sipx-cli` command subscribes or publishes, no built-in
+//! package consumer turns `reg` into a peer list yet, and nothing receives PUBLISH off a socket.
+//! Their pre-1.0 API shape is still soft.
 //!
 //! By that same rule, and named here rather than left for a reader to discover: the rest of
 //! Outbound is experimental too. `Flows` and `Attempt` — one registration per outbound proxy,
@@ -69,6 +71,7 @@ pub mod auth;
 pub mod challenge;
 #[cfg(feature = "runtime")]
 pub mod error;
+pub mod event_client;
 #[cfg(feature = "runtime")]
 pub mod flows;
 pub mod gruu;

@@ -28,7 +28,7 @@
 //! **Experimental**: choosing what a call offers — [`CodecPreference`], [`Codecs`], [`IcePolicy`],
 //! [`Keying`], [`MediaPolicy`], [`MediaProfile`], [`MediaAddress`],
 //! [`OutboundIdentityPolicy`], [`InboundIdentityPolicy`],
-//! the bounded inbound event [`Notifier`] and its observation handle,
+//! the bounded inbound event [`Notifier`] and outbound [`EventSubscriptions`] runtimes,
 //! the two-dialog ownership and relay surface in [`coupling`],
 //! [`DialOptions::with_codecs`], [`DialOptions::with_initial_direction`],
 //! [`DialOptions::with_media_policy`],
@@ -67,6 +67,7 @@ pub mod load;
 mod media_policy;
 pub mod notifier;
 pub mod rel;
+pub mod subscriber;
 pub mod transfer;
 // Crate-private: every item in it is `pub(crate)`, and a `pub mod` whose contents are all
 // private renders as an empty page in the API reference — a promise of surface that is not there.
@@ -97,5 +98,9 @@ pub use notifier::{Notifier, NotifierCounts, NotifierHandle};
 pub use rel::{
     Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_early_with_policy_at,
     ring_offer_early, ring_offer_early_with_policy, ring_offer_early_with_policy_at,
+};
+pub use subscriber::{
+    EventNotification, EventSubscription, EventSubscriptionCounts, EventSubscriptionError,
+    EventSubscriptions, EventSubscriptionsHandle,
 };
 pub use transfer::{Referral, Replaces, Transfer, TransferState};
