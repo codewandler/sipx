@@ -50,3 +50,6 @@ pin and reproduce.
   portable contract has 18 passing adversarial tests; its supervisor also completed a real call
   through the no-default-feature `sipx` binary. Stable publication remains blocked on roadmap
   predicate 3 and the actual release run, not on artifact implementation.
+- 2026-08-05: `1.0.0-rc.1` is the first selected live exercise of that portable publication path.
+  A successful candidate run can prove the mechanism and artifact bytes, but it cannot close this
+  stable story while the independent-application predicate remains open.

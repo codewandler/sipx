@@ -1,11 +1,11 @@
-# Stable CLI release artifacts
+# Portable CLI release artifacts
 
 **Status:** normative target · **Stories:** `A-10`, `P-14` · **Boundary:** release packaging and
 GitHub Actions orchestration
 
 ## 1. Scope
 
-This specification defines the portable `sipx` command artifacts attached to a stable release. It
+This specification defines the portable `sipx` command artifacts attached to a release. It
 does not authorize a release, replace the registry publication contract in
 [`release-rehearsal.md`](release-rehearsal.md), or weaken the immutable-tag requirements in
 [`release-workflow.md`](release-workflow.md). The artifact jobs consume the same exact annotated

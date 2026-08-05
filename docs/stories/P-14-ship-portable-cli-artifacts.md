@@ -45,6 +45,9 @@ Publish `sipx` binaries that run on the machines people have, without a runtime 
   contract tests, the 33 workflow mutation tests, a real no-default-feature loopback call, the
   release-workflow check, CI/gate drift check and public-site build pass. The story stays
   in-progress until a tag run publishes and natively records all five artifacts.
+- 2026-08-05: `1.0.0-rc.1` is selected as the first tag that must publish and verify the complete
+  five-target set. The public install guide now covers those prerelease archives instead of
+  presenting them only as a future stable-release path.
 
 ## Notes
 - The single most-engaged issue in the surveyed CLI project is users hitting `GLIBC_2.29`/`2.32`/

@@ -6,7 +6,7 @@ description: The crates are useful separately — a parser and transaction machi
 # Use sipx as a library
 
 The crates are useful separately. Take the pure protocol core, the async transport and user-agent
-layers, or the complete call framework. The current public beta is on crates.io; `main` can move
+layers, or the complete call framework. The current public prerelease is on crates.io; `main` can move
 ahead of it.
 
 ## Stability policy
@@ -18,11 +18,11 @@ support intent, not semantic-version stability.
 
 ## Add a dependency
 
-Pin the exact public beta in `Cargo.toml` so every sipx crate resolves to the same release:
+Pin the exact public prerelease in `Cargo.toml` so every sipx crate resolves to the same release:
 
 ```toml
 [dependencies]
-sipx-call = "=1.0.0-beta.7"
+sipx-call = "=1.0.0-rc.1"
 ```
 
 This website documents `main`, which can be tested explicitly with:
@@ -39,7 +39,7 @@ Optional behavior is opt-in. For example, make Opus selectable by `sipx-call` li
 
 ```toml
 [dependencies]
-sipx-call = { version = "=1.0.0-beta.7", features = ["opus"] }
+sipx-call = { version = "=1.0.0-rc.1", features = ["opus"] }
 ```
 
 Opus links a C library. Enabling the feature makes `Codecs::Opus` available; it does not silently
@@ -50,7 +50,7 @@ selected explicitly:
 
 ```toml
 [dependencies]
-sipx-call = { version = "=1.0.0-beta.7", features = ["opus", "dtls"] }
+sipx-call = { version = "=1.0.0-rc.1", features = ["opus", "dtls"] }
 ```
 
 ### Opus packaging policy

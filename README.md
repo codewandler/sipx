@@ -9,7 +9,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 <!-- BEGIN generated:badges -->
 <a href="https://codewandler.github.io/sipx/"><img alt="docs: codewandler.github.io/sipx" src="https://img.shields.io/static/v1?label=docs&message=codewandler.github.io%2Fsipx&color=blue"></a>
-<a href="CHANGELOG.md"><img alt="release: 1.0.0-beta.7" src="https://img.shields.io/static/v1?label=release&message=1.0.0-beta.7&color=blue"></a>
+<a href="CHANGELOG.md"><img alt="release: 1.0.0-rc.1" src="https://img.shields.io/static/v1?label=release&message=1.0.0-rc.1&color=blue"></a>
 <a href="#try-the-cli"><img alt="MSRV: rustc 1.88" src="https://img.shields.io/static/v1?label=MSRV&message=rustc%201.88&color=blue"></a>
 <a href="docs/compliance.md"><img alt="RFCs: 36 implemented of 82" src="https://img.shields.io/static/v1?label=RFCs&message=36%20implemented%20of%2082&color=blue"></a>
 <a href="docs/compliance.md"><img alt="codecs: G.711 · L16 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20L16%20%C2%B7%20Opus&color=blue"></a>
@@ -18,7 +18,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 </div>
 
-> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-beta.7<!-- END generated:workspace-version -->.** This is the current public-beta release. `main` can move ahead of
+> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-rc.1<!-- END generated:workspace-version -->.** This is the current public prerelease. `main` can move ahead of
 > the release tag. Public APIs are not frozen;
 > Supported APIs receive migration notes when they break, while Experimental APIs may change or be
 > removed without one. Start with the exact registry install below when reproducibility matters.
@@ -33,9 +33,9 @@ transfer, and carry real audio from a Rust library or a shell command.
 | Understand crate boundaries | [Why the core is different](#why-the-core-is-different) and [Crates](#crates) |
 | Contribute to the repository | [Contributing](#contributing) and [`AGENTS.md`](AGENTS.md) |
 
-For reproducible results, use the exact beta versions shown below. For current development APIs,
-follow the `main`-branch instructions in the getting-started guide and expect Experimental surfaces
-to change.
+For reproducible results, use the exact prerelease versions shown below. For current development
+APIs, follow the `main`-branch instructions in the getting-started guide and expect Experimental
+surfaces to change.
 
 ## Does it fit?
 
@@ -66,11 +66,11 @@ deployment shape.
 
 ## Try the CLI
 
-The <!-- BEGIN generated:release-tag -->v1.0.0-beta.7<!-- END generated:release-tag --> beta release needs
+The <!-- BEGIN generated:release-tag -->v1.0.0-rc.1<!-- END generated:release-tag --> prerelease needs
 Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```sh
-cargo install --locked --version =1.0.0-beta.7 sipx-cli
+cargo install --locked --version =1.0.0-rc.1 sipx-cli
 sipx version
 ```
 
@@ -78,7 +78,7 @@ To use the bounded browser-audio profile, install that same exact release with i
 media features:
 
 ```sh
-cargo install --locked --version =1.0.0-beta.7 --features opus,dtls sipx-cli
+cargo install --locked --version =1.0.0-rc.1 --features opus,dtls sipx-cli
 ```
 
 Then make a bounded loopback call. Terminal one listens for at most 15 seconds:
@@ -95,19 +95,20 @@ sipx dial sip:you@127.0.0.1:5060 --duration 2 --timeout 5 --json
 
 That proves the signalling and media session without needing an account. Add `--play hello.wav` or
 `--record reply.wav` to move audio samples; WAV input is 16-bit mono at the negotiated clock
-(8 kHz for G.711, 44.1 or 8 kHz for L16, or 48 kHz for an Opus-only call), and recordings preserve that rate. Input at another supported rate is resampled. The
+(8 kHz for G.711, 44.1 or 8 kHz for L16, or 48 kHz for an Opus-only call), and recordings preserve
+that rate. Input at another supported rate is resampled. The
 **[getting-started guide](https://codewandler.github.io/sipx/docs/getting-started)** continues with
 registration, expected output, and installing from `main`.
 
 ## Use the Rust libraries
 
 The workspace deliberately publishes modular crates rather than one facade crate. Pin every sipx
-dependency to the same exact beta while the API remains pre-1.0:
+dependency to the same exact prerelease while the API remains pre-1.0:
 
 ```toml
 [dependencies]
-sipx-call = "=1.0.0-beta.7"
-sipx-transport = "=1.0.0-beta.7"
+sipx-call = "=1.0.0-rc.1"
+sipx-transport = "=1.0.0-rc.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -118,7 +119,7 @@ The call guides inline real example files that CI compiles:
 - [Register](https://codewandler.github.io/sipx/docs/guides/register)
 - [Choose crates and features](https://codewandler.github.io/sipx/docs/guides/as-a-library)
 
-The beta release is for programmable SIP endpoints, not a promise of every telephony role. It
+The release candidate is for programmable SIP endpoints, not a promise of every telephony role. It
 does not provide proxy, registrar, PBX, TURN for relay-required networks, video, data channels,
 browser-facing APIs, or a general browser-media engine. It remains a prerelease rather than stable
 `1.0`, and the language-neutral application contract remains Experimental. The public

@@ -78,19 +78,19 @@ PUBLIC_RELEASE_HEADING = re.compile(
 DOC_COMMENT = re.compile(r"^\s*(?://!|///)\s?(?P<body>.*)$")
 RUST_DOC_LANGUAGES = {"", "rust", "no_run", "ignore", "should_panic"}
 
-# These entry points jointly define whether somebody can adopt the current public beta
+# These entry points jointly define whether somebody can adopt the current public prerelease
 # without first reading the repository's internal roadmap. Unlike a copied capability table, the
 # guard asks only for the release boundary and stability contract that must be present on each
 # public front door. Detailed capability truth remains in the fit and CLI references.
 ADOPTION_REQUIREMENTS = {
     "README.md": (
-        ("published public-beta status", re.compile(r"current public-beta\s+release", re.I)),
+        ("published public-prerelease status", re.compile(r"current public\s+prerelease", re.I)),
         ("pre-1.0 non-frozen policy", re.compile(r"Public APIs are not frozen", re.I)),
         ("Supported migration policy", re.compile(r"Supported APIs receive migration", re.I)),
         ("Experimental change policy", re.compile(r"Experimental APIs may change", re.I)),
     ),
     "website/docs/intro.md": (
-        ("published public-beta status", re.compile(r"current public-beta\s+release", re.I)),
+        ("published public-prerelease status", re.compile(r"current public\s+prerelease", re.I)),
         ("pre-1.0 non-frozen policy", re.compile(r"Public APIs are not frozen", re.I)),
     ),
     "website/docs/whats-new.md": (
@@ -553,7 +553,7 @@ def public_fact_problems(text: str, source: str) -> list[str]:
 
 
 def public_adoption_problems(contents: dict[str, str]) -> list[str]:
-    """Hold the public beta entry points to their adoption and stability boundary."""
+    """Hold the public prerelease entry points to their adoption and stability boundary."""
     problems = []
     for source, requirements in ADOPTION_REQUIREMENTS.items():
         text = contents.get(source, "")

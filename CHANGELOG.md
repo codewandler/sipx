@@ -7,6 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] — 2026-08-05
+
+This is the first release candidate for stable 1.0. It integrates the post-beta.7 transport,
+media, signalling, observability and distribution work as one reviewable boundary. It remains a
+prerelease: Supported APIs still receive migration guidance when they change, Experimental APIs
+may change without that guide, and stable promotion still requires independent application use.
+
 ### Added
 
 - **Routing and privacy consumers can inspect and edit parser-owned signalling syntax without
@@ -21,6 +28,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   optional native features; each runs a bounded loopback call before deterministic packaging. The
   exact release carries per-target SPDX documents and checksums, while a retry compares existing
   asset bytes and never overwrites them.
+
+- **The endpoint load comparison now has two compatible retained responder runs.** Both use the
+  same open-loop driver, workload, host, ceiling, seed and pass/fail contract. Their supported
+  throughput intervals overlap at the highest tested rate, so the published result is explicitly
+  inconclusive and makes no claim about callers, secure transports, media, routing or clusters.
 
 - **Calls expose an explicit, rate-converting linear PCM boundary and selectable mono L16.**
   Applications can play unsigned 8-bit or signed 16-bit mono PCM at a stated rate, capture at a
@@ -3142,7 +3154,9 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.6...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.1...HEAD
+[1.0.0-rc.1]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.7...v1.0.0-rc.1
+[1.0.0-beta.7]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.6...v1.0.0-beta.7
 [1.0.0-beta.6]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.5...v1.0.0-beta.6
 [1.0.0-beta.5]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.4...v1.0.0-beta.5
 [1.0.0-beta.4]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.3...v1.0.0-beta.4

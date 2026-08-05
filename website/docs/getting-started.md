@@ -6,15 +6,15 @@ description: Install the sipx CLI and place a first call between two terminals w
 # Getting started
 
 This walkthrough makes a real local SIP call between two `sipx` processes. It needs no PBX,
-account, or configuration file. The exact public beta is available from crates.io; `main` may move
-ahead of it.
+account, or configuration file. The exact public prerelease is available from crates.io; `main` may
+move ahead of it.
 
-## Install the public beta
+## Install the public prerelease
 
 Install the exact release with Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```bash
-cargo install --locked --version =1.0.0-beta.7 sipx-cli
+cargo install --locked --version =1.0.0-rc.1 sipx-cli
 ```
 
 The exact `--version` requirement makes the installation reproducible. This site follows the
@@ -26,10 +26,10 @@ cargo install --git https://github.com/codewandler/sipx \
   --branch main --locked sipx-cli
 ```
 
-### Prebuilt stable binary
+### Prebuilt release binaries
 
-Stable releases starting with `v1.0.0` also attach an exact native archive and SPDX bill of
-materials for each supported target:
+Release candidates and stable releases starting with `v1.0.0-rc.1` also attach an exact native
+archive and SPDX bill of materials for each supported target:
 
 | Machine | Target and archive suffix |
 |---|---|
@@ -42,7 +42,7 @@ materials for each supported target:
 For example, install the static x86-64 Linux binary after verifying the published checksum:
 
 ```bash
-VERSION=1.0.0
+VERSION=1.0.0-rc.1
 TARGET=x86_64-unknown-linux-musl
 ARCHIVE="sipx-$VERSION-$TARGET.tar.gz"
 curl --fail --location --remote-name \
@@ -61,11 +61,11 @@ above when you need `device-audio`, `opus` or `dtls`; the archive's `build-manif
 sidecar record that distinction.
 
 Confirm which version was installed. This documentation build covers
-<!-- BEGIN generated:workspace-version -->1.0.0-beta.7<!-- END generated:workspace-version -->:
+<!-- BEGIN generated:workspace-version -->1.0.0-rc.1<!-- END generated:workspace-version -->:
 
 ```console
 $ sipx version
-sipx 1.0.0-beta.7
+sipx 1.0.0-rc.1
 ```
 
 ## Prepare audio
@@ -77,8 +77,8 @@ device picker or mixer.
 
 Input WAV files must be **16-bit mono PCM** and carry a supported sample rate in their header.
 sipx linearly resamples them to the negotiated clock: 8 kHz for the default G.711 codecs, 44.1 or
-8 kHz for L16, or 48 kHz when both ends select Opus. If you do not have one, omit `--play` on either command below.
-The call will still complete, but that side sends silence.
+8 kHz for L16, or 48 kHz when both ends select Opus. If you do not have one, omit `--play` on
+either command below. The call will still complete, but that side sends silence.
 
 ## Make a call
 
@@ -115,7 +115,7 @@ For the narrower browser-compatible path, install the same exact release with th
 and `dtls` features:
 
 ```bash
-cargo install --locked --version =1.0.0-beta.7 --features opus,dtls sipx-cli
+cargo install --locked --version =1.0.0-rc.1 --features opus,dtls sipx-cli
 ```
 
 Then select the fail-closed `browser-audio` profile over WSS. It composes Opus, host or

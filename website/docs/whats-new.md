@@ -1,13 +1,61 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-beta.7 prerelease.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.1 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-beta.7 — 2026-08-05
+## 1.0.0-rc.1 — 2026-08-05
 <!-- END generated:release-heading -->
+
+RC.1 is sipx's first release candidate. It gathers the complete post-beta.7 transport, media,
+signalling, observability and distribution work into one immutable version for external review. It
+does not move or overwrite an existing tag, package or asset.
+
+- **Endpoints handle deployment edges explicitly.** Oversized UDP requests follow RFC 3261's TCP
+  fallback before transaction creation, and applications can drain new-dialog admission while
+  established calls and in-dialog work finish under a bounded deadline.
+- **Observability stays application-owned.** Redacted signalling can leave the existing bounded
+  capture path as non-blocking HEP3 datagrams, and per-stream RTCP loss, jitter and round-trip
+  samples reach a callback that survives media replacement and ICE restart. No metrics backend is
+  bundled, and collector failure cannot fail a call.
+- **The audio boundary is no longer tied to one sample format.** Applications can play and capture
+  explicit 8-bit or 16-bit mono PCM at supported caller-selected rates. One bounded streaming
+  resampler serves PCM, WAV and device paths; L16 is negotiable at 44.1 kHz or 8 kHz.
+- **Routing and privacy edits remain parser-owned.** TEL parameters have a typed allocation-free
+  iterator, address presentation and Warning agents can be replaced atomically without normalising
+  surrounding bytes, and genuine application provisional responses keep long-ringing server
+  transactions answerable without weakening the finite abandonment guard.
+- **Three field traps are fixed.** Bodyless re-INVITEs complete delayed offer/answer, dynamic RTP
+  payload numbers remain directional, and one transient registration-refresh failure receives a
+  bounded retry inside the granted lease.
+- **Release evidence is portable and reviewable.** The protected release attaches five native CLI
+  archives, per-target SPDX documents and checksums after a native loopback call on each target.
+  The retained endpoint-responder comparison now has two compatible runs; their supported
+  intervals overlap at the tested ceiling, so the result is inconclusive rather than a ranking.
+- **The public architecture page explains the core/driver seam.** It shows where bytes and fired
+  timers enter, which crates own I/O, and why the split enables virtual-time and network-free core
+  tests.
+
+Install the exact CLI release with:
+
+```bash
+cargo install --locked --version =1.0.0-rc.1 sipx-cli
+```
+
+The [getting-started guide](getting-started.md#prebuilt-release-binaries) also shows the exact binary
+archive, checksum and SPDX path. Those portable executables deliberately omit optional native
+features; use Cargo when `device-audio`, `opus` or `dtls` is required.
+
+The one source migration in RC.1 renames `sipx_transport::Config::mtu` to `path_mtu`: pass the path
+MTU as `Some(value)`, or `None` for the RFC 3261 unknown-path rule. Supported APIs are still not
+frozen before stable 1.0 and receive migration guidance when they change; Experimental APIs may
+change or disappear without that guide. The project still has no recorded independent production
+application or third-party security audit, so this candidate is an invitation to review, not a
+claim that repository evidence can substitute for outside use.
+
+## 1.0.0-beta.7 — 2026-08-05
 
 Beta.7 publishes the routing-integration wave after beta.6. It is a new immutable prerelease and
 does not move or overwrite any existing tag or package.
@@ -174,7 +222,7 @@ installed diagnostic CLI, independent transport peers and release-commit documen
 cargo install --locked --version =1.0.0-beta.2 sipx-cli
 ```
 
-Use beta.7 for new installations; beta.2 through beta.6 remain immutable for reproducible
+Use RC.1 for new installations; beta.2 through beta.7 remain immutable for reproducible
 existing consumers.
 
 ## 1.0.0-alpha.5 — 2026-08-03
@@ -261,10 +309,10 @@ instead of sound devices.
 The experimental `sipx-host` process can bind and
 answer calls, but application callback bindings are not implemented.
 
-## Changes after the beta
+## Development branch after the tagged release
 
 This website is built from `main`, so a page or API link may describe work newer than the tagged
-beta. Use the exact crates.io version when reproducibility matters, and consult the
+release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-beta.5` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.1` merely because it appears on this
 site.

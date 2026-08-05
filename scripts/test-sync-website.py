@@ -234,11 +234,11 @@ class PublicGuardTests(unittest.TestCase):
             source: (ROOT / source).read_text(encoding="utf-8") for source in sources
         }
         contents["README.md"] = contents["README.md"].replace(
-            "current public-beta release", "development branch", 1
+            "current public prerelease", "development branch", 1
         )
         contents["website/docs/getting-started.md"] += "\nThe CLI can use UDP or TCP only.\n"
         problems = SYNC.public_adoption_problems(contents)
-        self.assertTrue(any("missing published public-beta status" in p for p in problems))
+        self.assertTrue(any("missing published public-prerelease status" in p for p in problems))
         self.assertTrue(any("stale current-main capability claim" in p for p in problems))
 
     def test_adoption_guard_rejects_the_retired_message_denial(self) -> None:

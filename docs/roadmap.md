@@ -10,12 +10,13 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-08-05:_ **`1.0.0-beta.2` through `1.0.0-beta.7` are published prereleases, and beta.7 is
-current.** Beta.7 gives routing and forwarding consumers exact
-outgoing-INVITE cancellation, cleartext listener selection, typed privacy and identity fields, and
-lossless parser-owned URI editing. The retained load evidence covers the current endpoint direction
-only; no peer result or general ranking is claimed. Stable `1.0.0` remains a separate promotion and
-compatibility decision.
+_As of 2026-08-05:_ **`1.0.0-rc.1` is the current public prerelease; beta.2 through beta.7 remain
+immutable.** The first release candidate combines the post-beta.7 transport fallback and drain,
+application-owned observability, explicit PCM/L16 boundary, parser-owned routing/privacy edits,
+field-trap fixes, portable five-target CLI artifacts and a direct architecture guide. The retained
+endpoint-responder runs use one compatible profile and overlap at the tested ceiling, so the
+comparison is inconclusive rather than a ranking. Stable `1.0.0` remains a separate promotion:
+independent application use is still missing and is not inferred from repository evidence.
 
 _As of 2026-07-30:_ **all seven `1.0.0-alpha` predicates are met**, and `1.0.0-alpha` is cut.
 [`maturity.md`](maturity.md) reports them, and it reports them as *computed* rather than asserted —
