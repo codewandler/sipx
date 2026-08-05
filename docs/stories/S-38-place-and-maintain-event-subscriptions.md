@@ -23,7 +23,7 @@ dialog, without embedding any event package's application policy in the transpor
 
 - [ ] The public API establishes, refreshes and terminates a subscription through the state machine
       and byte vectors in [`docs/specs/event-client.md`](../specs/event-client.md), specifically
-      `S37-V1` through `S37-V12`.
+      `S37-V1` through `S37-V13`.
 - [ ] 401 and 407 challenges reuse endpoint credentials; refreshes use the granted expiry; initial
       and subsequent NOTIFY requests are ordered and surfaced with typed subscription state.
 - [ ] The dialog remote target, route set and CSeq rules are honored for every request, and a
@@ -60,3 +60,4 @@ The tests below cite the normative vectors rather than restating them:
 - `local_cseq_exhaustion_terminates_without_a_send` — `S37-V10`.
 - `response_intervals_fail_closed_for_every_operation` — `S37-V11`.
 - `notify_trust_and_contact_rejections_do_not_mutate` — `S37-V12`.
+- `refresh_timer_n_preserves_only_the_authoritative_expiry` — `S37-V13`.

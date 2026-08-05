@@ -108,7 +108,7 @@ Shutdown timer:
 
 | Timer | Duration/source | Fired behavior |
 |---|---|---|
-| `N` | exactly `64*T1`, armed for every initial, refresh or unsubscribe SUBSCRIBE | if no matching NOTIFY completed, terminate the attempt/subscription |
+| `N` | exactly `64*T1`, armed for every initial, refresh or unsubscribe SUBSCRIBE | initial: terminate `NoInitialNotify`; refresh: end only the refresh attempt as `RefreshUnconfirmed` and retain the usage until its unchanged authoritative Expiry; unsubscribe: terminate locally unconfirmed |
 | `Expiry` | requested expiry is armed at `Start` as a provisional upper bound; a valid 2xx grant or active/pending NOTIFY `expires` replaces it according to §5; every replacement is measured from the input that supplied it | terminate locally and cancel refresh work |
 | `Refresh` | four fifths of the authoritative expiry, clamped to at least 1 second and at most 1 second before expiry when expiry is at least 2 seconds; a 1-second expiry becomes one immediate input, not a loop | issue one in-dialog refresh if no operation is in flight |
 | `Retry` | reason table in §7 | start an unrelated subscription only while application intent remains active |
@@ -257,6 +257,7 @@ on the same input.
 | refresh 2xx | validate Expires by the table above; update response-derived expiry only if this operation has not already accepted an `expires` in its NOTIFY; remain in current active/pending state until the required NOTIFY arrives |
 | refresh 404, 405, 410, 416, 480-485, 489, 501 or 604 | terminate; any future attempt is an unrelated initial SUBSCRIBE with fresh Call-ID/tag |
 | other refresh failure | keep the old subscription only until its last authoritative expiry; do not move the expiry later |
+| refresh N | clear the in-flight refresh, emit `RefreshUnconfirmed`, arm no replacement Refresh, and keep active/pending state only until the unchanged authoritative Expiry |
 | expiry timer | terminate `LocalExpiry`; no automatic resurrection |
 | `Unsubscribe` | cancel Refresh/Retry; increment CSeq; send in-dialog SUBSCRIBE with Expires 0; arm N; enter `Unsubscribing` |
 | terminal NOTIFY while unsubscribing | respond 200, optionally deliver body, then terminate |
@@ -509,6 +510,15 @@ target, route set, state or delivery. Finally the unchanged V1 NOTIFY from the e
 its single parseable Contact receives 200 and establishes normally. For a live subscription, the
 same malformed/duplicate Contact cases preserve the previously accepted remote target.
 
+### S37-V13 — refresh Timer N cannot extend or prematurely erase the usage
+
+Starting from V1, let Refresh fire and emit its in-dialog SUBSCRIBE, then deliver no matching NOTIFY
+and fire that operation's current N generation. Expected output is
+`StateChanged(RefreshUnconfirmed)` and release of the in-flight operation. The active usage and its
+already-authoritative Expiry remain; their generation and deadline do not change. No new Refresh or
+SUBSCRIBE is emitted. Firing that retained Expiry then terminates `LocalExpiry` and releases all
+state. A late refresh response may complete its transport transaction but changes no client state.
+
 ## 10. S-38 conformance mapping
 
 `S-38` MUST derive failing-first tests from the vectors, without copying their expected behavior into
@@ -528,6 +538,7 @@ a second prose contract:
 | `local_cseq_exhaustion_terminates_without_a_send` | V10 |
 | `response_intervals_fail_closed_for_every_operation` | V11 |
 | `notify_trust_and_contact_rejections_do_not_mutate` | V12 |
+| `refresh_timer_n_preserves_only_the_authoritative_expiry` | V13 |
 
 The implementation is incomplete if any vector is asserted only against a helper rather than the
 public event-client surface and a real SIP transaction layer.

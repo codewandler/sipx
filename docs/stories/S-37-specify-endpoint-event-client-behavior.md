@@ -44,3 +44,5 @@ before the transport-facing client is implemented.
 - 2026-08-05: independent review added a finite pre-response expiry, exact invalid-response
   transitions, non-wrapping CSeq exhaustion, mandatory Contact validation and a fail-closed injected
   NOTIFY trust policy; S-38 now maps four additional negative vectors.
+- 2026-08-05: follow-up review fixed refresh Timer N: it ends only the refresh attempt, never moves
+  the authoritative Expiry, never schedules an implicit retry and has its own S37-V13 proof.

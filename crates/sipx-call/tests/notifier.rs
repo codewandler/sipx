@@ -401,6 +401,71 @@ async fn expiry_sends_timeout_notify_and_releases_the_timer_task() {
     pump.abort();
 }
 
+#[tokio::test(start_paused = true)]
+async fn silent_notify_peer_is_bounded_and_every_transaction_eventually_drains() {
+    let (watcher, mut watcher_incoming) = endpoint().await;
+    let (notifier_endpoint, notifier_incoming) = endpoint().await;
+    let notifier = Notifier::new(Duration::from_secs(5), 1);
+    let handle = notifier.handle();
+    let pump = pump(&notifier_endpoint, notifier_incoming, notifier);
+
+    let accepted = final_response(
+        &watcher,
+        notifier_endpoint.local_addr(),
+        subscribe(&watcher, "silent", "w-silent", None, "dialog", 5, 1),
+    )
+    .await;
+    assert_eq!(accepted.status.code(), 200);
+    let initial = next_notify(&mut watcher_incoming).await;
+    assert_eq!(initial.request.method, Method::Notify);
+
+    // Protocol/application failure bound: the notifier stops awaiting this unanswered NOTIFY.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(handle.counts().active_tasks, 1);
+    assert_eq!(shared_store(&handle).lock().expect("store").active(), 1);
+
+    // Protocol expiry: the original five-second lease, not the unanswered send, ends the usage.
+    tokio::time::advance(Duration::from_secs(3)).await;
+    let terminal = next_notify(&mut watcher_incoming).await;
+    assert_eq!(
+        terminal
+            .request
+            .headers
+            .value(&HeaderName::SubscriptionState)
+            .as_deref(),
+        Some(&b"terminated;reason=timeout"[..])
+    );
+
+    // Protocol/application failure bound: the terminal send is bounded independently as well.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(handle.counts().active_tasks, 0);
+    assert_eq!(handle.counts().finished_tasks, 1);
+    assert!(
+        shared_store(&handle)
+            .lock()
+            .expect("store")
+            .all()
+            .is_empty()
+    );
+    assert!(
+        notifier_endpoint.outstanding().await.expect("endpoint") > 0,
+        "the endpoint still owns bounded RFC transaction residue"
+    );
+
+    // Protocol Timer F/J cleanup: transport-owned residue has its own finite lifetime.
+    tokio::time::advance(Duration::from_secs(64)).await;
+    for _ in 0..100 {
+        if notifier_endpoint.outstanding().await.expect("endpoint") == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(notifier_endpoint.outstanding().await.expect("endpoint"), 0);
+    pump.abort();
+}
+
 #[tokio::test]
 async fn malformed_colliding_and_template_subscriptions_never_mutate_the_store() {
     let (watcher, mut watcher_incoming) = endpoint().await;
