@@ -1,7 +1,8 @@
 # Design: browser audio SDK
 
-**Status:** proposed · **Pillar:** Application · **Epic:** `browser-sdk` · **Stories:** A-16, S-41,
-T-33, M-52, A-17, A-18, X-100
+**Status:** contract accepted (`A-16`); implementation proposed · **Normative contract:**
+[`docs/specs/browser-sdk.md`](../specs/browser-sdk.md) · **Pillar:** Application ·
+**Epic:** `browser-sdk` · **Stories:** A-16, S-41, T-33, M-52, A-17, A-18, X-100
 
 ## Why
 
@@ -18,7 +19,9 @@ delivers bytes, timers and browser media descriptions at explicit interfaces.
 ## Approach
 
 `A-16` writes the normative ABI, lifecycle, security, package and browser-support contract before
-code and distinguishes this SDK from the server-side application contract in `A-3`. `S-41` makes the
+code and distinguishes this SDK from the server-side application contract in `A-3`; that contract
+now lives in [`docs/specs/browser-sdk.md`](../specs/browser-sdk.md) as `sipx.browser.v1`, and where
+it and this design disagree, the spec wins. `S-41` makes the
 selected sans-I/O kernel compile to WebAssembly with host-supplied entropy and timers. `T-33` binds
 the browser's WebSocket/WSS API without putting I/O in the core. `M-52` translates the delivered
 audio-only profile to `RTCPeerConnection` and refuses video, data channels and silent security
