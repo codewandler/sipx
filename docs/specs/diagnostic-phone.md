@@ -88,10 +88,9 @@ the required server identity for TLS/WSS; outbound-only name and trust options a
 secure URI cannot be combined with a cleartext transport. Certificate verification is on by
 default; disabling it is not part of this contract.
 
-An invocation that does not use `--transport` retains its existing output byte for byte. An
-explicit selection adds `requested_transport` and `negotiated_transport` to terminal results; the
-pre-call `answer` announcement carries only the requested transport because nothing has negotiated
-yet.
+Transport selection itself adds no fields when `--transport` is omitted. An explicit selection
+adds `requested_transport` and `negotiated_transport` to terminal results; the pre-call `answer`
+announcement carries only the requested transport because nothing has negotiated yet.
 
 Outbound setup preserves the terminal cause from the transport transaction. A concrete stream
 connection, handshake, certificate-verification or established-connection failure maps to
@@ -202,12 +201,14 @@ but cannot change the already selected terminal cause or cause a second originat
 outbound invitation never manufactures a BYE before a dialog exists: cancellation retains the call
 layer's CANCEL/late-2xx cleanup behavior.
 
-The terminal result adds `ended_by`, with value `remote`, `duration` or `interrupt`. Remote BYE and
-local-duration completion retain `status=answered` and exit 0. A handled Ctrl-C emits
-`status=interrupted`, `ended_by=interrupt` and exits 0 after cleanup. A typed transport, session,
-media or cleanup failure emits `status=failed` and exits 1. An unanswered local BYE is bounded and
-does not resurrect an ended call; a concrete failure to hand the BYE to the transport is a cleanup
-failure. SIGTERM and other supervisor signals are specified separately by story `P-22`.
+The terminal result adds `ended_by`, with value `remote`, `duration` or `interrupt`. When this side
+originates BYE and observes a valid final response, `bye_status` carries its status code; a remote
+end originates no BYE and omits that field. Remote BYE and local-duration completion retain
+`status=answered` and exit 0. A handled Ctrl-C emits `status=interrupted`, `ended_by=interrupt` and
+exits 0 after cleanup. A typed transport, session, media or cleanup failure emits `status=failed`
+and exits 1. An unanswered local BYE is bounded and does not resurrect an ended call; a concrete
+failure to hand the BYE to the transport is a cleanup failure. SIGTERM and other supervisor
+signals are specified separately by story `P-22`.
 
 Terminal output is a join barrier, not a request to begin cleanup. Before the record is emitted,
 the command MUST stop or finish media operations, join device relays and media workers, release the

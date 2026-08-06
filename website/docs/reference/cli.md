@@ -53,7 +53,7 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 | `--record <FILE>` | Record the far end to WAV with that negotiated clock in its header |
 | `--dtmf <DIGITS>` | Send these digits once the call is up |
 | `--early-media` | Receive a reliable provisional media session before the final answer; incompatible with `--profile browser-audio` |
-| `--duration <S>` | Hang up after this many seconds once connected (default 30) |
+| `--duration <S>` | Hang up after this many seconds once connected (default 30); Ctrl-C hangs up early and reports `interrupted` |
 | `--timeout <S>` | Give up if not answered in this many seconds (default 20). `0` waits as long as the transaction layer does — 32 seconds |
 | `--from <URI>` | Our own address (default `sip:sipx@<local>`) |
 | `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is world-readable |
@@ -77,11 +77,15 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 | `--capture <FILE>` | Record the signalling to this [pcapng](https://en.wikipedia.org/wiki/Pcap) file for a bug report. Credentials are redacted — digest responses and opaque `Bearer`/`Basic` tokens, SRTP keys (`a=crypto`, `k=`), push tokens, instance URNs. **TLS and WSS are recorded decrypted**, because capturing ciphertext from inside the process would be worse than capturing outside it. What redaction cannot remove is identity: the file still says who called whom, when, and from where, so treat it as sensitive |
 | `--counters <FILE>` | Write flattened signalling counters as JSON; `--capture` implies `<capture>.counters.json` |
 
-Report fields: `status`, `peer`, `media_advertised`, `media_bound`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
+Report fields: `status`, `ended_by`, `peer`, `media_advertised`, `media_bound`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
 `recording` when `--record` was given, and `loss`, `packets_lost`, `jitter_ms`, `mos`,
 `round_trip_ms` under `--stats`. `--early-media` adds `early_media` and
 `early_samples_recorded` to the terminal result. An explicit `--transport` also reports `requested_transport` and
-`negotiated_transport`; legacy no-flag and `--tcp` output remains byte-for-byte compatible.
+`negotiated_transport`; omitting it adds neither transport field, and `--tcp` remains the legacy
+alias rather than an explicit-selection report request.
+`ended_by` is `duration`, `remote`, or `interrupt`; a locally originated BYE adds `bye_status` when
+its final response was observed. Ctrl-C emits one `status: interrupted` terminal result after BYE
+and owned-work cleanup, and exits 0.
 Any explicit media selector adds `media_profile`, `requested_codecs`, `requested_media_security`, `requested_ice`,
 `negotiated_codec`, `negotiated_media_security`, and `negotiated_ice`. Negotiated ICE is read from
 the selected candidate pair and may be `checking`, `host`, `server-reflexive`, `peer-reflexive`, or
@@ -109,7 +113,7 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 |---|---|
 | `--play <FILE>` | Play mono 16-bit WAV, linearly resampled from its header rate to the negotiated clock |
 | `--record <FILE>` | Record the caller to WAV with that negotiated clock in its header |
-| `--duration <S>` | Hang up after this many seconds (default 30) |
+| `--duration <S>` | Maximum call duration (default 30); remote BYE or Ctrl-C ends it early |
 | `--wait <S>` | Give up if no call arrives within this many seconds (default 60) |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:5060`) |
 | `--advertise <IP>` | Address written consistently into Via, Contact, and SDP; independent of `--local` |
@@ -132,10 +136,14 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 | `--counters <FILE>` | Write flattened signalling counters as JSON; `--capture` implies `<capture>.counters.json` |
 
 Reports twice: `status: "listening"` with the bound `address` first, then
-`status: "answered"` with `caller`, `media_advertised`, `media_bound`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
+`status: "answered"` with `ended_by`, `caller`, `media_advertised`, `media_bound`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
 `dtmf` when digits arrived and `recording` when `--record` was given. Explicit selection adds the
 requested transport to the listening report and both requested and negotiated transport to the
 terminal report.
+Remote BYE reports `ended_by: remote` only after its 200 response and media cleanup. Local duration
+reports `ended_by: duration`; Ctrl-C sends BYE, emits one `status: interrupted`,
+`ended_by: interrupt` result after cleanup, and exits 0. A locally originated BYE adds `bye_status`
+when its final response was observed.
 
 `--profile browser-audio` is valid on both `dial` and `answer`. It cannot be combined with
 `--codec` or `--media-security`, because the named profile fixes those choices; `--ice host` and

@@ -326,7 +326,7 @@ pub(crate) struct DialOptions {
     /// DTMF digits to send once connected.
     #[arg(long, value_parser = parse_non_empty)]
     pub(crate) dtmf: Option<String>,
-    /// Connected-call duration in seconds.
+    /// Connected-call duration in seconds; Ctrl-C hangs up early.
     #[arg(long, default_value_t = 30, value_name = "S", value_parser = parse_seconds)]
     pub(crate) duration: u64,
     /// Answer timeout in seconds; zero delegates to the transaction layer.
@@ -364,6 +364,7 @@ pub(crate) struct DialOptions {
 pub(crate) struct AnswerOptions {
     #[command(flatten)]
     pub(crate) audio: AudioOptions,
+    /// Maximum call duration; remote BYE or Ctrl-C ends it early.
     #[arg(long, default_value_t = 30, value_name = "S", value_parser = parse_seconds)]
     pub(crate) duration: u64,
     #[arg(long, default_value_t = 60, value_name = "S", value_parser = parse_seconds)]

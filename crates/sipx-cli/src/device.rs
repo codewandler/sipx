@@ -205,17 +205,26 @@ impl Driver {
         &mut self,
         media: &sipx_media::MediaSession,
         duration: std::time::Duration,
+        cancelled: &tokio_util::sync::CancellationToken,
     ) -> Result<u64, String> {
         #[cfg(feature = "device-audio")]
         {
-            self.0.run(media, duration).await
+            self.0.run(media, duration, cancelled).await
         }
         #[cfg(not(feature = "device-audio"))]
         {
-            let _ = (self, media, duration);
+            let _ = (self, media, duration, cancelled);
             std::future::ready(()).await;
             Ok(0)
         }
+    }
+
+    /// Stop callbacks and release both selected streams. Idempotent after ordinary completion.
+    pub(crate) fn stop(&mut self) {
+        #[cfg(feature = "device-audio")]
+        self.0.shutdown();
+        #[cfg(not(feature = "device-audio"))]
+        let _ = self;
     }
 
     /// Add selected configurations and loss counters to the terminal result.
@@ -350,6 +359,7 @@ mod enabled {
             &mut self,
             media: &sipx_media::MediaSession,
             duration: Duration,
+            cancelled: &tokio_util::sync::CancellationToken,
         ) -> Result<u64, String> {
             let rate = media.clock_rate();
             let packet_samples = u32::try_from(media.samples_per_packet())
@@ -391,6 +401,7 @@ mod enabled {
                 deadline,
                 stop_rx.clone(),
                 stop_tx.clone(),
+                cancelled,
             );
             let output = relay_output(
                 self.output.as_mut(),
@@ -398,6 +409,7 @@ mod enabled {
                 deadline,
                 stop_rx,
                 stop_tx.clone(),
+                cancelled,
             );
             let (input_result, output_result) = tokio::join!(input, output);
             let _ = stop_tx.send(true);
@@ -409,7 +421,7 @@ mod enabled {
 
         /// Pausing stops new callbacks; dropping the stream waits for the backend worker it owns.
         /// Taking each option makes this idempotent on every error path.
-        fn shutdown(&mut self) {
+        pub(super) fn shutdown(&mut self) {
             if let Some(stream) = self.input.as_mut().and_then(|input| input.stream.take()) {
                 let _ = stream.pause();
                 drop(stream);
@@ -484,12 +496,14 @@ mod enabled {
         deadline: tokio::time::Instant,
         mut stop: watch::Receiver<bool>,
         stop_all: watch::Sender<bool>,
+        cancelled: &tokio_util::sync::CancellationToken,
     ) -> Result<(), String> {
         let Some(input) = input else {
             return Ok(());
         };
         loop {
             tokio::select! {
+                () = cancelled.cancelled() => return Ok(()),
                 () = tokio::time::sleep_until(deadline) => return Ok(()),
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
@@ -525,6 +539,7 @@ mod enabled {
         deadline: tokio::time::Instant,
         mut stop: watch::Receiver<bool>,
         stop_all: watch::Sender<bool>,
+        cancelled: &tokio_util::sync::CancellationToken,
     ) -> Result<u64, String> {
         let Some(output) = output else {
             return Ok(0);
@@ -532,6 +547,7 @@ mod enabled {
         let mut received = 0u64;
         loop {
             tokio::select! {
+                () = cancelled.cancelled() => return Ok(received),
                 () = tokio::time::sleep_until(deadline) => return Ok(received),
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {

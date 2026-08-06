@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use sipx_call::{CallEvent, EndCause, Served};
 use sipx_sip::{HeaderName, StatusCode};
 use sipx_transport::{Config as TransportConfig, bind};
 
@@ -99,13 +100,26 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
     // transcoding bridge, and a call goes near neither.
     tracing::info!(address = %listening, within = ?wait, "waiting for a call");
     let deadline = tokio::time::Instant::now() + wait;
+    let interrupted = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    tokio::pin!(interrupted);
     let request = loop {
-        let Ok(Some(request)) = tokio::time::timeout_at(deadline, incoming.recv()).await else {
-            return fail(
-                format,
-                Exit::Timeout,
-                "no call arrived on the selected transport",
-            );
+        let request = tokio::select! {
+            biased;
+            () = interrupted.as_mut() => {
+                return report_pending_interrupt(format, export, &handle).await;
+            }
+            request = tokio::time::timeout_at(deadline, incoming.recv()) => match request {
+                Ok(Some(request)) => request,
+                Ok(None) | Err(_) => {
+                    return fail(
+                        format,
+                        Exit::Timeout,
+                        "no call arrived on the selected transport",
+                    );
+                }
+            },
         };
         if transport.accepts(request.transport) {
             break request;
@@ -150,7 +164,6 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
     };
 
     let duration = Duration::from_secs(options.duration);
-    let session = call.media();
     let pcm = match clip.as_ref().map(crate::dial::pcm_clip).transpose() {
         Ok(pcm) => pcm,
         Err(message) => {
@@ -158,41 +171,86 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
             return fail(format, Exit::Usage, &message);
         }
     };
-    // The recording bounds itself, and keeps whatever arrived (`X-40`). It used to be
-    // `timeout(duration, media.record_until_idle(500ms))`, which spent one 500 ms window on both
-    // "has the stream started" and "has it ended" — so a first frame delayed past it recorded
-    // nothing at all — and then `unwrap_or_default` threw away any partial recording the cap cut
-    // short. `crate::record` separates the two bounds and returns what it got.
-    //
-    // The digits had both defects on one line too, and `M-34` split them the same way: the wait
-    // for the first keypress is the call's own duration — a caller cannot be quicker than the
-    // call — while `DIGIT_GAP` is left with the only question it can answer, whether the caller
-    // has stopped dialling. `collect_digits` enforces the cap itself, so there is no timed-out
-    // future left to `unwrap_or_default` the collected digits away.
     let output_device = devices.has_output();
-    let ((), recorded, digits, device_samples) = tokio::join!(
-        async {
-            if let Some(pcm) = &pcm {
-                let _ = tokio::time::timeout(duration, session.play_pcm(pcm)).await;
-            }
+    let Some(events) = call.events() else {
+        let _ = call.hang_up().await;
+        drop(call);
+        handle.shutdown().await;
+        return fail(
+            format,
+            Exit::Failed,
+            "the call event stream was unavailable",
+        );
+    };
+    let served = sipx_call::serve_until(
+        &mut call,
+        &mut incoming,
+        |media, cancelled| {
+            exchange(
+                media,
+                pcm.as_ref(),
+                duration,
+                &mut devices,
+                output_device,
+                events,
+                cancelled,
+            )
         },
-        async {
-            if output_device {
-                Vec::new()
-            } else {
-                crate::record(&call, duration, crate::RECORD_IDLE).await
-            }
-        },
-        session.collect_digits(duration, crate::DIGIT_GAP),
-        devices.run(session, duration),
-    );
-    let device_samples = match device_samples {
-        Ok(samples) => samples,
+        interrupted.as_mut(),
+    )
+    .await;
+    devices.stop();
+    let served = match served {
+        Ok(served) => served,
+        Err(error) => {
+            drop(call);
+            handle.shutdown().await;
+            return fail(format, Exit::Failed, &error.to_string());
+        }
+    };
+    let (exchanged, status, ended_by, bye) = match served {
+        Served::Remote {
+            cause: EndCause::RemoteBye,
+            output,
+        } => (output, "answered", "remote", None),
+        Served::Remote { cause, output } => {
+            let _ = output;
+            drop(call);
+            handle.shutdown().await;
+            return fail(
+                format,
+                Exit::Failed,
+                &format!("call ended unexpectedly: {cause:?}"),
+            );
+        }
+        Served::Local { output, bye } => (output, "answered", "duration", Some(bye)),
+        Served::Interrupted { output, bye } => (output, "interrupted", "interrupt", Some(bye)),
+        _ => {
+            drop(call);
+            handle.shutdown().await;
+            return fail(format, Exit::Failed, "unknown confirmed-call outcome");
+        }
+    };
+    let exchanged = match exchanged {
+        Ok(exchanged) => exchanged,
         Err(message) => {
-            let _ = call.hang_up().await;
+            drop(call);
+            handle.shutdown().await;
             return fail(format, Exit::Failed, &message);
         }
     };
+    let bye_status = match bye.transpose() {
+        Ok(status) => status,
+        Err(sipx_call::Error::SignallingTeardownTimeout(_)) => None,
+        Err(error) => {
+            drop(call);
+            handle.shutdown().await;
+            return fail(format, Exit::Failed, &error.to_string());
+        }
+    };
+    let recorded = exchanged.recorded;
+    let digits = exchanged.digits;
+    let device_samples = exchanged.device_samples;
     let samples_received = if output_device {
         usize::try_from(device_samples).unwrap_or(usize::MAX)
     } else {
@@ -201,7 +259,8 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
 
     let report = media.requested_report(
         Report::new()
-            .text("status", "answered")
+            .text("status", status)
+            .text("ended_by", ended_by)
             .text("caller", caller)
             .text("media_advertised", media_address.to_string())
             .text("media_bound", call.media().local_addr().to_string())
@@ -217,25 +276,124 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
     );
     let report = media.negotiated_report(report, &call, "browser-answerer");
     let mut report = devices.report(transport.report(report, request.transport));
+    if let Some(status) = bye_status {
+        report = report.number("bye_status", i64::from(status));
+    }
 
     if !digits.is_empty() {
         report = report.text("dtmf", digits);
     }
 
     if let Some(path) = audio.wav_output() {
-        match crate::dial::write_clip(path, &recorded, session.clock_rate()) {
+        match crate::dial::write_clip(path, &recorded, call.media().clock_rate()) {
             Ok(()) => report = report.text("recording", path),
             Err(message) => return fail(format, Exit::Failed, &message),
         }
     }
 
-    let _ = call.hang_up().await;
+    drop(call);
+    handle.shutdown().await;
     report = match export.into_report(report) {
         Ok(report) => report,
         Err(message) => return fail(format, Exit::Failed, &message),
     };
     report.emit(format);
     Exit::Success
+}
+
+async fn report_pending_interrupt(
+    format: Format,
+    export: crate::counters::Export,
+    handle: &sipx_transport::Handle,
+) -> Exit {
+    handle.shutdown().await;
+    let report = Report::new()
+        .text("status", "interrupted")
+        .text("ended_by", "interrupt");
+    match export.into_report(report) {
+        Ok(report) => {
+            report.emit(format);
+            Exit::Success
+        }
+        Err(message) => fail(format, Exit::Failed, &message),
+    }
+}
+
+/// Run media beside the confirmed-dialog input pump and retain partial results on every stop path.
+async fn exchange(
+    media: std::sync::Arc<sipx_media::MediaSession>,
+    pcm: Option<&sipx_audio::Pcm>,
+    duration: Duration,
+    devices: &mut crate::device::Driver,
+    output_device: bool,
+    events: sipx_call::CallEvents,
+    cancelled: tokio_util::sync::CancellationToken,
+) -> Result<Exchange, String> {
+    let playing = async {
+        if let Some(pcm) = pcm {
+            media
+                .play_pcm(pcm)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok::<(), String>(())
+    };
+    let recording = async {
+        if output_device {
+            Vec::new()
+        } else {
+            crate::record_media(&media, duration, crate::RECORD_IDLE).await
+        }
+    };
+    let digits = collect_digits(events, duration, &cancelled);
+    let device_audio = devices.run(&media, duration, &cancelled);
+    let (played, recorded, digits, device_samples) = tokio::join!(
+        tokio::time::timeout(duration, playing),
+        recording,
+        digits,
+        device_audio,
+    );
+    if let Ok(Err(error)) = played {
+        return Err(error);
+    }
+    Ok(Exchange {
+        recorded,
+        digits,
+        device_samples: device_samples?,
+    })
+}
+
+/// Collect call-layer DTMF events until local completion or the terminal `Ended` event.
+async fn collect_digits(
+    mut events: sipx_call::CallEvents,
+    duration: Duration,
+    cancelled: &tokio_util::sync::CancellationToken,
+) -> String {
+    let deadline = tokio::time::Instant::now() + duration;
+    let mut gap_at: Option<tokio::time::Instant> = None;
+    let mut digits = String::new();
+    loop {
+        let next = gap_at.map_or(deadline, |gap| gap.min(deadline));
+        tokio::select! {
+            biased;
+            event = events.recv() => match event {
+                Some(CallEvent::Dtmf { digit, .. }) => {
+                    digits.push(digit.as_char());
+                    gap_at = Some(tokio::time::Instant::now() + crate::DIGIT_GAP);
+                }
+                Some(CallEvent::Ended(_)) | None => return digits,
+                Some(_) => {}
+            },
+            () = cancelled.cancelled() => return digits,
+            () = tokio::time::sleep_until(next) => return digits,
+        }
+    }
+}
+
+struct Exchange {
+    recorded: Vec<i16>,
+    digits: String,
+    device_samples: u64,
 }
 
 /// Answer with a refusal rather than taking the call.

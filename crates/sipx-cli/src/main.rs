@@ -80,7 +80,7 @@ async fn main() -> ExitCode {
     let exit = match cli.command {
         Some(Command::Register(options)) => register::run(options, format).await,
         Some(Command::Dial(options)) => Box::pin(dial::run(options, format)).await,
-        Some(Command::Answer(options)) => answer::run(options, format).await,
+        Some(Command::Answer(options)) => Box::pin(answer::run(options, format)).await,
         Some(Command::Devices(options)) => device::list(options, format),
         Some(Command::Load(options)) => load::run(options, format).await,
         Some(Command::LoadResponder(options)) => load_responder::run(options, format).await,
@@ -168,16 +168,6 @@ fn apply_capture(options: &cli::CaptureOptions, config: &mut sipx_transport::Con
 /// `timeout(duration, ..).unwrap_or_default()`, which replaced a partial recording with silence at
 /// the moment the cap fired — losing the whole thing to save none of it. The bound is enforced in
 /// here so that there is no timed-out future left for a caller to unwrap.
-/// Takes the `Call` rather than the `MediaSession` only because `sipx-media` is not a direct
-/// dependency of this crate and the session type is not re-exported; the audio is all this touches.
-async fn record(
-    call: &sipx_call::Call,
-    within: std::time::Duration,
-    idle: std::time::Duration,
-) -> Vec<i16> {
-    record_media(call.media(), within, idle).await
-}
-
 /// The recording lifecycle shared by confirmed and reliable-provisional media sessions.
 ///
 /// `Dialing` intentionally is not a `Call`: a final answer has not arrived. Keeping this helper
@@ -223,7 +213,7 @@ const RECORD_IDLE: std::time::Duration = std::time::Duration::from_millis(500);
 /// The value `answer` has always used, and it now does only this one job: it used to be the wait
 /// for the *first* digit as well, so a caller who took longer than this to press anything had no
 /// digits reported at all. That bound is the call's own duration now, the same way
-/// [`record`] bounds the first frame of the recording.
+/// [`record_media`] bounds the first frame of the recording.
 const DIGIT_GAP: std::time::Duration = std::time::Duration::from_millis(800);
 
 #[cfg(test)]

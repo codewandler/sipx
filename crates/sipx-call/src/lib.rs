@@ -82,11 +82,12 @@ pub mod transfer;
 mod update;
 
 pub use call::{
-    Call, Credentials, DialOptions, Dialing, MediaAddress, answer, answer_at, answer_early,
+    Call, Credentials, DialOptions, Dialing, MediaAddress, Served, answer, answer_at, answer_early,
     answer_replacing, answer_replacing_with, answer_ringing, answer_ringing_with,
     answer_ringing_with_policy, answer_ringing_with_policy_at, answer_with, answer_with_policy,
     answer_with_policy_and_headers, answer_with_policy_and_headers_at, answer_with_policy_at, dial,
     dial_early, dial_early_until, dial_early_without_offer, dial_once, dial_until, serve,
+    serve_until,
 };
 pub use counters::SignallingCounts;
 pub use coupling::{

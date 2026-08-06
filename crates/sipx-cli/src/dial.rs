@@ -1,9 +1,11 @@
 //! `sipx dial`.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use sipx_audio::{Wav, read_wav, write_wav};
-use sipx_call::{Call, Credentials};
+use sipx_call::{Call, Credentials, EndCause, Served};
 use sipx_sip::{Address, Uri};
 use sipx_transport::{Config as TransportConfig, bind};
 
@@ -116,7 +118,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     if let Err(message) = transport.configure_client(&options.signalling, &mut config) {
         return fail(format, Exit::Usage, &message);
     }
-    let (handle, _incoming) = match bind(config).await {
+    let (handle, mut incoming) = match bind(config).await {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
     };
@@ -124,6 +126,10 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     // Armed here, not at the end: the run that most needs the numbers is the one that fails, and
     // every `return fail(…)` below now takes the counters file with it.
     let export = crate::counters::Export::arm(&options.capture, &handle);
+    let interrupted = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    tokio::pin!(interrupted);
 
     // The bound is handed to the library rather than wrapped around it. Dropping the call
     // future partway through would leave the far end believing it is in a call, and only code
@@ -155,12 +161,29 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     let early_requested = options.early_media;
     let started = std::time::Instant::now();
     let (mut call, selected_target, early_recorded, early_media) = if early_requested {
-        let (mut dialing, selected) =
-            match dial_early_candidates(&handle, &candidates, &to, &call_options).await {
-                Ok(dialing) => dialing,
-                Err(error) => return report_failure(format, &error),
-            };
-        let early_media = match dialing.wait_for_early_media().await {
+        let (mut dialing, selected) = match dial_early_candidates(
+            &handle,
+            &candidates,
+            &to,
+            &call_options,
+            interrupted.as_mut(),
+        )
+        .await
+        {
+            Ok(dialing) => dialing,
+            Err(sipx_call::Error::Cancelled(waited)) if waited.is_zero() => {
+                return report_pending_interrupt(format, export, &handle).await;
+            }
+            Err(error) => return report_failure(format, &error),
+        };
+        let early_media = match tokio::select! {
+            biased;
+            () = interrupted.as_mut() => {
+                dialing.cancel().await;
+                return report_pending_interrupt(format, export, &handle).await;
+            }
+            available = dialing.wait_for_early_media() => available,
+        } {
             Ok(available) => available,
             Err(error) => return report_failure(format, &error),
         };
@@ -172,19 +195,39 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                     "early media was reported without a running media session",
                 );
             };
-            crate::record_media(session, duration, crate::RECORD_IDLE).await
+            tokio::select! {
+                biased;
+                () = interrupted.as_mut() => {
+                    dialing.cancel().await;
+                    return report_pending_interrupt(format, export, &handle).await;
+                }
+                recorded = crate::record_media(session, duration, crate::RECORD_IDLE) => recorded,
+            }
         } else {
             Vec::new()
         };
-        let call = match dialing.answered().await {
+        let call = match dialing.answered_until(interrupted.as_mut()).await {
             Ok(call) => call,
+            Err(sipx_call::Error::Cancelled(waited)) if waited.is_zero() => {
+                return report_pending_interrupt(format, export, &handle).await;
+            }
             Err(error) => return report_failure(format, &error),
         };
         (call, selected, early_recorded, early_media)
     } else {
-        let (call, selected) = match dial_candidates(&handle, &candidates, &to, &call_options).await
+        let (call, selected) = match dial_candidates(
+            &handle,
+            &candidates,
+            &to,
+            &call_options,
+            interrupted.as_mut(),
+        )
+        .await
         {
             Ok(call) => call,
+            Err(sipx_call::Error::Cancelled(waited)) if waited.is_zero() => {
+                return report_pending_interrupt(format, export, &handle).await;
+            }
             Err(error) => return report_failure(format, &error),
         };
         (call, selected, Vec::new(), false)
@@ -192,19 +235,69 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     let negotiated_transport = selected_target.transport;
     tracing::info!(peer = uri, setup = ?started.elapsed(), "answered");
 
-    let exchanged = match exchange(
+    let served = sipx_call::serve_until(
         &mut call,
-        clip.as_ref(),
-        options.dtmf.as_deref(),
-        duration,
-        &mut devices,
+        &mut incoming,
+        |media, cancelled| {
+            exchange(
+                media,
+                clip.as_ref(),
+                options.dtmf.as_deref(),
+                duration,
+                &mut devices,
+                cancelled,
+            )
+        },
+        interrupted.as_mut(),
     )
-    .await
-    {
+    .await;
+    devices.stop();
+    let served = match served {
+        Ok(served) => served,
+        Err(error) => {
+            drop(call);
+            handle.shutdown().await;
+            return fail(format, Exit::Failed, &error.to_string());
+        }
+    };
+    let (exchanged, status, ended_by, bye) = match served {
+        Served::Remote {
+            cause: EndCause::RemoteBye,
+            output,
+        } => (output, "answered", "remote", None),
+        Served::Remote { cause, output } => {
+            let _ = output;
+            drop(call);
+            handle.shutdown().await;
+            return fail(
+                format,
+                Exit::Failed,
+                &format!("call ended unexpectedly: {cause:?}"),
+            );
+        }
+        Served::Local { output, bye } => (output, "answered", "duration", Some(bye)),
+        Served::Interrupted { output, bye } => (output, "interrupted", "interrupt", Some(bye)),
+        _ => {
+            drop(call);
+            handle.shutdown().await;
+            return fail(format, Exit::Failed, "unknown confirmed-call outcome");
+        }
+    };
+    let exchanged = match exchanged {
         Ok(exchanged) => exchanged,
         Err(message) => {
-            let _ = call.hang_up().await;
+            drop(call);
+            handle.shutdown().await;
             return fail(format, Exit::Failed, &message);
+        }
+    };
+    let bye_status = match bye.transpose() {
+        Ok(status) => status,
+        Err(sipx_call::Error::SignallingTeardownTimeout(_)) => None,
+        Err(error) => {
+            drop(call);
+            handle.shutdown().await;
+            return fail(format, Exit::Failed, &error.to_string());
         }
     };
 
@@ -212,7 +305,8 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     let total_samples = early_samples.saturating_add(exchanged.samples_received);
     let report = media.requested_report(
         Report::new()
-            .text("status", "answered")
+            .text("status", status)
+            .text("ended_by", ended_by)
             .text("peer", uri)
             .text("media_advertised", media_address.to_string())
             .text("media_bound", call.media().local_addr().to_string())
@@ -228,6 +322,9 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     );
     let report = media.negotiated_report(report, &call, "browser-offerer");
     let mut report = devices.report(transport.report(report, negotiated_transport));
+    if let Some(status) = bye_status {
+        report = report.number("bye_status", i64::from(status));
+    }
     if early_requested {
         report = report.boolean("early_media", early_media).number(
             "early_samples_recorded",
@@ -248,13 +345,14 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         }
     }
 
-    let _ = call.hang_up().await;
     tracing::info!(
         peer = uri,
         elapsed = ?started.elapsed(),
         samples_recorded = exchanged.samples_received,
         "hung up"
     );
+    drop(call);
+    handle.shutdown().await;
     report = match export.into_report(report) {
         Ok(report) => report,
         Err(message) => return fail(format, Exit::Failed, &message),
@@ -270,10 +368,12 @@ async fn dial_candidates(
     candidates: &[sipx_transport::Target],
     to: &Uri,
     options: &sipx_call::DialOptions,
+    mut interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
 ) -> Result<(Call, sipx_transport::Target), sipx_call::Error> {
     let mut last_transport = None;
     for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
-        match sipx_call::dial(handle, target.clone(), to, options).await {
+        match sipx_call::dial_until(handle, target.clone(), to, options, interrupted.as_mut()).await
+        {
             Ok(call) => return Ok((call, target.clone())),
             Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
             Err(error) => return Err(error),
@@ -287,10 +387,13 @@ async fn dial_early_candidates(
     candidates: &[sipx_transport::Target],
     to: &Uri,
     options: &sipx_call::DialOptions,
+    mut interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
 ) -> Result<(sipx_call::Dialing, sipx_transport::Target), sipx_call::Error> {
     let mut last_transport = None;
     for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
-        match sipx_call::dial_early(handle, target.clone(), to, options).await {
+        match sipx_call::dial_early_until(handle, target.clone(), to, options, interrupted.as_mut())
+            .await
+        {
             Ok(dialing) => return Ok((dialing, target.clone())),
             Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
             Err(error) => return Err(error),
@@ -301,24 +404,28 @@ async fn dial_early_candidates(
 
 /// Play, send digits and record for the duration of the call.
 async fn exchange(
-    call: &mut Call,
+    media: std::sync::Arc<sipx_media::MediaSession>,
     clip: Option<&Wav>,
     dtmf: Option<&str>,
     duration: Duration,
     devices: &mut crate::device::Driver,
+    cancelled: tokio_util::sync::CancellationToken,
 ) -> Result<Exchange, String> {
-    let media = call.media();
-
     let playing = async {
         if let Some(clip) = clip {
             let pcm = pcm_clip(clip)?;
-            call.play_pcm(&pcm)
+            media
+                .play_pcm(&pcm)
                 .await
                 .map_err(|error| error.to_string())?;
         }
         if let Some(digits) = dtmf {
             // After the audio, so a menu hears the prompt before the keypress.
-            call.send_digits(digits, Duration::from_millis(100)).await;
+            for character in digits.chars() {
+                if let Some(digit) = sipx_rtp::Digit::from_char(character) {
+                    let _ = media.send_digit(digit, Duration::from_millis(100)).await;
+                }
+            }
         }
         Ok::<(), String>(())
     };
@@ -334,10 +441,10 @@ async fn exchange(
         if output_device {
             Vec::new()
         } else {
-            crate::record(call, duration, crate::RECORD_IDLE).await
+            crate::record_media(&media, duration, crate::RECORD_IDLE).await
         }
     };
-    let device_audio = devices.run(media, duration);
+    let device_audio = devices.run(&media, duration, &cancelled);
 
     let (played, recorded, device_samples) = tokio::join!(
         tokio::time::timeout(duration, playing),
@@ -362,6 +469,25 @@ async fn exchange(
 struct Exchange {
     recorded: Vec<i16>,
     samples_received: usize,
+}
+
+/// Report a deliberate stop which the call layer has already drained as CANCEL or late-2xx BYE.
+async fn report_pending_interrupt(
+    format: Format,
+    export: crate::counters::Export,
+    handle: &sipx_transport::Handle,
+) -> Exit {
+    handle.shutdown().await;
+    let report = Report::new()
+        .text("status", "interrupted")
+        .text("ended_by", "interrupt");
+    match export.into_report(report) {
+        Ok(report) => {
+            report.emit(format);
+            Exit::Success
+        }
+        Err(message) => fail(format, Exit::Failed, &message),
+    }
 }
 
 fn report_failure(format: Format, error: &sipx_call::Error) -> Exit {

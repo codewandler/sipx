@@ -2586,6 +2586,65 @@ impl Call {
         observed
     }
 
+    /// End locally while continuing to answer requests which crossed the originated BYE.
+    ///
+    /// The ordinary observed hangup is sufficient when a dispatcher keeps driving the dialog.
+    /// A one-call command owns the receiver itself, though, and must not stop reading it while it
+    /// awaits the BYE response: the peer may have selected a BYE at the same time. That crossed
+    /// request is still answered, while [`Self::begin_end`] ensures this side originates only one.
+    async fn hang_up_observed_while_serving(
+        &mut self,
+        incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
+        within: Duration,
+    ) -> Result<u16> {
+        let reason = normal_clearing_reason();
+        let Some((bye, cseq)) = self.begin_end(EndCause::LocalHangup, &reason).await? else {
+            return Err(Error::InvalidDialogResponse);
+        };
+        let endpoint = self.endpoint.clone();
+        let target = self.target.clone();
+        let dialog = self.dialog.clone();
+        let observed = async move {
+            let mut responses = endpoint.send(bye, target).await?;
+            let response = responses
+                .final_response()
+                .await
+                .ok_or(Error::SignallingTeardownTimeout(within))?;
+            if !crate::signalling::response_matches_dialog(&response, &dialog, cseq) {
+                return Err(Error::InvalidDialogResponse);
+            }
+            // The dialog is already ended locally. Any valid final response completes this
+            // teardown exchange and is evidence worth reporting; a non-success status cannot
+            // resurrect the call or turn successful media work into a command failure.
+            Ok(response.status.code())
+        };
+        tokio::pin!(observed);
+        let deadline = Instant::now() + within;
+        let mut incoming_open = true;
+        let result = loop {
+            tokio::select! {
+                biased;
+                message = incoming.recv(), if incoming_open => match message {
+                    Some(message)
+                        if matches!(message.request.method, Method::Ack | Method::Bye) =>
+                    {
+                        if !self.handle(&message).await? {
+                            self.refuse_unclaimed(&message).await;
+                        }
+                    }
+                    Some(message) => self.refuse_unclaimed(&message).await,
+                    None => incoming_open = false,
+                },
+                response = &mut observed => break response,
+                () = tokio::time::sleep_until(deadline) => {
+                    break Err(Error::SignallingTeardownTimeout(within));
+                }
+            }
+        };
+        self.finish_media_ownership().await;
+        result
+    }
+
     /// End the call with an explicit protocol cause.
     ///
     /// This is the coupled-leg shape from RFC 3326 §3.1: a controller which knows the winning
@@ -2656,6 +2715,131 @@ pub async fn serve(
         }
     }
     Ok(())
+}
+
+/// Why [`serve_until`] returned.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Served<T> {
+    /// The far end ended the confirmed dialog. Media work was cancelled and joined.
+    Remote {
+        /// The protocol cause selected by the call.
+        cause: EndCause,
+        /// The media work's partial or complete result after the call stopped it.
+        output: T,
+    },
+    /// The supplied media work completed, after which one observed BYE ended the dialog.
+    Local {
+        /// The media work's result.
+        output: T,
+        /// The valid final status observed for the originated BYE, or its bounded failure.
+        bye: Result<u16>,
+    },
+    /// The supplied stop input won, after which one observed BYE ended the dialog.
+    Interrupted {
+        /// The media work's partial result after cancellation.
+        output: T,
+        /// The valid final status observed for the originated BYE, or its bounded failure.
+        bye: Result<u16>,
+    },
+}
+
+/// Drive one confirmed call, its media work and a local stop input as one owned lifecycle.
+///
+/// Inbound dialog traffic has priority over `interrupted`, which has priority over local work
+/// completion. ACK therefore stops successful-response retransmission while media runs, and a BYE
+/// already queued when a local terminal input is polled wins without this side originating one.
+/// A BYE which crosses local teardown is answered by the same loop while the originated BYE's
+/// response remains bounded.
+///
+/// `work` receives the current media session and a cancellation token. The token fires before a
+/// remote or interrupted end is joined. The future MUST be cancellation-safe and MUST resolve once
+/// that token and the media session have stopped; this function does not return until it has.
+pub async fn serve_until<F, W, S, T>(
+    call: &mut Call,
+    incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
+    work: F,
+    interrupted: S,
+) -> Result<Served<T>>
+where
+    F: FnOnce(Arc<MediaSession>, CancellationToken) -> W,
+    W: Future<Output = T>,
+    S: Future<Output = ()>,
+{
+    let stop_work = CancellationToken::new();
+    let work = work(Arc::clone(&call.media), stop_work.clone());
+    tokio::pin!(work);
+    tokio::pin!(interrupted);
+
+    loop {
+        let deadline = call.session_deadline();
+        tokio::select! {
+            biased;
+            message = incoming.recv() => {
+                if let Some(message) = message {
+                    let handled = match call.handle(&message).await {
+                        Ok(handled) => handled,
+                        Err(error) => {
+                            stop_work.cancel();
+                            let _ = call.hang_up().await;
+                            let _ = work.as_mut().await;
+                            return Err(error);
+                        }
+                    };
+                    if call.is_ended() {
+                        stop_work.cancel();
+                        let output = work.as_mut().await;
+                        return Ok(Served::Remote {
+                            cause: EndCause::RemoteBye,
+                            output,
+                        });
+                    }
+                    if !handled {
+                        call.refuse_unclaimed(&message).await;
+                    }
+                } else {
+                    stop_work.cancel();
+                    let _ = call.hang_up().await;
+                    let _ = work.as_mut().await;
+                    return Err(Error::Transport(sipx_transport::Error::EndpointClosed));
+                }
+            },
+            () = interrupted.as_mut() => {
+                stop_work.cancel();
+                let bye = call
+                    .hang_up_observed_while_serving(incoming, Duration::from_secs(2))
+                    .await;
+                let output = work.as_mut().await;
+                return Ok(Served::Interrupted { output, bye });
+            }
+            output = work.as_mut() => {
+                let bye = call
+                    .hang_up_observed_while_serving(incoming, Duration::from_secs(2))
+                    .await;
+                return Ok(Served::Local { output, bye });
+            }
+            () = sleep_until(deadline) => {
+                if let Err(error) = call.on_session_deadline().await {
+                    stop_work.cancel();
+                    let _ = work.as_mut().await;
+                    return Err(error);
+                }
+                if call.is_ended() {
+                    stop_work.cancel();
+                    let output = work.as_mut().await;
+                    return Ok(Served::Remote {
+                        cause: EndCause::Timeout,
+                        output,
+                    });
+                }
+            }
+            digit = call.media().recv_digit() => {
+                if let Some((digit, duration)) = digit {
+                    call.events.emit(CallEvent::Dtmf { digit, duration });
+                }
+            }
+        }
+    }
 }
 
 /// Wait for a deadline, or forever if there is none.
