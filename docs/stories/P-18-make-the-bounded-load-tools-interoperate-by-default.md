@@ -2,8 +2,7 @@
 id: P-18
 title: "Make the bounded load tools interoperate by default"
 pillar: "Phone"
-status: ready
-priority: 1
+status: in-progress
 epic: diagnostic-automation
 areas: [sipx-cli]
 design: docs/designs/diagnostic-automation.md
@@ -30,7 +29,8 @@ success after one attempted call.
 - [ ] The corrected default pair admits the requested 20 calls, reaches the configured concurrency
       and call bounds, drains to zero, reports `completed`, and exits 0 with no media requirement.
 - [ ] Selecting generated media on both commands retains the existing RTP proof. Selecting
-      incompatible explicit modes is refused before admission with exit 2 and an actionable message.
+      incompatible explicit peer modes is refused before dialog admission with a nonzero terminal
+      result and an actionable message; an invalid local mode is refused before I/O with exit 2.
 - [ ] An internal call/media worker error stops admission, cancels and joins owned calls, reports
       `failed`, exits nonzero and cannot be mislabeled as an operator interrupt.
 - [ ] Help, the CLI reference and bounded-load examples are generated/synchronized from the same

@@ -273,6 +273,32 @@ status codes are decimal strings):
 An unavailable percentile or media aggregate is `null`, not zero. Per-call events are optional,
 but this summary is emitted only after cleanup and is always exactly one machine-readable record.
 
+### 5.1 Shared workload modes and terminal causes
+
+`load` and `load-responder` share the same `--mode` vocabulary. `signalling` is the default on both
+commands. It sends a bodyless INVITE, completes the bodyless 2xx/ACK dialog, holds it for the
+configured call/dialog duration, and completes it with BYE. It creates no SDP, media port, RTP task
+or media snapshot. `generated-media` is selected explicitly on both commands and retains the
+deterministic PCMU offer/answer, one bounded generated frame and RTP quality snapshot used by the
+media workload. The `mode` field appears in responder readiness and in both terminal summaries;
+signalling summaries report zero media snapshots and unavailable media aggregates as `null`.
+
+Every INVITE emitted by `load` carries the private extension field
+`X-Sipx-Workload-Mode: signalling|generated-media`. The paired responder checks a present field
+before admitting the dialog. A value different from its configured mode receives 488 `Workload
+Mode Mismatch`, is counted as a pre-admission rejection, closes the paired run as `failed`, and
+exits 1 after cleanup. The marker is advisory for other clients: an absent field retains the
+body-based interoperability behavior. An unknown local `--mode` is command usage, exits 2, and
+opens no socket.
+
+`completed` means a configured call or duration admission bound was reached and every admitted
+worker joined. `interrupted` is reserved for an operator or supported process stop request whose
+cleanup completed. A worker error, workload-mode mismatch, poisoned measurement store, media
+failure or exhausted cleanup budget closes admission, cancels and joins owned calls, emits
+`status=failed` with an actionable `reason`, and exits 1. Such a failure MUST NOT be reported as an
+operator interruption merely because the internal error used the common stop token. Ordinary SIP
+policy rejections remain measured call outcomes and do not alone make a bounded run fail.
+
 ## 6. Secrets and output
 
 Passwords, private keys, digest responses and SRTP key material **MUST NOT** appear in human output,
