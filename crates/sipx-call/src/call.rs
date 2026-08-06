@@ -5908,9 +5908,7 @@ async fn answer_gathering(
     offer: &SessionDescription,
     policy: MediaPolicy,
 ) -> Result<(IceNegotiation, Option<LocalDescription>)> {
-    let remote = offer.media.first().map_or(IceNegotiation::Absent, |audio| {
-        sipx_media::ice::negotiate(offer, audio)
-    });
+    let remote = answer_ice_negotiation(offer, policy)?;
     if !remote.runs_ice() {
         return Ok((remote, None));
     }
@@ -5922,6 +5920,31 @@ async fn answer_gathering(
         None => None,
     };
     Ok((remote, local))
+}
+
+/// Read the peer ICE half that an answering call is allowed to retain.
+///
+/// Generic calls preserve every usable component for the ordinary mux fallback. The named
+/// browser profile has already required mux, so its pure validator removes an offered RTCP
+/// fallback before the media ICE agent can store or pair it.
+fn answer_ice_negotiation(
+    offer: &SessionDescription,
+    policy: MediaPolicy,
+) -> Result<IceNegotiation> {
+    if policy.profile == MediaProfile::BrowserAudio {
+        let remote = sipx_sdp::browser_audio::validate(
+            offer,
+            sipx_sdp::browser_audio::BrowserAudioRole::Offerer,
+        )?;
+        return Ok(IceNegotiation::Ice {
+            credentials: remote.ice,
+            candidates: remote.candidates,
+            lite: offer.is_ice_lite(),
+        });
+    }
+    Ok(offer.media.first().map_or(IceNegotiation::Absent, |audio| {
+        sipx_media::ice::negotiate(offer, audio)
+    }))
 }
 
 /// A session that has been described and answered, but not yet accepted.
@@ -7714,6 +7737,36 @@ mod tests {
         )
         .expect("complete browser answer");
         (offer, answer, local, port)
+    }
+
+    /// M-70: the answering call constructs the media agent's remote description from the named
+    /// profile result, not by reparsing fallback candidates the profile deliberately discarded.
+    #[cfg(all(feature = "opus", feature = "dtls"))]
+    #[tokio::test]
+    async fn browser_answer_ice_retains_only_the_mux_component() {
+        let (mut offer, _answer, _local, _port) = browser_answer_fixture().await;
+        let mut fallback = offer.media[0]
+            .ice_candidates()
+            .into_iter()
+            .next()
+            .expect("generated offer has a component-one candidate");
+        fallback.component = ComponentId::RTCP;
+        fallback.port = offer.media[0]
+            .port
+            .checked_add(1)
+            .expect("ephemeral media port has a fallback port");
+        offer.media[0].attributes.push(sipx_sdp::Attribute::valued(
+            "candidate",
+            fallback.to_value(),
+        ));
+
+        let negotiation = answer_ice_negotiation(&offer, MediaPolicy::browser_audio())
+            .expect("mux offer is accepted");
+        let IceNegotiation::Ice { candidates, .. } = negotiation else {
+            panic!("browser profile must retain an ICE generation");
+        };
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].component, ComponentId::RTP);
     }
 
     /// `M-49`: an incomplete final answer is refused at the call boundary before the retained ICE

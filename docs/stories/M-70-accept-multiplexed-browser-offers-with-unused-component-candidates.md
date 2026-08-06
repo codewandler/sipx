@@ -21,18 +21,18 @@ bound or interpreted as evidence that `a=rtcp-mux` is absent.
 
 - [x] `docs/specs/webrtc-audio.md` and the relevant ICE/multiplexing spec state how RFC 5761
       `a=rtcp-mux` composes with RFC 8445/8839 candidates for components one and two.
-- [ ] A byte-exact failing-first SDP vector contains `a=rtcp-mux`, at least one viable component-one
+- [x] A byte-exact failing-first SDP vector contains `a=rtcp-mux`, at least one viable component-one
       candidate and an extra component-two candidate, and reproduces the current
       `RtcpMuxRequired` profile error.
-- [ ] Validation accepts that vector, retains only component-one candidates for connectivity checks,
+- [x] Validation accepts that vector, retains only component-one candidates for connectivity checks,
       and still rejects an offer with no viable component-one path, absent `a=rtcp-mux`, or an
       otherwise invalid browser profile.
-- [ ] Runtime facts prove one bound socket, one nominated pair and no component-two check, route or
+- [x] Runtime facts prove one bound socket, one nominated pair and no component-two check, route or
       media worker. The fix cannot weaken source-address, ICE-generation, fingerprint or key-state
       gates.
 - [ ] The independent browser proof that produced this offer shape reaches nomination, verified
       DTLS keys and bidirectional protected RTP with a finite failure bound.
-- [ ] Native-to-native browser-profile tests remain green, so accepting unused candidates does not
+- [x] Native-to-native browser-profile tests remain green, so accepting unused candidates does not
       create a second profile or alter the emitted answer vocabulary.
 - [ ] SDP vectors, browser harness docs/evidence, RFC registry entries and the complete repository
       gate are synchronized and green.
@@ -49,3 +49,16 @@ inference until the exact SDP vector is captured by this story.
   currently treated as contradicting `a=rtcp-mux`, before ICE can retain the viable component-one
   path. The spec update distinguishes an initial offer's bounded fallback candidates from the
   one-component mux answer and runtime.
+- Implemented: byte-pinned `BA-SDP-O2` first reproduced `RtcpMuxRequired`, then crossed the profile
+  with only its component-one candidate retained. Component-two offer fallbacks are line- and
+  count-bounded; component-two-only, non-mux and over-bound offers remain typed refusals, as does a
+  component-two candidate in an answer after mux has been selected.
+- Runtime boundary: the answering call now constructs its remote ICE description from the filtered
+  browser-profile result. A call-layer mutation test proves the discarded candidate cannot enter
+  the agent, while the existing browser component suite keeps its one-socket nomination,
+  fingerprint, generation, DTLS and protected-media gates green.
+- Proof boundary: the bounded native-browser harness now requires a third positive call whose
+  browser-authored offer gains exactly one unused RTCP fallback. Its evidence validator requires
+  offered components 1 and 2, a component-one mux answer, one nominated pair, DTLS keys and
+  protected audio. All 14 adversarial harness self-tests pass; the real browser run, derived RFC
+  report regeneration and complete repository gate remain deliberately deferred to push time.

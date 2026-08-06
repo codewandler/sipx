@@ -15,7 +15,10 @@ the endpoint responds, then dials over that exact authenticated inbound WSS conn
 uses an ephemeral WSS port parsed from the example's bounded listening object and injected into the
 browser configuration. No fixed port or shell-evaluated command string is involved.
 
-CI runs the native browser in both roles and runs three more native sessions for fingerprint,
-nomination and weaker-media failures. `scripts/test-browser-audio-proof.py` separately reverses the
-measuring instrument's identity, structured-evidence, completeness, output-cap and process-tree
-boundaries. The real proof and self-test are different claims, and both must pass.
+CI runs the native browser in both roles, repeats the offerer role with one bounded unused RTCP
+fallback candidate in its browser-authored offer, and runs three more native sessions for
+fingerprint, nomination and weaker-media failures. The compatibility run must still report one
+nominated component and protected audio in both directions. `scripts/test-browser-audio-proof.py`
+separately reverses the measuring instrument's identity, structured-evidence, completeness,
+output-cap and process-tree boundaries. The real proof and self-test are different claims, and both
+must pass.

@@ -294,6 +294,66 @@ def validate_sipx_result(value: Any, role: str) -> dict[str, Any]:
     return result
 
 
+def validate_unused_rtcp_candidate(
+    browser_value: Any, sipx_value: Any, expected_pin: str
+) -> dict[str, dict[str, Any]]:
+    browser = validate_browser_result(browser_value, "browser-offerer", expected_pin)
+    sipx = validate_sipx_result(sipx_value, "browser-offerer")
+    sdp = _mapping(browser.get("sdp"), "unused-candidate SDP evidence")
+    local = _mapping(sdp.get("local"), "unused-candidate local SDP")
+    remote = _mapping(sdp.get("remote"), "unused-candidate remote SDP")
+    require(
+        local.get("candidate_components") == ["1", "2"],
+        "compatibility offer did not contain exactly components 1 and 2",
+    )
+    require(
+        remote.get("candidate_components") == ["1"],
+        "mux answer did not retain exactly component 1",
+    )
+    local_raw = local.get("raw")
+    remote_raw = remote.get("raw")
+    require(isinstance(local_raw, str), "compatibility offer raw SDP is absent")
+    require(isinstance(remote_raw, str), "compatibility answer raw SDP is absent")
+    local_candidate_components = [
+        line.split()[1]
+        for line in local_raw.splitlines()
+        if line.startswith("a=candidate:") and len(line.split()) > 1
+    ]
+    remote_candidate_components = [
+        line.split()[1]
+        for line in remote_raw.splitlines()
+        if line.startswith("a=candidate:") and len(line.split()) > 1
+    ]
+    require(
+        local_candidate_components.count("2") == 1
+        and local_candidate_components.count("1") >= 1,
+        "compatibility offer did not carry exactly one unused component-2 candidate",
+    )
+    require(
+        "2" not in remote_candidate_components
+        and remote_candidate_components.count("1") >= 1,
+        "mux answer retained an unused component-2 candidate",
+    )
+    cross_check_pair(browser, sipx)
+    return {"browser": browser, "sipx": sipx}
+
+
+def cross_check_pair(browser: dict[str, Any], sipx: dict[str, Any]) -> None:
+    browser_pair = _mapping(browser.get("candidate_pair"), "browser candidate pair")
+    browser_local = _mapping(browser_pair.get("local"), "browser local candidate")
+    browser_remote = _mapping(browser_pair.get("remote"), "browser remote candidate")
+    require(
+        (ipaddress.ip_address(browser_local["address"]), int(browser_local["port"]))
+        == _socket_address(sipx.get("nominated_remote"), "sipx nominated remote"),
+        "browser local candidate differs from sipx nominated remote",
+    )
+    require(
+        (ipaddress.ip_address(browser_remote["address"]), int(browser_remote["port"]))
+        == _socket_address(sipx.get("nominated_local"), "sipx nominated local"),
+        "browser remote candidate differs from sipx nominated local",
+    )
+
+
 def proof_digest(browser: dict[str, Any], sipx: dict[str, Any]) -> str:
     encoded = json.dumps(
         {"browser": browser, "sipx": sipx},
@@ -350,23 +410,22 @@ def validate_proof(directory: pathlib.Path, expected_pin: str) -> dict[str, Any]
         role_dir = directory / role
         browser = validate_browser_result(load_json(role_dir / "browser.json"), role, expected_pin)
         sipx = validate_sipx_result(load_json(role_dir / "sipx.json"), role)
-        browser_pair = _mapping(browser.get("candidate_pair"), "browser candidate pair")
-        browser_local = _mapping(browser_pair.get("local"), "browser local candidate")
-        browser_remote = _mapping(browser_pair.get("remote"), "browser remote candidate")
-        require(
-            (ipaddress.ip_address(browser_local["address"]), int(browser_local["port"]))
-            == _socket_address(sipx.get("nominated_remote"), "sipx nominated remote"),
-            "browser local candidate differs from sipx nominated remote",
-        )
-        require(
-            (ipaddress.ip_address(browser_remote["address"]), int(browser_remote["port"]))
-            == _socket_address(sipx.get("nominated_local"), "sipx nominated local"),
-            "browser remote candidate differs from sipx nominated local",
-        )
+        cross_check_pair(browser, sipx)
         roles[role] = {"browser": browser, "sipx": sipx}
+    compatibility_directory = directory / "unused-rtcp-candidate"
+    compatibility = validate_unused_rtcp_candidate(
+        load_json(compatibility_directory / "browser.json"),
+        load_json(compatibility_directory / "sipx.json"),
+        expected_pin,
+    )
     for name in ("FingerprintMismatch", "NoNominatedPair", "WeakerMedia"):
         validate_negative(load_json(directory / "negatives" / f"{name}.json"), name, roles)
-    return {"contract": CONTRACT, "type": "proof.complete", "roles": roles}
+    return {
+        "contract": CONTRACT,
+        "type": "proof.complete",
+        "roles": roles,
+        "unused_rtcp_candidate": compatibility,
+    }
 
 
 class WebDriver:
@@ -571,6 +630,7 @@ def main() -> int:
     run.add_argument("--config", type=pathlib.Path, required=True)
     run.add_argument("--capabilities", type=pathlib.Path, required=True)
     run.add_argument("--role", choices=ROLES, required=True)
+    run.add_argument("--mutation", choices=("UnusedRtcpCandidate",))
     run.add_argument("--pin", required=True)
     run.add_argument("--output", type=pathlib.Path, required=True)
     run.add_argument("--timeout", type=int, default=120)
@@ -624,6 +684,8 @@ def main() -> int:
         config = load_json(args.config)
         require(config.get("role") == args.role, "browser config names the wrong role")
         config["wssSpkiSha256"] = args.pin
+        if args.mutation:
+            config["mutation"] = args.mutation
         driver = WebDriver(args.url)
         try:
             driver.start(load_json(args.capabilities), args.pin, args.timeout)

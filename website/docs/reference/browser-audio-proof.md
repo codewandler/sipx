@@ -47,26 +47,31 @@ cargo build -p sipx-call --example browser_audio_proof --features opus,dtls
 ```
 
 The harness generates the ephemeral WSS identity, discovers a reachable host address, starts the
-matched Chrome WebDriver, runs both positive roles and all three refusal cases, and validates the
-evidence. It exits nonzero when a compatible `chromedriver`, browser, OpenSSL, or native Opus
+matched WebDriver, runs both positive roles, one unused-RTCP-candidate compatibility call and all
+three refusal cases, and validates the evidence. It exits nonzero when a compatible WebDriver,
+browser, OpenSSL, or native Opus
 development library is unavailable; an unavailable proof environment is not reported as a skip.
 This command is repository proof infrastructure, not a browser SDK or a supported application
 launcher.
 
 ## What the positive proves
 
-The proof establishes two separate calls:
+The proof establishes three separate calls:
 
 1. The browser creates the offer and sipx answers it.
 2. The browser opens authenticated WSS, reports readiness with OPTIONS, and sipx places the call
    back over that exact inbound connection; the browser then creates the answer.
+3. The browser creates another offer, the harness adds exactly one bounded component-two fallback
+   candidate derived from its component-one host candidate, and sipx answers with mux after
+   discarding that unused fallback.
 
 In each call the browser and sipx emit separate terminal objects. The validator requires both ends
 to report Opus at a 48 kHz RTP clock, connected DTLS-SRTP, a nominated component-one pair, and
 nonzero media in both directions. A generated tone must be decoded as non-silent audio at each end.
-The two views of the candidate pair are cross-checked in reverse: the browser's local endpoint is
-sipx's remote endpoint, and vice versa. INVITE, final response, ACK, BYE, and the BYE final response
-must complete in order.
+The two views of every candidate pair are cross-checked in reverse: the browser's local endpoint is
+sipx's remote endpoint, and vice versa. The compatibility call must show components 1 and 2 in the
+sent offer, component 1 in the received answer, and component 1 as the only nominated pair. INVITE,
+final response, ACK, BYE, and the BYE final response must complete in order.
 
 Process exit is not accepted as a substitute for any of those facts.
 
