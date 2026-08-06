@@ -571,6 +571,87 @@ async fn dph_3_opus_without_the_feature_fails_before_network_io() {
     );
 }
 
+/// M-69 failing-first: a valid offer outside the answerer's selected codec policy used to make
+/// the answerer exit locally with no response, leaving the caller to report a timeout. The capture
+/// and exported counters hold the wire boundary as well as both process outcomes.
+#[tokio::test]
+async fn an_unacceptable_initial_offer_is_refused_488_before_answer_teardown() {
+    let _scenario = process_scenario().await;
+    let dir = scratch("initial-offer-refusal");
+    let capture = dir.join("answer.pcapng");
+    let counters = dir.join("answer-counters.json");
+    let (mut answerer, address, _answer_lines) = start_answerer(&[
+        "--codec",
+        "l16",
+        "--capture",
+        capture.to_str().expect("capture path"),
+        "--counters",
+        counters.to_str().expect("counter path"),
+    ])
+    .await;
+
+    // The clock is the measurement: a final 488 must beat the caller's five-second setup budget.
+    let started = std::time::Instant::now();
+    let caller = tokio::time::timeout(
+        Duration::from_secs(10),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:answer@{address}"),
+                "--codec",
+                "pcmu",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("caller outcome is bounded")
+    .expect("caller runs");
+    let elapsed = started.elapsed();
+    let caller_error = String::from_utf8_lossy(&caller.stderr);
+
+    let answer_error = drain_stderr(&mut answerer).await;
+    let answer_status = tokio::time::timeout(Duration::from_secs(5), answerer.wait())
+        .await
+        .expect("answer teardown is bounded")
+        .expect("answerer exits");
+    assert_eq!(answer_status.code(), Some(1), "{answer_error}");
+    assert!(
+        answer_error.contains("no codec in common"),
+        "{answer_error}"
+    );
+    assert_eq!(caller.status.code(), Some(3), "{caller_error}");
+    assert!(
+        caller_error.contains(r#""status":"rejected"#),
+        "{caller_error}"
+    );
+    assert!(
+        caller_error.contains("488 Not Acceptable Here"),
+        "{caller_error}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "488 arrived after {elapsed:?}"
+    );
+
+    let wire =
+        String::from_utf8_lossy(&std::fs::read(&capture).expect("capture exists")).into_owned();
+    assert_eq!(wire.matches("INVITE sip:answer@").count(), 1, "{wire}");
+    assert!(wire.contains("SIP/2.0 488 Not Acceptable Here"), "{wire}");
+    assert!(wire.contains("Content-Length: 0"), "{wire}");
+
+    let counts: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&counters).expect("answer counters exist"))
+            .expect("counter JSON");
+    assert!(counts["messages_in"].as_u64().unwrap_or(0) >= 1, "{counts}");
+    assert!(
+        counts["messages_out"].as_u64().unwrap_or(0) >= 1,
+        "{counts}"
+    );
+}
+
 /// The positive command-process Opus claim: two distinguishable 48 kHz signals cross in opposite
 /// directions. Rate, duration and identity are all asserted, so an 8 kHz header, a 160-sample
 /// answer frame, a one-way path or a merely non-empty recording cannot satisfy this case.

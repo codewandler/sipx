@@ -4561,10 +4561,14 @@ pub(crate) async fn answer_tagged(
     policy: MediaPolicy,
     headers: &[sipx_sip::Header],
 ) -> Result<Call> {
-    // Ahead of the claim, deliberately: an offer that cannot be read fails here with nothing
-    // sent, and an invitation that was never taken is one a CANCEL can still end.
-    let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
-        .map_err(|error| Error::Sdp(error.to_string()))?;
+    let offer = match sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body())) {
+        Ok(offer) => offer,
+        Err(error) => {
+            let error = Error::Sdp(error.to_string());
+            refuse_initial_offer(endpoint, incoming, tag, claim, 400, "Bad Request").await?;
+            return Err(error);
+        }
+    };
     // No provisional was sent on this path, so there is nothing to report as `Ringing`.
     answer_negotiated(
         endpoint,
@@ -6261,8 +6265,15 @@ pub async fn answer_ringing_with_policy_at(
     if !ringing.is_acknowledged() {
         tracing::debug!("answering before the reliable provisional was acknowledged");
     }
-    let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
-        .map_err(|error| Error::Sdp(error.to_string()))?;
+    let offer = match sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body())) {
+        Ok(offer) => offer,
+        Err(error) => {
+            let error = Error::Sdp(error.to_string());
+            refuse_initial_offer(endpoint, incoming, ringing.tag(), None, 400, "Bad Request")
+                .await?;
+            return Err(error);
+        }
+    };
     answer_negotiated(
         endpoint,
         incoming,
@@ -6468,6 +6479,39 @@ async fn negotiate_session(
 /// `an_answer_future_is_spawnable` holds to.
 pub(crate) type Claim<'a> = &'a (dyn Fn() -> Result<()> + Send + Sync);
 
+/// End an initial offer that cannot become a call, through the INVITE's server transaction.
+///
+/// Everything that can fail while shaping the response happens before the optional dispatcher
+/// claim. Once claimed, a crossing CANCEL must not replace this final response with 487. A send
+/// failure is returned instead of the local negotiation error so it stays observable and the
+/// transport cannot count a response it did not hand to the socket.
+async fn refuse_initial_offer(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    tag: &str,
+    claim: Option<Claim<'_>>,
+    code: u16,
+    reason: &'static str,
+) -> Result<()> {
+    let status = StatusCode::new(code)
+        .ok_or_else(|| Error::Sdp(format!("invalid initial-offer response status {code}")))?;
+    let existing = incoming
+        .request
+        .headers
+        .value(&HeaderName::To)
+        .map(|value| String::from_utf8_lossy(&value).into_owned())
+        .unwrap_or_default();
+    let to_with_tag = format!("{};tag={tag}", strip_header_params(&existing));
+    let response = ResponseBuilder::to_request(&incoming.request, status, reason)?
+        .set_header(&HeaderName::To, Bytes::from(to_with_tag))?
+        .build();
+    if let Some(claim) = claim {
+        claim()?;
+    }
+    endpoint.respond(&incoming.key, response).await?;
+    Ok(())
+}
+
 /// Answer an INVITE whose offer has already been parsed.
 ///
 /// `reliable_ringing` is `Some` exactly when this side rang first (via [`crate::rel::ring`]):
@@ -6507,7 +6551,15 @@ async fn answer_negotiated(
         )?;
     }
     validate_dtls_offer_setup(&offer, policy)?;
-    let negotiated = negotiated(&offer, policy.codecs)?;
+    let negotiated = match negotiated(&offer, policy.codecs) {
+        Ok(negotiated) => negotiated,
+        Err(Error::NoCommonCodec) => {
+            refuse_initial_offer(endpoint, incoming, tag, claim, 488, "Not Acceptable Here")
+                .await?;
+            return Err(Error::NoCommonCodec);
+        }
+        Err(error) => return Err(error),
+    };
 
     // The port is bound before the session starts, because the answer has to name it *and* the
     // session has to be created with the keys that answer settles on. Starting the session first
@@ -6567,6 +6619,7 @@ async fn answer_negotiated(
         .iter()
         .all(sipx_sdp::MediaDescription::is_rejected)
     {
+        refuse_initial_offer(endpoint, incoming, tag, claim, 488, "Not Acceptable Here").await?;
         return Err(Error::NoCommonCodec);
     }
 
