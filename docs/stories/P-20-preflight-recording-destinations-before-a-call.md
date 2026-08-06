@@ -2,8 +2,7 @@
 id: P-20
 title: "Preflight recording destinations before a call"
 pillar: "Phone"
-status: ready
-priority: 2
+status: in-progress
 epic: diagnostic-automation
 areas: [sipx-cli]
 design: docs/designs/diagnostic-automation.md
@@ -41,3 +40,8 @@ on cancellation or failure.
 
 Finding 13 completed a short connected call before discovering that the requested recording's
 parent directory did not exist; playback input already failed at the correct pre-signalling point.
+
+## Progress
+
+- The shared WAV-output lifecycle is being specified before implementation. Board regeneration,
+  the complete gate and final status remain deferred to the requested push boundary.

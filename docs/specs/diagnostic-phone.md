@@ -107,6 +107,31 @@ the remainder is its value. `--play <path>` is exactly `--audio-input wav:<path>
 is a setup error rather than an ordering rule. Generator kinds are closed by the story that ships
 them; an unknown or not-yet-shipped kind is refused.
 
+### 3.1 WAV output ownership
+
+`dial` and `answer` normalize `--record <path>` and `--audio-output wav:<path>` into the same WAV
+output selection and use one reservation/finalization implementation. After command syntax, media
+selection and WAV input validation, but before destination resolution, transport bind, listener
+readiness or SIP emission, the command MUST reserve its output:
+
+1. The requested final path MUST name a file whose parent already exists. An existing file or
+   symlink at the final path is a usage refusal and MUST NOT be truncated, replaced or followed.
+2. The command creates a uniquely named sibling temporary file with exclusive creation and keeps
+   that exact file handle open for the call lifetime. Name collisions are retried a finite number
+   of times. Failure names the requested path, not only the internal temporary name.
+3. Captured samples remain in memory until the call's bounded media work joins. Finalization writes
+   the complete WAV through the reserved handle, flushes it durably, closes the handle, and installs
+   the sibling at the requested path without replacing a file created after preflight. A same-
+   filesystem atomic link/rename operation is used where the platform permits it.
+4. Successful installation is never undone by a later reporting or cleanup failure. Before
+   installation, every usage refusal, call failure, cancellation, remote hangup, media failure,
+   write failure and ordinary drop closes the handle and removes the sibling temporary entry.
+
+The temporary name is derived only from the operator-supplied destination and local randomness;
+network identities and header values never become paths. A destination race after preflight is a
+terminal command failure that names the final path and does not rewrite the call as never having
+occurred. The final result names `recording` only after installation succeeds.
+
 `dial --early-media` opts into the reliable-provisional call path. The command consumes provisional
 responses until an SDP-bearing reliable response starts a media session or a final response
 arrives. It acknowledges a reliable response with PRACK before reading its media. If early media
@@ -356,3 +381,5 @@ workspace build in the local gate and CI, so it observes the binary that will sh
 | `DPH-10` | Load run reaches its call bound | No new call starts; every owned call is cleaned up |
 | `DPH-11` | Load run is interrupted | Admission stops and cleanup finishes before the summary |
 | `DPH-12` | WAV input and a Linux virtual microphone containing the same deterministic clip call the same recorder | Both 8 kHz recordings pass the same quantised-sample assertion; the device result names its exact configuration and reports all three loss counters |
+| `DPH-13` | `dial` or `answer`, using either WAV-output spelling, names a missing parent, an existing final file or a destination whose sibling cannot be created | usage refusal names the requested path before resolver, bind, readiness or peer traffic; an existing final file retains its bytes |
+| `DPH-14` | a reserved destination becomes occupied before finalization | the call outcome remains observable, finalization fails without replacing the competing file, and no reservation temporary remains |
