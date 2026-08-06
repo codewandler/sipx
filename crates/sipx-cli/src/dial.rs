@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use sipx_audio::{Wav, read_wav, write_wav};
 use sipx_call::{Call, Credentials};
-use sipx_sip::{Address, Host, Uri};
-use sipx_transport::{Config as TransportConfig, TransportKind, bind};
+use sipx_sip::{Address, Uri};
+use sipx_transport::{Config as TransportConfig, bind};
 
 use crate::cli::DialOptions;
 use crate::output::{Exit, Format, Report, fail};
@@ -20,19 +20,11 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     let Ok(to) = Uri::parse(bytes::Bytes::from(uri.to_owned())) else {
         return fail(format, Exit::Usage, &format!("not a SIP URI: {uri}"));
     };
-    let transport = match crate::signalling::Selection::from_options(
+    let mut transport = match crate::signalling::Selection::from_options(
         &options.signalling,
         to.scheme().is_secure(),
     ) {
         Ok(transport) => transport,
-        Err(message) => return fail(format, Exit::Usage, &message),
-    };
-    let media = match crate::media::Selection::from_options(
-        &options.media,
-        transport.kind(),
-        options.early_media,
-    ) {
-        Ok(media) => media,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
     let audio = match crate::device::Selection::from_options(&options.audio) {
@@ -46,18 +38,28 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
 
     let password = options.password.clone();
 
-    let Some((target_addr, server_name)) = target_of(&to, transport.kind()) else {
-        return fail(
-            format,
-            Exit::Usage,
-            &format!("{uri} must name an address and port, e.g. sip:bob@192.0.2.1:5060"),
-        );
+    let resolver = crate::destination::Resolver::system();
+    let candidates = match resolver
+        .resolve(&to, None, transport, &options.signalling)
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => return fail(format, error.exit(), &error.to_string()),
     };
-    let target = match transport.target(&options.signalling, target_addr, &server_name) {
-        Ok(target) => target,
+    let target = match crate::destination::first(&candidates) {
+        Ok(target) => target.clone(),
+        Err(error) => return fail(format, error.exit(), &error.to_string()),
+    };
+    let target_addr = target.addr;
+    transport = transport.negotiated(target.transport);
+    let media = match crate::media::Selection::from_options(
+        &options.media,
+        transport.kind(),
+        options.early_media,
+    ) {
+        Ok(media) => media,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let negotiated_transport = target.transport;
 
     // Audio to play is read before the call is placed: failing after the far end has answered
     // means hanging up on someone for a mistake that was visible beforehand.
@@ -147,16 +149,17 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     // help text got silence from the level it documents (`X-57`). These three records are the
     // lifecycle a shell already sees on stdout — placed, answered, ended — on the stream that is
     // allowed to narrate it.
-    tracing::info!(peer = uri, transport = ?negotiated_transport, "calling");
+    tracing::info!(peer = uri, transport = ?target.transport, "calling");
 
     let duration = Duration::from_secs(options.duration);
     let early_requested = options.early_media;
     let started = std::time::Instant::now();
-    let (mut call, early_recorded, early_media) = if early_requested {
-        let mut dialing = match sipx_call::dial_early(&handle, target, &to, &call_options).await {
-            Ok(dialing) => dialing,
-            Err(error) => return report_failure(format, &error),
-        };
+    let (mut call, selected_target, early_recorded, early_media) = if early_requested {
+        let (mut dialing, selected) =
+            match dial_early_candidates(&handle, &candidates, &to, &call_options).await {
+                Ok(dialing) => dialing,
+                Err(error) => return report_failure(format, &error),
+            };
         let early_media = match dialing.wait_for_early_media().await {
             Ok(available) => available,
             Err(error) => return report_failure(format, &error),
@@ -177,14 +180,16 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
             Ok(call) => call,
             Err(error) => return report_failure(format, &error),
         };
-        (call, early_recorded, early_media)
+        (call, selected, early_recorded, early_media)
     } else {
-        let call = match sipx_call::dial(&handle, target, &to, &call_options).await {
+        let (call, selected) = match dial_candidates(&handle, &candidates, &to, &call_options).await
+        {
             Ok(call) => call,
             Err(error) => return report_failure(format, &error),
         };
-        (call, Vec::new(), false)
+        (call, selected, Vec::new(), false)
     };
+    let negotiated_transport = selected_target.transport;
     tracing::info!(peer = uri, setup = ?started.elapsed(), "answered");
 
     let exchanged = match exchange(
@@ -256,6 +261,42 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     };
     report.emit(format);
     Exit::Success
+}
+
+/// Try only concrete transport failures on the next RFC 3263 candidate. SIP refusals and response
+/// deadlines belong to the transaction that was sent and are never rewritten as routing retries.
+async fn dial_candidates(
+    handle: &sipx_transport::Handle,
+    candidates: &[sipx_transport::Target],
+    to: &Uri,
+    options: &sipx_call::DialOptions,
+) -> Result<(Call, sipx_transport::Target), sipx_call::Error> {
+    let mut last_transport = None;
+    for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+        match sipx_call::dial(handle, target.clone(), to, options).await {
+            Ok(call) => return Ok((call, target.clone())),
+            Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_transport.unwrap_or(sipx_call::Error::NoResponse))
+}
+
+async fn dial_early_candidates(
+    handle: &sipx_transport::Handle,
+    candidates: &[sipx_transport::Target],
+    to: &Uri,
+    options: &sipx_call::DialOptions,
+) -> Result<(sipx_call::Dialing, sipx_transport::Target), sipx_call::Error> {
+    let mut last_transport = None;
+    for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+        match sipx_call::dial_early(handle, target.clone(), to, options).await {
+            Ok(dialing) => return Ok((dialing, target.clone())),
+            Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_transport.unwrap_or(sipx_call::Error::NoResponse))
 }
 
 /// Play, send digits and record for the duration of the call.
@@ -364,18 +405,6 @@ pub(crate) fn write_clip(path: &str, samples: &[i16], sample_rate: u32) -> Resul
     .map_err(|error| format!("{path}: {error}"))
 }
 
-/// The address and port a URI names, if it names one directly.
-pub(crate) fn target_of(
-    uri: &Uri,
-    transport: TransportKind,
-) -> Option<(std::net::SocketAddr, String)> {
-    let Host::Ip(ip) = uri.host()? else {
-        return None;
-    };
-    let port = uri.port().unwrap_or_else(|| transport.default_port());
-    Some((std::net::SocketAddr::new(*ip, port), ip.to_string()))
-}
-
 /// Add the call's quality to a report.
 ///
 /// The round-trip time is added only when there is one. A peer that does not speak RTCP never
@@ -461,49 +490,6 @@ mod tests {
     }
 
     use super::*;
-
-    fn target(input: &str, transport: TransportKind) -> Option<std::net::SocketAddr> {
-        let uri = Uri::parse(bytes::Bytes::from(input.to_owned())).expect("a URI");
-        target_of(&uri, transport).map(|(addr, _)| addr)
-    }
-
-    #[test]
-    fn a_uri_naming_an_address_and_port_is_the_target() {
-        assert_eq!(
-            target("sip:bob@192.0.2.1:5080", TransportKind::Udp).map(|a| a.to_string()),
-            Some("192.0.2.1:5080".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_uri_without_a_port_gets_the_default() {
-        assert_eq!(
-            target("sip:bob@192.0.2.1", TransportKind::Udp).map(|a| a.to_string()),
-            Some("192.0.2.1:5060".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_uri_with_no_user_still_yields_its_host() {
-        assert_eq!(
-            target("sip:192.0.2.1:5060", TransportKind::Udp).map(|a| a.to_string()),
-            Some("192.0.2.1:5060".to_owned())
-        );
-    }
-
-    #[test]
-    fn uri_parameters_are_not_part_of_the_host() {
-        assert_eq!(
-            target("sip:bob@192.0.2.1:5060;transport=tcp", TransportKind::Tcp)
-                .map(|a| a.to_string()),
-            Some("192.0.2.1:5060".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_name_is_not_a_target_this_command_can_use() {
-        assert!(target("sip:bob@example.com", TransportKind::Udp).is_none());
-    }
 
     /// The behavioural half of `S-27`, and the one that actually matters: the *command* refuses,
     /// not just a helper. This needs no network and no peer, which is the point — the check happens

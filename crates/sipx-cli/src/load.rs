@@ -109,24 +109,27 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
     let Ok(to) = Uri::parse(bytes::Bytes::from(uri_text.to_owned())) else {
         return fail(format, Exit::Usage, &format!("not a SIP URI: {uri_text}"));
     };
-    let transport = match crate::signalling::Selection::from_options(
+    let mut transport = match crate::signalling::Selection::from_options(
         &command.signalling,
         to.scheme().is_secure(),
     ) {
         Ok(transport) => transport,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let Some((target_addr, server_name)) = crate::dial::target_of(&to, transport.kind()) else {
-        return fail(
-            format,
-            Exit::Usage,
-            &format!("{uri_text} must name an address and port"),
-        );
+    let resolver = crate::destination::Resolver::system();
+    let candidates = match resolver
+        .resolve(&to, None, transport, &command.signalling)
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => return fail(format, error.exit(), &error.to_string()),
     };
-    let target = match transport.target(&command.signalling, target_addr, &server_name) {
-        Ok(target) => target,
-        Err(message) => return fail(format, Exit::Usage, &message),
+    let target = match crate::destination::first(&candidates) {
+        Ok(target) => target.clone(),
+        Err(error) => return fail(format, error.exit(), &error.to_string()),
     };
+    let target_addr = target.addr;
+    transport = transport.negotiated(target.transport);
     let local = command.local;
     let media_address: IpAddr = crate::advertise::reachable_ip(local, target_addr.ip());
     let from = command
@@ -168,7 +171,7 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
     let handle = Arc::new(handle);
     let to = Arc::new(to);
     let options = Arc::new(options);
-    let target = Arc::new(target);
+    let candidates = Arc::new(candidates);
 
     let bounded = run_bounded(
         BoundedPlan {
@@ -184,19 +187,37 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
             let handle = Arc::clone(&handle);
             let to = Arc::clone(&to);
             let options = Arc::clone(&options);
-            let target = Arc::clone(&target);
+            let candidates = Arc::clone(&candidates);
             let measurements = Arc::clone(&observed);
             async move {
                 let started = tokio::time::Instant::now();
-                let mut call = sipx_call::dial_until(
-                    &handle,
-                    (*target).clone(),
-                    &to,
-                    &options,
-                    stop.requested(),
-                )
-                .await
-                .map_err(|error| {
+                let mut last_transport = None;
+                let mut connected = None;
+                for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+                    match sipx_call::dial_until(
+                        &handle,
+                        target.clone(),
+                        &to,
+                        &options,
+                        stop.requested(),
+                    )
+                    .await
+                    {
+                        Ok(call) => {
+                            connected = Some(call);
+                            break;
+                        }
+                        Err(error @ sipx_call::Error::Transport(_)) => {
+                            last_transport = Some(error);
+                        }
+                        Err(error) => {
+                            last_transport = Some(error);
+                            break;
+                        }
+                    }
+                }
+                let mut call = connected.ok_or_else(|| {
+                    let error = last_transport.unwrap_or(sipx_call::Error::NoResponse);
                     let cause = classify(error);
                     if matches!(&cause, Cause::Other(_)) {
                         stop.request();

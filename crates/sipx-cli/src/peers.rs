@@ -214,17 +214,25 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
             format!("not a SIP registrar address of record: {registrar}"),
         ));
     };
-    let selection = crate::signalling::Selection::from_options(
+    let mut selection = crate::signalling::Selection::from_options(
         &options.signalling,
         parsed.scheme().is_secure(),
     )
     .map_err(|message| (Exit::Usage, message))?;
-    let unresolved =
-        crate::register::resolve_target(options.target.as_deref(), &domain, selection.kind())
-            .map_err(|message| (Exit::Usage, message))?;
-    let selected = selection
-        .target(&options.signalling, unresolved.addr, &domain)
-        .map_err(|message| (Exit::Usage, message))?;
+    let resolver = crate::destination::Resolver::system();
+    let candidates = resolver
+        .resolve(
+            &parsed,
+            options.target.as_deref(),
+            selection,
+            &options.signalling,
+        )
+        .await
+        .map_err(|error| (error.exit(), error.to_string()))?;
+    let selected = crate::destination::first(&candidates)
+        .map_err(|error| (error.exit(), error.to_string()))?
+        .clone();
+    selection = selection.negotiated(selected.transport);
     let expires = Duration::from_secs(options.expires);
     if expires.is_zero() {
         return Err((

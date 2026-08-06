@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use sipx_sip::push::Device;
 use sipx_sip::{Host, HostName, Uri};
-use sipx_transport::{Config as TransportConfig, Target, TransportKind, bind};
+use sipx_transport::{Config as TransportConfig, bind};
 use sipx_ua::{Config, Credentials, Flow, InstanceId, RegId, UserAgent};
 
 use crate::cli::RegisterOptions;
@@ -48,7 +48,7 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
-    let transport = match crate::signalling::Selection::from_options(
+    let mut transport = match crate::signalling::Selection::from_options(
         &options.signalling,
         parsed_aor.scheme().is_secure(),
     ) {
@@ -56,16 +56,24 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
-    let unresolved = match resolve_target(options.target.as_deref(), &domain, transport.kind()) {
-        Ok(target) => target,
-        Err(message) => return fail(format, Exit::Usage, &message),
+    let resolver = crate::destination::Resolver::system();
+    let candidates = match resolver
+        .resolve(
+            &parsed_aor,
+            options.target.as_deref(),
+            transport,
+            &options.signalling,
+        )
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => return fail(format, error.exit(), &error.to_string()),
     };
-    let target = match transport.target(&options.signalling, unresolved.addr, &domain) {
-        Ok(target) => target,
-        Err(message) => return fail(format, Exit::Usage, &message),
+    let target = match crate::destination::first(&candidates) {
+        Ok(target) => target.clone(),
+        Err(error) => return fail(format, error.exit(), &error.to_string()),
     };
-    let negotiated_transport = target.transport;
-
+    transport = transport.negotiated(target.transport);
     let local = options.local;
 
     let mut config = TransportConfig::new(local);
@@ -113,14 +121,12 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
         ua_config = ua_config.with_push(device);
     }
 
-    let mut agent = UserAgent::new(handle, ua_config);
-
     // Both reports name the address of record the same way: the normalised AOR, not the argument
     // as typed, so a caller matching on it does not have to.
     let aor = format!("sip:{user}@{domain}");
 
-    match agent.register().await {
-        Ok(lease) => {
+    match register_candidates(&handle, &ua_config, &candidates).await {
+        Ok((mut agent, lease, negotiated_transport)) => {
             let mut report = transport.report(
                 Report::new()
                     .text("status", "registered")
@@ -168,6 +174,25 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
         }
         Err(error) => report_failure(format, &error),
     }
+}
+
+async fn register_candidates(
+    handle: &sipx_transport::Handle,
+    config: &Config,
+    candidates: &[sipx_transport::Target],
+) -> Result<(UserAgent, sipx_ua::Lease, sipx_transport::TransportKind), sipx_ua::Error> {
+    let mut last_transport = None;
+    for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+        let mut attempt = config.clone();
+        attempt.target = target.clone();
+        let mut agent = UserAgent::new(handle.clone(), attempt);
+        match agent.register().await {
+            Ok(lease) => return Ok((agent, lease, target.transport)),
+            Err(error @ sipx_ua::Error::Transport(_)) => last_transport = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_transport.unwrap_or(sipx_ua::Error::NoResponse))
 }
 
 /// What the reachability flags asked for: an Outbound flow (RFC 5626), a push service to be
@@ -322,29 +347,6 @@ pub(crate) fn parse_aor(aor: &str) -> Option<(String, String)> {
     })
 }
 
-/// Where to send. An explicit `--target` wins; otherwise the domain must already be an address,
-/// since resolving a name is the resolver's job and this command does not carry one.
-pub(crate) fn resolve_target(
-    explicit: Option<&str>,
-    domain: &str,
-    transport: TransportKind,
-) -> Result<Target, String> {
-    let raw = explicit.unwrap_or(domain);
-    if let Ok(addr) = raw.parse::<std::net::SocketAddr>() {
-        return Ok(Target::new(addr, transport));
-    }
-    if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
-        return Ok(Target::new(
-            std::net::SocketAddr::new(ip, transport.default_port()),
-            transport,
-        ));
-    }
-    Err(format!(
-        "cannot reach {raw}: give --target host:port, since name resolution is not wired into \
-         this command yet"
-    ))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -412,40 +414,6 @@ mod tests {
         ] {
             assert!(parse_aor(bad).is_none(), "{bad} is not an AOR");
         }
-    }
-
-    #[test]
-    fn an_explicit_target_wins_over_the_domain() {
-        let target = resolve_target(Some("192.0.2.1:5080"), "example.com", TransportKind::Udp)
-            .expect("an address");
-        assert_eq!(target.addr.to_string(), "192.0.2.1:5080");
-    }
-
-    #[test]
-    fn a_bare_address_gets_the_transport_default_port() {
-        assert_eq!(
-            resolve_target(Some("192.0.2.1"), "x", TransportKind::Udp)
-                .expect("an address")
-                .addr
-                .port(),
-            5060
-        );
-        assert_eq!(
-            resolve_target(Some("192.0.2.1"), "x", TransportKind::Tls)
-                .expect("an address")
-                .addr
-                .port(),
-            5061
-        );
-    }
-
-    /// A name with nothing to resolve it says so, rather than failing later with something
-    /// that looks like a network problem.
-    #[test]
-    fn a_name_with_no_resolver_is_a_named_usage_error() {
-        let error =
-            resolve_target(None, "example.com", TransportKind::Udp).expect_err("cannot be reached");
-        assert!(error.contains("--target"), "{error}");
     }
 
     fn parsed(items: &[&str]) -> Result<Reachability, String> {

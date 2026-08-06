@@ -122,7 +122,19 @@ async fn start_answerer_in(
     String,
     tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
 ) {
-    let mut args = vec!["answer", "--local", "127.0.0.1:0", "--json", "--wait", "20"];
+    start_answerer_on(dir, "127.0.0.1:0", extra).await
+}
+
+async fn start_answerer_on(
+    dir: Option<&std::path::Path>,
+    local: &str,
+    extra: &[&str],
+) -> (
+    tokio::process::Child,
+    String,
+    tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+) {
+    let mut args = vec!["answer", "--local", local, "--json", "--wait", "20"];
     args.extend_from_slice(extra);
 
     let mut command = sipx();
@@ -2026,19 +2038,92 @@ async fn dial_without_a_uri_is_a_usage_error() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("\"status\":\"usage\""));
 }
 
-/// A name with no resolver behind it says what to do about it, rather than failing later in a
-/// way that looks like a network problem.
+/// Named dial and registration share the system resolver. `localhost` makes the proof independent
+/// of public DNS while still failing if either command takes the old literal-only path.
 #[tokio::test]
-async fn dialling_a_name_explains_what_is_missing() {
+async fn dial_and_register_through_a_loopback_hostname() {
     let _scenario = process_scenario().await;
-    let output = sipx()
-        .args(["dial", "sip:bob@example.com", "--json"])
-        .output()
+    let (mut answerer, address, mut lines) = start_answerer(&["--duration", "0"]).await;
+    let port = address
+        .parse::<std::net::SocketAddr>()
+        .expect("answer address")
+        .port();
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:bob@localhost:{port}"),
+                "--local",
+                "127.0.0.1:0",
+                "--duration",
+                "0",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("named dial is bounded")
+    .expect("dial runs");
+    assert!(
+        output.status.success(),
+        "{} / {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let answered = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
         .await
-        .expect("runs");
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("address and port"), "{stderr}");
+        .expect("answer report is bounded")
+        .expect("reads answer report")
+        .expect("answer report exists");
+    assert!(answered.contains("\"status\":\"answered\""), "{answered}");
+    answerer_exits_cleanly(&mut answerer).await;
+
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("registrar binds");
+    let registrar_port = registrar.local_addr().expect("registrar address").port();
+    let child = sipx()
+        .args([
+            "register",
+            "sip:alice@example.test",
+            "--target",
+            &format!("localhost:{registrar_port}"),
+            "--local",
+            "127.0.0.1:0",
+            "--expires",
+            "60",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("register spawns");
+    let mut bytes = vec![0u8; 65_535];
+    let (length, source) =
+        tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut bytes))
+            .await
+            .expect("named REGISTER is bounded")
+            .expect("REGISTER arrives");
+    let request = String::from_utf8_lossy(&bytes[..length]).into_owned();
+    answer_register(&registrar, &request, source).await;
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("register exits")
+        .expect("register output");
+    assert!(
+        output.status.success(),
+        "{} / {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("\"status\":\"registered\""),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 /// The acceptance test for P-3 and P-4: two `sipx` processes, a real call, and a recording

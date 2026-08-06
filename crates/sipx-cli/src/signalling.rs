@@ -17,6 +17,8 @@ use crate::output::Report;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Selection {
     kind: TransportKind,
+    /// Whether the command selected a transport rather than accepting URI/DNS policy.
+    explicit: bool,
     /// Only the new `--transport` surface changes result records. The legacy default and `--tcp`
     /// keep their existing byte-for-byte output contract.
     report: bool,
@@ -38,6 +40,7 @@ impl Selection {
             None if options.transport.tcp => TransportKind::Tcp,
             Some(TransportChoice::Udp) | None => TransportKind::Udp,
         };
+        let explicit = requested.is_some() || options.transport.tcp;
         if secure_uri && !kind.is_secure() {
             return Err(format!(
                 "a sips: URI requires --transport tls or --transport wss; {} is cleartext and no downgrade is permitted",
@@ -59,6 +62,7 @@ impl Selection {
 
         Ok(Self {
             kind,
+            explicit,
             report: requested.is_some(),
         })
     }
@@ -67,6 +71,19 @@ impl Selection {
     #[must_use]
     pub(crate) fn kind(self) -> TransportKind {
         self.kind
+    }
+
+    /// Explicit command policy passed to RFC 3263 selection; an implicit default stays implicit.
+    #[must_use]
+    pub(crate) fn requested(self) -> Option<TransportKind> {
+        self.explicit.then_some(self.kind)
+    }
+
+    /// Bind reporting and media preflight to the first resolved candidate.
+    #[must_use]
+    pub(crate) fn negotiated(mut self, kind: TransportKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Whether an inbound request belongs to this command's listener contract.
@@ -100,15 +117,22 @@ impl Selection {
         }
     }
 
-    /// Build an outbound target and carry the name that TLS/WSS must verify.
-    pub(crate) fn target(
+    /// Apply command verification policy to a resolver-produced target without replacing its
+    /// selected transport or address.
+    pub(crate) fn resolved_target(
         self,
         options: &SignallingOptions,
-        addr: SocketAddr,
+        target: Target,
         default_server_name: &str,
     ) -> Result<Target, String> {
-        let target = Target::new(addr, self.kind);
-        if self.kind.is_secure() {
+        if self.explicit && target.transport != self.kind {
+            return Err(format!(
+                "resolved transport {} conflicts with requested transport {}",
+                name(target.transport),
+                name(self.kind)
+            ));
+        }
+        if target.transport.is_secure() {
             let verify_as = options
                 .peer
                 .tls_server_name

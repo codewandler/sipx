@@ -64,6 +64,7 @@ pub(crate) async fn run(options: ScenarioOptions) -> Exit {
         handle,
         incoming,
         transport,
+        resolver: crate::destination::Resolver::system(),
         policy: media.policy(),
         headers,
         call: None,
@@ -94,6 +95,7 @@ struct Actor {
     handle: sipx_transport::Handle,
     incoming: tokio::sync::mpsc::Receiver<Incoming>,
     transport: crate::signalling::Selection,
+    resolver: crate::destination::Resolver,
     policy: sipx_call::MediaPolicy,
     headers: Vec<sipx_sip::Header>,
     call: Option<Call>,
@@ -206,11 +208,15 @@ impl Actor {
         if to.scheme().is_secure() && !self.transport.kind().is_secure() {
             return Err("a sips: target requires tls or wss; no downgrade is permitted".to_owned());
         }
-        let (target_addr, server_name) = crate::dial::target_of(&to, self.transport.kind())
-            .ok_or_else(|| format!("{target_text} must name an IP address and port"))?;
-        let target = self
-            .transport
-            .target(&self.options.signalling, target_addr, &server_name)?;
+        let candidates = self
+            .resolver
+            .resolve(&to, None, self.transport, &self.options.signalling)
+            .await
+            .map_err(|error| error.to_string())?;
+        let target = crate::destination::first(&candidates)
+            .map_err(|error| error.to_string())?
+            .clone();
+        let target_addr = target.addr;
         let media_address: IpAddr =
             crate::advertise::reachable_ip(self.handle.local_addr(), target_addr.ip());
         let from = value
@@ -237,9 +243,24 @@ impl Actor {
                 options = options.with_header(crate::header::parse(raw)?);
             }
         }
-        let mut call = sipx_call::dial(&self.handle, target, &to, &options)
-            .await
-            .map_err(|error| error.to_string())?;
+        let mut last_transport = None;
+        let mut connected = None;
+        for candidate in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+            match sipx_call::dial(&self.handle, candidate.clone(), &to, &options).await {
+                Ok(call) => {
+                    connected = Some(call);
+                    break;
+                }
+                Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        let mut call = connected.ok_or_else(|| {
+            last_transport.map_or_else(
+                || "no target candidate was attempted".to_owned(),
+                |error| error.to_string(),
+            )
+        })?;
         self.events = call.events();
         self.snapshot = Snapshot::outbound(
             format!("scenario-{}", self.next_call),
