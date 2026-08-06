@@ -1,6 +1,6 @@
 # Diagnostic phone specification
 
-**Status:** normative target · **Epic:** `phone` · **Stories:** `P-8` … `P-13`
+**Status:** normative target · **Epic:** `phone` · **Stories:** `P-8` … `P-16`
 
 ## 1. Scope
 
@@ -175,6 +175,44 @@ device relay task it started is still live.
 | running | callback produces media frames; relay plays them into the call | relay receives call frames; callback consumes them |
 | stopping | callback producer dropped; relay observes stop | relay observes stop; callback receives silence until paused |
 | joined | relay task awaited; stream dropped | relay task awaited; stream dropped |
+
+### 3.2 Confirmed-call lifecycle
+
+After `dial` or `answer` confirms a dialog, the command MUST continuously drive that dialog while
+media work runs. The same input pump consumes ACK, BYE and every other in-dialog request admitted by
+the call layer; a media future or local duration MUST NOT replace that pump. In particular, an ACK
+is dequeued promptly enough to stop INVITE 2xx retransmission, and an accepted BYE receives its
+final response before terminal output.
+
+The command has these states and transitions:
+
+| State | Input | Required action | Next state |
+|---|---|---|---|
+| confirming | Ctrl-C/SIGINT | cancel the owned INVITE; send CANCEL, or ACK then BYE if confirmation crossed cancellation | joining |
+| confirmed | valid remote BYE | stop originating requests, answer the BYE, stop media | joining |
+| confirmed | Ctrl-C/SIGINT | stop media work, originate at most one BYE, finitely await its final response | joining |
+| confirmed | local duration or completed media work | originate at most one BYE and finitely await its final response | joining |
+| confirmed | terminal transport/session failure | stop media and retain the typed failure | joining |
+| joining | crossed remote BYE | answer it; do not originate another BYE | joining |
+| joining | owned work reaches zero | close the endpoint and finalize counters | reported |
+
+When multiple confirmed inputs are ready in one poll, a valid remote BYE wins over Ctrl-C, which
+wins over local completion. After local teardown has started, a crossed valid BYE is still answered
+but cannot change the already selected terminal cause or cause a second originated BYE. A pending
+outbound invitation never manufactures a BYE before a dialog exists: cancellation retains the call
+layer's CANCEL/late-2xx cleanup behavior.
+
+The terminal result adds `ended_by`, with value `remote`, `duration` or `interrupt`. Remote BYE and
+local-duration completion retain `status=answered` and exit 0. A handled Ctrl-C emits
+`status=interrupted`, `ended_by=interrupt` and exits 0 after cleanup. A typed transport, session,
+media or cleanup failure emits `status=failed` and exits 1. An unanswered local BYE is bounded and
+does not resurrect an ended call; a concrete failure to hand the BYE to the transport is a cleanup
+failure. SIGTERM and other supervisor signals are specified separately by story `P-22`.
+
+Terminal output is a join barrier, not a request to begin cleanup. Before the record is emitted,
+the command MUST stop or finish media operations, join device relays and media workers, release the
+call, shut down the endpoint driver, and finalize its counter export. No dialog, transport, media
+or device task owned by the invocation may still be running after terminal output.
 
 `--header 'Name: value'` MAY be repeated. Values pass the same injection checks as the message
 builders. These stack-owned fields **MUST** be refused: `Via`, `Route`, `Record-Route`,

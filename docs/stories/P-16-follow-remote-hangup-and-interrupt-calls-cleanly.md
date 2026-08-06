@@ -2,8 +2,7 @@
 id: P-16
 title: "Follow remote hangup and interrupt calls cleanly"
 pillar: "Phone"
-status: ready
-priority: 1
+status: in-progress
 epic: phone-lifecycle
 areas: [sipx-cli, sipx-call]
 design: docs/designs/phone-lifecycle.md
@@ -20,7 +19,7 @@ required SIP exchange, stop media, join owned work and emit one terminal result.
 
 ## Acceptance
 
-- [ ] `docs/specs/diagnostic-phone.md` defines the confirmed-command state table before code: active
+- [x] `docs/specs/diagnostic-phone.md` defines the confirmed-command state table before code: active
       inputs, winner when terminal inputs race, BYE request/response ordering, interrupt result and
       exit semantics, and the join barrier before terminal output.
 - [ ] A failing-first two-process test runs `answer --duration 10` against `dial --duration 2`,
