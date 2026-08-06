@@ -170,6 +170,10 @@ the testkit or its dependency closure to the shipped application's production su
 check proves the example target and import exist; this rehearsal proves the archived bytes resolve
 and compile as a clean external consumer.
 
+The newcomer-facing answer example has a separate source-shape and direct-dependency consumer in
+[`published-onboarding.md`](published-onboarding.md). It runs on ordinary `main` with disposable
+local registry patches; this rehearsal remains the authority for the same-version packaged bytes.
+
 ## 4. Partial registry availability
 
 Publishing is restartable. Before a write, the helper asks Cargo whether each public

@@ -2,8 +2,7 @@
 id: X-111
 title: "Make published onboarding executable"
 pillar: "Build"
-status: ready
-priority: 2
+status: in-progress
 epic: published-adoption
 areas: [docs, release]
 design: docs/designs/published-adoption.md
@@ -40,3 +39,9 @@ site renderer as complete prose.
 The follow-up review copied the published dependency and answer example into a clean consumer; the
 example imported a package not declared by the snippet. The deployed getting-started HTML split the
 version sentence into two paragraphs and displayed `.0.0-rc.2` instead of the complete version.
+
+## Progress
+
+- `docs/specs/published-onboarding.md` now defines the canonical clean consumer, exact dependency
+  and source synchronization, generated-marker placement rule, built-visible-text assertion and
+  ONB-1 through ONB-5 vectors. Board regeneration and the complete gate remain deferred to push.
