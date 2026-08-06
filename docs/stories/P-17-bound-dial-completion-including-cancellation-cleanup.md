@@ -2,8 +2,7 @@
 id: P-17
 title: "Bound dial completion including cancellation cleanup"
 pillar: "Phone"
-status: ready
-priority: 2
+status: in-progress
 epic: phone-lifecycle
 areas: [sipx-cli, sipx-call]
 design: docs/designs/phone-lifecycle.md
@@ -42,3 +41,10 @@ post-timeout tail may not be hidden behind an error that names only the requeste
 
 Finding 8 measured 1, 2, 3, 5 and 8 second requests returning at approximately 3, 4, 5, 7 and 10
 seconds respectively, consistent with one unreported two-second cancellation tail.
+
+## Progress
+
+- The diagnostic-phone contract now preserves `--timeout` as the invitation-answer phase and names
+  a separate cancellation allowance, including zero and exact-boundary semantics, terminal fields
+  and the endpoint join barrier. Board regeneration and the complete gate remain deferred to the
+  requested push boundary.

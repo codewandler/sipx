@@ -200,7 +200,44 @@ device relay task it started is still live.
 | stopping | callback producer dropped; relay observes stop | relay observes stop; callback receives silence until paused |
 | joined | relay task awaited; stream dropped | relay task awaited; stream dropped |
 
-### 3.2 Confirmed-call lifecycle
+### 3.2 Invitation deadline and cancellation
+
+`dial --timeout <S>` is the invitation-answer budget. A positive value starts when the initial
+INVITE is handed to the endpoint and ends before cancellation begins; zero delegates answer
+expiry to the SIP client transaction. `--cancel-timeout <S>` is a separate cancellation-cleanup
+allowance and defaults to two seconds. It starts only when the answer budget or an operator
+interrupt wins. The documented process bound for a positive answer budget is therefore the sum of
+these two values followed by the endpoint's causal task-join barrier; the error MUST NOT describe
+the answer budget alone as total elapsed time.
+
+Cancellation is one owned operation with this state table:
+
+| State | Input | Required action | Next state |
+|---|---|---|---|
+| inviting | final response before answer deadline | retain that final result; do not cancel | terminal or confirmed |
+| inviting | answer deadline | freeze the timeout result; begin cancellation allowance | cancelling |
+| inviting | operator interrupt | freeze the interrupt result; begin cancellation allowance | cancelling |
+| cancelling | provisional observed and allowance remains | create exactly one CANCEL for the INVITE transaction | joining |
+| cancelling | final non-2xx INVITE response | retain the frozen local cause; no CANCEL or BYE | joining |
+| cancelling | final 2xx INVITE response | ACK it, originate BYE, retain the frozen local cause | joining |
+| cancelling | allowance expires | stop waiting; retain the frozen cause and mark cleanup exhausted | joining |
+| joining | endpoint work reaches zero | emit the terminal record | reported |
+
+The deadline branch wins an exact-boundary tie with a newly readable final response. A response
+that was observed before the deadline wins normally; one observed after the deadline can only
+complete cancellation cleanup and MUST NOT turn the timeout into success. A zero cancellation
+allowance performs no timed wait: already-ready cancellation state may be consumed, then endpoint
+shutdown joins every owned task. It does not mean an unbounded fallback.
+
+Timeout text and JSON contain the same fields: `status=timeout`, `invitation_limit_ms`, measured
+`invitation_elapsed_ms`, `cancel_limit_ms`, measured `cancel_elapsed_ms`, `cancel_sent`,
+`cancel_final_observed`, `cancel_cleanup_exhausted` and an actionable `error`. Interrupted setup
+uses the same cleanup facts with `status=interrupted`; a pre-deadline SIP rejection retains its SIP
+status and does not invent cancellation fields. Durations use the monotonic clock. A fixed duration
+may bound failed cleanup, but transaction events and the endpoint join barrier are the successful
+happens-before relations.
+
+### 3.3 Confirmed-call lifecycle
 
 After `dial` or `answer` confirms a dialog, the command MUST continuously drive that dialog while
 media work runs. The same input pump consumes ACK, BYE and every other in-dialog request admitted by
@@ -383,3 +420,5 @@ workspace build in the local gate and CI, so it observes the binary that will sh
 | `DPH-12` | WAV input and a Linux virtual microphone containing the same deterministic clip call the same recorder | Both 8 kHz recordings pass the same quantised-sample assertion; the device result names its exact configuration and reports all three loss counters |
 | `DPH-13` | `dial` or `answer`, using either WAV-output spelling, names a missing parent, an existing final file or a destination whose sibling cannot be created | usage refusal names the requested path before resolver, bind, readiness or peer traffic; an existing final file retains its bytes |
 | `DPH-14` | a reserved destination becomes occupied before finalization | the call outcome remains observable, finalization fails without replacing the competing file, and no reservation temporary remains |
+| `DPH-15` | invitation limits 1, 2, 3, 5 and 8 seconds expire against a ringing peer; cancellation allowance is 2 seconds | paused time reaches each invitation limit and at most its explicit cancellation allowance; one CANCEL is sent and the timeout report separates both measured phases |
+| `DPH-16` | final response is ready immediately before, exactly at or immediately after the invitation deadline | before wins as a final result; exact and after retain timeout while cleanup handles the crossed response at most once |
