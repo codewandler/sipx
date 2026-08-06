@@ -1688,6 +1688,88 @@ async fn dph_12_wav_and_virtual_device_carry_the_same_clip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// P-20: both commands and both WAV-output spellings reject local destination failures before a
+/// socket can emit. A regular file used as the parent is a controlled unwritable destination that
+/// remains reliable even when the test runner has elevated privileges.
+#[tokio::test]
+async fn recording_destinations_are_preflighted_before_network_io() {
+    let _scenario = process_scenario().await;
+    let observer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("observer binds");
+    let address = observer.local_addr().expect("observer address");
+    let directory = scratch("recording-preflight");
+    let missing = directory.join("missing").join("heard.wav");
+    let blocked_parent = directory.join("not-a-directory");
+    std::fs::write(&blocked_parent, b"ordinary file").expect("blocking parent writes");
+    let blocked = blocked_parent.join("heard.wav");
+
+    let cases = [
+        vec![
+            "dial".to_owned(),
+            format!("sip:preflight@{address}"),
+            "--record".to_owned(),
+            missing.to_string_lossy().into_owned(),
+            "--timeout".to_owned(),
+            "1".to_owned(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "dial".to_owned(),
+            format!("sip:preflight@{address}"),
+            "--audio-output".to_owned(),
+            format!("wav:{}", blocked.display()),
+            "--timeout".to_owned(),
+            "1".to_owned(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "answer".to_owned(),
+            "--local".to_owned(),
+            address.to_string(),
+            "--record".to_owned(),
+            missing.to_string_lossy().into_owned(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "answer".to_owned(),
+            "--local".to_owned(),
+            address.to_string(),
+            "--audio-output".to_owned(),
+            format!("wav:{}", blocked.display()),
+            "--json".to_owned(),
+        ],
+    ];
+
+    for case in cases {
+        let requested = case
+            .iter()
+            .find(|value| value.ends_with("heard.wav"))
+            .expect("case names its requested path");
+        let requested = requested.strip_prefix("wav:").unwrap_or(requested);
+        let output = tokio::time::timeout(Duration::from_secs(5), sipx().args(&case).output())
+            .await
+            .expect("preflight refusal is bounded")
+            .expect("command runs");
+        let complaint = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{case:?}: {complaint}");
+        assert!(complaint.contains(requested), "{case:?}: {complaint}");
+        assert!(output.stdout.is_empty(), "usage emits no result: {case:?}");
+    }
+
+    let mut datagram = [0u8; 2048];
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(300),
+            observer.recv_from(&mut datagram)
+        )
+        .await
+        .is_err(),
+        "a local recording refusal must not emit a datagram"
+    );
+    std::fs::remove_dir_all(directory).expect("scratch removes");
+}
+
 /// Registration uses the same selection and certificate policy as calls. This is deliberately a
 /// real endpoint rather than a mock byte sink: TCP framing, TLS and both WebSocket handshakes must
 /// complete before the REGISTER reaches the registrar.

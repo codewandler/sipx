@@ -38,6 +38,10 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
         Some(Err(message)) => return fail(format, Exit::Usage, &message),
         None => None,
     };
+    let recording = match audio.reserve_wav_output() {
+        Ok(recording) => recording,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
     let mut devices = match audio.open() {
         Ok(devices) => devices,
         Err(message) => return fail(format, Exit::Failed, &message),
@@ -284,10 +288,14 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
         report = report.text("dtmf", digits);
     }
 
-    if let Some(path) = audio.wav_output() {
-        match crate::dial::write_clip(path, &recorded, call.media().clock_rate()) {
-            Ok(()) => report = report.text("recording", path),
-            Err(message) => return fail(format, Exit::Failed, &message),
+    if let Some(recording) = recording {
+        match recording.finish(&recorded, call.media().clock_rate()) {
+            Ok(path) => report = report.text("recording", path),
+            Err(message) => {
+                drop(call);
+                handle.shutdown().await;
+                return fail(format, Exit::Failed, &message);
+            }
         }
     }
 

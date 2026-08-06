@@ -3,6 +3,11 @@
 //! Device callbacks live here, at the command leaf. They exchange bounded PCM frames with a media
 //! session and use `sipx-audio`'s public converter for their rate boundary.
 
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+
 use crate::cli::{AudioOptions, DevicesOptions};
 use crate::output::{Exit, Format, Report, fail};
 
@@ -52,6 +57,11 @@ impl Selection {
         }
     }
 
+    /// Reserve a WAV destination before any resolver, socket or peer I/O.
+    pub(crate) fn reserve_wav_output(&self) -> Result<Option<WavOutput>, String> {
+        self.wav_output().map(WavOutput::reserve).transpose()
+    }
+
     /// Open explicit devices paused. This is called before transport bind.
     pub(crate) fn open(&self) -> Result<Driver, String> {
         let input = match &self.input {
@@ -63,6 +73,199 @@ impl Selection {
             Endpoint::Null | Endpoint::Wav(_) => None,
         };
         Driver::open(input, output)
+    }
+}
+
+/// One preflighted WAV destination.
+///
+/// The temporary is a sibling, held open from preflight through finalization. Drop is the cleanup
+/// path for every early return in `dial` and `answer`.
+#[derive(Debug)]
+pub(crate) struct WavOutput {
+    requested: String,
+    final_path: PathBuf,
+    temporary_path: PathBuf,
+    file: Option<File>,
+}
+
+impl WavOutput {
+    const NAME_ATTEMPTS: usize = 16;
+
+    fn reserve(requested: &str) -> Result<Self, String> {
+        let final_path = PathBuf::from(requested);
+        match std::fs::symlink_metadata(&final_path) {
+            Ok(_) => {
+                return Err(format!("{requested}: recording destination already exists"));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{requested}: {error}")),
+        }
+
+        let file_name = final_path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("{requested}: recording destination must name a file"))?;
+        let parent = final_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+
+        for _ in 0..Self::NAME_ATTEMPTS {
+            let mut temporary_name = OsString::from(".");
+            temporary_name.push(file_name);
+            temporary_name.push(format!(
+                ".sipx-recording-{:016x}.tmp",
+                rand::random::<u64>()
+            ));
+            let temporary_path = parent.join(temporary_name);
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary_path)
+            {
+                Ok(file) => {
+                    return Ok(Self {
+                        requested: requested.to_owned(),
+                        final_path,
+                        temporary_path,
+                        file: Some(file),
+                    });
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(format!("{requested}: {error}")),
+            }
+        }
+        Err(format!(
+            "{requested}: could not reserve a unique recording temporary"
+        ))
+    }
+
+    /// Write, durably flush and atomically install the completed WAV without replacing a race.
+    pub(crate) fn finish(mut self, samples: &[i16], sample_rate: u32) -> Result<String, String> {
+        let mut file = self
+            .file
+            .take()
+            .ok_or_else(|| format!("{}: recording reservation is closed", self.requested))?;
+        sipx_audio::write_wav(
+            &mut file,
+            &sipx_audio::Wav {
+                sample_rate,
+                samples: samples.to_vec(),
+            },
+        )
+        .map_err(|error| format!("{}: {error}", self.requested))?;
+        file.sync_all()
+            .map_err(|error| format!("{}: {error}", self.requested))?;
+        drop(file);
+
+        // Both names are siblings, so the link is same-filesystem and atomic. Unlike `rename`,
+        // `hard_link` refuses an existing destination instead of replacing a file created after
+        // preflight.
+        std::fs::hard_link(&self.temporary_path, &self.final_path)
+            .map_err(|error| format!("{}: {error}", self.requested))?;
+        std::fs::remove_file(&self.temporary_path)
+            .map_err(|error| format!("{}: {error}", self.requested))?;
+        Ok(self.requested.clone())
+    }
+}
+
+impl Drop for WavOutput {
+    fn drop(&mut self) {
+        self.file.take();
+        let _ = std::fs::remove_file(&self.temporary_path);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod output_tests {
+    use super::*;
+
+    fn scratch(case: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "sipx-recording-output-{}-{case}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path).expect("scratch directory creates");
+        path
+    }
+
+    fn temporary_entries(directory: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(directory)
+            .expect("directory reads")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains(".sipx-recording-"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reservation_does_not_create_or_truncate_the_final_path() {
+        let directory = scratch("reserve");
+        let final_path = directory.join("heard.wav");
+        let requested = final_path.to_string_lossy();
+        let reservation = WavOutput::reserve(&requested).expect("destination reserves");
+        assert!(
+            !final_path.exists(),
+            "preflight must not expose an empty WAV"
+        );
+        assert_eq!(temporary_entries(&directory).len(), 1);
+        drop(reservation);
+        assert!(temporary_entries(&directory).is_empty());
+
+        std::fs::write(&final_path, b"keep me").expect("existing destination writes");
+        let error = WavOutput::reserve(&requested).expect_err("existing destination is refused");
+        assert!(error.contains("already exists"), "{error}");
+        assert_eq!(
+            std::fs::read(&final_path).expect("existing bytes read"),
+            b"keep me"
+        );
+        std::fs::remove_dir_all(directory).expect("scratch removes");
+    }
+
+    #[test]
+    fn finalization_installs_a_complete_wav_and_removes_the_temporary() {
+        let directory = scratch("finish");
+        let final_path = directory.join("heard.wav");
+        let requested = final_path.to_string_lossy().into_owned();
+        let reservation = WavOutput::reserve(&requested).expect("destination reserves");
+        assert_eq!(
+            reservation
+                .finish(&[1, -2, 3, -4], 8_000)
+                .expect("WAV installs"),
+            requested
+        );
+        let wav = sipx_audio::read_wav(File::open(&final_path).expect("installed recording opens"))
+            .expect("installed recording parses");
+        assert_eq!(wav.sample_rate, 8_000);
+        assert_eq!(wav.samples, [1, -2, 3, -4]);
+        assert!(temporary_entries(&directory).is_empty());
+        std::fs::remove_dir_all(directory).expect("scratch removes");
+    }
+
+    #[test]
+    fn a_file_created_after_preflight_is_not_replaced() {
+        let directory = scratch("race");
+        let final_path = directory.join("heard.wav");
+        let requested = final_path.to_string_lossy().into_owned();
+        let reservation = WavOutput::reserve(&requested).expect("destination reserves");
+        std::fs::write(&final_path, b"winner").expect("competing destination writes");
+        let error = reservation
+            .finish(&[1, 2, 3], 8_000)
+            .expect_err("late destination wins without replacement");
+        assert!(error.contains(&requested), "{error}");
+        assert_eq!(std::fs::read(&final_path).expect("winner reads"), b"winner");
+        assert!(temporary_entries(&directory).is_empty());
+        std::fs::remove_dir_all(directory).expect("scratch removes");
     }
 }
 

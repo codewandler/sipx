@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use sipx_audio::{Wav, read_wav, write_wav};
+use sipx_audio::{Wav, read_wav};
 use sipx_call::{Call, Credentials, EndCause, Served};
 use sipx_sip::{Address, Uri};
 use sipx_transport::{Config as TransportConfig, bind};
@@ -38,6 +38,22 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
+    // Local file failures are knowable without a peer. Read input and reserve output before even
+    // destination resolution, which may itself perform network I/O.
+    let clip = match audio.wav_input().map(read_clip) {
+        Some(Ok(clip)) => Some(clip),
+        Some(Err(message)) => return fail(format, Exit::Usage, &message),
+        None => None,
+    };
+    let recording = match audio.reserve_wav_output() {
+        Ok(recording) => recording,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
+    let mut devices = match audio.open() {
+        Ok(devices) => devices,
+        Err(message) => return fail(format, Exit::Failed, &message),
+    };
+
     let password = options.password.clone();
 
     let resolver = crate::destination::Resolver::system();
@@ -61,18 +77,6 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     ) {
         Ok(media) => media,
         Err(message) => return fail(format, Exit::Usage, &message),
-    };
-
-    // Audio to play is read before the call is placed: failing after the far end has answered
-    // means hanging up on someone for a mistake that was visible beforehand.
-    let clip = match audio.wav_input().map(read_clip) {
-        Some(Ok(clip)) => Some(clip),
-        Some(Err(message)) => return fail(format, Exit::Usage, &message),
-        None => None,
-    };
-    let mut devices = match audio.open() {
-        Ok(devices) => devices,
-        Err(message) => return fail(format, Exit::Failed, &message),
     };
 
     let local = options.local;
@@ -336,12 +340,16 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         report = with_quality(report, &call.media().quality().await);
     }
 
-    if let Some(path) = audio.wav_output() {
+    if let Some(recording) = recording {
         let mut recorded = early_recorded;
         recorded.extend_from_slice(&exchanged.recorded);
-        match write_clip(path, &recorded, call.media().clock_rate()) {
-            Ok(()) => report = report.text("recording", path),
-            Err(message) => return fail(format, Exit::Failed, &message),
+        match recording.finish(&recorded, call.media().clock_rate()) {
+            Ok(path) => report = report.text("recording", path),
+            Err(message) => {
+                drop(call);
+                handle.shutdown().await;
+                return fail(format, Exit::Failed, &message);
+            }
         }
     }
 
@@ -519,18 +527,6 @@ pub(crate) fn pcm_clip(clip: &Wav) -> Result<sipx_audio::Pcm, String> {
     .map_err(|error| error.to_string())
 }
 
-pub(crate) fn write_clip(path: &str, samples: &[i16], sample_rate: u32) -> Result<(), String> {
-    let file = std::fs::File::create(path).map_err(|error| format!("{path}: {error}"))?;
-    write_wav(
-        file,
-        &Wav {
-            sample_rate,
-            samples: samples.to_vec(),
-        },
-    )
-    .map_err(|error| format!("{path}: {error}"))
-}
-
 /// Add the call's quality to a report.
 ///
 /// The round-trip time is added only when there is one. A peer that does not speak RTCP never
@@ -616,6 +612,7 @@ mod tests {
     }
 
     use super::*;
+    use sipx_audio::write_wav;
 
     /// The behavioural half of `S-27`, and the one that actually matters: the *command* refuses,
     /// not just a helper. This needs no network and no peer, which is the point — the check happens

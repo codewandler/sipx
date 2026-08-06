@@ -110,8 +110,8 @@ them; an unknown or not-yet-shipped kind is refused.
 ### 3.1 WAV output ownership
 
 `dial` and `answer` normalize `--record <path>` and `--audio-output wav:<path>` into the same WAV
-output selection and use one reservation/finalization implementation. After command syntax, media
-selection and WAV input validation, but before destination resolution, transport bind, listener
+output selection and use one reservation/finalization implementation. After command syntax, local
+audio selection and WAV input validation, but before destination resolution, transport bind, listener
 readiness or SIP emission, the command MUST reserve its output:
 
 1. The requested final path MUST name a file whose parent already exists. An existing file or
