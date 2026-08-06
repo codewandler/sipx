@@ -21,16 +21,16 @@ honor the requested codec, security mode or profile.
 
 - [x] Parser/output specs define the `version` text and JSON result and one validation phase that
       completes all build-capability checks before resolver, bind or peer I/O.
-- [ ] Failing-first process tests prove `version --json` currently emits plain text and an
+- [x] Failing-first process tests prove `version --json` currently emits plain text and an
       unavailable codec against an unreachable target currently reports timeout instead of the
       local feature refusal.
-- [ ] `version --json` emits one stable JSON object through the common report builder; plain
+- [x] `version --json` emits one stable JSON object through the common report builder; plain
       `version` retains its existing one-line human output and both reject stray positionals.
-- [ ] Codec, media-security, profile, ICE and device selections validate their compiled capability
+- [x] Codec, media-security, profile, ICE and device selections validate their compiled capability
       before destination resolution, transport bind, file/device open or datagram emission.
-- [ ] The preflight is shared by `dial`, `answer`, `load`, `load-responder` and scenario wherever a
+- [x] The preflight is shared by `dial`, `answer`, `load`, `load-responder` and scenario wherever a
       selection is available; command-specific timing cannot reintroduce a peer-dependent verdict.
-- [ ] Text/JSON failures retain usage exit 2 and name the missing feature. A local observer proves
+- [x] Text/JSON failures retain usage exit 2 and name the missing feature. A local observer proves
       zero network bytes for every unavailable selection.
 - [ ] Parser, feature-matrix, output-contract and process tests plus the complete repository gate
       are green.
@@ -46,3 +46,8 @@ answered; an unreachable peer hid the local incompatibility behind the invitatio
 - The diagnostic-phone contract now fixes version's two result forms and defines one I/O-free
   capability phase shared across command selectors, including its feature matrix, error mapping and
   DPH-18/19 process vectors. Board regeneration and the complete gate remain deferred to push.
+- Dispatch now runs one capability preflight before URI, filesystem, device or transport work.
+  Default, Opus-only, DTLS-only and all-feature checks cover codec, keying, profile, ICE, device and
+  both baseline load modes; process observers see no traffic for every absent optional capability.
+  Version text/JSON and stray-position contracts, strict lints, CLI-reference drift, docs links,
+  fixed-wait and provenance checks pass. The complete gate remains deferred to push.

@@ -37,6 +37,7 @@ mod load_responder_readiness;
 mod media;
 mod output;
 mod peers;
+mod preflight;
 mod register;
 mod scenario;
 mod signalling;
@@ -73,6 +74,17 @@ async fn main() -> ExitCode {
         }
     };
     let format = if cli.json { Format::Json } else { Format::Text };
+    if let Some(command) = cli.command.as_ref()
+        && let Err(message) = preflight::command(command)
+    {
+        let format = if matches!(command, Command::Scenario(_)) {
+            Format::Json
+        } else {
+            format
+        };
+        let exit = output::fail(format, Exit::Usage, &message);
+        return ExitCode::from(u8::try_from(exit.code()).unwrap_or(1));
+    }
 
     // Logging goes to stderr. One stray line on stdout turns valid JSON into a parse error at
     // the far end of a pipe, where the cause is invisible.
@@ -88,7 +100,13 @@ async fn main() -> ExitCode {
         Some(Command::Peers(options)) => peers::run(options, format).await,
         Some(Command::Scenario(options)) => scenario::run(options).await,
         Some(Command::Version(_)) => {
-            println!("sipx {}", env!("CARGO_PKG_VERSION"));
+            match format {
+                Format::Text => println!("sipx {}", env!("CARGO_PKG_VERSION")),
+                Format::Json => output::Report::new()
+                    .text("status", "version")
+                    .text("version", env!("CARGO_PKG_VERSION"))
+                    .emit(format),
+            }
             Exit::Success
         }
         None => {

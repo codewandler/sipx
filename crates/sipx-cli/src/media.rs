@@ -29,6 +29,58 @@ enum Security {
     DtlsSrtp,
 }
 
+/// Validate every build-dependent and ICE selector without performing I/O.
+pub(crate) fn preflight(options: &MediaOptions) -> Result<(), String> {
+    let profile = options.profile.unwrap_or(MediaProfileChoice::Standard);
+    if profile == MediaProfileChoice::BrowserAudio {
+        if !cfg!(feature = "opus") {
+            return Err(
+                "--profile browser-audio requires a build with the `opus` feature".to_owned(),
+            );
+        }
+        if !cfg!(feature = "dtls") {
+            return Err(
+                "--profile browser-audio requires a build with the `dtls` feature".to_owned(),
+            );
+        }
+    }
+
+    let selection = &options.selection;
+    if !selection.codec.is_empty() {
+        let preferences = selection
+            .codec
+            .iter()
+            .copied()
+            .map(codec)
+            .collect::<Vec<_>>();
+        Codecs::ordered(&preferences).map_err(|error| error.to_string())?;
+    }
+    if selection.media_security == Some(MediaSecurityChoice::DtlsSrtp) && !cfg!(feature = "dtls") {
+        return Err(
+            "--media-security dtls-srtp requires a build with the `dtls` feature".to_owned(),
+        );
+    }
+    match selection.ice.unwrap_or(IceChoice::Disabled) {
+        IceChoice::Stun if selection.stun_server.is_none() => {
+            return Err("--ice stun requires --stun-server host:port".to_owned());
+        }
+        IceChoice::Disabled | IceChoice::Host if selection.stun_server.is_some() => {
+            return Err("--stun-server requires --ice stun".to_owned());
+        }
+        IceChoice::Disabled | IceChoice::Host | IceChoice::Stun => {}
+    }
+    if profile == MediaProfileChoice::Standard
+        && selection.media_security == Some(MediaSecurityChoice::DtlsSrtp)
+        && selection.ice.unwrap_or(IceChoice::Disabled) != IceChoice::Disabled
+    {
+        return Err(
+            "DTLS-SRTP and ICE cannot yet share the initial media port; no fallback is permitted"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 impl Security {
     const fn name(self) -> &'static str {
         match self {
@@ -47,6 +99,7 @@ impl Selection {
         transport: TransportKind,
         early_media: bool,
     ) -> Result<Self, String> {
+        preflight(options)?;
         let profile = match options.profile.unwrap_or(MediaProfileChoice::Standard) {
             MediaProfileChoice::Standard => MediaProfile::Standard,
             MediaProfileChoice::BrowserAudio => MediaProfile::BrowserAudio,
@@ -81,12 +134,6 @@ impl Selection {
                 "--media-security sdes requires protected TLS or WSS signalling; {transport:?} would expose the SDES key"
             ));
         }
-        if security == Security::DtlsSrtp && !cfg!(feature = "dtls") {
-            return Err(
-                "--media-security dtls-srtp requires a build with the `dtls` feature".to_owned(),
-            );
-        }
-
         let ice = match selection.ice.unwrap_or(IceChoice::Disabled) {
             IceChoice::Disabled => {
                 if selection.stun_server.is_some() {
@@ -146,16 +193,6 @@ impl Selection {
             return Err(
                 "--profile browser-audio does not support --early-media; wait for the final answer"
                     .to_owned(),
-            );
-        }
-        if !cfg!(feature = "opus") {
-            return Err(
-                "--profile browser-audio requires a build with the `opus` feature".to_owned(),
-            );
-        }
-        if !cfg!(feature = "dtls") {
-            return Err(
-                "--profile browser-audio requires a build with the `dtls` feature".to_owned(),
             );
         }
         let selection = &options.selection;

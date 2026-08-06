@@ -550,12 +550,17 @@ async fn dph_3_opus_without_the_feature_fails_before_network_io() {
         .await
         .expect("observer binds");
     let address = observer.local_addr().expect("observer address");
+    let recording = scratch("capability-before-resources")
+        .join("missing-parent")
+        .join("out.wav");
     let output = sipx()
         .args([
             "dial",
             &format!("sip:bob@{address}"),
             "--codec",
             "opus",
+            "--record",
+            recording.to_str().expect("recording path"),
             "--json",
         ])
         .output()
@@ -564,6 +569,29 @@ async fn dph_3_opus_without_the_feature_fails_before_network_io() {
     let complaint = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{complaint}");
     assert!(complaint.contains("`opus` feature"), "{complaint}");
+    assert!(
+        !complaint.contains("missing-parent"),
+        "capability preflight precedes local resources: {complaint}"
+    );
+
+    let text = sipx()
+        .args([
+            "dial",
+            &format!("sip:bob@{address}"),
+            "--codec",
+            "opus",
+            "--record",
+            recording.to_str().expect("recording path"),
+        ])
+        .output()
+        .await
+        .expect("text dial runs");
+    let text_complaint = String::from_utf8_lossy(&text.stderr);
+    assert_eq!(text.status.code(), Some(2), "{text_complaint}");
+    assert!(
+        text_complaint.contains("`opus` feature"),
+        "{text_complaint}"
+    );
     let mut datagram = [0u8; 1];
     assert!(
         observer.try_recv_from(&mut datagram).is_err(),
@@ -1175,6 +1203,7 @@ async fn browser_audio_profile_runs_both_cli_roles_and_reports_nominated_facts()
 }
 
 /// A named profile selected on clear signalling is rejected before any datagram leaves.
+#[cfg(all(feature = "opus", feature = "dtls"))]
 #[tokio::test]
 async fn browser_audio_profile_refuses_non_wss_before_network_io() {
     let observer = tokio::net::UdpSocket::bind("127.0.0.1:0")
@@ -1196,6 +1225,43 @@ async fn browser_audio_profile_refuses_non_wss_before_network_io() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires --transport wss"));
     let mut datagram = [0_u8; 1];
     assert!(observer.try_recv_from(&mut datagram).is_err());
+}
+
+/// The named profile's complete build requirement is known before WSS connection setup or any
+/// verdict from the selected peer.
+#[cfg(any(not(feature = "opus"), not(feature = "dtls")))]
+#[tokio::test]
+async fn browser_audio_missing_build_feature_precedes_peer_io() {
+    let observer = std::net::TcpListener::bind("127.0.0.1:0").expect("observer binds");
+    observer
+        .set_nonblocking(true)
+        .expect("observer is nonblocking");
+    let address = observer.local_addr().expect("observer address");
+    let output = sipx()
+        .args([
+            "dial",
+            &format!("sip:bob@{address}"),
+            "--transport",
+            "wss",
+            "--profile",
+            "browser-audio",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("dial runs");
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    let missing = if cfg!(feature = "opus") {
+        "`dtls` feature"
+    } else {
+        "`opus` feature"
+    };
+    assert_eq!(output.status.code(), Some(2), "{complaint}");
+    assert!(complaint.contains(missing), "{complaint}");
+    assert!(
+        observer.accept().is_err(),
+        "profile preflight precedes WSS I/O"
+    );
 }
 
 /// Browser audio starts media only after a final answer, ICE nomination and verified DTLS. The
@@ -1437,7 +1503,7 @@ async fn a_device_endpoint_without_the_feature_fails_before_network_io() {
         .output()
         .await
         .expect("dial runs");
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     let complaint = String::from_utf8_lossy(&output.stderr);
     assert!(complaint.contains("device-audio"), "{complaint}");
     let mut datagram = [0u8; 1];
@@ -2146,12 +2212,52 @@ async fn register_over_a_flow_keeps_it_and_a_push_wakes_it() {
 }
 
 #[tokio::test]
-async fn version_and_help_succeed() {
+async fn version_obeys_the_selected_output_contract() {
     let _scenario = process_scenario().await;
     let output = sipx().arg("version").output().await.expect("runs");
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("sipx"));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("sipx {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(output.stderr.is_empty());
 
+    let output = sipx()
+        .args(["version", "--json"])
+        .output()
+        .await
+        .expect("JSON version runs");
+    assert!(output.status.success());
+    let version: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("version is one JSON object");
+    assert_eq!(version["status"], "version");
+    assert_eq!(version["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 1);
+    assert!(output.stderr.is_empty());
+
+    for arguments in [
+        ["version", "extra"].as_slice(),
+        ["version", "--json", "extra"].as_slice(),
+    ] {
+        let output = sipx()
+            .args(arguments)
+            .output()
+            .await
+            .expect("version refuses");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let complaint = String::from_utf8_lossy(&output.stderr);
+        assert!(complaint.contains("extra"), "{complaint}");
+        if arguments.contains(&"--json") {
+            serde_json::from_slice::<serde_json::Value>(&output.stderr)
+                .expect("requested JSON usage report");
+        }
+    }
+}
+
+#[tokio::test]
+async fn help_succeeds() {
+    let _scenario = process_scenario().await;
     let output = sipx().arg("help").output().await.expect("runs");
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("USAGE"));

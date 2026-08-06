@@ -39,6 +39,15 @@ on Unix, supervisor SIGTERM through the same graceful stop path. The first signa
 command's documented cleanup bound or produce another terminal record. A clean signal stop exits
 0 after owned work joins. Handler or cleanup failure reports `failed` and exits 1.
 
+`sipx version` prints exactly `sipx <version>` in text mode. `sipx version --json` emits one object
+with `status: "version"` and the complete `version`; neither form accepts a positional argument.
+
+Build-capability checks happen before destination resolution, local file/device setup, transport
+binding or peer traffic. Opus, DTLS-SRTP, the browser-audio profile and explicit device endpoints
+therefore fail as usage (exit 2) and name the missing `opus`, `dtls` or `device-audio` feature even
+when the destination is unreachable. ICE is a baseline capability; `stun` requires a server, while
+the other ICE modes refuse one. Full transport policy is checked next, still before signalling.
+
 `dial`, `answer`, and `register` select `udp`, `tcp`, `tls`, `ws`, or `wss` with
 `--transport <T>`. `dial` and `register` default to UDP; `answer` without a transport flag keeps its
 historical UDP and TCP listeners. `--tcp` remains a compatible alias. TLS/WSS verify certificates
@@ -382,7 +391,8 @@ and backend-qualified, for example `alsa:hw:CARD=Loopback,DEV=0`; pass the compl
 as `device:<id>` to `--audio-input` or `--audio-output`. Names are display text and cannot be used as
 selectors.
 
-An explicit selector never falls back to the default device. Missing, busy, permission-denied and
+An explicit selector never falls back to the default device. A binary without `device-audio`
+refuses the selector as usage; in a device-enabled binary, missing, busy, permission-denied and
 unsupported devices fail before signalling is bound. Streams accept bounded linear PCM conversion,
 use one second of non-blocking callback queue per direction, report dropped or silent samples, and
 are stopped and joined before the terminal call result is emitted.

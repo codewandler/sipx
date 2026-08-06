@@ -76,6 +76,11 @@ impl Selection {
     }
 }
 
+/// Validate endpoint syntax and build support without opening a file or device.
+pub(crate) fn preflight(options: &AudioOptions) -> Result<(), String> {
+    Selection::from_options(options).map(|_| ())
+}
+
 /// One preflighted WAV destination.
 ///
 /// The temporary is a sibling, held open from preflight through finalization. Drop is the cleanup
@@ -203,7 +208,14 @@ fn endpoint(
     }
     match kind {
         "wav" => Ok(Endpoint::Wav(value.to_owned())),
-        "device" => Ok(Endpoint::Device(value.to_owned())),
+        "device" => {
+            if !cfg!(feature = "device-audio") {
+                return Err(format!(
+                    "--audio-{direction} device:{value} requires a build with the `device-audio` feature"
+                ));
+            }
+            Ok(Endpoint::Device(value.to_owned()))
+        }
         "generator" => Err(format!(
             "--audio-{direction} generator:{value} is not shipped yet"
         )),
