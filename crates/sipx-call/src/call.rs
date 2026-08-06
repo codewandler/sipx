@@ -585,6 +585,24 @@ impl Call {
             .map(|(digit, _duration)| digit)
     }
 
+    /// Move one completed telephone event from media into this call's event stream.
+    ///
+    /// Call owners that use [`serve`] or [`serve_until`] get this automatically. An owner with
+    /// its own signalling `select!` loop can await this branch beside incoming SIP and
+    /// [`CallEvents::recv`](crate::CallEvents::recv). The handoff uses only the media session's
+    /// bounded digit queue and the call's bounded event queue; it does not spawn a task or create
+    /// another buffer.
+    ///
+    /// A stopped media channel waits forever rather than returning immediately. That makes this a
+    /// safe `select!` arm after teardown instead of a closed-channel busy loop; dropping the
+    /// future remains cancellation-safe.
+    pub async fn drive_media_event(&self) {
+        match self.media.recv_digit().await {
+            Some((digit, duration)) => self.events.emit(CallEvent::Dtmf { digit, duration }),
+            None => std::future::pending().await,
+        }
+    }
+
     /// Play a clip and wait for it, reporting on the event stream when it stops.
     ///
     /// Paced by the send loop, so this resolves when the audio has actually gone out rather than
@@ -2702,16 +2720,8 @@ pub async fn serve(
                 None => return Ok(()),
             },
             () = sleep_until(deadline) => call.on_session_deadline().await?,
-            // DTMF arrives over RTP, not signalling, so nothing above ever sees it — this is
-            // the one place a digit becomes a `CallEvent`. Read fresh from `call.media()` on
-            // every pass rather than once outside the loop, so a re-INVITE that moves the
-            // media session (`move_media_if_changed`) is followed automatically: the next
-            // iteration's future is built against whichever session is current.
-            digit = call.media().recv_digit() => {
-                if let Some((digit, duration)) = digit {
-                    call.events.emit(CallEvent::Dtmf { digit, duration });
-                }
-            }
+            // Built fresh on each pass so a re-INVITE follows the current media generation.
+            () = call.drive_media_event() => {}
         }
     }
     Ok(())
@@ -2833,11 +2843,7 @@ where
                     });
                 }
             }
-            digit = call.media().recv_digit() => {
-                if let Some((digit, duration)) = digit {
-                    call.events.emit(CallEvent::Dtmf { digit, duration });
-                }
-            }
+            () = call.drive_media_event() => {}
         }
     }
 }

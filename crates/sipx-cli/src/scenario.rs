@@ -73,7 +73,8 @@ pub(crate) async fn run(options: ScenarioOptions) -> Exit {
         playback: None,
         recording: None,
         snapshot: Snapshot::idle(),
-        emitted: BTreeSet::new(),
+        emitted: BTreeMap::new(),
+        consumed: BTreeMap::new(),
         correlations: BTreeSet::new(),
         stream_failed: false,
         output: Output::default(),
@@ -105,7 +106,10 @@ struct Actor {
     playback: Option<sipx_media::Playback>,
     recording: Option<Recording>,
     snapshot: Snapshot,
-    emitted: BTreeSet<String>,
+    /// Event occurrences in the current correlation scope. Counts, rather than membership, let
+    /// repeated `wait_for call.dtmf` commands consume distinct keypresses.
+    emitted: BTreeMap<String, u64>,
+    consumed: BTreeMap<String, u64>,
     correlations: BTreeSet<String>,
     stream_failed: bool,
     output: Output,
@@ -300,6 +304,7 @@ impl Actor {
         );
         self.next_call = self.next_call.saturating_add(1);
         self.emitted.clear();
+        self.consumed.clear();
         self.call = Some(call);
         self.drain_events();
         Ok(())
@@ -370,7 +375,7 @@ impl Actor {
             None,
             BTreeMap::from([("status", Value::from(code))]),
         );
-        self.emitted.insert("call.ended".to_owned());
+        self.note_event("call.ended");
         Ok(())
     }
 
@@ -486,25 +491,31 @@ impl Actor {
         };
         let timeout_ms = required_u64(value, "timeout_ms")
             .map_err(|_| "wait_for requires a finite timeout_ms".to_owned())?;
-        if self.emitted.contains(&wanted) {
-            return Ok(());
-        }
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
-            let arrived = self.next_runtime(deadline).await?;
-            if arrived == wanted {
+            if self.consume_event(&wanted) {
                 return Ok(());
             }
+            let _ = self.next_runtime(deadline).await?;
         }
     }
 
     async fn next_runtime(&mut self, deadline: tokio::time::Instant) -> Result<String, String> {
         enum Arrived {
             Event(Option<CallEvent>),
+            Media,
             Incoming(Box<Option<Incoming>>),
             Timeout,
         }
-        let arrived = if let Some(events) = self.events.as_mut() {
+        let arrived = if let (Some(events), Some(call)) = (self.events.as_mut(), self.call.as_ref())
+        {
+            tokio::select! {
+                event = events.recv() => Arrived::Event(event),
+                () = call.drive_media_event() => Arrived::Media,
+                incoming = self.incoming.recv() => Arrived::Incoming(Box::new(incoming)),
+                () = tokio::time::sleep_until(deadline) => Arrived::Timeout,
+            }
+        } else if let Some(events) = self.events.as_mut() {
             tokio::select! {
                 event = events.recv() => Arrived::Event(event),
                 incoming = self.incoming.recv() => Arrived::Incoming(Box::new(incoming)),
@@ -519,6 +530,10 @@ impl Actor {
         match arrived {
             Arrived::Event(Some(event)) => Ok(self.emit_call_event(event)),
             Arrived::Event(None) => Err("the call event stream ended".to_owned()),
+            // `drive_media_event` has offered exactly one item to the bounded call-event queue.
+            // Reading it on the next loop preserves that queue as the public handoff; if a slow
+            // consumer filled it, its existing drop counter and recovery policy remain decisive.
+            Arrived::Media => Ok("call.media".to_owned()),
             Arrived::Incoming(incoming) => match *incoming {
                 Some(incoming) => self.on_incoming(incoming).await,
                 None => Err("the signalling endpoint stopped".to_owned()),
@@ -554,10 +569,11 @@ impl Actor {
         );
         self.next_call = self.next_call.saturating_add(1);
         self.emitted.clear();
+        self.consumed.clear();
         self.pending = Some(incoming);
         self.output
             .event(&self.snapshot, "call.incoming", None, BTreeMap::new());
-        self.emitted.insert("call.incoming".to_owned());
+        self.note_event("call.incoming");
         Ok("call.incoming".to_owned())
     }
 
@@ -641,8 +657,23 @@ impl Actor {
             _ => ("call.event", BTreeMap::new()),
         };
         self.output.event(&self.snapshot, name, None, details);
-        self.emitted.insert(name.to_owned());
+        self.note_event(name);
         name.to_owned()
+    }
+
+    fn note_event(&mut self, name: &str) {
+        let count = self.emitted.entry(name.to_owned()).or_default();
+        *count = count.saturating_add(1);
+    }
+
+    fn consume_event(&mut self, name: &str) -> bool {
+        let emitted = self.emitted.get(name).copied().unwrap_or(0);
+        let consumed = self.consumed.entry(name.to_owned()).or_default();
+        if *consumed >= emitted {
+            return false;
+        }
+        *consumed = consumed.saturating_add(1);
+        true
     }
 
     async fn finish_recording_if_any(&mut self) -> Result<(), String> {

@@ -19,19 +19,19 @@ automation boundary.
 
 ## Acceptance
 
-- [ ] The RTP/media spec pins receive state for start, continuation, duration growth, end-bit
+- [x] The RTP/media spec pins receive state for start, continuation, duration growth, end-bit
       retransmission, duplicates, reordering, timeout and source/payload changes using RFC 4733
       byte vectors.
-- [ ] Payload type is taken from negotiated SDP and tested with a non-101 dynamic value. Packets on
+- [x] Payload type is taken from negotiated SDP and tested with a non-101 dynamic value. Packets on
       an unnegotiated payload cannot become digits.
-- [ ] Failing-first two-scenario process proof negotiates telephone events in both directions,
+- [x] Failing-first two-scenario process proof negotiates telephone events in both directions,
       sends `1234`, observes sender completion, and reproduces the current remote `call.dtmf` wait
       expiry.
-- [ ] The corrected receiver emits one ordered typed event per digit with the negotiated digit and
+- [x] The corrected receiver emits one ordered typed event per digit with the negotiated digit and
       duration facts; continuation and repeated end packets cannot duplicate events.
-- [ ] The existing bounded RTP ingress and call-event queues remain the only handoff path. A stalled
+- [x] The existing bounded RTP ingress and call-event queues remain the only handoff path. A stalled
       scenario consumer cannot block RTP/RTCP work or grow an unbounded digit buffer.
-- [ ] Call replacement, hold/resume and teardown reset receive state deliberately; events from a
+- [x] Call replacement, hold/resume and teardown reset receive state deliberately; events from a
       prior stream or call cannot leak into the next correlation scope.
 - [ ] Sender behavior, interrupt-on-digit playback, hold/resume controls, malformed-packet tests and
       the complete repository gate are green.
@@ -43,8 +43,15 @@ remote typed event in the same harness that successfully observed hold and resum
 
 ## Progress
 
-- Receiver state and the process boundary are being specified before the implementation. The
-  failing process proof will retain the sender completion and remote wait-expiry output that
-  distinguishes delivery failure from negotiation or send failure.
-- Board and compliance regeneration, the complete gate and final status are deferred to the
-  requested push boundary.
+- Failing-first output retained the sender's completed `send_dtmf`, emitted no remote `call.dtmf`,
+  expired the remote waits and ended both scenario streams as failed. With the shared call-owned
+  media pump, the same two processes emit exactly `1234` with 100 ms wire-derived durations.
+- PT 96 byte vectors cover start, continuation, end, reordering, repeated final reports and a fired
+  silence input. Media tests prove PT 101 cannot create a digit when 96 was negotiated, a full
+  32-place digit queue drops and counts the 33rd event, and reconfiguration cannot leak an
+  incomplete old-generation digit.
+- Focused RTP, media, call-event, interrupt-on-digit, hold/resume and scenario process tests pass;
+  strict all-target/all-feature clippy passes for the four changed packages. Fixed-sleep, docs-link
+  and provenance checks pass.
+- Board/compliance regeneration, the complete gate, CHANGELOG and final status remain deferred to
+  the requested push boundary.

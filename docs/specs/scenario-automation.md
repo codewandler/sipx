@@ -1,6 +1,6 @@
 # Spec: Scenario automation stream
 
-**Status:** normative for `sipx scenario` · **Story:** P-19 · **Design:**
+**Status:** normative for `sipx scenario` · **Stories:** P-19, M-71 · **Design:**
 [diagnostic automation](../designs/diagnostic-automation.md) · **Envelope:**
 [`sipx.app.v1`](app-contract.md)
 
@@ -66,7 +66,7 @@ application-owned header validation.
 | `resume` | — | — | Restore send-and-receive media. |
 | `transfer` | `target` | — | Send a transfer request to the active call. |
 | `hangup` | — | — | Stop owned media work and end the active call. |
-| `wait_for` | `event`, `timeout_ms` | — | Complete when the named emitted event exists or refuse when the deadline fires. A missing deadline is always a refusal. |
+| `wait_for` | `event`, `timeout_ms` | — | Complete when the next unconsumed occurrence of the named emitted event exists or refuse when the deadline fires. A missing deadline is always a refusal. |
 | `shutdown` | — | — | Complete the command, perform orderly cleanup, emit the stream outcome and exit. |
 
 `dial.uri`, its `target` alias, and `transfer.target` MUST be SIP URIs accepted by the corresponding
@@ -107,6 +107,14 @@ Each input line is an independent recovery boundary. Invalid JSON, a missing or 
 invalid selector, an unknown command or an operation refusal emits its refusal and processing
 continues with the next line. A later successful command cannot erase the remembered stream
 failure. Input order, runtime event order and command outcomes are preserved by the single actor.
+
+`wait_for` counts event occurrences within the active call's correlation scope. An occurrence
+emitted before the command remains available until one wait for that event consumes it; four
+successive waits for `call.dtmf` therefore require four distinct digits and cannot all complete from
+the first one. Dialling or accepting a replacement call clears both occurrence and consumption
+state. While a wait is active, the actor drives incoming SIP, the call event receiver and the
+call-owned media-to-event handoff in one `select` loop. A completed telephone event always enters
+the bounded call-event queue before it satisfies the predicate.
 
 Clean EOF and a successful `shutdown` command both request orderly cleanup. The `shutdown` command
 outcome precedes cleanup and the terminal stream outcome. An empty stream therefore emits

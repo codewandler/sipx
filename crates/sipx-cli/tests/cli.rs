@@ -4598,6 +4598,145 @@ async fn scenario_waits_for_answer_then_sends_dtmf_and_hangs_up_in_causal_order(
     answerer_exits_cleanly(&mut answerer).await;
 }
 
+/// M-71 failing-first process boundary: both peers are the shipped scenario actor. The sender
+/// completing only proves that its bounded media queue accepted all four digits; the remote typed
+/// events prove that negotiated RTP crossed the media and call-event queues too.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn two_scenarios_deliver_each_negotiated_digit_once_and_in_order() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let _scenario = process_scenario().await;
+    let mut answerer = sipx()
+        .args(["scenario", "--local", "127.0.0.1:0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("answering scenario starts");
+    let stdout = answerer.stdout.take().expect("answerer stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("answerer readiness is bounded")
+            .expect("answerer readiness can be read")
+            .expect("answerer readiness exists"),
+    )
+    .expect("answerer readiness JSON");
+    let address = ready["event"]["address"]
+        .as_str()
+        .expect("answerer readiness names its address")
+        .to_owned();
+    let answer_output = tokio::spawn(async move {
+        let mut output = vec![ready];
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .expect("answerer output can be read")
+        {
+            output.push(serde_json::from_str(&line).expect("answerer emits JSON"));
+        }
+        output
+    });
+    let mut answer_stderr = answerer.stderr.take().expect("answerer stderr is piped");
+    let answer_complaint = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        answer_stderr
+            .read_to_end(&mut bytes)
+            .await
+            .expect("answerer stderr can be read");
+        String::from_utf8_lossy(&bytes).into_owned()
+    });
+
+    let answer_script = "{\"id\":\"incoming\",\"command\":\"wait_for\",\"event\":\"call.incoming\",\"timeout_ms\":5000}\n\
+                         {\"id\":\"accept\",\"command\":\"accept\"}\n\
+                         {\"id\":\"digit-1\",\"command\":\"wait_for\",\"event\":\"call.dtmf\",\"timeout_ms\":1500}\n\
+                         {\"id\":\"digit-2\",\"command\":\"wait_for\",\"event\":\"call.dtmf\",\"timeout_ms\":1500}\n\
+                         {\"id\":\"digit-3\",\"command\":\"wait_for\",\"event\":\"call.dtmf\",\"timeout_ms\":1500}\n\
+                         {\"id\":\"digit-4\",\"command\":\"wait_for\",\"event\":\"call.dtmf\",\"timeout_ms\":1500}\n\
+                         {\"id\":\"hangup\",\"command\":\"hangup\"}\n\
+                         {\"id\":\"shutdown\",\"command\":\"shutdown\"}\n";
+    answerer
+        .stdin
+        .take()
+        .expect("answerer stdin is piped")
+        .write_all(answer_script.as_bytes())
+        .await
+        .expect("answerer script writes");
+
+    let mut caller = sipx()
+        .args(["scenario", "--local", "127.0.0.1:0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("calling scenario starts");
+    let call_script = format!(
+        "{{\"id\":\"dial\",\"command\":\"dial\",\"uri\":\"sip:dtmf@{address}\",\"timeout_ms\":5000}}\n\
+         {{\"id\":\"answered\",\"command\":\"wait_for\",\"event\":\"call.answered\",\"timeout_ms\":5000}}\n\
+         {{\"id\":\"send\",\"command\":\"send_dtmf\",\"digits\":\"1234\"}}\n\
+         {{\"id\":\"ended\",\"command\":\"wait_for\",\"event\":\"call.ended\",\"timeout_ms\":10000}}\n\
+         {{\"id\":\"shutdown\",\"command\":\"shutdown\"}}\n"
+    );
+    caller
+        .stdin
+        .take()
+        .expect("caller stdin is piped")
+        .write_all(call_script.as_bytes())
+        .await
+        .expect("caller script writes");
+
+    let caller_output = tokio::time::timeout(Duration::from_secs(20), caller.wait_with_output())
+        .await
+        .expect("calling scenario is bounded")
+        .expect("calling scenario exits");
+    let answer_status = tokio::time::timeout(Duration::from_secs(20), answerer.wait())
+        .await
+        .expect("answering scenario is bounded")
+        .expect("answering scenario exits");
+    let answer_lines = answer_output.await.expect("answer output collector joins");
+    let answer_complaint = answer_complaint
+        .await
+        .expect("answer stderr collector joins");
+    let caller_lines = scenario_lines(&caller_output);
+
+    assert_eq!(
+        caller_output.status.code(),
+        Some(0),
+        "{}; {caller_lines:?}",
+        String::from_utf8_lossy(&caller_output.stderr)
+    );
+    assert!(
+        answer_status.success(),
+        "{answer_complaint}; {answer_lines:?}"
+    );
+    assert!(caller_lines.iter().any(|line| {
+        line["event"]["type"] == "scenario.command.completed" && line["event"]["id"] == "send"
+    }));
+    let received: Vec<_> = answer_lines
+        .iter()
+        .filter(|line| line["event"]["type"] == "call.dtmf")
+        .map(|line| {
+            (
+                line["event"]["digit"].as_str().unwrap_or_default(),
+                line["event"]["duration_ms"].as_u64().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        received.iter().map(|(digit, _)| *digit).collect::<String>(),
+        "1234",
+        "sender completed but remote typed events were {received:?}"
+    );
+    assert!(
+        received
+            .iter()
+            .all(|(_, duration)| (80..=140).contains(duration)),
+        "durations came from the event clock: {received:?}"
+    );
+}
+
 /// Logging must never reach stdout, or one verbosity flag turns every JSON result into a parse
 /// error at the far end of a pipe.
 ///
