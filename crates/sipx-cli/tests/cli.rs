@@ -4123,6 +4123,49 @@ async fn a_call_that_is_never_answered_times_out_on_schedule() {
     assert!(stderr.contains("\"status\":\"timeout\""), "{stderr}");
 }
 
+/// A refused stream connection is a definitive local transport failure, not SIP silence. UDP's
+/// no-answer control remains covered by `a_call_that_is_never_answered_times_out_on_schedule`.
+#[tokio::test]
+async fn a_refused_stream_connection_exits_failed_without_waiting_for_sip_timeout() {
+    let _scenario = process_scenario().await;
+    for json in [false, true] {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+        let peer = closed.local_addr().expect("reserved address");
+        drop(closed);
+
+        let mut command = sipx();
+        command.args([
+            "dial",
+            &format!("sip:absent@{peer}"),
+            "--transport",
+            "tcp",
+            "--timeout",
+            "30",
+        ]);
+        if json {
+            command.arg("--json");
+        }
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+            .await
+            .expect("connection refusal is prompt")
+            .expect("dial runs");
+
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            output.stdout.is_empty(),
+            "results stay off stdout on failure"
+        );
+        let failure = String::from_utf8_lossy(&output.stderr);
+        let status = if json {
+            "\"status\":\"failed\""
+        } else {
+            "status  failed"
+        };
+        assert!(failure.contains(status), "{failure}");
+        assert!(failure.contains("transport:"), "{failure}");
+    }
+}
+
 /// A flag's value must never be read as the URI. `sipx dial --timeout 30 sip:bob@host` tried
 /// to call "30" until `--timeout` was registered as taking a value.
 #[tokio::test]

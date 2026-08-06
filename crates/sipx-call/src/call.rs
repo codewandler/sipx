@@ -6642,13 +6642,11 @@ async fn await_final(
                 }
             }
             Some(sipx_sip::transaction::TuEvent::TransportError) => {
-                // Preserve TLS verification failures because treating a rejected certificate as
-                // "no response" hides the security decision the caller must act on. Other send
-                // failures retain the call API's established NoResponse behavior; changing those
-                // exit semantics is outside this transport-selection story.
-                if let Some(error @ sipx_transport::Error::Tls(_)) =
-                    responses.take_transport_error()
-                {
+                // The endpoint queues the concrete driver cause before this event. Preserve every
+                // cause: connection refusal, TLS verification failure and a closed established
+                // stream are definitive transport outcomes, not evidence that a reachable SIP
+                // peer stayed silent.
+                if let Some(error) = responses.take_transport_error() {
                     return Waited::Transport(error);
                 }
                 return Waited::Gone;

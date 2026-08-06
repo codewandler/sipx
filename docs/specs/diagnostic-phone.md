@@ -93,6 +93,13 @@ explicit selection adds `requested_transport` and `negotiated_transport` to term
 pre-call `answer` announcement carries only the requested transport because nothing has negotiated
 yet.
 
+Outbound setup preserves the terminal cause from the transport transaction. A concrete stream
+connection, handshake, certificate-verification or established-connection failure maps to
+`failed`/exit 1 and retains the transport cause. A datagram request that was handed to a usable
+socket but received no final SIP response maps to `timeout`/exit 5. The command MUST NOT infer this
+classification from elapsed time or error text, and it MUST NOT rewrite a concrete transport
+failure as `NoResponse` merely because no SIP response object exists.
+
 `dial` and `answer` accept repeatable ordered `--codec` values, `--media-security`, `--ice`,
 `--stun-server`, `--audio-input` and `--audio-output`. An audio endpoint is written
 `wav:<path>`, `device:<id>`, `generator:<kind>` or `null`; the first colon separates the kind and
