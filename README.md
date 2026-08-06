@@ -105,12 +105,15 @@ registration, expected output, and installing from `main`.
 The workspace deliberately publishes modular crates rather than one facade crate. Pin every sipx
 dependency to the same exact prerelease while the API remains pre-1.0:
 
+<!-- BEGIN generated:answer-consumer-dependencies -->
 ```toml
 [dependencies]
 sipx-call = "=1.0.0-rc.2"
+sipx-sip = "=1.0.0-rc.2"
 sipx-transport = "=1.0.0-rc.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
+<!-- END generated:answer-consumer-dependencies -->
 
 The call guides inline real example files that CI compiles:
 

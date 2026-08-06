@@ -19,17 +19,17 @@ site renderer as complete prose.
 
 ## Acceptance
 
-- [ ] A failing-first clean consumer uses exactly the README/as-a-library dependency snippet and
+- [x] A failing-first clean consumer uses exactly the README/as-a-library dependency snippet and
       answer-a-call source, reproducing the missing direct package dependency.
-- [ ] The dependency block and example have one reusable source or a synchronization check. The
+- [x] The dependency block and example have one reusable source or a synchronization check. The
       registry-shaped consumer compiles without workspace path leakage or undeclared imports.
-- [ ] README, as-a-library and answer-a-call pages show a complete minimal dependency set, with
+- [x] README, as-a-library and answer-a-call pages show a complete minimal dependency set, with
       exact-version policy consistent with the release channel and no hidden setup step.
-- [ ] A failing-first site assertion reproduces the getting-started sentence split and truncated
+- [x] A failing-first site assertion reproduces the getting-started sentence split and truncated
       workspace version from the inline generated marker.
-- [ ] Generated workspace-version content uses a markdown-safe form, and built HTML contains the
+- [x] Generated workspace-version content uses a markdown-safe form, and built HTML contains the
       exact complete sentence and version as visible text.
-- [ ] A repository check scans generated markers for unsupported inline placement so the same
+- [x] A repository check scans generated markers for unsupported inline placement so the same
       renderer defect cannot move to another page.
 - [ ] Archived consumer, docs link/build, site rendering, package rehearsal and the complete
       repository gate are green.
@@ -45,3 +45,9 @@ version sentence into two paragraphs and displayed `.0.0-rc.2` instead of the co
 - `docs/specs/published-onboarding.md` now defines the canonical clean consumer, exact dependency
   and source synchronization, generated-marker placement rule, built-visible-text assertion and
   ONB-1 through ONB-5 vectors. Board regeneration and the complete gate remain deferred to push.
+- `tests/published-answer-consumer/` is the registry-shaped source of the generated dependency
+  snippets and stays byte-identical to the compiled answer example. The focused consumer compile,
+  five onboarding regressions, four synchronization regressions, documentation build, rendered
+  HTML assertion, internal-link check and provenance check pass. The comparison-render portion of
+  the existing synchronization suite remains blocked by comparative-load evidence that predates
+  its current contract; package rehearsal and the complete gate remain deferred to push.

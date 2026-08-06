@@ -8,6 +8,19 @@ description: Accept an incoming call from Rust — what to advertise, who retran
 The example below is a real file that CI compiles
 ([`crates/sipx-call/examples/answer_a_call.rs`](https://github.com/codewandler/sipx/blob/main/crates/sipx-call/examples/answer_a_call.rs)):
 
+Create a binary package with this complete dependency table; every directly imported sipx crate is
+pinned to the same exact prerelease:
+
+<!-- BEGIN generated:answer-consumer-dependencies -->
+```toml
+[dependencies]
+sipx-call = "=1.0.0-rc.2"
+sipx-sip = "=1.0.0-rc.2"
+sipx-transport = "=1.0.0-rc.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+<!-- END generated:answer-consumer-dependencies -->
+
 <!-- BEGIN generated:example crates/sipx-call/examples/answer_a_call.rs -->
 ```rust
 //! Wait for a call, answer it, record what the caller says, and serve it until it ends.
